@@ -155,14 +155,14 @@ import {
   isClientWait,
   isSelfWait,
   REFUSED_WAITING_ON_ACTIONS,
+  REMOVAL_WOULD_COMPLETE_WAITING_STEP,
+  removalWouldCompleteWaitingStep,
   SELF_WAIT_REFUSAL,
   waitForTaskLinkDenial,
-  waitingAncestorBlocksCompletion,
-  waitingBlocksCascadedCompletion,
-  waitingBlocksCompletion,
   waitingLockRefusal,
   waitingOnActionRefusal,
   waitingOnStage,
+  waitingToggleRefusal,
 } from './lib/waiting-on-state.js'
 import {
   generateBackupCodes,
@@ -9127,6 +9127,25 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // A removal that would roll a WAITING step up to done is refused the same
+      // way the DELETE routes refuse it (the simulation runs the store's own
+      // removal). The request stays in place so it can be approved once the wait
+      // is cleared, and the approver is told why nothing happened.
+      if (req.subItemId) {
+        const approvalData = await appDataStore.read()
+        const approvalChecklist = approvalData.checklists.find(
+          (entry) => entry.id === req.checklistId,
+        )
+        const approvalItem = approvalChecklist?.items.find((entry) => entry.id === req.itemId)
+        if (removalWouldCompleteWaitingStep(approvalItem, req.subItemId, req.subSubItemId)) {
+          sendJson(response, 409, {
+            error: 'STEP_IS_WAITING',
+            message: REMOVAL_WOULD_COMPLETE_WAITING_STEP,
+          })
+          return
+        }
+      }
+
       // approve → execute the real delete by the stored path.
       let updated = null
       if (req.subSubItemId) {
@@ -9936,32 +9955,23 @@ const server = createServer(async (request, response) => {
         }
       }
 
-      // A waiting step cannot be checked off (featreq-cdab1605) — the shared
-      // predicate reuses `stepIsWaiting`'s meaning (the legacy flag, or any
-      // structured wait not yet verified) and is itself the source of truth:
-      // the UI disables the same checkboxes, but this is what actually
-      // refuses it, before the store ever sees the toggle. Un-checking a done
-      // step is never blocked — the predicate is already false once `done`.
-      const toggleTarget = targetSubSub ?? targetSub ?? targetItem
-      // Ticking an item or sub-item also completes everything beneath it
-      // (`applyItemToggle` cascades), so the check looks at the target's whole
-      // subtree: a waiting sub-step cannot be checked off through its parent.
-      if (waitingBlocksCascadedCompletion(toggleTarget)) {
-        sendJson(response, 409, {
-          error: 'STEP_IS_WAITING',
-          message: waitingBlocksCompletion(toggleTarget)
-            ? 'Clear the wait on this step first.'
-            : 'Clear the wait on this step (or one of its sub-steps) first.',
-        })
-        return
-      }
-      // The same rule going UP: the store rolls a parent's `done` up from its
-      // children, so ticking the last open sub-step would complete a step that
-      // is itself waiting. A waiting step cannot become done by any path.
-      if (waitingAncestorBlocksCompletion(targetItem, toggleSubItemId, toggleSubSubItemId)) {
-        sendJson(response, 409, {
-          error: 'STEP_IS_WAITING',
-          message: 'The step above is waiting. Clear its wait first.',
+      // A waiting step cannot be checked off (featreq-cdab1605). One rule, decided
+      // by SIMULATION: the guard runs the store's own toggle (`applyItemToggle`,
+      // lib/checklist-step-ops.js) on this step and refuses when a waiting,
+      // not-yet-done node (the target, anything its tick cascades onto, or a
+      // parent its tick rolls up) would come out done. The UI disables the same
+      // checkboxes with the same helper, but this is what actually refuses it,
+      // before the store ever sees the toggle. Un-checking is never blocked:
+      // nothing becomes done.
+      const toggleRefusal = waitingToggleRefusal(
+        targetItem,
+        toggleSubItemId,
+        toggleSubSubItemId,
+      )
+      if (toggleRefusal) {
+        sendJson(response, toggleRefusal.status, {
+          error: toggleRefusal.error,
+          message: toggleRefusal.message,
         })
         return
       }
@@ -10200,6 +10210,17 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // Removing the last open sub-sub-step would roll a waiting sub-step (or
+        // step) up to done; the simulation says so before anything is filed or
+        // removed.
+        if (removalWouldCompleteWaitingStep(targetItem, subItemId, subSubItemId)) {
+          sendJson(response, 409, {
+            error: 'STEP_IS_WAITING',
+            message: REMOVAL_WOULD_COMPLETE_WAITING_STEP,
+          })
+          return
+        }
+
         if (session.user.role !== 'owner') {
           const filed = await fileItemDeletionRequest(request, session, data, checklist, {
             itemId,
@@ -10383,6 +10404,16 @@ const server = createServer(async (request, response) => {
           : undefined
         if (!targetSub) {
           sendJson(response, 404, { error: 'Sub-item not found' })
+          return
+        }
+
+        // Removing the last open sub-step would roll a waiting step up to done;
+        // the simulation says so before anything is filed or removed.
+        if (removalWouldCompleteWaitingStep(targetItem, subItemId)) {
+          sendJson(response, 409, {
+            error: 'STEP_IS_WAITING',
+            message: REMOVAL_WOULD_COMPLETE_WAITING_STEP,
+          })
           return
         }
 

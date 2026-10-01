@@ -70,14 +70,35 @@ export const REFUSED_WAITING_ON_ACTIONS: readonly string[]
 
 export function hasLiveSavedWait(node: WaitingStepLike | undefined): boolean
 export function waitingBlocksCompletion(
-  node: (WaitingStepLike & { done?: boolean }) | undefined,
-): boolean
-export function waitingBlocksCascadedCompletion(
   node: (WaitingStepLike & { done?: boolean; subItems?: unknown[] }) | undefined,
 ): boolean
-export function waitingAncestorBlocksCompletion(
-  item: { subItems?: unknown[] } | undefined,
-  subItemId: string | undefined,
+
+/** The step as the guard reads it: its own done and wait state plus its sub-steps. */
+export type StepSimulationItem = WaitingStepLike & { done?: boolean; subItems?: unknown[] }
+
+export const REMOVAL_WOULD_COMPLETE_WAITING_STEP: string
+export function operationCompletesWaitingStep(
+  itemBefore: StepSimulationItem | undefined,
+  itemAfter: StepSimulationItem | undefined,
+): boolean
+export function waitingToggleRefusal(
+  item: StepSimulationItem | undefined,
+  subItemId?: string,
+  subSubItemId?: string,
+): {
+  status: number
+  error: string
+  message: string
+  where: 'own' | 'below' | 'above'
+} | null
+export function toggleWouldCompleteWaitingStep(
+  item: StepSimulationItem | undefined,
+  subItemId?: string,
+  subSubItemId?: string,
+): boolean
+export function removalWouldCompleteWaitingStep(
+  item: StepSimulationItem | undefined,
+  subItemId?: string,
   subSubItemId?: string,
 ): boolean
 export function waitForTaskLinkDenial(args: {

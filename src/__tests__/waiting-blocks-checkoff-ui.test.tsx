@@ -350,3 +350,72 @@ describe('a step assigned to someone else', () => {
     }
   })
 })
+
+// The same simulation guards a DELETE: removing the last open child rolls the
+// parent up to done, so a waiting step's delete button is disabled for it, with
+// the sentence the route would answer.
+describe('deleting the last open sub-step of a waiting step', () => {
+  const deleteButton = (container: HTMLElement, label: string) => {
+    const row = Array.from(container.querySelectorAll('.sub-item-row')).find((el) =>
+      el.textContent?.includes(label),
+    )
+    return row?.querySelector('button[aria-label="Delete sub-step"]') as HTMLButtonElement
+  }
+
+  const waitingParent = (subs: Array<Record<string, unknown>>) =>
+    [
+      { id: 'it-1', label: 'Bank rec', done: false, assigneeId: OWNER, waiting: true, subItems: subs },
+    ] as unknown as Checklist['items']
+
+  it('disables the sub-step delete button and says why', () => {
+    signInWith(
+      waitingParent([
+        { id: 'sub-1', title: 'Pull statements', done: true },
+        { id: 'sub-2', title: 'Match deposits', done: false },
+      ]),
+    )
+    const { container } = renderProgress()
+    const button = deleteButton(container, 'Match deposits')
+    expect(button).toBeDisabled()
+    expect(button.title).toBe(
+      'Removing this would finish a step that is waiting. Clear its wait first.',
+    )
+  })
+
+  it('leaves the delete button alone while another sub-step is open', () => {
+    signInWith(
+      waitingParent([
+        { id: 'sub-1', title: 'Pull statements', done: false },
+        { id: 'sub-2', title: 'Match deposits', done: false },
+      ]),
+    )
+    const { container } = renderProgress()
+    expect(deleteButton(container, 'Match deposits')).not.toBeDisabled()
+  })
+
+  it('disables the sub-sub-step delete button when it would finish a waiting sub-step', () => {
+    signInWith([
+      {
+        id: 'it-1',
+        label: 'Bank rec',
+        done: false,
+        assigneeId: OWNER,
+        subItems: [
+          {
+            id: 'sub-1',
+            title: 'Match deposits',
+            done: false,
+            waiting: true,
+            subItems: [
+              { id: 'ss-1', title: 'Chase client', done: true },
+              { id: 'ss-2', title: 'File receipt', done: false },
+            ],
+          },
+        ],
+      },
+    ] as unknown as Checklist['items'])
+    const { container } = renderProgress()
+    expect(deleteButton(container, 'File receipt')).toBeDisabled()
+    expect(deleteButton(container, 'Chase client')).not.toBeDisabled()
+  })
+})

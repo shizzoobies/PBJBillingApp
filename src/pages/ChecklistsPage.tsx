@@ -27,10 +27,11 @@ import {
   hasLiveSavedWait,
   isClientWait,
   isWaitingOnOpen,
-  waitingAncestorBlocksCompletion,
-  waitingBlocksCascadedCompletion,
-  waitingBlocksCompletion,
+  REMOVAL_WOULD_COMPLETE_WAITING_STEP,
+  removalWouldCompleteWaitingStep,
+  toggleWouldCompleteWaitingStep,
   waitingOnStage,
+  waitingToggleRefusal,
 } from '../../lib/waiting-on-state.js'
 import {
   SKIP_REASON_CATEGORIES,
@@ -3294,6 +3295,23 @@ export function WaitingEditor({
   )
 }
 
+/**
+ * The tooltip for a checkbox the waiting guard disables, or undefined when the
+ * tick is allowed. It asks the very simulation the toggle route refuses with, so
+ * a disabled box is never a surprise 409 and an enabled one is never refused.
+ */
+function toggleWaitTitle(
+  item: Parameters<typeof waitingToggleRefusal>[0],
+  subItemId?: string,
+  subSubItemId?: string,
+): string | undefined {
+  const refusal = waitingToggleRefusal(item, subItemId, subSubItemId)
+  if (!refusal) return undefined
+  if (refusal.where === 'own') return 'Clear the wait first'
+  if (refusal.where === 'below') return 'A sub-step is waiting - clear it first'
+  return 'The step above is waiting - clear it first'
+}
+
 function DraggableTaskList({
   canEdit,
   canReorder,
@@ -3640,15 +3658,13 @@ function DraggableTaskList({
               ) : null}
               <input
                 checked={item.done}
-                disabled={!allowToggle || waitingBlocksCascadedCompletion(item)}
+                disabled={!allowToggle || toggleWouldCompleteWaitingStep(item)}
                 onChange={() => void onToggle(checklistId, item.id)}
                 title={
                   !allowToggle
                     ? "This step is assigned to someone else — only they can check it off."
-                    : waitingBlocksCascadedCompletion(item)
-                      ? waitingBlocksCompletion(item)
-                        ? 'Clear the wait first'
-                        : 'A sub-step is waiting - clear it first'
+                    : toggleWaitTitle(item)
+                      ? toggleWaitTitle(item)
                       : hasSubItems
                         ? 'Checking this checks every sub-step'
                         : undefined
@@ -3920,21 +3936,13 @@ function DraggableTaskList({
                         ) : null}
                         <input
                           checked={sub.done}
-                          disabled={
-                            !allowToggle ||
-                            waitingBlocksCascadedCompletion(sub) ||
-                            waitingAncestorBlocksCompletion(item, sub.id)
-                          }
+                          disabled={!allowToggle || toggleWouldCompleteWaitingStep(item, sub.id)}
                           onChange={() => onToggleSubItem(item.id, sub.id)}
                           title={
                             !allowToggle
                               ? "This step is assigned to someone else — only they can check it off."
-                              : waitingBlocksCascadedCompletion(sub)
-                                ? waitingBlocksCompletion(sub)
-                                  ? 'Clear the wait first'
-                                  : 'A sub-step is waiting - clear it first'
-                                : waitingAncestorBlocksCompletion(item, sub.id)
-                                  ? 'The step above is waiting - clear it first'
+                              : toggleWaitTitle(item, sub.id)
+                                ? toggleWaitTitle(item, sub.id)
                                 : hasSubSubItems
                                 ? 'Checking this checks every sub-step'
                                 : undefined
@@ -4004,11 +4012,16 @@ function DraggableTaskList({
                             type="button"
                             aria-label="Delete sub-step"
                             className="item-delete-btn sub-item-delete"
-                            disabled={hasPendingDeletion(item.id, sub.id)}
+                            disabled={
+                              hasPendingDeletion(item.id, sub.id) ||
+                              removalWouldCompleteWaitingStep(item, sub.id)
+                            }
                             title={
                               hasPendingDeletion(item.id, sub.id)
                                 ? 'Deletion already requested — waiting on owner approval'
-                                : 'Delete sub-step'
+                                : removalWouldCompleteWaitingStep(item, sub.id)
+                                  ? REMOVAL_WOULD_COMPLETE_WAITING_STEP
+                                  : 'Delete sub-step'
                             }
                             onClick={() => onRemoveSubItem(item.id, sub.id)}
                           >
@@ -4111,8 +4124,7 @@ function DraggableTaskList({
                                 checked={subSub.done}
                                 disabled={
                                   !allowToggle ||
-                                  waitingBlocksCompletion(subSub) ||
-                                  waitingAncestorBlocksCompletion(item, sub.id, subSub.id)
+                                  toggleWouldCompleteWaitingStep(item, sub.id, subSub.id)
                                 }
                                 onChange={() =>
                                   onToggleSubSubItem(item.id, sub.id, subSub.id)
@@ -4120,11 +4132,7 @@ function DraggableTaskList({
                                 title={
                                   !allowToggle
                                     ? "This step is assigned to someone else — only they can check it off."
-                                    : waitingBlocksCompletion(subSub)
-                                      ? 'Clear the wait first'
-                                      : waitingAncestorBlocksCompletion(item, sub.id, subSub.id)
-                                        ? 'The step above is waiting - clear it first'
-                                        : undefined
+                                    : toggleWaitTitle(item, sub.id, subSub.id)
                                 }
                                 type="checkbox"
                               />
@@ -4134,11 +4142,16 @@ function DraggableTaskList({
                                   type="button"
                                   aria-label="Delete sub-step"
                                   className="item-delete-btn sub-item-delete"
-                                  disabled={hasPendingDeletion(item.id, sub.id, subSub.id)}
+                                  disabled={
+                                    hasPendingDeletion(item.id, sub.id, subSub.id) ||
+                                    removalWouldCompleteWaitingStep(item, sub.id, subSub.id)
+                                  }
                                   title={
                                     hasPendingDeletion(item.id, sub.id, subSub.id)
                                       ? 'Deletion already requested — waiting on owner approval'
-                                      : 'Delete sub-step'
+                                      : removalWouldCompleteWaitingStep(item, sub.id, subSub.id)
+                                        ? REMOVAL_WOULD_COMPLETE_WAITING_STEP
+                                        : 'Delete sub-step'
                                   }
                                   onClick={() =>
                                     onRemoveSubSubItem(item.id, sub.id, subSub.id)
