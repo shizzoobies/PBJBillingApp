@@ -423,3 +423,97 @@ describe('InvoiceMonthRun — a refusal that arrives after the editor is gone', 
     expect(screen.queryByText('INV-2026-08-001: ' + sentence)).not.toBeInTheDocument()
   })
 })
+
+/**
+ * The message slot sits above the footer buttons, so on a long invoice a
+ * refusal put there can be off screen when Void / Save is pressed. Every message
+ * the slot receives brings it into view (`nearest`: nothing moves when it is
+ * already visible), and a repeat of the same sentence from a NEW refusal scrolls
+ * again.
+ */
+describe('InvoiceMonthRun — a refusal in the editor is brought into view', () => {
+  const sentence = 'Something the server would not do.'
+  let scrollIntoView: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    scrollIntoView = vi.fn()
+    // happy-dom has no layout, so the method is stubbed on the prototype.
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value: scrollIntoView,
+    })
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
+  })
+
+  afterEach(() => {
+    delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView
+  })
+
+  async function openEditorWithRefusingVoid() {
+    mockUpdate.mockRejectedValue(new ApiError(500, sentence))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+  }
+
+  it('scrolls the slot into view once for a refused Void', async () => {
+    await openEditorWithRefusingVoid()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Void' }))
+
+    const alert = await editor().findByText(sentence)
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1))
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', behavior: 'smooth' })
+    // It is the slot itself that was scrolled to.
+    expect(scrollIntoView.mock.contexts[0]).toBe(alert)
+  })
+
+  it('scrolls again for a second refusal with the very same sentence', async () => {
+    await openEditorWithRefusingVoid()
+    fireEvent.click(await screen.findByRole('button', { name: 'Void' }))
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Void' }))
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2))
+    // Still one alert: nothing was added.
+    expect(screen.getAllByText(sentence)).toHaveLength(1)
+  })
+
+  it('does not scroll when editing a line clears the message', async () => {
+    await openEditorWithRefusingVoid()
+    fireEvent.click(await screen.findByRole('button', { name: 'Void' }))
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(screen.getByDisplayValue('Billable hours — Lisa'), {
+      target: { value: 'Billable hours — edited' },
+    })
+
+    expect(screen.queryByText(sentence)).not.toBeInTheDocument()
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not scroll for a successful save', async () => {
+    mockUpdate.mockResolvedValue(invoice)
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+    fireEvent.change(screen.getByDisplayValue('Billable hours — Lisa'), {
+      target: { value: 'Billable hours — edited' },
+    })
+
+    fireEvent.click(saveButton())
+
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalled())
+    await waitFor(() => expect(saveButton()).toBeInTheDocument())
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+
+  it('does nothing, and does not throw, where scrollIntoView does not exist', async () => {
+    delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView
+    await openEditorWithRefusingVoid()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Void' }))
+
+    expect(await editor().findByText(sentence)).toBeInTheDocument()
+  })
+})

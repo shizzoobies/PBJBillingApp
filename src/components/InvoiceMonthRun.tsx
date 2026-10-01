@@ -2156,8 +2156,23 @@ function InvoiceEditor({
       mountedRef.current = false
     }
   }, [])
+  // The slot sits above the footer buttons, so on a long invoice a message put
+  // there can be off screen when a button is pressed. Every message the slot
+  // RECEIVES brings it into view; `errorTick` is bumped per message so the same
+  // sentence from a NEW refusal scrolls again, which the string alone would not.
+  // `nearest` moves nothing when it is already visible.
+  const [errorTick, setErrorTick] = useState(0)
+  const errorSlotRef = useRef<HTMLParagraphElement | null>(null)
+  const showError = (message: string) => {
+    setRetainerError(message)
+    setErrorTick((tick) => tick + 1)
+  }
+  useEffect(() => {
+    if (errorTick === 0) return
+    errorSlotRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
+  }, [errorTick])
   const sayRefusal = (message: string) => {
-    if (mountedRef.current) setRetainerError(message)
+    if (mountedRef.current) showError(message)
     else onRefusal(message)
   }
 
@@ -2783,7 +2798,7 @@ function InvoiceEditor({
       const updated = await markInvoicePaidRequest(invoice.id)
       onInvoiceChanged(updated)
     } catch (error) {
-      setRetainerError(error instanceof Error ? error.message : 'Could not mark that paid.')
+      showError(error instanceof Error ? error.message : 'Could not mark that paid.')
     }
   }
 
@@ -2798,7 +2813,7 @@ function InvoiceEditor({
       const updated = await verifyInvoicePaymentRequest(invoice.id)
       onInvoiceChanged(updated)
     } catch (error) {
-      setRetainerError(error instanceof Error ? error.message : 'Could not check with Stripe.')
+      showError(error instanceof Error ? error.message : 'Could not check with Stripe.')
     }
   }
 
@@ -2833,7 +2848,7 @@ function InvoiceEditor({
       const updated = await unmarkInvoicePaidRequest(invoice.id)
       onInvoiceChanged(updated)
     } catch (error) {
-      setRetainerError(error instanceof Error ? error.message : 'Could not undo that.')
+      showError(error instanceof Error ? error.message : 'Could not undo that.')
     }
   }
 
@@ -2869,14 +2884,14 @@ function InvoiceEditor({
     // out, and quietly editing the table under a message about a frozen invoice
     // would be the exact contradiction it is warning about.
     if (result.locked) {
-      setRetainerError(result.message)
+      showError(result.message)
       return
     }
     // Any other refusal (a re-tag the server would not make, an unknown code)
     // wrote nothing: say why beside Save and leave every line, tag edit and
     // note exactly as she left them, so Save stays live for her to fix it.
     if (!result.retainer) {
-      setRetainerError(result.message)
+      showError(result.message)
       return
     }
     // The server would not honor the credit — most often because that retainer
@@ -2884,7 +2899,7 @@ function InvoiceEditor({
     // the lines it is about, and take the credit back out: leaving it in would
     // mean every subsequent save failed the same way, and the note to the client
     // she typed alongside it would never land either.
-    setRetainerError(result.message)
+    showError(result.message)
     setLines((current) => current.filter((line) => line.kind !== 'retainer_credit'))
   }
 
@@ -3069,7 +3084,7 @@ function InvoiceEditor({
           credit line has just been taken back out — the message is the only
           record of why the table changed. */}
       {retainerError ? (
-        <p className="invoice-run-error" role="alert">
+        <p className="invoice-run-error" role="alert" ref={errorSlotRef}>
           {retainerError}
         </p>
       ) : null}
