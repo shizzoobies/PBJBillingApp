@@ -305,6 +305,68 @@ describe('InvoiceMonthRun — changing the covered dates on an unflagged line', 
     expect(changeButton()).toHaveAttribute('title', 'Disabled in preview mode')
   })
 
+  // A greyed-out Save dates with the reason only on hover looks broken.
+  it('says why Save dates is off, in words, while her other changes are unsaved', async () => {
+    await openEditor(baseInvoice)
+    fireEvent.click(changeButton())
+    fireEvent.change(endBox(), { target: { value: '2026-11-13' } })
+    expect(saveButton()).not.toBeDisabled()
+    expect(screen.queryByText('Save your other changes first')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getAllByLabelText('Line description')[0], {
+      target: { value: 'A label she is still typing' },
+    })
+
+    expect(screen.getByText('Save your other changes first')).toBeInTheDocument()
+    expect(saveButton()).toBeDisabled()
+  })
+
+  // Two expenses on one invoice: only one panel is open at a time, and the
+  // dates typed into the one that closed do not come back later.
+  it('opening another line\'s panel discards the dates typed into the first', async () => {
+    const second = {
+      ...baseInvoice.lineItems[1],
+      label: 'Payroll Service — September 13 – October 13, 2026',
+      recurringId: 'recur-payroll',
+    }
+    await openEditor({ ...baseInvoice, lineItems: [...baseInvoice.lineItems, second] })
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Change covered dates' })[0])
+    fireEvent.change(endBox(), { target: { value: '2026-11-13' } })
+
+    // The second line's button is the only one left; its panel replaces the first.
+    fireEvent.click(screen.getByRole('button', { name: 'Change covered dates' }))
+    expect(endBox().value).toBe('2026-10-13')
+    expect(screen.getAllByLabelText('Covered period end')).toHaveLength(1)
+
+    // Back to the first: its boxes open on the line's own dates, not the stale typing.
+    fireEvent.click(screen.getByRole('button', { name: 'Change covered dates' }))
+    expect(endBox().value).toBe('2026-10-13')
+  })
+
+  it('locks the line inputs while the dates are being saved', async () => {
+    let finish: (invoice: PersistedInvoice) => void = () => {}
+    mockConfirm.mockReturnValue(new Promise((resolve) => (finish = resolve)))
+    await openEditor(baseInvoice)
+    fireEvent.click(changeButton())
+    fireEvent.change(endBox(), { target: { value: '2026-11-13' } })
+
+    fireEvent.click(saveButton())
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Saving…' })).toBeDisabled())
+    for (const box of screen.getAllByLabelText('Line description')) {
+      expect(box).toHaveAttribute('readonly')
+    }
+
+    finish(movedInvoice)
+    expect(
+      await screen.findByDisplayValue('QuickBooks Ledger — October 13 – November 13, 2026'),
+    ).toBeInTheDocument()
+    for (const box of screen.getAllByLabelText('Line description')) {
+      expect(box).not.toHaveAttribute('readonly')
+    }
+  })
+
   // Saving the dates reloads the invoice from the server, so an unsaved line
   // edit would be thrown away. The dates wait until the other changes are saved.
   it('waits for her other unsaved changes, and says so', async () => {

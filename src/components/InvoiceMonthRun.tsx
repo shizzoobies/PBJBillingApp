@@ -1865,6 +1865,11 @@ function InvoiceLineRow({
                   Cancel
                 </button>
               </div>
+              {/* Said in words as well as on hover: a greyed-out Save dates
+                  with no reason beside it just looks broken. */}
+              {coverage.disabledTitle ? (
+                <p className="invoice-run-coverage-why">{coverage.disabledTitle}</p>
+              ) : null}
             </div>
           ) : (
             <button
@@ -2540,9 +2545,17 @@ function InvoiceEditor({
       onEdit: (range: { start: string; end: string }) =>
         setCoverageEdits((current) => ({ ...current, [recurringId]: range })),
       onConfirm: () => void confirmCoverage(recurringId, coverageValue(line)),
+      // One panel at a time: opening this one drops the dates typed into the
+      // one that was open, which would otherwise come back stale later.
       onOpen: () => {
         setCoverageError(null)
         setCoverageOpenId(recurringId)
+        setCoverageEdits((current) => {
+          if (!coverageOpenId || coverageOpenId === recurringId) return current
+          const next = { ...current }
+          delete next[coverageOpenId]
+          return next
+        })
       },
       // Closing throws the typed dates away — the boxes reopen on the line's own.
       onCancel: () => {
@@ -2744,7 +2757,7 @@ function InvoiceEditor({
                       index={index}
                       onChange={setLine}
                       onRemove={removeLine}
-                      locked={Boolean(lockMessage)}
+                      locked={Boolean(lockMessage) || coverageBusyId !== null}
                       coverage={coverageFor(line)}
                       // Ad hoc work keeps its three-way decision inside its
                       // company's block; a scoped line has none, and that absence
@@ -2764,7 +2777,7 @@ function InvoiceEditor({
                   index={index}
                   onChange={setLine}
                   onRemove={removeLine}
-                  locked={Boolean(lockMessage)}
+                  locked={Boolean(lockMessage) || coverageBusyId !== null}
                   coverage={coverageFor(line)}
                 />
               ))}
@@ -2787,7 +2800,7 @@ function InvoiceEditor({
                   index={index}
                   onChange={setLine}
                   onRemove={removeLine}
-                  locked={Boolean(lockMessage)}
+                  locked={Boolean(lockMessage) || coverageBusyId !== null}
                   onModeChange={setAdhocMode}
                 />
               ))}

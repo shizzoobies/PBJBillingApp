@@ -13285,6 +13285,133 @@ describe('covered dates — changing an unflagged window (file backend)', () => 
     expect(recurringLineOf(changed).coverageEnd).toBe('2026-11-13')
   })
 
+  /** Rewrite the seeded expense in place — the window and anchor a case needs. */
+  const patchExpense = async (patch) => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    Object.assign(data.recurringReimbursements.find((entry) => entry.id === 'recur-qbo'), patch)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  // THE CLAMP. Anchor 31 with a September window ending on the 30th: the 30th
+  // is the short month talking, not her. Moving only the START must leave the
+  // cycle on the 31st, or the next window would end on October 30.
+  it('keeps the anchor when she changes only the start of a clamped window', async () => {
+    await seedOne()
+    await patchExpense({
+      coverageStart: '2026-08-31',
+      coverageEnd: '2026-09-30',
+      coverageAnchorDay: 31,
+    })
+    const run = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    expect(recurringLineOf(run.created[0])).toMatchObject({
+      coverageStart: '2026-08-31',
+      coverageEnd: '2026-09-30',
+    })
+
+    await store.confirmExpenseCoverage(run.created[0].id, 'recur-qbo', {
+      start: '2026-08-30',
+      end: '2026-09-30',
+    })
+
+    expect((await readExpense()).coverageAnchorDay).toBe(31)
+    const october = await store.generateInvoicesForPeriod('2026-10', { clientId: 'c1' })
+    expect(recurringLineOf(october.created[0])).toMatchObject({
+      coverageStart: '2026-09-30',
+      coverageEnd: '2026-10-31',
+    })
+  })
+
+  it('still moves the anchor when the END lands on a different day', async () => {
+    const invoice = await seededSeptember()
+
+    await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+      start: '2026-10-20',
+      end: '2026-11-20',
+    })
+
+    expect((await readExpense()).coverageAnchorDay).toBe(20)
+  })
+
+  describe('with a later month already billed', () => {
+    /** September and October both billed, neither flagged. */
+    async function septemberAndOctober() {
+      const september = await seededSeptember()
+      const october = await store.generateInvoicesForPeriod('2026-10', { clientId: 'c1' })
+      expect(recurringLineOf(october.created[0]).needsCoverageConfirmation).toBeFalsy()
+      return { september, october: october.created[0] }
+    }
+
+    it('refuses to move the earlier month and writes nothing', async () => {
+      const { september } = await septemberAndOctober()
+      const ledgerBefore = (await readExpense()).coverageHistory
+      const anchorBefore = (await readExpense()).coverageAnchorDay
+      const dataBefore = await readFile(localDataPath, 'utf8')
+
+      await expect(
+        store.confirmExpenseCoverage(september.id, 'recur-qbo', {
+          start: '2026-10-20',
+          end: '2026-11-20',
+        }),
+      ).rejects.toThrow(
+        'A later month has already been billed for this expense. Change the dates on the latest invoice instead.',
+      )
+      await expect(
+        store.confirmExpenseCoverage(september.id, 'recur-qbo', {
+          start: '2026-10-20',
+          end: '2026-11-20',
+        }),
+      ).rejects.toBeInstanceOf(CoverageConfirmationError)
+
+      expect(await readFile(localDataPath, 'utf8')).toBe(dataBefore)
+      expect((await readExpense()).coverageHistory).toEqual(ledgerBefore)
+      expect((await readExpense()).coverageAnchorDay).toBe(anchorBefore)
+    })
+
+    it('still allows the latest month', async () => {
+      const { october } = await septemberAndOctober()
+
+      const changed = await store.confirmExpenseCoverage(october.id, 'recur-qbo', {
+        start: '2026-11-13',
+        end: '2026-12-13',
+      })
+
+      expect(recurringLineOf(changed).coverageEnd).toBe('2026-12-13')
+    })
+
+    it('still lets her press confirm on the earlier month without moving anything', async () => {
+      const { september } = await septemberAndOctober()
+
+      const same = await store.confirmExpenseCoverage(september.id, 'recur-qbo', {
+        start: '2026-09-13',
+        end: '2026-10-13',
+      })
+
+      expect(recurringLineOf(same).coverageEnd).toBe('2026-10-13')
+    })
+
+    // A backfill is the question being answered, in whatever order she gets to it.
+    it('still confirms a FLAGGED backfill line while later periods exist', async () => {
+      await seedOne()
+      await store.generateInvoicesForPeriod('2026-10', { clientId: 'c1' })
+      const september = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+      expect(recurringLineOf(september.created[0])).toMatchObject({
+        needsCoverageConfirmation: true,
+        coverageReason: 'backfill',
+      })
+
+      const confirmed = await store.confirmExpenseCoverage(september.created[0].id, 'recur-qbo', {
+        start: '2026-08-13',
+        end: '2026-09-13',
+      })
+
+      expect(recurringLineOf(confirmed)).toMatchObject({
+        coverageStart: '2026-08-13',
+        coverageEnd: '2026-09-13',
+        needsCoverageConfirmation: false,
+      })
+    })
+  })
+
   it('still allows a sent invoice that nobody has paid', async () => {
     const invoice = await seededSeptember()
     await store.updateInvoice(invoice.id, { status: 'sent' })
@@ -13404,6 +13531,98 @@ describe('covered dates — changing an unflagged window (postgres branch)', () 
       start: '2026-10-13',
       end: '2026-11-13',
       needsConfirmation: false,
+    })
+  })
+
+  const ledgerWrite = (fake) => JSON.parse(fake.matching(/jsonb_set\(/i)[0].params[2])
+  const anchorWritten = (fake) => fake.matching(/jsonb_set\(/i)[0].params[3]
+
+  it('keeps the anchor when only the start of a clamped window changes', async () => {
+    const row = unflaggedRow('sent')
+    row.line_items[0].coverageStart = '2026-08-31'
+    row.line_items[0].coverageEnd = '2026-09-30'
+    const fake = fakePostgres({
+      invoices: [row],
+      recurringRows: [{ ...recurringRow, coverage_anchor_day: 31 }],
+    })
+
+    await postgresStore(fake).confirmExpenseCoverage('inv-1', 'recur-qbo', {
+      start: '2026-08-30',
+      end: '2026-09-30',
+    })
+
+    expect(ledgerWrite(fake)).toMatchObject({ start: '2026-08-30', end: '2026-09-30' })
+    // Null leaves the stored 31 alone (`coalesce` in the ledger write).
+    expect(anchorWritten(fake)).toBeNull()
+  })
+
+  it('still moves the anchor when the end lands on a different day', async () => {
+    const fake = fakePostgres({ invoices: [unflaggedRow('sent')], recurringRows: [recurringRow] })
+
+    await postgresStore(fake).confirmExpenseCoverage('inv-1', 'recur-qbo', {
+      start: '2026-10-20',
+      end: '2026-11-20',
+    })
+
+    expect(anchorWritten(fake)).toBe(20)
+  })
+
+  describe('with a later month already billed', () => {
+    const laterBilled = {
+      ...recurringRow,
+      coverage_history: {
+        '2026-09': { start: '2026-09-13', end: '2026-10-13', needsConfirmation: false },
+        '2026-10': { start: '2026-10-13', end: '2026-11-13', needsConfirmation: false },
+      },
+    }
+
+    it('refuses to move the earlier month and writes nothing', async () => {
+      const fake = fakePostgres({ invoices: [unflaggedRow('sent')], recurringRows: [laterBilled] })
+
+      await expect(
+        postgresStore(fake).confirmExpenseCoverage('inv-1', 'recur-qbo', {
+          start: '2026-10-20',
+          end: '2026-11-20',
+        }),
+      ).rejects.toThrow(/A later month has already been billed/)
+
+      expect(fake.matching(/^BEGIN$/i)).toHaveLength(0)
+      expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+      expect(fake.matching(/jsonb_set\(/i)).toHaveLength(0)
+    })
+
+    it('allows the latest month', async () => {
+      const row = { ...unflaggedRow('sent'), period: '2026-10' }
+      const fake = fakePostgres({ invoices: [row], recurringRows: [laterBilled] })
+
+      await postgresStore(fake).confirmExpenseCoverage('inv-1', 'recur-qbo', {
+        start: '2026-10-20',
+        end: '2026-11-20',
+      })
+
+      expect(fake.matching(/jsonb_set\(/i)).toHaveLength(1)
+    })
+
+    it('allows pressing confirm without moving the range', async () => {
+      const fake = fakePostgres({ invoices: [unflaggedRow('sent')], recurringRows: [laterBilled] })
+
+      await postgresStore(fake).confirmExpenseCoverage('inv-1', 'recur-qbo')
+
+      expect(fake.matching(/jsonb_set\(/i)).toHaveLength(1)
+    })
+
+    it('still confirms a flagged line', async () => {
+      const row = unflaggedRow('draft')
+      row.line_items[0].needsCoverageConfirmation = true
+      row.line_items[0].coverageReason = 'backfill'
+      const fake = fakePostgres({ invoices: [row], recurringRows: [laterBilled] })
+
+      await postgresStore(fake).confirmExpenseCoverage('inv-1', 'recur-qbo', {
+        start: '2026-08-13',
+        end: '2026-09-13',
+      })
+
+      expect(ledgerWrite(fake)).toMatchObject({ start: '2026-08-13', needsConfirmation: false })
     })
   })
 

@@ -11831,6 +11831,20 @@ export class AppDataStore {
     // is hers and it stays. Re-rendering is also skipped outright when the
     // window did not move — there would be nothing new to say.
     const rangeMoved = nextStart !== line.coverageStart || nextEnd !== line.coverageEnd
+
+    // A SETTLED window moves only on the latest month billed. The next month
+    // already stepped from this one, so moving it here would leave that invoice
+    // (and the cycle) describing dates that no longer follow on. A flagged line
+    // is a different case — it is an open question, answered in any order.
+    if (rangeMoved && !line.needsCoverageConfirmation) {
+      const history = expense?.coverageHistory ?? {}
+      if (Object.keys(history).some((key) => /^\d{4}-\d{2}$/.test(key) && key > current.period)) {
+        throw new CoverageConfirmationError(
+          'A later month has already been billed for this expense. Change the dates on the latest invoice instead.',
+        )
+      }
+    }
+
     const generatedNow = coverageLineLabel(expense, {
       start: line.coverageStart,
       end: line.coverageEnd,
@@ -11858,10 +11872,14 @@ export class AppDataStore {
     // just said this window runs to the 20th; proposing the 13th again next
     // month would bill a 23-day period at the full monthly price and never
     // mention it. Only a genuine change is written — `coalesce` in the ledger
-    // write leaves the stored anchor alone when this is null.
+    // write leaves the stored anchor alone when this is null. The END's day has
+    // to be the thing that changed: a window clamped by a short month (anchor
+    // 31, end September 30) must not re-anchor to the 30th because she moved
+    // only the start.
     const movedAnchor = anchorDayFromRange(nextEnd)
+    const endDayChanged = nextEnd.slice(8, 10) !== String(line.coverageEnd ?? '').slice(8, 10)
     const anchorDay =
-      rangeMoved && movedAnchor !== null && movedAnchor !== anchorDayOf(expense)
+      rangeMoved && endDayChanged && movedAnchor !== null && movedAnchor !== anchorDayOf(expense)
         ? movedAnchor
         : null
 
