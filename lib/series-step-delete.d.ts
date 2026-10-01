@@ -45,3 +45,12 @@ export declare function approvalDenial(
   request: DeletionRequestPath & { scope?: string },
   shownScope: string | null | undefined,
 ): { status: 409; body: { error: string; message?: string } } | null
+export declare function normalizeStepLabel(label: unknown): string
+export declare function normalizedLabelSql(column: string): string
+export declare function stepCarriesWork(item: unknown): boolean
+export declare function untouchedStepSql(alias?: string): string
+export declare function sameLabelOrdinal(items: { id: string; label?: string }[], itemId: string): number
+export declare function pickCopyToRemove(
+  copies: { id: string; carriesWork: boolean }[],
+  ordinal: number,
+): { removeId: string | null; kept: boolean }
