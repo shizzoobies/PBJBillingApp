@@ -620,6 +620,13 @@ export type AppContextValue = {
   printInvoice: () => void
   handleLogout: () => Promise<void>
   dataSyncState: 'loading' | 'saving' | 'synced' | 'offline' | 'error'
+  /**
+   * How many times the live-sync ping has made this tab refetch the workspace.
+   * Endpoint-managed data that lives outside `data` (pending notes) refetches
+   * on this, not on the `data` reference - which also changes on every local
+   * edit and would make those lists flicker as the owner types.
+   */
+  dataRefreshCount: number
   syncMessage: string
   firmSettings: FirmSettings
   setFirmSettings: (settings: FirmSettings) => void

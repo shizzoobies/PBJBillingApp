@@ -8,10 +8,10 @@ import {
   deleteClientNote,
   deleteClientPendingNoteRequest,
   listClientNotes,
-  listClientPendingNotesRequest,
 } from '../lib/api'
+import { useClientPendingNotes, type ClientPendingNotesState } from '../hooks/useClientPendingNotes'
 import { renderRichNote } from '../lib/richText'
-import type { ClientNote, ClientPendingNote } from '../lib/types'
+import type { ClientNote } from '../lib/types'
 import { RichNoteEditor } from './RichNoteEditor'
 
 const noteStamp = new Intl.DateTimeFormat('en-US', {
@@ -33,14 +33,16 @@ export function ClientNotesPanel({
   clientId,
   ownerMode,
   currentUserId,
-  onPendingCountChange,
+  pendingState,
 }: {
   clientId: string
   ownerMode: boolean
   currentUserId: string
-  /** Lets the client page show the "N waiting for a checklist" pill in the
-   *  section header — the count itself lives here, where it's fetched. */
-  onPendingCountChange?: (count: number) => void
+  /** The client's pending notes, when the page owns them (the client page
+   *  keeps them so the "N waiting for a checklist" pill in the section header
+   *  shows even while this box is collapsed and unmounted). Without it the box
+   *  loads its own. */
+  pendingState?: ClientPendingNotesState
 }) {
   const { data } = useAppContext()
   const [notes, setNotes] = useState<ClientNote[]>([])
@@ -70,37 +72,17 @@ export function ClientNotesPanel({
   }, [clientId])
 
   // ---- Pending notes for future recurring checklists (featreq-b688e73c) ----
-  const [pendingNotes, setPendingNotes] = useState<ClientPendingNote[]>([])
-  const [pendingLoading, setPendingLoading] = useState(true)
-  const [pendingError, setPendingError] = useState('')
+  const ownPending = useClientPendingNotes(clientId, !pendingState)
+  const pending = pendingState ?? ownPending
+  const pendingNotes = pending.notes
+  const setPendingNotes = pending.setNotes
+  // Action errors (add/delete) live here; a LOAD error comes from the hook.
+  const [pendingActionError, setPendingActionError] = useState('')
+  const pendingError = pendingActionError || pending.error
   const [pendingBusy, setPendingBusy] = useState(false)
   const [pendingBody, setPendingBody] = useState('')
   const [pendingTemplateId, setPendingTemplateId] = useState('')
   const [pendingKind, setPendingKind] = useState<'task' | 'note'>('task')
-
-  // Re-fetches on any app-data broadcast (a NEW `data` reference), not just on
-  // clientId change — the attach pass runs server-side on other tabs' reads
-  // and writes too, so this is how an already-open notes box learns a note
-  // just attached.
-  useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      setPendingLoading(true)
-      setPendingError('')
-      try {
-        const list = await listClientPendingNotesRequest(clientId)
-        if (!cancelled) setPendingNotes(list)
-      } catch {
-        if (!cancelled) setPendingError('Could not load pending notes.')
-      } finally {
-        if (!cancelled) setPendingLoading(false)
-      }
-    }
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [clientId, data])
 
   const activeTemplates = useMemo(
     () =>
@@ -132,7 +114,10 @@ export function ClientNotesPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [activeTemplates, gateUser, liveChecklists],
   )
-  const showPendingBlock = ownerMode ? activeTemplates.length > 0 : eligibleTemplates.length > 0
+  // The FORM is for people who can write; the LIST is for everyone who can see
+  // the client - a teammate without write access still sees what is waiting.
+  const showPendingForm = ownerMode ? activeTemplates.length > 0 : eligibleTemplates.length > 0
+  const showPendingBlock = showPendingForm || pendingNotes.length > 0
 
   // Derived, not effect-synced: the select defaults to the first writable
   // template until the user picks one explicitly, and falls back again if the
@@ -143,11 +128,6 @@ export function ClientNotesPanel({
       ? pendingTemplateId
       : preferredTemplateId
 
-  const pendingCount = pendingNotes.filter((note) => !note.attachedChecklistId).length
-  useEffect(() => {
-    onPendingCountChange?.(pendingCount)
-  }, [pendingCount, onPendingCountChange])
-
   const selectedTemplate = activeTemplates.find((template) => template.id === effectiveTemplateId)
   const canAddSelected = canAddForTemplate(selectedTemplate)
 
@@ -155,7 +135,7 @@ export function ClientNotesPanel({
     const body = pendingBody.trim()
     if (!body || !selectedTemplate || !canAddSelected || pendingBusy) return
     setPendingBusy(true)
-    setPendingError('')
+    setPendingActionError('')
     try {
       const note = await addClientPendingNoteRequest(clientId, {
         templateId: selectedTemplate.id,
@@ -165,19 +145,19 @@ export function ClientNotesPanel({
       setPendingNotes((current) => [note, ...current])
       setPendingBody('')
     } catch {
-      setPendingError('Could not add that note — please try again.')
+      setPendingActionError('Could not add that note — please try again.')
     } finally {
       setPendingBusy(false)
     }
   }
 
   const removePendingNote = async (noteId: string) => {
-    setPendingError('')
+    setPendingActionError('')
     try {
       await deleteClientPendingNoteRequest(clientId, noteId)
       setPendingNotes((current) => current.filter((note) => note.id !== noteId))
     } catch {
-      setPendingError('Could not delete that note.')
+      setPendingActionError('Could not delete that note.')
     }
   }
 
@@ -212,60 +192,64 @@ export function ClientNotesPanel({
       {showPendingBlock ? (
         <div className="pending-client-notes">
           <span className="field-label-row">For an upcoming checklist</span>
-          <textarea
-            className="pending-note-textarea"
-            value={pendingBody}
-            onChange={(event) => setPendingBody(event.target.value)}
-            placeholder="A note for a checklist that hasn't come up yet…"
-            rows={2}
-          />
-          <div className="pending-note-controls">
-            <select
-              aria-label="Attach to"
-              value={effectiveTemplateId}
-              onChange={(event) => setPendingTemplateId(event.target.value)}
-            >
-              {activeTemplates.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {template.title}
-                </option>
-              ))}
-            </select>
-            <label className="pending-note-kind">
-              <input
-                type="radio"
-                name={`pending-note-kind-${clientId}`}
-                checked={pendingKind === 'task'}
-                onChange={() => setPendingKind('task')}
+          {showPendingForm ? (
+            <>
+              <textarea
+                className="pending-note-textarea"
+                value={pendingBody}
+                onChange={(event) => setPendingBody(event.target.value)}
+                placeholder="A note for a checklist that hasn't come up yet…"
+                rows={2}
               />
-              Task
-            </label>
-            <label className="pending-note-kind">
-              <input
-                type="radio"
-                name={`pending-note-kind-${clientId}`}
-                checked={pendingKind === 'note'}
-                onChange={() => setPendingKind('note')}
-              />
-              Note
-            </label>
-            <button
-              type="button"
-              className="secondary-action"
-              disabled={pendingBusy || !pendingBody.trim() || !canAddSelected}
-              onClick={() => void submitPendingNote()}
-            >
-              {pendingBusy ? 'Adding…' : 'Add'}
-            </button>
-          </div>
-          {!canAddSelected && selectedTemplate ? (
-            <p className="field-helper">
-              You don’t have write access to {selectedTemplate.title} — ask its assignee or an
-              owner to add this one.
-            </p>
+              <div className="pending-note-controls">
+                <select
+                  aria-label="Attach to"
+                  value={effectiveTemplateId}
+                  onChange={(event) => setPendingTemplateId(event.target.value)}
+                >
+                  {activeTemplates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.title}
+                    </option>
+                  ))}
+                </select>
+                <label className="pending-note-kind">
+                  <input
+                    type="radio"
+                    name={`pending-note-kind-${clientId}`}
+                    checked={pendingKind === 'task'}
+                    onChange={() => setPendingKind('task')}
+                  />
+                  Task
+                </label>
+                <label className="pending-note-kind">
+                  <input
+                    type="radio"
+                    name={`pending-note-kind-${clientId}`}
+                    checked={pendingKind === 'note'}
+                    onChange={() => setPendingKind('note')}
+                  />
+                  Note
+                </label>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  disabled={pendingBusy || !pendingBody.trim() || !canAddSelected}
+                  onClick={() => void submitPendingNote()}
+                >
+                  {pendingBusy ? 'Adding…' : 'Add'}
+                </button>
+              </div>
+              {!canAddSelected && selectedTemplate ? (
+                <p className="field-helper">
+                  You don’t have write access to {selectedTemplate.title} — ask its assignee or an
+                  owner to add this one.
+                </p>
+              ) : null}
+            </>
           ) : null}
           {pendingError ? <p className="auth-error">{pendingError}</p> : null}
-          {pendingLoading ? (
+          {pending.loading ? (
             <p className="muted-text">Loading…</p>
           ) : pendingNotes.length === 0 ? null : (
             <ul className="pending-client-notes-list">

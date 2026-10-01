@@ -3802,20 +3802,37 @@ export async function deleteClientPendingNoteRequest(clientId: string, noteId: s
   return (await response.json()) as { ok: boolean }
 }
 
-/** Notes attached to one checklist (kind 'note' to show, kind 'task' for the link back). */
-export async function listPendingNotesForChecklistRequest(checklistId: string) {
-  const response = await apiFetch(
-    `/api/checklists/${encodeURIComponent(checklistId)}/pending-notes`,
-    { credentials: 'same-origin' },
-  )
-  if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null
-    throw new ApiError(
-      response.status,
-      body?.error ?? `Failed to load checklist notes (${response.status})`,
+/**
+ * Ids per request - under the server's 500 cap, and short enough
+ * that the id list never threatens a URL length limit.
+ */
+const ATTACHED_NOTES_CHUNK = 300
+
+/**
+ * Notes attached to ANY of the given checklists (kind 'note' to show, kind
+ * 'task' for the link back) - one request for a whole page of cards rather
+ * than one per card. Ids the caller cannot see are simply absent. A page with
+ * more than ATTACHED_NOTES_CHUNK checklists takes one request per chunk.
+ */
+export async function listAttachedPendingNotesRequest(checklistIds: string[]) {
+  const unique = [...new Set(checklistIds.filter(Boolean))]
+  const notes: ClientPendingNote[] = []
+  for (let start = 0; start < unique.length; start += ATTACHED_NOTES_CHUNK) {
+    const chunk = unique.slice(start, start + ATTACHED_NOTES_CHUNK)
+    const response = await apiFetch(
+      `/api/pending-notes/attached?checklistIds=${chunk.map(encodeURIComponent).join(',')}`,
+      { credentials: 'same-origin' },
     )
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as { error?: string } | null
+      throw new ApiError(
+        response.status,
+        body?.error ?? `Failed to load checklist notes (${response.status})`,
+      )
+    }
+    notes.push(...((await response.json()) as { notes: ClientPendingNote[] }).notes)
   }
-  return ((await response.json()) as { notes: ClientPendingNote[] }).notes
+  return notes
 }
 
 export async function assistantFeatureRequestSend(draft: AssistantFeatureRequestDraft) {

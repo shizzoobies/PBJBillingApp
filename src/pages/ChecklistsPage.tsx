@@ -35,7 +35,7 @@ import {
   type SkipReasonCategory,
 } from '../../lib/checklist-skip.js'
 import { useAppContext } from '../AppContext'
-import { listPendingNotesForChecklistRequest } from '../lib/api'
+import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { PeriodLabelChip } from '../components/PeriodLabelChip'
 import {
@@ -1671,6 +1671,12 @@ function ChecklistInProgressSection({
     [checklists, assignee, client, status, todayDateOnly, query, clients, reportPeriod, focusId],
   )
 
+  // The notes attached to the rendered cards, fetched ONCE for all of them (a
+  // projected card has no id the server knows).
+  const attachedNotesFor = useAttachedClientNotes(
+    filtered.filter((checklist) => !checklist.projected).map((checklist) => checklist.id),
+  )
+
   // Status grouping (current behavior, unchanged).
   const groupedByStatus: Record<Group, Checklist[]> = {
     overdue: [],
@@ -1743,6 +1749,7 @@ function ChecklistInProgressSection({
       ownerMode={ownerMode}
       role={role}
       timeEntries={timeEntries}
+      attachedNotes={attachedNotesFor(checklist.id)}
     />
   )
 
@@ -2023,28 +2030,14 @@ function SkipTaskDialog({
 /**
  * "Notes from the client page" (featreq-b688e73c): a note flagged against
  * this checklist's recurring template, kind 'note', that attached here once
- * this checklist populated. Checklists have no notes field, so this reads
- * from the pending-notes table instead — GET /api/checklists/:id/pending-notes
- * — and renders read-only above the item list. Kind 'task' notes are excluded
- * here: they already landed as an ordinary item.
+ * this checklist populated. Checklists have no notes field, so these come from
+ * the pending-notes table — fetched ONCE per page by `useAttachedClientNotes`
+ * (GET /api/pending-notes/attached) and handed to the card, never fetched by
+ * the card itself. Renders read-only above the item list. Kind 'task' notes
+ * are excluded here: they already landed as an ordinary item.
  */
-export function AttachedClientNotes({ checklistId }: { checklistId: string }) {
-  const [notes, setNotes] = useState<ClientPendingNote[]>([])
-
-  useEffect(() => {
-    let cancelled = false
-    void listPendingNotesForChecklistRequest(checklistId)
-      .then((list) => {
-        if (!cancelled) setNotes(list.filter((note) => note.kind === 'note'))
-      })
-      .catch(() => {
-        if (!cancelled) setNotes([])
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [checklistId])
-
+export function AttachedClientNotes({ notes: attached }: { notes: ClientPendingNote[] }) {
+  const notes = attached.filter((note) => note.kind === 'note')
   if (notes.length === 0) return null
 
   return (
@@ -2097,9 +2090,14 @@ export function ChecklistCard({
   ownerMode,
   role,
   timeEntries,
+  attachedNotes = [],
 }: {
   activeEmployeeId: string
   checklist: Checklist
+  /** Notes that attached to this checklist from the client page. The PAGE
+   *  fetches them once for every card it renders (`useAttachedClientNotes`);
+   *  the card only displays what it is handed. */
+  attachedNotes?: ClientPendingNote[]
   /** Current stage's name for multi-stage checklists (resolved from template). */
   stageName?: string
   clients: Client[]
@@ -2572,7 +2570,7 @@ export function ChecklistCard({
           }}
         />
       </div>
-      {!checklist.projected ? <AttachedClientNotes checklistId={checklist.id} /> : null}
+      <AttachedClientNotes notes={attachedNotes} />
       {canEditStructure && checklist.items.length === 0 ? (
         <p className="checklist-empty-hint">No items yet — add one below.</p>
       ) : null}

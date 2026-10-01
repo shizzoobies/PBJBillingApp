@@ -8,8 +8,9 @@ import type { AppData, Checklist, ChecklistTemplate, ClientPendingNote } from '.
 /**
  * Pending notes for future recurring checklists (featreq-b688e73c), the
  * client-page half: the "For an upcoming checklist" block inside
- * ClientNotesPanel — the count, the write gate (mirrors
- * `pendingNoteWriteDenial`), adding, and how an attached note renders.
+ * ClientNotesPanel — the write gate (mirrors `pendingNoteWriteDenial`),
+ * adding, how an attached note renders, and when the list refetches. (The
+ * count pill lives in the section header: client-notes-section-pill.test.tsx.)
  * Reuses the existing `ClientNotesPanel` plumbing (client-statements-panel
  * test's mocking pattern), so the plain-notes half is stubbed out rather than
  * re-tested here.
@@ -52,26 +53,20 @@ function renderPanel({
   currentUserId = 'emp-owner',
   templates = [payrollTemplate()],
   checklists = [],
-  onPendingCountChange,
 }: {
   clientId?: string
   ownerMode?: boolean
   currentUserId?: string
   templates?: ChecklistTemplate[]
   checklists?: Checklist[]
-  onPendingCountChange?: (count: number) => void
 } = {}) {
   contextValue = {
     data: { checklistTemplates: templates, checklists } as unknown as AppData,
+    dataRefreshCount: 0,
   } as unknown as AppContextValue
   return render(
     <MemoryRouter>
-      <ClientNotesPanel
-        clientId={clientId}
-        ownerMode={ownerMode}
-        currentUserId={currentUserId}
-        onPendingCountChange={onPendingCountChange}
-      />
+      <ClientNotesPanel clientId={clientId} ownerMode={ownerMode} currentUserId={currentUserId} />
     </MemoryRouter>,
   )
 }
@@ -99,37 +94,93 @@ beforeEach(() => {
   deletePending = vi.fn(async () => ({ ok: true }))
 })
 
-describe('the "for an upcoming checklist" block', () => {
-  it('is shown to the owner and reports the unattached count', async () => {
-    const onPendingCountChange = vi.fn()
+describe('refetching the pending notes', () => {
+  const rerenderWith = (view: ReturnType<typeof renderPanel>, over: Partial<AppContextValue>) => {
+    contextValue = { ...contextValue, ...over } as AppContextValue
+    view.rerender(
+      <MemoryRouter>
+        <ClientNotesPanel clientId="c1" ownerMode currentUserId="emp-owner" />
+      </MemoryRouter>,
+    )
+  }
+
+  it('fetches once, and a new `data` reference alone does not refetch', async () => {
     listPending = vi.fn(async () => [pendingNote()])
-    renderPanel({ onPendingCountChange })
-    expect(await screen.findByText('For an upcoming checklist')).toBeInTheDocument()
-    await waitFor(() => expect(onPendingCountChange).toHaveBeenLastCalledWith(1))
+    const view = renderPanel()
+    await screen.findByText('New hire starting')
+    expect(listPending).toHaveBeenCalledTimes(1)
+
+    // Every local edit replaces `data`; that must not hit the server again.
+    rerenderWith(view, {
+      data: { checklistTemplates: [payrollTemplate()], checklists: [] } as unknown as AppData,
+    })
+    rerenderWith(view, {
+      data: { checklistTemplates: [payrollTemplate()], checklists: [] } as unknown as AppData,
+    })
+    expect(listPending).toHaveBeenCalledTimes(1)
   })
 
-  it('does not count an already-attached note toward the pill', async () => {
-    const onPendingCountChange = vi.fn()
-    listPending = vi.fn(async () => [
-      pendingNote({ id: 'pnote-attached', attachedChecklistId: 'chk-1', attachedAt: '2026-09-25T00:00:00.000Z' }),
-    ])
+  it('refetches on the data-changed signal, keeping the rows on screen while it does', async () => {
+    listPending = vi.fn(async () => [pendingNote()])
+    const view = renderPanel()
+    await screen.findByText('New hire starting')
+
+    let finish: (notes: ClientPendingNote[]) => void = () => {}
+    listPending = vi.fn(
+      () =>
+        new Promise<ClientPendingNote[]>((resolve) => {
+          finish = resolve
+        }),
+    )
+    rerenderWith(view, { dataRefreshCount: 1 })
+    await waitFor(() => expect(listPending).toHaveBeenCalledTimes(1))
+
+    // In flight: the existing row is still there and nothing flashes "Loading".
+    expect(screen.getByText('New hire starting')).toBeInTheDocument()
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
+
+    finish([pendingNote(), pendingNote({ id: 'pnote-2', body: 'A second one' })])
+    expect(await screen.findByText('A second one')).toBeInTheDocument()
+    expect(screen.getByText('New hire starting')).toBeInTheDocument()
+  })
+
+  it('says "Loading…" only until the first answer', async () => {
+    let finish: (notes: ClientPendingNote[]) => void = () => {}
+    listPending = vi.fn(
+      () =>
+        new Promise<ClientPendingNote[]>((resolve) => {
+          finish = resolve
+        }),
+    )
+    renderPanel()
+    expect(await screen.findByText('Loading…')).toBeInTheDocument()
+    finish([pendingNote()])
+    expect(await screen.findByText('New hire starting')).toBeInTheDocument()
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
+  })
+})
+
+describe('the "for an upcoming checklist" block', () => {
+  it('is shown to the owner', async () => {
+    listPending = vi.fn(async () => [pendingNote()])
+    renderPanel()
+    expect(await screen.findByText('For an upcoming checklist')).toBeInTheDocument()
+    expect(await screen.findByText('New hire starting')).toBeInTheDocument()
+  })
+
+  it('shows a staff user with no write access the LIST of what is waiting, but not the add form', async () => {
+    listPending = vi.fn(async () => [pendingNote({ body: 'Waiting for the next run' })])
     renderPanel({
-      onPendingCountChange,
-      checklists: [
-        {
-          id: 'chk-1',
-          title: 'Payroll',
-          clientId: 'c1',
-          assigneeId: 'emp-lisa',
-          dueDate: '2026-10-05',
-          viewerIds: [],
-          editorIds: [],
-          items: [],
-        } as unknown as Checklist,
-      ],
+      ownerMode: false,
+      currentUserId: 'emp-stranger',
+      templates: [payrollTemplate({ assigneeId: 'emp-lisa' })],
     })
-    await screen.findByText(/Attached to/i)
-    await waitFor(() => expect(onPendingCountChange).toHaveBeenLastCalledWith(0))
+    expect(await screen.findByText('Waiting for the next run')).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText(/hasn't come up yet/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Add$/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+    // Not theirs, so nothing to delete either.
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
   })
 
   it('is hidden for a staff user with no write access to any active template', async () => {
@@ -191,7 +242,7 @@ describe('the "for an upcoming checklist" block', () => {
     expect(screen.getByText(/→ Payroll as Note/)).toBeInTheDocument()
   })
 
-  it('renders an attached note greyed with a link to the checklist', async () => {
+  it('renders an attached note grayed with a link to the checklist', async () => {
     listPending = vi.fn(async () => [
       pendingNote({
         attachedChecklistId: 'chk-1',
@@ -239,6 +290,7 @@ describe('the "for an upcoming checklist" block', () => {
 
     contextValue = {
       data: { checklistTemplates: [payrollTemplate()], checklists: [] } as unknown as AppData,
+      dataRefreshCount: 0,
     } as unknown as AppContextValue
     rerender(
       <MemoryRouter>

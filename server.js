@@ -877,6 +877,9 @@ const PREVIEW_AWARE_API_PATHS = new Set([
 // which meant any deeper path under a prefix was allowlisted by a parent it has
 // nothing to do with. `normalizedPath` carries no query string, but `?` stays
 // excluded too so a normalizer change cannot quietly widen them.
+// Most checklist ids one batched pending-notes request may ask about.
+const PENDING_NOTES_BATCH_LIMIT = 500
+
 const PREVIEW_AWARE_API_PATTERNS = [
   /^\/api\/auth\/[^/?]*$/,
   // Named rather than swept in by the line above: `GET /api/auth/totp/status`
@@ -890,7 +893,7 @@ const PREVIEW_AWARE_API_PATTERNS = [
   /^\/api\/clients\/[^/]+\/notes$/,
   /^\/api\/clients\/[^/]+\/statement-accounts$/,
   /^\/api\/clients\/[^/]+\/pending-notes$/,
-  /^\/api\/checklists\/[^/]+\/pending-notes$/,
+  /^\/api\/pending-notes\/attached$/,
 ]
 
 function isPreviewAwareApiPath(normalizedPath) {
@@ -6348,6 +6351,18 @@ const server = createServer(async (request, response) => {
           checklist.clientId === clientId &&
           !checklist.deletedAt,
       )
+      // A note rides a RECURRING template: the materializer never spawns from a
+      // standard blueprint or an inactive recipe, so a note against one would
+      // wait forever. The UI already filters these out; this is the server's
+      // own answer for anything that gets past it.
+      if (template.isStandard || template.active === false) {
+        sendJson(response, 409, {
+          error: 'template_not_recurring',
+          message:
+            'That template is not an active recurring template, so a note could never attach to it.',
+        })
+        return
+      }
       const denial = pendingNoteWriteDenial({
         user: session.user,
         clientVisible: true,
@@ -6397,9 +6412,12 @@ const server = createServer(async (request, response) => {
         sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
+      const clientId = decodeURIComponent(clientPendingNoteDeleteMatch[1])
       const noteId = decodeURIComponent(clientPendingNoteDeleteMatch[2])
       const note = await appDataStore.getClientPendingNote(noteId)
-      if (!note) {
+      // The path names a client; the note must belong to it, or this route
+      // would delete any client's note through any other client's URL.
+      if (!note || note.clientId !== clientId) {
         sendJson(response, 404, { error: 'Note not found' })
         return
       }
@@ -6414,6 +6432,9 @@ const server = createServer(async (request, response) => {
         return
       }
       const removed = await appDataStore.deleteClientPendingNote(noteId)
+      if (removed) {
+        await appDataStore.recordActivity(session.user.id, 'client_pending_note_deleted', clientId)
+      }
       broadcastDataChanged()
       sendJson(response, removed ? 200 : 404, removed ? { ok: true } : { error: 'Note not found' })
       return
@@ -6423,27 +6444,46 @@ const server = createServer(async (request, response) => {
     // that landed on it. Kind 'note' renders read-only above the items; kind
     // 'task' is already an ordinary item, returned too so the UI can link back
     // to "added from the client page".
-    const checklistPendingNotesMatch = normalizedPath.match(
-      /^\/api\/checklists\/([^/]+)\/pending-notes$/,
-    )
-    if (checklistPendingNotesMatch && request.method === 'GET') {
+    //
+    // ONE request answers a whole page of cards (`?checklistIds=a,b,c`, at most
+    // PENDING_NOTES_BATCH_LIMIT ids): the page asks once for the cards it
+    // renders, and the cards never fetch. A GET on purpose — a POST here would
+    // be treated as a data mutation by the central broadcast hook and ping
+    // every tab into refetching, which would ask again.
+    if (normalizedPath === '/api/pending-notes/attached' && request.method === 'GET') {
       const session = await requireSession(request, response)
       if (!session) return
-      const checklistId = decodeURIComponent(checklistPendingNotesMatch[1])
+      const requested = [
+        ...new Set(
+          String(requestUrl.searchParams.get('checklistIds') ?? '')
+            .split(',')
+            .map((id) => id.trim())
+            .filter(Boolean),
+        ),
+      ]
+      if (requested.length > PENDING_NOTES_BATCH_LIMIT) {
+        sendJson(response, 400, {
+          error: `Ask for at most ${PENDING_NOTES_BATCH_LIMIT} checklists at a time`,
+        })
+        return
+      }
+      if (requested.length === 0) {
+        sendJson(response, 200, { notes: [] })
+        return
+      }
+      // One read() for the whole batch (not one per card): the visibility of
+      // every id is decided from the same snapshot, scoped to the PREVIEWED
+      // person like every other read here. An id the caller cannot see is
+      // simply absent from the answer.
       const data = await appDataStore.read()
       const scoped = await previewScopedSession(request, session, response, { data })
       if (!scoped) return
-      const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId)
-      if (!checklist) {
-        sendJson(response, 404, { error: 'Checklist not found' })
-        return
-      }
       const allowed = visibleClientIdSet(scoped, data)
-      if (!allowed.has(checklist.clientId)) {
-        sendJson(response, 403, { error: 'No access to that client' })
-        return
-      }
-      const notes = await appDataStore.listPendingNotesForChecklist(checklistId)
+      const wanted = new Set(requested)
+      const visibleIds = (data.checklists ?? [])
+        .filter((checklist) => wanted.has(checklist.id) && allowed.has(checklist.clientId))
+        .map((checklist) => checklist.id)
+      const notes = await appDataStore.listPendingNotesForChecklists(visibleIds)
       sendJson(response, 200, { notes })
       return
     }
@@ -6614,6 +6654,19 @@ const server = createServer(async (request, response) => {
           console.log(`[bulk-save] re-stamped ${restampedLabels} period label(s)`)
         }
 
+        // The write changed the workspace, so the fingerprint moved. Hand the
+        // new one back or the tab's very next save would 409 against itself.
+        // Computed AFTER the restamp above, which touches checklists — a
+        // fingerprint taken before it would 409 the tab against this server's
+        // own write — but BEFORE the pending-notes attach pass below, on
+        // purpose. The attach pass inserts a task-kind note's `item-pn-*` row
+        // into `checklist_items`, which this tab's payload does not have; a
+        // fingerprint taken after it would let the tab's very next autosave
+        // pass the staleness guard and have `write()` delete that item (the
+        // note would stay stamped attached with nothing to show for it). With
+        // the version taken first, that next save 409s and the tab refetches.
+        const nextVersion = await appDataStore.computeWorkspaceVersion()
+
         // Pending notes for future recurring checklists (featreq-b688e73c): a
         // bulk save can create/change checklists too, not only the
         // materializer, so the attach pass runs here as well — idempotent and
@@ -6626,12 +6679,6 @@ const server = createServer(async (request, response) => {
           console.error('[bulk-save] pending-notes attach pass failed:', error)
         }
 
-        // The write changed the workspace, so the fingerprint moved. Hand the
-        // new one back or the tab's very next save would 409 against itself.
-        // Computed AFTER the restamp above, which touches checklists — a
-        // fingerprint taken before it would 409 the tab against this server's
-        // own write.
-        const nextVersion = await appDataStore.computeWorkspaceVersion()
         // Forensics for accepted saves goes to the SERVER LOG, deliberately not
         // to activity_log: that table is trimmed to the last 200 rows per user,
         // and the autosave fires on every debounced edit — logging each one

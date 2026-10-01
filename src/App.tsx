@@ -291,6 +291,10 @@ function App() {
   const [authState, setAuthState] = useState<AuthState>('loading')
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(null)
   const [dataSyncState, setDataSyncState] = useState<DataSyncState>('loading')
+  // Bumped each time the live-sync ping makes this tab refetch the workspace,
+  // so endpoint-managed data (pending notes) that lives OUTSIDE `data` can
+  // refetch on exactly the same signal rather than on every `data` change.
+  const [dataRefreshCount, setDataRefreshCount] = useState(0)
   const [serverPersistenceEnabled, setServerPersistenceEnabled] = useState(false)
   // Active Checklists board columns. Endpoint-managed (separate from the bulk
   // workspace data) so they survive autosaves; fetched once the user is signed
@@ -707,6 +711,7 @@ function App() {
         dirtyRef.current = false
         setData(remote)
         setDataSyncState('synced')
+        setDataRefreshCount((count) => count + 1)
       } catch {
         /* transient — the next ping (or auto-reconnect) retries */
       }
@@ -4079,6 +4084,7 @@ function App() {
     printInvoice,
     handleLogout,
     dataSyncState,
+    dataRefreshCount,
     syncMessage,
     firmSettings,
     setFirmSettings: (next: FirmSettings) => {

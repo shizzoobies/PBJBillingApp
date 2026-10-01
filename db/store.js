@@ -2208,6 +2208,11 @@ function buildChecklistFromStage({
     assigneeId: stage.assigneeId,
     frequency: template.frequency,
     dueDate,
+    // When this instance came to exist. Postgres stamps `created_at` itself
+    // (and ignores this); the file backend persists exactly what is here, and
+    // the pending-notes attach rule ("the next checklist created AFTER the
+    // note") needs the same answer from both.
+    createdAt: nowIso(),
     viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
     editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
     caseId,
@@ -6798,11 +6803,19 @@ export class AppDataStore {
         // The write-back landed, so any pending note waiting on a template
         // that just spawned may now have a checklist to attach to. Only runs
         // on this SUCCESS path — never against a write that got refused.
+        let attachedCount = 0
         try {
-          await this.attachPendingClientNotes({})
+          attachedCount = await this.attachPendingClientNotes({})
         } catch (attachError) {
           console.error('[read] pending-notes attach pass failed:', attachError)
         }
+        // A task-kind attachment inserted an `item-pn-*` row AFTER the snapshot
+        // we hold was taken, and the GET handler computes the workspace version
+        // from the persisted state AFTER this returns. Serving the pre-attach
+        // snapshot under the post-attach version would let the tab's next save
+        // pass the staleness guard and delete that item — so hand back what is
+        // actually persisted, and data and version agree.
+        if (attachedCount > 0) return await this.read()
         return freshMaterialized.data
       } catch (error) {
         if (error instanceof StaleWorkspaceError) {
@@ -6970,11 +6983,16 @@ export class AppDataStore {
       // when the write-back actually persisted — a refused/failed write-back
       // leaves every pending note exactly as pending as it was.
       if (writeBackSucceeded) {
+        let attachedCount = 0
         try {
-          await this.attachPendingClientNotes({})
+          attachedCount = await this.attachPendingClientNotes({})
         } catch (attachError) {
           console.error('[read] pending-notes attach pass failed:', attachError)
         }
+        // Same reasoning as the Postgres branch: an attached task item is not in
+        // the snapshot we hold, and the version is computed from the file after
+        // we return — so return the persisted workspace, not the stale one.
+        if (attachedCount > 0) return await this.read()
       }
       return materialized.data
     }
@@ -19431,24 +19449,32 @@ export class AppDataStore {
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
   }
 
-  /** Notes attached to one checklist (kind 'note' to show, kind 'task' for the link back). */
-  async listPendingNotesForChecklist(checklistId) {
-    if (!checklistId) return []
+  /**
+   * Notes attached to ANY of the given checklists, oldest attachment first
+   * (kind 'note' to show, kind 'task' for the link back). One query for the
+   * whole page of cards — a checklist page asks once, not once per card.
+   */
+  async listPendingNotesForChecklists(checklistIds) {
+    const ids = [
+      ...new Set((Array.isArray(checklistIds) ? checklistIds : []).filter((id) => id && typeof id === 'string')),
+    ]
+    if (ids.length === 0) return []
     if (this.pool) {
       const result = await this.pool.query(
         `select id, client_id, template_id, kind, body, author_id, author_name,
                 created_at, attached_checklist_id, attached_item_id, attached_at
            from client_pending_notes
-          where attached_checklist_id = $1
+          where attached_checklist_id = any($1::text[])
           order by attached_at asc nulls last, created_at asc`,
-        [checklistId],
+        [ids],
       )
       return result.rows.map(mapClientPendingNoteRow)
     }
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    const wanted = new Set(ids)
     return list
-      .filter((note) => note.attachedChecklistId === checklistId)
+      .filter((note) => wanted.has(note.attachedChecklistId))
       .slice()
       .sort((a, b) =>
         String(a.attachedAt ?? a.createdAt).localeCompare(String(b.attachedAt ?? b.createdAt)),
@@ -19463,7 +19489,9 @@ export class AppDataStore {
     const cleanBody = String(body ?? '').trim().slice(0, 2000)
     if (!cleanBody) return null
     const note = {
-      id: `pnote-${randomUUID().slice(0, 8)}`,
+      // 12 hex chars: a task-kind note's checklist item takes its id from this
+      // (`item-pn-<these>`), and item ids share one primary-key space.
+      id: `pnote-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
       clientId,
       templateId,
       kind: cleanKind,
@@ -19533,21 +19561,33 @@ export class AppDataStore {
    * Every pending (unattached) note, optionally narrowed to one client.
    * Internal helper for `attachPendingClientNotes` — cheap, so that method's
    * "nothing pending" fast path costs one query.
+   *
+   * A note whose attached checklist has since been deleted (recycled) or has
+   * vanished is pending AGAIN, by decision: it was written for "the next
+   * checklist", and the one it landed on no longer exists. Those notes are
+   * returned with their stale stamp cleared, so the same pass can move them
+   * onto the next live checklist (or leave them waiting on the client page).
    */
   async _listUnattachedPendingNotes(clientId) {
     if (this.pool) {
-      const result = clientId
-        ? await this.pool.query(
-            `select id, client_id, template_id, kind, body, created_at
-               from client_pending_notes
-              where attached_checklist_id is null and client_id = $1`,
-            [clientId],
-          )
-        : await this.pool.query(
-            `select id, client_id, template_id, kind, body, created_at
-               from client_pending_notes
-              where attached_checklist_id is null`,
-          )
+      const result = await this.pool.query(
+        `select n.id, n.client_id, n.template_id, n.kind, n.body, n.created_at,
+                (n.attached_checklist_id is not null) as stale
+           from client_pending_notes n
+           left join checklists c on c.id = n.attached_checklist_id
+          where (n.attached_checklist_id is null or c.id is null or c.deleted_at is not null)
+            ${clientId ? 'and n.client_id = $1' : ''}`,
+        clientId ? [clientId] : [],
+      )
+      const staleIds = result.rows.filter((row) => row.stale).map((row) => row.id)
+      if (staleIds.length > 0) {
+        await this.pool.query(
+          `update client_pending_notes
+              set attached_checklist_id = null, attached_item_id = null, attached_at = null
+            where id = any($1::text[])`,
+          [staleIds],
+        )
+      }
       return result.rows.map((row) => ({
         id: row.id,
         clientId: row.client_id,
@@ -19559,17 +19599,37 @@ export class AppDataStore {
     }
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
-    return list
-      .filter((note) => !note.attachedChecklistId)
-      .filter((note) => !clientId || note.clientId === clientId)
-      .map((note) => ({
-        id: note.id,
-        clientId: note.clientId,
-        templateId: note.templateId,
-        kind: note.kind === 'task' ? 'task' : 'note',
-        body: note.body,
-        createdAt: note.createdAt,
-      }))
+    const scoped = list.filter((note) => !clientId || note.clientId === clientId)
+    let liveChecklistIds = null
+    if (scoped.some((note) => note.attachedChecklistId)) {
+      const data = await readJson(localDataPath)
+      liveChecklistIds = new Set(
+        (Array.isArray(data.checklists) ? data.checklists : [])
+          .filter((checklist) => checklist && !checklist.deletedAt)
+          .map((checklist) => checklist.id),
+      )
+    }
+    let cleared = false
+    const pending = scoped.filter((note) => {
+      if (!note.attachedChecklistId) return true
+      if (liveChecklistIds?.has(note.attachedChecklistId)) return false
+      note.attachedChecklistId = null
+      note.attachedItemId = null
+      note.attachedAt = null
+      cleared = true
+      return true
+    })
+    if (cleared) {
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+    return pending.map((note) => ({
+      id: note.id,
+      clientId: note.clientId,
+      templateId: note.templateId,
+      kind: note.kind === 'task' ? 'task' : 'note',
+      body: note.body,
+      createdAt: note.createdAt,
+    }))
   }
 
   /**
@@ -19577,8 +19637,13 @@ export class AppDataStore {
    * of the note's template, not deleted, not skipped, whose `createdAt` is
    * AFTER the note's `createdAt` (a checklist that already existed when the
    * note was written is not "the next one that populates") — falling back to
-   * `dueDate > note.createdAt's date` for rows with no `createdAt` — picking
-   * the earliest by due date. Returns `{ id }` or null.
+   * `dueDate > note.createdAt's date` for rows that truly carry no
+   * `createdAt` — picking the earliest by due date. Returns `{ id }` or null.
+   *
+   * Only a cycle's FIRST stage qualifies (`stageIndex` 0, or no stage at all).
+   * On a multi-stage template, "the next checklist that populates" is the next
+   * CYCLE; a stage-advance spawn (stageIndex > 0) is the same cycle's later
+   * step, and a note written for the cycle belongs on its first stage.
    */
   async _findNextChecklistForPendingNote(note) {
     const noteDateOnly = String(note.createdAt ?? '').slice(0, 10)
@@ -19590,6 +19655,7 @@ export class AppDataStore {
             and client_id = $2
             and deleted_at is null
             and skipped_at is null
+            and coalesce(stage_index, 0) = 0
             and (
               (created_at is not null and created_at > $3)
               or (created_at is null and due_date > $4)
@@ -19607,6 +19673,7 @@ export class AppDataStore {
           return false
         }
         if (checklist.deletedAt || checklist.skippedAt) return false
+        if (typeof checklist.stageIndex === 'number' && checklist.stageIndex !== 0) return false
         if (typeof checklist.createdAt === 'string' && checklist.createdAt) {
           return checklist.createdAt > note.createdAt
         }
@@ -19621,13 +19688,29 @@ export class AppDataStore {
   /**
    * Attach a task-kind note: insert the derived item at the end of the
    * checklist's items, idempotent, then stamp the note attached — one
-   * Postgres transaction; a matched pair of file writes otherwise.
+   * Postgres transaction; a matched pair of file writes otherwise. Returns
+   * true only when the stamp actually changed a row (false: another pass got
+   * there first, and on Postgres the item insert is rolled back with it).
    */
   async _attachTaskKindPendingNote({ checklistId, itemId, label, noteId }) {
     if (this.pool) {
       const client = await this.pool.connect()
       try {
         await client.query('begin')
+        // Item ids share one primary-key space, and a deleted checklist keeps
+        // its rows. A note whose first checklist was deleted attaches again
+        // (see `_listUnattachedPendingNotes`), and its old `item-pn-*` row must
+        // not swallow the new insert via `on conflict` - so a taken id on a
+        // DIFFERENT checklist gets this checklist's id appended.
+        const taken = await client.query(
+          `select checklist_id from checklist_items where id = $1`,
+          [itemId],
+        )
+        const takenBy = taken.rows[0]?.checklist_id
+        const finalItemId =
+          takenBy && takenBy !== checklistId
+            ? `${itemId}-${String(checklistId).replace(/^check-/, '')}`
+            : itemId
         const sortResult = await client.query(
           `select coalesce(max(sort_order), -1) as max_order
              from checklist_items where checklist_id = $1`,
@@ -19638,22 +19721,26 @@ export class AppDataStore {
           `insert into checklist_items (id, checklist_id, label, done, sort_order, created_at, updated_at)
            values ($1, $2, $3, false, $4, now(), now())
            on conflict (id) do nothing`,
-          [itemId, checklistId, label, nextOrder],
+          [finalItemId, checklistId, label, nextOrder],
         )
-        await client.query(
+        const stamp = await client.query(
           `update client_pending_notes
               set attached_checklist_id = $2, attached_item_id = $3, attached_at = now()
             where id = $1 and attached_checklist_id is null`,
-          [noteId, checklistId, itemId],
+          [noteId, checklistId, finalItemId],
         )
+        if ((stamp.rowCount ?? 0) === 0) {
+          await client.query('rollback')
+          return false
+        }
         await client.query('commit')
+        return true
       } catch (error) {
         await client.query('rollback')
         throw error
       } finally {
         client.release()
       }
-      return
     }
 
     const data = await readJson(localDataPath)
@@ -19677,19 +19764,21 @@ export class AppDataStore {
       note.attachedItemId = itemId
       note.attachedAt = nowIso()
       await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return true
     }
+    return false
   }
 
-  /** Attach a note-kind note: stamp the checklist id only, no item. */
+  /** Attach a note-kind note: stamp the checklist id only, no item. True when the stamp changed a row. */
   async _attachNoteKindPendingNote({ checklistId, noteId }) {
     if (this.pool) {
-      await this.pool.query(
+      const result = await this.pool.query(
         `update client_pending_notes
             set attached_checklist_id = $2, attached_item_id = null, attached_at = now()
           where id = $1 and attached_checklist_id is null`,
         [noteId, checklistId],
       )
-      return
+      return (result.rowCount ?? 0) > 0
     }
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
@@ -19699,7 +19788,9 @@ export class AppDataStore {
       note.attachedItemId = null
       note.attachedAt = nowIso()
       await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return true
     }
+    return false
   }
 
   /**
@@ -19721,6 +19812,15 @@ export class AppDataStore {
    * `this.onPendingNotesAttached` (set by server.js to `broadcastDataChanged`)
    * when anything actually attached, so open tabs refetch.
    *
+   * Each note is attempted on its own: one failure is logged and the rest
+   * still attach. A note counts only when its stamp actually changed a row.
+   *
+   * ORDERING CONTRACT for callers that hand a workspace version to a tab: a
+   * task-kind attachment adds an item row the tab's snapshot does not have, so
+   * take the version BEFORE this pass (the next save then 409s and refetches)
+   * or, if you return data, return it AFTER re-reading — never a pre-attach
+   * snapshot under a post-attach version.
+   *
    * @returns {Promise<number>} how many notes were attached.
    */
   async attachPendingClientNotes({ clientId } = {}) {
@@ -19729,20 +19829,28 @@ export class AppDataStore {
 
     let attached = 0
     for (const note of pending) {
-      const target = await this._findNextChecklistForPendingNote(note)
-      if (!target) continue
-      if (note.kind === 'task') {
-        const itemId = `item-pn-${note.id.replace(/^pnote-/, '')}`
-        await this._attachTaskKindPendingNote({
-          checklistId: target.id,
-          itemId,
-          label: note.body,
-          noteId: note.id,
-        })
-      } else {
-        await this._attachNoteKindPendingNote({ checklistId: target.id, noteId: note.id })
+      try {
+        const target = await this._findNextChecklistForPendingNote(note)
+        if (!target) continue
+        let stamped = false
+        if (note.kind === 'task') {
+          const itemId = `item-pn-${note.id.replace(/^pnote-/, '')}`
+          stamped = await this._attachTaskKindPendingNote({
+            checklistId: target.id,
+            itemId,
+            label: note.body,
+            noteId: note.id,
+          })
+        } else {
+          stamped = await this._attachNoteKindPendingNote({
+            checklistId: target.id,
+            noteId: note.id,
+          })
+        }
+        if (stamped) attached += 1
+      } catch (error) {
+        console.error(`[pending-notes] could not attach ${note.id}:`, error)
       }
-      attached += 1
     }
     if (attached > 0) {
       this.onPendingNotesAttached?.()

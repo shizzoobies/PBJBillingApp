@@ -140,11 +140,9 @@ describe('every leaking route now scopes by the previewed person', () => {
     expect(clientBlock).toContain('visibleClientIdSet(scoped, data)')
     expect(clientBlock).toContain('visibleClientIdSet(session, data)')
 
-    // The attached-side GET (for the checklist itself) is scoped the same way.
-    const checklistBlock = routeBlock(
-      /const checklistPendingNotesMatch = normalizedPath\.match/,
-      1200,
-    )
+    // The attached-side GET (one batched request for a page of checklists) is
+    // scoped the same way.
+    const checklistBlock = routeBlock(/normalizedPath === '\/api\/pending-notes\/attached'/, 2800)
     expect(checklistBlock).toContain('await previewScopedSession(request, session, response')
     expect(checklistBlock).toContain('visibleClientIdSet(scoped, data)')
   })
@@ -317,7 +315,7 @@ describe('the guard fails closed', () => {
     expect(patterns).toContain('/^\\/api\\/auth\\/totp\\/[^/?]*$/')
     expect(patterns).toContain('/^\\/api\\/clients\\/[^/]+\\/statement-accounts$/')
     expect(patterns).toContain('/^\\/api\\/clients\\/[^/]+\\/pending-notes$/')
-    expect(patterns).toContain('/^\\/api\\/checklists\\/[^/]+\\/pending-notes$/')
+    expect(patterns).toContain('/^\\/api\\/pending-notes\\/attached$/')
   })
 })
 

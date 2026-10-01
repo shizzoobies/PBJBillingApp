@@ -53,6 +53,8 @@ import {
 } from '../lib/api'
 import { applyPackageConfirmText } from '../lib/packages'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
+import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
+import { pendingNoteCount as pendingNoteCountOf, useClientPendingNotes } from '../hooks/useClientPendingNotes'
 import { ClientStatementsPanel } from '../components/ClientStatementsPanel'
 import { useSaveFlash } from '../lib/useSaveFlash'
 import {
@@ -105,6 +107,49 @@ import {
 } from '../lib/utils'
 
 /* -------------------------------------------------------------------------- */
+/* Client notes section                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The "Client notes" section, with the pending-notes count pill in its HEADER
+ * (featreq-b688e73c). The pending notes are owned HERE, not by the notes box:
+ * a CollapsibleSection unmounts its children when collapsed, so a count that
+ * the box fetched and reported up would vanish exactly when the section is
+ * folded away. The box is handed this state rather than fetching its own.
+ */
+export function ClientNotesSection({
+  clientId,
+  ownerMode,
+  currentUserId,
+}: {
+  clientId: string
+  ownerMode: boolean
+  currentUserId: string
+}) {
+  const pendingNotesState = useClientPendingNotes(clientId)
+  const waiting = pendingNoteCountOf(pendingNotesState.notes)
+  return (
+    <CollapsibleSection
+      id="client-section-notes"
+      kicker="Notes"
+      title="Client notes"
+      headerAction={
+        waiting > 0 ? (
+          <span className="pending-note-count-pill">{waiting} waiting for a checklist</span>
+        ) : undefined
+      }
+    >
+      <ClientNotesPanel
+        clientId={clientId}
+        ownerMode={ownerMode}
+        currentUserId={currentUserId}
+        pendingState={pendingNotesState}
+      />
+    </CollapsibleSection>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
 /* Page                                                                       */
 /* -------------------------------------------------------------------------- */
 
@@ -118,10 +163,6 @@ export function ClientDetailPage() {
   const [trackingTime, setTrackingTime] = useState(false)
   // True while a retire/reactivate round-trip is in flight.
   const [lifecycleBusy, setLifecycleBusy] = useState(false)
-  // Pending-notes count (featreq-b688e73c) for the "Client notes" section's
-  // header pill — fetched inside ClientNotesPanel, reported up here so it can
-  // sit in the CollapsibleSection's header rather than its body.
-  const [pendingNoteCount, setPendingNoteCount] = useState(0)
 
   const client = useMemo(
     () => data.clients.find((entry) => entry.id === clientId),
@@ -386,25 +427,11 @@ export function ClientDetailPage() {
         <ClientStatementsPanel clientId={client.id} />
       </CollapsibleSection>
 
-      <CollapsibleSection
-        id="client-section-notes"
-        kicker="Notes"
-        title="Client notes"
-        headerAction={
-          pendingNoteCount > 0 ? (
-            <span className="pending-note-count-pill">
-              {pendingNoteCount} waiting for a checklist
-            </span>
-          ) : undefined
-        }
-      >
-        <ClientNotesPanel
-          clientId={client.id}
-          ownerMode={ownerMode}
-          currentUserId={sessionUser.id}
-          onPendingCountChange={setPendingNoteCount}
-        />
-      </CollapsibleSection>
+      <ClientNotesSection
+        clientId={client.id}
+        ownerMode={ownerMode}
+        currentUserId={sessionUser.id}
+      />
       </div>
       ) : null}
 
@@ -1938,6 +1965,11 @@ export function ActiveChecklistsBody({ client, data }: { client: Client; data: A
     ? checklists.filter((entry) => isDueThisMonth(entry.dueDate, today))
     : checklists
 
+  // The notes attached to the cards below, fetched ONCE for all of them.
+  const attachedNotesFor = useAttachedClientNotes(
+    shownChecklists.filter((entry) => !entry.projected).map((entry) => entry.id),
+  )
+
   if (checklists.length === 0) {
     // For staff this is now a statement about THEM, not the client — a
     // colleague may well have live work here that is none of their business.
@@ -1997,6 +2029,7 @@ export function ActiveChecklistsBody({ client, data }: { client: Client; data: A
           ownerMode={ownerMode}
           role={role}
           timeEntries={data.timeEntries}
+          attachedNotes={attachedNotesFor(checklist.id)}
         />
           ))}
         </div>

@@ -6913,7 +6913,8 @@ describe('pending client notes (file backend)', () => {
       authorId: 'emp-lisa',
       authorName: 'Lisa',
     })
-    expect(first.id).toMatch(/^pnote-/)
+    // 12 hex chars: a task-kind note's checklist item id is derived from it.
+    expect(first.id).toMatch(/^pnote-[0-9a-f]{12}$/)
     expect(first.attachedChecklistId).toBeNull()
 
     const second = await store.createClientPendingNote('c-pn-1', {
@@ -7104,7 +7105,10 @@ describe('pending client notes — attach pass (file backend)', () => {
   })
 
   it('is idempotent: a second pass attaches nothing more and does not duplicate the item', async () => {
-    const note = await store.createClientPendingNote('c1', {
+    // Its own client: a note an earlier test attached to a checklist this
+    // workspace no longer holds is pending AGAIN (by decision), and would
+    // otherwise attach here too.
+    const note = await store.createClientPendingNote('c-pn-idem', {
       templateId: 'tpl-pn',
       kind: 'task',
       body: 'New hire starting',
@@ -7112,19 +7116,26 @@ describe('pending client notes — attach pass (file backend)', () => {
     const later = new Date(new Date(note.createdAt).getTime() + 1000).toISOString()
     await store.write(
       workspace({
-        checklists: [checklistFixture('chk-pn-idem', { createdAt: later, dueDate: '2026-09-10' })],
+        clients: [{ id: 'c-pn-idem', name: 'Idem' }],
+        checklists: [
+          checklistFixture('chk-pn-idem', {
+            createdAt: later,
+            dueDate: '2026-09-10',
+            clientId: 'c-pn-idem',
+          }),
+        ],
       }),
     )
 
-    expect(await store.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
-    expect(await store.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-idem' })).toBe(1)
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-idem' })).toBe(0)
 
     const target = (await persisted()).checklists.find((c) => c.id === 'chk-pn-idem')
     expect(target.items).toHaveLength(2)
   })
 
   it('kind "note" only stamps the checklist id — no item is inserted', async () => {
-    const note = await store.createClientPendingNote('c1', {
+    const note = await store.createClientPendingNote('c-pn-note', {
       templateId: 'tpl-pn',
       kind: 'note',
       body: 'Heads up for next cycle',
@@ -7132,11 +7143,18 @@ describe('pending client notes — attach pass (file backend)', () => {
     const later = new Date(new Date(note.createdAt).getTime() + 1000).toISOString()
     await store.write(
       workspace({
-        checklists: [checklistFixture('chk-pn-note', { createdAt: later, dueDate: '2026-09-10' })],
+        clients: [{ id: 'c-pn-note', name: 'Note' }],
+        checklists: [
+          checklistFixture('chk-pn-note', {
+            createdAt: later,
+            dueDate: '2026-09-10',
+            clientId: 'c-pn-note',
+          }),
+        ],
       }),
     )
 
-    await store.attachPendingClientNotes({ clientId: 'c1' })
+    await store.attachPendingClientNotes({ clientId: 'c-pn-note' })
 
     const updated = await store.getClientPendingNote(note.id)
     expect(updated.attachedChecklistId).toBe('chk-pn-note')
@@ -7144,7 +7162,7 @@ describe('pending client notes — attach pass (file backend)', () => {
     const target = (await persisted()).checklists.find((c) => c.id === 'chk-pn-note')
     expect(target.items).toHaveLength(1)
 
-    const notesForChecklist = await store.listPendingNotesForChecklist('chk-pn-note')
+    const notesForChecklist = await store.listPendingNotesForChecklists(['chk-pn-note', 'chk-other'])
     expect(notesForChecklist.map((entry) => entry.id)).toEqual([note.id])
   })
 
@@ -7167,6 +7185,231 @@ describe('pending client notes — attach pass (file backend)', () => {
     const before = await persisted()
     expect(await store.attachPendingClientNotes({ clientId: 'c-pn-truly-empty' })).toBe(0)
     expect(await persisted()).toEqual(before)
+  })
+
+  it('refuses a save built from a pre-attachment payload - the attached item survives', async () => {
+    const note = await store.createClientPendingNote('c-pn-stale', {
+      templateId: 'tpl-pn',
+      kind: 'task',
+      body: 'Add the new hire',
+    })
+    const later = new Date(new Date(note.createdAt).getTime() + 1000).toISOString()
+    const tabPayload = () =>
+      workspace({
+        clients: [{ id: 'c-pn-stale', name: 'Stale' }],
+        checklists: [
+          checklistFixture('chk-pn-stale', {
+            createdAt: later,
+            dueDate: '2026-09-10',
+            clientId: 'c-pn-stale',
+          }),
+        ],
+      })
+    await store.write(tabPayload())
+    // What the owner's tab was served: the workspace BEFORE the attachment.
+    const tabVersion = await store.computeWorkspaceVersion()
+
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-stale' })).toBe(1)
+    expect(await store.computeWorkspaceVersion()).not.toBe(tabVersion)
+
+    // The tab's next autosave still holds the pre-attachment payload (no
+    // item-pn row) under the version it was served. It must be refused, not
+    // allowed to delete-and-reinsert the checklist's items without the new one.
+    await expect(
+      store.write(tabPayload(), { expectedVersion: tabVersion }),
+    ).rejects.toBeInstanceOf(StaleWorkspaceError)
+
+    const target = (await persisted()).checklists.find((c) => c.id === 'chk-pn-stale')
+    const itemId = `item-pn-${note.id.replace(/^pnote-/, '')}`
+    expect(target.items.some((item) => item.id === itemId)).toBe(true)
+  })
+
+  it('a note whose attached checklist was deleted becomes pending again, then attaches to the next live one', async () => {
+    const note = await store.createClientPendingNote('c-pn-del', {
+      templateId: 'tpl-pn',
+      kind: 'task',
+      body: 'New hire starting',
+    })
+    const later = new Date(new Date(note.createdAt).getTime() + 1000).toISOString()
+    const withChecklists = (checklists, recycledChecklists = []) =>
+      workspace({
+        clients: [{ id: 'c-pn-del', name: 'Del' }],
+        checklists,
+        recycledChecklists,
+      })
+    const first = checklistFixture('chk-del-1', {
+      createdAt: later,
+      dueDate: '2026-09-10',
+      clientId: 'c-pn-del',
+    })
+    await store.write(withChecklists([first]))
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-del' })).toBe(1)
+    expect((await store.getClientPendingNote(note.id)).attachedChecklistId).toBe('chk-del-1')
+
+    // The checklist is deleted (recycled): the note is waiting again.
+    await store.write(
+      withChecklists([], [{ ...first, deletedAt: new Date().toISOString() }]),
+    )
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-del' })).toBe(0)
+    expect(await store.getClientPendingNote(note.id)).toMatchObject({
+      attachedChecklistId: null,
+      attachedItemId: null,
+      attachedAt: null,
+    })
+    expect((await store.listClientPendingNotes('c-pn-del')).map((entry) => entry.id)).toEqual([
+      note.id,
+    ])
+
+    // The next live checklist of the template picks it up.
+    const second = checklistFixture('chk-del-2', {
+      createdAt: later,
+      dueDate: '2026-10-10',
+      clientId: 'c-pn-del',
+    })
+    await store.write(
+      withChecklists([second], [{ ...first, deletedAt: new Date().toISOString() }]),
+    )
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-del' })).toBe(1)
+    expect((await store.getClientPendingNote(note.id)).attachedChecklistId).toBe('chk-del-2')
+    const target = (await persisted()).checklists.find((c) => c.id === 'chk-del-2')
+    expect(target.items.at(-1).id).toBe(`item-pn-${note.id.replace(/^pnote-/, '')}`)
+  })
+
+  it('a note whose attached checklist has vanished entirely is pending again too', async () => {
+    const note = await store.createClientPendingNote('c-pn-gone', {
+      templateId: 'tpl-pn',
+      kind: 'note',
+      body: 'Heads up',
+    })
+    const later = new Date(new Date(note.createdAt).getTime() + 1000).toISOString()
+    await store.write(
+      workspace({
+        clients: [{ id: 'c-pn-gone', name: 'Gone' }],
+        checklists: [
+          checklistFixture('chk-gone-1', {
+            createdAt: later,
+            dueDate: '2026-09-10',
+            clientId: 'c-pn-gone',
+          }),
+        ],
+      }),
+    )
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-gone' })).toBe(1)
+
+    await store.write(workspace({ clients: [{ id: 'c-pn-gone', name: 'Gone' }], checklists: [] }))
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-gone' })).toBe(0)
+    expect((await store.getClientPendingNote(note.id)).attachedChecklistId).toBeNull()
+  })
+
+  it('only a first-stage checklist qualifies - a stage-advance spawn never takes the note', async () => {
+    const note = await store.createClientPendingNote('c-pn-stage', {
+      templateId: 'tpl-pn',
+      kind: 'note',
+      body: 'For the next cycle',
+    })
+    const later = new Date(new Date(note.createdAt).getTime() + 1000).toISOString()
+    await store.write(
+      workspace({
+        clients: [{ id: 'c-pn-stage', name: 'Stage' }],
+        checklists: [
+          {
+            ...checklistFixture('chk-stage-1', {
+              createdAt: later,
+              dueDate: '2026-09-05',
+              clientId: 'c-pn-stage',
+            }),
+            stageIndex: 1,
+            stageCount: 2,
+          },
+          {
+            ...checklistFixture('chk-stage-0', {
+              createdAt: later,
+              dueDate: '2026-09-20',
+              clientId: 'c-pn-stage',
+            }),
+            stageIndex: 0,
+            stageCount: 2,
+          },
+        ],
+      }),
+    )
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-stage' })).toBe(1)
+    expect((await store.getClientPendingNote(note.id)).attachedChecklistId).toBe('chk-stage-0')
+  })
+
+  it('one note failing to attach does not stop the rest, and the failure is logged', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const failing = vi.spyOn(store, '_attachTaskKindPendingNote').mockRejectedValueOnce(new Error('boom'))
+    try {
+      const first = await store.createClientPendingNote('c-pn-fail', {
+        templateId: 'tpl-pn',
+        kind: 'task',
+        body: 'Fails to attach',
+      })
+      const second = await store.createClientPendingNote('c-pn-fail', {
+        templateId: 'tpl-pn',
+        kind: 'note',
+        body: 'Attaches fine',
+      })
+      const later = new Date(Date.now() + 5000).toISOString()
+      await store.write(
+        workspace({
+          clients: [{ id: 'c-pn-fail', name: 'Fail' }],
+          checklists: [
+            checklistFixture('chk-fail-1', {
+              createdAt: later,
+              dueDate: '2026-09-10',
+              clientId: 'c-pn-fail',
+            }),
+          ],
+        }),
+      )
+
+      expect(await store.attachPendingClientNotes({ clientId: 'c-pn-fail' })).toBe(1)
+      expect((await store.getClientPendingNote(first.id)).attachedChecklistId).toBeNull()
+      expect((await store.getClientPendingNote(second.id)).attachedChecklistId).toBe('chk-fail-1')
+      expect(logged).toHaveBeenCalled()
+    } finally {
+      failing.mockRestore()
+      logged.mockRestore()
+    }
+  })
+
+  it('counts an attachment, and broadcasts, only when the stamp changed a row', async () => {
+    const hook = vi.fn()
+    store.onPendingNotesAttached = hook
+    const stamp = vi.spyOn(store, '_attachNoteKindPendingNote').mockResolvedValueOnce(false)
+    try {
+      const note = await store.createClientPendingNote('c-pn-count', {
+        templateId: 'tpl-pn',
+        kind: 'note',
+        body: 'Heads up',
+      })
+      const later = new Date(new Date(note.createdAt).getTime() + 1000).toISOString()
+      await store.write(
+        workspace({
+          clients: [{ id: 'c-pn-count', name: 'Count' }],
+          checklists: [
+            checklistFixture('chk-count-1', {
+              createdAt: later,
+              dueDate: '2026-09-10',
+              clientId: 'c-pn-count',
+            }),
+          ],
+        }),
+      )
+
+      // Someone else won the stamp: nothing attached, nobody pinged.
+      expect(await store.attachPendingClientNotes({ clientId: 'c-pn-count' })).toBe(0)
+      expect(hook).not.toHaveBeenCalled()
+
+      // The real stamp changes a row: counted, and the open tabs are told.
+      expect(await store.attachPendingClientNotes({ clientId: 'c-pn-count' })).toBe(1)
+      expect(hook).toHaveBeenCalledTimes(1)
+    } finally {
+      stamp.mockRestore()
+      store.onPendingNotesAttached = undefined
+    }
   })
 })
 
@@ -7267,6 +7510,34 @@ describe("read()'s pending-notes attach pass wiring (file backend)", () => {
 
     expect(attachSpy).not.toHaveBeenCalled()
     expect(warn).toHaveBeenCalled()
+  })
+
+  it('read() returns the workspace WITH an attached task item - the served data and the version agree', async () => {
+    await store.write(spawnableWorkspace())
+    const note = await store.createClientPendingNote('c1', {
+      templateId: 'tpl-1',
+      kind: 'task',
+      body: 'New hire this cycle',
+    })
+    // The spawn's createdAt has to land strictly after the note's.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+
+    const served = await store.read()
+    const itemId = `item-pn-${note.id.replace(/^pnote-/, '')}`
+    const spawned = served.checklists.find((c) => c.templateId === 'tpl-1')
+    expect(spawned.items.some((item) => item.id === itemId)).toBe(true)
+
+    // The version the GET handler computes next describes exactly this data: a
+    // save built from what was served passes the guard and keeps the item.
+    const version = await store.computeWorkspaceVersion()
+    await expect(store.write(served, { expectedVersion: version })).resolves.toBeUndefined()
+    const onDisk = JSON.parse(await readFile(localDataPath, 'utf8')).checklists.find(
+      (c) => c.templateId === 'tpl-1',
+    )
+    expect(onDisk.items.some((item) => item.id === itemId)).toBe(true)
+    // The file backend persists what the materializer stamped, so the attach
+    // rule matches on createdAt exactly as the Postgres column does.
+    expect(typeof onDisk.createdAt).toBe('string')
   })
 })
 
@@ -7373,12 +7644,32 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
       })
       return { rows: [] }
     }
-    if (/^select id, client_id, template_id, kind, body, created_at\s+from client_pending_notes\s+where attached_checklist_id is null/i.test(trimmed)) {
-      const clientId = params[0]
+    if (/^select n\.id, n\.client_id[\s\S]*from client_pending_notes n\s+left join checklists c on c\.id = n\.attached_checklist_id/i.test(trimmed)) {
+      // Pending notes, plus notes whose attached checklist is gone or deleted
+      // (flagged stale so the caller clears the stamp).
+      const clientId = /and n\.client_id = \$1/i.test(trimmed) ? params[0] : null
       const rows = notes
-        .filter((note) => note.attached_checklist_id === null)
         .filter((note) => !clientId || note.client_id === clientId)
+        .filter((note) => {
+          if (note.attached_checklist_id === null) return true
+          const checklist = checklists.find((entry) => entry.id === note.attached_checklist_id)
+          return !checklist || Boolean(checklist.deleted_at)
+        })
+        .map((note) => ({ ...note, stale: note.attached_checklist_id !== null }))
       return { rows }
+    }
+    if (/^update client_pending_notes\s+set attached_checklist_id = null/i.test(trimmed)) {
+      const ids = params[0]
+      let cleared = 0
+      for (const note of notes) {
+        if (ids.includes(note.id)) {
+          note.attached_checklist_id = null
+          note.attached_item_id = null
+          note.attached_at = null
+          cleared += 1
+        }
+      }
+      return { rows: [], rowCount: cleared }
     }
     if (/^select id\s+from checklists/i.test(trimmed)) {
       const [templateId, clientId, createdAfter, dueAfter] = params
@@ -7389,6 +7680,9 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
             c.client_id === clientId &&
             !c.deleted_at &&
             !c.skipped_at &&
+            // Honored only when the SQL actually asks for it, so the
+            // first-stage pin below proves the clause, not the fixture.
+            (!/coalesce\(stage_index, 0\) = 0/i.test(trimmed) || (c.stage_index ?? 0) === 0) &&
             (c.created_at ? c.created_at > createdAfter : c.due_date > dueAfter),
         )
         .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)))
@@ -7400,6 +7694,10 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
       const existing = items.filter((item) => item.checklist_id === checklistId)
       const max = existing.reduce((acc, item) => Math.max(acc, item.sort_order ?? -1), -1)
       return { rows: [{ max_order: max }] }
+    }
+    if (/^select checklist_id from checklist_items where id = \$1/i.test(trimmed)) {
+      const found = items.find((item) => item.id === params[0])
+      return { rows: found ? [{ checklist_id: found.checklist_id }] : [] }
     }
     if (/^insert into checklist_items/i.test(trimmed)) {
       const [id, checklistId, label, sortOrder] = params
@@ -7416,7 +7714,7 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
         note.attached_item_id = itemId ?? null
         note.attached_at = new Date()
       }
-      return { rows: [] }
+      return { rows: [], rowCount: note ? 1 : 0 }
     }
     return { rows: [] }
   }
@@ -7549,6 +7847,311 @@ describe('pending client notes — attach pass (postgres branch)', () => {
     expect(fake.notes[0].attached_item_id).toBeNull()
     expect(fake.items).toHaveLength(0)
   })
+
+  it('a note whose attached checklist was deleted is pending again: stamp cleared, re-attached to the next live checklist under a fresh item id', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        {
+          id: 'pnote-9',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'task',
+          body: 'New hire starting',
+          created_at: '2026-09-01T00:00:00.000Z',
+          attached_checklist_id: 'check-gone',
+          attached_item_id: 'item-pn-9',
+          attached_at: '2026-09-06T00:00:00.000Z',
+        },
+      ],
+      checklists: [
+        {
+          id: 'check-gone',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-09-10',
+          created_at: '2026-09-05T00:00:00.000Z',
+          deleted_at: '2026-09-08T00:00:00.000Z',
+        },
+        {
+          id: 'check-live',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-10-10',
+          created_at: '2026-09-20T00:00:00.000Z',
+        },
+      ],
+      // The deleted checklist keeps its rows, so the old item id is TAKEN.
+      items: [{ id: 'item-pn-9', checklist_id: 'check-gone', sort_order: 0 }],
+    })
+
+    expect(await postgresStore(fake).attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+
+    const [cleared] = fake.matching(/^update client_pending_notes\s+set attached_checklist_id = null/i)
+    expect(cleared.params).toEqual([['pnote-9']])
+    expect(fake.notes[0].attached_checklist_id).toBe('check-live')
+    // The conflict-skipped insert would have attached the note to a checklist
+    // that never got the item; the id carries the new checklist instead.
+    expect(fake.notes[0].attached_item_id).toBe('item-pn-9-live')
+    expect(fake.items.find((item) => item.checklist_id === 'check-live')).toMatchObject({
+      id: 'item-pn-9-live',
+      label: 'New hire starting',
+    })
+  })
+
+  it('a note attached to a live checklist is left alone (no clearing update)', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        {
+          id: 'pnote-10',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'note',
+          body: 'x',
+          created_at: '2026-09-01T00:00:00.000Z',
+          attached_checklist_id: 'check-live',
+        },
+      ],
+      checklists: [{ id: 'check-live', template_id: 'tpl-pn', client_id: 'c1' }],
+    })
+    expect(await postgresStore(fake).attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+    expect(fake.matching(/^update client_pending_notes/i)).toHaveLength(0)
+  })
+
+  it('only first-stage checklists qualify: the SQL asks for it, and a stage-advance spawn is skipped', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        {
+          id: 'pnote-11',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'note',
+          body: 'x',
+          created_at: '2026-09-01T00:00:00.000Z',
+          attached_checklist_id: null,
+        },
+      ],
+      checklists: [
+        {
+          id: 'check-s1',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-09-10',
+          created_at: '2026-09-05T00:00:00.000Z',
+          stage_index: 1,
+        },
+        {
+          id: 'check-s0',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-09-20',
+          created_at: '2026-09-05T00:00:00.000Z',
+          stage_index: 0,
+        },
+      ],
+    })
+    await postgresStore(fake).attachPendingClientNotes({ clientId: 'c1' })
+    const [select] = fake.matching(/^select id\s+from checklists/i)
+    expect(select.text).toMatch(/coalesce\(stage_index, 0\) = 0/i)
+    expect(fake.notes[0].attached_checklist_id).toBe('check-s0')
+  })
+
+  it('a stamp that changed no row rolls the item insert back and counts nothing', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        {
+          id: 'pnote-12',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'task',
+          body: 'x',
+          created_at: '2026-09-01T00:00:00.000Z',
+          attached_checklist_id: null,
+        },
+      ],
+      checklists: [
+        {
+          id: 'check-1',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-09-10',
+          created_at: '2026-09-05T00:00:00.000Z',
+        },
+      ],
+    })
+    const pgStore = postgresStore(fake)
+    const hook = vi.fn()
+    pgStore.onPendingNotesAttached = hook
+    // Another pass stamps the note between our list and our stamp.
+    const realList = pgStore._listUnattachedPendingNotes.bind(pgStore)
+    vi.spyOn(pgStore, '_listUnattachedPendingNotes').mockImplementation(async (...args) => {
+      const rows = await realList(...args)
+      fake.notes[0].attached_checklist_id = 'check-other'
+      return rows
+    })
+
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+    expect(fake.matching(/^commit$/i)).toHaveLength(0)
+    expect(hook).not.toHaveBeenCalled()
+  })
+
+  it('one note failing to attach does not stop the rest', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        {
+          id: 'pnote-13',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'task',
+          body: 'fails',
+          created_at: '2026-09-01T00:00:00.000Z',
+          attached_checklist_id: null,
+        },
+        {
+          id: 'pnote-14',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'note',
+          body: 'fine',
+          created_at: '2026-09-01T00:00:00.000Z',
+          attached_checklist_id: null,
+        },
+      ],
+      checklists: [
+        {
+          id: 'check-1',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-09-10',
+          created_at: '2026-09-05T00:00:00.000Z',
+        },
+      ],
+    })
+    const pgStore = postgresStore(fake)
+    const failing = vi.spyOn(pgStore, '_attachTaskKindPendingNote').mockRejectedValueOnce(new Error('boom'))
+    try {
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+      expect(fake.notes.find((note) => note.id === 'pnote-13').attached_checklist_id).toBeNull()
+      expect(fake.notes.find((note) => note.id === 'pnote-14').attached_checklist_id).toBe('check-1')
+      expect(logged).toHaveBeenCalled()
+    } finally {
+      failing.mockRestore()
+      logged.mockRestore()
+    }
+  })
+
+  it('lists the notes attached to a whole page of checklists in one query', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    await pgStore.listPendingNotesForChecklists(['check-a', 'check-b', 'check-a'])
+    const [select] = fake.matching(/^select id, client_id, template_id, kind, body/i)
+    expect(select.text).toMatch(/where attached_checklist_id = any\(\$1::text\[\]\)/i)
+    expect(select.params).toEqual([['check-a', 'check-b']])
+
+    const before = fake.statements.length
+    expect(await pgStore.listPendingNotesForChecklists([])).toEqual([])
+    expect(fake.statements).toHaveLength(before)
+  })
+})
+
+/**
+ * read() and the attach pass (Postgres): a task-kind attachment inserts an item
+ * AFTER the snapshot read() holds was taken, and the GET handler computes the
+ * workspace version from the persisted state AFTER read() returns. So when the
+ * pass attached anything, read() has to hand back what is persisted - never the
+ * pre-attach snapshot under the post-attach version.
+ */
+describe("read()'s attach pass hands back the persisted workspace (postgres branch)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const utcDaysAgo = (days) =>
+    new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+
+  const template = (nextDueDate) => ({
+    id: 'tpl-1',
+    title: 'Monthly bookkeeping',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate,
+    active: true,
+    isStandard: false,
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      {
+        id: 'stage-1',
+        name: 'Stage 1',
+        assigneeId: 'emp-1',
+        offsetDays: 0,
+        viewerIds: [],
+        editorIds: [],
+        items: [{ id: 'ti-1', label: 'Close the month' }],
+      },
+    ],
+  })
+  const spawnable = () => ({
+    clients: [{ id: 'c1', name: 'Acme' }],
+    checklists: [],
+    recycledChecklists: [],
+    checklistTemplates: [template(utcDaysAgo(1))],
+  })
+  // The workspace as persisted after the spawn AND the attachment.
+  const persistedAfterAttach = () => ({
+    clients: [{ id: 'c1', name: 'Acme' }],
+    recycledChecklists: [],
+    checklistTemplates: [template('2099-01-01')],
+    checklists: [
+      {
+        id: 'check-spawned',
+        title: 'Monthly bookkeeping',
+        clientId: 'c1',
+        assigneeId: 'emp-1',
+        templateId: 'tpl-1',
+        dueDate: utcDaysAgo(1),
+        caseId: 'case-1',
+        stageId: 'stage-1',
+        stageIndex: 0,
+        stageCount: 1,
+        items: [{ id: 'item-pn-1', label: 'New hire', done: false }],
+      },
+    ],
+  })
+
+  it('re-reads after an attachment, so the served data carries the attached item', async () => {
+    const pgStore = postgresStore(fakePostgres())
+    const reader = vi
+      .spyOn(pgStore, '_readPostgresWorkspace')
+      .mockResolvedValueOnce(spawnable())
+      .mockResolvedValueOnce(spawnable())
+      .mockResolvedValue(persistedAfterAttach())
+    vi.spyOn(pgStore, 'write').mockResolvedValue(undefined)
+    const attach = vi.spyOn(pgStore, 'attachPendingClientNotes').mockResolvedValue(1)
+
+    const served = await pgStore.read()
+
+    expect(attach).toHaveBeenCalledTimes(1)
+    expect(reader).toHaveBeenCalledTimes(3)
+    expect(served.checklists[0].items.map((item) => item.id)).toContain('item-pn-1')
+  })
+
+  it('serves the materialized snapshot as-is when nothing attached', async () => {
+    const pgStore = postgresStore(fakePostgres())
+    const reader = vi
+      .spyOn(pgStore, '_readPostgresWorkspace')
+      .mockResolvedValueOnce(spawnable())
+      .mockResolvedValueOnce(spawnable())
+    vi.spyOn(pgStore, 'write').mockResolvedValue(undefined)
+    vi.spyOn(pgStore, 'attachPendingClientNotes').mockResolvedValue(0)
+
+    const served = await pgStore.read()
+
+    expect(reader).toHaveBeenCalledTimes(2)
+    expect(served.checklists.some((c) => c.templateId === 'tpl-1')).toBe(true)
+  })
 })
 
 /**
@@ -7598,6 +8201,26 @@ describe('generateChecklistFromTemplate runs the pending-notes attach pass (file
 
     const updated = await store.getClientPendingNote(note.id)
     expect(updated.attachedChecklistId).toBe(created.id)
+  })
+
+  it('stamps createdAt on the generated checklist and matches on it, not on the due date', async () => {
+    await store.write(workspace({ checklistTemplates: [{ ...genTemplate, id: 'tpl-pn-gen2' }] }))
+    const note = await store.createClientPendingNote('c1', {
+      templateId: 'tpl-pn-gen2',
+      kind: 'note',
+      body: 'For the next one',
+    })
+    // The spawn's createdAt has to land strictly after the note's.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+
+    // A due date long BEFORE the note was written: the due-date fallback could
+    // never match it, so only the createdAt stamp can attach this.
+    const created = await store.generateChecklistFromTemplate('tpl-pn-gen2', {
+      dueDate: '2020-01-15',
+    })
+    expect(typeof created.createdAt).toBe('string')
+    expect(created.createdAt > note.createdAt).toBe(true)
+    expect((await store.getClientPendingNote(note.id)).attachedChecklistId).toBe(created.id)
   })
 })
 
