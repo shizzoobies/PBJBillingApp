@@ -60,7 +60,9 @@ describe('every state-changing checklist route checks the request origin', () =>
     const guardAt = block.search(GUARD)
     expect(guardAt).toBeGreaterThan(-1)
     // After the session check (a signed-out caller still gets the 401 first)...
-    expect(guardAt).toBeGreaterThan(block.indexOf('await requireSession(request, response)'))
+    const sessionAt = block.indexOf('await requireSession(request, response)')
+    expect(sessionAt).toBeGreaterThan(-1)
+    expect(guardAt).toBeGreaterThan(sessionAt)
     // ...and before anything is read: the body, or the store.
     for (const touch of ['await readJsonBody(request)', 'await appDataStore.']) {
       const touchAt = block.indexOf(touch)

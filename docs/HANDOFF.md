@@ -684,9 +684,12 @@ routes/permissions, frontend), one post-review fix pass and a delta review; ship
   wait should be deletable at all (only the roll-up is guarded); recurring notes are not built.
 - **Follow-ups (not blocking):** toggle/removal can undo a concurrent sub-step reorder (order
   only); an owner edit within ~2.5 s of any targeted write can hit the stale-tab reload notice;
-  time logged before a split stays on the completed record. CLOSED in `fix/checklist-loose-ends`:
-  every `/api/checklists/**` write route checks the origin (the `/api/checklist-templates/**`
-  routes still do not); the toggle's waiting refusal is decided inside the store
+  time logged before a split stays on the completed record. STILL OPEN (tracker
+  featreq-6bb0d8a5): `addWaitingOn` is an unlocked read-modify-write, so a wait
+  written from a read taken BEFORE a tick can erase that tick (the toggle only protects against
+  a wait committed before its lock); the seven `/api/checklist-templates/**` write routes lack
+  the origin check. Closed 2026-10-01 (59ae2bd; rolled-back production trial passed):
+  every `/api/checklists/**` write route checks the origin; the toggle's waiting refusal is decided inside the store
   (`StepIsWaitingError`; Postgres reads the row `for update` in a transaction, the file backend
   reads inside the queue slot) so the route no longer asks first; the step chip, the Board and the
   Delayed page's sub-step rows read "done" by the roll-up like the Waiting count; the released-note
