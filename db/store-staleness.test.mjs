@@ -1174,6 +1174,21 @@ function fakePostgres({
         ? { rows: [], rowCount: 1 }
         : { rows: [], rowCount: 0 }
     }
+    // The void pass's RETURNING also carries the two checkout-session columns it
+    // does not touch — the route expires those once the void commits.
+    if (
+      /^update invoices\b[\s\S]*\breturning id, stripe_checkout_session_id, stripe_card_session_id$/i.test(
+        trimmed,
+      )
+    ) {
+      return {
+        rows: invoices.map((invoice) => ({
+          id: invoice.id,
+          stripe_checkout_session_id: invoice.stripe_checkout_session_id ?? null,
+          stripe_card_session_id: invoice.stripe_card_session_id ?? null,
+        })),
+      }
+    }
     if (/^update invoices\b[\s\S]*\breturning id$/i.test(trimmed)) {
       return { rows: invoices.map((invoice) => ({ id: invoice.id })) }
     }
@@ -5022,7 +5037,7 @@ describe('voidUnsentInvoicesForPeriod (file backend)', () => {
       voided: 0,
       ids: [],
       clearing: 0,
-      sessionIds: [],
+      sessions: [],
     })
   })
 
@@ -5042,7 +5057,7 @@ describe('voidUnsentInvoicesForPeriod (file backend)', () => {
 
     const result = await store.voidUnsentInvoicesForPeriod('2026-08')
 
-    expect(result).toEqual({ voided: 1, ids: ['draft'], clearing: 1, sessionIds: [] })
+    expect(result).toEqual({ voided: 1, ids: ['draft'], clearing: 1, sessions: [] })
     expect(await storedStatuses()).toEqual({
       clearing: 'processing',
       draft: 'void',
@@ -11675,23 +11690,29 @@ describe('voiding while a bank payment is clearing (postgres branch)', () => {
     expect(voidStatement.text).toMatch(/status in \('draft', 'reviewed'\)/i)
   })
 
-  it('hands back the checkout sessions of the invoices it voided, read before the commit', async () => {
+  it('hands back the checkout sessions of the invoices it voided, off the void itself', async () => {
     const fake = fakePostgres({
       invoices: [
         { id: 'inv-final', stripe_checkout_session_id: 'cs_ach_1', stripe_card_session_id: 'cs_card_1' },
+        { id: 'inv-ach', stripe_checkout_session_id: 'cs_ach_2', stripe_card_session_id: null },
         { id: 'inv-bare', stripe_checkout_session_id: null, stripe_card_session_id: null },
       ],
     })
 
     const result = await postgresStore(fake).voidUnsentInvoicesForPeriod('2026-08')
 
-    expect(result.sessionIds).toEqual(['cs_ach_1', 'cs_card_1'])
-    const voided = fake.indexOf(/set status = 'void'/i)
-    const held = fake.indexOf(/^select stripe_checkout_session_id, stripe_card_session_id\s+from invoices where id = any\(\$1::text\[\]\)$/i)
-    const commit = fake.indexOf(/^COMMIT$/i)
-    expect(held).toBeGreaterThan(voided)
-    expect(commit).toBeGreaterThan(held)
-    expect(fake.statements[held].params).toEqual([['inv-final', 'inv-bare']])
+    expect(result.sessions).toEqual([
+      { invoiceId: 'inv-final', sessionId: 'cs_ach_1' },
+      { invoiceId: 'inv-final', sessionId: 'cs_card_1' },
+      { invoiceId: 'inv-ach', sessionId: 'cs_ach_2' },
+    ])
+    // One statement, not two: the sessions ride the void's own RETURNING.
+    const [voidStatement] = fake.matching(/set status = 'void'/i)
+    expect(voidStatement.text.replace(/\s+/g, ' ')).toBe(
+      "update invoices set status = 'void', updated_at = now() where period = $1 and kind = 'monthly' and status in ('draft', 'reviewed') returning id, stripe_checkout_session_id, stripe_card_session_id",
+    )
+    expect(voidStatement.params).toEqual(['2026-08'])
+    expect(fake.matching(/^select stripe_checkout_session_id/i)).toHaveLength(0)
   })
 })
 
@@ -11777,7 +11798,7 @@ describe('a save that races a payment (postgres branch)', () => {
     expect(error).toBeInstanceOf(InvoiceChangedError)
     expect(error.message).toBe(INVOICE_CHANGED_MESSAGE)
     expect(error.message).toBe(
-      'This invoice changed while you were working - a payment may have just come in. Reload it and try again.',
+      'This invoice changed while you were working. It has been refreshed — check it and make your change again.',
     )
     expect(fake.matching(/^update invoices\s+set line_items/i)).toHaveLength(1)
     expect(fake.matching(/^select 1 as present from invoices where id = \$1$/i)[0].params).toEqual([
@@ -11974,7 +11995,11 @@ describe('voidUnsentInvoicesForPeriod hands back the checkout sessions it closed
     const result = await store.voidUnsentInvoicesForPeriod('2026-08')
 
     expect(result.voided).toBe(3)
-    expect(result.sessionIds.sort()).toEqual(['cs_ach_draft', 'cs_ach_reviewed', 'cs_card_draft'])
+    expect(result.sessions).toEqual([
+      { invoiceId: 'draft-with-links', sessionId: 'cs_ach_draft' },
+      { invoiceId: 'draft-with-links', sessionId: 'cs_card_draft' },
+      { invoiceId: 'reviewed-with-ach', sessionId: 'cs_ach_reviewed' },
+    ])
   })
 })
 

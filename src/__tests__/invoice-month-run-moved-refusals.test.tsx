@@ -143,9 +143,67 @@ afterEach(() => {
 })
 
 describe('InvoiceMonthRun — a refusal that means the invoice moved reloads the month', () => {
-  const sentence = 'This invoice changed while you were working - a payment may have just come in.'
+  const sentence =
+    'This invoice changed while you were working. It has been refreshed — check it and make your change again.'
+  const notKept = 'Your unsaved changes were not kept.'
+  const codes = ['invoice_payment_processing', 'invoice_locked', 'invoice_changed']
 
-  for (const code of ['invoice_payment_processing', 'invoice_locked', 'invoice_changed']) {
+  /** Type into the first line, so the editor holds unsaved edits, and press Save. */
+  async function saveWithUnsavedEdit() {
+    fireEvent.change(await screen.findByDisplayValue('Billable hours — Lisa'), {
+      target: { value: 'Billable hours — edited' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  }
+
+  // THE REAL SHAPE. The server stamps `updatedAt` on every write, so a reloaded
+  // invoice that moved carries a NEW one, and the editor is keyed on it: it
+  // remounts, and anything she typed is gone. The row can stay in the very same
+  // tab (draft -> reviewed from another tab) so nothing else tells her.
+  for (const code of codes) {
+    it(`${code}: a remounted editor says it once, in the banner with the invoice number, and says her typing was not kept`, async () => {
+      mockUpdate.mockRejectedValue(new ApiError(409, sentence, code))
+      await openEditor([makeInvoice()])
+      expect(mockList).toHaveBeenCalledTimes(1)
+      // Same tab (To review), new `updatedAt`: another tab saved it meanwhile.
+      mockList.mockResolvedValue([makeInvoice({ updatedAt: '2026-10-02T00:00:00.000Z' })])
+
+      await saveWithUnsavedEdit()
+
+      expect(await screen.findByText(`${NUMBER}: ${sentence} ${notKept}`)).toBeInTheDocument()
+      expect(mockList).toHaveBeenCalledTimes(2)
+      // Once: not also in an editor, and the row's editor is a fresh one.
+      expect(screen.getAllByText(new RegExp(sentence.slice(0, 30)))).toHaveLength(1)
+      expect(screen.queryByDisplayValue('Billable hours — edited')).not.toBeInTheDocument()
+      expect(screen.getByDisplayValue('Billable hours — Lisa')).toBeInTheDocument()
+    })
+
+    it(`${code}: a remounted editor with nothing typed says it once, in the banner, without the unsaved-changes sentence`, async () => {
+      mockUpdate.mockRejectedValue(new ApiError(409, sentence, code))
+      await openEditor([makeInvoice()])
+      mockList.mockResolvedValue([makeInvoice({ updatedAt: '2026-10-02T00:00:00.000Z' })])
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }))
+
+      expect(await screen.findByText(`${NUMBER}: ${sentence}`)).toBeInTheDocument()
+      expect(screen.queryByText(new RegExp(notKept))).not.toBeInTheDocument()
+      expect(screen.getAllByText(new RegExp(sentence.slice(0, 30)))).toHaveLength(1)
+    })
+
+    it(`${code}: when the invoice left its tab, says it once in the banner (with the unsaved-changes sentence if she had typed)`, async () => {
+      mockUpdate.mockRejectedValue(new ApiError(409, sentence, code))
+      await openEditor([makeInvoice()])
+      // What the server holds now: a payment has taken the invoice.
+      mockList.mockResolvedValue([
+        makeInvoice({ status: 'paid', paidAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z' }),
+      ])
+
+      await saveWithUnsavedEdit()
+      await waitFor(() => expect(screen.queryByText(NUMBER)).not.toBeInTheDocument())
+      expect(await screen.findByText(`${NUMBER}: ${sentence} ${notKept}`)).toBeInTheDocument()
+      expect(screen.getAllByText(new RegExp(sentence.slice(0, 30)))).toHaveLength(1)
+    })
+
     it(`${code}: reloads the month once, the row leaves the tab it no longer belongs in, and the sentence is said once`, async () => {
       mockUpdate.mockRejectedValue(new ApiError(409, sentence, code))
       await openEditor([makeInvoice()])
@@ -172,15 +230,23 @@ describe('InvoiceMonthRun — a refusal that means the invoice moved reloads the
     })
   }
 
-  it('says it in the editor, once, when the reload leaves the row where it was', async () => {
+  // THE NO-REMOUNT CASE, and an honest one about why: both list answers carry
+  // `updatedAt: null`, i.e. the server's row is byte-for-byte what is on screen
+  // (a stale button refused on an invoice that had not actually changed). The
+  // editor is keyed on `updatedAt`, so nothing remounts, her typing survives, and
+  // the sentence goes in the editor's slot. A real moved invoice never looks like
+  // this — see the remount tests above.
+  it('says it in the editor, once, and keeps her typing, when the reloaded row is unchanged', async () => {
     mockUpdate.mockRejectedValue(new ApiError(409, sentence, 'invoice_changed'))
     await openEditor([makeInvoice()])
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Void' }))
+    await saveWithUnsavedEdit()
 
     expect(await editor().findByText(sentence)).toBeInTheDocument()
     expect(mockList).toHaveBeenCalledTimes(2)
-    expect(screen.getAllByText(sentence)).toHaveLength(1)
+    expect(screen.getAllByText(new RegExp(sentence.slice(0, 30)))).toHaveLength(1)
+    expect(screen.queryByText(new RegExp(notKept))).not.toBeInTheDocument()
+    expect(screen.getByDisplayValue('Billable hours — edited')).toBeInTheDocument()
   })
 
   it('does not reload for an ordinary refusal such as coverage_unconfirmed', async () => {

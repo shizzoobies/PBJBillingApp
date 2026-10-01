@@ -5617,7 +5617,10 @@ const server = createServer(async (request, response) => {
       // The voided drafts may still hold open payment pages (a draft can be
       // sent back from "sent", or given a Payment link). Closed as soon as the
       // void has committed, before the rebuild: nothing below may skip it.
-      await expireInvoiceSessions(voided.sessionIds ?? [], regenPeriod, 'regenerate')
+      // One at a time, each logged against its own invoice if it will not expire.
+      for (const { invoiceId, sessionId } of voided.sessions ?? []) {
+        await expireInvoiceSessions([sessionId], invoiceId, 'regenerate')
+      }
 
       let rebuilt
       try {

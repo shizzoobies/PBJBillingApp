@@ -150,14 +150,14 @@ describe('the invoice PATCH route closes the payment pages of a void', () => {
 describe('Void & regenerate closes the payment pages of the drafts it voided', () => {
   it('expires what the store hands back, right after the void commits and before the rebuild', () => {
     const voided = regenerateBlock.indexOf('appDataStore.voidUnsentInvoicesForPeriod(')
-    const expire = regenerateBlock.indexOf('await expireInvoiceSessions(')
+    const expire = regenerateBlock.indexOf('for (const { invoiceId, sessionId } of voided.sessions')
     const rebuild = regenerateBlock.indexOf('appDataStore.generateInvoicesForPeriod(')
     expect(voided).toBeGreaterThan(-1)
     expect(expire).toBeGreaterThan(voided)
     expect(rebuild).toBeGreaterThan(expire)
+    // Sequential, one session at a time, each named by its own invoice.
     const call = regenerateBlock.slice(expire, rebuild)
-    expect(call).toContain('voided.sessionIds')
-    expect(call).toContain("'regenerate'")
+    expect(call).toContain('await expireInvoiceSessions([sessionId], invoiceId, \'regenerate\')')
     expect(regenerateBlock).not.toContain('expireCheckoutSession(')
   })
 })

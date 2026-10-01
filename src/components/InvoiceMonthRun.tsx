@@ -224,6 +224,20 @@ type PatchResult =
   | { ok: false; message: string; retainer: boolean; locked: boolean; code?: string }
 
 /**
+ * The refusals that mean "this invoice moved under you" — a payment landed or
+ * another tab changed it. The run reloads the month for each, which can replace
+ * the editor that sent the request.
+ */
+const INVOICE_MOVED_CODES: ReadonlySet<string | undefined> = new Set([
+  'invoice_payment_processing',
+  'invoice_locked',
+  'invoice_changed',
+])
+
+/** Appended when that reload threw away edits she had not saved. */
+const UNSAVED_NOT_KEPT = 'Your unsaved changes were not kept.'
+
+/**
  * Everything ONE invoice's hours panel needs, resolved by the run rather than
  * by the editor — the entries have to be narrowed the same way the re-tag rule
  * narrows them, and a billing master's hours are its SUBS'. Gathered once per
@@ -1192,12 +1206,13 @@ export function InvoiceMonthRun({
       // banner: it is about the lines she is looking at, the sentence names the
       // other invoice involved, and it comes with the credit line being taken
       // back out — none of which reads as a message about the month.
-      // Four different 409s reach here (retainer_credit_refused,
-      // coverage_unconfirmed, invoice_locked, entry_tag_refused) and only one is
-      // about a retainer. Keyed on the CODE rather than the status, because the
-      // wrong branch would take a credit back out of an invoice that never had
-      // one refused. Every other failure, including a code this screen has not
-      // met yet, is an ordinary error.
+      // Six different 409s reach here (retainer_credit_refused,
+      // coverage_unconfirmed, invoice_locked, entry_tag_refused,
+      // invoice_payment_processing, invoice_changed) and only one is about a
+      // retainer. Keyed on the CODE rather than the status, because the wrong
+      // branch would take a credit back out of an invoice that never had one
+      // refused. Every other failure, including a code this screen has not met
+      // yet, is an ordinary error.
       const code = err instanceof ApiError ? err.code : undefined
       const locked = code === 'invoice_locked'
       const refusedRetainer = code === 'retainer_credit_refused'
@@ -1206,21 +1221,20 @@ export function InvoiceMonthRun({
         // before offering it to anybody else.
         setRetainerToken((token) => token + 1)
       }
-      // Three refusals mean "this invoice moved under you" — a payment landed, or
-      // another tab changed it. The row on screen is describing an invoice that
-      // is no longer that, and its buttons (Void, Save, Mark reviewed) are
-      // offers that no longer apply. Re-read the month so it shows what the
-      // invoice is NOW.
+      // `INVOICE_MOVED_CODES` mean "this invoice moved under you" — a payment
+      // landed, or another tab changed it. The row on screen is describing an
+      // invoice that is no longer that, and its buttons (Void, Save, Mark
+      // reviewed) are offers that no longer apply. Re-read the month so it shows
+      // what the invoice is NOW.
       //
       // Done BEFORE returning, and flushed, because the caller says the sentence
-      // as soon as it gets the result: if the row is about to leave this tab, the
+      // as soon as it gets the result: a reloaded invoice almost always carries
+      // a new `updatedAt`, which remounts its editor (and drops anything unsaved
+      // in it), and a row that leaves its tab unmounts it too. Either way the
       // editor has to be gone by then so the sentence goes to the banner instead
-      // of an editor that is about to vanish. Either way it is said once.
-      if (
-        code === 'invoice_payment_processing' ||
-        code === 'invoice_locked' ||
-        code === 'invoice_changed'
-      ) {
+      // of an editor that is about to vanish — said once, and the editor says
+      // whether it took unsaved edits with it (`sayPatchRefusal`).
+      if (INVOICE_MOVED_CODES.has(code)) {
         const target = period
         try {
           const rows = await listInvoicesRequest(target)
@@ -2201,6 +2215,16 @@ function InvoiceEditor({
     if (mountedRef.current) slot(message)
     else onRefusal(message)
   }
+  // Whether this editor held unsaved edits, as of its last render. Kept in a ref
+  // (set where `dirty` is computed) because the question is asked AFTER the run
+  // has reloaded and unmounted this editor: when the refusal says the invoice
+  // moved and the reload replaced the editor, what she typed went with it, and
+  // the sentence says so. A still-mounted editor kept her edits, so says nothing.
+  const dirtyRef = useRef(false)
+  const sayPatchRefusal = (result: { message: string; code?: string }) => {
+    const lostEdits = !mountedRef.current && dirtyRef.current && INVOICE_MOVED_CODES.has(result.code)
+    sayRefusal(lostEdits ? `${result.message} ${UNSAVED_NOT_KEPT}` : result.message)
+  }
 
   /**
    * The scope decisions staged in the hours panel, keyed by time entry id.
@@ -2351,7 +2375,7 @@ function InvoiceEditor({
   const reviewOrSayWhy = async () => {
     setRetainerError(null)
     const result = await onPatch({ status: 'reviewed' })
-    if (!result.ok) sayRefusal(result.message)
+    if (!result.ok) sayPatchRefusal(result)
   }
 
   /**
@@ -2363,7 +2387,7 @@ function InvoiceEditor({
   const backToDraft = async () => {
     setRetainerError(null)
     const result = await onPatch({ status: 'draft' })
-    if (!result.ok) sayRefusal(result.message)
+    if (!result.ok) sayPatchRefusal(result)
   }
 
   const markReviewed = () => {
@@ -2586,6 +2610,7 @@ function InvoiceEditor({
   // it on the way out — an unmounted editor cannot have anything unsaved, and a
   // stale true would ask her to discard work that is no longer there.
   useEffect(() => {
+    dirtyRef.current = dirty
     onDirtyChange(dirty)
     return () => onDirtyChange(false)
   }, [dirty, onDirtyChange])
@@ -2865,7 +2890,7 @@ function InvoiceEditor({
     if (!window.confirm(sentence)) return
     setRetainerError(null)
     const result = await onPatch({ status: 'void' })
-    if (!result.ok) sayRefusal(result.message)
+    if (!result.ok) sayPatchRefusal(result)
   }
 
   const unmarkPaid = async () => {
@@ -2906,7 +2931,7 @@ function InvoiceEditor({
     // The row was collapsed (or the tab switched) while the request was in the
     // air: there is no editor left to speak in, so the run's banner says it.
     if (!mountedRef.current) {
-      onRefusal(result.message)
+      sayPatchRefusal(result)
       return
     }
     // A locked invoice refused the save outright. Say so where she is looking

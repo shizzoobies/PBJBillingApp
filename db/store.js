@@ -937,7 +937,7 @@ export class InvoicePaymentProcessingError extends Error {
  * What she reads when a save finds the invoice's status moved under it.
  */
 export const INVOICE_CHANGED_MESSAGE =
-  'This invoice changed while you were working - a payment may have just come in. Reload it and try again.'
+  'This invoice changed while you were working. It has been refreshed — check it and make your change again.'
 
 /**
  * A save that lost a race: `updateInvoice` read the invoice, decided, and by the
@@ -13022,9 +13022,10 @@ export class AppDataStore {
     // wonder why that client was not rebuilt.
     const clearing = monthly.filter((invoice) => invoice.status === 'processing').length
 
-    // Open checkout sessions on the invoices this pass voids, for the route to
-    // expire after the void commits.
-    let sessionIds = []
+    // Open checkout sessions on the invoices this pass voids, as
+    // `{ invoiceId, sessionId }` pairs, for the route to expire after the void
+    // commits — and to name the invoice if one will not expire.
+    let sessions = []
     if (this.pool) {
       const dbClient = await this.pool.connect()
       try {
@@ -13033,23 +13034,20 @@ export class AppDataStore {
           `update invoices
               set status = 'void', updated_at = now()
             where period = $1 and kind = 'monthly' and status in ('draft', 'reviewed')
-          returning id`,
+          returning id, stripe_checkout_session_id, stripe_card_session_id`,
           [period],
         )
         const ids = rows.map((row) => row.id)
-        if (ids.length > 0) {
-          // The checkout sessions these invoices still hold, read on the SAME
-          // connection after the void: a voided row refuses a session swap, so
-          // what is read here is what a client could still be paying against.
-          // The route expires them once this commits.
-          const held = await dbClient.query(
-            `select stripe_checkout_session_id, stripe_card_session_id
-               from invoices where id = any($1::text[])`,
-            [ids],
-          )
-          sessionIds = held.rows
-            .flatMap((row) => [row.stripe_checkout_session_id, row.stripe_card_session_id])
+        // The checkout sessions these invoices still hold, straight off the void
+        // (the update does not touch those columns): a voided row refuses a
+        // session swap, so these are all a client could still be paying against.
+        // The route expires them once this commits.
+        sessions = rows.flatMap((row) =>
+          [row.stripe_checkout_session_id, row.stripe_card_session_id]
             .filter(Boolean)
+            .map((sessionId) => ({ invoiceId: row.id, sessionId })),
+        )
+        if (ids.length > 0) {
           await dbClient.query(
             `update invoices
                 set applied_to_invoice_id = null, updated_at = now()
@@ -13063,7 +13061,7 @@ export class AppDataStore {
           await this._clearCoverageLedgerForPeriod(period, releasing, { dbClient })
         }
         await dbClient.query('COMMIT')
-        return { voided: ids.length, ids, clearing, sessionIds }
+        return { voided: ids.length, ids, clearing, sessions }
       } catch (error) {
         try {
           await dbClient.query('ROLLBACK')
@@ -13087,12 +13085,13 @@ export class AppDataStore {
       // which is the opposite of a stale generated snapshot.
       if ((invoice.kind ?? 'monthly') !== 'monthly') continue
       if (invoice.status !== 'draft' && invoice.status !== 'reviewed') continue
-      sessionIds.push(invoice.stripeCheckoutSessionId, invoice.stripeCardSessionId)
+      for (const sessionId of [invoice.stripeCheckoutSessionId, invoice.stripeCardSessionId]) {
+        if (sessionId) sessions.push({ invoiceId: invoice.id, sessionId })
+      }
       invoice.status = 'void'
       invoice.updatedAt = nowIso()
       ids.push(invoice.id)
     }
-    sessionIds = sessionIds.filter(Boolean)
     // Same read-modify-write, which is this backend's version of the
     // transaction above.
     if (ids.length > 0) {
@@ -13112,7 +13111,7 @@ export class AppDataStore {
       }
       await writeFile(localDataPath, JSON.stringify(data, null, 2))
     }
-    return { voided: ids.length, ids, clearing, sessionIds }
+    return { voided: ids.length, ids, clearing, sessions }
   }
 
   /**
