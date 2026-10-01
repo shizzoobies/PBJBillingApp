@@ -82,7 +82,7 @@ describe('the question action', () => {
   })
 
   it('appends through the store rather than touching a stage field', () => {
-    const dispatch = routeBlock(/const resolved =\s*\n\s*action === 'done'/, 1200)
+    const dispatch = routeBlock(/resolved =\s*\n\s*action === 'done'/, 1500)
     expect(dispatch).toContain('appDataStore.addWaitingOnQuestion(checklistId, waitingOnId, {')
     // The three stage-moving calls stay exactly three.
     expect(dispatch).toContain('markWaitingOnDone')
@@ -208,5 +208,96 @@ describe('who hears about a question', () => {
 
   it('still never notifies whoever pressed it', () => {
     expect(block()).toContain('recipients.delete(session.user.id)')
+  })
+})
+
+/**
+ * Two people acting on one wait at the same instant (tracker featreq-3c7f9e5a).
+ * The route's own checks read a copy BEFORE the store call, so the store asks the
+ * same question again on the wait / step as it is then and throws a
+ * `WaitRefusedError`; the route maps it to the status and sentence its early
+ * check gives. The store's half is pinned in db/store-staleness.test.mjs; this is
+ * the glue, and the order that keeps the notification out of a refused request.
+ */
+describe('a hand-off action refused by the store is answered like the early check', () => {
+  const dispatch = () => routeBlock(/The stage the checks above used was read BEFORE this call/, 3000)
+
+  it('keeps every early check, ahead of the store call', () => {
+    for (const guard of [
+      'canAskWaitingOnQuestion(permissionArgs)',
+      'canMarkWaitingOnDone(permissionArgs)',
+      'canVerifyWaitingOn(permissionArgs)',
+      'canSendBackWaitingOn(permissionArgs)',
+    ]) {
+      expect(serverSource.indexOf(guard), guard).toBeGreaterThan(-1)
+      expect(serverSource.indexOf(guard), guard).toBeLessThan(
+        serverSource.indexOf('The stage the checks above used was read BEFORE this call'),
+      )
+    }
+  })
+
+  it('maps the typed error to its own status and sentence, and rethrows anything else', () => {
+    const text = dispatch()
+    const at = text.indexOf('if (error instanceof WaitRefusedError) {')
+    expect(at).toBeGreaterThan(-1)
+    const guard = text.slice(at, at + 300)
+    expect(guard).toContain('sendJson(response, error.refusal.status, { error: error.refusal.error })')
+    expect(guard).toContain('return')
+    expect(guard).toContain('throw error')
+  })
+
+  // A refusal that comes after a notification is not a refusal.
+  it('answers before the read, the notifications and the activity log', () => {
+    const start = serverSource.indexOf('The stage the checks above used was read BEFORE this call')
+    const caught = serverSource.indexOf('if (error instanceof WaitRefusedError) {', start)
+    expect(caught).toBeGreaterThan(start)
+    for (const later of [
+      'const data = await appDataStore.read()',
+      'await notify(appDataStore, recipientId',
+      'await appDataStore.recordActivity(',
+    ]) {
+      const at = serverSource.indexOf(later, start)
+      expect(at, later).toBeGreaterThan(caught)
+    }
+  })
+
+  it('passes each stage rule through the shared sentences, not a second copy of them', () => {
+    for (const name of [
+      'WAIT_ALREADY_MARKED_DONE',
+      'WAIT_NOTHING_TO_ASK',
+      'WAIT_NOT_DONE_YET_TO_APPROVE',
+      'WAIT_NOT_DONE_YET_TO_SEND_BACK',
+      'WAIT_ALREADY_CLOSED',
+      'CLIENT_WAIT_NOBODY_TO_ASK',
+      'CLIENT_WAIT_CANNOT_BE_SENT_BACK',
+    ]) {
+      expect(serverSource, name).toContain(`${name},`)
+    }
+    expect(serverSource).not.toContain('This wait is already closed out')
+    expect(serverSource).not.toContain('This wait has already been marked done')
+    expect(serverSource).not.toContain('Nobody has marked this done yet')
+  })
+})
+
+describe('a new wait refused by the store is answered like the early lock check', () => {
+  const block = () => routeBlock(/POST \/api\/checklists\/:id\/waiting-ons — flag a step/, 9000)
+
+  it('keeps the early lock check and the link check, ahead of the store call', () => {
+    const text = block()
+    const call = text.indexOf('result = await appDataStore.addWaitingOn(')
+    expect(call).toBeGreaterThan(-1)
+    expect(text.indexOf('const createLockRefusal = waitingLockRefusal(')).toBeLessThan(call)
+    expect(text.indexOf('waitForTaskLinkDenial({')).toBeLessThan(call)
+  })
+
+  it('maps the typed error to its own status and sentence, before anything is notified', () => {
+    const text = block()
+    const at = text.indexOf('if (error instanceof WaitRefusedError) {')
+    expect(at).toBeGreaterThan(-1)
+    const guard = text.slice(at, at + 300)
+    expect(guard).toContain('sendJson(response, error.refusal.status, { error: error.refusal.error })')
+    expect(guard).toContain('throw error')
+    expect(at).toBeLessThan(text.indexOf('await notify(appDataStore'))
+    expect(at).toBeLessThan(text.indexOf('await appDataStore.recordActivity('))
   })
 })

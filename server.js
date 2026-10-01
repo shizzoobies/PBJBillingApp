@@ -28,6 +28,7 @@ import {
   StepIsWaitingError,
   TimeEntrySplitError,
   TooManyPendingNotesError,
+  WaitRefusedError,
 } from './db/store.js'
 import {
   allocateGroupMinutes,
@@ -169,12 +170,19 @@ import {
   canMarkWaitingOnDone,
   canSendBackWaitingOn,
   canVerifyWaitingOn,
+  CLIENT_WAIT_CANNOT_BE_SENT_BACK,
+  CLIENT_WAIT_NOBODY_TO_ASK,
   isClientWait,
   isSelfWait,
   REFUSED_WAITING_ON_ACTIONS,
   REMOVAL_WOULD_COMPLETE_WAITING_STEP,
   removalWouldCompleteWaitingStep,
   SELF_WAIT_REFUSAL,
+  WAIT_ALREADY_CLOSED,
+  WAIT_ALREADY_MARKED_DONE,
+  WAIT_NOT_DONE_YET_TO_APPROVE,
+  WAIT_NOT_DONE_YET_TO_SEND_BACK,
+  WAIT_NOTHING_TO_ASK,
   waitForTaskLinkDenial,
   waitingLockRefusal,
   waitingOnActionRefusal,
@@ -11251,10 +11259,10 @@ const server = createServer(async (request, response) => {
             error: clientWait
               ? // No login on the far end, and the person holding it would be
                 // asking themselves.
-                'A client wait has nobody to ask — clients have no login here'
+                CLIENT_WAIT_NOBODY_TO_ASK
               : waitingOnStage(entry) === 'waiting'
                 ? 'Only the person being waited on can send a question back'
-                : 'This wait has already been marked done, so there is nothing to ask about',
+                : WAIT_NOTHING_TO_ASK,
           })
           return
         }
@@ -11277,7 +11285,7 @@ const server = createServer(async (request, response) => {
                 ? clientWait
                   ? 'Only the person who flagged this (or the step owner) can clear a client wait'
                   : 'Only the person being waited on can mark this done'
-                : 'This wait has already been marked done',
+                : WAIT_ALREADY_MARKED_DONE,
           })
           return
         }
@@ -11289,9 +11297,9 @@ const server = createServer(async (request, response) => {
                 ? // You cannot confirm work the other person has not reported
                   // finished — and there is no longer a way out at this stage
                   // either, so the answer is to wait for their Done.
-                  'Nobody has marked this done yet — it can be approved once they do'
+                  WAIT_NOT_DONE_YET_TO_APPROVE
                 : waitingOnStage(entry) === 'verified'
-                  ? 'This wait is already closed out'
+                  ? WAIT_ALREADY_CLOSED
                   : 'You cannot confirm this waiting-on request',
           })
           return
@@ -11304,11 +11312,11 @@ const server = createServer(async (request, response) => {
           sendJson(response, waitingOnStage(entry) === 'resolved' ? 403 : 409, {
             error: clientWait
               ? // Nobody to send it back TO.
-                'A client wait cannot be sent back'
+                CLIENT_WAIT_CANNOT_BE_SENT_BACK
               : waitingOnStage(entry) === 'waiting'
-                ? 'Nobody has marked this done yet — there is nothing to send back'
+                ? WAIT_NOT_DONE_YET_TO_SEND_BACK
                 : waitingOnStage(entry) === 'verified'
-                  ? 'This wait is already closed out'
+                  ? WAIT_ALREADY_CLOSED
                   : 'You cannot send this waiting-on request back',
           })
           return
@@ -11324,26 +11332,41 @@ const server = createServer(async (request, response) => {
         }
       }
 
-      const resolved =
-        action === 'done'
-          ? await appDataStore.markWaitingOnDone(checklistId, waitingOnId, {
-              userId: session.user.id,
-              alsoVerify: clientWait,
-            })
-          : action === 'verify'
-            ? await appDataStore.markWaitingOnVerified(checklistId, waitingOnId, {
+      // The stage the checks above used was read BEFORE this call. The store asks
+      // the same question again on the wait as it is NOW (the locked row / the
+      // queue slot): when another action moved it in between - Approve in one
+      // tab, Send back in another - it throws, writes nothing, and the answer is
+      // the sentence the early check gives for that stage. Nothing below (the
+      // notifications, the activity log) is reached.
+      let resolved
+      try {
+        resolved =
+          action === 'done'
+            ? await appDataStore.markWaitingOnDone(checklistId, waitingOnId, {
                 userId: session.user.id,
+                alsoVerify: clientWait,
               })
-            : action === 'question'
-              ? // Appends a message and nothing else — the wait does not move.
-                await appDataStore.addWaitingOnQuestion(checklistId, waitingOnId, {
+            : action === 'verify'
+              ? await appDataStore.markWaitingOnVerified(checklistId, waitingOnId, {
                   userId: session.user.id,
-                  note: questionNote,
                 })
-              : await appDataStore.markWaitingOnSentBack(checklistId, waitingOnId, {
-                  userId: session.user.id,
-                  note: sendBackNote,
-                })
+              : action === 'question'
+                ? // Appends a message and nothing else — the wait does not move.
+                  await appDataStore.addWaitingOnQuestion(checklistId, waitingOnId, {
+                    userId: session.user.id,
+                    note: questionNote,
+                  })
+                : await appDataStore.markWaitingOnSentBack(checklistId, waitingOnId, {
+                    userId: session.user.id,
+                    note: sendBackNote,
+                  })
+      } catch (error) {
+        if (error instanceof WaitRefusedError) {
+          sendJson(response, error.refusal.status, { error: error.refusal.error })
+          return
+        }
+        throw error
+      }
       if (!resolved) {
         sendJson(response, 404, { error: 'Waiting-on request not found' })
         return
@@ -11598,17 +11621,30 @@ const server = createServer(async (request, response) => {
         }
       }
 
-      const result = await appDataStore.addWaitingOn(
-        checklistId,
-        { itemId, subItemId, subSubItemId },
-        {
-          blockerId: effectiveBlockerId,
-          requestedBy: session.user.id,
-          note,
-          blockerType: isClientRequest ? 'client' : 'employee',
-          waitingForChecklistId,
-        },
-      )
+      // The lock above was decided on the copy read at the top of this request.
+      // The store asks the same question again on the step as it is NOW: when a
+      // wait saved a moment ago already holds the link, it throws, writes
+      // nothing, and the answer is the one the early check gives.
+      let result
+      try {
+        result = await appDataStore.addWaitingOn(
+          checklistId,
+          { itemId, subItemId, subSubItemId },
+          {
+            blockerId: effectiveBlockerId,
+            requestedBy: session.user.id,
+            note,
+            blockerType: isClientRequest ? 'client' : 'employee',
+            waitingForChecklistId,
+          },
+        )
+      } catch (error) {
+        if (error instanceof WaitRefusedError) {
+          sendJson(response, error.refusal.status, { error: error.refusal.error })
+          return
+        }
+        throw error
+      }
       if (!result) {
         sendJson(response, 404, { error: 'Step not found' })
         return

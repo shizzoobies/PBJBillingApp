@@ -29,6 +29,7 @@ import {
   StaleStatementAccountsError,
   StepIsWaitingError,
   TooManyPendingNotesError,
+  WaitRefusedError,
   mapChecklistItemRow,
   mapClientRow,
   mapInvoiceRow,
@@ -51,7 +52,12 @@ import {
   resolveCoverageForPeriod,
 } from '../lib/expense-coverage.js'
 import { rollUpItemDone } from '../lib/checklist-step-done.js'
-import { waitingToggleRefusal } from '../lib/waiting-on-state.js'
+import {
+  SAVED_WAIT_FIELDS_ARE_LOCKED,
+  waitingLockRefusal,
+  waitingOnStage,
+  waitingToggleRefusal,
+} from '../lib/waiting-on-state.js'
 import {
   LAST_RECURRING_STEP_MESSAGE,
   approvalDenial,
@@ -26780,13 +26786,19 @@ describe('addWaitingOn on Postgres: one transaction on the locked row', () => {
 })
 
 describe('resolving a wait on Postgres: one transaction on the locked row', () => {
-  const entry = () => openWait({ id: 'wo-1', blockerId: 'emp-lisa', requestedBy: OWNER_ID })
+  const entry = (over = {}) =>
+    openWait({ id: 'wo-1', blockerId: 'emp-lisa', requestedBy: OWNER_ID, ...over })
 
   function pgStoreWhere({ calledCopy, lockedStep }) {
     const fake = fakePostgres()
     const pgStore = postgresStore(fake)
+    // The caller's copy and the locked row are different objects in production
+    // (the row is a fresh read). A clone keeps them apart here too: the unlocked
+    // pass that finds the wait changes ITS copy, and must not change the row.
     pgStore.read = async () => ({
-      checklists: [{ id: 'cl-1', clientId: 'c1', title: 'August close', items: [calledCopy] }],
+      checklists: [
+        { id: 'cl-1', clientId: 'c1', title: 'August close', items: [structuredClone(calledCopy)] },
+      ],
     })
     answerLockedChecklistItem(fake, (_checklistId, itemId) =>
       itemId === lockedStep?.id ? lockedRowOf(lockedStep) : null,
@@ -26815,7 +26827,13 @@ describe('resolving a wait on Postgres: one transaction on the locked row', () =
       label: 'Reconcile',
       done: false,
       subItems: [
-        { id: 'sub-1', title: 'Confirm', done: false, waitingOns: [entry()] },
+        {
+          id: 'sub-1',
+          title: 'Confirm',
+          done: false,
+          // Approve is the second stage: it needs the blocker's Done first.
+          waitingOns: [entry({ resolvedAt: '2026-09-30T13:00:00.000Z', resolvedBy: 'emp-lisa' })],
+        },
         { id: 'sub-2', title: 'Approve', done: false },
       ],
     }
@@ -27000,5 +27018,914 @@ describe('a deletion request is not filed for a step that is already gone (file 
     expect(
       deletionTargetStillExists(current, { itemId: 'it-1', subItemId: 'sub-1', subSubItemId: 'ss-1' }),
     ).toBe(true)
+  })
+})
+
+/**
+ * Three "two people at the same instant" gaps on checklist steps (tracker
+ * featreq-3c7f9e5a), closed the way 62510ff / e22d5ec closed the tick and the
+ * wait: the decision is made on the step as it is NOW (the row locked `for update`
+ * on Postgres, the one queue slot on the file backend), not on a copy read earlier.
+ *
+ *   1. a hand-off action (Done / Approve / Send back / Question) re-checks the
+ *      wait's stage on the locked entry;
+ *   2. a new wait re-checks the task-link lock on the locked step;
+ *   3. the sub-step writers read the step they write back under the lock.
+ *
+ * Every Postgres test here makes the fake tag what a CONNECTION ran (`via:
+ * 'client'`), so a writer that fell back to `this.pool.query` would fail them.
+ */
+const LATE_SENTENCES = {
+  done: {
+    resolved: 'This wait has already been marked done',
+    verified: 'This wait has already been marked done',
+  },
+  question: {
+    resolved: 'This wait has already been marked done, so there is nothing to ask about',
+    verified: 'This wait has already been marked done, so there is nothing to ask about',
+  },
+  verify: {
+    waiting: 'Nobody has marked this done yet — it can be approved once they do',
+    verified: 'This wait is already closed out',
+  },
+  'send-back': {
+    waiting: 'Nobody has marked this done yet — there is nothing to send back',
+    verified: 'This wait is already closed out',
+  },
+}
+const STAGE_NEEDED = { done: 'waiting', question: 'waiting', verify: 'resolved', 'send-back': 'resolved' }
+
+/** A wait (`wo-1`, Lisa waited on, Brittany asked) at the named stage. */
+function waitAtStage(stage, over = {}) {
+  const entry = openWait({ id: 'wo-1', blockerId: 'emp-lisa', requestedBy: OWNER_ID, ...over })
+  if (stage === 'waiting') return entry
+  const resolved = { ...entry, resolvedAt: '2026-09-30T13:00:00.000Z', resolvedBy: 'emp-lisa' }
+  if (stage === 'resolved') return resolved
+  return { ...resolved, verifiedAt: '2026-09-30T14:00:00.000Z', verifiedBy: OWNER_ID }
+}
+
+/** The four hand-off writes, keyed by the route's action word. */
+const HAND_OFFS = {
+  done: (target) => target.markWaitingOnDone('cl-1', 'wo-1', { userId: 'emp-lisa' }),
+  question: (target) =>
+    target.addWaitingOnQuestion('cl-1', 'wo-1', { userId: 'emp-lisa', note: 'which page?' }),
+  verify: (target) => target.markWaitingOnVerified('cl-1', 'wo-1', { userId: OWNER_ID }),
+  'send-back': (target) =>
+    target.markWaitingOnSentBack('cl-1', 'wo-1', { userId: OWNER_ID, note: 'not that one' }),
+}
+
+/**
+ * Make the fake record, on each statement, that a CONNECTION ran it
+ * (`via: 'client'`). A statement run on the pool carries no `via`.
+ */
+function tagConnection(fake) {
+  const connect = fake.pool.connect
+  fake.pool.connect = async () => {
+    const client = await connect()
+    return {
+      ...client,
+      query: async (text, params) => {
+        const at = fake.statements.length
+        try {
+          return await client.query(text, params)
+        } finally {
+          if (fake.statements[at]) fake.statements[at].via = 'client'
+        }
+      },
+    }
+  }
+}
+
+/** Every statement ran on the transaction's connection, in this exact order. */
+function expectOneLockedTransaction(fake, updatePattern) {
+  expect(fake.statements.map((statement) => statement.via)).toEqual(Array(4).fill('client'))
+  expect(
+    [/^begin$/i, LOCKED_ITEM_SELECT, updatePattern, /^commit$/i].map((pattern) =>
+      fake.indexOf(pattern),
+    ),
+  ).toEqual([0, 1, 2, 3])
+}
+
+/** A refusal: the locked read, a rollback, nothing written, and no commit - all on the connection. */
+function expectRolledBackWithNothingWritten(fake) {
+  expect(fake.matching(/^update checklist_items/i)).toHaveLength(0)
+  expect(fake.indexOf(/^commit$/i)).toBe(-1)
+  expect(fake.indexOf(LOCKED_ITEM_SELECT)).toBeGreaterThan(fake.indexOf(/^begin$/i))
+  expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(fake.indexOf(LOCKED_ITEM_SELECT))
+  for (const pattern of [/^begin$/i, LOCKED_ITEM_SELECT, /^rollback$/i]) {
+    expect(fake.matching(pattern).every((statement) => statement.via === 'client')).toBe(true)
+  }
+}
+
+const UPDATE_SUB_ITEMS_AND_DONE =
+  /^update checklist_items\s+set sub_items = \$3::jsonb, done = \$4, completed_at = case when \$4 then coalesce\(completed_at, now\(\)\) else null end, updated_at = now\(\)\s+where checklist_id = \$1 and id = \$2$/i
+
+const HANDOFF_WORKSPACE = (stage, { client = false } = {}) =>
+  workspace({
+    employees: [
+      { id: OWNER_ID, name: 'Brittany', role: 'owner' },
+      { id: 'emp-lisa', name: 'Lisa', role: 'bookkeeper' },
+    ],
+    checklists: [
+      {
+        id: 'cl-1',
+        title: 'August close',
+        clientId: 'c1',
+        items: [
+          {
+            id: 'it-1',
+            label: 'Reconcile',
+            done: false,
+            assigneeId: 'emp-lisa',
+            waitingOns: [waitAtStage(stage, client ? { blockerType: 'client', blockerId: 'c1' } : {})],
+            subItems: [
+              { id: 'sub-1', title: 'Confirm the hours', done: false },
+              { id: 'sub-2', title: 'Approve', done: false },
+            ],
+          },
+        ],
+      },
+    ],
+  })
+
+describe('a hand-off action is decided on the wait as it is now (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const entryNow = async () => (await persisted()).checklists[0].items[0].waitingOns[0]
+
+  // Every stage / action pair the routes allow today still lands; every other
+  // pair is refused with the sentence the route's own early check gives.
+  for (const [action, call] of Object.entries(HAND_OFFS)) {
+    for (const stage of ['waiting', 'resolved', 'verified']) {
+      if (stage === STAGE_NEEDED[action]) {
+        it(`${action} lands on a wait that is ${stage}`, async () => {
+          await store.write(HANDOFF_WORKSPACE(stage))
+          const result = await call(store)
+          expect(result).not.toBeNull()
+          expect(result.entry.id).toBe('wo-1')
+        })
+      } else {
+        it(`${action} on a wait that is ${stage} is refused with the route's sentence and writes nothing`, async () => {
+          await store.write(HANDOFF_WORKSPACE(stage))
+          const before = await readFile(localDataPath, 'utf8')
+          const error = await call(store).catch((caught) => caught)
+          expect(error).toBeInstanceOf(WaitRefusedError)
+          expect(error.refusal).toEqual({ status: 409, error: LATE_SENTENCES[action][stage] })
+          expect(await readFile(localDataPath, 'utf8')).toBe(before)
+        })
+      }
+    }
+  }
+
+  it('Approve already landed in another tab: Send back is refused, and the wait stays closed with no new send-back', async () => {
+    await store.write(HANDOFF_WORKSPACE('resolved'))
+    // What this caller's route read: the wait is awaiting approval.
+    const callersCopy = await store.getWaitingOn('cl-1', 'wo-1')
+    expect(waitingOnStage(callersCopy.entry)).toBe('resolved')
+
+    await store.markWaitingOnVerified('cl-1', 'wo-1', { userId: OWNER_ID })
+    const before = await readFile(localDataPath, 'utf8')
+    const error = await HAND_OFFS['send-back'](store).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(WaitRefusedError)
+    expect(error.refusal).toEqual({ status: 409, error: 'This wait is already closed out' })
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+    const entry = await entryNow()
+    expect(entry.verifiedBy).toBe(OWNER_ID)
+    expect(entry.sendBacks).toBeUndefined()
+  })
+
+  it('Send back already landed in another tab: Approve is refused, and the wait is the blocker\'s move again', async () => {
+    await store.write(HANDOFF_WORKSPACE('resolved'))
+    await store.markWaitingOnSentBack('cl-1', 'wo-1', { userId: OWNER_ID, note: 'redo it' })
+    const before = await readFile(localDataPath, 'utf8')
+    const error = await HAND_OFFS.verify(store).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(WaitRefusedError)
+    expect(error.refusal.error).toBe('Nobody has marked this done yet — it can be approved once they do')
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+    const entry = await entryNow()
+    expect(entry.verifiedAt).toBeUndefined()
+    expect(entry.sendBacks).toHaveLength(1)
+  })
+
+  it('Approve and Send back at the same instant: exactly one applies, never both', async () => {
+    await store.write(HANDOFF_WORKSPACE('resolved'))
+    const settled = await Promise.allSettled([HAND_OFFS.verify(store), HAND_OFFS['send-back'](store)])
+    const refused = settled.filter((outcome) => outcome.status === 'rejected')
+    expect(refused).toHaveLength(1)
+    expect(refused[0].reason).toBeInstanceOf(WaitRefusedError)
+    expect(settled.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1)
+
+    const entry = await entryNow()
+    const closed = Boolean(entry.verifiedAt)
+    const sentBack = (entry.sendBacks ?? []).length
+    expect(closed ? sentBack === 0 : sentBack === 1).toBe(true)
+  })
+
+  it('Done twice at the same instant: the second is refused and the first person stays on the record', async () => {
+    await store.write(HANDOFF_WORKSPACE('waiting'))
+    const settled = await Promise.allSettled([
+      store.markWaitingOnDone('cl-1', 'wo-1', { userId: 'emp-lisa' }),
+      store.markWaitingOnDone('cl-1', 'wo-1', { userId: OWNER_ID }),
+    ])
+    expect(settled.map((outcome) => outcome.status)).toEqual(['fulfilled', 'rejected'])
+    expect(settled[1].reason).toBeInstanceOf(WaitRefusedError)
+    expect((await entryNow()).resolvedBy).toBe('emp-lisa')
+  })
+
+  it('a sub-step wait is decided the same way', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'August close',
+            clientId: 'c1',
+            items: [
+              {
+                id: 'it-1',
+                label: 'Reconcile',
+                done: false,
+                subItems: [
+                  { id: 'sub-1', title: 'Confirm', done: false, waitingOns: [waitAtStage('verified')] },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    )
+    const before = await readFile(localDataPath, 'utf8')
+    const error = await HAND_OFFS['send-back'](store).catch((caught) => caught)
+    expect(error).toBeInstanceOf(WaitRefusedError)
+    expect(error.refusal.error).toBe('This wait is already closed out')
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('a client wait still finishes in one click, and a second Done is refused', async () => {
+    await store.write(HANDOFF_WORKSPACE('waiting', { client: true }))
+    const first = await store.markWaitingOnDone('cl-1', 'wo-1', { userId: OWNER_ID, alsoVerify: true })
+    expect(first.entry).toMatchObject({ resolvedBy: OWNER_ID, verifiedBy: OWNER_ID })
+    const error = await store
+      .markWaitingOnDone('cl-1', 'wo-1', { userId: OWNER_ID, alsoVerify: true })
+      .catch((caught) => caught)
+    expect(error).toBeInstanceOf(WaitRefusedError)
+  })
+
+  it('a wait that is not there is still answered null, not refused', async () => {
+    await store.write(HANDOFF_WORKSPACE('verified'))
+    expect(await store.markWaitingOnDone('cl-1', 'wo-nope', { userId: OWNER_ID })).toBeNull()
+  })
+})
+
+describe('a hand-off action on Postgres is decided on the locked row', () => {
+  const stepWith = (stage) => ({
+    id: 'it-1',
+    label: 'Reconcile',
+    done: false,
+    assigneeId: 'emp-lisa',
+    waitingOns: [waitAtStage(stage)],
+  })
+
+  /** `read()` answers what the CALLER saw (`calledStage`); the locked select, the row as it is now. */
+  function pgStoreWhere({ calledStage, lockedStage }) {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.read = async () => ({
+      checklists: [
+        { id: 'cl-1', clientId: 'c1', title: 'August close', items: [stepWith(calledStage)] },
+      ],
+    })
+    answerLockedChecklistItem(fake, (_checklistId, itemId) =>
+      itemId === 'it-1' ? lockedRowOf(stepWith(lockedStage)) : null,
+    )
+    tagConnection(fake)
+    return { fake, pgStore }
+  }
+
+  for (const [action, call] of Object.entries(HAND_OFFS)) {
+    for (const stage of ['waiting', 'resolved', 'verified']) {
+      if (stage === STAGE_NEEDED[action]) {
+        it(`${action} on a locked wait that is ${stage}: begin / select for update / update / commit, on one connection`, async () => {
+          const { fake, pgStore } = pgStoreWhere({ calledStage: stage, lockedStage: stage })
+          const result = await call(pgStore)
+          expect(result.entry.id).toBe('wo-1')
+          expectOneLockedTransaction(fake, UPDATE_WAITING_ONS)
+          expect(fake.matching(LOCKED_ITEM_SELECT)[0].params).toEqual(['cl-1', 'it-1'])
+          expect(fake.matching(UPDATE_WAITING_ONS)[0].params.slice(0, 2)).toEqual(['cl-1', 'it-1'])
+        })
+      } else {
+        it(`${action} on a locked wait that is ${stage}: refused with the route's sentence, rolled back, nothing written`, async () => {
+          const { fake, pgStore } = pgStoreWhere({ calledStage: STAGE_NEEDED[action], lockedStage: stage })
+          const counter = countReleases(fake)
+          const error = await call(pgStore).catch((caught) => caught)
+          expect(error).toBeInstanceOf(WaitRefusedError)
+          expect(error.refusal).toEqual({ status: 409, error: LATE_SENTENCES[action][stage] })
+          expectRolledBackWithNothingWritten(fake)
+          expect(counter.released).toBe(1)
+        })
+      }
+    }
+  }
+
+  it('the caller\'s copy said resolved but Approve landed first: Send back is refused', async () => {
+    const { fake, pgStore } = pgStoreWhere({ calledStage: 'resolved', lockedStage: 'verified' })
+    const error = await HAND_OFFS['send-back'](pgStore).catch((caught) => caught)
+    expect(error).toBeInstanceOf(WaitRefusedError)
+    expect(error.refusal.error).toBe('This wait is already closed out')
+    expectRolledBackWithNothingWritten(fake)
+  })
+
+  it('decides on the locked row, not on the caller\'s copy: a wait sent back since the read can be marked done', async () => {
+    const { fake, pgStore } = pgStoreWhere({ calledStage: 'resolved', lockedStage: 'waiting' })
+    const result = await HAND_OFFS.done(pgStore)
+    expect(result.entry.resolvedBy).toBe('emp-lisa')
+    expectOneLockedTransaction(fake, UPDATE_WAITING_ONS)
+  })
+
+  it('a refusal releases the connection once and a thrown update rolls back and releases too', async () => {
+    const { fake, pgStore } = pgStoreWhere({ calledStage: 'resolved', lockedStage: 'resolved' })
+    failUpdates(fake)
+    const counter = countReleases(fake)
+    await expect(HAND_OFFS.verify(pgStore)).rejects.toThrow('boom')
+    expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(-1)
+    expect(fake.indexOf(/^commit$/i)).toBe(-1)
+    expect(counter.released).toBe(1)
+  })
+})
+
+describe('the task-link lock is decided on the step as it is now (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const wait = { blockerId: OWNER_ID, requestedBy: 'emp-lisa', note: 'needs your sign-off' }
+  const seed = () =>
+    store.write(
+      workspace({
+        employees: [
+          { id: OWNER_ID, name: 'Brittany', role: 'owner' },
+          { id: 'emp-lisa', name: 'Lisa', role: 'bookkeeper' },
+        ],
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'August close',
+            clientId: 'c1',
+            items: [
+              {
+                id: 'it-1',
+                label: 'Reconcile',
+                done: false,
+                subItems: [{ id: 'sub-1', title: 'Confirm the hours', done: false }],
+              },
+            ],
+          },
+        ],
+      }),
+    )
+
+  beforeEach(seed)
+
+  it('a wait with link A was committed after the caller read: an add with link B is refused with the existing sentence and writes nothing', async () => {
+    // What the route read: no link yet, so a link is not a "change" to it.
+    const callersCopy = (await store.read()).checklists[0].items[0]
+    expect(waitingLockRefusal(callersCopy, { waitingForChecklistId: 'cl-b' })).toBeNull()
+
+    await store.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-a' })
+    const before = await readFile(localDataPath, 'utf8')
+    const error = await store
+      .addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-b' })
+      .catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(WaitRefusedError)
+    expect(error.refusal).toEqual({ status: 409, error: SAVED_WAIT_FIELDS_ARE_LOCKED })
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+    const item = (await persisted()).checklists[0].items[0]
+    expect(item.waitingForChecklistId).toBe('cl-a')
+    expect(item.waitingOns).toHaveLength(1)
+  })
+
+  it('clearing the link while a live wait holds it is refused the same way', async () => {
+    await store.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-a' })
+    for (const cleared of ['', null]) {
+      const error = await store
+        .addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: cleared })
+        .catch((caught) => caught)
+      expect(error).toBeInstanceOf(WaitRefusedError)
+    }
+    expect((await persisted()).checklists[0].items[0].waitingForChecklistId).toBe('cl-a')
+  })
+
+  it('an add with the same link, or with no link, still lands beside the first wait', async () => {
+    await store.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-a' })
+    expect(
+      await store.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-a' }),
+    ).not.toBeNull()
+    expect(await store.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait })).not.toBeNull()
+    const item = (await persisted()).checklists[0].items[0]
+    expect(item.waitingOns).toHaveLength(3)
+    expect(item.waitingForChecklistId).toBe('cl-a')
+  })
+
+  it('once every wait is closed the link is free again', async () => {
+    const first = await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1' },
+      { ...wait, waitingForChecklistId: 'cl-a' },
+    )
+    await store.markWaitingOnDone('cl-1', first.entry.id, { userId: OWNER_ID })
+    await store.markWaitingOnVerified('cl-1', first.entry.id, { userId: 'emp-lisa' })
+    await store.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-b' })
+    expect((await persisted()).checklists[0].items[0].waitingForChecklistId).toBe('cl-b')
+  })
+
+  it('two adds at the same instant with different links: one lands, the other is refused, and the link is the one that landed', async () => {
+    const settled = await Promise.allSettled([
+      store.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-a' }),
+      store.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-b' }),
+    ])
+    expect(settled.map((outcome) => outcome.status)).toEqual(['fulfilled', 'rejected'])
+    expect(settled[1].reason).toBeInstanceOf(WaitRefusedError)
+    const item = (await persisted()).checklists[0].items[0]
+    expect(item.waitingForChecklistId).toBe('cl-a')
+    expect(item.waitingOns).toHaveLength(1)
+  })
+
+  it('a sub-step is guarded the same way', async () => {
+    await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1', subItemId: 'sub-1' },
+      { ...wait, waitingForChecklistId: 'cl-a' },
+    )
+    const before = await readFile(localDataPath, 'utf8')
+    const error = await store
+      .addWaitingOn(
+        'cl-1',
+        { itemId: 'it-1', subItemId: 'sub-1' },
+        { ...wait, waitingForChecklistId: 'cl-b' },
+      )
+      .catch((caught) => caught)
+    expect(error).toBeInstanceOf(WaitRefusedError)
+    expect(error.refusal.error).toBe(SAVED_WAIT_FIELDS_ARE_LOCKED)
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+})
+
+describe('the task-link lock on Postgres is decided on the locked row', () => {
+  const wait = { blockerId: 'emp-lisa', requestedBy: OWNER_ID, note: 'the March page' }
+  const plainStep = () => ({
+    id: 'it-1',
+    label: 'Reconcile',
+    done: false,
+    assigneeId: 'emp-lisa',
+    subItems: [{ id: 'sub-1', title: 'Confirm', done: false }],
+  })
+  // A wait with link A, committed after the caller read.
+  const heldStep = () => ({
+    ...plainStep(),
+    waitingForChecklistId: 'cl-a',
+    waitingOns: [openWait({ id: 'wo-early', blockerId: 'emp-lisa' })],
+  })
+  const heldSubStep = () => ({
+    ...plainStep(),
+    subItems: [
+      {
+        id: 'sub-1',
+        title: 'Confirm',
+        done: false,
+        waitingForChecklistId: 'cl-a',
+        waitingOns: [openWait({ id: 'wo-early', blockerId: 'emp-lisa' })],
+      },
+    ],
+  })
+
+  function pgStoreWhere({ lockedStep }) {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.read = async () => ({
+      checklists: [{ id: 'cl-1', clientId: 'c1', title: 'August close', items: [plainStep()] }],
+    })
+    answerLockedChecklistItem(fake, (_checklistId, itemId) =>
+      itemId === 'it-1' ? lockedRowOf(lockedStep) : null,
+    )
+    tagConnection(fake)
+    return { fake, pgStore }
+  }
+
+  it('refuses a different link on a row a live wait already holds: rolled back, nothing written, one release', async () => {
+    const { fake, pgStore } = pgStoreWhere({ lockedStep: heldStep() })
+    const counter = countReleases(fake)
+    const error = await pgStore
+      .addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-b' })
+      .catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(WaitRefusedError)
+    expect(error.refusal).toEqual({ status: 409, error: SAVED_WAIT_FIELDS_ARE_LOCKED })
+    expectRolledBackWithNothingWritten(fake)
+    expect(counter.released).toBe(1)
+  })
+
+  it('refuses a different link on a sub-step the locked row says is held', async () => {
+    const { fake, pgStore } = pgStoreWhere({ lockedStep: heldSubStep() })
+    const error = await pgStore
+      .addWaitingOn(
+        'cl-1',
+        { itemId: 'it-1', subItemId: 'sub-1' },
+        { ...wait, waitingForChecklistId: 'cl-b' },
+      )
+      .catch((caught) => caught)
+    expect(error).toBeInstanceOf(WaitRefusedError)
+    expectRolledBackWithNothingWritten(fake)
+  })
+
+  it('an add with the same link lands: waits, then the link, then commit, all on the connection', async () => {
+    const { fake, pgStore } = pgStoreWhere({ lockedStep: heldStep() })
+    await pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-a' })
+
+    expect(fake.statements.map((statement) => statement.via)).toEqual(Array(5).fill('client'))
+    expect(
+      [/^begin$/i, LOCKED_ITEM_SELECT, UPDATE_WAITING_ONS, UPDATE_WAIT_LINK, /^commit$/i].map(
+        (pattern) => fake.indexOf(pattern),
+      ),
+    ).toEqual([0, 1, 2, 3, 4])
+    expect(fake.matching(UPDATE_WAIT_LINK)[0].params).toEqual(['cl-1', 'it-1', 'cl-a'])
+    const written = JSON.parse(fake.matching(UPDATE_WAITING_ONS)[0].params[2])
+    expect(written.map((entry) => entry.id)).toEqual(['wo-early', expect.stringMatching(/^wo-/)])
+  })
+
+  it('an add with no link lands and writes no link statement', async () => {
+    const { fake, pgStore } = pgStoreWhere({ lockedStep: heldStep() })
+    await pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait })
+    expectOneLockedTransaction(fake, UPDATE_WAITING_ONS)
+    expect(fake.matching(UPDATE_WAIT_LINK)).toHaveLength(0)
+  })
+
+  it('a link on a row that carries no live wait is free to set, as before', async () => {
+    const { fake, pgStore } = pgStoreWhere({ lockedStep: plainStep() })
+    await pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-b' })
+    expect(fake.matching(UPDATE_WAIT_LINK)[0].params).toEqual(['cl-1', 'it-1', 'cl-b'])
+    expect(fake.indexOf(/^commit$/i)).toBeGreaterThan(-1)
+  })
+
+  it('a link held by waits that are all closed is free again', async () => {
+    const closedStep = {
+      ...heldStep(),
+      waitingOns: [waitAtStage('verified', { id: 'wo-early' })],
+    }
+    const { fake, pgStore } = pgStoreWhere({ lockedStep: closedStep })
+    await pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-b' })
+    expect(fake.matching(UPDATE_WAIT_LINK)[0].params).toEqual(['cl-1', 'it-1', 'cl-b'])
+  })
+})
+
+/**
+ * The sub-step writers (add / rename-or-wait-flag / remove a sub-step, add /
+ * remove a sub-sub-step, the sub-step reorder and the step's own edit) used to
+ * read a step, change it in memory and write it back in a second, unlocked step.
+ * A wait or a tick that landed in between was written over.
+ */
+describe('sub-step writers work on the step as it is now (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const wait = { blockerId: OWNER_ID, requestedBy: 'emp-lisa', note: 'needs your sign-off' }
+  const seed = () =>
+    store.write(
+      workspace({
+        employees: [
+          { id: OWNER_ID, name: 'Brittany', role: 'owner' },
+          { id: 'emp-lisa', name: 'Lisa', role: 'bookkeeper' },
+        ],
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'August close',
+            clientId: 'c1',
+            items: [
+              {
+                id: 'it-1',
+                label: 'Reconcile',
+                done: false,
+                subItems: [
+                  { id: 'sub-1', title: 'Confirm the hours', done: false },
+                  { id: 'sub-2', title: 'Approve', done: false },
+                  {
+                    id: 'sub-3',
+                    title: 'Review',
+                    done: false,
+                    subItems: [{ id: 'ss-1', title: 'Tie out', done: false }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    )
+  const subItemsNow = async () => (await persisted()).checklists[0].items[0].subItems
+  const waitOnSub1 = () =>
+    store.addWaitingOn('cl-1', { itemId: 'it-1', subItemId: 'sub-1' }, wait)
+  const tickSub2 = () => store.toggleChecklistItem('cl-1', 'it-1', 'sub-2')
+
+  beforeEach(seed)
+
+  // Each write is queued right behind the other's read: the old code read in one
+  // queue entry and wrote in another, so the other request's whole-file write
+  // landed in between and was then overwritten by the stale copy.
+  const races = [
+    [
+      'addChecklistSubItem',
+      () => store.addChecklistSubItem('cl-1', 'it-1', 'New one'),
+      waitOnSub1,
+      (subs) => {
+        expect(subs.map((sub) => sub.title)).toContain('New one')
+        expect(subs[0].waitingOns).toHaveLength(1)
+      },
+    ],
+    [
+      'updateChecklistSubItem',
+      () => store.updateChecklistSubItem('cl-1', 'it-1', 'sub-3', { waitingOn: 'ping' }),
+      waitOnSub1,
+      (subs) => {
+        expect(subs[2].waitingOn).toBe('ping')
+        expect(subs[0].waitingOns).toHaveLength(1)
+      },
+    ],
+    [
+      'removeChecklistSubItem',
+      () => store.removeChecklistSubItem('cl-1', 'it-1', 'sub-2'),
+      waitOnSub1,
+      (subs) => {
+        expect(subs.map((sub) => sub.id)).toEqual(['sub-1', 'sub-3'])
+        expect(subs[0].waitingOns).toHaveLength(1)
+      },
+    ],
+    [
+      'addChecklistSubSubItem',
+      () => store.addChecklistSubSubItem('cl-1', 'it-1', 'sub-3', 'Another'),
+      tickSub2,
+      (subs) => {
+        expect(subs[2].subItems).toHaveLength(2)
+        expect(subs[1].done).toBe(true)
+      },
+    ],
+    [
+      'removeChecklistSubSubItem',
+      () => store.removeChecklistSubSubItem('cl-1', 'it-1', 'sub-3', 'ss-1'),
+      tickSub2,
+      (subs) => {
+        expect(subs[2].subItems).toBeUndefined()
+        expect(subs[1].done).toBe(true)
+      },
+    ],
+    [
+      'reorderChecklistSubItems',
+      () => store.reorderChecklistSubItems('cl-1', 'it-1', ['sub-3', 'sub-1', 'sub-2']),
+      waitOnSub1,
+      (subs) => {
+        expect(subs.map((sub) => sub.id)).toEqual(['sub-3', 'sub-1', 'sub-2'])
+        expect(subs[1].waitingOns).toHaveLength(1)
+      },
+    ],
+    [
+      'updateChecklistItem',
+      () => store.updateChecklistItem('cl-1', 'it-1', { title: 'Renamed' }),
+      tickSub2,
+      (subs, item) => {
+        expect(item.label).toBe('Renamed')
+        expect(subs[1].done).toBe(true)
+      },
+    ],
+  ]
+
+  for (const [name, write, other, check] of races) {
+    it(`${name} keeps a wait or a tick that lands right after its read`, async () => {
+      await Promise.all([write(), other()])
+      check(await subItemsNow(), (await persisted()).checklists[0].items[0])
+    })
+
+    it(`${name} keeps a wait or a tick that lands right before it, too`, async () => {
+      await Promise.all([other(), write()])
+      check(await subItemsNow(), (await persisted()).checklists[0].items[0])
+    })
+  }
+
+  it('the ordinary write answers the updated checklist, as before', async () => {
+    const added = await store.addChecklistSubItem('cl-1', 'it-1', '  Spaced  ')
+    expect(added.id).toBe('cl-1')
+    expect(added.items[0].subItems.at(-1)).toMatchObject({ title: 'Spaced', done: false })
+
+    const removed = await store.removeChecklistSubItem('cl-1', 'it-1', 'sub-2')
+    expect(removed.items[0].subItems.map((sub) => sub.id)).not.toContain('sub-2')
+
+    const patched = await store.updateChecklistSubItem('cl-1', 'it-1', 'sub-1', {
+      waiting: true,
+      waitingOn: 'the bank',
+      waitingForChecklistId: 'cl-9',
+    })
+    expect(patched.items[0].subItems[0]).toMatchObject({
+      waiting: true,
+      waitingOn: 'the bank',
+      waitingForChecklistId: 'cl-9',
+    })
+
+    const grown = await store.addChecklistSubSubItem('cl-1', 'it-1', 'sub-1', 'Tick me')
+    expect(grown.items[0].subItems[0].subItems).toHaveLength(1)
+    const shrunk = await store.removeChecklistSubSubItem('cl-1', 'it-1', 'sub-1', grown.items[0].subItems[0].subItems[0].id)
+    expect(shrunk.items[0].subItems[0].subItems).toBeUndefined()
+
+    const renamed = await store.updateChecklistItem('cl-1', 'it-1', { title: 'Reconcile again' })
+    expect(renamed.items[0].label).toBe('Reconcile again')
+  })
+
+  it('answers null and writes nothing for a step, sub-step or checklist that is not there', async () => {
+    const before = await readFile(localDataPath, 'utf8')
+    expect(await store.addChecklistSubItem('cl-1', 'nope', 'x')).toBeNull()
+    expect(await store.addChecklistSubItem('cl-nope', 'it-1', 'x')).toBeNull()
+    expect(await store.updateChecklistSubItem('cl-1', 'it-1', 'nope', { waiting: true })).toBeNull()
+    expect(await store.updateChecklistSubItem('cl-1', 'nope', 'sub-1', { waiting: true })).toBeNull()
+    expect(await store.removeChecklistSubItem('cl-1', 'it-1', 'nope')).toBeNull()
+    expect(await store.addChecklistSubSubItem('cl-1', 'it-1', 'nope', 'x')).toBeNull()
+    expect(await store.removeChecklistSubSubItem('cl-1', 'it-1', 'sub-3', 'nope')).toBeNull()
+    expect(await store.removeChecklistSubSubItem('cl-1', 'it-1', 'nope', 'ss-1')).toBeNull()
+    expect(await store.reorderChecklistSubItems('cl-1', 'nope', ['sub-1'])).toBeNull()
+    expect(await store.updateChecklistItem('cl-1', 'nope', { title: 'x' })).toBeNull()
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+})
+
+describe('sub-step writers on Postgres work on the locked row', () => {
+  // The row as it is NOW: a wait on sub-1 and a tick on sub-2 were committed after
+  // the caller read its copy, which is why the caller's copy has neither.
+  const lockedStep = (over = {}) => ({
+    id: 'it-1',
+    label: 'Reconcile',
+    done: false,
+    subItems: [
+      {
+        id: 'sub-1',
+        title: 'Confirm',
+        done: false,
+        waitingOns: [openWait({ id: 'wo-late', blockerId: 'emp-lisa', requestedBy: OWNER_ID })],
+      },
+      { id: 'sub-2', title: 'Approve', done: true },
+      {
+        id: 'sub-3',
+        title: 'Review',
+        done: false,
+        subItems: [{ id: 'ss-1', title: 'Tie out', done: false }],
+      },
+    ],
+    ...over,
+  })
+  const calledCopy = () => ({
+    ...lockedStep(),
+    subItems: [
+      { id: 'sub-1', title: 'Confirm', done: false },
+      { id: 'sub-2', title: 'Approve', done: false },
+      { id: 'sub-3', title: 'Review', done: false, subItems: [{ id: 'ss-1', title: 'Tie out', done: false }] },
+    ],
+  })
+
+  function pgStoreWhere({ locked = lockedStep() } = {}) {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.read = async () => ({
+      checklists: [{ id: 'cl-1', clientId: 'c1', title: 'August close', items: [calledCopy()] }],
+    })
+    answerLockedChecklistItem(fake, (_checklistId, itemId) =>
+      itemId === 'it-1' && locked ? lockedRowOf(locked) : null,
+    )
+    tagConnection(fake)
+    return { fake, pgStore }
+  }
+
+  // [method, the call, the update it writes, what the written sub_items must show]
+  const writers = [
+    [
+      'addChecklistSubItem',
+      (target) => target.addChecklistSubItem('cl-1', 'it-1', 'New one'),
+      UPDATE_SUB_ITEMS_AND_DONE,
+      (written, params) => {
+        expect(written.map((sub) => sub.title)).toEqual(['Confirm', 'Approve', 'Review', 'New one'])
+        expect(params[3]).toBe(false)
+      },
+    ],
+    [
+      'updateChecklistSubItem',
+      (target) => target.updateChecklistSubItem('cl-1', 'it-1', 'sub-3', { waitingOn: 'ping' }),
+      UPDATE_SUB_ITEMS,
+      (written) => expect(written[2].waitingOn).toBe('ping'),
+    ],
+    [
+      'removeChecklistSubItem',
+      (target) => target.removeChecklistSubItem('cl-1', 'it-1', 'sub-3'),
+      UPDATE_SUB_ITEMS_AND_DONE,
+      (written, params) => {
+        expect(written.map((sub) => sub.id)).toEqual(['sub-1', 'sub-2'])
+        expect(params[3]).toBe(false)
+      },
+    ],
+    [
+      'addChecklistSubSubItem',
+      (target) => target.addChecklistSubSubItem('cl-1', 'it-1', 'sub-3', 'Another'),
+      UPDATE_SUB_ITEMS_AND_DONE,
+      (written) => expect(written[2].subItems.map((sub) => sub.title)).toEqual(['Tie out', 'Another']),
+    ],
+    [
+      'removeChecklistSubSubItem',
+      (target) => target.removeChecklistSubSubItem('cl-1', 'it-1', 'sub-3', 'ss-1'),
+      UPDATE_SUB_ITEMS_AND_DONE,
+      (written) => expect(written[2].subItems).toBeUndefined(),
+    ],
+  ]
+
+  for (const [name, call, update, check] of writers) {
+    it(`${name}: begin / select for update / update / commit on one connection, and the wait and the tick committed after the caller read are written back`, async () => {
+      const { fake, pgStore } = pgStoreWhere()
+      const counter = countReleases(fake)
+      const result = await call(pgStore)
+
+      expect(result.id).toBe('cl-1')
+      expectOneLockedTransaction(fake, update)
+      expect(fake.matching(LOCKED_ITEM_SELECT)[0].params).toEqual(['cl-1', 'it-1'])
+      const [written] = fake.matching(update)
+      expect(written.params.slice(0, 2)).toEqual(['cl-1', 'it-1'])
+      const subItems = JSON.parse(written.params[2])
+      expect(subItems[0].waitingOns.map((entry) => entry.id)).toEqual(['wo-late'])
+      expect(subItems.find((sub) => sub.id === 'sub-2').done).toBe(true)
+      check(subItems, written.params)
+      // Nothing touched the table outside the transaction's connection.
+      expect(
+        fake.statements.filter((statement) => /checklist_items/i.test(statement.text) && statement.via !== 'client'),
+      ).toEqual([])
+      expect(counter.released).toBe(1)
+    })
+
+    it(`${name}: a step row that is gone rolls back, writes nothing and answers null`, async () => {
+      const { fake, pgStore } = pgStoreWhere({ locked: null })
+      const counter = countReleases(fake)
+      expect(await call(pgStore)).toBeNull()
+      expectRolledBackWithNothingWritten(fake)
+      expect(counter.released).toBe(1)
+    })
+
+    it(`${name}: a throwing update rolls back, releases the connection and rethrows`, async () => {
+      const { fake, pgStore } = pgStoreWhere()
+      failUpdates(fake)
+      const counter = countReleases(fake)
+      await expect(call(pgStore)).rejects.toThrow('boom')
+      expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(fake.indexOf(LOCKED_ITEM_SELECT))
+      expect(fake.indexOf(/^commit$/i)).toBe(-1)
+      expect(counter.released).toBe(1)
+    })
+  }
+
+  it('a sub-step that the locked row no longer has is "not found": rolled back, nothing written', async () => {
+    const calls = [
+      (target) => target.updateChecklistSubItem('cl-1', 'it-1', 'sub-gone', { waiting: true }),
+      (target) => target.removeChecklistSubItem('cl-1', 'it-1', 'sub-gone'),
+      (target) => target.addChecklistSubSubItem('cl-1', 'it-1', 'sub-gone', 'x'),
+      (target) => target.removeChecklistSubSubItem('cl-1', 'it-1', 'sub-3', 'ss-gone'),
+    ]
+    for (const call of calls) {
+      const { fake, pgStore } = pgStoreWhere()
+      expect(await call(pgStore)).toBeNull()
+      expectRolledBackWithNothingWritten(fake)
+    }
+  })
+
+  it('removing the last sub-step keeps the step\'s stored done, read from the locked row', async () => {
+    const locked = lockedStep({ done: true, subItems: [{ id: 'sub-1', title: 'Confirm', done: true }] })
+    const { fake, pgStore } = pgStoreWhere({ locked })
+    await pgStore.removeChecklistSubItem('cl-1', 'it-1', 'sub-1')
+    const [update] = fake.matching(UPDATE_SUB_ITEMS_AND_DONE)
+    expect(JSON.parse(update.params[2])).toEqual([])
+    expect(update.params[3]).toBe(true)
+  })
+
+  it('reorderChecklistSubItems was already locked: begin / select for update / update / commit', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.read = async () => ({
+      checklists: [{ id: 'cl-1', clientId: 'c1', title: 'August close', items: [calledCopy()] }],
+    })
+    const inner = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      const result = await inner(text, params)
+      if (/^select sub_items from checklist_items\s+where checklist_id = \$1 and id = \$2\s+for update$/i.test(String(text).trim())) {
+        return { rows: [{ sub_items: lockedStep().subItems }], rowCount: 1 }
+      }
+      return result
+    }
+    fake.pool.connect = async () => ({
+      query: (text, params) => fake.pool.query(text, params),
+      release() {},
+    })
+    tagConnection(fake)
+    await pgStore.reorderChecklistSubItems('cl-1', 'it-1', ['sub-3', 'sub-1', 'sub-2'])
+    expect(fake.statements.map((statement) => statement.via)).toEqual(Array(4).fill('client'))
+    const [update] = fake.matching(
+      /^update checklist_items\s+set sub_items = \$3::jsonb, updated_at = now\(\)\s+where checklist_id = \$1 and id = \$2$/i,
+    )
+    const written = JSON.parse(update.params[2])
+    expect(written.map((sub) => sub.id)).toEqual(['sub-3', 'sub-1', 'sub-2'])
+    expect(written[1].waitingOns[0].id).toBe('wo-late')
   })
 })

@@ -149,6 +149,18 @@ export function canMarkWaitingOnDone(args: WaitingOnPermissionArgs): boolean
 export function canVerifyWaitingOn(args: WaitingOnPermissionArgs): boolean
 export function canSendBackWaitingOn(args: WaitingOnPermissionArgs): boolean
 export function canAskWaitingOnQuestion(args: WaitingOnPermissionArgs): boolean
+export const WAIT_ALREADY_MARKED_DONE: string
+export const WAIT_NOTHING_TO_ASK: string
+export const WAIT_NOT_DONE_YET_TO_APPROVE: string
+export const WAIT_NOT_DONE_YET_TO_SEND_BACK: string
+export const WAIT_ALREADY_CLOSED: string
+export const CLIENT_WAIT_NOBODY_TO_ASK: string
+export const CLIENT_WAIT_CANNOT_BE_SENT_BACK: string
+export const WAITING_ON_ACTION_STAGE: Readonly<Record<string, WaitingOnStage>>
+export function waitingOnStageRefusal(
+  action: string,
+  entry: WaitingOnLike | undefined,
+): { status: number; error: string } | null
 export function waitingOnConcernsUser(args: {
   entry: WaitingOnLike
   userId: string

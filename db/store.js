@@ -38,7 +38,9 @@ import {
 import {
   isWaitingOnOpen,
   toggleClosingWaits,
+  waitingLockRefusal,
   waitingOnStage,
+  waitingOnStageRefusal,
   waitingToggleRefusal,
 } from '../lib/waiting-on-state.js'
 import {
@@ -2531,6 +2533,24 @@ export class StepIsWaitingError extends Error {
   constructor(refusal) {
     super(refusal.message)
     this.name = 'StepIsWaitingError'
+    this.refusal = refusal
+  }
+}
+
+/**
+ * Thrown by `addWaitingOn` and the hand-off writers (`markWaitingOnDone`,
+ * `markWaitingOnVerified`, `markWaitingOnSentBack`, `addWaitingOnQuestion`) when
+ * the wait or step, read AS IT IS NOW on the locked row (Postgres) or inside the
+ * file queue slot, no longer allows what the caller decided from its own, older
+ * copy: the wait moved to another stage, or a live saved wait now holds the
+ * step's task link. `refusal` is `{ status, error }`, exactly what the route's
+ * own early check answers for that case; the route sends it as it is, and
+ * nothing was written.
+ */
+export class WaitRefusedError extends Error {
+  constructor(refusal) {
+    super(refusal.error)
+    this.name = 'WaitRefusedError'
     this.refusal = refusal
   }
 }
@@ -16445,67 +16465,50 @@ export class AppDataStore {
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedChecklist = null
-    let itemFound = false
-    data.checklists = data.checklists.map((checklist) => {
-      if (checklist.id !== checklistId) {
-        return checklist
+    // One queue slot for the read and the write (Postgres is a single UPDATE of
+    // the columns named, so it never writes back a column it did not read).
+    return this._withFileChecklistItem(checklistId, itemId, (item) => {
+      const next = { ...item }
+      if (title !== undefined) {
+        next.label = title
       }
-      const items = checklist.items.map((item) => {
-        if (item.id !== itemId) {
-          return item
+      if (dueDate !== undefined) {
+        if (dueDate === '' || dueDate === null) {
+          delete next.dueDate
+        } else {
+          next.dueDate = dueDate
         }
-        itemFound = true
-        const next = { ...item }
-        if (title !== undefined) {
-          next.label = title
+      }
+      if (assigneeId !== undefined) {
+        if (assigneeId === '' || assigneeId === null) {
+          delete next.assigneeId
+        } else {
+          next.assigneeId = assigneeId
         }
-        if (dueDate !== undefined) {
-          if (dueDate === '' || dueDate === null) {
-            delete next.dueDate
-          } else {
-            next.dueDate = dueDate
-          }
+      }
+      if (waitingOn !== undefined) {
+        if (waitingOn === '' || waitingOn === null) {
+          delete next.waitingOn
+        } else {
+          next.waitingOn = String(waitingOn)
         }
-        if (assigneeId !== undefined) {
-          if (assigneeId === '' || assigneeId === null) {
-            delete next.assigneeId
-          } else {
-            next.assigneeId = assigneeId
-          }
+      }
+      if (waiting !== undefined) {
+        if (waiting) {
+          next.waiting = true
+        } else {
+          delete next.waiting
         }
-        if (waitingOn !== undefined) {
-          if (waitingOn === '' || waitingOn === null) {
-            delete next.waitingOn
-          } else {
-            next.waitingOn = String(waitingOn)
-          }
+      }
+      if (waitingForChecklistId !== undefined) {
+        if (waitingForChecklistId === '' || waitingForChecklistId === null) {
+          delete next.waitingForChecklistId
+        } else {
+          next.waitingForChecklistId = String(waitingForChecklistId)
         }
-        if (waiting !== undefined) {
-          if (waiting) {
-            next.waiting = true
-          } else {
-            delete next.waiting
-          }
-        }
-        if (waitingForChecklistId !== undefined) {
-          if (waitingForChecklistId === '' || waitingForChecklistId === null) {
-            delete next.waitingForChecklistId
-          } else {
-            next.waitingForChecklistId = String(waitingForChecklistId)
-          }
-        }
-        return next
-      })
-      updatedChecklist = { ...checklist, items }
-      return updatedChecklist
+      }
+      return next
     })
-    if (!itemFound || !updatedChecklist) {
-      return null
-    }
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedChecklist
   }
 
   async deleteChecklistItem(checklistId, itemId) {
@@ -17167,51 +17170,45 @@ export class AppDataStore {
     const trimmed = typeof title === 'string' ? title.trim() : ''
     if (!trimmed) return null
 
-    if (this.pool) {
-      const itemResult = await this.pool.query(
-        `select sub_items from checklist_items where checklist_id = $1 and id = $2`,
-        [checklistId, itemId],
-      )
-      if (!itemResult.rowCount) return null
-      const subItems = normalizeSubItems(itemResult.rows[0].sub_items, { withDone: true })
-      const nextSubItems = [
+    // The same pure change on both backends: Postgres applies it to the step's
+    // row locked `for update`, the file backend inside one queue slot, so a wait
+    // or a tick committed after the caller's own read is still there when the
+    // sub-steps are written back.
+    const addTo = (rawSubItems) => {
+      const subItems = normalizeSubItems(rawSubItems, { withDone: true })
+      return [
         ...subItems,
         { id: `subitem-${randomUUID().slice(0, 8)}`, title: trimmed, done: false },
       ]
-      await this.pool.query(
-        `update checklist_items
+    }
+
+    if (this.pool) {
+      const written = await this._withLockedChecklistItem(
+        checklistId,
+        itemId,
+        async (client, _mapped, row) => {
+          const nextSubItems = addTo(row.sub_items)
+          await client.query(
+            `update checklist_items
          set sub_items = $3::jsonb, done = $4, ${completedAtClause(4)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
-        [checklistId, itemId, JSON.stringify(nextSubItems), nextSubItems.every((sub) => sub.done)],
+            [checklistId, itemId, JSON.stringify(nextSubItems), nextSubItems.every((sub) => sub.done)],
+          )
+          return { subItems: nextSubItems }
+        },
       )
+      if (!written) return null
       const data = await this.read()
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedChecklist = null
-    let itemFound = false
-    data.checklists = data.checklists.map((checklist) => {
-      if (checklist.id !== checklistId) return checklist
-      const items = checklist.items.map((item) => {
-        if (item.id !== itemId) return item
-        itemFound = true
-        const subItems = normalizeSubItems(item.subItems, { withDone: true })
-        const nextSubItems = [
-          ...subItems,
-          { id: `subitem-${randomUUID().slice(0, 8)}`, title: trimmed, done: false },
-        ]
-        return withCompletionStamp(
-          { ...item, subItems: nextSubItems },
-          nextSubItems.every((sub) => sub.done),
-        )
-      })
-      updatedChecklist = { ...checklist, items }
-      return updatedChecklist
+    return this._withFileChecklistItem(checklistId, itemId, (item) => {
+      const nextSubItems = addTo(item.subItems)
+      return withCompletionStamp(
+        { ...item, subItems: nextSubItems },
+        nextSubItems.every((sub) => sub.done),
+      )
     })
-    if (!itemFound || !updatedChecklist) return null
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedChecklist
   }
 
   /**
@@ -17222,47 +17219,34 @@ export class AppDataStore {
    */
   async removeChecklistSubItem(checklistId, itemId, subItemId) {
     if (this.pool) {
-      const itemResult = await this.pool.query(
-        `select done, sub_items from checklist_items where checklist_id = $1 and id = $2`,
-        [checklistId, itemId],
-      )
-      if (!itemResult.rowCount) return null
-      // With sub-items the parent is the roll-up; with none left, keep its
-      // current stored `done`. (The pure math: lib/checklist-step-ops.js.)
-      const removed = applySubItemRemoval(
-        itemResult.rows[0].sub_items,
-        itemResult.rows[0].done,
-        subItemId,
-      )
-      if (!removed) return null
-      await this.pool.query(
-        `update checklist_items
+      // Applied to the step's row locked `for update` (see `addChecklistSubItem`).
+      const removedFrom = await this._withLockedChecklistItem(
+        checklistId,
+        itemId,
+        async (client, _mapped, row) => {
+          // With sub-items the parent is the roll-up; with none left, keep its
+          // current stored `done`. (The pure math: lib/checklist-step-ops.js.)
+          const removed = applySubItemRemoval(row.sub_items, row.done, subItemId)
+          if (!removed) return null
+          await client.query(
+            `update checklist_items
          set sub_items = $3::jsonb, done = $4, ${completedAtClause(4)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
-        [checklistId, itemId, JSON.stringify(removed.subItems), removed.done],
+            [checklistId, itemId, JSON.stringify(removed.subItems), removed.done],
+          )
+          return removed
+        },
       )
+      if (!removedFrom) return null
       const data = await this.read()
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedChecklist = null
-    let subItemFound = false
-    data.checklists = data.checklists.map((checklist) => {
-      if (checklist.id !== checklistId) return checklist
-      const items = checklist.items.map((item) => {
-        if (item.id !== itemId) return item
-        const removed = applySubItemRemoval(item.subItems, item.done, subItemId)
-        if (!removed) return item
-        subItemFound = true
-        return withCompletionStamp({ ...item, subItems: removed.subItems }, removed.done)
-      })
-      updatedChecklist = { ...checklist, items }
-      return updatedChecklist
+    return this._withFileChecklistItem(checklistId, itemId, (item) => {
+      const removed = applySubItemRemoval(item.subItems, item.done, subItemId)
+      if (!removed) return null
+      return withCompletionStamp({ ...item, subItems: removed.subItems }, removed.done)
     })
-    if (!subItemFound || !updatedChecklist) return null
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedChecklist
   }
 
   /**
@@ -17323,23 +17307,12 @@ export class AppDataStore {
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedChecklist = null
-    let itemFound = false
-    data.checklists = data.checklists.map((checklist) => {
-      if (checklist.id !== checklistId) return checklist
-      const items = checklist.items.map((item) => {
-        if (item.id !== itemId) return item
-        itemFound = true
-        const current = Array.isArray(item.subItems) ? item.subItems : []
-        return { ...item, subItems: reorderById(current, ids) }
-      })
-      updatedChecklist = { ...checklist, items }
-      return updatedChecklist
+    // One queue slot for the read and the write, so a sub-step added, ticked or
+    // removed in between is not put back as it was.
+    return this._withFileChecklistItem(checklistId, itemId, (item) => {
+      const current = Array.isArray(item.subItems) ? item.subItems : []
+      return { ...item, subItems: reorderById(current, ids) }
     })
-    if (!itemFound || !updatedChecklist) return null
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedChecklist
   }
 
   /**
@@ -17370,45 +17343,39 @@ export class AppDataStore {
       return next
     }
 
-    if (this.pool) {
-      const itemResult = await this.pool.query(
-        `select sub_items from checklist_items where checklist_id = $1 and id = $2`,
-        [checklistId, itemId],
-      )
-      if (!itemResult.rowCount) return null
-      const subItems = normalizeSubItems(itemResult.rows[0].sub_items, { withDone: true })
+    // The sub-steps after the patch, or null when there is no such sub-step.
+    const patchedSubItems = (rawSubItems) => {
+      const subItems = normalizeSubItems(rawSubItems, { withDone: true })
       if (!subItems.some((sub) => sub.id === subItemId)) return null
-      const nextSubItems = subItems.map((sub) => (sub.id === subItemId ? applyPatch(sub) : sub))
-      await this.pool.query(
-        `update checklist_items set sub_items = $3::jsonb, updated_at = now()
+      return subItems.map((sub) => (sub.id === subItemId ? applyPatch(sub) : sub))
+    }
+
+    if (this.pool) {
+      // Applied to the step's row locked `for update` (see `addChecklistSubItem`):
+      // a wait saved on this sub-step a moment ago is on the row we patch.
+      const patched = await this._withLockedChecklistItem(
+        checklistId,
+        itemId,
+        async (client, _mapped, row) => {
+          const nextSubItems = patchedSubItems(row.sub_items)
+          if (!nextSubItems) return null
+          await client.query(
+            `update checklist_items set sub_items = $3::jsonb, updated_at = now()
          where checklist_id = $1 and id = $2`,
-        [checklistId, itemId, JSON.stringify(nextSubItems)],
+            [checklistId, itemId, JSON.stringify(nextSubItems)],
+          )
+          return { subItems: nextSubItems }
+        },
       )
+      if (!patched) return null
       const data = await this.read()
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedChecklist = null
-    let subItemFound = false
-    data.checklists = data.checklists.map((checklist) => {
-      if (checklist.id !== checklistId) return checklist
-      const items = checklist.items.map((item) => {
-        if (item.id !== itemId) return item
-        const subItems = normalizeSubItems(item.subItems, { withDone: true })
-        if (!subItems.some((sub) => sub.id === subItemId)) return item
-        subItemFound = true
-        const nextSubItems = subItems.map((sub) =>
-          sub.id === subItemId ? applyPatch(sub) : sub,
-        )
-        return { ...item, subItems: nextSubItems }
-      })
-      updatedChecklist = { ...checklist, items }
-      return updatedChecklist
+    return this._withFileChecklistItem(checklistId, itemId, (item) => {
+      const nextSubItems = patchedSubItems(item.subItems)
+      return nextSubItems ? { ...item, subItems: nextSubItems } : null
     })
-    if (!subItemFound || !updatedChecklist) return null
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedChecklist
   }
 
   /**
@@ -17422,15 +17389,12 @@ export class AppDataStore {
     const trimmed = typeof title === 'string' ? title.trim() : ''
     if (!trimmed) return null
 
-    if (this.pool) {
-      const itemResult = await this.pool.query(
-        `select sub_items from checklist_items where checklist_id = $1 and id = $2`,
-        [checklistId, itemId],
-      )
-      if (!itemResult.rowCount) return null
-      const subItems = normalizeSubItems(itemResult.rows[0].sub_items, { withDone: true })
+    // The sub-steps with the new sub-sub-step added, or null when there is no
+    // such sub-step. One pure change for both backends.
+    const addedTo = (rawSubItems) => {
+      const subItems = normalizeSubItems(rawSubItems, { withDone: true })
       if (!subItems.some((sub) => sub.id === subItemId)) return null
-      const nextSubItems = subItems.map((sub) => {
+      return subItems.map((sub) => {
         if (sub.id !== subItemId) return sub
         const subSubItems = normalizeSubSubItems(sub.subItems, { withDone: true })
         const nextSubSubItems = [
@@ -17443,50 +17407,38 @@ export class AppDataStore {
           done: nextSubSubItems.every((subSub) => subSub.done),
         }
       })
-      await this.pool.query(
-        `update checklist_items
+    }
+
+    if (this.pool) {
+      // Applied to the step's row locked `for update` (see `addChecklistSubItem`).
+      const written = await this._withLockedChecklistItem(
+        checklistId,
+        itemId,
+        async (client, _mapped, row) => {
+          const nextSubItems = addedTo(row.sub_items)
+          if (!nextSubItems) return null
+          await client.query(
+            `update checklist_items
          set sub_items = $3::jsonb, done = $4, ${completedAtClause(4)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
-        [checklistId, itemId, JSON.stringify(nextSubItems), nextSubItems.every((sub) => sub.done)],
+            [checklistId, itemId, JSON.stringify(nextSubItems), nextSubItems.every((sub) => sub.done)],
+          )
+          return { subItems: nextSubItems }
+        },
       )
+      if (!written) return null
       const data = await this.read()
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedChecklist = null
-    let subItemFound = false
-    data.checklists = data.checklists.map((checklist) => {
-      if (checklist.id !== checklistId) return checklist
-      const items = checklist.items.map((item) => {
-        if (item.id !== itemId) return item
-        const subItems = normalizeSubItems(item.subItems, { withDone: true })
-        if (!subItems.some((sub) => sub.id === subItemId)) return item
-        subItemFound = true
-        const nextSubItems = subItems.map((sub) => {
-          if (sub.id !== subItemId) return sub
-          const subSubItems = normalizeSubSubItems(sub.subItems, { withDone: true })
-          const nextSubSubItems = [
-            ...subSubItems,
-            { id: `subsubitem-${randomUUID().slice(0, 8)}`, title: trimmed, done: false },
-          ]
-          return {
-            ...sub,
-            subItems: nextSubSubItems,
-            done: nextSubSubItems.every((subSub) => subSub.done),
-          }
-        })
-        return withCompletionStamp(
-          { ...item, subItems: nextSubItems },
-          nextSubItems.every((sub) => sub.done),
-        )
-      })
-      updatedChecklist = { ...checklist, items }
-      return updatedChecklist
+    return this._withFileChecklistItem(checklistId, itemId, (item) => {
+      const nextSubItems = addedTo(item.subItems)
+      if (!nextSubItems) return null
+      return withCompletionStamp(
+        { ...item, subItems: nextSubItems },
+        nextSubItems.every((sub) => sub.done),
+      )
     })
-    if (!subItemFound || !updatedChecklist) return null
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedChecklist
   }
 
   /**
@@ -17498,46 +17450,34 @@ export class AppDataStore {
    */
   async removeChecklistSubSubItem(checklistId, itemId, subItemId, subSubItemId) {
     if (this.pool) {
-      const itemResult = await this.pool.query(
-        `select sub_items from checklist_items where checklist_id = $1 and id = $2`,
-        [checklistId, itemId],
-      )
-      if (!itemResult.rowCount) return null
-      // The pure math (sub-item roll-up, then the top item's) lives in
-      // lib/checklist-step-ops.js.
-      const removed = applySubSubItemRemoval(itemResult.rows[0].sub_items, {
-        subItemId,
-        subSubItemId,
-      })
-      if (!removed) return null
-      await this.pool.query(
-        `update checklist_items
+      // Applied to the step's row locked `for update` (see `addChecklistSubItem`).
+      const removedFrom = await this._withLockedChecklistItem(
+        checklistId,
+        itemId,
+        async (client, _mapped, row) => {
+          // The pure math (sub-item roll-up, then the top item's) lives in
+          // lib/checklist-step-ops.js.
+          const removed = applySubSubItemRemoval(row.sub_items, { subItemId, subSubItemId })
+          if (!removed) return null
+          await client.query(
+            `update checklist_items
          set sub_items = $3::jsonb, done = $4, ${completedAtClause(4)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
-        [checklistId, itemId, JSON.stringify(removed.subItems), removed.done],
+            [checklistId, itemId, JSON.stringify(removed.subItems), removed.done],
+          )
+          return removed
+        },
       )
+      if (!removedFrom) return null
       const data = await this.read()
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedChecklist = null
-    let subSubItemFound = false
-    data.checklists = data.checklists.map((checklist) => {
-      if (checklist.id !== checklistId) return checklist
-      const items = checklist.items.map((item) => {
-        if (item.id !== itemId) return item
-        const removed = applySubSubItemRemoval(item.subItems, { subItemId, subSubItemId })
-        if (!removed) return item
-        subSubItemFound = true
-        return withCompletionStamp({ ...item, subItems: removed.subItems }, removed.done)
-      })
-      updatedChecklist = { ...checklist, items }
-      return updatedChecklist
+    return this._withFileChecklistItem(checklistId, itemId, (item) => {
+      const removed = applySubSubItemRemoval(item.subItems, { subItemId, subSubItemId })
+      if (!removed) return null
+      return withCompletionStamp({ ...item, subItems: removed.subItems }, removed.done)
     })
-    if (!subSubItemFound || !updatedChecklist) return null
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedChecklist
   }
 
   // ---- Structured "waiting on a person" blockers (waitingOns) ----
@@ -17607,8 +17547,10 @@ export class AppDataStore {
    * writes through `client`, `commit`. A tick (or another wait) committed after
    * the caller's own `read()` is on the row we lock, so a write built from the
    * stale copy can no longer erase it; one that commits after us waits for this
-   * commit. `change` gets the row mapped exactly as `read()` maps it and returns
-   * the result to hand back, or null to write nothing (rolled back).
+   * commit. `change` gets the row mapped exactly as `read()` maps it, then the
+   * raw row (for a writer whose pure change reads the stored columns, such as
+   * `sub_items` and `done`, rather than the mapped step), and returns the result
+   * to hand back, or null to write nothing (rolled back).
    *
    * Returns null when the row is gone, or `change` answered null. Rolls back and
    * releases on every other exit path, the way `toggleChecklistItem` does.
@@ -17622,7 +17564,7 @@ export class AppDataStore {
         [checklistId, itemId],
       )
       const result = itemResult.rowCount
-        ? await change(client, mapChecklistItemRow(itemResult.rows[0]))
+        ? await change(client, mapChecklistItemRow(itemResult.rows[0]), itemResult.rows[0])
         : null
       if (!result) {
         await client.query('rollback')
@@ -17640,6 +17582,40 @@ export class AppDataStore {
     } finally {
       client.release()
     }
+  }
+
+  /**
+   * File backend: read the file, hand one step to `edit`, and write the file back
+   * inside ONE queue slot (raw fs calls only in here: `readJson` / `writeFile`
+   * enqueue behind this very slot and would deadlock). As two queue entries
+   * another request's write could land between the read and the write, and the
+   * whole file written back would erase it.
+   *
+   * `edit(item)` returns the next step, or null when it changes nothing (the
+   * sub-step is not there, ...): then nothing is written and this answers null.
+   * Otherwise it answers the updated checklist, the way the methods always have.
+   */
+  async _withFileChecklistItem(checklistId, itemId, edit) {
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      let updatedChecklist = null
+      let changed = false
+      data.checklists = data.checklists.map((checklist) => {
+        if (checklist.id !== checklistId) return checklist
+        const items = checklist.items.map((item) => {
+          if (item.id !== itemId) return item
+          const next = edit(item)
+          if (!next) return item
+          changed = true
+          return next
+        })
+        updatedChecklist = { ...checklist, items }
+        return updatedChecklist
+      })
+      if (!changed || !updatedChecklist) return null
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return updatedChecklist
+    })
   }
 
   /**
@@ -17685,6 +17661,21 @@ export class AppDataStore {
       }
     }
 
+    // The task-link lock, decided on the node as it is HERE (the locked row /
+    // the queue slot), not on the copy the route read: a wait committed a moment
+    // ago may already hold the link. Same rule, same arguments as the route's own
+    // early check - only a CHANGE of the link is refused, so an identical value,
+    // or none, passes. Throws before anything is written.
+    const refuseChangedTaskLink = (node) => {
+      if (waitingForChecklistId === undefined) return
+      const wanted = waitingForChecklistId === null ? '' : waitingForChecklistId
+      const refusal = waitingLockRefusal(
+        node,
+        wanted !== (node.waitingForChecklistId ?? '') ? { waitingForChecklistId: wanted } : {},
+      )
+      if (refusal) throw new WaitRefusedError(refusal)
+    }
+
     if (this.pool) {
       // The whole-workspace read only answers "is there such a checklist". The
       // step's own columns come from the row locked below, so a tick committed
@@ -17699,6 +17690,7 @@ export class AppDataStore {
         async (client, row) => {
           const found = this._findChecklistNode({ items: [row] }, location)
           if (!found) return null
+          refuseChangedTaskLink(found.node)
           found.node.waitingOns = [...(found.node.waitingOns ?? []), entry]
           applyTaskLink(found.node)
           await this._persistItemWaitingOns(checklistId, found.item, Boolean(location.subItemId), client)
@@ -17733,6 +17725,7 @@ export class AppDataStore {
       if (!checklist) return null
       const found = this._findChecklistNode(checklist, location)
       if (!found) return null
+      refuseChangedTaskLink(found.node)
       found.node.waitingOns = [...(found.node.waitingOns ?? []), entry]
       applyTaskLink(found.node)
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
@@ -17789,13 +17782,25 @@ export class AppDataStore {
    * Both backends need this identical walk and differ only in how they persist.
    * Cardinal rule 1 says a persisted change must touch both; the surest way to
    * honor that is to leave only one body to change.
+   *
+   * `action` (`done`, `verify`, `send-back` or `question`) names the hand-off
+   * the caller is performing. The stage that action needs is checked HERE, on
+   * `previous` - the entry as it is on the locked row (Postgres) or inside the
+   * queue slot (file) - before `mutate` runs: the route decided it from a copy
+   * read earlier, and a second action on the same wait may have moved it since.
+   * A wait at the wrong stage throws a `WaitRefusedError` with the route's own
+   * sentence, and nothing is written. Omitted, no stage is checked.
    */
-  async _mutateWaitingOn(checklistId, waitingOnId, mutate) {
-    const applyTo = (node) => {
+  async _mutateWaitingOn(checklistId, waitingOnId, mutate, action) {
+    const applyTo = (node, guarded) => {
       const list = node.waitingOns ?? []
       const index = list.findIndex((w) => w.id === waitingOnId)
       if (index === -1) return null
       const previous = list[index]
+      if (guarded && action) {
+        const refusal = waitingOnStageRefusal(action, previous)
+        if (refusal) throw new WaitRefusedError(refusal)
+      }
       const next = mutate(previous)
       if (!next) {
         throw new Error(
@@ -17806,19 +17811,22 @@ export class AppDataStore {
       return next
     }
 
-    const locate = (checklist) => {
+    // `guarded` is true only where the copy is the one about to be written (the
+    // locked row, the queue slot). The unlocked read on Postgres only finds the
+    // holder and is thrown away, so the stage is not judged on it.
+    const locate = (checklist, guarded = false) => {
       for (const item of checklist.items ?? []) {
-        const atItem = applyTo(item)
+        const atItem = applyTo(item, guarded)
         if (atItem) {
           return { item, entry: atItem, isSubNode: false, label: this._nodeLabel(item) }
         }
         for (const sub of item.subItems ?? []) {
-          const atSub = applyTo(sub)
+          const atSub = applyTo(sub, guarded)
           if (atSub) {
             return { item, entry: atSub, isSubNode: true, label: this._nodeLabel(sub) }
           }
           for (const subSub of sub.subItems ?? []) {
-            const atSubSub = applyTo(subSub)
+            const atSubSub = applyTo(subSub, guarded)
             if (atSubSub) {
               return { item, entry: atSubSub, isSubNode: true, label: this._nodeLabel(subSub) }
             }
@@ -17842,7 +17850,7 @@ export class AppDataStore {
         checklistId,
         holder.item.id,
         async (client, row) => {
-          const locked = locate({ items: [row] })
+          const locked = locate({ items: [row] }, true)
           if (!locked) return null
           await this._persistItemWaitingOns(checklistId, locked.item, locked.isSubNode, client)
           return locked
@@ -17864,7 +17872,7 @@ export class AppDataStore {
       const data = JSON.parse(await readFile(localDataPath, 'utf8'))
       const checklist = (data.checklists ?? []).find((c) => c.id === checklistId)
       if (!checklist) return null
-      const hit = locate(checklist)
+      const hit = locate(checklist, true)
       if (!hit) return null
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       return {
@@ -17889,7 +17897,7 @@ export class AppDataStore {
       resolvedAt: at,
       resolvedBy: String(userId),
       ...(alsoVerify ? { verifiedAt: at, verifiedBy: String(userId) } : {}),
-    }))
+    }), 'done')
   }
 
   /**
@@ -17901,7 +17909,7 @@ export class AppDataStore {
       ...entry,
       verifiedAt: nowIso(),
       verifiedBy: String(userId),
-    }))
+    }), 'verify')
   }
 
   /**
@@ -17930,7 +17938,7 @@ export class AppDataStore {
       if (resolvedAt) event.resolvedAt = resolvedAt
       if (resolvedBy) event.resolvedBy = resolvedBy
       return { ...rest, sendBacks: [...(entry.sendBacks ?? []), event] }
-    })
+    }, 'send-back')
   }
 
   /**
@@ -17952,7 +17960,7 @@ export class AppDataStore {
       const event = { at, by: String(userId) }
       if (typeof note === 'string' && note.trim()) event.note = note.trim()
       return { ...entry, questions: [...(entry.questions ?? []), event] }
-    })
+    }, 'question')
   }
 
   /**

@@ -784,13 +784,21 @@ routes/permissions, frontend), one post-review fix pass and a delta review; ship
   caller's read is kept; all seven `/api/checklist-templates/**` write routes check the origin;
   the toggle's locked select uses `CHECKLIST_ITEM_SELECT_COLUMNS`; a deletion request re-filed
   after the pending one vanished is not created for a step the approval just deleted (the
-  requester gets the route's own "not found" sentence). STILL OPEN (tracker featreq-3c7f9e5a): the
-  sub-step add / update / remove and sub-sub add / remove writers are unlocked read-modify-writes
-  of `sub_items` on Postgres and can still erase a concurrent wait (Postgres sub-step REORDER is
-  already locked; its file branch and the file backend's `updateChecklistItem` are not); the
-  hand-off stage checks and the task-link lock run in the route on a stale copy, so two racing
-  actions on one wait both apply; the deletion re-check is a read before the insert, not
-  atomic with it; and the whole-workspace save can still erase any of these (featreq-6a5c6162).
+  requester gets the route's own "not found" sentence). Closed by the `fix/checklist-same-instant`
+  commit (tracker featreq-3c7f9e5a): the hand-off stage checks and the task-link lock are asked
+  again where the write happens, on the entry / node as it is on the locked row or inside the
+  queue slot (`_mutateWaitingOn` takes the action and asks `waitingOnStageRefusal`; `addWaitingOn`
+  re-asks `waitingLockRefusal`), and a refusal throws `WaitRefusedError`, which the two routes
+  answer with the status and sentence their early check already gives, so Approve and Send back
+  at the same instant no longer both apply; the sub-step add / update / remove and sub-sub add /
+  remove writers run on the row locked `for update` on Postgres (`_withLockedChecklistItem`, which
+  now also hands the raw row to the change), and those, the sub-step reorder's file branch and
+  `updateChecklistItem`'s file branch run in one queue slot (`_withFileChecklistItem`). STILL OPEN:
+  the routes' own guards for a sub-step removal (`removalWouldCompleteWaitingStep`) and for the
+  item / sub-step PATCH lock (`waitingLockRefusal`) still decide on the route's copy, and
+  `updateChecklistItem` is a single UPDATE with no lock re-check; the deletion re-check is a read
+  before the insert, not atomic with it; and the whole-workspace save can still erase any of these
+  (featreq-6a5c6162).
   Closed 2026-10-01 (62510ff; rolled-back production trial passed):
   every `/api/checklists/**` write route checks the origin; the toggle's waiting refusal is decided inside the store
   (`StepIsWaitingError`; Postgres reads the row `for update` in a transaction, the file backend
