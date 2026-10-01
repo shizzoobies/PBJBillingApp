@@ -4464,8 +4464,14 @@ export async function sendInvoiceRequest(invoiceId: string, to?: string[]) {
     body: JSON.stringify(to ? { to } : {}),
   })
   if (!response.ok) {
-    const message = await safeErrorMessage(response)
-    throw new ApiError(response.status, message || `Could not send the invoice (${response.status})`)
+    // The code rides along: `invoice_voided` (a void landed mid-send) makes the
+    // month run reload itself so the row shows Void.
+    const { message, code } = await safeError(response)
+    throw new ApiError(
+      response.status,
+      message || `Could not send the invoice (${response.status})`,
+      code,
+    )
   }
   return (await response.json()) as { invoice: PersistedInvoice }
 }

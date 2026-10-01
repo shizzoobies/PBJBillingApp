@@ -224,14 +224,15 @@ type PatchResult =
   | { ok: false; message: string; retainer: boolean; locked: boolean; code?: string }
 
 /**
- * The refusals that mean "this invoice moved under you" — a payment landed or
- * another tab changed it. The run reloads the month for each, which can replace
- * the editor that sent the request.
+ * The refusals that mean "this invoice moved under you" — a payment landed,
+ * another tab changed it, or a void landed while it was being sent. The run
+ * reloads the month for each, which can replace the editor that sent the request.
  */
 const INVOICE_MOVED_CODES: ReadonlySet<string | undefined> = new Set([
   'invoice_payment_processing',
   'invoice_locked',
   'invoice_changed',
+  'invoice_voided',
 ])
 
 /** Appended when that reload threw away edits she had not saved. */
@@ -1184,6 +1185,21 @@ export function InvoiceMonthRun({
       current.map((invoice) => (invoice.id === updated.id ? updated : invoice)),
     )
 
+  /**
+   * Re-read the month on screen, flushed, so the rows show what the invoices
+   * are NOW. A failed read keeps the list we have: the refusal that asked for
+   * the reload is the important part.
+   */
+  const reloadMonth = async () => {
+    const target = period
+    try {
+      const rows = await listInvoicesRequest(target)
+      if (shownPeriod.current === target) flushSync(() => setInvoices(rows))
+    } catch {
+      /* keep the list we have */
+    }
+  }
+
   const patch = async (
     invoiceId: string,
     body: Parameters<typeof updateInvoiceRequest>[1],
@@ -1234,15 +1250,7 @@ export function InvoiceMonthRun({
       // editor has to be gone by then so the sentence goes to the banner instead
       // of an editor that is about to vanish — said once, and the editor says
       // whether it took unsaved edits with it (`sayPatchRefusal`).
-      if (INVOICE_MOVED_CODES.has(code)) {
-        const target = period
-        try {
-          const rows = await listInvoicesRequest(target)
-          if (shownPeriod.current === target) flushSync(() => setInvoices(rows))
-        } catch {
-          /* keep the list we have; the refusal below is the important part */
-        }
-      }
+      if (INVOICE_MOVED_CODES.has(code)) await reloadMonth()
       // NO BANNER for any of them. Every caller of `patch` is the open editor
       // (Save, Mark reviewed, Back to draft, Void), and each says the refusal
       // itself in the slot beside its buttons; the banner above the whole list
@@ -1509,6 +1517,7 @@ export function InvoiceMonthRun({
                     onToggle={() => setOpenId(openId === invoice.id ? null : invoice.id)}
                     onPatch={(body) => patch(invoice.id, body)}
                     onInvoiceChanged={mergeInvoice}
+                    onInvoiceMoved={reloadMonth}
                     onRefusal={(message) =>
                       setError(`${invoice.number ?? clientName(invoice.clientId)}: ${message}`)
                     }
@@ -1547,6 +1556,7 @@ function InvoiceRow({
   onPatch,
   onPrint,
   onInvoiceChanged,
+  onInvoiceMoved,
   onRefusal,
   onDirtyChange,
 }: {
@@ -1587,6 +1597,8 @@ function InvoiceRow({
   onPrint: () => void
   /** Push a server-returned invoice back into the list (payment link marks it sent). */
   onInvoiceChanged: (invoice: PersistedInvoice) => void
+  /** The invoice moved under a request (a void landed mid-send): re-read the month. */
+  onInvoiceMoved: () => Promise<void>
   /** A refusal whose editor was gone when it arrived: the run's banner says it. */
   onRefusal: (message: string) => void
   /** Tell the run whether this row's open editor has unsaved edits. */
@@ -1760,6 +1772,7 @@ function InvoiceRow({
           onPatch={onPatch}
           onPrint={onPrint}
           onInvoiceChanged={onInvoiceChanged}
+          onInvoiceMoved={onInvoiceMoved}
           onRefusal={onRefusal}
           onDirtyChange={onDirtyChange}
         />
@@ -2126,6 +2139,7 @@ function InvoiceEditor({
   onPatch,
   onPrint,
   onInvoiceChanged,
+  onInvoiceMoved,
   onRefusal,
   onDirtyChange,
 }: {
@@ -2161,6 +2175,8 @@ function InvoiceEditor({
   /** Push a server-returned invoice back into the list — creating a payment
    *  link marks it sent, and the row must show that immediately. */
   onInvoiceChanged: (invoice: PersistedInvoice) => void
+  /** The invoice moved under a request (a void landed mid-send): re-read the month. */
+  onInvoiceMoved: () => Promise<void>
   /** Say a refusal in the run's banner. Used only when this editor is gone by
    *  the time the answer arrives, so it still has somewhere to be read. */
   onRefusal: (message: string) => void
@@ -2476,6 +2492,9 @@ function InvoiceEditor({
       setPicking(false)
       onInvoiceChanged(result.invoice)
     } catch (err) {
+      // A void that landed mid-send: re-read the month first, so the row shows
+      // Void and the sentence goes where the reload leaves room for it (once).
+      if (err instanceof ApiError && INVOICE_MOVED_CODES.has(err.code)) await onInvoiceMoved()
       sayRefusal(err instanceof Error ? err.message : 'Could not send the invoice.', setSendError)
     } finally {
       setSendBusy(false)

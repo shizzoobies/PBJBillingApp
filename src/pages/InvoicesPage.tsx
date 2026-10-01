@@ -20,6 +20,7 @@ import type {
   SubscriptionPlan,
   TimeEntry,
 } from '../lib/types'
+import { ApiError } from '../lib/types'
 import {
   currency,
   formatDecimalHours,
@@ -867,6 +868,11 @@ export function InvoicesPage() {
       // to be on the same month as this page.
       setMonthRunRefresh((token) => token + 1)
     } catch (err) {
+      // The invoice moved under the send (voided, or changed by another tab):
+      // the month run's row is stale, so it reloads to show what it is now.
+      if (err instanceof ApiError && (err.code === 'invoice_voided' || err.code === 'invoice_changed')) {
+        setMonthRunRefresh((token) => token + 1)
+      }
       setSendResult({
         key: seedKey,
         error: err instanceof Error ? err.message : 'Could not send the invoice.',

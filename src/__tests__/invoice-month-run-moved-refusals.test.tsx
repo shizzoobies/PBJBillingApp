@@ -284,6 +284,87 @@ describe('InvoiceMonthRun — a refusal that means the invoice moved reloads the
   })
 })
 
+describe('InvoiceMonthRun — a void that lands mid-send reloads the month (featreq-051122e4)', () => {
+  const sentence = 'This invoice was voided while it was being sent. Nothing was emailed.'
+
+  it('invoice_voided: reloads the month once, the row shows Void, and the sentence is said once', async () => {
+    mockSend.mockRejectedValue(new ApiError(409, sentence, 'invoice_voided'))
+    await openEditor([makeInvoice({ status: 'reviewed' })], /^Reviewed/)
+    expect(mockList).toHaveBeenCalledTimes(1)
+    // What the server holds now: the void landed while the send was in the air.
+    mockList.mockResolvedValue([
+      makeInvoice({ status: 'void', updatedAt: '2026-10-02T00:00:00.000Z' }),
+    ])
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Send$/ }))
+
+    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(2))
+    expect(mockList).toHaveBeenLastCalledWith(mockList.mock.calls[0][0])
+    // The row left Reviewed; the editor went with it, so the banner says it.
+    await waitFor(() => expect(screen.queryByText(NUMBER)).not.toBeInTheDocument())
+    expect(await screen.findByText(`${NUMBER}: ${sentence}`)).toBeInTheDocument()
+    expect(screen.getAllByText(new RegExp(sentence.slice(0, 30)))).toHaveLength(1)
+    // And it now shows its real status, under Voided.
+    fireEvent.click(screen.getByRole('tab', { name: /^Voided/ }))
+    expect(await screen.findByText(NUMBER)).toBeInTheDocument()
+  })
+
+  it('an ordinary send failure does not reload the month', async () => {
+    mockSend.mockRejectedValue(new ApiError(502, 'The email provider refused.', 'invoice_send_failed'))
+    await openEditor([makeInvoice({ status: 'reviewed' })], /^Reviewed/)
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Send$/ }))
+
+    expect(await editor().findByText('The email provider refused.')).toBeInTheDocument()
+    expect(mockList).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('sendInvoiceRequest — carries the refusal code', () => {
+  it('puts the server\'s error code on the ApiError', async () => {
+    const actual = await vi.importActual<typeof import('../lib/api')>('../lib/api')
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ error: 'invoice_voided', message: 'This invoice was voided while it was being sent. Nothing was emailed.' }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(actual.sendInvoiceRequest('inv-1')).rejects.toMatchObject({
+      status: 409,
+      code: 'invoice_voided',
+      message: 'This invoice was voided while it was being sent. Nothing was emailed.',
+    })
+  })
+
+  // The top-of-route refusal for an invoice that was already void used to answer
+  // the sentence AS the code; it now carries both, and the sentence still shows.
+  it('shows the sentence, and carries the code, for the refusal of an already voided invoice', async () => {
+    const actual = await vi.importActual<typeof import('../lib/api')>('../lib/api')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: 'invoice_voided',
+              message: 'This invoice is voided, so it cannot be sent.',
+            }),
+            { status: 409, headers: { 'Content-Type': 'application/json' } },
+          ),
+      ),
+    )
+
+    await expect(actual.sendInvoiceRequest('inv-1')).rejects.toMatchObject({
+      status: 409,
+      code: 'invoice_voided',
+      message: 'This invoice is voided, so it cannot be sent.',
+    })
+  })
+})
+
 /** A refusal-in-the-air: the returned function settles the pending request with a failure. */
 function pending(mock: { mockReturnValue: (value: never) => unknown }) {
   let fail: (error: Error) => void = () => {}

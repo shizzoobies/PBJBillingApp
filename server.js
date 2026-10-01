@@ -684,6 +684,72 @@ async function expireInvoiceSessions(sessionIds, invoiceId, label) {
 }
 
 /**
+ * A fresh read of one invoice, for the send route's mid-send checks: the row as
+ * the store holds it right now, or null when it is gone. Reads that invoice's
+ * month, not the whole book.
+ */
+async function readInvoiceNow(invoice) {
+  const rows = await appDataStore.listInvoices({ period: invoice.period ?? null })
+  return rows.find((entry) => entry.id === invoice.id) ?? null
+}
+
+/**
+ * The send route's answer when its invoice was voided after it read it: the
+ * checkout sessions it minted so far are expired (labeled so the log says they
+ * came from a send), nothing is emailed or written, and the month run is told
+ * to reload itself so the row shows Void.
+ */
+async function refuseSendVoidedMidSend(response, invoiceId, sessionIds) {
+  await expireInvoiceSessions(sessionIds, invoiceId, 'send (voided mid-send)')
+  sendJson(response, 409, {
+    error: 'invoice_voided',
+    message: 'This invoice was voided while it was being sent. Nothing was emailed.',
+  })
+}
+
+/**
+ * The send route's answer when `swapInvoiceCheckoutSession` came back null.
+ * Null does NOT always mean void: the whole-workspace save deletes and
+ * re-inserts every invoice inside one transaction, and a swap that waited on it
+ * finds no row for a perfectly good invoice. So the invoice is read again.
+ *
+ *   gone or void -> invoice_voided, and every session this request minted is
+ *                   expired (the stored one too: the void's own sweep may have
+ *                   missed it).
+ *   still live   -> invoice_changed, "try again", and ONLY the session that was
+ *                   never stored is expired. A session stored by an earlier
+ *                   swap in this request belongs to a valid invoice; expiring it
+ *                   would break the link the invoice points at.
+ *   read failed  -> nothing is known, so nothing is sent and only the
+ *                   never-stored session is expired.
+ *
+ * Nothing is emailed or recorded in any case.
+ */
+async function refuseSendOnNullSwap(response, invoice, { unstored = [], stored = [] } = {}) {
+  let current
+  try {
+    current = await readInvoiceNow(invoice)
+  } catch (error) {
+    console.error('[invoices] send: could not re-read the invoice after a refused swap:', error)
+    await expireInvoiceSessions(unstored, invoice.id, 'send (swap refused, state unknown)')
+    sendJson(response, 502, {
+      error: 'invoice_send_failed',
+      message: 'Could not confirm the invoice before sending, so nothing was emailed. Try again.',
+    })
+    return
+  }
+  if (!current || current.status === 'void') {
+    await refuseSendVoidedMidSend(response, invoice.id, [...stored, ...unstored])
+    return
+  }
+  await expireInvoiceSessions(unstored, invoice.id, 'send (invoice changed mid-send)')
+  sendJson(response, 409, {
+    error: 'invoice_changed',
+    message: 'This invoice changed while it was being sent. Nothing was emailed. Try sending again.',
+  })
+}
+
+/**
  * The rate history the caller is allowed to see.
  *
  * Replaces the old cost-rate map, which returned one live cost rate per person
@@ -4759,7 +4825,10 @@ const server = createServer(async (request, response) => {
         return
       }
       if (invoice.status === 'void') {
-        sendJson(response, 409, { error: 'This invoice is voided, so it cannot be sent.' })
+        sendJson(response, 409, {
+          error: 'invoice_voided',
+          message: 'This invoice is voided, so it cannot be sent.',
+        })
         return
       }
       // A covered-date window the owner has not answered for must not reach the
@@ -4843,6 +4912,9 @@ const server = createServer(async (request, response) => {
       const settled = invoice.status === 'paid' || invoice.status === 'processing'
       let payUrl = ''
       let cardPayUrl = ''
+      // The checkout sessions THIS request minted, so a void that lands before
+      // the email leaves can retire them.
+      const mintedSessionIds = []
       if (isStripeConfigured() && invoice.total > 0 && !settled) {
         // Reuse the client's Stripe customer so a repeat payer is one customer
         // in Stripe rather than one per invoice.
@@ -4915,7 +4987,20 @@ const server = createServer(async (request, response) => {
           channel: 'ach',
           sessionId: linkResult.session.id,
         })
-        if (sendSwap?.previous && sendSwap.previous !== linkResult.session.id) {
+        mintedSessionIds.push(linkResult.session.id)
+        // Refused means the invoice is no longer there to swap into: usually a
+        // void between this route's read and the swap, but a whole-workspace
+        // save in flight looks the same, so the invoice is read again (see
+        // `refuseSendOnNullSwap`). The session just minted was never stored, so
+        // nothing could ever expire it later: it is expired there, and nothing
+        // is sent either way.
+        if (!sendSwap) {
+          await refuseSendOnNullSwap(response, invoice, {
+            unstored: [linkResult.session.id],
+          })
+          return
+        }
+        if (sendSwap.previous && sendSwap.previous !== linkResult.session.id) {
           await expireCheckoutSession(sendSwap.previous)
         }
 
@@ -4955,7 +5040,17 @@ const server = createServer(async (request, response) => {
             channel: 'card',
             sessionId: cardResult.session.id,
           })
-          if (cardSwap?.previous && cardSwap.previous !== cardResult.session.id) {
+          mintedSessionIds.push(cardResult.session.id)
+          // Same refusal, one channel later. The bank session WAS stored by the
+          // swap above: a void retires it too, a still-live invoice keeps it.
+          if (!cardSwap) {
+            await refuseSendOnNullSwap(response, invoice, {
+              unstored: [cardResult.session.id],
+              stored: [linkResult.session.id],
+            })
+            return
+          }
+          if (cardSwap.previous && cardSwap.previous !== cardResult.session.id) {
             await expireCheckoutSession(cardSwap.previous)
           }
         }
@@ -4999,6 +5094,29 @@ const server = createServer(async (request, response) => {
         sendAttachments = [{ filename: invoicePdfFilename(sendInvoice), content: pdf }]
       } catch (error) {
         console.error('[invoice] PDF attachment failed, sending without it:', error?.message || error)
+      }
+
+      // THE LAST LOOK before the email leaves (it cannot be unsent): a void that
+      // landed any time since this route read the invoice, including on an
+      // invoice that had no checkout session to swap (zero total, already
+      // settled, Stripe not connected), stops the send here. The sessions this
+      // request minted are retired with it. The instant between this read and the
+      // provider call is not covered. A failed read sends nothing: not knowing
+      // is not a reason to email.
+      let lastLook
+      try {
+        lastLook = await readInvoiceNow(invoice)
+      } catch (error) {
+        console.error('[invoices] send: could not re-read the invoice before sending:', error)
+        sendJson(response, 502, {
+          error: 'invoice_send_failed',
+          message: 'Could not confirm the invoice before sending, so nothing was emailed. Try again.',
+        })
+        return
+      }
+      if (!lastLook || lastLook.status === 'void') {
+        await refuseSendVoidedMidSend(response, invoice.id, mintedSessionIds)
+        return
       }
 
       const sendResult = await sendInvoiceEmail({
