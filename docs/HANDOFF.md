@@ -25,7 +25,21 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-01, evening):** `main` = `3eb502f` (+ this handoff). FIVE ships today.
+**State right now (2026-10-01, night - the New-queue run):** `main` = `6d7382e`, deployed,
+`/health` 200. Alex's instruction for the run: WORK THE NEW TICKETS A COUPLE AT A TIME, IN THE
+ORDER YOU JUDGE BEST, AND DEPLOY EACH AS IT FINISHES - never a batch deploy. Eight more ships
+since the paragraph below (list and lessons: the "2026-10-01 (evening and night)" entry at the
+top of section 5). Suite **5089 tests / 253 files**; manifest about 193,100 bytes (condensed
+today, ample room). ONE BRANCH IS HELD ON PURPOSE: `fix/invoice-send-stamp` (`6fd6211`,
+`featreq-29c6dac1`) changes what an outgoing invoice email says, and Brittany's 38 September
+invoices were reviewed but NOT YET SENT - ship it after they are out (rebase onto main and
+re-verify first), or sooner only on Alex's word. ONE BRANCH IS IN REVIEW:
+`fix/void-closes-payment-pages` (`featreq-61347136`). The second lane is a worktree at
+`D:\PBJ Accounting Work\AP-laneB` (`node_modules` is a junction: remove the LINK, never its
+target, before `git worktree remove`). The run's ledger is `.superpowers/sdd/new-queue-2026-10-01.md`
+(git-ignored, this machine). Brittany should refresh her tab once to pick up the day's changes.
+
+**Earlier that evening:** `main` = `3eb502f` (+ handoff `39be332`). FIVE ships to that point.
 The last: the OWNER can check off a waiting step and that closes the wait (send-back
 `featreq-8a01fe08`). Suite **4871 tests / 242 files**; manifest 204,523 bytes (477 under the
 tripwire - ticket `featreq-65473ff4` is to condense it; DO THAT BEFORE ANY MANIFEST EDIT).
@@ -456,6 +470,67 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-10-01 (evening and night) - the New-queue run: eight ships, one at a time.**
+
+- **How the run works.** Two lanes (the primary tree and the `AP-laneB` worktree), one writer
+  per tree, each item: brief -> builder -> independent reviewer -> fix round -> re-review -> my own
+  `npm run verify` -> read-only check that no invoice send is in flight -> push -> `/health` shows
+  the commit -> voice re-provision if the manifest changed -> tracker flip with a note in
+  Brittany's words. `main` is advanced without a checkout (`git branch -f main <branch>`, then a
+  plain `git push origin main`) because neither tree sits on `main` during a run. To re-provision
+  the voice agent while a tree is mid-edit, run the provisioner from the tree that holds the
+  RELEASED commit (it reads the manifest next to its own script).
+- **Shipped, in order** (tracker ids in parentheses, all Shipped):
+  `56dc31c` a refusal on the Invoices page is no longer mistaken for a retainer problem
+  (`featreq-3be1524a`); `77f4c19` the manifest condensed from 204,523 to about 192,300 bytes with
+  six lost facts restored (`featreq-65473ff4`); `871a0dc` a $0 monthly service line is left off
+  the client's copy but STAYS on the draft, because Generate would otherwise silently skip a
+  rate-0 client (`featreq-87b20ed7`); `78f5a11` Void asks first and says what it means, and an
+  invoice whose bank payment is clearing cannot be voided (item 2 of `featreq-459bdfc2`, which
+  stays In progress); `6dd27a8` a client with time logged or invoices - its own or as a line on a
+  master's invoice - cannot be deleted, only marked inactive; the rule is `lib/client-delete-rule.js`
+  and the bulk save locks the omitted client rows before it checks them (`featreq-27836ea0`);
+  `789c793` the lower "Print invoice" button prints the SAVED invoice when the month has one and
+  the dialog says which sheet it will print (`featreq-1755dbf2`); `1288115` the covered-dates
+  leftovers (`featreq-f3386a6a`); `6d7382e` the checklist loose ends (`featreq-165b4001`).
+- **Covered dates, what changed (`1288115`).** While a dates save is in flight the whole editor is
+  held (one dates save at a time); the flagged "Confirm dates" is disabled while the editor has
+  unsaved edits, as the quiet control already was (before, confirming threw the edits away);
+  `coverageChangeable: false` is DERIVED on the way out by `store.withCoverageChangeable` (one
+  ledger read per list, best-effort in `server.js`, never stored, ignored by the editor's `dirty`)
+  and the line then reads "Dates are set by a later invoice — change them there."; a backfill
+  confirm never moves the expense's anchor day when a later month is billed. `hasLaterCoveragePeriod`
+  is the one rule behind the refusal, the anchor rule and the mark.
+- **One message per refusal (`1288115`).** `patch()` in the month run no longer raises the banner
+  for a refusal the open editor shows. The editor has a mounted ref: still open -> its own slot
+  (scrolled into view); closed before the answer arrived -> the banner, prefixed with the invoice
+  number. Do not add a second alert for the same refusal anywhere in that file.
+- **Checklist tick (`62510ff`).** `toggleChecklistItem` is one transaction on Postgres (row read
+  `for update`) and one queue slot on the file backend; the waiting refusal is thrown by the STORE
+  as `StepIsWaitingError` and the route no longer asks first. Rolled-back production trial passed
+  (`prod-checklist-loose-ends-trial.mjs` in the session scratchpad: real store method through a
+  savepoint-wrapping pool). The roll-up reading of "done" agreed with the stored flag on all
+  1,275 checklists that day, so nothing moved on screen.
+- **Whole-app tests lost clicks under load** (`b6f00fd`): the app's boot redirect (`/` ->
+  `/dashboard`) undid an early sidebar click. Use `openNavLink` from `src/__tests__/helpers.ts`;
+  the suite-wide timeouts are 30 s (test) and 10 s (async utils).
+- **Tickets filed during the run (all New):** `featreq-beec1ccc` the lower Email button has no
+  retainer check (production has NO retainer invoices, so nothing can go wrong yet; ship with the
+  held send fix); `featreq-a501d644` two confirms from two tabs can undo each other, a backfilled
+  window can overlap the next month's (needs Brittany's rule), and a reviewed invoice with a
+  flagged line plus unsaved edits has no clean way forward (none exists in production);
+  `featreq-6bb0d8a5` see the checklist follow-ups bullet in the 2026-09-30 entry;
+  `featreq-d84ddb16` RAILWAY IS RETIRING `railway.json` - the CLI warns the file keeps working
+  until 2026-12-01; migrate on a quiet day, read Railway's docs first, keep the Dockerfile
+  builder and `/health` check identical.
+- **Accepted, no ticket:** two bulk saves racing while one deletes a client can deadlock;
+  Postgres aborts one after about a second and nothing is lost. Locking every client row up
+  front would fix it but would block time-entry inserts for the length of every save.
+- **Still waiting on Brittany** (asked through the tracker): `featreq-21d0bba8` gates items 1, 3,
+  4, 5, 6, 7 and 9 of `featreq-459bdfc2`; `featreq-1f352c4f` (checklists). Item 8 of
+  `featreq-459bdfc2` (the client footer note in the invoice email) touches the send route: build
+  it on top of the held `fix/invoice-send-stamp` and hold it the same way.
+
 **2026-10-01 - the Plans/Packages tabs fix, and the invoice date rule (shipped mid-invoicing).**
 
 - **Plans tab / Packages tab each showed BOTH lists** (`featreq-9a2e7bcd`, `81ab2ae`). Both
@@ -688,7 +763,7 @@ routes/permissions, frontend), one post-review fix pass and a delta review; ship
   featreq-6bb0d8a5): `addWaitingOn` is an unlocked read-modify-write, so a wait
   written from a read taken BEFORE a tick can erase that tick (the toggle only protects against
   a wait committed before its lock); the seven `/api/checklist-templates/**` write routes lack
-  the origin check. Closed 2026-10-01 (59ae2bd; rolled-back production trial passed):
+  the origin check. Closed 2026-10-01 (62510ff; rolled-back production trial passed):
   every `/api/checklists/**` write route checks the origin; the toggle's waiting refusal is decided inside the store
   (`StepIsWaitingError`; Postgres reads the row `for update` in a transaction, the file backend
   reads inside the queue slot) so the route no longer asks first; the step chip, the Board and the
