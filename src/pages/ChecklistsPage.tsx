@@ -26,6 +26,7 @@ import {
   hasLiveSavedWait,
   isClientWait,
   isWaitingOnOpen,
+  waitingBlocksCascadedCompletion,
   waitingBlocksCompletion,
   waitingOnStage,
 } from '../../lib/waiting-on-state.js'
@@ -3457,13 +3458,15 @@ function DraggableTaskList({
               ) : null}
               <input
                 checked={item.done}
-                disabled={!allowToggle || waitingBlocksCompletion(item)}
+                disabled={!allowToggle || waitingBlocksCascadedCompletion(item)}
                 onChange={() => void onToggle(checklistId, item.id)}
                 title={
                   !allowToggle
                     ? "This step is assigned to someone else — only they can check it off."
-                    : waitingBlocksCompletion(item)
-                      ? 'Clear the wait first'
+                    : waitingBlocksCascadedCompletion(item)
+                      ? waitingBlocksCompletion(item)
+                        ? 'Clear the wait first'
+                        : 'A sub-step is waiting - clear it first'
                       : hasSubItems
                         ? 'Checking this checks every sub-step'
                         : undefined
@@ -3689,12 +3692,16 @@ function DraggableTaskList({
                       <div className={sub.done ? 'sub-item-row done' : 'sub-item-row'}>
                         <input
                           checked={sub.done}
-                          disabled={!allowToggle || waitingBlocksCompletion(sub)}
+                          disabled={!allowToggle || waitingBlocksCascadedCompletion(sub)}
                           onChange={() => onToggleSubItem(item.id, sub.id)}
                           title={
-                            waitingBlocksCompletion(sub)
-                              ? 'Clear the wait first'
-                              : hasSubSubItems
+                            !allowToggle
+                              ? "This step is assigned to someone else — only they can check it off."
+                              : waitingBlocksCascadedCompletion(sub)
+                                ? waitingBlocksCompletion(sub)
+                                  ? 'Clear the wait first'
+                                  : 'A sub-step is waiting - clear it first'
+                                : hasSubSubItems
                                 ? 'Checking this checks every sub-step'
                                 : undefined
                           }
@@ -3873,9 +3880,11 @@ function DraggableTaskList({
                                   onToggleSubSubItem(item.id, sub.id, subSub.id)
                                 }
                                 title={
-                                  waitingBlocksCompletion(subSub)
-                                    ? 'Clear the wait first'
-                                    : undefined
+                                  !allowToggle
+                                    ? "This step is assigned to someone else — only they can check it off."
+                                    : waitingBlocksCompletion(subSub)
+                                      ? 'Clear the wait first'
+                                      : undefined
                                 }
                                 type="checkbox"
                               />

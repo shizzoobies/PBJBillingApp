@@ -36,22 +36,33 @@ describe('POST /api/checklists/:id/items/:itemId/toggle refuses a waiting step',
   it('asks the shared predicate, against whichever node the request targets', () => {
     const block = toggleBlock()
     expect(block).toContain('const toggleTarget = targetSubSub ?? targetSub ?? targetItem')
-    expect(block).toContain('if (waitingBlocksCompletion(toggleTarget)) {')
+    expect(block).toContain('if (waitingBlocksCascadedCompletion(toggleTarget)) {')
   })
 
   it('answers 409 with the exact code and sentence the plan pins', () => {
     const block = toggleBlock()
-    const at = block.indexOf('if (waitingBlocksCompletion(toggleTarget)) {')
-    const guard = block.slice(at, at + 300)
+    const at = block.indexOf('if (waitingBlocksCascadedCompletion(toggleTarget)) {')
+    const guard = block.slice(at, at + 500)
     expect(guard).toContain("sendJson(response, 409, {")
     expect(guard).toContain("error: 'STEP_IS_WAITING',")
-    expect(guard).toContain("message: 'Clear the wait on this step first.',")
+    expect(guard).toContain("'Clear the wait on this step first.'")
+  })
+
+  // Ticking a parent cascades `done` onto every sub-item and sub-sub-item
+  // (`applyItemToggle`), so the guard reads the target's whole subtree and
+  // says so when the block comes from a child.
+  it('refuses a parent whose sub-step is waiting, with the sub-step sentence', () => {
+    const block = toggleBlock()
+    const at = block.indexOf('if (waitingBlocksCascadedCompletion(toggleTarget)) {')
+    const guard = block.slice(at, at + 500)
+    expect(guard).toContain('waitingBlocksCompletion(toggleTarget)')
+    expect(guard).toContain("'Clear the wait on this step (or one of its sub-steps) first.'")
   })
 
   // A refusal that lands after the write is not a refusal.
   it('refuses BEFORE the store is asked to toggle anything', () => {
     const block = toggleBlock()
-    const guardAt = block.indexOf('if (waitingBlocksCompletion(toggleTarget)) {')
+    const guardAt = block.indexOf('if (waitingBlocksCascadedCompletion(toggleTarget)) {')
     const writeAt = block.indexOf('appDataStore.toggleChecklistItem(')
     expect(guardAt).toBeGreaterThan(-1)
     expect(writeAt).toBeGreaterThan(-1)
@@ -63,7 +74,7 @@ describe('POST /api/checklists/:id/items/:itemId/toggle refuses a waiting step',
   // call above — this pins the ordering against the 404s those lookups answer.
   it('runs after the sub-item and sub-sub-item are resolved, not before', () => {
     const block = toggleBlock()
-    const guardAt = block.indexOf('if (waitingBlocksCompletion(toggleTarget)) {')
+    const guardAt = block.indexOf('if (waitingBlocksCascadedCompletion(toggleTarget)) {')
     expect(block.indexOf("error: 'Sub-item not found'")).toBeLessThan(guardAt)
     expect(block.indexOf("error: 'Sub-sub-item not found'")).toBeLessThan(guardAt)
   })
@@ -71,6 +82,7 @@ describe('POST /api/checklists/:id/items/:itemId/toggle refuses a waiting step',
   // The shared predicate is imported, not re-implemented — the whole point is
   // that the UI's disabled checkboxes and this refusal can never drift apart.
   it('imports the predicate from the shared module rather than inlining it', () => {
+    expect(serverSource).toContain("waitingBlocksCascadedCompletion,")
     expect(serverSource).toContain("waitingBlocksCompletion,")
     expect(serverSource).toContain("from './lib/waiting-on-state.js'")
   })

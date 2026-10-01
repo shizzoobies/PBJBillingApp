@@ -72,6 +72,9 @@ export function hasLiveSavedWait(node: WaitingStepLike | undefined): boolean
 export function waitingBlocksCompletion(
   node: (WaitingStepLike & { done?: boolean }) | undefined,
 ): boolean
+export function waitingBlocksCascadedCompletion(
+  node: (WaitingStepLike & { done?: boolean; subItems?: unknown[] }) | undefined,
+): boolean
 export function waitForTaskLinkDenial(args: {
   checklist: { id?: string; clientId?: string } | undefined
   pool?: Array<{ id?: string; clientId?: string }>

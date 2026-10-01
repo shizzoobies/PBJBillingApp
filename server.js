@@ -155,6 +155,7 @@ import {
   REFUSED_WAITING_ON_ACTIONS,
   SELF_WAIT_REFUSAL,
   waitForTaskLinkDenial,
+  waitingBlocksCascadedCompletion,
   waitingBlocksCompletion,
   waitingLockRefusal,
   waitingOnActionRefusal,
@@ -9923,10 +9924,15 @@ const server = createServer(async (request, response) => {
       // refuses it, before the store ever sees the toggle. Un-checking a done
       // step is never blocked — the predicate is already false once `done`.
       const toggleTarget = targetSubSub ?? targetSub ?? targetItem
-      if (waitingBlocksCompletion(toggleTarget)) {
+      // Ticking an item or sub-item also completes everything beneath it
+      // (`applyItemToggle` cascades), so the check looks at the target's whole
+      // subtree: a waiting sub-step cannot be checked off through its parent.
+      if (waitingBlocksCascadedCompletion(toggleTarget)) {
         sendJson(response, 409, {
           error: 'STEP_IS_WAITING',
-          message: 'Clear the wait on this step first.',
+          message: waitingBlocksCompletion(toggleTarget)
+            ? 'Clear the wait on this step first.'
+            : 'Clear the wait on this step (or one of its sub-steps) first.',
         })
         return
       }

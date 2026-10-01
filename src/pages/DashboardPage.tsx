@@ -24,7 +24,10 @@ import {
 // THE bill-rate chain the invoice is priced with, and the pin rule, so the
 // revenue estimate below says what the month run will.
 import { billRateAt, ratePeriodAsOf } from '../../lib/rate-history.js'
-import { waitingBlocksCompletion } from '../../lib/waiting-on-state.js'
+import {
+  waitingBlocksCascadedCompletion,
+  waitingBlocksCompletion,
+} from '../../lib/waiting-on-state.js'
 import { useAppContext } from '../AppContext'
 import {
   fetchGlobalActivity,
@@ -1281,7 +1284,7 @@ function QueueGroup({
               </div>
               <ul className={`queue-row-items${disabled ? ' preview-disabled' : ''}`}>
                 {c.items.map((item) => {
-                  const blocked = waitingBlocksCompletion(item)
+                  const blocked = waitingBlocksCascadedCompletion(item)
                   return (
                     <li key={item.id}>
                       <label
@@ -1289,7 +1292,9 @@ function QueueGroup({
                           disabled
                             ? 'Disabled in preview mode'
                             : blocked
-                              ? 'Clear the wait first'
+                              ? waitingBlocksCompletion(item)
+                                ? 'Clear the wait first'
+                                : 'A sub-step is waiting - clear it first'
                               : undefined
                         }
                       >

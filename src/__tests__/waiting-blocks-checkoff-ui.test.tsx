@@ -157,3 +157,65 @@ describe('a waiting step', () => {
     expect(box.title).toBeFalsy()
   })
 })
+
+// Ticking a parent cascades `done` onto every sub-step beneath it, so a parent
+// whose sub-step (or sub-sub-step) is waiting is blocked too - otherwise the
+// waiting child is checked off through the parent while its own box stays
+// disabled.
+describe('a parent with a waiting sub-step', () => {
+  const withSub = (sub: Record<string, unknown>) =>
+    [
+      {
+        id: 'it-1',
+        label: 'Bank rec',
+        done: false,
+        assigneeId: OWNER,
+        subItems: [{ id: 'sub-1', title: 'Pull statements', done: false }, sub],
+      },
+    ] as unknown as Checklist['items']
+
+  it('disables the parent checkbox and says a sub-step is waiting', () => {
+    signInWith(withSub({ id: 'sub-2', title: 'Match deposits', done: false, waiting: true }))
+    const { container } = renderProgress()
+    const box = itemCheckbox(container, 'Bank rec')
+    expect(box).toBeDisabled()
+    expect(box.title).toBe('A sub-step is waiting - clear it first')
+  })
+
+  it('disables the parent when only a sub-sub-step is waiting', () => {
+    signInWith(
+      withSub({
+        id: 'sub-2',
+        title: 'Match deposits',
+        done: false,
+        subItems: [{ id: 'ss-1', title: 'Chase client', done: false, waiting: true }],
+      }),
+    )
+    const { container } = renderProgress()
+    expect(itemCheckbox(container, 'Bank rec')).toBeDisabled()
+  })
+
+  it('disables the sub-item whose own sub-sub-step is waiting', () => {
+    signInWith(
+      withSub({
+        id: 'sub-2',
+        title: 'Match deposits',
+        done: false,
+        subItems: [{ id: 'ss-1', title: 'Chase client', done: false, waiting: true }],
+      }),
+    )
+    const { container } = renderProgress()
+    const row = Array.from(container.querySelectorAll('.sub-item-row')).find((el) =>
+      el.textContent?.includes('Match deposits'),
+    )
+    const box = row?.querySelector('input[type="checkbox"]') as HTMLInputElement
+    expect(box).toBeDisabled()
+    expect(box.title).toBe('A sub-step is waiting - clear it first')
+  })
+
+  it('leaves the parent checkable once the waiting sub-step is done', () => {
+    signInWith(withSub({ id: 'sub-2', title: 'Match deposits', done: true, waiting: true }))
+    const { container } = renderProgress()
+    expect(itemCheckbox(container, 'Bank rec')).not.toBeDisabled()
+  })
+})
