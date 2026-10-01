@@ -10856,6 +10856,13 @@ mark.list-search-hit {
   gap: 18px;
 }
 
+/* Beats the rule above on specificity, which the UA's own [hidden] rule does
+   not. The Plans page keeps both of its tabs mounted and hides the one that is
+   not open; without this, Plans and Packages each showed both lists. */
+.client-tab-panel[hidden] {
+  display: none;
+}
+
 /* This month at a glance, above the client's time entries. */
 .client-time-summary {
   display: flex;

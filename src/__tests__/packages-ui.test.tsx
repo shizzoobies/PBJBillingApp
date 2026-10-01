@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -258,6 +261,24 @@ describe('the Plans page tabs', () => {
     expect(screen.getByRole('tab', { name: /Plans/ })).toHaveTextContent(String(PLANS.length))
     await waitFor(() =>
       expect(screen.getByRole('tab', { name: /Packages/ })).toHaveTextContent('1'),
+    )
+  })
+
+  // featreq-9a2e7bcd: the tests above pass on the `hidden` attribute alone, but
+  // this test environment loads no stylesheet. In a real browser the panel's own
+  // `display: flex` outranked the browser's built-in [hidden] rule, so both tabs
+  // showed both lists. The stylesheet has to hide a hidden panel itself.
+  it('has a stylesheet rule that actually hides the tab that is not open', () => {
+    const css = readFileSync(
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../App.css'),
+      'utf8',
+    )
+    const panelRule = /\.client-tab-panel \{[^}]*\}/.exec(css)?.[0] ?? ''
+    expect(panelRule).toMatch(/display:\s*flex/)
+    const hiddenRule = /\.client-tab-panel\[hidden\] \{[^}]*\}/.exec(css)?.[0] ?? ''
+    expect(hiddenRule).toMatch(/display:\s*none/)
+    expect(css.indexOf('.client-tab-panel[hidden] {')).toBeGreaterThan(
+      css.indexOf('.client-tab-panel {'),
     )
   })
 })
