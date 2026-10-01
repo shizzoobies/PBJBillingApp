@@ -96,6 +96,33 @@ const MIXED = checklist({
     { id: 'cl-mixed-open', label: 'Send statements', done: false },
   ],
 })
+/** The usual push: nothing done yet, five steps all open - they all move. */
+const FIVE_OPEN = checklist({
+  id: 'cl-five',
+  title: 'Five open close',
+  templateId: 'tmpl-on',
+  items: ['a', 'b', 'c', 'd', 'e'].map((key) => ({ id: `cl-five-${key}`, label: `Step ${key}`, done: false })),
+})
+/** A task with no steps can still be pushed; the dialog says it without counts. */
+const NO_STEPS = checklist({
+  id: 'cl-nosteps',
+  title: 'Empty close',
+  templateId: 'tmpl-on',
+  items: [],
+})
+/** Two done, three open: the plural forms of the mixed sentence. */
+const MOSTLY_DONE = checklist({
+  id: 'cl-plural',
+  title: 'Plural close',
+  templateId: 'tmpl-on',
+  items: [
+    { id: 'cl-plural-1', label: 'One', done: true },
+    { id: 'cl-plural-2', label: 'Two', done: true },
+    { id: 'cl-plural-3', label: 'Three', done: false },
+    { id: 'cl-plural-4', label: 'Four', done: false },
+    { id: 'cl-plural-5', label: 'Five', done: false },
+  ],
+})
 /** Every step done — Push is refused server-side, so it must not be offered. */
 const ALL_DONE = checklist({
   id: 'cl-alldone',
@@ -178,6 +205,9 @@ const data = {
     ALREADY_SKIPPED,
     ALREADY_PUSHED,
     MIXED,
+    FIVE_OPEN,
+    NO_STEPS,
+    MOSTLY_DONE,
     ALL_DONE,
     HALF_DONE_STEP,
     PUSHED_ORIGINAL,
@@ -433,9 +463,9 @@ describe('the push affordance', () => {
       screen.getByRole('group', { name: /Push Mixed close to a new date/i }),
     )
     expect(
-      dialog.getByText(/1 done step\(s\) stay here as a completed record/),
+      dialog.getByText(/1 done step stays here as a completed record/),
     ).toBeInTheDocument()
-    expect(dialog.getByText(/1 open step\(s\) move to/)).toBeInTheDocument()
+    expect(dialog.getByText(/1 open step moves to/)).toBeInTheDocument()
     // Said up front: a step is never cut in half.
     expect(dialog.getByText(/A step with some sub-steps done moves whole\./)).toBeInTheDocument()
   })
@@ -447,8 +477,51 @@ describe('the push affordance', () => {
     const dialog = within(
       screen.getByRole('group', { name: /Push Half done close to a new date/i }),
     )
-    expect(dialog.getByText(/1 done step\(s\) stay here as a completed record/)).toBeInTheDocument()
-    expect(dialog.getByText(/1 open step\(s\) move to/)).toBeInTheDocument()
+    expect(dialog.getByText(/1 done step stays here as a completed record/)).toBeInTheDocument()
+    expect(dialog.getByText(/1 open step moves to/)).toBeInTheDocument()
+  })
+
+  it('says "All N steps move" with nothing completed when no step is done yet (the usual push)', () => {
+    renderPage()
+    fireEvent.click(within(cardFor('Five open close')).getByText(PUSH_LABEL))
+    const dialog = within(screen.getByRole('group', { name: /Push Five open close to a new date/i }))
+    expect(dialog.getByText(/All 5 steps move to .*\. Nothing is completed\./)).toBeInTheDocument()
+    expect(dialog.queryByText(/done step/)).not.toBeInTheDocument()
+    expect(dialog.queryByText(/\(s\)/)).not.toBeInTheDocument()
+  })
+
+  it('reads in the singular for one step that moves, with no "(s)"', () => {
+    renderPage()
+    fireEvent.click(within(cardFor('Skippable close')).getByText(PUSH_LABEL))
+    const dialog = within(screen.getByRole('group', { name: /Push Skippable close to a new date/i }))
+    expect(dialog.getByText(/Its one step moves to .*\. Nothing is completed\./)).toBeInTheDocument()
+  })
+
+  it('uses real plurals for a mix of several done and open steps', () => {
+    renderPage()
+    fireEvent.click(within(cardFor('Plural close')).getByText(PUSH_LABEL))
+    const dialog = within(screen.getByRole('group', { name: /Push Plural close to a new date/i }))
+    expect(
+      dialog.getByText(/2 done steps stay here as a completed record; 3 open steps move to /),
+    ).toBeInTheDocument()
+    expect(dialog.queryByText(/\(s\)/)).not.toBeInTheDocument()
+  })
+
+  it('keeps the plain sentence for a task with no steps at all', () => {
+    renderPage()
+    fireEvent.click(within(cardFor('Empty close')).getByText(PUSH_LABEL))
+    const dialog = within(screen.getByRole('group', { name: /Push Empty close to a new date/i }))
+    expect(dialog.getByText(/Pushing “Empty close” to a new date\. It stays on your list/)).toBeInTheDocument()
+    expect(dialog.queryByText(/steps? (stays?|moves?)/)).not.toBeInTheDocument()
+  })
+
+  it('the Push button title is true for a split too: open steps move, finished ones stay as a record', () => {
+    renderPage()
+    const button = within(cardFor('Mixed close')).getByText(PUSH_LABEL)
+    expect(button).toHaveAttribute(
+      'title',
+      expect.stringMatching(/open steps to a new date.*finished steps stay here as a record/),
+    )
   })
 
   it('still renders when the date field is cleared (no RangeError from an empty date)', () => {
@@ -461,7 +534,7 @@ describe('the push affordance', () => {
     fireEvent.change(dialog.getByLabelText('New due date'), { target: { value: '' } })
 
     // The dialog is still there, and says it without inventing a date.
-    expect(dialog.getByText(/1 open step\(s\) move to the new date\./)).toBeInTheDocument()
+    expect(dialog.getByText(/1 open step moves to the new date\./)).toBeInTheDocument()
     // And an empty date is not a pushable date.
     expect(dialog.getByRole('button', { name: 'Push to this date' })).toBeDisabled()
   })

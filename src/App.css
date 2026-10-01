@@ -1869,10 +1869,10 @@ textarea.input {
   color: var(--muted);
   cursor: pointer;
   display: inline-flex;
-  height: 20px;
+  height: 24px;
   justify-content: center;
   padding: 0;
-  width: 20px;
+  width: 24px;
 }
 
 .reorder-btn:hover:not(:disabled) {
@@ -2178,6 +2178,9 @@ textarea.input {
 .sub-item-row {
   align-items: center;
   display: flex;
+  /* A crowded row (Board columns are narrow) wraps its controls onto the next
+     line instead of squeezing the title. */
+  flex-wrap: wrap;
   gap: 8px;
   min-height: 26px;
 }
@@ -8755,6 +8758,18 @@ button.repeating-task-toggle-pill {
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 8px;
+}
+
+/* The Task / Note radios are a fieldset (legend "Add as", visually hidden) so a
+   screen reader announces the group; it lays out exactly like the bare labels did. */
+.pending-note-kind-group {
+  align-items: center;
+  border: 0;
+  display: flex;
+  gap: 10px;
+  margin: 0;
+  min-inline-size: 0;
+  padding: 0;
 }
 
 .pending-note-kind {

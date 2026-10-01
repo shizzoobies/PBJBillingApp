@@ -51,7 +51,7 @@ const DAYS = Array.from({ length: 31 }, (_, index) => index + 1)
  *    fetch still in flight so an older list cannot land after it.
  */
 export function ClientStatementsPanel({ clientId }: { clientId: string }) {
-  const { data, dataRefreshCount = 0 } = useAppContext()
+  const { data, dataRefreshCount = 0, previewMode } = useAppContext()
   const [rows, setRows] = useState<Row[]>([])
   const [loading, setLoading] = useState(true)
   const [loadFailed, setLoadFailed] = useState(false)
@@ -265,6 +265,10 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
   }
 
   const controlsDisabled = loading || loadFailed
+  // Saving writes the client's list: while previewing as someone, the write
+  // controls are off (the same rule and title as the Dashboard queue).
+  const writeDisabled = controlsDisabled || Boolean(previewMode)
+  const previewTitle = previewMode ? 'Disabled in preview mode' : undefined
 
   return (
     <div className="statement-accounts-panel">
@@ -290,13 +294,14 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
             <li className="statement-account-row" key={row.id ?? `new-${index}`}>
               <input
                 type="text"
+                aria-label="Account name"
                 value={row.name}
                 placeholder="Account name"
                 disabled={loading}
                 onChange={(event) => updateRow(index, { name: event.target.value })}
               />
               <select
-                aria-label="Day"
+                aria-label={`Day for ${row.name.trim() || 'account'}`}
                 disabled={loading}
                 value={row.dayOfMonth ?? ''}
                 onChange={(event) =>
@@ -330,7 +335,8 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
         <button
           type="button"
           className="secondary-action"
-          disabled={controlsDisabled}
+          disabled={writeDisabled}
+          title={previewTitle}
           onClick={() => addRow()}
         >
           <Plus size={14} /> Add account
@@ -346,7 +352,8 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
                 key={label}
                 type="button"
                 className="add-person-pill"
-                disabled={controlsDisabled}
+                disabled={writeDisabled}
+                title={previewTitle}
                 onClick={() => addRow(label)}
               >
                 {label}
@@ -371,7 +378,8 @@ export function ClientStatementsPanel({ clientId }: { clientId: string }) {
         <button
           type="button"
           className="primary-action"
-          disabled={saving || controlsDisabled}
+          disabled={saving || writeDisabled}
+          title={previewTitle}
           onClick={() => void save()}
         >
           {saving ? 'Saving…' : 'Save'}

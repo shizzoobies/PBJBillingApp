@@ -212,13 +212,23 @@ describe('waiting steps and the status filter', () => {
     expect(statusForChecklist(c, TODAY)).toBe('active')
   })
 
-  it('a done parent with an open waiting sub-step counts 0', () => {
+  it('a parent stored done with an open waiting sub-step is OPEN by the roll-up, so the wait counts', () => {
+    // The same reading Push and the progress badge use: a step is done only when
+    // every sub-step is.
     const c = withItems('2026-12-01', [
       open({ id: 'a', done: true, subItems: [{ id: 's', label: 's', done: false, waiting: true }] }),
       open({ id: 'b' }),
     ])
+    expect(waitingStepCount(c)).toBe(1)
+    expect(idsFor([c], 'waiting')).toEqual(['a'])
+  })
+
+  it('a parent whose sub-steps are all done is done by the roll-up even if its own flag lags, so its wait is not counted', () => {
+    const c = withItems('2026-12-01', [
+      open({ id: 'a', done: false, waiting: true, subItems: [{ id: 's', label: 's', done: true }] }),
+      open({ id: 'b' }),
+    ])
     expect(waitingStepCount(c)).toBe(0)
-    expect(idsFor([c], 'waiting')).toEqual([])
   })
 
   it('a waiting sub-step and a waiting sub-sub-step count', () => {

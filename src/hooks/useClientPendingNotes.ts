@@ -27,6 +27,8 @@ export function useClientPendingNotes(clientId: string, enabled = true) {
     if (!enabled || !clientId) return
     let cancelled = false
     void (async () => {
+      // A previous client's load error must not carry over to this one.
+      setError('')
       try {
         const list = await listClientPendingNotesRequest(clientId)
         if (cancelled) return

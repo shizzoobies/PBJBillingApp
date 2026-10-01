@@ -17,6 +17,7 @@ import {
   type DragEvent,
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
   type RefObject,
 } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
@@ -30,6 +31,7 @@ import {
   isWaitingOnOpen,
   REMOVAL_WOULD_COMPLETE_WAITING_STEP,
   removalWouldCompleteWaitingStep,
+  WAITING_BLOCK_TITLES,
   waitingOnStage,
   waitingToggleRefusal,
 } from '../../lib/waiting-on-state.js'
@@ -2016,13 +2018,28 @@ function SkipTaskDialog({
       <p className="skip-task-dialog-lead">
         {isPush ? (
           // Split push (featreq-fbab3370): say exactly what this push is about
-          // to do, since "nothing is completed" stopped being true the moment
-          // a checklist can carry a mix of done and open steps.
-          <>
-            {doneStepCount} done step(s) stay here as a completed record; {openStepCount} open
-            step(s) move to {shortDateOrNull(newDueDate) ?? 'the new date'}. A step with some
-            sub-steps done moves whole.
-          </>
+          // to do, in the three cases it can be: nothing done yet (the usual
+          // one: every step moves), a mix (the done steps stay as a record), or
+          // no steps at all.
+          doneStepCount + openStepCount === 0 ? (
+            <>
+              Pushing “{title}” to a new date. It stays on your list and stays open, and it keeps
+              its place in the cycle, so the next occurrence still generates as normal.
+            </>
+          ) : doneStepCount === 0 ? (
+            <>
+              {openStepCount === 1 ? 'Its one step moves' : `All ${openStepCount} steps move`} to{' '}
+              {shortDateOrNull(newDueDate) ?? 'the new date'}. Nothing is completed. A step with
+              some sub-steps done moves whole.
+            </>
+          ) : (
+            <>
+              {doneStepCount} done {doneStepCount === 1 ? 'step stays' : 'steps stay'} here as a
+              completed record; {openStepCount} open {openStepCount === 1 ? 'step moves' : 'steps move'}{' '}
+              to {shortDateOrNull(newDueDate) ?? 'the new date'}. A step with some sub-steps done
+              moves whole.
+            </>
+          )
         ) : (
           <>
             Skipping “{title}” for this cycle. It leaves your list now and the next occurrence still
@@ -2250,12 +2267,15 @@ export function ChecklistCard({
   timeEntries: TimeEntry[]
 }) {
   const todayDateOnly = localDateOnly()
-  const completed = checklist.items.filter((item) => item.done).length
-  const allDone = checklist.items.length > 0 && completed === checklist.items.length
-  // The push dialog counts with the SAME rule the server splits a push by
-  // (lib/checklist-step-done.js): a step marked done with an unchecked
-  // sub-step is still open, and moves.
+  // ONE reading of "done" for the progress badge, the progress bar, the push
+  // dialog and the server's split (lib/checklist-step-done.js): a step marked
+  // done with an unchecked sub-step is still open, and moves.
   const doneStepCount = checklist.items.filter((item) => isChecklistItemDone(item)).length
+  const completed = doneStepCount
+  // "All done" (hand-off, due cue) keeps the stored flags, the way the page's Completed
+  // group and the tab counts decide it (`groupChecklist`).
+  const allDone =
+    checklist.items.length > 0 && checklist.items.every((item) => item.done)
   const viewerIds = checklist.viewerIds ?? []
   const editorIds = checklist.editorIds ?? []
   const isAssignee = checklist.assigneeId === activeEmployeeId
@@ -2359,11 +2379,20 @@ export function ChecklistCard({
     setStepDeleteNote(null)
     setStepDeleteError(null)
     if (checklist.templateId) {
+      // One question at a time on a card: opening this closes the add prompt.
+      setSeriesPromptLabels(null)
       setStepDeletePrompt({ itemId, label: checklist.items.find((item) => item.id === itemId)?.label ?? '' })
     } else if (window.confirm('Delete this step?')) {
       void onDeleteItem(checklist.id, itemId)
     }
   }
+  // The result sentence is a passing notice: it clears after 8 seconds, or on
+  // the next click or keypress anywhere on this card (see the article below).
+  useEffect(() => {
+    if (!stepDeleteNote) return undefined
+    const timer = window.setTimeout(() => setStepDeleteNote(null), 8000)
+    return () => window.clearTimeout(timer)
+  }, [stepDeleteNote])
   const [metaTitle, setMetaTitle] = useState(checklist.title)
   const [metaDue, setMetaDue] = useState(checklist.dueDate)
   const [metaAssignee, setMetaAssignee] = useState(checklist.assigneeId)
@@ -2433,6 +2462,12 @@ export function ChecklistCard({
     <article
       className={focused ? 'checklist-block focused' : 'checklist-block'}
       ref={focusRef as React.RefObject<HTMLElement>}
+      onClickCapture={() => {
+        if (stepDeleteNote) setStepDeleteNote(null)
+      }}
+      onKeyDownCapture={() => {
+        if (stepDeleteNote) setStepDeleteNote(null)
+      }}
     >
       <header>
         <div>
@@ -2580,9 +2615,9 @@ export function ChecklistCard({
                   return waitingSteps > 0 ? (
                     <span
                       className="board-chip board-chip-pending checklist-waiting-badge"
-                      title={`${waitingSteps} ${waitingSteps === 1 ? 'step' : 'steps'} waiting`}
+                      title={`${waitingSteps} ${waitingSteps === 1 ? 'step or sub-step' : 'steps or sub-steps'} waiting`}
                     >
-                      Waiting
+                      {waitingSteps} waiting
                     </span>
                   ) : null
                 })()}
@@ -2652,7 +2687,7 @@ export function ChecklistCard({
               type="button"
               className="secondary-action"
               onClick={() => setSkipOpen('push')}
-              title="Still doing it, just later? Push it to a new date — it stays open and keeps its place in the cycle."
+              title="Still doing it, just later? Push its open steps to a new date - finished steps stay here as a record, and it keeps its place in the cycle."
             >
               Push to a new date
             </button>
@@ -2734,6 +2769,49 @@ export function ChecklistCard({
         }
         onCanToggle={canToggleItem}
         onDeleteItem={async (itemId) => requestStepDelete(itemId)}
+        deletePromptItemId={stepDeletePrompt?.itemId ?? null}
+        renderDeletePrompt={() =>
+          stepDeletePrompt ? (
+            <StepDeletePrompt
+              label={stepDeletePrompt.label}
+              canDeleteSeries={role === 'owner'}
+              busy={stepDeleteBusy}
+              error={stepDeleteError}
+              onThisOnly={() => {
+                void (async () => {
+                  setStepDeleteBusy(true)
+                  try {
+                    await onDeleteItem(checklist.id, stepDeletePrompt.itemId)
+                  } finally {
+                    setStepDeleteBusy(false)
+                  }
+                  setStepDeletePrompt(null)
+                })()
+              }}
+              onSeries={() => {
+                void (async () => {
+                  setStepDeleteBusy(true)
+                  setStepDeleteError(null)
+                  try {
+                    const result = await deleteChecklistItemFromSeries(checklist.id, stepDeletePrompt.itemId)
+                    setStepDeletePrompt(null)
+                    if (result) setStepDeleteNote(seriesDeleteNotice(result))
+                  } catch (error) {
+                    // A refusal (the recurring checklist's last step, a step that is already
+                    // gone): keep the prompt open and say why, in the server's own sentence.
+                    setStepDeleteError(error instanceof Error ? error.message : 'Could not remove the step.')
+                  } finally {
+                    setStepDeleteBusy(false)
+                  }
+                })()
+              }}
+              onCancel={() => {
+                setStepDeletePrompt(null)
+                setStepDeleteError(null)
+              }}
+            />
+          ) : null
+        }
         onRemoveSubItem={(itemId, subItemId) =>
           onRemoveSubItem(checklist.id, itemId, subItemId)
         }
@@ -2754,70 +2832,6 @@ export function ChecklistCard({
         onUpdateItem={(itemId, patch) => onUpdateItem(checklist.id, itemId, patch)}
         todayDateOnly={todayDateOnly}
       />
-      {stepDeletePrompt ? (
-        <div className="series-scope-prompt" role="group" aria-label="Where to delete this step">
-          <span className="series-scope-text">Delete “{stepDeletePrompt.label}” from…</span>
-          <div className="series-scope-actions">
-            <button
-              type="button"
-              className="secondary-action"
-              disabled={stepDeleteBusy}
-              onClick={() => {
-                void (async () => {
-                  setStepDeleteBusy(true)
-                  try {
-                    await onDeleteItem(checklist.id, stepDeletePrompt.itemId)
-                  } finally {
-                    setStepDeleteBusy(false)
-                  }
-                  setStepDeletePrompt(null)
-                })()
-              }}
-            >
-              This checklist only
-            </button>
-            {role === 'owner' ? (
-              <button
-                type="button"
-                className="primary-action"
-                disabled={stepDeleteBusy}
-                onClick={() => {
-                  void (async () => {
-                    setStepDeleteBusy(true)
-                    try {
-                      const result = await deleteChecklistItemFromSeries(checklist.id, stepDeletePrompt.itemId)
-                      setStepDeletePrompt(null)
-                      if (result) setStepDeleteNote(seriesDeleteNotice(result))
-                    } catch (error) {
-                      // A refusal (the recurring checklist's last step): keep the prompt open and say why.
-                      setStepDeleteError(error instanceof Error ? error.message : 'Could not remove the step.')
-                    } finally {
-                      setStepDeleteBusy(false)
-                    }
-                  })()
-                }}
-              >
-                This + all future
-              </button>
-            ) : null}
-            <button
-              type="button"
-              className="link-button"
-              onClick={() => {
-                setStepDeletePrompt(null)
-                setStepDeleteError(null)
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-          {stepDeleteError ? (
-            <p className="waiting-editor-error" role="alert">
-              {stepDeleteError}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
       {stepDeleteNote ? (
         <p className="series-scope-text" role="status">
           {stepDeleteNote}
@@ -2833,8 +2847,12 @@ export function ChecklistCard({
             const handleAdd = (labels: string[]) => {
               const clean = labels.map((label) => label.trim()).filter(Boolean)
               if (clean.length === 0) return
-              if (canSeries) setSeriesPromptLabels(clean)
-              else onBulkAddItems(checklist.id, clean)
+              if (canSeries) {
+                // One question at a time on a card: opening this closes the delete prompt.
+                setStepDeletePrompt(null)
+                setStepDeleteError(null)
+                setSeriesPromptLabels(clean)
+              } else onBulkAddItems(checklist.id, clean)
             }
             return (
               <>
@@ -3499,6 +3517,85 @@ export function WaitingEditor({
 }
 
 /**
+ * The "where to delete this step" question on a recurring checklist, rendered
+ * INSIDE the row of the step being deleted (so on a long card or a narrow Board
+ * column the question is right where the person clicked). It takes focus when it
+ * opens, Escape closes it, and every button waits while a request is running.
+ * The server's own sentence for a refusal shows under the buttons.
+ */
+function StepDeletePrompt({
+  label,
+  canDeleteSeries,
+  busy,
+  error,
+  onThisOnly,
+  onSeries,
+  onCancel,
+}: {
+  label: string
+  canDeleteSeries: boolean
+  busy: boolean
+  error: string | null
+  onThisOnly: () => void
+  onSeries: () => void
+  onCancel: () => void
+}) {
+  const { previewMode } = useAppContext()
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    containerRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()
+  }, [])
+  const locked = busy || Boolean(previewMode)
+  const lockedTitle = previewMode ? 'Disabled in preview mode' : undefined
+  return (
+    <div
+      ref={containerRef}
+      className="series-scope-prompt step-delete-prompt"
+      role="group"
+      aria-label="Where to delete this step"
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !busy) {
+          event.stopPropagation()
+          onCancel()
+        }
+      }}
+    >
+      <span className="series-scope-text">Delete “{label}” from…</span>
+      <div className="series-scope-actions">
+        <button
+          type="button"
+          className="secondary-action"
+          disabled={locked}
+          title={lockedTitle}
+          onClick={onThisOnly}
+        >
+          This checklist only
+        </button>
+        {canDeleteSeries ? (
+          <button
+            type="button"
+            className="primary-action"
+            disabled={locked}
+            title={lockedTitle}
+            onClick={onSeries}
+          >
+            This + all future
+          </button>
+        ) : null}
+        <button type="button" className="link-button" disabled={busy} onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+      {error ? (
+        <p className="waiting-editor-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
  * The tooltip for a checkbox the waiting guard disables, or undefined when the
  * tick is allowed. It asks the very simulation the toggle route refuses with, so
  * a disabled box is never a surprise 409 and an enabled one is never refused.
@@ -3509,10 +3606,7 @@ function toggleWaitTitle(
   subSubItemId?: string,
 ): string | undefined {
   const refusal = waitingToggleRefusal(item, subItemId, subSubItemId)
-  if (!refusal) return undefined
-  if (refusal.where === 'own') return 'Clear the wait first'
-  if (refusal.where === 'below') return 'A sub-step is waiting - clear it first'
-  return 'The step above is waiting - clear it first'
+  return refusal ? WAITING_BLOCK_TITLES[refusal.where] : undefined
 }
 
 function DraggableTaskList({
@@ -3525,6 +3619,8 @@ function DraggableTaskList({
   onAddSubSubItem,
   onCanToggle,
   onDeleteItem,
+  deletePromptItemId = null,
+  renderDeletePrompt,
   onRemoveSubItem,
   onRemoveSubSubItem,
   onReorderItems,
@@ -3544,6 +3640,9 @@ function DraggableTaskList({
   onAddSubSubItem: (itemId: string, subItemId: string, title: string) => void
   onCanToggle: (item: ChecklistItem) => boolean
   onDeleteItem: (itemId: string) => Promise<void>
+  /** The step whose "where to delete" question is open: it renders INSIDE that step's row. */
+  deletePromptItemId?: string | null
+  renderDeletePrompt?: () => ReactNode
   onRemoveSubItem: (itemId: string, subItemId: string) => void
   onRemoveSubSubItem: (itemId: string, subItemId: string, subSubItemId: string) => void
   onReorderItems: (checklistId: string, orderedIds: string[]) => void
@@ -3586,6 +3685,7 @@ function DraggableTaskList({
     waitingOnQuestion,
     reorderChecklistSubItems,
     role,
+    previewMode,
   } = useAppContext()
   const isOwner = role === 'owner'
   // "Hide completed" is a per-checklist, per-browser preference (like the
@@ -3860,9 +3960,9 @@ function DraggableTaskList({
                   <button
                     type="button"
                     className="reorder-btn"
-                    aria-label="Move up"
-                    title="Move up"
-                    disabled={itemOpenIndex <= 0}
+                    aria-label={`Move ${item.label} up`}
+                    title={previewMode ? 'Disabled in preview mode' : 'Move up'}
+                    disabled={Boolean(previewMode) || itemOpenIndex <= 0}
                     onClick={() => moveItem(item.id, 'up')}
                   >
                     <ChevronUp size={13} />
@@ -3870,9 +3970,9 @@ function DraggableTaskList({
                   <button
                     type="button"
                     className="reorder-btn"
-                    aria-label="Move down"
-                    title="Move down"
-                    disabled={itemOpenIndex === openItemIds.length - 1}
+                    aria-label={`Move ${item.label} down`}
+                    title={previewMode ? 'Disabled in preview mode' : 'Move down'}
+                    disabled={Boolean(previewMode) || itemOpenIndex === openItemIds.length - 1}
                     onClick={() => moveItem(item.id, 'down')}
                   >
                     <ChevronDown size={13} />
@@ -4029,6 +4129,7 @@ function DraggableTaskList({
                 )}
               </span>
             </div>
+            {deletePromptItemId === item.id && renderDeletePrompt ? renderDeletePrompt() : null}
             {/* Ticking a step off used to unmount this outright, taking a LIVE
                 wait's only controls with it — the wait was still open, still on
                 the Delayed page, and suddenly had no Approve on the step. A done
@@ -4144,9 +4245,9 @@ function DraggableTaskList({
                             <button
                               type="button"
                               className="reorder-btn"
-                              aria-label="Move up"
-                              title="Move up"
-                              disabled={subOpenIndex <= 0}
+                              aria-label={`Move ${sub.title} up`}
+                              title={previewMode ? 'Disabled in preview mode' : 'Move up'}
+                              disabled={Boolean(previewMode) || subOpenIndex <= 0}
                               onClick={() => moveSubItem(item.id, sub.id, 'up')}
                             >
                               <ChevronUp size={12} />
@@ -4154,9 +4255,9 @@ function DraggableTaskList({
                             <button
                               type="button"
                               className="reorder-btn"
-                              aria-label="Move down"
-                              title="Move down"
-                              disabled={subOpenIndex === openSubIds.length - 1}
+                              aria-label={`Move ${sub.title} down`}
+                              title={previewMode ? 'Disabled in preview mode' : 'Move down'}
+                              disabled={Boolean(previewMode) || subOpenIndex === openSubIds.length - 1}
                               onClick={() => moveSubItem(item.id, sub.id, 'down')}
                             >
                               <ChevronDown size={12} />

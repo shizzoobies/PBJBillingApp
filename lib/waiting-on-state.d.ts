@@ -80,6 +80,8 @@ export function waitingBlocksCompletion(
 export type StepSimulationItem = WaitingStepLike & { done?: boolean; subItems?: unknown[] }
 
 export const REMOVAL_WOULD_COMPLETE_WAITING_STEP: string
+/** One wording per place a blocked checkbox's wait comes from: the tooltip and the server answer. */
+export const WAITING_BLOCK_TITLES: Readonly<{ own: string; below: string; above: string }>
 export function operationCompletesWaitingStep(
   itemBefore: StepSimulationItem | undefined,
   itemAfter: StepSimulationItem | undefined,

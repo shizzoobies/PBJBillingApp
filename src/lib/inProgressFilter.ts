@@ -1,4 +1,4 @@
-import { clientName, effectiveChecklistDue, stepIsWaiting } from './utils'
+import { clientName, effectiveChecklistDue, isChecklistItemDone, stepIsWaiting } from './utils'
 import { inactiveClientIdSet } from './clientLifecycle'
 import { isInReportPeriod, type ReportPeriod } from './reportPeriod'
 import type { Checklist, Client } from './types'
@@ -6,16 +6,20 @@ import type { Checklist, Client } from './types'
 type WaitNode = Parameters<typeof stepIsWaiting>[0] & { done: boolean; subItems?: WaitNode[] }
 
 /**
- * How many OPEN steps (top-level, sub-step or sub-sub-step) are waiting. A done
- * step is not counted, and neither is anything beneath it; a verified wait is
- * not waiting (`stepIsWaiting`). Derived on every read, never stored, so
- * clearing or verifying the wait is what returns a checklist to Active.
+ * How many OPEN steps (top-level, sub-step or sub-sub-step) are waiting. "Open"
+ * is the roll-up reading (`isChecklistItemDone`, the rule Push splits by): a
+ * step marked done with an unchecked sub-step is open, so its waiting sub-step
+ * counts, while a done step - and anything beneath it - does not. A verified
+ * wait is not waiting (`stepIsWaiting`). Derived on every read, never stored,
+ * so clearing or verifying the wait is what returns a checklist to Active.
  */
 export function waitingStepCount(checklist: Checklist): number {
   const walk = (nodes: WaitNode[]): number =>
     nodes.reduce(
       (sum, node) =>
-        node.done ? sum : sum + (stepIsWaiting(node) ? 1 : 0) + walk(node.subItems ?? []),
+        isChecklistItemDone(node)
+          ? sum
+          : sum + (stepIsWaiting(node) ? 1 : 0) + walk(node.subItems ?? []),
       0,
     )
   return walk(checklist.items)

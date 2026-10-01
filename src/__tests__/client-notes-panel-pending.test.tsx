@@ -1,9 +1,9 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import type { AppContextValue } from '../AppContext'
-import type { AppData, Checklist, ChecklistTemplate, ClientPendingNote } from '../lib/types'
+import { ApiError, type AppData, type Checklist, type ChecklistTemplate, type ClientPendingNote } from '../lib/types'
 
 /**
  * Pending notes for future recurring checklists (featreq-b688e73c), the
@@ -306,5 +306,78 @@ describe('the "for an upcoming checklist" block', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
     await waitFor(() => expect(deletePending).toHaveBeenCalledWith('c1', 'pnote-1'))
     await waitFor(() => expect(screen.queryByText('New hire starting')).not.toBeInTheDocument())
+  })
+})
+
+describe('accessibility, preview mode, the 100-note cap and a stale load error', () => {
+  const typeNote = (text: string) =>
+    fireEvent.change(screen.getByRole('textbox', { name: 'Note for an upcoming checklist' }), {
+      target: { value: text },
+    })
+
+  it('names the textarea and groups the Task / Note radios under "Add as"', async () => {
+    renderPanel()
+    await waitFor(() => expect(listPending).toHaveBeenCalled())
+    expect(screen.getByRole('textbox', { name: 'Note for an upcoming checklist' })).toBeInTheDocument()
+    const group = screen.getByRole('group', { name: 'Add as' })
+    expect(within(group).getByRole('radio', { name: 'Task' })).toBeChecked()
+    expect(within(group).getByRole('radio', { name: 'Note' })).not.toBeChecked()
+  })
+
+  it('disables Add with "Disabled in preview mode" while previewing as someone', async () => {
+    renderPanel()
+    contextValue = { ...contextValue, previewMode: true } as unknown as AppContextValue
+    cleanup()
+    render(
+      <MemoryRouter>
+        <ClientNotesPanel clientId="c1" ownerMode currentUserId="emp-owner" />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(listPending).toHaveBeenCalled())
+    typeNote('Heads up')
+    const add = screen.getByRole('button', { name: 'Add' })
+    expect(add).toBeDisabled()
+    expect(add).toHaveAttribute('title', 'Disabled in preview mode')
+  })
+
+  it('shows the server sentence when the client already has 100 notes waiting', async () => {
+    addPending = vi.fn(async () => {
+      throw new ApiError(
+        409,
+        'This client already has 100 notes waiting. Delete some first.',
+        'too_many_pending_notes',
+      )
+    })
+    renderPanel()
+    await waitFor(() => expect(listPending).toHaveBeenCalled())
+    typeNote('One more')
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+    expect(
+      await screen.findByText('This client already has 100 notes waiting. Delete some first.'),
+    ).toBeInTheDocument()
+    // Any other failure keeps the generic line.
+    addPending = vi.fn(async () => {
+      throw new Error('boom')
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+    expect(await screen.findByText('Could not add that note — please try again.')).toBeInTheDocument()
+  })
+
+  it('does not carry one client’s load error over to the next client', async () => {
+    listPending = vi.fn(async () => {
+      throw new Error('down')
+    })
+    const view = renderPanel({ templates: [payrollTemplate(), payrollTemplate({ id: 'tmpl-2', clientId: 'c2' })] })
+    expect(await screen.findByText('Could not load pending notes.')).toBeInTheDocument()
+
+    // The next client's load is still in flight: its answer has not cleared anything yet.
+    listPending = vi.fn(() => new Promise<ClientPendingNote[]>(() => {}))
+    view.rerender(
+      <MemoryRouter>
+        <ClientNotesPanel clientId="c2" ownerMode currentUserId="emp-owner" />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(listPending).toHaveBeenCalled())
+    await waitFor(() => expect(screen.queryByText('Could not load pending notes.')).not.toBeInTheDocument())
   })
 })

@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -300,7 +303,7 @@ describe('Move up and Move down', () => {
   it('moves a step within the open group, sending the open order then the done order', () => {
     mixed()
     const { container } = renderProgress()
-    fireEvent.click(within(taskItem(container, 'Echo')).getAllByRole('button', { name: 'Move up' })[0])
+    fireEvent.click(within(taskItem(container, 'Echo')).getByRole('button', { name: 'Move Echo up' }))
     // Open group a, c, e -> a, e, c; done order b, d unchanged.
     expect(contextValue.reorderChecklistItems).toHaveBeenCalledWith('cl-1', [
       'it-a',
@@ -315,7 +318,7 @@ describe('Move up and Move down', () => {
     mixed()
     const { container } = renderProgress()
     fireEvent.click(
-      within(stepRow(container, 'Alpha')).getByRole('button', { name: 'Move down' }),
+      within(stepRow(container, 'Alpha')).getByRole('button', { name: 'Move Alpha down' }),
     )
     expect(contextValue.reorderChecklistItems).toHaveBeenCalledWith('cl-1', [
       'it-c',
@@ -329,9 +332,9 @@ describe('Move up and Move down', () => {
   it('disables Move up on the first open step and Move down on the last', () => {
     mixed()
     const { container } = renderProgress()
-    expect(within(stepRow(container, 'Alpha')).getByRole('button', { name: 'Move up' })).toBeDisabled()
-    expect(within(stepRow(container, 'Echo')).getByRole('button', { name: 'Move down' })).toBeDisabled()
-    expect(within(stepRow(container, 'Charlie')).getByRole('button', { name: 'Move up' })).toBeEnabled()
+    expect(within(stepRow(container, 'Alpha')).getByRole('button', { name: 'Move Alpha up' })).toBeDisabled()
+    expect(within(stepRow(container, 'Echo')).getByRole('button', { name: 'Move Echo down' })).toBeDisabled()
+    expect(within(stepRow(container, 'Charlie')).getByRole('button', { name: 'Move Charlie up' })).toBeEnabled()
   })
 
   it('offers no move buttons on a done step', () => {
@@ -351,7 +354,7 @@ describe('Move up and Move down', () => {
       }),
     ] as unknown as Checklist['items'])
     const { container } = renderProgress()
-    fireEvent.click(within(subRow(container, 'Run the file')).getByRole('button', { name: 'Move up' }))
+    fireEvent.click(within(subRow(container, 'Run the file')).getByRole('button', { name: 'Move Run the file up' }))
     expect(contextValue.reorderChecklistSubItems).toHaveBeenCalledWith('cl-1', 'it-1', [
       's3',
       's1',
@@ -370,8 +373,8 @@ describe('Move up and Move down', () => {
       }),
     ] as unknown as Checklist['items'])
     const { container } = renderProgress()
-    expect(within(subRow(container, 'Pull hours')).getByRole('button', { name: 'Move up' })).toBeDisabled()
-    expect(within(subRow(container, 'Run the file')).getByRole('button', { name: 'Move down' })).toBeDisabled()
+    expect(within(subRow(container, 'Pull hours')).getByRole('button', { name: 'Move Pull hours up' })).toBeDisabled()
+    expect(within(subRow(container, 'Run the file')).getByRole('button', { name: 'Move Run the file down' })).toBeDisabled()
   })
 })
 
@@ -568,9 +571,43 @@ describe('done is the roll-up in the display order and in Hide completed', () =>
     ] as unknown as Checklist['items'])
     const { container } = renderProgress()
     const buttons = within(taskItem(container, 'Bravo')).getAllByRole('button', {
-      name: /^Move (up|down)$/,
+      name: /^Move Bravo (up|down)$/,
     })
     expect(buttons.length).toBeGreaterThan(0)
+  })
+})
+
+describe('Move buttons: specific names, 24 px targets, locked in preview', () => {
+  it('names the step in each button so a screen reader hears which one moves', () => {
+    mixed()
+    const { container } = renderProgress()
+    const row = stepRow(container, 'Charlie')
+    expect(within(row).getByRole('button', { name: 'Move Charlie up' })).toHaveAttribute('title', 'Move up')
+    expect(within(row).getByRole('button', { name: 'Move Charlie down' })).toHaveAttribute('title', 'Move down')
+    // The generic names are gone.
+    expect(screen.queryByRole('button', { name: 'Move up' })).toBeNull()
+  })
+
+  it('is a 24 px target', () => {
+    const css = readFileSync(
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../App.css'),
+      'utf8',
+    )
+    const rule = /\.reorder-btn \{[^}]*\}/.exec(css)?.[0] ?? ''
+    expect(rule).toMatch(/height:\s*24px/)
+    expect(rule).toMatch(/width:\s*24px/)
+  })
+
+  it('is disabled with "Disabled in preview mode" while previewing as someone', () => {
+    mixed()
+    contextValue = { ...contextValue, previewMode: true } as unknown as AppContextValue
+    const { container } = renderProgress()
+    const row = stepRow(container, 'Charlie')
+    for (const name of ['Move Charlie up', 'Move Charlie down']) {
+      const button = within(row).getByRole('button', { name })
+      expect(button).toBeDisabled()
+      expect(button).toHaveAttribute('title', 'Disabled in preview mode')
+    }
   })
 })
 

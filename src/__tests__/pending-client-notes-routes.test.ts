@@ -287,6 +287,21 @@ describe('GET /api/app-data hands out the version that came WITH its data', () =
   })
 })
 
+describe('skipping a checklist puts its notes back on the client page right away', () => {
+  it('re-runs the attach pass for that checklist client, after the skip and its trail entry, never failing the skip', () => {
+    const skipAt = serverSource.indexOf('await appDataStore.skipChecklistInstance(checklistId, session.user.id)')
+    const attachAt = serverSource.indexOf('attachPendingClientNotes({ clientId: checklist.clientId })', skipAt)
+    expect(skipAt).toBeGreaterThan(-1)
+    expect(attachAt).toBeGreaterThan(skipAt)
+    expect(attachAt).toBeGreaterThan(serverSource.indexOf("'checklist_skipped'", skipAt))
+    // Its own try/catch: a failed pass is logged, and the skip still answers 200.
+    expect(serverSource.slice(attachAt - 60, attachAt)).toContain('await appDataStore.')
+    expect(serverSource.slice(attachAt - 120, attachAt)).toContain('try {')
+    expect(serverSource.slice(attachAt, attachAt + 200)).toContain("[checklist-skip] pending-notes attach pass failed:")
+    expect(serverSource.indexOf('sendJson(response, 200, { checklist: skipped, skip: record })')).toBeGreaterThan(attachAt)
+  })
+})
+
 describe('deleting a checklist puts its notes back on the client page right away', () => {
   it('both delete callers re-run the attach pass for that checklist client', () => {
     const calls = [...serverSource.matchAll(/await appDataStore\.deleteChecklist\(checklistId\)/g)]

@@ -11,7 +11,7 @@ import {
 } from '../lib/api'
 import { useClientPendingNotes, type ClientPendingNotesState } from '../hooks/useClientPendingNotes'
 import { renderRichNote } from '../lib/richText'
-import type { ClientNote } from '../lib/types'
+import { ApiError, type ClientNote } from '../lib/types'
 import { RichNoteEditor } from './RichNoteEditor'
 
 const noteStamp = new Intl.DateTimeFormat('en-US', {
@@ -44,7 +44,7 @@ export function ClientNotesPanel({
    *  loads its own. */
   pendingState?: ClientPendingNotesState
 }) {
-  const { data } = useAppContext()
+  const { data, previewMode } = useAppContext()
   const [notes, setNotes] = useState<ClientNote[]>([])
   const [draft, setDraft] = useState('')
   const [loading, setLoading] = useState(true)
@@ -144,8 +144,13 @@ export function ClientNotesPanel({
       })
       setPendingNotes((current) => [note, ...current])
       setPendingBody('')
-    } catch {
-      setPendingActionError('Could not add that note — please try again.')
+    } catch (err) {
+      // The cap (100 notes waiting) carries its own sentence; anything else is generic.
+      setPendingActionError(
+        err instanceof ApiError && err.code === 'too_many_pending_notes'
+          ? err.message
+          : 'Could not add that note — please try again.',
+      )
     } finally {
       setPendingBusy(false)
     }
@@ -195,6 +200,7 @@ export function ClientNotesPanel({
           {showPendingForm ? (
             <>
               <textarea
+                aria-label="Note for an upcoming checklist"
                 className="pending-note-textarea"
                 value={pendingBody}
                 onChange={(event) => setPendingBody(event.target.value)}
@@ -213,28 +219,32 @@ export function ClientNotesPanel({
                     </option>
                   ))}
                 </select>
-                <label className="pending-note-kind">
-                  <input
-                    type="radio"
-                    name={`pending-note-kind-${clientId}`}
-                    checked={pendingKind === 'task'}
-                    onChange={() => setPendingKind('task')}
-                  />
-                  Task
-                </label>
-                <label className="pending-note-kind">
-                  <input
-                    type="radio"
-                    name={`pending-note-kind-${clientId}`}
-                    checked={pendingKind === 'note'}
-                    onChange={() => setPendingKind('note')}
-                  />
-                  Note
-                </label>
+                <fieldset className="pending-note-kind-group">
+                  <legend className="visually-hidden">Add as</legend>
+                  <label className="pending-note-kind">
+                    <input
+                      type="radio"
+                      name={`pending-note-kind-${clientId}`}
+                      checked={pendingKind === 'task'}
+                      onChange={() => setPendingKind('task')}
+                    />
+                    Task
+                  </label>
+                  <label className="pending-note-kind">
+                    <input
+                      type="radio"
+                      name={`pending-note-kind-${clientId}`}
+                      checked={pendingKind === 'note'}
+                      onChange={() => setPendingKind('note')}
+                    />
+                    Note
+                  </label>
+                </fieldset>
                 <button
                   type="button"
                   className="secondary-action"
-                  disabled={pendingBusy || !pendingBody.trim() || !canAddSelected}
+                  disabled={Boolean(previewMode) || pendingBusy || !pendingBody.trim() || !canAddSelected}
+                  title={previewMode ? 'Disabled in preview mode' : undefined}
                   onClick={() => void submitPendingNote()}
                 >
                   {pendingBusy ? 'Adding…' : 'Add'}

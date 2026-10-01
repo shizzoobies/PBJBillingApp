@@ -2263,6 +2263,9 @@ function App() {
         // as isCleanRejection elsewhere in this file.
         setDataSyncState('synced')
         window.alert(error.message)
+        // A 409 means the tab is behind the server (the wait it was just told
+        // about is not on screen), so pull the fresh workspace now.
+        if (error.status === 409) requestLiveRefetchRef.current?.()
         return
       }
 
@@ -2297,6 +2300,7 @@ function App() {
         // so a 409 here means the render was stale, not that the save failed.
         setDataSyncState('synced')
         window.alert(error.message)
+        if (error.status === 409) requestLiveRefetchRef.current?.()
         return
       }
       setDataSyncState('error')
@@ -2390,6 +2394,7 @@ function App() {
         // so a 409 here means the render was stale, not that the save failed.
         setDataSyncState('synced')
         window.alert(error.message)
+        if (error.status === 409) requestLiveRefetchRef.current?.()
         return
       }
       setDataSyncState('error')
@@ -3217,9 +3222,11 @@ function App() {
         setDataSyncState('offline')
         return null
       }
-      if (error instanceof ApiError && error.status === 409) {
-        // A refusal, not a failure: nothing was written, so the tab is still in
-        // sync. The caller shows the server's sentence.
+      if (isCleanRejection(error) || (error instanceof ApiError && error.status === 404)) {
+        // A refusal, not a failure: nothing was written (a 404 is the step
+        // already gone, e.g. a second click on the same button), so the tab is
+        // still in sync. The caller shows the server's sentence and keeps its
+        // prompt open - a 400 / 404 never closes it silently.
         setDataSyncState('synced')
         throw error
       }

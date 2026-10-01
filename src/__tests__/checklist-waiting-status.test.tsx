@@ -83,10 +83,26 @@ const COMPLETE = checklist({
   items: [{ id: 'a', label: 'Reconcile', done: true, waiting: true }],
 } as Partial<Checklist>)
 
+/** Stored done, but a sub-step is still open and waiting: open by the roll-up (the rule Push uses). */
+const ROLLUP = checklist({
+  id: 'cl-rollup',
+  title: 'Roll-up close',
+  items: [
+    {
+      id: 'a',
+      label: 'Parent',
+      done: true,
+      subItems: [{ id: 's1', title: 'Open sub', done: false, waiting: true }],
+    },
+    { id: 'b', label: 'Finished', done: true },
+    { id: 'c', label: 'Still to do', done: false },
+  ],
+} as Partial<Checklist>)
+
 const data = {
   clients: [CLIENT],
   employees: [{ id: LISA, name: 'Lisa Chen', role: 'Bookkeeper' }],
-  checklists: [ONE_WAIT, TWO_WAITS, QUIET, VERIFIED, COMPLETE],
+  checklists: [ONE_WAIT, TWO_WAITS, QUIET, VERIFIED, COMPLETE, ROLLUP],
   checklistTemplates: [],
   recycledChecklists: [],
   timeEntries: [],
@@ -178,14 +194,22 @@ describe('FilterBar status options', () => {
 describe('the Waiting badge on an In progress row', () => {
   it('shows on a checklist with a waiting step, with the count in its tooltip', () => {
     renderPage()
-    expect(badge(cardFor('One wait close'))).toHaveAttribute(
-      'title',
-      '1 step waiting',
-    )
-    expect(badge(cardFor('Two waits close'))).toHaveAttribute(
-      'title',
-      '2 steps waiting',
-    )
+    // Says what it counts: steps AND sub-steps (the second card has one of each).
+    expect(badge(cardFor('One wait close'))).toHaveAttribute('title', '1 step or sub-step waiting')
+    expect(badge(cardFor('One wait close'))).toHaveTextContent('1 waiting')
+    expect(badge(cardFor('Two waits close'))).toHaveAttribute('title', '2 steps or sub-steps waiting')
+    expect(badge(cardFor('Two waits close'))).toHaveTextContent('2 waiting')
+  })
+
+  it('counts with the roll-up reading, and the progress badge and bar agree with it', () => {
+    renderPage()
+    const card = cardFor('Roll-up close')
+    // The parent is stored done but has an open waiting sub-step, so it is OPEN:
+    // 1 of 3 steps done (Push would carry the parent forward), not the 2 of 3 the stored flags say.
+    expect(card.querySelector('.checklist-progress-badge')).toHaveTextContent('1/3 done')
+    expect((card.querySelector('.progress-track span') as HTMLElement).style.width).toMatch(/^33\./)
+    expect(badge(card)).toHaveTextContent('1 waiting')
+    expect(badge(card)).toHaveAttribute('title', '1 step or sub-step waiting')
   })
 
   it('is absent on a checklist with nothing waiting', () => {

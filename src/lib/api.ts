@@ -3846,10 +3846,13 @@ export async function addClientPendingNoteRequest(
     body: JSON.stringify(note),
   })
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    // `too_many_pending_notes` (409) comes with a sentence for a person; the
+    // code rides along so the box can show it instead of a generic failure.
+    const { message, code } = await safeError(response)
     throw new ApiError(
       response.status,
-      body?.error ?? `Failed to add pending note (${response.status})`,
+      message || `Failed to add pending note (${response.status})`,
+      code,
     )
   }
   return ((await response.json()) as { note: ClientPendingNote }).note

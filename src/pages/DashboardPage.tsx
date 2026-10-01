@@ -24,7 +24,7 @@ import {
 // THE bill-rate chain the invoice is priced with, and the pin rule, so the
 // revenue estimate below says what the month run will.
 import { billRateAt, ratePeriodAsOf } from '../../lib/rate-history.js'
-import { waitingToggleRefusal } from '../../lib/waiting-on-state.js'
+import { WAITING_BLOCK_TITLES, waitingToggleRefusal } from '../../lib/waiting-on-state.js'
 import { useAppContext } from '../AppContext'
 import {
   fetchGlobalActivity,
@@ -1290,9 +1290,7 @@ function QueueGroup({
                           disabled
                             ? 'Disabled in preview mode'
                             : waitRefusal
-                              ? waitRefusal.where === 'own'
-                                ? 'Clear the wait first'
-                                : 'A sub-step is waiting - clear it first'
+                              ? WAITING_BLOCK_TITLES[waitRefusal.where]
                               : undefined
                         }
                       >

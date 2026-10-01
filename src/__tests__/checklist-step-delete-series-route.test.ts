@@ -94,7 +94,9 @@ describe('the tab merges the series delete as a server update', () => {
     const block = appSource.slice(at, at + 2400)
     expect(block).toContain('applyServerDataUpdate(')
     // The refusal reaches the prompt as a thrown ApiError instead of being swallowed.
-    expect(block).toContain('error.status === 409')
+    // Every clean refusal (400 / 403 / 409 / 422 / 423) and a 404 (the step is
+    // already gone, e.g. a double click) leaves the tab in sync and is rethrown.
+    expect(block).toContain('isCleanRejection(error) || (error instanceof ApiError && error.status === 404)')
     expect(block).toContain('throw error')
     expect(block).toContain('checklistTemplates: current.checklistTemplates.map')
     expect(block).not.toContain('updateWorkspaceData(')

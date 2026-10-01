@@ -538,14 +538,14 @@ function shortDate(iso: string): string {
   return `${(MONTH_NAMES[month - 1] ?? '').slice(0, 3)} ${day}`
 }
 
-/** The due / overdue / pending chip itself; reason text only for pending. */
+/** The due / overdue / waiting chip itself; reason text only for waiting (the same word the card's badge and the Waiting filter use). */
 function StatusChip({ status }: { status: BoardChecklistStatus }) {
   if (status.kind === 'pending') {
     const [first] = status.reasons
     const extra = status.waitingCount - 1
     return (
       <span className="board-chip board-chip-pending" title={status.reasons.join(' · ')}>
-        Pending — {first}
+        Waiting — {first}
         {extra > 0 ? ` (+${extra} more)` : ''}
       </span>
     )
@@ -624,7 +624,7 @@ function BoardClientRow({
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <span className="board-client-name">{name}</span>
         {pendingCount > 0 ? (
-          <span className="board-chip board-chip-pending">{pendingCount} pending</span>
+          <span className="board-chip board-chip-pending">{pendingCount} waiting</span>
         ) : null}
         {overdueCount > 0 ? (
           <span className="board-chip board-chip-overdue">{overdueCount} overdue</span>

@@ -157,7 +157,7 @@ describe('the statement dates box', () => {
     renderPanel('c1', [reconciliationTemplate('c1', ['Chase 7712'])])
     fireEvent.click(await screen.findByRole('button', { name: 'Chase 7712' }))
     expect(await screen.findByDisplayValue('Chase 7712')).toBeInTheDocument()
-    expect(screen.getByLabelText('Day')).toHaveValue('')
+    expect(screen.getByLabelText('Day for Chase 7712')).toHaveValue('')
   })
 
   it('ignores templates whose title does not mention reconciliation', async () => {
@@ -188,7 +188,7 @@ describe('the statement dates box', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add account/i }))
     const names = screen.getAllByPlaceholderText('Account name')
     fireEvent.change(names[1], { target: { value: 'TD Bank 4920' } })
-    fireEvent.change(screen.getAllByLabelText('Day')[1], { target: { value: '12' } })
+    fireEvent.change(screen.getByLabelText('Day for TD Bank 4920'), { target: { value: '12' } })
     fireEvent.click(screen.getByRole('button', { name: /^Save$/ }))
     await waitFor(() => expect(saveAccounts).toHaveBeenCalled())
     expect(saveAccounts).toHaveBeenCalledWith(
@@ -210,7 +210,7 @@ describe('the statement dates box', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add account/i }))
     const names = screen.getAllByPlaceholderText('Account name')
     fireEvent.change(names[names.length - 1], { target: { value: 'Amex 1108' } })
-    const days = screen.getAllByLabelText('Day')
+    const days = screen.getAllByLabelText(/^Day for /)
     fireEvent.change(days[days.length - 1], { target: { value: '3' } })
     fireEvent.click(screen.getByRole('button', { name: /^Save$/ }))
     await waitFor(() => expect(saveAccounts).toHaveBeenCalled())
@@ -408,7 +408,7 @@ describe('a stale save (409) is told to reload, not shown the generic save error
     fireEvent.change(screen.getByPlaceholderText('Account name'), {
       target: { value: 'TD Bank 4920' },
     })
-    fireEvent.change(screen.getByLabelText('Day'), { target: { value: '12' } })
+    fireEvent.change(screen.getByLabelText('Day for TD Bank 4920'), { target: { value: '12' } })
     fireEvent.click(screen.getByRole('button', { name: /^Save$/ }))
     expect(
       await screen.findByText('Could not save statement dates — please try again.'),
@@ -446,7 +446,7 @@ describe('an explicit Reload always takes, and a recovered load clears its error
     await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(1))
 
     expect(screen.getByDisplayValue('TD Bank 4920')).toBeDisabled()
-    expect(screen.getByLabelText('Day')).toBeDisabled()
+    expect(screen.getByLabelText('Day for TD Bank 4920')).toBeDisabled()
     expect(screen.getByRole('button', { name: /Remove TD Bank 4920/ })).toBeDisabled()
 
     pending.resolve(LOADED)
@@ -552,5 +552,38 @@ describe('an explicit Reload always takes, and a recovered load clears its error
 
     expect(screen.getByDisplayValue('Amex 1108')).toBeInTheDocument()
     expect(screen.queryByDisplayValue('TD Bank 4920')).not.toBeInTheDocument()
+  })
+})
+
+describe('accessible names and preview mode', () => {
+  it('names the account input and each Day select by the account they belong to', async () => {
+    listAccounts = vi.fn(async () => ({
+      accounts: [
+        { id: 'stmt-1', clientId: 'c1', name: 'TD Bank 4920', dayOfMonth: 12, sortOrder: 0 },
+        { id: 'stmt-2', clientId: 'c1', name: 'Amex 1108', dayOfMonth: 3, sortOrder: 1 },
+      ],
+      version: 'v0',
+    }))
+    renderPanel()
+    await screen.findByDisplayValue('TD Bank 4920')
+    expect(screen.getAllByLabelText('Account name')).toHaveLength(2)
+    expect(screen.getByLabelText('Day for TD Bank 4920')).toHaveValue('12')
+    expect(screen.getByLabelText('Day for Amex 1108')).toHaveValue('3')
+  })
+
+  it('disables Save, Add account and the chips with "Disabled in preview mode" while previewing', async () => {
+    listAccounts = vi.fn(async () => LOADED)
+    contextValue = {
+      data: { checklistTemplates: [reconciliationTemplate('c1', ['Chase 7712'])] } as unknown as AppData,
+      dataRefreshCount: 0,
+      previewMode: true,
+    } as unknown as AppContextValue
+    render(<ClientStatementsPanel clientId="c1" />)
+    await screen.findByDisplayValue('TD Bank 4920')
+    for (const name of [/^Save$/, /Add account/i, 'Chase 7712']) {
+      const button = screen.getByRole('button', { name })
+      expect(button).toBeDisabled()
+      expect(button).toHaveAttribute('title', 'Disabled in preview mode')
+    }
   })
 })

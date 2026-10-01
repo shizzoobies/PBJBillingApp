@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChecklistsPage } from '../pages/ChecklistsPage'
@@ -38,6 +38,17 @@ const checklist = (over: Partial<Checklist>): Checklist =>
 
 const RECURRING = checklist({ id: 'cl-recurring', title: 'Recurring close', templateId: 'tmpl-1' })
 const ONE_OFF = checklist({ id: 'cl-oneoff', title: 'One off cleanup' })
+/** A long card: the question has to appear at the step that was clicked, not below them all. */
+const TWO_STEPS = checklist({
+  id: 'cl-two',
+  title: 'Two step close',
+  templateId: 'tmpl-1',
+  items: [
+    { id: 'cl-two-first', label: 'First step', done: false },
+    { id: 'cl-two-second', label: 'Second step', done: false },
+    { id: 'cl-two-third', label: 'Third step', done: false },
+  ],
+} as Partial<Checklist>)
 
 const data = {
   clients: [CLIENT],
@@ -45,7 +56,7 @@ const data = {
     { id: LISA, name: 'Lisa Chen', role: 'Bookkeeper' },
     { id: OWNER, name: 'Patrice Owner', role: 'Owner' },
   ],
-  checklists: [RECURRING, ONE_OFF],
+  checklists: [RECURRING, ONE_OFF, TWO_STEPS],
   checklistTemplates: [],
   recycledChecklists: [],
   timeEntries: [],
@@ -283,6 +294,139 @@ describe('deleting a step on a recurring checklist', () => {
         'This is the last step of the recurring checklist. Delete or pause the recurring checklist instead.',
       )
       expect(prompt('Recurring close')).toBeInTheDocument()
+    })
+  })
+
+  describe('where the question appears and how it behaves', () => {
+    const stepItem = (label: string) =>
+      screen.getByText(label, { selector: '.task-row-title' }).closest('.task-item') as HTMLElement
+    const deleteStep = (label: string) =>
+      fireEvent.click(within(stepItem(label)).getAllByRole('button', { name: 'Delete item' })[0])
+
+    it('renders inside the row of the step being deleted, not below the whole list', () => {
+      renderPage()
+      deleteStep('Second step')
+      const group = within(stepItem('Second step')).getByRole('group', { name: 'Where to delete this step' })
+      expect(group).toHaveTextContent('Delete “Second step” from…')
+      // Not under the other steps, and only one question is open.
+      expect(
+        within(stepItem('First step')).queryByRole('group', { name: 'Where to delete this step' }),
+      ).not.toBeInTheDocument()
+      expect(
+        within(stepItem('Third step')).queryByRole('group', { name: 'Where to delete this step' }),
+      ).not.toBeInTheDocument()
+      expect(screen.getAllByRole('group', { name: 'Where to delete this step' })).toHaveLength(1)
+    })
+
+    it('takes focus when it opens, so the keyboard lands on the question', () => {
+      renderPage()
+      deleteStep('Second step')
+      const first = within(stepItem('Second step')).getByRole('button', { name: 'This checklist only' })
+      expect(first).toHaveFocus()
+    })
+
+    it('closes on Escape and deletes nothing', () => {
+      renderPage()
+      deleteStep('Second step')
+      fireEvent.keyDown(within(stepItem('Second step')).getByRole('button', { name: 'This checklist only' }), {
+        key: 'Escape',
+      })
+      expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument()
+      expect(deleteChecklistItem).not.toHaveBeenCalled()
+      expect(deleteChecklistItemFromSeries).not.toHaveBeenCalled()
+    })
+
+    it('does not close on Escape while a delete is running, and Cancel waits too', async () => {
+      let settle: (value?: unknown) => void = () => {}
+      deleteChecklistItemFromSeries.mockReturnValue(new Promise((resolve) => (settle = resolve)))
+      renderPage()
+      deleteStep('Second step')
+      const group = within(stepItem('Second step'))
+      fireEvent.click(group.getByRole('button', { name: 'This + all future' }))
+      await waitFor(() => expect(group.getByRole('button', { name: 'Cancel' })).toBeDisabled())
+      fireEvent.keyDown(group.getByRole('group', { name: 'Where to delete this step' }), { key: 'Escape' })
+      expect(screen.getByRole('group', { name: 'Where to delete this step' })).toBeInTheDocument()
+      settle({ removedFromTemplate: true, removedFromChecklists: [], keptOnChecklists: [] })
+      await waitFor(() =>
+        expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument(),
+      )
+    })
+
+    it('shows the server’s sentence for a refusal such as "already gone" and keeps the question open', async () => {
+      deleteChecklistItemFromSeries.mockRejectedValue(new Error('Checklist item not found'))
+      renderPage()
+      deleteStep('Second step')
+      fireEvent.click(within(stepItem('Second step')).getByRole('button', { name: 'This + all future' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('Checklist item not found')
+      expect(screen.getByRole('group', { name: 'Where to delete this step' })).toBeInTheDocument()
+      // The choices are live again, so the person can cancel or try something else.
+      await waitFor(() =>
+        expect(within(stepItem('Second step')).getByRole('button', { name: 'Cancel' })).not.toBeDisabled(),
+      )
+    })
+
+    it('opening the delete question closes the add question, and the other way round', () => {
+      renderPage()
+      const card = () => cardFor('Two step close')
+      const addBox = () => within(card()).getByPlaceholderText('Add an item...')
+      fireEvent.change(addBox(), { target: { value: 'Extra step' } })
+      fireEvent.keyDown(addBox(), { key: 'Enter' })
+      expect(within(card()).getByRole('group', { name: 'Where to add this task' })).toBeInTheDocument()
+
+      deleteStep('Second step')
+      expect(within(card()).queryByRole('group', { name: 'Where to add this task' })).not.toBeInTheDocument()
+      expect(within(card()).getByRole('group', { name: 'Where to delete this step' })).toBeInTheDocument()
+
+      fireEvent.change(addBox(), { target: { value: 'Another step' } })
+      fireEvent.keyDown(addBox(), { key: 'Enter' })
+      expect(within(card()).getByRole('group', { name: 'Where to add this task' })).toBeInTheDocument()
+      expect(within(card()).queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument()
+    })
+
+    it('is disabled with "Disabled in preview mode" while previewing as someone', () => {
+      contextValue = { ...contextValue, previewMode: true } as unknown as AppContextValue
+      renderPage()
+      deleteStep('Second step')
+      const group = within(stepItem('Second step'))
+      for (const name of ['This checklist only', 'This + all future']) {
+        const button = group.getByRole('button', { name })
+        expect(button).toBeDisabled()
+        expect(button).toHaveAttribute('title', 'Disabled in preview mode')
+      }
+    })
+  })
+
+  describe('the result notice is a passing one', () => {
+    const seriesResult = { removedFromTemplate: true, removedFromChecklists: ['a'], keptOnChecklists: [] }
+    const removeFromSeries = async () => {
+      deleteChecklistItemFromSeries.mockResolvedValue(seriesResult)
+      renderPage()
+      clickDelete('Recurring close')
+      fireEvent.click(within(prompt('Recurring close')).getByRole('button', { name: 'This + all future' }))
+      return screen.findByRole('status')
+    }
+
+    it('clears after 8 seconds', async () => {
+      const timers = vi.spyOn(window, 'setTimeout')
+      try {
+        const notice = await removeFromSeries()
+        expect(notice).toHaveTextContent('Removed from the recurring checklist')
+        // The notice armed exactly one 8-second timer; fire it as the clock would.
+        const eightSeconds = timers.mock.calls.filter(([, delay]) => delay === 8000)
+        expect(eightSeconds).toHaveLength(1)
+        act(() => {
+          ;(eightSeconds[0][0] as () => void)()
+        })
+        expect(screen.queryByRole('status')).not.toBeInTheDocument()
+      } finally {
+        timers.mockRestore()
+      }
+    })
+
+    it('clears on the next click on that card', async () => {
+      await removeFromSeries()
+      fireEvent.click(within(cardFor('Recurring close')).getByText('Recurring close'))
+      expect(screen.queryByRole('status')).not.toBeInTheDocument()
     })
   })
 

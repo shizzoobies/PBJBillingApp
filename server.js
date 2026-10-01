@@ -9866,6 +9866,15 @@ const server = createServer(async (request, response) => {
 
       await appDataStore.recordActivity(session.user.id, 'checklist_skipped', checklist.title)
 
+      // A note attached to this checklist is waiting again now (a skipped cycle
+      // never runs): re-run the attach pass for the client so the client page
+      // shows it right away, or moves it to the next checklist.
+      try {
+        await appDataStore.attachPendingClientNotes({ clientId: checklist.clientId })
+      } catch (error) {
+        console.error('[checklist-skip] pending-notes attach pass failed:', error)
+      }
+
       // Quiet for the person skipping; loud for the people who need to know.
       // Recipients come from the shared-client substitution in
       // lib/checklist-skip.js (owner always; an Accountant only for a
