@@ -26,6 +26,7 @@ import {
   formatSentOn,
   getBillingPeriodLabel,
   getInvoice,
+  INVOICE_STATUS_LABELS,
   isInBillingPeriod,
   isSafeHttpUrl,
   isSafeImageSrc,
@@ -871,9 +872,17 @@ export function InvoicesPage() {
    * the live calculation for that month, built by the same two functions the
    * page itself uses, with no edits — Customize belongs to the month it was
    * opened on. That sheet is committed by the effect above before it prints.
+   *
+   * A month that already has a SAVED invoice prints that, through the same path
+   * as the Print on its row in the month run: the dialog found it and hands it
+   * here, unless Customize is open on the page's month (her one-off sheet).
    */
-  const confirmPrint = (period: string) => {
+  const confirmPrint = (period: string, saved: PersistedInvoice | null) => {
     setPrintDialog(null)
+    if (saved) {
+      printStored(saved)
+      return
+    }
     setStoredPrint(null)
     if (period === billingPeriod) {
       setMonthPrint(null)
@@ -898,8 +907,10 @@ export function InvoicesPage() {
     <>
       {printDialog ? (
         <PrintInvoiceDialog
+          clientId={selectedClient.id}
           clientName={selectedClient.name}
           initialPeriod={printDialog.period}
+          pagePeriod={billingPeriod}
           customizeNote={customizing ? billingPeriodLabel : null}
           onPrint={confirmPrint}
           onCancel={() => setPrintDialog(null)}
@@ -1142,23 +1153,69 @@ export function InvoicesPage() {
  * the sheet cannot quietly be the top-bar month (the current one) while she is
  * invoicing the month before. Nothing prints until Print; Escape and Cancel
  * print nothing.
+ *
+ * It also looks for the client's SAVED invoice for the month chosen and says
+ * which sheet Print will give: the saved invoice (what the month run's own
+ * Print gives) or a fresh preview. The answer is kept with the client and month
+ * it was asked for, so a slow answer for a month she has since left is never
+ * read as the answer for the month now showing.
  */
 function PrintInvoiceDialog({
+  clientId,
   clientName,
   initialPeriod,
+  pagePeriod,
   customizeNote,
   onPrint,
   onCancel,
 }: {
+  clientId: string
   clientName: string
   initialPeriod: string
+  /** The month the page itself is on, the one Customize edits belong to. */
+  pagePeriod: string
   /** The month Customize edits belong to, while Customize is open. */
   customizeNote: string | null
-  onPrint: (period: string) => void
+  onPrint: (period: string, saved: PersistedInvoice | null) => void
   onCancel: () => void
 }) {
   const [period, setPeriod] = useState(initialPeriod)
   const valid = /^\d{4}-(0[1-9]|1[0-2])$/.test(period)
+  const lookupKey = `${clientId}::${period}`
+  const [lookup, setLookup] = useState<{
+    key: string
+    saved: PersistedInvoice | null
+    failed: boolean
+  } | null>(null)
+  useEffect(() => {
+    if (!valid) return
+    let stale = false
+    void (async () => {
+      try {
+        const invoices = await listInvoicesRequest(period)
+        // A live row only (void rows count as none), and the MONTHLY one when
+        // the client also has a retainer invoice issued that month: the lower
+        // Print is the month's invoice, and a retainer is another document.
+        const saved =
+          invoices.find(
+            (entry) =>
+              entry.clientId === clientId && entry.status !== 'void' && entry.kind !== 'retainer',
+          ) ?? null
+        if (!stale) setLookup({ key: lookupKey, saved, failed: false })
+      } catch {
+        if (!stale) setLookup({ key: lookupKey, saved: null, failed: true })
+      }
+    })()
+    return () => {
+      stale = true
+    }
+  }, [valid, period, clientId, lookupKey])
+  const answer = valid && lookup?.key === lookupKey ? lookup : null
+  const checking = valid && !answer
+  const saved = answer?.saved ?? null
+  // Customize is her deliberate one-off sheet for the page's own month.
+  const customizedHere = Boolean(customizeNote) && period === pagePeriod
+  const savedLabel = saved ? `saved invoice${saved.number ? ` ${saved.number}` : ''}` : ''
   return (
     <AddModal title="Print invoice" onClose={onCancel}>
       <p className="modal-intro">Which month is this invoice for?</p>
@@ -1179,6 +1236,24 @@ function PrintInvoiceDialog({
       {customizeNote ? (
         <p className="modal-intro">Customize edits apply to {customizeNote} only.</p>
       ) : null}
+      {checking ? (
+        <p className="modal-intro">Checking for a saved invoice...</p>
+      ) : answer?.failed ? (
+        <p className="modal-intro" role="alert">
+          Could not check for a saved invoice. Try again.
+        </p>
+      ) : saved ? (
+        <p className="modal-intro">
+          {customizedHere
+            ? `Prints this page with your Customize edits, not the ${savedLabel}.`
+            : `Prints the ${savedLabel} (${INVOICE_STATUS_LABELS[saved.status] ?? saved.status}).`}
+        </p>
+      ) : answer ? (
+        <p className="modal-intro">
+          No invoice has been generated for {getBillingPeriodLabel(period)} yet. Prints a preview from
+          current time and rates.
+        </p>
+      ) : null}
       <div className="button-row">
         <button type="button" className="secondary-action" onClick={onCancel}>
           Cancel
@@ -1186,8 +1261,8 @@ function PrintInvoiceDialog({
         <button
           type="button"
           className="primary-action"
-          disabled={!valid}
-          onClick={() => onPrint(period)}
+          disabled={!valid || !answer || answer.failed}
+          onClick={() => onPrint(period, customizedHere ? null : saved)}
         >
           Print
         </button>

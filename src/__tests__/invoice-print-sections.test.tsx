@@ -247,6 +247,8 @@ async function printLive(month = '2026-08') {
   fireEvent.click(await screen.findByRole('button', { name: 'Print invoice' }))
   const dialog = within(await screen.findByRole('dialog', { name: 'Print invoice' }))
   fireEvent.change(dialog.getByLabelText('Billing month'), { target: { value: month } })
+  // The dialog first looks for a saved invoice for the month; Print waits on it.
+  await waitFor(() => expect(dialog.getByRole('button', { name: 'Print' })).toBeEnabled())
   fireEvent.click(dialog.getByRole('button', { name: 'Print' }))
   await waitFor(() => expect(printInvoice).toHaveBeenCalled())
 }

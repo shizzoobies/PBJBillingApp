@@ -137,6 +137,12 @@ const openDialog = async () => {
 const setMonth = (dialog: ReturnType<typeof within>, value: string) =>
   fireEvent.change(dialog.getByLabelText('Billing month'), { target: { value } })
 
+// Print waits on the dialog's look for a saved invoice, so it is pressed only once enabled.
+const clickPrint = async (dialog: ReturnType<typeof within>) => {
+  await waitFor(() => expect(dialog.getByRole('button', { name: 'Print' })).toBeEnabled())
+  fireEvent.click(dialog.getByRole('button', { name: 'Print' }))
+}
+
 const addCustomLine = async () => {
   fireEvent.click(await screen.findByRole('button', { name: 'Customize' }))
   fireEvent.click(await screen.findByRole('button', { name: 'Add line' }))
@@ -204,7 +210,7 @@ describe('Print invoice asks which month', () => {
     const dialog = await openDialog()
 
     expect(dialog.getByText('Which month is this invoice for?')).toBeInTheDocument()
-    expect(dialog.getByRole('button', { name: 'Print' })).toBeEnabled()
+    await waitFor(() => expect(dialog.getByRole('button', { name: 'Print' })).toBeEnabled())
     expect(printInvoice).not.toHaveBeenCalled()
   })
 
@@ -242,7 +248,7 @@ describe('Print invoice asks which month', () => {
     setMonth(dialog, '')
     expect(dialog.getByRole('button', { name: 'Print' })).toBeDisabled()
     setMonth(dialog, '2026-09')
-    expect(dialog.getByRole('button', { name: 'Print' })).toBeEnabled()
+    await waitFor(() => expect(dialog.getByRole('button', { name: 'Print' })).toBeEnabled())
   })
 
   it('prints the live calculation for a different month, dated that month’s last day', async () => {
@@ -252,7 +258,7 @@ describe('Print invoice asks which month', () => {
 
     const dialog = await openDialog()
     setMonth(dialog, '2026-09')
-    fireEvent.click(dialog.getByRole('button', { name: 'Print' }))
+    await clickPrint(dialog)
 
     await waitFor(() => expect(printInvoice).toHaveBeenCalledOnce())
     expect(screen.queryByRole('dialog', { name: 'Print invoice' })).toBeNull()
@@ -266,7 +272,7 @@ describe('Print invoice asks which month', () => {
     renderInShell()
     const dialog = await openDialog()
     setMonth(dialog, '2026-09')
-    fireEvent.click(dialog.getByRole('button', { name: 'Print' }))
+    await clickPrint(dialog)
     await waitFor(() => expect(printInvoice).toHaveBeenCalledOnce())
     expect(printed()).toContain('$300.00')
 
@@ -286,7 +292,7 @@ describe('Print invoice asks which month', () => {
     const dialog = await openDialog()
     expect(dialog.getByText('Customize edits apply to October 2026 only.')).toBeInTheDocument()
     setMonth(dialog, '2026-10')
-    fireEvent.click(dialog.getByRole('button', { name: 'Print' }))
+    await clickPrint(dialog)
 
     await waitFor(() => expect(printInvoice).toHaveBeenCalledOnce())
     expect(printed()).toContain('Custom review fee')
@@ -298,7 +304,7 @@ describe('Print invoice asks which month', () => {
 
     const dialog = await openDialog()
     setMonth(dialog, '2026-09')
-    fireEvent.click(dialog.getByRole('button', { name: 'Print' }))
+    await clickPrint(dialog)
 
     await waitFor(() => expect(printInvoice).toHaveBeenCalledOnce())
     expect(printed()).not.toContain('Custom review fee')
