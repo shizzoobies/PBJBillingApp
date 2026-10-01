@@ -247,7 +247,11 @@ describe('InvoiceMonthRun — the credit at the edges', () => {
   // else while this tab sat open.
   it('explains a refused credit beside the lines, and takes it back out', async () => {
     mockUpdate.mockRejectedValue(
-      new ApiError(409, 'That retainer has already been applied to another invoice.'),
+      new ApiError(
+        409,
+        'That retainer has already been applied to another invoice.',
+        'retainer_credit_refused',
+      ),
     )
     await openEditor()
     await waitFor(() => expect(applyButton()).toBeInTheDocument())
@@ -267,8 +271,9 @@ describe('InvoiceMonthRun — the credit at the edges', () => {
     await waitFor(() => expect(mockRetainers).toHaveBeenCalledTimes(2))
   })
 
-  // An ordinary failure is still the run's business, not the editor's.
-  it('leaves a non-retainer failure to the run, with the lines intact', async () => {
+  // An ordinary failure reports to the run's banner and, since the save was
+  // hers, beside Save as well — hence two copies of the sentence.
+  it('reports a non-retainer failure without touching the lines', async () => {
     mockUpdate.mockRejectedValue(new ApiError(500, 'Could not save that change — please try again.'))
     await openEditor()
     await waitFor(() => expect(applyButton()).toBeInTheDocument())
@@ -277,8 +282,8 @@ describe('InvoiceMonthRun — the credit at the edges', () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText('Could not save that change — please try again.'),
-      ).toBeInTheDocument(),
+        screen.getAllByText('Could not save that change — please try again.'),
+      ).toHaveLength(2),
     )
     expect(screen.getByDisplayValue('Retainer applied — credit')).toBeInTheDocument()
   })

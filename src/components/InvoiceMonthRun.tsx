@@ -219,7 +219,7 @@ const ADHOC_CHOICES: ReadonlyArray<{ value: AdhocMode; label: string }> = [
  */
 type PatchResult =
   | { ok: true; invoice: PersistedInvoice }
-  | { ok: false; message: string; retainer: boolean; locked: boolean }
+  | { ok: false; message: string; retainer: boolean; locked: boolean; code?: string }
 
 /**
  * Everything ONE invoice's hours panel needs, resolved by the run rather than
@@ -1184,12 +1184,15 @@ export function InvoiceMonthRun({
       // banner: it is about the lines she is looking at, the sentence names the
       // other invoice involved, and it comes with the credit line being taken
       // back out — none of which reads as a message about the month.
-      // Two different 409s reach here now, and only one is about a retainer.
-      // Keyed on the CODE rather than the status, because the wrong branch would
-      // take a credit back out of an invoice that never had one refused.
+      // Four different 409s reach here (retainer_credit_refused,
+      // coverage_unconfirmed, invoice_locked, entry_tag_refused) and only one is
+      // about a retainer. Keyed on the CODE rather than the status, because the
+      // wrong branch would take a credit back out of an invoice that never had
+      // one refused. Every other failure, including a code this screen has not
+      // met yet, is an ordinary error.
       const code = err instanceof ApiError ? err.code : undefined
       const locked = code === 'invoice_locked'
-      const refusedRetainer = err instanceof ApiError && err.status === 409 && !locked
+      const refusedRetainer = code === 'retainer_credit_refused'
       if (refusedRetainer || locked) {
         // Whatever the server knows about that retainer, we now do not. Re-ask
         // before offering it to anybody else.
@@ -1197,7 +1200,7 @@ export function InvoiceMonthRun({
       } else {
         setError(message)
       }
-      return { ok: false, message, retainer: refusedRetainer, locked }
+      return { ok: false, message, retainer: refusedRetainer, locked, code }
     } finally {
       setBusy(false)
     }
@@ -2204,7 +2207,19 @@ function InvoiceEditor({
     if (refused) setAiError(refused)
     setApproveBusy(false)
     setApproving(false)
-    await onPatch({ status: 'reviewed' })
+    await reviewOrSayWhy()
+  }
+
+  /**
+   * The status patch behind Mark reviewed. A refusal (unconfirmed covered dates,
+   * a locked invoice) is said in the editor's own error slot beside the buttons:
+   * the run's banner sits above the whole list, and a button that appears to do
+   * nothing is the worst answer to a refusal.
+   */
+  const reviewOrSayWhy = async () => {
+    setRetainerError(null)
+    const result = await onPatch({ status: 'reviewed' })
+    if (!result.ok) setRetainerError(result.message)
   }
 
   /**
@@ -2219,7 +2234,7 @@ function InvoiceEditor({
       setApproving(true)
       return
     }
-    void onPatch({ status: 'reviewed' })
+    void reviewOrSayWhy()
   }
 
   const confirmCoverage = async (recurringId: string, range: { start: string; end: string }) => {
@@ -2701,7 +2716,13 @@ function InvoiceEditor({
       setRetainerError(result.message)
       return
     }
-    if (!result.retainer) return
+    // Any other refusal (a re-tag the server would not make, an unknown code)
+    // wrote nothing: say why beside Save and leave every line, tag edit and
+    // note exactly as she left them, so Save stays live for her to fix it.
+    if (!result.retainer) {
+      setRetainerError(result.message)
+      return
+    }
     // The server would not honor the credit — most often because that retainer
     // was given back somewhere else while this tab sat open. Say so HERE, beside
     // the lines it is about, and take the credit back out: leaving it in would
