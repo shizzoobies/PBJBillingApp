@@ -223,12 +223,12 @@ describe('waiting steps and the status filter', () => {
     expect(idsFor([c], 'waiting')).toEqual(['a'])
   })
 
-  it('a parent whose sub-steps are all done but whose own stored done is false and own waiting flag is on still counts as waiting', () => {
+  it('a parent whose sub-steps are all done is done by the roll-up even if its own flag lags, so its wait is not counted', () => {
     const c = withItems('2026-12-01', [
       open({ id: 'a', done: false, waiting: true, subItems: [{ id: 's', label: 's', done: true }] }),
       open({ id: 'b' }),
     ])
-    expect(waitingStepCount(c)).toBe(1)
+    expect(waitingStepCount(c)).toBe(0)
   })
 
   it('a waiting sub-step and a waiting sub-sub-step count', () => {

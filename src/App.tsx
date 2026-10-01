@@ -3225,10 +3225,11 @@ function App() {
       if (isCleanRejection(error) || (error instanceof ApiError && error.status === 404)) {
         // A refusal, not a failure: nothing was written (a 404 is the step
         // already gone, e.g. a second click on the same button), so the tab is
-        // still in sync. The caller shows the server's sentence and keeps its
-        // prompt open - a 400 / 404 never closes it silently.
+        // still in sync. On a 400 / 409 the caller shows the server's sentence
+        // and keeps its prompt open.
         setDataSyncState('synced')
-        // A 404 means the row the server says is gone is still on this screen.
+        // A 404 means the row the server says is gone is still on this screen:
+        // the refetch removes it, and the prompt closes with its step.
         if (error instanceof ApiError && error.status === 404) requestLiveRefetchRef.current?.()
         throw error
       }
