@@ -8,6 +8,7 @@ import {
   AppDataStore,
   BillingMasterError,
   CHECKLIST_ITEM_SELECT_COLUMNS,
+  ClientHasHistoryError,
   CLIENT_SELECT_COLUMNS,
   CREATED_AT_PRESERVED_TABLES,
   CoverageConfirmationError,
@@ -160,6 +161,11 @@ beforeEach(async () => {
   // Skipping this passed locally and failed the first CI run, because a clean
   // clone has no tmp/ — a test that depended on ambient machine state.
   await store.initialize()
+  // Start from an empty workspace file. The baseline write below REPLACES the
+  // whole workspace, and a bulk save now refuses to drop a stored client that
+  // has time entries or invoices - which the previous test's leftovers (clients
+  // with time, written by the test before this one) would otherwise trip.
+  await rm(localDataPath, { force: true })
   // Baseline, unguarded (server-authoritative writes pass no expectedVersion).
   await store.write(workspace())
 })
@@ -1022,6 +1028,9 @@ function fakePostgres({
   checklistIndexV3Exists = false,
   // { pattern, error }: throw `error` on the first statement matching `pattern`.
   failOn = null,
+  // Stored clients that have time entries or invoices, as the bulk save's
+  // history check would select them: { id, name, has_time, has_invoices }.
+  clientsWithHistory = [],
 } = {}) {
   const statements = []
   // The instance unique index
@@ -1083,6 +1092,16 @@ function fakePostgres({
     statements.push({ text: trimmed, params })
     if (failOn && failOn.pattern.test(trimmed)) throw failOn.error
     if (simulateChecklistUniqueness) simulateUniqueness(trimmed, params)
+    // The bulk save's "never delete a client who has history" read. FIRST, and
+    // actually filtering by the kept ids ($1), for two reasons: its text names
+    // `from invoices` and `from time_entries`, so the general invoice select
+    // further down would otherwise swallow it and answer every invoice row; and
+    // answering every stored client would make a test that proves the guard
+    // spares a client still in the payload pass no matter what the store does.
+    if (/^select c\.id, c\.name,[\s\S]*from clients c\s+where not \(c\.id = any\(\$1::text\[\]\)\)/i.test(trimmed)) {
+      const kept = new Set(params?.[0] ?? [])
+      return { rows: clientsWithHistory.filter((row) => !kept.has(row.id)) }
+    }
     // The workspace fingerprint (lib/workspace-version.js) — read()'s
     // pre-capture and write()'s in-transaction re-check issue the same SQL.
     // `versionResponses` scripts the answers in order, so a test can make the
@@ -5310,6 +5329,9 @@ describe('the payment window on generated invoices (file backend)', () => {
  * next save. One `coerceLifecycleStage` guards all three write paths.
  */
 describe('lifecycle stage validation (file backend)', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
+  beforeEach(() => rm(localDataPath, { force: true }))
   it('accepts all four real stages through a bulk save', async () => {
     await store.write(
       workspace({
@@ -7347,6 +7369,13 @@ describe('pending client notes (file backend)', () => {
  * that decides WHEN this runs relative to `read()` is pinned separately below.
  */
 describe('pending client notes — attach pass (file backend)', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices. The
+  // file has to exist afterwards, with nothing in it.
+  beforeEach(async () => {
+    await rm(localDataPath, { force: true })
+    await store.write(workspace({ clients: [], timeEntries: [] }))
+  })
   const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
 
   const checklistFixture = (id, { createdAt, dueDate, deletedAt, skippedAt, clientId = 'c1' }) => ({
@@ -15781,6 +15810,9 @@ describe('invoice time-breakdown settings round-trip the bulk save (file backend
  * column-count test above names these columns too.
  */
 describe('consolidated billing: the three client columns (file backend)', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
+  beforeEach(() => rm(localDataPath, { force: true }))
   const roster = () => [
     {
       id: 'klc-master',
@@ -15843,6 +15875,9 @@ describe('consolidated billing: the three client columns (file backend)', () => 
  * write and took the app offline for a day (2026-06-17).
  */
 describe('consolidated billing: bill-to links are resolved on write', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
+  beforeEach(() => rm(localDataPath, { force: true }))
   const links = (clients) => sanitizeClientBillingLinks(clients)
 
   const master = { id: 'm', name: 'KLC Master', isBillingMaster: true }
@@ -15958,6 +15993,9 @@ describe('consolidated billing: bill-to links are resolved on write', () => {
  * looking at a "Bills to" she set and the app did not keep.
  */
 describe('consolidated billing: createClient refuses a link that does not hold', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
+  beforeEach(() => rm(localDataPath, { force: true }))
   beforeEach(async () => {
     await store.write(
       workspace({
@@ -16023,6 +16061,9 @@ describe('consolidated billing: createClient refuses a link that does not hold',
  * maintains.
  */
 describe('consolidated billing: a billing master refuses work of its own', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
+  beforeEach(() => rm(localDataPath, { force: true }))
   beforeEach(async () => {
     await store.write(
       workspace({
@@ -16184,6 +16225,9 @@ describe('consolidated billing: a billing master refuses work of its own', () =>
  * it came from.
  */
 describe('consolidated billing: generateInvoicesForPeriod merges the subs', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
+  beforeEach(() => rm(localDataPath, { force: true }))
   const period = '2026-08'
 
   async function seedGroup(overrides = {}) {
@@ -16535,6 +16579,9 @@ describe('consolidated billing: generateInvoicesForPeriod merges the subs', () =
  * where the last outage was reconstructed from.
  */
 describe('consolidated billing: a dissolved group is logged, not refused', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
+  beforeEach(() => rm(localDataPath, { force: true }))
   it('warns and names every link it dropped', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
@@ -16592,6 +16639,9 @@ describe('consolidated billing: a dissolved group is logged, not refused', () =>
  * look reasonable and would silently stop four cycles.
  */
 describe('consolidated billing: a sub’s covered-date ledger rides the master’s invoice', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
+  beforeEach(() => rm(localDataPath, { force: true }))
   const period = '2026-08'
 
   async function seedGroupWithCoverage() {
@@ -19177,6 +19227,9 @@ describe('copyTemplateToClient stamps where the copy came from', () => {
  * version and every hourly client gets a pin at the cutover.
  */
 describe('rate history: migration + client pin (file backend)', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
+  beforeEach(() => rm(localDataPath, { force: true }))
   beforeEach(async () => {
     const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
     authState.billRateVersions = []
@@ -20075,6 +20128,9 @@ describe('removing a bill rate version the ledger still points at (postgres bran
  * stored still wins outright.
  */
 describe('a client that becomes Hourly is pinned at save time (file backend)', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
+  beforeEach(() => rm(localDataPath, { force: true }))
   const thisMonth = () => new Date().toISOString().slice(0, 7)
 
   it('pins a subscription client that is saved again as Hourly', async () => {
@@ -20313,6 +20369,9 @@ describe('the cost-rate refusal talks about days (file backend)', () => {
  * while a new one starts on today's.
  */
 describe('the month run bills each client at its own pin (file backend)', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
+  beforeEach(() => rm(localDataPath, { force: true }))
   beforeEach(async () => {
     const authState = existsSync(localAuthPath)
       ? JSON.parse(await readFile(localAuthPath, 'utf8'))
@@ -20390,6 +20449,8 @@ describe('the month run bills each client at its own pin (file backend)', () => 
    * both subs the same and collapse this to two lines at one rate.
    */
   it('prices each sub of a billing master at its own pin before the merge', async () => {
+    // Replaces the describe's two clients (which have time) with its own.
+    await rm(localDataPath, { force: true })
     await store.write(
       workspace({
         employees: [{ id: 'emp-lisa', name: 'Lisa', role: 'bookkeeper' }],
@@ -21574,12 +21635,16 @@ describe('proposal letters (both backends)', () => {
 })
 
 describe('accepting a proposal (file backend)', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
   beforeEach(async () => {
     await clearProposals()
     await setProposalRates(store)
     await store.write(
       workspace({
         plans: [{ id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: [] }],
+        // No time on the baseline client, so a test may replace the client list.
+        timeEntries: [],
       }),
     )
   })
@@ -23067,6 +23132,9 @@ describe('deleteChecklistItemFromSeries (postgres branch)', () => {
  * note's step link. Both backends.
  */
 describe('pending notes: cap, capped list, attach guards (file backend)', () => {
+  // These fixtures replace the whole workspace, so they start from none: a bulk
+  // save refuses to drop a stored client that has time entries or invoices.
+  beforeEach(() => rm(localDataPath, { force: true }))
   const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
   const authNow = async () =>
     existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
@@ -24531,5 +24599,192 @@ describe('the owner ticks a waiting step (postgres branch)', () => {
         closeWaitsBy: OWNER_ID,
       }),
     ).toBeNull()
+  })
+})
+
+/**
+ * A client with time entries or invoices in the DATABASE is never deleted by a
+ * bulk save, whatever the payload says (tracker featreq-27836ea0). Before this
+ * a deleted client took its time entries with it and silently dropped its
+ * invoices - the page said they would be "left intact".
+ */
+describe('bulk save refuses to delete a client with history (file backend)', () => {
+  const invoice = (id, clientId, status = 'sent') => ({ id, clientId, period: '2026-08', status })
+
+  async function persisted() {
+    return JSON.parse(await readFile(localDataPath, 'utf8'))
+  }
+
+  it('refuses a payload missing a client that has stored time entries, and writes nothing', async () => {
+    const before = await readFile(localDataPath, 'utf8')
+    const error = await store.write(workspace({ clients: [], timeEntries: [] })).catch((e) => e)
+
+    expect(error).toBeInstanceOf(ClientHasHistoryError)
+    expect(error.message).toBe(
+      'Acme has time logged and cannot be deleted. Reload and mark it inactive instead.',
+    )
+    // Not the stale-tab error: the endpoint tells the two apart by class.
+    expect(error).not.toBeInstanceOf(StaleWorkspaceError)
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('refuses a payload missing a client that has only an invoice (void included)', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Voided Co' },
+        ],
+        invoices: [invoice('inv-1', 'c2', 'void')],
+      }),
+    )
+    const before = await readFile(localDataPath, 'utf8')
+
+    const error = await store
+      .write(workspace({ clients: [{ id: 'c1', name: 'Acme' }], invoices: [] }))
+      .catch((e) => e)
+
+    expect(error).toBeInstanceOf(ClientHasHistoryError)
+    expect(error.message).toBe(
+      'Voided Co has invoices and cannot be deleted. Reload and mark it inactive instead.',
+    )
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('still deletes a client with no time and no invoices, as before', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Mistake Co' },
+        ],
+      }),
+    )
+    await expect(
+      store.write(workspace({ clients: [{ id: 'c1', name: 'Acme' }] })),
+    ).resolves.toBeUndefined()
+
+    const after = await persisted()
+    expect(after.clients.map((c) => c.id)).toEqual(['c1'])
+  })
+
+  it('does not refuse a save that keeps every client, even ones with history', async () => {
+    await expect(store.write(workspace())).resolves.toBeUndefined()
+  })
+
+  it('answers a stale tab with the stale error first, so the tab reloads', async () => {
+    const staleVersion = await store.computeWorkspaceVersion()
+    await store.write(
+      workspace({
+        timeEntries: [
+          { id: 't1', minutes: 30, clientId: 'c1' },
+          { id: 't2', minutes: 5, clientId: 'c1' },
+        ],
+      }),
+    )
+    await expect(
+      store.write(workspace({ clients: [], timeEntries: [] }), { expectedVersion: staleVersion }),
+    ).rejects.toBeInstanceOf(StaleWorkspaceError)
+  })
+
+  it("counts a client's invoices, void ones too", async () => {
+    await store.write(
+      workspace({
+        invoices: [invoice('inv-1', 'c1', 'void'), invoice('inv-2', 'c1'), invoice('inv-3', 'c9')],
+      }),
+    )
+    expect(await store.countClientInvoices('c1')).toBe(2)
+    expect(await store.countClientInvoices('nobody')).toBe(0)
+  })
+})
+
+describe('bulk save refuses to delete a client with history (postgres branch)', () => {
+  const withTime = { id: 'c-time', name: 'Timely LLC', has_time: true, has_invoices: false }
+  const withInvoice = { id: 'c-inv', name: 'Billed Inc', has_time: false, has_invoices: true }
+
+  it('refuses inside the transaction, before any delete, and commits nothing', async () => {
+    const fake = fakePostgres({ clientsWithHistory: [withTime] })
+    const error = await postgresStore(fake).write(workspace()).catch((e) => e)
+
+    expect(error).toBeInstanceOf(ClientHasHistoryError)
+    expect(error.message).toBe(
+      'Timely LLC has time logged and cannot be deleted. Reload and mark it inactive instead.',
+    )
+
+    const texts = fake.statements.map((s) => s.text)
+    const beginAt = fake.indexOf(/^begin$/i)
+    const checkAt = fake.indexOf(/^select c\.id, c\.name,/i)
+    expect(beginAt).toBeGreaterThan(-1)
+    expect(checkAt).toBeGreaterThan(beginAt)
+    // Nothing destructive ran, nothing was committed, and the rollback did.
+    expect(fake.matching(/^delete from /i)).toHaveLength(0)
+    expect(fake.matching(/^insert into /i)).toHaveLength(0)
+    expect(texts).not.toContain('commit')
+    expect(texts).toContain('rollback')
+    expect(texts.indexOf('rollback')).toBeGreaterThan(checkAt)
+  })
+
+  it('names a client with only invoices in the invoice words', async () => {
+    const fake = fakePostgres({ clientsWithHistory: [withInvoice] })
+    const error = await postgresStore(fake).write(workspace()).catch((e) => e)
+
+    expect(error).toBeInstanceOf(ClientHasHistoryError)
+    expect(error.message).toBe(
+      'Billed Inc has invoices and cannot be deleted. Reload and mark it inactive instead.',
+    )
+  })
+
+  it('is ONE set-based statement carrying the kept ids, not a query per client', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Beta' },
+        ],
+      }),
+    )
+
+    const checks = fake.matching(/^select c\.id, c\.name,/i)
+    expect(checks).toHaveLength(1)
+    expect(checks[0].params).toEqual([['c1', 'c2']])
+    expect(checks[0].text).toMatch(/from time_entries t where t\.client_id = c\.id/)
+    expect(checks[0].text).toMatch(/from invoices i where i\.client_id = c\.id/)
+  })
+
+  it('runs AFTER the staleness fingerprint and BEFORE the first delete', async () => {
+    const fake = fakePostgres({ clientsWithHistory: [withTime] })
+    const pgStore = postgresStore(fake)
+    const current = await pgStore.computeWorkspaceVersion()
+
+    // A stale tab is told to reload first: the history check never ran.
+    await expect(pgStore.write(workspace(), { expectedVersion: 'stale' })).rejects.toBeInstanceOf(
+      StaleWorkspaceError,
+    )
+    expect(fake.matching(/^select c.id, c.name,/i)).toHaveLength(0)
+
+    // A current tab reaches the history check, which runs ahead of every delete.
+    await expect(
+      pgStore.write(workspace(), { expectedVersion: current }),
+    ).rejects.toBeInstanceOf(ClientHasHistoryError)
+    expect(fake.matching(/^delete from /i)).toHaveLength(0)
+  })
+
+  it('lets a payload that keeps the client with history, and drops nothing else, through to the wipe', async () => {
+    const fake = fakePostgres({ clientsWithHistory: [withTime] })
+    // The one client with history is KEPT in the payload.
+    await postgresStore(fake).write(workspace({ clients: [{ id: 'c-time', name: 'Timely LLC' }] }))
+
+    expect(fake.matching(/^delete from clients$/i)).toHaveLength(1)
+    expect(fake.statements.map((s) => s.text)).toContain('commit')
+  })
+
+  it('lets a payload that drops a client with no history through to the wipe', async () => {
+    // The fake lists NO client with history, so the dropped one has none.
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace({ clients: [] }))
+
+    expect(fake.matching(/^delete from clients$/i)).toHaveLength(1)
+    expect(fake.statements.map((s) => s.text)).toContain('commit')
   })
 })

@@ -59,6 +59,7 @@ import {
   fileWorkspaceVersion,
   postgresWorkspaceVersion,
 } from '../lib/workspace-version.js'
+import { clientHistoryRefusal } from '../lib/client-delete-rule.js'
 import {
   periodLabelForInstance,
   sanitizeCoverageDate,
@@ -1017,6 +1018,39 @@ export class ProposalStateError extends Error {
     this.name = 'ProposalStateError'
   }
 }
+
+/**
+ * A bulk save that would delete a client who still has time entries or
+ * invoices in the database. A fact about the data, not a bug: the endpoint
+ * answers 409 `client_has_history` with `message` (which names the client) and
+ * NOTHING is written. Deliberately not `StaleWorkspaceError`: that one means
+ * "reload and your change is gone", this one means "this particular change may
+ * never be made".
+ */
+export class ClientHasHistoryError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'ClientHasHistoryError'
+  }
+}
+
+/**
+ * The stored clients absent from `keptIds` that have time entries or invoices,
+ * one row each. ONE set-based statement - never a query per client - and run
+ * on the same connection as the bulk write so it sees what the write is about
+ * to delete. `invoices` is not in the payload, so only the database can say.
+ */
+const CLIENTS_WITH_HISTORY_SQL = `
+  select c.id, c.name,
+         exists (select 1 from time_entries t where t.client_id = c.id) as has_time,
+         exists (select 1 from invoices i where i.client_id = c.id) as has_invoices
+    from clients c
+   where not (c.id = any($1::text[]))
+     and (exists (select 1 from time_entries t where t.client_id = c.id)
+          or exists (select 1 from invoices i where i.client_id = c.id))
+   order by c.name
+   limit 1
+`
 
 /**
  * The statement dates box's save was sent a `version` that no longer matches
@@ -7182,6 +7216,25 @@ export class AppDataStore {
           }
         }
 
+        // A client with time or invoices in the DATABASE is never deleted by a
+        // bulk save, whatever the payload says (a stale tab, a bug, a crafted
+        // request). After the staleness check on purpose: a stale tab is told
+        // to reload first, and only a current one can reach this. Same
+        // transaction as the deletes below, so nothing can log time between
+        // this look and the wipe. Throwing lands in the catch's rollback.
+        const keptClientIds = (Array.isArray(data.clients) ? data.clients : [])
+          .map((c) => c?.id)
+          .filter((id) => typeof id === 'string')
+        const blocked = (await client.query(CLIENTS_WITH_HISTORY_SQL, [keptClientIds])).rows[0]
+        if (blocked) {
+          throw new ClientHasHistoryError(
+            clientHistoryRefusal(blocked.name, {
+              hasTime: blocked.has_time === true,
+              hasInvoices: blocked.has_invoices === true,
+            }),
+          )
+        }
+
         // `invoices` is NOT part of the bulk-save payload — the app never sends
         // invoices through the workspace save, so `data` carries none to
         // re-insert. They still have to be DELETED below: `client_id` is
@@ -8175,6 +8228,37 @@ export class AppDataStore {
         const currentVersion = fileWorkspaceVersion(previous ?? {})
         if (currentVersion !== expectedVersion) {
           throw new StaleWorkspaceError(currentVersion)
+        }
+      }
+
+      // Mirror of the Postgres "never delete a client who has history" check,
+      // in the same slot and before any write: a stored client absent from the
+      // payload that has stored time entries or invoices refuses the whole save.
+      // `previous` unreadable or absent means there is nothing stored to protect.
+      if (previous && Array.isArray(previous.clients)) {
+        const keptIds = new Set(
+          (Array.isArray(data.clients) ? data.clients : []).map((c) => c?.id),
+        )
+        const timeClientIds = new Set(
+          (Array.isArray(previous.timeEntries) ? previous.timeEntries : []).map((e) => e?.clientId),
+        )
+        const invoiceClientIds = new Set(
+          (Array.isArray(previous.invoices) ? previous.invoices : []).map((i) => i?.clientId),
+        )
+        const blocked = previous.clients.find(
+          (c) =>
+            c &&
+            typeof c.id === 'string' &&
+            !keptIds.has(c.id) &&
+            (timeClientIds.has(c.id) || invoiceClientIds.has(c.id)),
+        )
+        if (blocked) {
+          throw new ClientHasHistoryError(
+            clientHistoryRefusal(blocked.name, {
+              hasTime: timeClientIds.has(blocked.id),
+              hasInvoices: invoiceClientIds.has(blocked.id),
+            }),
+          )
         }
       }
 
@@ -12248,6 +12332,25 @@ export class AppDataStore {
         payToken: invoice.payToken ?? null,
       }))
       .sort((a, b) => String(a.number ?? '').localeCompare(String(b.number ?? '')))
+  }
+
+  /**
+   * How many invoices (any status, void included) a client has. The client page
+   * asks this to decide whether Delete is offered; the invoices themselves are
+   * not in the workspace payload, so the page cannot count them locally.
+   */
+  async countClientInvoices(clientId) {
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        'select count(*)::int as n from invoices where client_id = $1',
+        [clientId],
+      )
+      return rows[0]?.n ?? 0
+    }
+    const data = await readJson(localDataPath)
+    return (Array.isArray(data.invoices) ? data.invoices : []).filter(
+      (invoice) => invoice?.clientId === clientId,
+    ).length
   }
 
   /**

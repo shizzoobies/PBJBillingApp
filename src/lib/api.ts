@@ -144,6 +144,20 @@ export class StaleWorkspaceApiError extends ApiError {
   }
 }
 
+/**
+ * Thrown when the server refuses a bulk save because it would delete a client
+ * that has time logged or invoices (409 `client_has_history`). Its own class,
+ * NOT a `StaleWorkspaceApiError`: the tab's snapshot is not out of date, a
+ * delete in it is simply not allowed. The caller stops retrying (the same save
+ * would be refused again) and tells the owner to reload.
+ */
+export class ClientHasHistoryApiError extends ApiError {
+  constructor(message: string) {
+    super(409, message)
+    this.name = 'ClientHasHistoryApiError'
+  }
+}
+
 export async function fetchAppData(signal: AbortSignal, previewAs?: string | null) {
   const url = previewAs
     ? `/api/app-data?previewAs=${encodeURIComponent(previewAs)}`
@@ -187,6 +201,12 @@ export async function saveAppData(data: AppData): Promise<{ refetch: boolean }> 
         throw new StaleWorkspaceApiError(
           (body as { message?: string } | null)?.message ??
             'This tab is out of date — please reload.',
+        )
+      }
+      if (code === 'client_has_history') {
+        throw new ClientHasHistoryApiError(
+          (body as { message?: string } | null)?.message ??
+            'A client with time logged or invoices cannot be deleted. Reload and mark it inactive instead.',
         )
       }
       // The OTHER 409 (the empty-payload guard) already consumed the body
@@ -4042,6 +4062,22 @@ export async function listInvoicesRequest(
     throw new ApiError(response.status, message || `Failed to load invoices (${response.status})`)
   }
   return ((await response.json()) as { invoices: PersistedInvoice[] }).invoices
+}
+
+/**
+ * How many invoices (any status, void included) a client has. The client page
+ * needs it to decide whether Delete is offered, and invoices are not in the
+ * workspace payload.
+ */
+export async function fetchClientInvoiceCount(clientId: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/invoice-count`,
+    { credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load invoice count (${response.status})`)
+  }
+  return ((await response.json()) as { invoiceCount: number }).invoiceCount
 }
 
 /**

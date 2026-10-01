@@ -93,6 +93,7 @@ import {
   reorderChecklistSubItemsRequest,
   saveAppData,
   StaleWorkspaceApiError,
+  ClientHasHistoryApiError,
   setChecklistViewersRequest,
   setPreviewUser,
   setTemplateViewersRequest,
@@ -388,6 +389,9 @@ function App() {
   // refetch a `data-changed` ping gets, instead of waiting for the ping.
   const requestLiveRefetchRef = useRef<(() => void) | null>(null)
   const [staleWorkspaceMessage, setStaleWorkspaceMessage] = useState<string | null>(null)
+  // Set instead of the default title when the refusal was a blocked client
+  // delete (409 client_has_history) rather than an out-of-date snapshot.
+  const [staleWorkspaceTitle, setStaleWorkspaceTitle] = useState<string | null>(null)
   // Real-time sync support: timestamp of the last local workspace edit (so an
   // incoming refetch never clobbers an in-flight edit), plus a live mirror of
   // the sync state readable inside the SSE refetch timer.
@@ -1037,6 +1041,18 @@ function App() {
           // stays set, which keeps the indicator honest ("not saved").
           if (error instanceof StaleWorkspaceApiError) {
             staleWorkspaceRef.current = true
+            setStaleWorkspaceMessage(error.message)
+            setDataSyncState('error')
+            return
+          }
+          // The server refused a save that would delete a client with time or
+          // invoices on record - nothing was written. Not retryable either: the
+          // same payload would be refused again every 4s, so it takes the same
+          // latch as a stale tab and ends on a reload, which re-reads the
+          // client the local delete had removed.
+          if (error instanceof ClientHasHistoryApiError) {
+            staleWorkspaceRef.current = true
+            setStaleWorkspaceTitle('A client could not be deleted')
             setStaleWorkspaceMessage(error.message)
             setDataSyncState('error')
             return
@@ -3752,9 +3768,9 @@ function App() {
 
   const deleteClient = (clientId: string) => {
     // Cascade the local cleanup so we don't leave orphan rows that reference a
-    // client we just removed. Server-side these tables CASCADE on
-    // `clients.id`, but the bulk autosave wipes-and-rewrites from local state,
-    // so any orphan we keep around here would re-fail the FK on the next save.
+    // client we just removed. The bulk autosave wipes-and-rewrites from local
+    // state, so any orphan we keep around here would re-fail the FK on the
+    // next save.
     updateWorkspaceData((current) => ({
       ...current,
       clients: current.clients.filter((client) => client.id !== clientId),
@@ -3773,9 +3789,9 @@ function App() {
       recurringReimbursements: (current.recurringReimbursements ?? []).filter(
         (recurring) => recurring.clientId !== clientId,
       ),
-      timeEntries: (current.timeEntries ?? []).filter(
-        (entry) => entry.clientId !== clientId,
-      ),
+      // Time entries are deliberately NOT removed: only a client with none can
+      // be deleted (lib/client-delete-rule.js), and the server refuses a save
+      // that would delete one that has any.
     }))
   }
 
@@ -4286,7 +4302,7 @@ function App() {
             snapshot is stale. Blocking — every further save is refused too, and
             a reload is the only recovery. */}
         {staleWorkspaceMessage ? (
-          <StaleWorkspaceNotice message={staleWorkspaceMessage} />
+          <StaleWorkspaceNotice message={staleWorkspaceMessage} title={staleWorkspaceTitle ?? undefined} />
         ) : null}
       </AppContext.Provider>
     </BrowserRouter>

@@ -15,12 +15,12 @@ import { RefreshCw, AlertTriangle } from 'lucide-react'
  * snapshot into current data is exactly the failure this guard exists to
  * prevent, so we do not offer it.
  */
-export function StaleWorkspaceNotice({ message }: { message?: string }) {
+export function StaleWorkspaceNotice({ message, title }: { message?: string; title?: string }) {
   return (
     <div className="stale-workspace-backdrop" role="alertdialog" aria-modal="true">
       <div className="stale-workspace-panel">
         <p className="stale-workspace-title">
-          <AlertTriangle size={16} aria-hidden="true" /> This tab is out of date
+          <AlertTriangle size={16} aria-hidden="true" /> {title ?? 'This tab is out of date'}
         </p>
         <p className="stale-workspace-body">
           {message ??

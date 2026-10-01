@@ -44,6 +44,7 @@ import {
 } from '../components/SectionKit'
 import {
   applyPackageRequest,
+  fetchClientInvoiceCount,
   fetchRateVersions,
   issueRetainerInvoiceRequest,
   listPackagesRequest,
@@ -77,6 +78,8 @@ import {
 // The one place 'off' is decided, shared with the generator and the invoice
 // preview so all three agree about what an unset client means.
 import { normalizeTimeBreakdownMode } from '../../lib/invoice-lines.js'
+// The one rule for whether Delete is offered; the server enforces the same one.
+import { clientDeleteVerdict } from '../../lib/client-delete-rule.js'
 // The one resolver for "what did this person's hour bill at back then" —
 // shared with the invoice, so the block below can never quote a rate the
 // invoice would not charge.
@@ -169,6 +172,39 @@ export function ClientDetailPage() {
     [data.clients, clientId],
   )
 
+  // Whether this client may be deleted (lib/client-delete-rule.js). Time is
+  // known locally; invoices are not in the workspace payload, so they are asked
+  // of the server - and only when there is no time, since time already decides.
+  // Until that answer arrives the verdict is unknown and Delete is not offered.
+  const hasTime = useMemo(
+    () => (data.timeEntries ?? []).some((entry) => entry.clientId === clientId),
+    [data.timeEntries, clientId],
+  )
+  // The answer carries the client it is about, so one fetched for the previous
+  // client can never be read as this one's.
+  const [invoiceAnswer, setInvoiceAnswer] = useState<{ id: string; count: number } | null>(null)
+  const invoiceCount = invoiceAnswer && invoiceAnswer.id === clientId ? invoiceAnswer.count : null
+  useEffect(() => {
+    if (!ownerMode || !clientId || hasTime) return
+    let cancelled = false
+    fetchClientInvoiceCount(clientId)
+      .then((count) => {
+        if (!cancelled) setInvoiceAnswer({ id: clientId, count })
+      })
+      .catch(() => {
+        // Unknown stays unknown: Delete stays hidden, and the server refuses
+        // the delete on its own regardless.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [ownerMode, clientId, hasTime])
+  const deleteVerdict = hasTime
+    ? clientDeleteVerdict({ timeEntryCount: 1 })
+    : invoiceCount === null
+      ? null
+      : clientDeleteVerdict({ invoiceCount })
+
   // Activity-record debounce: only fire one event per ~60s of editing.
   const lastActivityRef = useRef<number>(0)
 
@@ -247,7 +283,7 @@ export function ClientDetailPage() {
   const handleDelete = () => {
     if (
       !window.confirm(
-        `Delete ${client.name}? This removes the client from the workspace. Time entries and checklists referencing this client will be left intact in the data, but the client will no longer appear in lists.`,
+        `Delete ${client.name}? This permanently removes the client and its checklists, recurring checklists and reimbursements. This cannot be undone.`,
       )
     ) {
       return
@@ -372,10 +408,15 @@ export function ClientDetailPage() {
                   {lifecycleBusy ? 'Saving…' : 'Mark inactive'}
                 </button>
               )}
-              <button className="danger-action" onClick={handleDelete} type="button">
-                <Trash2 size={14} />
-                Delete client
-              </button>
+              {deleteVerdict?.deletable ? (
+                <button className="danger-action" onClick={handleDelete} type="button">
+                  <Trash2 size={14} />
+                  Delete client
+                </button>
+              ) : null}
+              {deleteVerdict && !deleteVerdict.deletable ? (
+                <p className="muted-text">{deleteVerdict.reason}</p>
+              ) : null}
             </div>
           }
         >

@@ -7,6 +7,7 @@ import QRCode from 'qrcode'
 import {
   AppDataStore,
   BillingMasterError,
+  ClientHasHistoryError,
   coerceEntryMinutes,
   CoverageConfirmationError,
   EntryTagError,
@@ -865,7 +866,7 @@ function teamClientIdSet(session, clients) {
  *
  * Deliberately absent, and therefore refused in preview: `/api/invoices`,
  * `/api/client-recap`, `/api/clients/:id/billed-on-invoices`,
- * `/api/checklists/skips`, `/api/feature-requests`, `/api/activity`,
+ * `/api/clients/:id/invoice-count`, `/api/checklists/skips`, `/api/feature-requests`, `/api/activity`,
  * `/api/team`, `/api/setup/*` and the assistant routes. Every one of them
  * answers firm-wide for an owner, and every one belongs to a surface an
  * effective-staff preview hides anyway (`OwnerOnly`, or an owner-only card) —
@@ -6679,6 +6680,16 @@ const server = createServer(async (request, response) => {
               },
               { [WORKSPACE_VERSION_HEADER]: error.currentVersion },
             )
+            return
+          }
+          // A client with time or invoices on record cannot be deleted by a
+          // save, whatever the payload says. Nothing was written. A DIFFERENT
+          // code from `stale_workspace` on purpose: the tab's snapshot is not
+          // out of date, a delete in it is simply not allowed, and the client
+          // shows this sentence rather than the stale-tab one.
+          if (error instanceof ClientHasHistoryError) {
+            console.warn(`[bulk-save] REFUSED client delete from ${session.user.id}: ${error.message}`)
+            sendJson(response, 409, { error: 'client_has_history', message: error.message })
             return
           }
           // Log the full SQL/JS error server-side (visible in Railway logs);
@@ -13026,6 +13037,26 @@ const server = createServer(async (request, response) => {
         period: billedOnPeriod || null,
       })
       sendJson(response, 200, { invoices: billedOnInvoices })
+      return
+    }
+
+    // GET /api/clients/:id/invoice-count — owner-only: how many invoices (any
+    // status, void included) this client has. The client page asks it to decide
+    // whether to offer Delete (a client with invoices can only be made
+    // inactive); invoices are not in the workspace payload, so the page cannot
+    // count them itself. The bulk save enforces the same rule on its own.
+    const invoiceCountMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/invoice-count$/)
+    if (invoiceCountMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see invoices' })
+        return
+      }
+      const invoiceCount = await appDataStore.countClientInvoices(
+        decodeURIComponent(invoiceCountMatch[1]),
+      )
+      sendJson(response, 200, { invoiceCount })
       return
     }
 
