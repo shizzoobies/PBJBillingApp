@@ -467,3 +467,182 @@ describe('the waiting guards on reordered and hidden lists', () => {
     expect(box).not.toBeDisabled()
   })
 })
+
+const liveWait = {
+  id: 'wo-1',
+  blockerId: 'emp-lisa',
+  requestedBy: OWNER,
+  createdAt: '2026-08-01T00:00:00.000Z',
+}
+
+describe('Hide completed never buries a live wait, however deep it sits', () => {
+  it('keeps a done step whose sub-step carries a live saved wait', () => {
+    signInWith([
+      item('it-a', 'Alpha'),
+      item('it-b', 'Bravo', {
+        done: true,
+        subItems: [{ id: 's1', title: 'Chase client', done: true, waitingOns: [liveWait] }],
+      }),
+      item('it-c', 'Charlie', { done: true }),
+    ] as unknown as Checklist['items'])
+    const { container } = renderProgress()
+    fireEvent.click(screen.getByRole('button', { name: 'Hide completed (1)' }))
+    expect(stepLabels(container)).toEqual(['Alpha', 'Bravo'])
+  })
+
+  it('keeps a done step whose sub-sub-step carries a live saved wait', () => {
+    signInWith([
+      item('it-a', 'Alpha'),
+      item('it-b', 'Bravo', {
+        done: true,
+        subItems: [
+          {
+            id: 's1',
+            title: 'Match deposits',
+            done: true,
+            subItems: [{ id: 'ss1', title: 'Chase client', done: true, waitingOns: [liveWait] }],
+          },
+        ],
+      }),
+      item('it-c', 'Charlie', { done: true }),
+    ] as unknown as Checklist['items'])
+    const { container } = renderProgress()
+    fireEvent.click(screen.getByRole('button', { name: 'Hide completed (1)' }))
+    expect(stepLabels(container)).toEqual(['Alpha', 'Bravo'])
+  })
+
+  it('still hides a done step once the wait beneath it is approved', () => {
+    signInWith([
+      item('it-a', 'Alpha'),
+      item('it-b', 'Bravo', {
+        done: true,
+        subItems: [
+          {
+            id: 's1',
+            title: 'Chase client',
+            done: true,
+            waitingOns: [
+              {
+                ...liveWait,
+                resolvedAt: '2026-08-02T00:00:00.000Z',
+                resolvedBy: 'emp-lisa',
+                verifiedAt: '2026-08-03T00:00:00.000Z',
+                verifiedBy: OWNER,
+              },
+            ],
+          },
+        ],
+      }),
+    ] as unknown as Checklist['items'])
+    const { container } = renderProgress()
+    fireEvent.click(screen.getByRole('button', { name: 'Hide completed (1)' }))
+    expect(stepLabels(container)).toEqual(['Alpha'])
+  })
+})
+
+describe('done is the roll-up in the display order and in Hide completed', () => {
+  it('sorts a step stored done with an open sub-step into the open group, and never hides it', () => {
+    signInWith([
+      item('it-c', 'Charlie', { done: true }),
+      item('it-b', 'Bravo', {
+        done: true,
+        subItems: [{ id: 's1', title: 'Still open', done: false }],
+      }),
+      item('it-a', 'Alpha'),
+    ] as unknown as Checklist['items'])
+    const { container } = renderProgress()
+    expect(stepLabels(container)).toEqual(['Bravo', 'Alpha', 'Charlie'])
+    fireEvent.click(screen.getByRole('button', { name: 'Hide completed (1)' }))
+    expect(stepLabels(container)).toEqual(['Bravo', 'Alpha'])
+  })
+
+  it('treats the step as open for its Move buttons too', () => {
+    signInWith([
+      item('it-b', 'Bravo', {
+        done: true,
+        subItems: [{ id: 's1', title: 'Still open', done: false }],
+      }),
+      item('it-a', 'Alpha'),
+    ] as unknown as Checklist['items'])
+    const { container } = renderProgress()
+    const buttons = within(taskItem(container, 'Bravo')).getAllByRole('button', {
+      name: /^Move (up|down)$/,
+    })
+    expect(buttons.length).toBeGreaterThan(0)
+  })
+})
+
+describe('a fully complete checklist', () => {
+  // A finished checklist lands in the collapsed Completed bucket.
+  const renderCompleted = () => {
+    const result = renderProgress()
+    fireEvent.click(screen.getByRole('button', { name: /^Completed/ }))
+    return result
+  }
+
+  it('offers no Hide completed toggle, since nothing open would remain', () => {
+    signInWith([
+      item('it-a', 'Alpha', { done: true }),
+      item('it-b', 'Bravo', { done: true }),
+    ] as unknown as Checklist['items'])
+    const { container } = renderCompleted()
+    expect(stepLabels(container)).toEqual(['Alpha', 'Bravo'])
+    expect(screen.queryByRole('button', { name: /Hide completed/ })).toBeNull()
+  })
+
+  it('does not blank the list when a stored preference says hide', () => {
+    window.localStorage.setItem('pbj.hideDone.v1.cl-1', '1')
+    signInWith([
+      item('it-a', 'Alpha', { done: true }),
+      item('it-b', 'Bravo', { done: true }),
+    ] as unknown as Checklist['items'])
+    const { container } = renderCompleted()
+    expect(stepLabels(container)).toEqual(['Alpha', 'Bravo'])
+    expect(screen.queryByText(/completed steps? hidden/)).toBeNull()
+  })
+})
+
+describe('done rows are not drop targets', () => {
+  const dragOverAccepted = (from: HTMLElement, to: HTMLElement) => {
+    const transfer = dataTransfer()
+    fireEvent.dragStart(from, { dataTransfer: transfer })
+    // fireEvent returns false when the handler called preventDefault, which is
+    // how a drop is allowed.
+    return !fireEvent.dragOver(to, { dataTransfer: transfer })
+  }
+
+  it('does not accept a step dragged over a done step, and shows no drop line', () => {
+    mixed()
+    const { container } = renderProgress()
+    expect(dragOverAccepted(stepRow(container, 'Alpha'), stepRow(container, 'Bravo'))).toBe(false)
+    expect(stepRow(container, 'Bravo').className).not.toContain('drop-target')
+  })
+
+  it('does accept one over an open step, with the drop line', () => {
+    mixed()
+    const { container } = renderProgress()
+    expect(dragOverAccepted(stepRow(container, 'Alpha'), stepRow(container, 'Charlie'))).toBe(true)
+    expect(stepRow(container, 'Charlie').className).toContain('drop-target')
+  })
+
+  it('does the same for sub-steps', () => {
+    signInWith([
+      item('it-1', 'Payroll', {
+        subItems: [
+          { id: 's1', title: 'Pull hours', done: false },
+          { id: 's2', title: 'Review overtime', done: true },
+          { id: 's3', title: 'Run the file', done: false },
+        ],
+      }),
+    ] as unknown as Checklist['items'])
+    const { container } = renderProgress()
+    expect(
+      dragOverAccepted(subRow(container, 'Pull hours'), subRow(container, 'Review overtime')),
+    ).toBe(false)
+    expect(subRow(container, 'Review overtime').className).not.toContain('drop-target')
+    expect(
+      dragOverAccepted(subRow(container, 'Pull hours'), subRow(container, 'Run the file')),
+    ).toBe(true)
+    expect(subRow(container, 'Run the file').className).toContain('drop-target')
+  })
+})

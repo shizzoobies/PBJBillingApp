@@ -73,3 +73,32 @@ describe('POST /api/checklists/:id/items/:itemId/sub-items/reorder', () => {
     expect(block).toContain('sendJson(response, 200, updated)')
   })
 })
+
+/**
+ * Both reorder routes are writes, so both refuse a cross-site request, and they
+ * do it BEFORE the body is read - the same guard every other write route carries.
+ */
+describe('the reorder routes check the request origin', () => {
+  const guard =
+    "if (isCrossSiteOrigin(request)) {\n        sendJson(response, 403, { error: 'Origin not allowed' })"
+  const normalized = serverSource.replaceAll('\r\n', '\n')
+
+  const blockFor = (routeMarker: string) => {
+    const at = normalized.indexOf(routeMarker)
+    expect(at, routeMarker).toBeGreaterThan(-1)
+    return normalized.slice(at, at + 4200)
+  }
+
+  it.each([
+    ['sub-step reorder', 'const checklistSubItemsReorderMatch = normalizedPath.match('],
+    ['step reorder', 'const checklistItemsReorderMatch = normalizedPath.match('],
+  ])('%s refuses a cross-site origin with 403 before reading the body', (_name, routeMarker) => {
+    const routeBlock = blockFor(routeMarker)
+    const guardAt = routeBlock.indexOf(guard)
+    expect(guardAt).toBeGreaterThan(-1)
+    expect(guardAt).toBeLessThan(routeBlock.indexOf('await readJsonBody(request)'))
+    // After the method check (a GET never gets this far) and before any store read.
+    expect(guardAt).toBeGreaterThan(routeBlock.indexOf("if (request.method !== 'POST') {"))
+    expect(guardAt).toBeLessThan(routeBlock.indexOf('await appDataStore.read()'))
+  })
+})

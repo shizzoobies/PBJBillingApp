@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   hideDoneKey,
+  isStepDone,
   orderAfterDrag,
   orderAfterMove,
   orderStepsForDisplay,
@@ -122,5 +123,36 @@ describe('the hide-completed preference', () => {
     expect(readHideDone('cl-2')).toBe(false)
     writeHideDone('cl-1', false)
     expect(readHideDone('cl-1')).toBe(false)
+  })
+})
+
+// "Done" is the roll-up (the reading the store and the waiting guards use), not
+// the raw stored flag: a step stored done with an open sub-step is OPEN.
+describe('done is read through the roll-up', () => {
+  const staleDone = {
+    id: 'b',
+    done: true,
+    subItems: [{ id: 'b1', done: false }],
+  }
+
+  it('sorts a step stored done with an open sub-step into the open group', () => {
+    const steps = [{ id: 'a', done: true }, staleDone, { id: 'c', done: false }]
+    expect(orderStepsForDisplay(steps).map((step) => step.id)).toEqual(['b', 'c', 'a'])
+  })
+
+  it('treats it as open when dragging and moving', () => {
+    const steps = [{ id: 'a', done: true }, staleDone, { id: 'c', done: false }]
+    expect(orderAfterDrag(steps, 'c', 'b')).toEqual(['c', 'b', 'a'])
+    expect(orderAfterMove(steps, 'b', 'down')).toEqual(['c', 'b', 'a'])
+  })
+
+  it('reads a sub-step through its own sub-sub-steps', () => {
+    const subs = [
+      { id: 's1', done: true, subItems: [{ id: 'x', done: false }] },
+      { id: 's2', done: true },
+    ]
+    expect(orderStepsForDisplay(subs).map((step) => step.id)).toEqual(['s1', 's2'])
+    expect(isStepDone(subs[0])).toBe(false)
+    expect(isStepDone(subs[1])).toBe(true)
   })
 })

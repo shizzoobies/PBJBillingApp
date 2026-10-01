@@ -1919,6 +1919,10 @@ function withCompletionStamp(item, done) {
 /**
  * `list` with the entries named by `orderedIds` first, in that order, then the
  * rest in their existing order. Unknown and repeated ids are ignored. Pure.
+ *
+ * The tail is whatever is not in the head BY IDENTITY, not by id: two entries
+ * that share an id (a hand-edited or legacy row) must both survive a reorder,
+ * and filtering the tail by id would silently drop the one the head did not take.
  */
 function reorderById(list, orderedIds) {
   const byId = new Map(list.map((entry) => [entry?.id, entry]))
@@ -1929,7 +1933,7 @@ function reorderById(list, orderedIds) {
     seen.add(id)
     head.push(byId.get(id))
   }
-  return [...head, ...list.filter((entry) => !seen.has(entry?.id))]
+  return [...head, ...list.filter((entry) => !head.includes(entry))]
 }
 
 function buildChecklistFromStage({
@@ -16145,20 +16149,41 @@ export class AppDataStore {
       : []
 
     if (this.pool) {
-      const itemResult = await this.pool.query(
-        `select sub_items from checklist_items where checklist_id = $1 and id = $2`,
-        [checklistId, itemId],
-      )
-      if (!itemResult.rowCount) return null
-      const current = Array.isArray(itemResult.rows[0].sub_items)
-        ? itemResult.rows[0].sub_items
-        : []
-      await this.pool.query(
-        `update checklist_items
-         set sub_items = $3::jsonb, updated_at = now()
-         where checklist_id = $1 and id = $2`,
-        [checklistId, itemId, JSON.stringify(reorderById(current, ids))],
-      )
+      // Read and write in ONE transaction with the item row locked: sub_items is
+      // a whole-array column, so a reorder written from a read taken before a
+      // concurrent add / toggle / remove committed would put that change back as
+      // it was. `for update` makes the second writer wait and read what the
+      // first one left.
+      const client = await this.pool.connect()
+      let found = false
+      try {
+        await client.query('begin')
+        const itemResult = await client.query(
+          `select sub_items from checklist_items
+           where checklist_id = $1 and id = $2
+           for update`,
+          [checklistId, itemId],
+        )
+        if (itemResult.rowCount) {
+          found = true
+          const current = Array.isArray(itemResult.rows[0].sub_items)
+            ? itemResult.rows[0].sub_items
+            : []
+          await client.query(
+            `update checklist_items
+             set sub_items = $3::jsonb, updated_at = now()
+             where checklist_id = $1 and id = $2`,
+            [checklistId, itemId, JSON.stringify(reorderById(current, ids))],
+          )
+        }
+        await client.query('commit')
+      } catch (error) {
+        await client.query('rollback')
+        throw error
+      } finally {
+        client.release()
+      }
+      if (!found) return null
       const data = await this.read()
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }

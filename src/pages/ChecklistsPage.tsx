@@ -25,6 +25,7 @@ import {
   canMarkWaitingOnDone,
   canVerifyWaitingOn,
   hasLiveSavedWait,
+  hasLiveSavedWaitInTree,
   isClientWait,
   isWaitingOnOpen,
   REMOVAL_WOULD_COMPLETE_WAITING_STEP,
@@ -81,6 +82,7 @@ import { overdueChecklists } from '../lib/overdueChecklists'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { inactiveClientIdSet, workableClients } from '../lib/clientLifecycle'
 import {
+  isStepDone,
   orderAfterDrag,
   orderAfterMove,
   orderStepsForDisplay,
@@ -3462,6 +3464,10 @@ function DraggableTaskList({
 
   const handleDragOver = (event: DragEvent<HTMLDivElement>, itemId: string) => {
     if (!canReorder || !draggingId || draggingId === itemId) return
+    // A done step is not part of the open group a drag reorders, so it takes no
+    // drop and shows no drop line.
+    const target = items.find((entry) => entry.id === itemId)
+    if (!target || isStepDone(target)) return
     event.preventDefault()
     event.dataTransfer.dropEffect = 'move'
     setDropTargetId(itemId)
@@ -3507,6 +3513,10 @@ function DraggableTaskList({
     if (!canReorder || !draggingSub || draggingSub.itemId !== itemId || draggingSub.subId === subId) {
       return
     }
+    // Same as a step: a done sub-step is no drop target.
+    const parent = items.find((entry) => entry.id === itemId)
+    const target = (parent?.subItems ?? []).find((entry) => entry.id === subId)
+    if (!target || isStepDone(target)) return
     event.preventDefault()
     event.dataTransfer.dropEffect = 'move'
     setDropSubTargetId(subId)
@@ -3539,24 +3549,31 @@ function DraggableTaskList({
   }
 
   // What "Hide completed" can hide: done steps, and the done sub-steps of an
-  // open step. A done step that still carries a LIVE saved wait stays put - its
-  // Approve controls live on the row, and hiding it would bury an open hand-off.
+  // open step. "Done" is the roll-up, the reading the ordering and the guards
+  // share, so a step stored done with an open sub-step is open and never hidden.
+  // A done step with a LIVE saved wait anywhere in it - on the step, a sub-step or
+  // a sub-sub-step - stays put: the Approve controls live on the row holding the
+  // wait, and hiding the step would bury an open hand-off.
   // Hiding is display only; no step's data changes.
-  const hideable = (node: { done?: boolean; waitingOns?: ChecklistItem['waitingOns'] }) =>
-    Boolean(node.done) && !hasLiveSavedWait(node)
+  const hideable = (node: ChecklistItem | NonNullable<ChecklistItem['subItems']>[number]) =>
+    isStepDone(node) && !hasLiveSavedWaitInTree(node)
+  // Nothing open would remain on a fully complete checklist, so there is nothing
+  // to fold away and no toggle to offer (a saved preference is simply not applied).
+  const everyStepDone = items.every((item) => isStepDone(item))
+  const hiding = hideDone && !everyStepDone
   const hiddenCount = items.reduce(
     (count, item) =>
       count +
       (hideable(item)
         ? 1
-        : item.done
+        : isStepDone(item)
           ? 0
           : (item.subItems ?? []).filter(hideable).length),
     0,
   )
   const orderedItems = orderStepsForDisplay(items)
-  const visibleItems = hideDone ? orderedItems.filter((item) => !hideable(item)) : orderedItems
-  const openItemIds = items.filter((entry) => !entry.done).map((entry) => entry.id)
+  const visibleItems = hiding ? orderedItems.filter((item) => !hideable(item)) : orderedItems
+  const openItemIds = items.filter((entry) => !isStepDone(entry)).map((entry) => entry.id)
 
   const handleDragEnd = () => {
     setDraggingId(null)
@@ -3565,7 +3582,7 @@ function DraggableTaskList({
 
   return (
     <div className="task-list">
-      {hiddenCount > 0 || hideDone ? (
+      {!everyStepDone && (hiddenCount > 0 || hideDone) ? (
         <div className="task-list-controls">
           <button
             type="button"
@@ -3575,7 +3592,7 @@ function DraggableTaskList({
           >
             Hide completed ({hiddenCount})
           </button>
-          {hideDone && hiddenCount > 0 ? (
+          {hiding && hiddenCount > 0 ? (
             <span className="completed-hidden-note">
               {hiddenCount} completed {hiddenCount === 1 ? 'step' : 'steps'} hidden -{' '}
               <button
@@ -3597,10 +3614,12 @@ function DraggableTaskList({
         // checklist's "Hide completed" (an open step only - a done step is
         // hidden whole, or shown whole).
         const shownSubItems = orderStepsForDisplay(subItems).filter(
-          (sub) => !(hideDone && !item.done && hideable(sub)),
+          (sub) => !(hiding && !isStepDone(item) && hideable(sub)),
         )
         const itemOpenIndex = openItemIds.indexOf(item.id)
-        const openSubIds = subItems.filter((sub) => !sub.done).map((sub) => sub.id)
+        const openSubIds = subItems.filter((sub) => !isStepDone(sub)).map((sub) => sub.id)
+        // Reordering follows the display order, which reads done by the roll-up.
+        const itemInOpenGroup = !isStepDone(item)
         const overdue = Boolean(
           item.dueDate && !item.done && item.dueDate < todayDateOnly,
         )
@@ -3614,7 +3633,7 @@ function DraggableTaskList({
           <div key={item.id} className="task-item">
             <div
               className={classes.join(' ')}
-              draggable={canReorder && !item.done}
+              draggable={canReorder && itemInOpenGroup}
               onDragStart={(event) => handleDragStart(event, item.id)}
               onDragOver={(event) => handleDragOver(event, item.id)}
               onDragLeave={handleDragLeave}
@@ -3625,14 +3644,14 @@ function DraggableTaskList({
                 // Visible at rest. A done step is not part of the open group a
                 // drag reorders, so its handle is kept (for alignment) but idle.
                 <span
-                  className={item.done ? 'drag-handle drag-handle-idle' : 'drag-handle'}
+                  className={itemInOpenGroup ? 'drag-handle' : 'drag-handle drag-handle-idle'}
                   aria-hidden="true"
-                  title={item.done ? undefined : 'Drag to reorder'}
+                  title={itemInOpenGroup ? 'Drag to reorder' : undefined}
                 >
                   <GripVertical size={14} />
                 </span>
               ) : null}
-              {canReorder && !item.done ? (
+              {canReorder && itemInOpenGroup ? (
                 <span className="reorder-buttons">
                   <button
                     type="button"
@@ -3886,6 +3905,7 @@ function DraggableTaskList({
                   const hasSubSubItems = subSubItems.length > 0
                   const subSubDoneCount = subSubItems.filter((s) => s.done).length
                   const subOpenIndex = openSubIds.indexOf(sub.id)
+                  const subInOpenGroup = !isStepDone(sub)
                   const subRowClasses = ['sub-item-row']
                   if (sub.done) subRowClasses.push('done')
                   if (draggingSub?.subId === sub.id) subRowClasses.push('dragging')
@@ -3894,7 +3914,7 @@ function DraggableTaskList({
                     <div key={sub.id} className="sub-item-group">
                       <div
                         className={subRowClasses.join(' ')}
-                        draggable={canReorder && !sub.done}
+                        draggable={canReorder && subInOpenGroup}
                         onDragStart={(event) => handleSubDragStart(event, item.id, sub.id)}
                         onDragOver={(event) => handleSubDragOver(event, item.id, sub.id)}
                         onDragLeave={() => setDropSubTargetId(null)}
@@ -3903,14 +3923,16 @@ function DraggableTaskList({
                       >
                         {canReorder ? (
                           <span
-                            className={sub.done ? 'drag-handle drag-handle-idle' : 'drag-handle'}
+                            className={
+                              subInOpenGroup ? 'drag-handle' : 'drag-handle drag-handle-idle'
+                            }
                             aria-hidden="true"
-                            title={sub.done ? undefined : 'Drag to reorder'}
+                            title={subInOpenGroup ? 'Drag to reorder' : undefined}
                           >
                             <GripVertical size={12} />
                           </span>
                         ) : null}
-                        {canReorder && !sub.done ? (
+                        {canReorder && subInOpenGroup ? (
                           <span className="reorder-buttons">
                             <button
                               type="button"

@@ -19119,6 +19119,38 @@ describe('reorderChecklistSubItems (file backend)', () => {
     const updated = await store.reorderChecklistSubItems('cl-1', 'it-1', ['sub-a'])
     expect(updated.items.find((item) => item.id === 'it-1').subItems ?? []).toEqual([])
   })
+
+  // The tail is whatever the head did not take BY IDENTITY, so two sub-steps that
+  // share an id (a hand-edited or legacy row) are both kept.
+  it('keeps two sub-steps that share an id: both survive the reorder', async () => {
+    await store.write(
+      workspace({
+        ...SUB_REORDER_WORKSPACE,
+        checklists: [
+          {
+            ...SUB_REORDER_WORKSPACE.checklists[0],
+            items: [
+              {
+                id: 'it-2',
+                label: 'Payroll',
+                done: false,
+                subItems: [
+                  { id: 'sub-a', title: 'First twin', done: false },
+                  { id: 'sub-a', title: 'Second twin', done: false },
+                  { id: 'sub-b', title: 'Other', done: false },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    )
+    const updated = await store.reorderChecklistSubItems('cl-1', 'it-2', ['sub-b', 'sub-a'])
+    const titles = updated.items[0].subItems.map((sub) => sub.title)
+    expect(titles).toHaveLength(3)
+    expect([...titles].sort()).toEqual(['First twin', 'Other', 'Second twin'])
+    expect(titles[0]).toBe('Other')
+  })
 })
 
 describe('reorderChecklistSubItems (postgres branch)', () => {
@@ -19128,17 +19160,31 @@ describe('reorderChecklistSubItems (postgres branch)', () => {
     { id: 'sub-c', title: 'Run the file', done: false },
   ]
 
-  /** A store whose per-step sub_items read answers with `rows`. */
-  function pgStoreWithSubs(rows) {
+  /**
+   * A store whose per-step sub_items read answers with `rows`. The reorder reads
+   * and writes on one checked-out client (a transaction), so the answer is
+   * wired onto the pool AND onto every client it hands out. `failUpdate` makes
+   * the write throw, to watch the transaction roll back.
+   */
+  function pgStoreWithSubs(rows, { failUpdate = false } = {}) {
     const fake = fakePostgres()
     const store = postgresStore(fake)
-    const inner = fake.pool.query.bind(fake.pool)
-    fake.pool.query = async (text, params) => {
+    const answering = (inner) => async (text, params) => {
       const result = await inner(text, params)
-      if (/^select sub_items\s+from checklist_items/i.test(String(text).trim())) {
+      const trimmed = String(text).trim()
+      if (failUpdate && /^update checklist_items\b/i.test(trimmed)) {
+        throw new Error('write failed')
+      }
+      if (/^select sub_items\s+from checklist_items/i.test(trimmed)) {
         return rows ? { rows: [{ sub_items: rows }], rowCount: 1 } : { rows: [], rowCount: 0 }
       }
       return result
+    }
+    fake.pool.query = answering(fake.pool.query.bind(fake.pool))
+    const connect = fake.pool.connect.bind(fake.pool)
+    fake.pool.connect = async () => {
+      const client = await connect()
+      return { ...client, query: answering(client.query.bind(client)) }
     }
     return { fake, store }
   }
@@ -19182,5 +19228,55 @@ describe('reorderChecklistSubItems (postgres branch)', () => {
     const { fake, store } = pgStoreWithSubs(null)
     expect(await store.reorderChecklistSubItems('cl-1', 'item-nope', ['sub-a'])).toBeNull()
     expect(fake.matching(/^update checklist_items\b/i)).toHaveLength(0)
+  })
+
+  // sub_items is a whole-array column: a reorder written from a read taken before
+  // a concurrent sub-step write committed would put that write back as it was. So
+  // the read and the write are one transaction with the item row locked.
+  it('reads the step with for update and writes inside the same transaction', async () => {
+    const { fake, store } = pgStoreWithSubs(subRows)
+    await store.reorderChecklistSubItems('cl-1', 'item-1', ['sub-c'])
+
+    const beginAt = fake.indexOf(/^begin$/i)
+    const selectAt = fake.indexOf(/^select sub_items\s+from checklist_items/i)
+    const updateAt = fake.indexOf(/^update checklist_items\b/i)
+    const commitAt = fake.indexOf(/^commit$/i)
+    expect(beginAt).toBeGreaterThan(-1)
+    expect(selectAt).toBeGreaterThan(beginAt)
+    expect(updateAt).toBeGreaterThan(selectAt)
+    expect(commitAt).toBeGreaterThan(updateAt)
+    expect(fake.statements[selectAt].text).toMatch(/for update\s*$/i)
+    expect(fake.statements[selectAt].params).toEqual(['cl-1', 'item-1'])
+  })
+
+  it('rolls the transaction back and rethrows when the write fails', async () => {
+    const { fake, store } = pgStoreWithSubs(subRows, { failUpdate: true })
+    await expect(store.reorderChecklistSubItems('cl-1', 'item-1', ['sub-c'])).rejects.toThrow(
+      'write failed',
+    )
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+    expect(fake.matching(/^commit$/i)).toHaveLength(0)
+  })
+
+  it('never writes sub_items from a read taken outside the lock', async () => {
+    const { fake, store } = pgStoreWithSubs(subRows)
+    await store.reorderChecklistSubItems('cl-1', 'item-1', ['sub-c'])
+    const unlockedReads = fake
+      .matching(/^select sub_items\s+from checklist_items/i)
+      .filter((statement) => !/for update/i.test(statement.text))
+    expect(unlockedReads).toHaveLength(0)
+  })
+
+  it('keeps two sub-steps that share an id: both survive the reorder', async () => {
+    const twins = [
+      { id: 'sub-a', title: 'First twin', done: false },
+      { id: 'sub-a', title: 'Second twin', done: false },
+      { id: 'sub-b', title: 'Other', done: false },
+    ]
+    const { fake, store } = pgStoreWithSubs(twins)
+    await store.reorderChecklistSubItems('cl-1', 'item-1', ['sub-b', 'sub-a'])
+    const written = JSON.parse(fake.matching(/^update checklist_items\b/i)[0].params[2])
+    expect(written).toHaveLength(3)
+    expect(written.map((sub) => sub.title).sort()).toEqual(['First twin', 'Other', 'Second twin'])
   })
 })

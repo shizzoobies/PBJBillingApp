@@ -10270,6 +10270,11 @@ const server = createServer(async (request, response) => {
         sendJson(response, 405, { error: 'Method not allowed' })
         return
       }
+      // A write: refuse a cross-site request before the body is even read.
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
 
       const checklistId = checklistSubItemsReorderMatch[1]
       const itemId = checklistSubItemsReorderMatch[2]
@@ -10985,6 +10990,11 @@ const server = createServer(async (request, response) => {
 
       if (request.method !== 'POST') {
         sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      // A write: refuse a cross-site request before the body is even read.
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
 

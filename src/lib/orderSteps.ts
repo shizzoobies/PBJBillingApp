@@ -8,11 +8,20 @@
  * OPEN group, and the full order sent to the server is the new open order
  * followed by the existing done order (see {@link orderAfterDrag} and
  * {@link orderAfterMove}) - the saved order of done steps never changes.
+ *
+ * "Done" is the roll-up (`rollUpItemDone`), the one reading the store and the
+ * waiting guard use, not the raw stored flag: a step stored done with an open
+ * sub-step is OPEN, so it sits in the open group and is never tucked away.
  */
 
-type StepLike = { id: string; done?: boolean }
+import { rollUpItemDone } from '../../lib/checklist-step-done.js'
 
-const isDone = (step: StepLike) => Boolean(step.done)
+type StepLike = { id: string; done?: boolean; subItems?: StepLike[] }
+
+/** Whether a step (or sub-step) is done, by the roll-up. */
+export const isStepDone = (step: StepLike) => rollUpItemDone(step)
+
+const isDone = isStepDone
 
 /** Open steps in saved order, then done steps in saved order. Pure; never mutates. */
 export function orderStepsForDisplay<T extends StepLike>(steps: readonly T[]): T[] {
