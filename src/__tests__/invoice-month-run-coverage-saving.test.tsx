@@ -35,17 +35,20 @@ vi.mock('../lib/api', () => ({
   regenerateInvoicesRequest: vi.fn(),
   sendInvoiceRequest: vi.fn(),
   updateInvoiceRequest: vi.fn(),
+  verifyAllInvoicePaymentsRequest: vi.fn(),
 }))
 
 import {
   confirmInvoiceCoverageRequest,
   listInvoicesRequest,
   updateInvoiceRequest,
+  verifyAllInvoicePaymentsRequest,
 } from '../lib/api'
 
 const mockList = vi.mocked(listInvoicesRequest)
 const mockConfirm = vi.mocked(confirmInvoiceCoverageRequest)
 const mockUpdate = vi.mocked(updateInvoiceRequest)
+const mockVerifyAll = vi.mocked(verifyAllInvoicePaymentsRequest)
 
 const clients = [
   {
@@ -301,7 +304,7 @@ describe('InvoiceMonthRun — the control is offered only where it works', () =>
     await openEditor(settledInvoice)
 
     expect(
-      screen.getByText('Dates are set by a later invoice - change them there.'),
+      screen.getByText('Dates are set by a later invoice — change them there.'),
     ).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Change covered dates' })).not.toBeInTheDocument()
     // Not a gate: nothing is flagged, so Mark reviewed is as live as ever.
@@ -313,7 +316,7 @@ describe('InvoiceMonthRun — the control is offered only where it works', () =>
 
     expect(changeButton()).toBeInTheDocument()
     expect(
-      screen.queryByText('Dates are set by a later invoice - change them there.'),
+      screen.queryByText('Dates are set by a later invoice — change them there.'),
     ).not.toBeInTheDocument()
   })
 
@@ -334,7 +337,7 @@ describe('InvoiceMonthRun — the control is offered only where it works', () =>
 
     expect(screen.getByRole('button', { name: 'Confirm dates' })).toBeInTheDocument()
     expect(
-      screen.queryByText('Dates are set by a later invoice - change them there.'),
+      screen.queryByText('Dates are set by a later invoice — change them there.'),
     ).not.toBeInTheDocument()
   })
 })
@@ -350,5 +353,158 @@ describe('InvoiceMonthRun — the editor message clears when she stages a tag', 
     fireEvent.change(scopeSelect(), { target: { value: 'out-of-scope' } })
 
     expect(screen.queryByText(sentence)).not.toBeInTheDocument()
+  })
+})
+
+describe('InvoiceMonthRun — one dates save at a time', () => {
+  const payrollLine = {
+    ...recurringLine,
+    label: 'Payroll Service — August 13 – September 13, 2026',
+    recurringId: 'recur-payroll',
+  }
+  const flagged = (line: typeof recurringLine) => ({
+    ...line,
+    needsCoverageConfirmation: true,
+    coverageReason: 'gap' as const,
+  })
+
+  it('freezes the other line\'s Confirm and date boxes until the first answers', async () => {
+    await openEditor({
+      ...baseInvoice,
+      lineItems: [baseInvoice.lineItems[0], flagged(recurringLine), flagged(payrollLine)],
+    })
+    let settle: (invoice: PersistedInvoice) => void = () => {}
+    mockConfirm.mockReturnValue(new Promise((resolve) => (settle = resolve)))
+    const [firstConfirm] = screen.getAllByRole('button', { name: 'Confirm dates' })
+
+    fireEvent.click(firstConfirm)
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirming…' })).toBeDisabled())
+    // The label stays on the line being saved; the other line only waits.
+    const waiting = screen.getByRole('button', { name: 'Confirm dates' })
+    expect(waiting).toBeDisabled()
+    fireEvent.click(waiting)
+    expect(mockConfirm).toHaveBeenCalledTimes(1)
+    for (const box of [
+      ...screen.getAllByLabelText('Covered period start'),
+      ...screen.getAllByLabelText('Covered period end'),
+    ]) {
+      expect(box).toHaveAttribute('readonly')
+    }
+
+    settle(movedInvoice)
+    await screen.findByDisplayValue('QuickBooks Ledger — September 13 – October 13, 2026')
+  })
+
+  it('freezes a quiet line\'s Change covered dates and an open Save dates too', async () => {
+    await openEditor({
+      ...baseInvoice,
+      lineItems: [baseInvoice.lineItems[0], recurringLine, flagged(payrollLine)],
+    })
+    mockConfirm.mockReturnValue(new Promise(() => {}))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm dates' }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirming…' })).toBeDisabled())
+    expect(changeButton()).toBeDisabled()
+  })
+
+  it('frees the other line once the first save is refused', async () => {
+    await openEditor({
+      ...baseInvoice,
+      lineItems: [baseInvoice.lineItems[0], flagged(recurringLine), flagged(payrollLine)],
+    })
+    let refuse: (error: Error) => void = () => {}
+    mockConfirm.mockReturnValue(new Promise((_, reject) => (refuse = reject)))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Confirm dates' })[0])
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirming…' })).toBeDisabled())
+
+    refuse(new Error('Nope.'))
+
+    await screen.findByText('Nope.')
+    for (const button of screen.getAllByRole('button', { name: 'Confirm dates' })) {
+      expect(button).toBeEnabled()
+    }
+    for (const box of screen.getAllByLabelText('Covered period end')) {
+      expect(box).not.toHaveAttribute('readonly')
+    }
+  })
+})
+
+describe('InvoiceMonthRun — a flagged Confirm waits for her unsaved edits', () => {
+  const flaggedInvoice: PersistedInvoice = {
+    ...baseInvoice,
+    lineItems: [
+      baseInvoice.lineItems[0],
+      { ...recurringLine, needsCoverageConfirmation: true, coverageReason: 'gap' },
+    ],
+  }
+
+  it('is live on a clean editor', async () => {
+    await openEditor(flaggedInvoice)
+
+    expect(screen.getByRole('button', { name: 'Confirm dates' })).toBeEnabled()
+    expect(screen.queryByText('Save your other changes first')).not.toBeInTheDocument()
+  })
+
+  it('is disabled, with the reason in words, once a line is edited, and nothing is sent', async () => {
+    await openEditor(flaggedInvoice)
+
+    fireEvent.change(screen.getAllByLabelText('Line description')[0], {
+      target: { value: 'A label she is still typing' },
+    })
+
+    const confirm = screen.getByRole('button', { name: 'Confirm dates' })
+    expect(confirm).toBeDisabled()
+    expect(confirm).toHaveAttribute('title', 'Save your other changes first')
+    expect(screen.getByText('Save your other changes first')).toBeInTheDocument()
+    fireEvent.click(confirm)
+    expect(mockConfirm).not.toHaveBeenCalled()
+  })
+
+  it('is disabled for a typed note and for a staged tag as well', async () => {
+    await openEditor(flaggedInvoice)
+
+    fireEvent.change(note(), { target: { value: 'Thanks!' } })
+    expect(screen.getByRole('button', { name: 'Confirm dates' })).toBeDisabled()
+
+    fireEvent.change(note(), { target: { value: '' } })
+    expect(screen.getByRole('button', { name: 'Confirm dates' })).toBeEnabled()
+
+    fireEvent.change(scopeSelect(), { target: { value: 'out-of-scope' } })
+    expect(screen.getByRole('button', { name: 'Confirm dates' })).toBeDisabled()
+  })
+})
+
+describe('InvoiceMonthRun — the derived mark is not an edit', () => {
+  it('a re-fetch that changes only the mark leaves a clean editor clean', async () => {
+    await openEditor()
+    expect(saveChanges()).toBeDisabled()
+    expect(reviewButton()).toBeEnabled()
+    expect(changeButton()).toBeInTheDocument()
+
+    // Same invoice, same updatedAt, but the server now says a later month is
+    // billed. Verify all with Stripe re-reads the list.
+    mockList.mockResolvedValue([
+      {
+        ...baseInvoice,
+        lineItems: [baseInvoice.lineItems[0], { ...recurringLine, coverageChangeable: false }],
+      },
+    ])
+    mockVerifyAll.mockResolvedValue({
+      checked: 0,
+      verified: [],
+      stillSettling: [],
+      unverifiable: [],
+      invoices: [],
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Verify all with Stripe/ }))
+
+    // The mark arrives (so it reaches the open editor), and it is not an edit.
+    expect(
+      await screen.findByText('Dates are set by a later invoice — change them there.'),
+    ).toBeInTheDocument()
+    expect(saveChanges()).toBeDisabled()
+    expect(reviewButton()).toBeEnabled()
+    expect(screen.queryByText(/unsaved/)).not.toBeInTheDocument()
   })
 })

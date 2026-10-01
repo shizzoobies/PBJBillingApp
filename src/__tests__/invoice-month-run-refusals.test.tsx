@@ -338,3 +338,88 @@ describe('InvoiceMonthRun — the editor message clears when she edits', () => {
     answer(invoice)
   })
 })
+
+/**
+ * A REFUSAL IS NEVER SHOWN NOWHERE. The editor says it beside its buttons, and
+ * the run's banner no longer repeats it, so a refusal that arrives after the
+ * editor is gone (she collapsed the row, opened another invoice, or switched
+ * tab after pressing the button) would otherwise be lost. It goes to the banner
+ * instead, naming the invoice.
+ */
+describe('InvoiceMonthRun — a refusal that arrives after the editor is gone', () => {
+  const sentence = 'Something the server would not do.'
+
+  function pendingRefusal() {
+    let refuse: (error: Error) => void = () => {}
+    mockUpdate.mockReturnValue(new Promise((_, reject) => (refuse = reject)))
+    return () => refuse(new ApiError(500, sentence))
+  }
+
+  it('lands in the banner, naming the invoice, when the row is collapsed first', async () => {
+    const refuse = pendingRefusal()
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }))
+    // Collapse the row while the request is in the air.
+    fireEvent.click(screen.getByText('INV-2026-08-001'))
+    expect(document.querySelector('.invoice-run-editor')).toBeNull()
+
+    refuse()
+
+    expect(await screen.findByText('INV-2026-08-001: ' + sentence)).toBeInTheDocument()
+    expect(screen.getAllByText(new RegExp(sentence))).toHaveLength(1)
+  })
+
+  it('lands in the banner when a tab switch unmounts the row without changing it', async () => {
+    const refuse = pendingRefusal()
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }))
+    fireEvent.click(screen.getByRole('tab', { name: /^Reviewed/ }))
+    expect(document.querySelector('.invoice-run-editor')).toBeNull()
+
+    refuse()
+
+    expect(await screen.findByText('INV-2026-08-001: ' + sentence)).toBeInTheDocument()
+    expect(screen.getAllByText(new RegExp(sentence))).toHaveLength(1)
+  })
+
+  it('does the same for Void and Back to draft', async () => {
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
+    const refuse = pendingRefusal()
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Void' }))
+    fireEvent.click(screen.getByText('INV-2026-08-001'))
+
+    refuse()
+
+    expect(await screen.findByText('INV-2026-08-001: ' + sentence)).toBeInTheDocument()
+  })
+
+  it('names the client when the invoice has no number', async () => {
+    mockList.mockResolvedValue([{ ...invoice, number: null }])
+    const refuse = pendingRefusal()
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByText('Acme'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }))
+    fireEvent.click(screen.getByText('Acme'))
+
+    refuse()
+
+    expect(await screen.findByText('Acme: ' + sentence)).toBeInTheDocument()
+  })
+
+  // The ordinary case is unchanged: still open, so exactly one alert, in the editor.
+  it('still says it once, in the editor, when the row stayed open', async () => {
+    mockUpdate.mockRejectedValue(new ApiError(500, sentence))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }))
+
+    expect(await editor().findByText(sentence)).toBeInTheDocument()
+    expect(screen.getAllByText(new RegExp(sentence))).toHaveLength(1)
+    expect(screen.queryByText('INV-2026-08-001: ' + sentence)).not.toBeInTheDocument()
+  })
+})

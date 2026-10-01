@@ -640,7 +640,16 @@ function todayIso() {
  * its list goes through here, or the control would reappear after a save.
  */
 async function withCoverageChangeable(invoice) {
-  return (await appDataStore.withCoverageChangeable([invoice]))[0]
+  // BEST EFFORT. The mark is a courtesy to the editor, and every caller has
+  // already committed its write (or delivered its email) by the time it asks:
+  // a failure here must never turn that into a 500. Unmarked just means the
+  // editor offers the control, and the server's own refusal still guards it.
+  try {
+    return (await appDataStore.withCoverageChangeable([invoice]))[0]
+  } catch (error) {
+    console.error('[invoices] covered-dates mark failed, answering unmarked:', error)
+    return invoice
+  }
 }
 
 /**
@@ -3856,7 +3865,13 @@ const server = createServer(async (request, response) => {
       }
       // The month run is the one reader that needs to know which covered windows
       // can still move. ONE ledger read for the whole list.
-      sendJson(response, 200, { invoices: await appDataStore.withCoverageChangeable(invoices) })
+      let marked = invoices
+      try {
+        marked = await appDataStore.withCoverageChangeable(invoices)
+      } catch (error) {
+        console.error('[invoices] covered-dates mark failed on the list, answering unmarked:', error)
+      }
+      sendJson(response, 200, { invoices: marked })
       return
     }
 
@@ -4993,13 +5008,9 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         console.error('[invoice] send bookkeeping failed after delivery:', error)
       }
-      // Its own guard: past this point nothing may turn a delivered email into a
-      // failed response, and the mark is a courtesy to the editor.
-      try {
-        sentInvoice = await withCoverageChangeable(sentInvoice)
-      } catch (error) {
-        console.error('[invoice] could not mark covered dates after send:', error)
-      }
+      // Best-effort by construction (it never throws), so a delivered email
+      // cannot become a failed response here.
+      sentInvoice = await withCoverageChangeable(sentInvoice)
       sendJson(response, 200, { invoice: sentInvoice })
       return
     }

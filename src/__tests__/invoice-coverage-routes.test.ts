@@ -431,9 +431,30 @@ describe('the invoice responses carry which covered windows can still move', () 
     expect(link).toContain('invoice: await withCoverageChangeable(updated)')
   })
 
-  it('does not let a failed mark turn a delivered email into a failed send', () => {
+  // The mark is a courtesy: every response it decorates has already committed
+  // its write (or delivered its email), so a failure must answer unmarked rather
+  // than 500. The helper owns that, so no caller needs its own try.
+  it('answers unmarked, and logs, when the mark itself fails', () => {
+    const at = serverSource.indexOf('async function withCoverageChangeable(invoice)')
+    expect(at).toBeGreaterThan(-1)
+    const helper = serverSource.slice(at, at + 900)
+    expect(helper).toContain('try {')
+    expect(helper).toContain("console.error('[invoices] covered-dates mark failed")
+    expect(helper).toContain('return invoice')
+  })
+
+  it('answers the list unmarked when the mark fails, rather than failing the list', () => {
+    const block = routeBlock(/\/\/ GET \/api\/invoices\?period=YYYY-MM/, 3600)
+    const at = block.indexOf('appDataStore.withCoverageChangeable(invoices)')
+    expect(block.slice(Math.max(0, at - 60), at)).toContain('marked = await')
+    expect(block.slice(at, at + 200)).toContain('catch (error)')
+  })
+
+  it('leaves the send route to the best-effort helper, with nothing around it', () => {
     const send = routeBlock(/send bookkeeping failed after delivery/, 900)
-    const at = send.indexOf('sentInvoice = await withCoverageChangeable(sentInvoice)')
-    expect(send.slice(Math.max(0, at - 80), at)).toContain('try {')
+    expect(send).toContain('sentInvoice = await withCoverageChangeable(sentInvoice)')
+    // The block starts inside the bookkeeping catch, so any `try {` here would
+    // be a second guard around the helper.
+    expect(send).not.toContain('try {')
   })
 })

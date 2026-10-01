@@ -1471,6 +1471,9 @@ export function InvoiceMonthRun({
                     onToggle={() => setOpenId(openId === invoice.id ? null : invoice.id)}
                     onPatch={(body) => patch(invoice.id, body)}
                     onInvoiceChanged={mergeInvoice}
+                    onRefusal={(message) =>
+                      setError(`${invoice.number ?? clientName(invoice.clientId)}: ${message}`)
+                    }
                     onPrint={() => onPrint(invoice)}
                     onDirtyChange={setOpenDirty}
                   />
@@ -1506,6 +1509,7 @@ function InvoiceRow({
   onPatch,
   onPrint,
   onInvoiceChanged,
+  onRefusal,
   onDirtyChange,
 }: {
   invoice: PersistedInvoice
@@ -1545,6 +1549,8 @@ function InvoiceRow({
   onPrint: () => void
   /** Push a server-returned invoice back into the list (payment link marks it sent). */
   onInvoiceChanged: (invoice: PersistedInvoice) => void
+  /** A refusal whose editor was gone when it arrived: the run's banner says it. */
+  onRefusal: (message: string) => void
   /** Tell the run whether this row's open editor has unsaved edits. */
   onDirtyChange: (dirty: boolean) => void
 }) {
@@ -1716,6 +1722,7 @@ function InvoiceRow({
           onPatch={onPatch}
           onPrint={onPrint}
           onInvoiceChanged={onInvoiceChanged}
+          onRefusal={onRefusal}
           onDirtyChange={onDirtyChange}
         />
       ) : null}
@@ -1755,9 +1762,19 @@ function InvoiceLineRow({
     start: string
     end: string
     busy: boolean
+    /**
+     * ANY dates save on this invoice is in flight (not just this line's). Every
+     * date box and every coverage button waits, so a second save cannot start
+     * before the first answers and nothing is typed into a box about to be
+     * discarded. `busy` stays the label for the one line being saved.
+     */
+    frozen: boolean
     /** `change` only: the From / To boxes are showing. */
     open: boolean
-    /** `change` only: set while previewing as someone, to say why it is dead. */
+    /**
+     * Why the button is dead, said in words as well as on hover: previewing as
+     * someone (`change` only), or her other edits are unsaved (both modes).
+     */
     disabledTitle?: string
     /**
      * `change` only: a later month is already billed for this expense, so the
@@ -1792,6 +1809,7 @@ function InvoiceLineRow({
           type="date"
           value={coverage.start}
           aria-label="Covered period start"
+          readOnly={coverage.frozen}
           onChange={(event) => coverage.onEdit({ start: event.target.value, end: coverage.end })}
         />
       </label>
@@ -1802,6 +1820,7 @@ function InvoiceLineRow({
           type="date"
           value={coverage.end}
           aria-label="Covered period end"
+          readOnly={coverage.frozen}
           onChange={(event) => coverage.onEdit({ start: coverage.start, end: event.target.value })}
         />
       </label>
@@ -1847,12 +1866,24 @@ function InvoiceLineRow({
               <button
                 type="button"
                 className="secondary-action"
-                disabled={coverage.busy || !coverage.start || !coverage.end}
+                disabled={
+                  coverage.frozen ||
+                  Boolean(coverage.disabledTitle) ||
+                  !coverage.start ||
+                  !coverage.end
+                }
+                title={coverage.disabledTitle}
                 onClick={coverage.onConfirm}
               >
                 {coverage.busy ? 'Confirming…' : 'Confirm dates'}
               </button>
             </div>
+            {/* Confirming reloads this invoice from the server, which would
+                throw away her unsaved edits, so it waits for them. Said in
+                words, as the quiet control does. */}
+            {coverage.disabledTitle ? (
+              <p className="invoice-run-coverage-why">{coverage.disabledTitle}</p>
+            ) : null}
           </div>
         ) : null}
         {/* THE QUIET VERSION. A window nobody flagged can still be wrong — the
@@ -1863,7 +1894,7 @@ function InvoiceLineRow({
             never gates Mark reviewed: that reads the flag, and there is none. */}
         {coverage?.mode === 'change' && coverage.settledByLater ? (
           <p className="invoice-run-coverage-why">
-            Dates are set by a later invoice - change them there.
+            Dates are set by a later invoice — change them there.
           </p>
         ) : coverage?.mode === 'change' ? (
           coverage.open ? (
@@ -1879,7 +1910,7 @@ function InvoiceLineRow({
                   type="button"
                   className="secondary-action"
                   disabled={
-                    coverage.busy ||
+                    coverage.frozen ||
                     Boolean(coverage.disabledTitle) ||
                     !coverage.start ||
                     !coverage.end ||
@@ -1894,7 +1925,7 @@ function InvoiceLineRow({
                 <button
                   type="button"
                   className="link-button"
-                  disabled={coverage.busy}
+                  disabled={coverage.frozen}
                   onClick={coverage.onCancel}
                 >
                   Cancel
@@ -1910,7 +1941,7 @@ function InvoiceLineRow({
             <button
               type="button"
               className="link-button invoice-run-coverage-change"
-              disabled={Boolean(coverage.disabledTitle)}
+              disabled={coverage.frozen || Boolean(coverage.disabledTitle)}
               title={coverage.disabledTitle}
               onClick={coverage.onOpen}
             >
@@ -2057,6 +2088,7 @@ function InvoiceEditor({
   onPatch,
   onPrint,
   onInvoiceChanged,
+  onRefusal,
   onDirtyChange,
 }: {
   invoice: PersistedInvoice
@@ -2091,6 +2123,9 @@ function InvoiceEditor({
   /** Push a server-returned invoice back into the list — creating a payment
    *  link marks it sent, and the row must show that immediately. */
   onInvoiceChanged: (invoice: PersistedInvoice) => void
+  /** Say a refusal in the run's banner. Used only when this editor is gone by
+   *  the time the answer arrives, so it still has somewhere to be read. */
+  onRefusal: (message: string) => void
   /** Report unsaved edits upward so switching tabs can warn before this
    *  editor is unmounted out from under them. */
   onDirtyChange: (dirty: boolean) => void
@@ -2110,6 +2145,21 @@ function InvoiceEditor({
   // the run, because it is about the lines on this screen and it arrives with
   // the credit line being removed from them.
   const [retainerError, setRetainerError] = useState<string | null>(null)
+
+  // Whether this editor is still on screen. A refusal that arrives after she
+  // collapsed the row, opened another invoice or switched tab has no slot to
+  // appear in, and the run's banner no longer says it for us (see `patch`).
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+  const sayRefusal = (message: string) => {
+    if (mountedRef.current) setRetainerError(message)
+    else onRefusal(message)
+  }
 
   /**
    * The scope decisions staged in the hours panel, keyed by time entry id.
@@ -2260,7 +2310,7 @@ function InvoiceEditor({
   const reviewOrSayWhy = async () => {
     setRetainerError(null)
     const result = await onPatch({ status: 'reviewed' })
-    if (!result.ok) setRetainerError(result.message)
+    if (!result.ok) sayRefusal(result.message)
   }
 
   /**
@@ -2272,7 +2322,7 @@ function InvoiceEditor({
   const backToDraft = async () => {
     setRetainerError(null)
     const result = await onPatch({ status: 'draft' })
-    if (!result.ok) setRetainerError(result.message)
+    if (!result.ok) sayRefusal(result.message)
   }
 
   const markReviewed = () => {
@@ -2285,6 +2335,9 @@ function InvoiceEditor({
   }
 
   const confirmCoverage = async (recurringId: string, range: { start: string; end: string }) => {
+    // One dates save at a time: a second one started before the first answers
+    // would outlive the remount the first one causes.
+    if (coverageBusyId !== null) return
     setCoverageBusyId(recurringId)
     setCoverageError(null)
     try {
@@ -2464,8 +2517,18 @@ function InvoiceEditor({
     setSaved(false)
   }
 
+  // `coverageChangeable` is derived by the server on every response and is not
+  // hers to edit, so it never counts as an edit: a re-fetch that changes only
+  // the mark must not make a clean editor read dirty.
+  const withoutDerivedMarks = (list: PersistedInvoiceLine[]) =>
+    list.map((line) => {
+      const copy = { ...line }
+      delete copy.coverageChangeable
+      return copy
+    })
   const dirty =
-    JSON.stringify(lines) !== JSON.stringify(invoice.lineItems) ||
+    JSON.stringify(withoutDerivedMarks(lines)) !==
+      JSON.stringify(withoutDerivedMarks(invoice.lineItems)) ||
     blurb !== invoice.blurb ||
     Object.keys(tagEdits).length > 0
   const localTotal = previewLines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0)
@@ -2581,6 +2644,15 @@ function InvoiceEditor({
    * the same way — this is a gate on marking the invoice reviewed, and a block
    * that quietly skipped it would let an unconfirmed window through.
    */
+  // Which expenses the SERVER says cannot move, read off the invoice as it was
+  // handed to us rather than off the editable copy: the mark is derived on every
+  // response, and a list re-fetch that changes only the mark must reach here.
+  const settledExpenseIds = new Set(
+    invoice.lineItems
+      .filter((line) => line.coverageChangeable === false && line.recurringId)
+      .map((line) => line.recurringId as string),
+  )
+
   const coverageFor = (line: PersistedInvoiceLine) => {
     const recurringId = line.recurringId
     if (!recurringId) return undefined
@@ -2598,16 +2670,17 @@ function InvoiceEditor({
       mode: flagged ? ('confirm' as const) : ('change' as const),
       ...coverageValue(line),
       busy: coverageBusyId === recurringId,
+      frozen: savingDates,
       open: coverageOpenId === recurringId,
       // The server marks it on every response it sends; a flagged line is the
       // open question and is always answerable, so it never carries it.
-      settledByLater: !flagged && line.coverageChangeable === false,
-      // Saving the dates reloads this invoice from the server, which would
-      // throw away any line, note or hours edit she has not saved yet — so
-      // the dates wait until those are saved.
-      disabledTitle: flagged
-        ? undefined
-        : scope.previewMode
+      settledByLater: !flagged && settledExpenseIds.has(recurringId),
+      // Saving or confirming the dates reloads this invoice from the server,
+      // which would throw away any line, note or hours edit she has not saved
+      // yet, so the dates wait until those are saved. The flagged Confirm is
+      // the same request with the same remount, so it waits too.
+      disabledTitle:
+        !flagged && scope.previewMode
           ? 'Disabled in preview mode'
           : dirty
             ? 'Save your other changes first'
@@ -2747,7 +2820,7 @@ function InvoiceEditor({
     if (!window.confirm(sentence)) return
     setRetainerError(null)
     const result = await onPatch({ status: 'void' })
-    if (!result.ok) setRetainerError(result.message)
+    if (!result.ok) sayRefusal(result.message)
   }
 
   const unmarkPaid = async () => {
@@ -2783,6 +2856,12 @@ function InvoiceEditor({
       // The page moves them in local app data; the remount this save causes
       // then re-reads the tags off entries that already carry them.
       if (entryTags.length > 0) scope.onEntriesTagged?.(entryTags)
+      return
+    }
+    // The row was collapsed (or the tab switched) while the request was in the
+    // air: there is no editor left to speak in, so the run's banner says it.
+    if (!mountedRef.current) {
+      onRefusal(result.message)
       return
     }
     // A locked invoice refused the save outright. Say so where she is looking
