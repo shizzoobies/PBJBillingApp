@@ -16,11 +16,12 @@
 //
 // WHY THE DUPLICATE ROW IS RETIRED AND NEVER DELETED
 // --------------------------------------------------
-// Eight of the columns that hold a client id carry no foreign key at all:
+// Nine of the columns that hold a client id carry no foreign key at all:
 // checklist_skips.client_id, client_notes.client_id,
 // item_deletion_requests.client_id, sales_tax_records.client_id,
 // invoice_review_events.client_id, invoice_ai_reviews.client_id,
-// clients.bill_to_client_id and clients.invoice_recipient_client_id — and
+// client_statement_accounts.client_id, clients.bill_to_client_id and
+// clients.invoice_recipient_client_id — and
 // neither do the array/jsonb references (time_entries.group_client_ids,
 // clients.plan_ids / contact_ids / assigned_bookkeeper_ids,
 // invoices.line_items[].sourceClientId). The database will happily let a row
@@ -75,6 +76,8 @@ const CHILD_TABLES = [
   'reimbursements',
   'recurring_reimbursements',
   'client_notes',
+  'client_statement_accounts',
+  'client_pending_notes',
   'item_deletion_requests',
   'sales_tax_records',
   'invoices',

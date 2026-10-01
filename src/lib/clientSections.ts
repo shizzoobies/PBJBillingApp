@@ -51,6 +51,7 @@ export const CLIENT_SECTION_LEGACY_ANCHORS: Record<string, ClientSection> = {
   'client-section-contacts': 'overview',
   'client-section-team': 'overview',
   'client-section-branding': 'overview',
+  'client-section-statements': 'overview',
   'client-section-notes': 'overview',
   'client-section-billing': 'billing',
   'client-section-plan-checklists': 'billing',

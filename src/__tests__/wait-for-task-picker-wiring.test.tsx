@@ -128,6 +128,7 @@ function signIn() {
     bulkAddChecklistItems: vi.fn(),
     deleteChecklist: vi.fn(),
     deleteChecklistItem: vi.fn(),
+    dataRefreshCount: 0,
     deleteChecklistItemFromSeries: vi.fn(),
     emptyChecklistRecycleBin: vi.fn(),
     rejectChecklistDeletion: vi.fn(),

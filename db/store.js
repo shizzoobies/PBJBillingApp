@@ -126,7 +126,7 @@ function writeFile(filePath, content) {
   return enqueueFileOperation(filePath, () => fsWriteFile(filePath, content))
 }
 import path from 'node:path'
-import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 
@@ -1000,6 +1000,22 @@ export class ProposalStateError extends Error {
   constructor(message) {
     super(message)
     this.name = 'ProposalStateError'
+  }
+}
+
+/**
+ * The statement dates box's save was sent a `version` that no longer matches
+ * the client's stored list (see `statementAccountsVersion` below) — another
+ * tab or another save landed first. Same idea as `StaleWorkspaceError` in
+ * lib/workspace-version.js, scaled down to one client's list instead of the
+ * whole bulk-save payload: nothing is written, and the route answers 409 with
+ * this message so the panel can show a Reload prompt instead of silently
+ * overwriting someone else's change.
+ */
+export class StaleStatementAccountsError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'StaleStatementAccountsError'
   }
 }
 
@@ -1967,6 +1983,11 @@ function buildChecklistFromStage({
     assigneeId: stage.assigneeId,
     frequency: template.frequency,
     dueDate,
+    // When this instance came to exist. Postgres stamps `created_at` itself
+    // (and ignores this); the file backend persists exactly what is here, and
+    // the pending-notes attach rule ("the next checklist created AFTER the
+    // note") needs the same answer from both.
+    createdAt: nowIso(),
     viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
     editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
     caseId,
@@ -3188,6 +3209,27 @@ function mapChecklistSkipRow(row) {
   }
 }
 
+/**
+ * One shape for a pending-client-note record whichever backend produced it —
+ * same idea as {@link mapChecklistSkipRow}. The file backend already stores
+ * this exact shape, so it needs no separate normalizer.
+ */
+function mapClientPendingNoteRow(row) {
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    templateId: row.template_id,
+    kind: row.kind === 'task' ? 'task' : 'note',
+    body: row.body,
+    authorId: row.author_id ?? null,
+    authorName: row.author_name ?? null,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    attachedChecklistId: row.attached_checklist_id ?? null,
+    attachedItemId: row.attached_item_id ?? null,
+    attachedAt: row.attached_at ? new Date(row.attached_at).toISOString() : null,
+  }
+}
+
 /** The file backend's stored object, filled out to the same shape. */
 function normalizeChecklistSkip(record) {
   return {
@@ -3266,6 +3308,26 @@ export function periodRestampPlan(template, instances) {
     plan.push({ id: instance.id, before, after })
   }
   return plan
+}
+
+/** A client-supplied statement-account id is kept only in this shape; anything else is a new row. */
+const STATEMENT_ACCOUNT_ID_PATTERN = /^stmt-[0-9a-f]{8}$/
+
+/**
+ * The stale-tab guard for the statement dates box: a stable fingerprint of one
+ * client's list, derived from the data itself rather than a bumped counter —
+ * same reasoning as the bulk-save fingerprint in lib/workspace-version.js, just
+ * scaled to one list instead of fifteen tables. `GET` hands this back beside
+ * the rows; `PUT` is sent it and refuses (409) when it no longer matches the
+ * stored list, so a save from a tab that loaded before someone else's change
+ * cannot silently replace it.
+ */
+export function statementAccountsVersion(rows) {
+  // A JSON array of [id, name, dayOfMonth] tuples, not a delimiter-joined
+  // string: a name containing the delimiter can never collide with a
+  // different list.
+  const tuples = (Array.isArray(rows) ? rows : []).map((row) => [row.id, row.name, row.dayOfMonth])
+  return createHash('sha1').update(JSON.stringify(tuples)).digest('hex')
 }
 
 export class AppDataStore {
@@ -3708,6 +3770,60 @@ export class AppDataStore {
       `)
       await this.pool.query(
         `create index if not exists client_notes_client_idx on client_notes (client_id)`,
+      )
+
+      // Statement dates box: a reference-only per-client list of accounts and
+      // the day of the month each one's statement usually appears. Nothing
+      // else in the app reads this — it exists so staff stop hunting old
+      // statements for the date. Endpoint-managed (NOT part of the bulk
+      // /api/app-data wipe-and-reinsert) — exactly like client_notes — so the
+      // whole box is saved with one PUT and can't be clobbered by an autosave.
+      // `saveClientStatementAccounts` replaces a client's whole list in one
+      // transaction (delete + insert), which is why there is no update path.
+      await this.pool.query(`
+        create table if not exists client_statement_accounts (
+          id text primary key,
+          client_id text not null,
+          name text not null,
+          day_of_month int not null check (day_of_month between 1 and 31),
+          sort_order int not null default 0,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(
+        `create index if not exists client_statement_accounts_client_idx
+           on client_statement_accounts (client_id)`,
+      )
+
+      // Pending notes for future recurring checklists (featreq-b688e73c): she
+      // flags a note ("new hire starting" etc.) against a recurring template
+      // BEFORE that template's next checklist has materialized, picks Task or
+      // Note, and the note attaches itself to the next checklist that template
+      // spawns. Endpoint-managed (NOT part of the bulk /api/app-data write) —
+      // exactly like client_notes — so staff can write one without the
+      // owner-only bulk save. `attached_checklist_id` / `attached_item_id` /
+      // `attached_at` stay null until the idempotent attach pass
+      // (`attachPendingClientNotes`) finds a checklist for it; see that
+      // method's comment for why it never runs inside the pure materializer.
+      await this.pool.query(`
+        create table if not exists client_pending_notes (
+          id text primary key,
+          client_id text not null,
+          template_id text not null,
+          kind text not null check (kind in ('task', 'note')),
+          body text not null,
+          author_id text,
+          author_name text,
+          created_at timestamptz not null default now(),
+          attached_checklist_id text,
+          attached_item_id text,
+          attached_at timestamptz
+        )
+      `)
+      await this.pool.query(
+        `create index if not exists client_pending_notes_client_idx
+           on client_pending_notes (client_id)`,
       )
 
       // Item-level deletion requests: a NON-owner asks to delete a single
@@ -6557,11 +6673,53 @@ export class AppDataStore {
   }
 
   async read() {
+    // No `captureVersion`: ~110 call sites read the workspace for their own
+    // purposes and must not pay the fingerprint query (an md5 over every row of
+    // ~15 tables) or fail if it ever fails. Only `readWithVersion()` does.
+    return (await this._readWorkspace({ captureVersion: false })).data
+  }
+
+  /**
+   * `read()` plus the workspace version (staleness-guard token) that is SAFE to
+   * hand a tab together with the returned data: it was captured BEFORE the
+   * final workspace read that produced that data, never after. A write that
+   * lands in between (another request's pending-note attach, say) therefore
+   * moves the persisted state PAST the version the tab holds, and the tab's
+   * next save is refused (409) instead of passing the guard and wiping rows it
+   * never saw. Computing the version after `read()` returns (the old shape of
+   * `GET /api/app-data`) left exactly that window open.
+   *
+   * Only this method (used by `GET /api/app-data`) computes that fingerprint;
+   * plain `read()` does not.
+   *
+   * @returns {Promise<{ data: object, version: string }>}
+   */
+  async readWithVersion() {
+    return this._readWorkspace({ captureVersion: true })
+  }
+
+  /**
+   * The shared body of `read()` and `readWithVersion()`.
+   *
+   * `captureVersion` false (plain `read()`) skips the workspace fingerprint
+   * query and returns `version: null`; the materializer write-back's own
+   * guard fingerprint is separate and still runs when something spawns.
+   *
+   * `afterWriteBack` is internal: the re-read that follows a successful
+   * materializer write-back. It serves what was persisted and does NOT run the
+   * materializer again.
+   *
+   * @returns {Promise<{ data: object, version: string | null }>}
+   */
+  async _readWorkspace({ afterWriteBack = false, captureVersion = false } = {}) {
     if (this.pool) {
+      const firstVersion = captureVersion ? await postgresWorkspaceVersion(this.pool) : null
       const data = await this._readPostgresWorkspace()
-      const materialized = materializeRecurringChecklists(data)
+      const materialized = afterWriteBack
+        ? { changed: false, data }
+        : materializeRecurringChecklists(data)
       if (!materialized.changed) {
-        return data
+        return { data, version: firstVersion }
       }
 
       // Persist the freshly-materialized checklists — GUARDED. The write-back
@@ -6581,18 +6739,33 @@ export class AppDataStore {
       // load; if this write-back throws (e.g. a constraint violation on one
       // bad row), an unguarded throw turns a single bad record into a TOTAL
       // outage for every user (the 2026-06-17 incident).
+      //
+      // Whatever is served carries the version captured before the read it
+      // came from: `firstVersion` for the first snapshot, `expectedVersion`
+      // (the one the write-back is guarded by) for the re-read.
       let served = materialized.data
+      let servedVersion = firstVersion
+      let wroteBack = false
       try {
         const expectedVersion = await postgresWorkspaceVersion(this.pool)
         const fresh = await this._readPostgresWorkspace()
         const freshMaterialized = materializeRecurringChecklists(fresh)
         if (!freshMaterialized.changed) {
           // Another server (or a concurrent read) already persisted the spawn.
-          return fresh
+          return { data: fresh, version: expectedVersion }
         }
         served = freshMaterialized.data
+        servedVersion = expectedVersion
         await this.write(freshMaterialized.data, { expectedVersion })
-        return freshMaterialized.data
+        wroteBack = true
+        // The write-back landed, so any pending note waiting on a template
+        // that just spawned may now have a checklist to attach to. Only runs
+        // on this SUCCESS path — never against a write that got refused.
+        try {
+          await this.attachPendingClientNotes({})
+        } catch (attachError) {
+          console.error('[read] pending-notes attach pass failed:', attachError)
+        }
       } catch (error) {
         if (error instanceof StaleWorkspaceError) {
           console.warn(
@@ -6604,15 +6777,32 @@ export class AppDataStore {
         // The freshest snapshot we materialized (the re-read when it got that
         // far, the first read otherwise). Its spawned ids were never
         // persisted; the next read's write-back mints its own.
-        return served
+        return { data: served, version: servedVersion }
       }
+      // The write-back (and any attach pass) persisted changes our snapshot
+      // does not carry — a task-kind attachment inserts an `item-pn-*` row — so
+      // hand back what is actually persisted, under a version captured just
+      // before THAT read. OUTSIDE the try above on purpose, so a failed attach
+      // pass can never skip it. If the re-read itself fails, the snapshot we
+      // hold is still safe to serve: its version predates it, so anything the
+      // attach pass added only makes the tab's next save 409.
+      if (wroteBack) {
+        try {
+          return await this._readWorkspace({ afterWriteBack: true, captureVersion })
+        } catch (rereadError) {
+          console.error('[read] re-read after materialize write-back failed; serving in-memory data:', rereadError)
+        }
+      }
+      return { data: served, version: servedVersion }
     }
 
     const data = await readJson(localDataPath)
     // Fingerprint of the persisted file EXACTLY as read, captured before any
     // in-place backfill below mutates `data` — this is what the guarded
     // write-back at the bottom is compared against.
-    const persistedVersion = fileWorkspaceVersion(data)
+    // The afterWriteBack re-read neither writes back nor hands out a version
+    // unless asked, so a plain read() does not fingerprint it at all.
+    const persistedVersion = afterWriteBack && !captureVersion ? null : fileWorkspaceVersion(data)
     if (!Array.isArray(data.checklistTemplates)) {
       const seed = await this.getSeedData()
       data.checklistTemplates = seed.checklistTemplates ?? []
@@ -6729,8 +6919,10 @@ export class AppDataStore {
       backfilled = true
     }
 
-    const materialized = materializeRecurringChecklists(data)
-    if (materialized.changed || backfilled) {
+    const materialized = afterWriteBack
+      ? { changed: false, data }
+      : materializeRecurringChecklists(data)
+    if (!afterWriteBack && (materialized.changed || backfilled)) {
       // Same guarded write-back as the Postgres branch above: the fingerprint
       // captured right after the file was read gates the save, so a write that
       // landed mid-read refuses this snapshot instead of being erased by it.
@@ -6742,8 +6934,10 @@ export class AppDataStore {
       // restores invoices explicitly); file mode is dev/test only.
       // A refused (or failed) write-back serves the in-memory data and lets
       // the next read retry — never 500s the read.
+      let writeBackSucceeded = false
       try {
         await this.write(materialized.data, { expectedVersion: persistedVersion })
+        writeBackSucceeded = true
       } catch (error) {
         if (error instanceof StaleWorkspaceError) {
           console.warn(
@@ -6753,10 +6947,31 @@ export class AppDataStore {
           console.error('[read] materialize write-back failed; serving in-memory data:', error)
         }
       }
-      return materialized.data
+      // Same reasoning as the Postgres branch above: only run the attach pass
+      // when the write-back actually persisted — a refused/failed write-back
+      // leaves every pending note exactly as pending as it was.
+      if (writeBackSucceeded) {
+        try {
+          await this.attachPendingClientNotes({})
+        } catch (attachError) {
+          console.error('[read] pending-notes attach pass failed:', attachError)
+        }
+        // Same reasoning as the Postgres branch: the write-back and an attached
+        // task item changed the file past the snapshot we hold, so return the
+        // persisted workspace under a version taken before THAT read. The
+        // `persistedVersion` below is the fingerprint of the file BEFORE this
+        // write-back, so it would make the tab's very next save 409 against
+        // our own write; the re-read's own pre-read fingerprint does not.
+        try {
+          return await this._readWorkspace({ afterWriteBack: true, captureVersion })
+        } catch (rereadError) {
+          console.error('[read] re-read after materialize write-back failed; serving in-memory data:', rereadError)
+        }
+      }
+      return { data: materialized.data, version: persistedVersion }
     }
 
-    return data
+    return { data, version: persistedVersion }
   }
 
   /**
@@ -19346,6 +19561,632 @@ export class AppDataStore {
     return removed
   }
 
+  // ---- Statement dates box: reference-only per-client account/day list ----
+  //
+  // Endpoint-managed (NOT part of the bulk /api/app-data write), like client
+  // notes — nothing else in the app reads this, and it must never be clobbered
+  // by an autosave. Stored in auth-state on the file backend,
+  // client_statement_accounts on pg. The panel always saves its whole box at
+  // once, so there is one write method that replaces a client's entire list
+  // rather than per-row create/update/delete.
+
+  /** A client's statement accounts, in saved (display) order. */
+  async listClientStatementAccounts(clientId) {
+    if (!clientId) return []
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, client_id, name, day_of_month, sort_order
+           from client_statement_accounts where client_id = $1 order by sort_order asc`,
+        [clientId],
+      )
+      return result.rows.map((row) => ({
+        id: row.id,
+        clientId: row.client_id,
+        name: row.name,
+        dayOfMonth: row.day_of_month,
+        sortOrder: row.sort_order,
+      }))
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientStatementAccounts)
+      ? authState.clientStatementAccounts
+      : []
+    return list
+      .filter((row) => row.clientId === clientId)
+      .slice()
+      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+  }
+
+  /**
+   * Replace a client's whole statement-dates list. Rows are validated (name
+   * trimmed 1..120 chars, day an integer 1..31), capped at 60 rows, and
+   * re-sorted to match array order — a row's id is kept only when the caller
+   * sent one shaped like `stmt-<8 hex>`, it is one of THIS client's current
+   * ids (an edit), and it has not already appeared earlier in this same
+   * payload; otherwise a fresh id is minted (a new row). A malformed,
+   * duplicated or foreign id (one that belongs to another client's row would
+   * hit the primary key and 500) is exactly the shape a bug or a replayed chip
+   * click would produce, and minting rather than trusting it keeps two rows
+   * from ever fighting over one id. One transaction on Postgres (delete then
+   * insert); a full replace of this client's slice on the file backend.
+   * Returns the saved list.
+   *
+   * `expectedVersion`, when sent, is checked against the CURRENT stored
+   * list's `statementAccountsVersion` — a mismatch means another save landed
+   * first, and throws `StaleStatementAccountsError` instead of replacing it.
+   * The check is atomic with the write: on Postgres it runs INSIDE the
+   * transaction behind a per-client advisory lock (a `for update` would have
+   * nothing to lock when the list is empty), so two tabs holding the same
+   * version cannot both pass; on the file backend the read, compare and write
+   * are one queue slot with no await between compare and write. Omitted
+   * (falsy), the check is skipped, so the API stays usable for callers that
+   * don't track it.
+   */
+  async saveClientStatementAccounts(clientId, rows, expectedVersion) {
+    if (!clientId) return []
+    const staleMessage = 'Someone else changed these dates. Reload and try again.'
+    // `currentIds` is the ids of this client's rows as stored right now (read
+    // inside the atomic section by the caller); only those may be kept.
+    const cleanRows = (currentIds) => {
+      const seenIds = new Set()
+      return (Array.isArray(rows) ? rows : [])
+        .map((row) => ({
+          id: row?.id ? String(row.id) : null,
+          name: String(row?.name ?? '').trim().slice(0, 120),
+          day: Number(row?.dayOfMonth),
+        }))
+        .filter((row) => row.name && Number.isInteger(row.day) && row.day >= 1 && row.day <= 31)
+        .slice(0, 60)
+        .map((row, index) => {
+          const keepId =
+            row.id &&
+            STATEMENT_ACCOUNT_ID_PATTERN.test(row.id) &&
+            currentIds.has(row.id) &&
+            !seenIds.has(row.id)
+              ? row.id
+              : null
+          if (keepId) seenIds.add(keepId)
+          return {
+            id: keepId || `stmt-${randomUUID().slice(0, 8)}`,
+            clientId,
+            name: row.name,
+            dayOfMonth: row.day,
+            sortOrder: index,
+          }
+        })
+    }
+
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        await client.query('select pg_advisory_xact_lock(hashtext($1))', [
+          `client_statement_accounts:${clientId}`,
+        ])
+        const stored = await client.query(
+          `select id, client_id, name, day_of_month, sort_order
+             from client_statement_accounts where client_id = $1 order by sort_order asc`,
+          [clientId],
+        )
+        const current = stored.rows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          dayOfMonth: row.day_of_month,
+        }))
+        if (expectedVersion && statementAccountsVersion(current) !== expectedVersion) {
+          throw new StaleStatementAccountsError(staleMessage)
+        }
+        const clean = cleanRows(new Set(current.map((row) => row.id)))
+        await client.query(`delete from client_statement_accounts where client_id = $1`, [
+          clientId,
+        ])
+        for (const row of clean) {
+          await client.query(
+            `insert into client_statement_accounts
+               (id, client_id, name, day_of_month, sort_order, created_at, updated_at)
+             values ($1, $2, $3, $4, $5, now(), now())`,
+            [row.id, row.clientId, row.name, row.dayOfMonth, row.sortOrder],
+          )
+        }
+        await client.query('commit')
+        return clean
+      } catch (error) {
+        await client.query('rollback')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    // File backend: read, compare and write in ONE queue slot. `readJson` and
+    // `writeFile` enqueue behind the slot they would run in and deadlock, so
+    // raw fs calls only in here.
+    return enqueueFileOperation(localAuthPath, async () => {
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const all = Array.isArray(authState.clientStatementAccounts)
+        ? authState.clientStatementAccounts
+        : []
+      const current = all
+        .filter((row) => row.clientId === clientId)
+        .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+      if (expectedVersion && statementAccountsVersion(current) !== expectedVersion) {
+        throw new StaleStatementAccountsError(staleMessage)
+      }
+      const clean = cleanRows(new Set(current.map((row) => row.id)))
+      authState.clientStatementAccounts = [...all.filter((row) => row.clientId !== clientId), ...clean]
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return clean
+    })
+  }
+
+  // ---- Pending notes for future recurring checklists (featreq-b688e73c) ----
+  //
+  // Endpoint-managed (NOT part of the bulk /api/app-data write), like client
+  // notes — so anyone who can write the client's checklists can flag one
+  // without the owner-only bulk save. Stored in auth-state on the file
+  // backend, client_pending_notes on pg.
+  //
+  // A note starts unattached (`attachedChecklistId: null`) and stays that way
+  // until `attachPendingClientNotes` finds the next checklist its chosen
+  // template spawns. `listClientPendingNotes` returns BOTH pending notes and
+  // notes attached in the last 90 days, so the client page can render the
+  // short history alongside the live count.
+
+  /** A client's pending notes, newest first: pending + attached (last 90 days). */
+  async listClientPendingNotes(clientId) {
+    if (!clientId) return []
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, client_id, template_id, kind, body, author_id, author_name,
+                created_at, attached_checklist_id, attached_item_id, attached_at
+           from client_pending_notes
+          where client_id = $1
+            and (attached_checklist_id is null or attached_at > now() - interval '90 days')
+          order by created_at desc`,
+        [clientId],
+      )
+      return result.rows.map(mapClientPendingNoteRow)
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000
+    return list
+      .filter((note) => note.clientId === clientId)
+      .filter((note) => !note.attachedAt || new Date(note.attachedAt).getTime() > cutoff)
+      .slice()
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+  }
+
+  /**
+   * Notes attached to ANY of the given checklists, oldest attachment first
+   * (kind 'note' to show, kind 'task' for the link back). One query for the
+   * whole page of cards — a checklist page asks once, not once per card.
+   */
+  async listPendingNotesForChecklists(checklistIds) {
+    const ids = [
+      ...new Set((Array.isArray(checklistIds) ? checklistIds : []).filter((id) => id && typeof id === 'string')),
+    ]
+    if (ids.length === 0) return []
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, client_id, template_id, kind, body, author_id, author_name,
+                created_at, attached_checklist_id, attached_item_id, attached_at
+           from client_pending_notes
+          where attached_checklist_id = any($1::text[])
+          order by attached_at asc nulls last, created_at asc`,
+        [ids],
+      )
+      return result.rows.map(mapClientPendingNoteRow)
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    const wanted = new Set(ids)
+    return list
+      .filter((note) => wanted.has(note.attachedChecklistId))
+      .slice()
+      .sort((a, b) =>
+        String(a.attachedAt ?? a.createdAt).localeCompare(String(b.attachedAt ?? b.createdAt)),
+      )
+  }
+
+  /** Create a pending note. Returns the created note, or null on invalid input. */
+  async createClientPendingNote(clientId, { templateId, kind, body, authorId, authorName } = {}) {
+    if (!clientId || !templateId) return null
+    const cleanKind = kind === 'task' ? 'task' : kind === 'note' ? 'note' : null
+    if (!cleanKind) return null
+    const cleanBody = String(body ?? '').trim().slice(0, 2000)
+    if (!cleanBody) return null
+    const note = {
+      // 12 hex chars: a task-kind note's checklist item takes its id from this
+      // (`item-pn-<these>`), and item ids share one primary-key space.
+      id: `pnote-${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+      clientId,
+      templateId,
+      kind: cleanKind,
+      body: cleanBody,
+      authorId: authorId ?? null,
+      authorName: authorName ?? null,
+      createdAt: nowIso(),
+      attachedChecklistId: null,
+      attachedItemId: null,
+      attachedAt: null,
+    }
+    if (this.pool) {
+      await this.pool.query(
+        `insert into client_pending_notes
+           (id, client_id, template_id, kind, body, author_id, author_name, created_at)
+         values ($1, $2, $3, $4, $5, $6, $7, now())`,
+        [note.id, note.clientId, note.templateId, note.kind, note.body, note.authorId, note.authorName],
+      )
+      return note
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.clientPendingNotes)) authState.clientPendingNotes = []
+    authState.clientPendingNotes.push(note)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return note
+  }
+
+  /** Look up a single pending note by id (used to authorize deletes). */
+  async getClientPendingNote(noteId) {
+    if (!noteId) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, client_id, template_id, kind, body, author_id, author_name,
+                created_at, attached_checklist_id, attached_item_id, attached_at
+           from client_pending_notes where id = $1`,
+        [noteId],
+      )
+      if (!result.rowCount) return null
+      return mapClientPendingNoteRow(result.rows[0])
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    return list.find((note) => note.id === noteId) ?? null
+  }
+
+  /** Delete a pending note by id. Returns true if a row was removed. */
+  async deleteClientPendingNote(noteId) {
+    if (!noteId) return false
+    if (this.pool) {
+      const result = await this.pool.query(`delete from client_pending_notes where id = $1`, [
+        noteId,
+      ])
+      return (result.rowCount ?? 0) > 0
+    }
+    const authState = await readJson(localAuthPath)
+    if (!Array.isArray(authState.clientPendingNotes)) authState.clientPendingNotes = []
+    const before = authState.clientPendingNotes.length
+    authState.clientPendingNotes = authState.clientPendingNotes.filter(
+      (note) => note.id !== noteId,
+    )
+    const removed = authState.clientPendingNotes.length < before
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return removed
+  }
+
+  /**
+   * Every pending (unattached) note, optionally narrowed to one client.
+   * Internal helper for `attachPendingClientNotes` — cheap, so that method's
+   * "nothing pending" fast path costs one query.
+   *
+   * A note whose attached checklist has since been deleted (recycled) or has
+   * vanished is pending AGAIN, by decision: it was written for "the next
+   * checklist", and the one it landed on no longer exists. Those notes are
+   * returned with their stale stamp cleared, so the same pass can move them
+   * onto the next live checklist (or leave them waiting on the client page).
+   */
+  async _listUnattachedPendingNotes(clientId) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select n.id, n.client_id, n.template_id, n.kind, n.body, n.created_at,
+                (n.attached_checklist_id is not null) as stale
+           from client_pending_notes n
+           left join checklists c on c.id = n.attached_checklist_id
+          where (n.attached_checklist_id is null or c.id is null or c.deleted_at is not null)
+            ${clientId ? 'and n.client_id = $1' : ''}`,
+        clientId ? [clientId] : [],
+      )
+      const staleIds = result.rows.filter((row) => row.stale).map((row) => row.id)
+      if (staleIds.length > 0) {
+        await this.pool.query(
+          `update client_pending_notes
+              set attached_checklist_id = null, attached_item_id = null, attached_at = null
+            where id = any($1::text[])
+              and not exists (
+                select 1 from checklists c
+                 where c.id = client_pending_notes.attached_checklist_id
+                   and c.deleted_at is null
+              )`,
+          [staleIds],
+        )
+      }
+      return result.rows.map((row) => ({
+        id: row.id,
+        clientId: row.client_id,
+        templateId: row.template_id,
+        kind: row.kind === 'task' ? 'task' : 'note',
+        body: row.body,
+        createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+      }))
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    const scoped = list.filter((note) => !clientId || note.clientId === clientId)
+    let liveChecklistIds = null
+    if (scoped.some((note) => note.attachedChecklistId)) {
+      const data = await readJson(localDataPath)
+      liveChecklistIds = new Set(
+        (Array.isArray(data.checklists) ? data.checklists : [])
+          .filter((checklist) => checklist && !checklist.deletedAt)
+          .map((checklist) => checklist.id),
+      )
+    }
+    let cleared = false
+    const pending = scoped.filter((note) => {
+      if (!note.attachedChecklistId) return true
+      if (liveChecklistIds?.has(note.attachedChecklistId)) return false
+      note.attachedChecklistId = null
+      note.attachedItemId = null
+      note.attachedAt = null
+      cleared = true
+      return true
+    })
+    if (cleared) {
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+    return pending.map((note) => ({
+      id: note.id,
+      clientId: note.clientId,
+      templateId: note.templateId,
+      kind: note.kind === 'task' ? 'task' : 'note',
+      body: note.body,
+      createdAt: note.createdAt,
+    }))
+  }
+
+  /**
+   * The next checklist a pending note attaches to: this client's checklists
+   * of the note's template, not deleted, not skipped, whose `createdAt` is
+   * AFTER the note's `createdAt` (a checklist that already existed when the
+   * note was written is not "the next one that populates") — falling back to
+   * `dueDate > note.createdAt's date` for rows that truly carry no
+   * `createdAt` — picking the earliest by due date. Returns `{ id }` or null.
+   *
+   * Only a cycle's FIRST stage qualifies (`stageIndex` 0, or no stage at all).
+   * On a multi-stage template, "the next checklist that populates" is the next
+   * CYCLE; a stage-advance spawn (stageIndex > 0) is the same cycle's later
+   * step, and a note written for the cycle belongs on its first stage.
+   */
+  async _findNextChecklistForPendingNote(note) {
+    const noteDateOnly = String(note.createdAt ?? '').slice(0, 10)
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id
+           from checklists
+          where template_id = $1
+            and client_id = $2
+            and deleted_at is null
+            and skipped_at is null
+            and coalesce(stage_index, 0) = 0
+            and (
+              (created_at is not null and created_at > $3)
+              or (created_at is null and due_date > $4)
+            )
+          order by due_date asc
+          limit 1`,
+        [note.templateId, note.clientId, note.createdAt, noteDateOnly],
+      )
+      return result.rowCount ? { id: result.rows[0].id } : null
+    }
+    const data = await readJson(localDataPath)
+    const candidates = (Array.isArray(data.checklists) ? data.checklists : []).filter(
+      (checklist) => {
+        if (checklist.templateId !== note.templateId || checklist.clientId !== note.clientId) {
+          return false
+        }
+        if (checklist.deletedAt || checklist.skippedAt) return false
+        if (typeof checklist.stageIndex === 'number' && checklist.stageIndex !== 0) return false
+        if (typeof checklist.createdAt === 'string' && checklist.createdAt) {
+          return checklist.createdAt > note.createdAt
+        }
+        return typeof checklist.dueDate === 'string' && checklist.dueDate > noteDateOnly
+      },
+    )
+    if (candidates.length === 0) return null
+    candidates.sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)))
+    return { id: candidates[0].id }
+  }
+
+  /**
+   * Attach a task-kind note: insert the derived item at the end of the
+   * checklist's items, idempotent, then stamp the note attached — one
+   * Postgres transaction; a matched pair of file writes otherwise. Returns
+   * true only when the stamp actually changed a row (false: another pass got
+   * there first, and on Postgres the item insert is rolled back with it).
+   */
+  async _attachTaskKindPendingNote({ checklistId, itemId, label, noteId }) {
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        // Item ids share one primary-key space, and a deleted checklist keeps
+        // its rows. A note whose first checklist was deleted attaches again
+        // (see `_listUnattachedPendingNotes`), and its old `item-pn-*` row must
+        // not swallow the new insert via `on conflict` - so a taken id on a
+        // DIFFERENT checklist gets this checklist's id appended.
+        const taken = await client.query(
+          `select checklist_id from checklist_items where id = $1`,
+          [itemId],
+        )
+        const takenBy = taken.rows[0]?.checklist_id
+        const finalItemId =
+          takenBy && takenBy !== checklistId
+            ? `${itemId}-${String(checklistId).replace(/^check-/, '')}`
+            : itemId
+        const sortResult = await client.query(
+          `select coalesce(max(sort_order), -1) as max_order
+             from checklist_items where checklist_id = $1`,
+          [checklistId],
+        )
+        const nextOrder = (sortResult.rows[0]?.max_order ?? -1) + 1
+        await client.query(
+          `insert into checklist_items (id, checklist_id, label, done, sort_order, created_at, updated_at)
+           values ($1, $2, $3, false, $4, now(), now())
+           on conflict (id) do nothing`,
+          [finalItemId, checklistId, label, nextOrder],
+        )
+        const stamp = await client.query(
+          `update client_pending_notes
+              set attached_checklist_id = $2, attached_item_id = $3, attached_at = now()
+            where id = $1 and attached_checklist_id is null`,
+          [noteId, checklistId, finalItemId],
+        )
+        if ((stamp.rowCount ?? 0) === 0) {
+          await client.query('rollback')
+          return false
+        }
+        await client.query('commit')
+        return true
+      } catch (error) {
+        await client.query('rollback')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    const data = await readJson(localDataPath)
+    const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId)
+    // Same rule as the Postgres branch: item ids share one namespace and a
+    // deleted checklist keeps its items (in `recycledChecklists` here), so an
+    // id already used by a DIFFERENT checklist gets this checklist's id appended.
+    const takenByOther = [
+      ...(Array.isArray(data.checklists) ? data.checklists : []),
+      ...(Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []),
+    ].some(
+      (entry) =>
+        entry &&
+        entry.id !== checklistId &&
+        Array.isArray(entry.items) &&
+        entry.items.some((item) => item && item.id === itemId),
+    )
+    const finalItemId = takenByOther
+      ? `${itemId}-${String(checklistId).replace(/^check-/, '')}`
+      : itemId
+    let itemAdded = false
+    if (checklist) {
+      if (!Array.isArray(checklist.items)) checklist.items = []
+      if (!checklist.items.some((item) => item.id === finalItemId)) {
+        checklist.items.push({ id: finalItemId, label, done: false })
+        itemAdded = true
+      }
+    }
+    if (itemAdded) {
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    const note = list.find((entry) => entry.id === noteId)
+    if (note && !note.attachedChecklistId) {
+      note.attachedChecklistId = checklistId
+      note.attachedItemId = finalItemId
+      note.attachedAt = nowIso()
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return true
+    }
+    return false
+  }
+
+  /** Attach a note-kind note: stamp the checklist id only, no item. True when the stamp changed a row. */
+  async _attachNoteKindPendingNote({ checklistId, noteId }) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update client_pending_notes
+            set attached_checklist_id = $2, attached_item_id = null, attached_at = now()
+          where id = $1 and attached_checklist_id is null`,
+        [noteId, checklistId],
+      )
+      return (result.rowCount ?? 0) > 0
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+    const note = list.find((entry) => entry.id === noteId)
+    if (note && !note.attachedChecklistId) {
+      note.attachedChecklistId = checklistId
+      note.attachedItemId = null
+      note.attachedAt = nowIso()
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return true
+    }
+    return false
+  }
+
+  /**
+   * Idempotent pass that moves pending notes onto the next checklist that
+   * populates for their chosen recurring template — the part the pure
+   * materializer cannot do itself (its spawned output may never be
+   * persisted: a guarded write-back can be refused as stale, in which case
+   * nothing here should run against it). Call ONLY after a checklist write
+   * has actually landed:
+   *   - at the end of `read()`, after its guarded materializer write-back
+   *     SUCCEEDS (both backends) — never on a failed/refused write-back;
+   *   - after the bulk `write()` (the owner's PUT /api/app-data);
+   *   - after `generateChecklistFromTemplate`.
+   * Never call this from inside `materializeRecurringChecklists` itself.
+   *
+   * `clientId` narrows the sweep to one client (cheap; used after a single
+   * checklist is generated); omitted, it sweeps every pending note. Cheap
+   * when nothing is pending — the first query decides that. Broadcasts via
+   * `this.onPendingNotesAttached` (set by server.js to `broadcastDataChanged`)
+   * when anything actually attached, so open tabs refetch.
+   *
+   * Each note is attempted on its own: one failure is logged and the rest
+   * still attach. A note counts only when its stamp actually changed a row.
+   *
+   * ORDERING CONTRACT for callers that hand a workspace version to a tab: a
+   * task-kind attachment adds an item row the tab's snapshot does not have, so
+   * take the version BEFORE this pass (the next save then 409s and refetches)
+   * or, if you return data, return it AFTER re-reading — never a pre-attach
+   * snapshot under a post-attach version.
+   *
+   * @returns {Promise<number>} how many notes were attached.
+   */
+  async attachPendingClientNotes({ clientId } = {}) {
+    const pending = await this._listUnattachedPendingNotes(clientId)
+    if (pending.length === 0) return 0
+
+    let attached = 0
+    for (const note of pending) {
+      try {
+        const target = await this._findNextChecklistForPendingNote(note)
+        if (!target) continue
+        let stamped = false
+        if (note.kind === 'task') {
+          const itemId = `item-pn-${note.id.replace(/^pnote-/, '')}`
+          stamped = await this._attachTaskKindPendingNote({
+            checklistId: target.id,
+            itemId,
+            label: note.body,
+            noteId: note.id,
+          })
+        } else {
+          stamped = await this._attachNoteKindPendingNote({
+            checklistId: target.id,
+            noteId: note.id,
+          })
+        }
+        if (stamped) attached += 1
+      } catch (error) {
+        console.error(`[pending-notes] could not attach ${note.id}:`, error)
+      }
+    }
+    if (attached > 0) {
+      this.onPendingNotesAttached?.()
+    }
+    return attached
+  }
+
   // ---- Item-level deletion requests (staff request → owner approves) ----
   //
   // Endpoint-managed (NOT part of the bulk /api/app-data write), like client
@@ -20828,6 +21669,13 @@ export class AppDataStore {
     })
     const created = await this.createChecklist(checklist)
     await this.grantClientVisibility(created.clientId, created.assigneeId)
+    // A freshly generated instance may be exactly what a pending note
+    // (featreq-b688e73c) was waiting on — never fatal to "Generate a task now".
+    try {
+      await this.attachPendingClientNotes({ clientId: created.clientId })
+    } catch (error) {
+      console.error('[generateChecklistFromTemplate] pending-notes attach pass failed:', error)
+    }
     return created
   }
 

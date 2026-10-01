@@ -15,6 +15,8 @@
   type PersistedInvoice,
   type PersistedInvoiceLine,
   type ClientNote,
+  type ClientPendingNote,
+  type ClientStatementAccount,
   type FeatureRequest,
   type FeatureRequestType,
   type ItemDeletionRequest,
@@ -157,7 +159,12 @@ export async function fetchAppData(signal: AbortSignal, previewAs?: string | nul
   return (await response.json()) as AppData
 }
 
-export async function saveAppData(data: AppData) {
+/**
+ * Saves the workspace. Resolves `{ refetch: true }` when the server changed
+ * the workspace beyond what this tab sent (a pending note attached to a
+ * checklist), so the caller can ask for its normal live-sync refetch.
+ */
+export async function saveAppData(data: AppData): Promise<{ refetch: boolean }> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (workspaceVersion) {
     headers[WORKSPACE_VERSION_HEADER] = workspaceVersion
@@ -196,6 +203,13 @@ export async function saveAppData(data: AppData) {
   // The write moved the fingerprint; adopt the new one or this tab's very next
   // save would be refused as stale against its own change.
   workspaceVersion = response.headers.get(WORKSPACE_VERSION_HEADER) ?? workspaceVersion
+  let refetch = false
+  try {
+    refetch = ((await response.json()) as { refetch?: boolean } | null)?.refetch === true
+  } catch {
+    // An empty or non-JSON body just means "nothing to refetch".
+  }
+  return { refetch }
 }
 
 export async function fetchSession(signal: AbortSignal) {
@@ -3741,6 +3755,148 @@ export async function deleteClientNote(clientId: string, noteId: string) {
     throw new ApiError(response.status, body?.error ?? `Failed to delete note (${response.status})`)
   }
   return (await response.json()) as { ok: boolean }
+}
+
+// ---- Statement dates box: reference-only accounts + day-of-month per client ----
+
+/**
+ * A client's statement accounts, in saved order, plus the `version` fingerprint
+ * of that list — the panel keeps it and sends it back on save so a stale tab is
+ * told to reload instead of silently overwriting someone else's edit (see
+ * `saveClientStatementAccountsRequest`).
+ */
+export async function listClientStatementAccountsRequest(clientId: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/statement-accounts`,
+    { credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to load statement accounts (${response.status})`,
+    )
+  }
+  return (await response.json()) as { accounts: ClientStatementAccount[]; version: string }
+}
+
+/**
+ * Replace a client's whole statement-dates list. `version` is the fingerprint
+ * the panel last loaded (or saved); omit it to skip the staleness check. On a
+ * 409 the thrown `ApiError`'s `code` is `'stale_statement_accounts'` — the
+ * panel matches on that, not the sentence, to show its Reload prompt.
+ */
+export async function saveClientStatementAccountsRequest(
+  clientId: string,
+  accounts: Array<{ id?: string; name: string; dayOfMonth: number }>,
+  version?: string | null,
+) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/statement-accounts`,
+    {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(version ? { accounts, version } : { accounts }),
+    },
+  )
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to save statement accounts (${response.status})`,
+      code,
+    )
+  }
+  return (await response.json()) as { accounts: ClientStatementAccount[]; version: string }
+}
+
+// ---- Pending notes for future recurring checklists (featreq-b688e73c) ----
+
+/** A client's pending notes: pending + attached in the last 90 days, newest first. */
+export async function listClientPendingNotesRequest(clientId: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/pending-notes`,
+    { credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to load pending notes (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { notes: ClientPendingNote[] }).notes
+}
+
+/** Flag a pending note against a recurring template. Returns the created note. */
+export async function addClientPendingNoteRequest(
+  clientId: string,
+  note: { templateId: string; kind: 'task' | 'note'; body: string },
+) {
+  const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/pending-notes`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(note),
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to add pending note (${response.status})`,
+    )
+  }
+  return ((await response.json()) as { note: ClientPendingNote }).note
+}
+
+/** Delete a pending note. Owner can delete any; staff only their own, while unattached. */
+export async function deleteClientPendingNoteRequest(clientId: string, noteId: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/pending-notes/${encodeURIComponent(noteId)}`,
+    { method: 'DELETE', credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(
+      response.status,
+      body?.error ?? `Failed to delete pending note (${response.status})`,
+    )
+  }
+  return (await response.json()) as { ok: boolean }
+}
+
+/**
+ * Ids per request - under the server's 500 cap, and short enough
+ * that the id list never threatens a URL length limit.
+ */
+const ATTACHED_NOTES_CHUNK = 300
+
+/**
+ * Notes attached to ANY of the given checklists (kind 'note' to show, kind
+ * 'task' for the link back) - one request for a whole page of cards rather
+ * than one per card. Ids the caller cannot see are simply absent. A page with
+ * more than ATTACHED_NOTES_CHUNK checklists takes one request per chunk.
+ */
+export async function listAttachedPendingNotesRequest(checklistIds: string[]) {
+  const unique = [...new Set(checklistIds.filter(Boolean))]
+  const notes: ClientPendingNote[] = []
+  for (let start = 0; start < unique.length; start += ATTACHED_NOTES_CHUNK) {
+    const chunk = unique.slice(start, start + ATTACHED_NOTES_CHUNK)
+    const response = await apiFetch(
+      `/api/pending-notes/attached?checklistIds=${chunk.map(encodeURIComponent).join(',')}`,
+      { credentials: 'same-origin' },
+    )
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as { error?: string } | null
+      throw new ApiError(
+        response.status,
+        body?.error ?? `Failed to load checklist notes (${response.status})`,
+      )
+    }
+    notes.push(...((await response.json()) as { notes: ClientPendingNote[] }).notes)
+  }
+  return notes
 }
 
 export async function assistantFeatureRequestSend(draft: AssistantFeatureRequestDraft) {

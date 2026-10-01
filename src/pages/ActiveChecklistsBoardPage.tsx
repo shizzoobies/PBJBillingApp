@@ -15,6 +15,7 @@ import { ListSearch } from '../components/ListSearch'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
 import { reportPeriodLabel } from '../lib/reportPeriod'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
+import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
 import { ChecklistCard } from './ChecklistsPage'
 import { localDateOnly, MONTH_NAMES, stageNameFor } from '../lib/utils'
 import type { Checklist, ServiceCategory } from '../lib/types'
@@ -250,6 +251,20 @@ export function ActiveChecklistsBoardPage() {
     })
   }, [board.columns, query, data.clients])
 
+  // The notes attached to the cards on the board, fetched ONCE for all of them
+  // (a projected ghost has no id the server knows). Taken from the board BEFORE
+  // the search box narrows it, so typing in it does not refetch.
+  const boardCardIds = useMemo(
+    () =>
+      board.columns.flatMap((col) =>
+        col.clients.flatMap((clientRow) =>
+          clientRow.checklists.filter((c) => !c.projected).map((c) => c.id),
+        ),
+      ),
+    [board.columns],
+  )
+  const attachedNotesFor = useAttachedClientNotes(boardCardIds)
+
   // Full-fidelity card, wired to the same context handlers the Checklists page
   // uses — so checking items off the board behaves identically (and completing
   // a checklist drops its client off the column on the next render). Projected
@@ -286,6 +301,7 @@ export function ActiveChecklistsBoardPage() {
       ownerMode={ownerMode}
       role={role}
       timeEntries={data.timeEntries}
+      attachedNotes={attachedNotesFor(checklist.id)}
     />
     )
   }

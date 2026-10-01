@@ -115,6 +115,36 @@ describe('every leaking route now scopes by the previewed person', () => {
     const notesBlock = routeBlock(/const clientNotesMatch = normalizedPath\.match/, 1200)
     expect(notesBlock).toContain('await previewScopedSession(request, session, response')
     expect(notesBlock).toContain('visibleClientIdSet(scoped, data)')
+
+    // The statement dates box GET follows the same rule: it opens from a link
+    // in the previewed workspace, so the READ is scoped. The save (PUT) is
+    // NOT — it mirrors the notes POST, which gates on the real session.
+    const statementsBlock = routeBlock(
+      /const clientStatementAccountsMatch = normalizedPath\.match/,
+      2400,
+    )
+    expect(statementsBlock).toContain('await previewScopedSession(request, session, response')
+    expect(statementsBlock).toContain('visibleClientIdSet(scoped, data)')
+    expect(statementsBlock).toContain('visibleClientIdSet(session, data)')
+  })
+
+  it('pending client notes follow the same split: GET scoped, POST/DELETE on the real session', () => {
+    // GET (list, for the client page) and POST (add) share one matcher —
+    // same shape as clientNotesMatch above: the GET opens from a link in the
+    // previewed workspace, the write does not.
+    const clientBlock = routeBlock(
+      /const clientPendingNotesMatch = normalizedPath\.match/,
+      3800,
+    )
+    expect(clientBlock).toContain('await previewScopedSession(request, session, response')
+    expect(clientBlock).toContain('visibleClientIdSet(scoped, data)')
+    expect(clientBlock).toContain('visibleClientIdSet(session, data)')
+
+    // The attached-side GET (one batched request for a page of checklists) is
+    // scoped the same way.
+    const checklistBlock = routeBlock(/normalizedPath === '\/api\/pending-notes\/attached'/, 2800)
+    expect(checklistBlock).toContain('await previewScopedSession(request, session, response')
+    expect(checklistBlock).toContain('visibleClientIdSet(scoped, data)')
   })
 
   it('the team activity log is gated on the PREVIEWED role, so a staffer preview 403s', () => {
@@ -283,6 +313,9 @@ describe('the guard fails closed', () => {
     expect(patterns).toContain('/^\\/api\\/me\\/[^/?]*$/')
     // The one deeper path that is allowlisted is named, not swept in.
     expect(patterns).toContain('/^\\/api\\/auth\\/totp\\/[^/?]*$/')
+    expect(patterns).toContain('/^\\/api\\/clients\\/[^/]+\\/statement-accounts$/')
+    expect(patterns).toContain('/^\\/api\\/clients\\/[^/]+\\/pending-notes$/')
+    expect(patterns).toContain('/^\\/api\\/pending-notes\\/attached$/')
   })
 })
 

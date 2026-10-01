@@ -1669,6 +1669,43 @@ export type ClientNote = {
 }
 
 /**
+ * One row in a client's statement dates box: an account name and the day of
+ * the month its statement usually appears. Reference only — nothing else in
+ * the app reads this. Endpoint-managed (NOT part of the bulk app-data save),
+ * saved as the client's whole list at once.
+ */
+export type ClientStatementAccount = {
+  id: string
+  clientId: string
+  name: string
+  dayOfMonth: number
+  sortOrder: number
+}
+
+/**
+ * A note flagged against a recurring template BEFORE that template's next
+ * checklist has materialized (featreq-b688e73c) — "new hire starting next
+ * Payroll run", picked as a Task or a plain Note. `attachedChecklistId` is
+ * null until the server's idempotent attach pass finds the next checklist
+ * that template spawns; `attachedItemId` is set only for kind 'task' (the
+ * derived item it inserted). Endpoint-managed (NOT part of the bulk app-data
+ * save), like {@link ClientNote}.
+ */
+export type ClientPendingNote = {
+  id: string
+  clientId: string
+  templateId: string
+  kind: 'task' | 'note'
+  body: string
+  authorId: string | null
+  authorName: string | null
+  createdAt: string | null
+  attachedChecklistId: string | null
+  attachedItemId: string | null
+  attachedAt: string | null
+}
+
+/**
  * Owner-configurable defaults applied when creating a NEW client. Lets the
  * firm set its house rate / terms / invoice prefs once instead of retyping
  * them on every new client. Only affects the Add-client form's starting

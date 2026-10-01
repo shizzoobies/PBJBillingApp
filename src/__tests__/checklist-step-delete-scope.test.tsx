@@ -89,6 +89,7 @@ function signInAs(viewerId: string, isOwner: boolean) {
     deleteChecklist: vi.fn(),
     deleteChecklistItem,
     reorderChecklistSubItems: vi.fn(),
+    dataRefreshCount: 0,
     deleteChecklistItemFromSeries,
     emptyChecklistRecycleBin: vi.fn(),
     rejectChecklistDeletion: vi.fn(),

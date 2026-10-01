@@ -123,6 +123,7 @@ const contextValue = {
   deleteChecklist: vi.fn(),
   deleteChecklistItem: vi.fn(),
   reorderChecklistSubItems: vi.fn(),
+  dataRefreshCount: 0,
   deleteChecklistItemFromSeries: vi.fn(),
   emptyChecklistRecycleBin: vi.fn(),
   rejectChecklistDeletion: vi.fn(),

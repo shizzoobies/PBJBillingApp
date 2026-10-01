@@ -41,6 +41,7 @@ import {
   type SkipReasonCategory,
 } from '../../lib/checklist-skip.js'
 import { useAppContext } from '../AppContext'
+import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { PeriodLabelChip } from '../components/PeriodLabelChip'
 import {
@@ -66,6 +67,7 @@ import type {
   ChecklistTemplate,
   ChecklistTemplateItem,
   Client,
+  ClientPendingNote,
   Employee,
   ItemDeletionRequest,
   PendingTaskEdit,
@@ -1697,6 +1699,29 @@ function ChecklistInProgressSection({
     [checklists, assignee, client, status, todayDateOnly, query, clients, reportPeriod, focusId],
   )
 
+  // The notes attached to the rendered cards, fetched ONCE for all of them (a
+  // projected card has no id the server knows). Keyed on the set WITHOUT the
+  // search box applied, so typing in it does not refetch. Requests are already
+  // chunked (300 ids each), so this is not about a cap: every chunk costs a
+  // full server read, and a refetch per keystroke would repeat that cost.
+  const notesScope = useMemo(
+    () =>
+      filterInProgressChecklists(checklists, {
+        reportPeriod,
+        assignee,
+        client,
+        status,
+        today: todayDateOnly,
+        query: '',
+        clients,
+        focusId,
+      }),
+    [checklists, assignee, client, status, todayDateOnly, clients, reportPeriod, focusId],
+  )
+  const attachedNotesFor = useAttachedClientNotes(
+    notesScope.filter((checklist) => !checklist.projected).map((checklist) => checklist.id),
+  )
+
   // Status grouping (current behavior, unchanged).
   const groupedByStatus: Record<Group, Checklist[]> = {
     overdue: [],
@@ -1769,6 +1794,7 @@ function ChecklistInProgressSection({
       ownerMode={ownerMode}
       role={role}
       timeEntries={timeEntries}
+      attachedNotes={attachedNotesFor(checklist.id)}
     />
   )
 
@@ -2075,6 +2101,43 @@ function seriesDeleteNotice(result: {
     : `${notOnTemplate}, so only this checklist changed.${kept}`
 }
 
+/**
+ * "Notes from the client page" (featreq-b688e73c): a note flagged against
+ * this checklist's recurring template, kind 'note', that attached here once
+ * this checklist populated. Checklists have no notes field, so these come from
+ * the pending-notes table — fetched ONCE per page by `useAttachedClientNotes`
+ * (GET /api/pending-notes/attached) and handed to the card, never fetched by
+ * the card itself. Renders read-only above the item list. Kind 'task' notes
+ * are excluded here: they already landed as an ordinary item.
+ */
+export function AttachedClientNotes({ notes: attached }: { notes: ClientPendingNote[] }) {
+  const notes = attached.filter((note) => note.kind === 'note')
+  if (notes.length === 0) return null
+
+  return (
+    <div className="checklist-client-notes">
+      <span className="field-label-row">Notes from the client page</span>
+      <ul className="checklist-client-notes-list">
+        {notes.map((note) => (
+          <li key={note.id}>
+            <span className="client-note-body">{note.body}</span>
+            <strong>{note.authorName || 'Unknown'}</strong>
+            {note.createdAt ? (
+              <span className="muted-text">
+                {new Date(note.createdAt).toLocaleDateString('en-US', {
+                  month: 'short',
+                  day: 'numeric',
+                  year: 'numeric',
+                })}
+              </span>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 export function ChecklistCard({
   activeEmployeeId,
   checklist,
@@ -2101,9 +2164,14 @@ export function ChecklistCard({
   ownerMode,
   role,
   timeEntries,
+  attachedNotes = [],
 }: {
   activeEmployeeId: string
   checklist: Checklist
+  /** Notes that attached to this checklist from the client page. The PAGE
+   *  fetches them once for every card it renders (`useAttachedClientNotes`);
+   *  the card only displays what it is handed. */
+  attachedNotes?: ClientPendingNote[]
   /** Current stage's name for multi-stage checklists (resolved from template). */
   stageName?: string
   clients: Client[]
@@ -2632,6 +2700,7 @@ export function ChecklistCard({
           }}
         />
       </div>
+      <AttachedClientNotes notes={attachedNotes} />
       {canEditStructure && checklist.items.length === 0 ? (
         <p className="checklist-empty-hint">No items yet — add one below.</p>
       ) : null}

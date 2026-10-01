@@ -78,6 +78,7 @@ function signInWith(items: Checklist['items']) {
     reorderChecklistItems: vi.fn(),
 
     reorderChecklistSubItems: vi.fn(),
+    dataRefreshCount: 0,
     deleteChecklistItemFromSeries: vi.fn(),
     restoreChecklist: vi.fn(),
     setChecklistViewers: vi.fn(),

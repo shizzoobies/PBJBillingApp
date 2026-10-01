@@ -34,3 +34,20 @@ export function canWriteChecklistItem(args: ChecklistItemWriteArgs): boolean
 export function checklistWriteDenial(
   args: ChecklistItemWriteArgs & { error?: string },
 ): null | { status: 403; error: string }
+
+export type PendingNoteWriteTemplate = {
+  assigneeId?: string
+  editorIds?: string[]
+}
+
+export type PendingNoteWriteArgs = {
+  user: ChecklistWriteUser | undefined
+  clientVisible: boolean | undefined
+  template?: PendingNoteWriteTemplate
+  checklists?: ChecklistWriteTarget[]
+}
+
+export function canAddPendingClientNote(args: PendingNoteWriteArgs): boolean
+export function pendingNoteWriteDenial(
+  args: PendingNoteWriteArgs & { error?: string },
+): null | { status: 403; error: string }

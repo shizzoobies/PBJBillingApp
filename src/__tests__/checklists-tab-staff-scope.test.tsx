@@ -98,6 +98,7 @@ function signInAs(viewerId: string, isOwner: boolean, staffRole = 'Bookkeeper') 
     bulkAddChecklistItems: vi.fn(),
     deleteChecklist: vi.fn(),
     deleteChecklistItem: vi.fn(),
+    dataRefreshCount: 0,
     deleteChecklistItemFromSeries: vi.fn(),
     emptyChecklistRecycleBin: vi.fn(),
     rejectChecklistDeletion: vi.fn(),

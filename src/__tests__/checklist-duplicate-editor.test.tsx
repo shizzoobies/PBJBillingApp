@@ -108,6 +108,9 @@ beforeEach(() => {
     setReportPeriod: vi.fn(),
     updateChecklistTemplate,
     duplicateChecklistTemplate,
+    dataRefreshCount: 0,
+    reorderChecklistSubItems: vi.fn(),
+    deleteChecklistItemFromSeries: vi.fn(),
   } as unknown as AppContextValue
 })
 

@@ -67,6 +67,7 @@ function signInAs(viewerId: string, isOwner: boolean, checklists: Checklist[] = 
     bulkAddChecklistItems: vi.fn(),
     deleteChecklist: vi.fn(),
     deleteChecklistItem: vi.fn(),
+    dataRefreshCount: 0,
     deleteChecklistItemFromSeries: vi.fn(),
     removeSubItem: vi.fn(),
     removeSubSubItem: vi.fn(),
