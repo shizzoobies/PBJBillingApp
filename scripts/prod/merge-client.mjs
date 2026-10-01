@@ -16,12 +16,15 @@
 //
 // WHY THE DUPLICATE ROW IS RETIRED AND NEVER DELETED
 // --------------------------------------------------
-// Nine of the columns that hold a client id carry no foreign key at all:
+// Ten of the columns that hold a client id carry no foreign key at all:
 // checklist_skips.client_id, client_notes.client_id,
 // item_deletion_requests.client_id, sales_tax_records.client_id,
 // invoice_review_events.client_id, invoice_ai_reviews.client_id,
-// client_statement_accounts.client_id, clients.bill_to_client_id and
-// clients.invoice_recipient_client_id — and
+// client_statement_accounts.client_id, client_pending_notes.client_id,
+// clients.bill_to_client_id and clients.invoice_recipient_client_id (and
+// client_pending_notes.template_id points at a template with no foreign key
+// either; a pending note is moved with its client and keeps its template id) —
+// and
 // neither do the array/jsonb references (time_entries.group_client_ids,
 // clients.plan_ids / contact_ids / assigned_bookkeeper_ids,
 // invoices.line_items[].sourceClientId). The database will happily let a row

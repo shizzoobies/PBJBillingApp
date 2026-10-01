@@ -1019,6 +1019,21 @@ export class StaleStatementAccountsError extends Error {
   }
 }
 
+/**
+ * A client already has the most unattached pending notes it may hold
+ * (`MAX_UNATTACHED_PENDING_NOTES`). Nothing is written; the route answers 409
+ * `too_many_pending_notes` with this message.
+ */
+export const MAX_UNATTACHED_PENDING_NOTES = 100
+/** The most notes the client page's list ever returns (pending first, newest first). */
+export const MAX_LISTED_PENDING_NOTES = 200
+export class TooManyPendingNotesError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'TooManyPendingNotesError'
+  }
+}
+
 export const PROPOSAL_STATUSES = ['draft', 'sent', 'accepted', 'declined']
 
 /** Every `proposals` column, in the order `mapProposal` reads them. */
@@ -3931,43 +3946,55 @@ export class AppDataStore {
       // (non-concurrent) is transactional in Postgres, so the window can simply
       // be closed. Order inside it still matters: build v2 FIRST so a ROLLBACK
       // leaves v1 — the old backstop — standing rather than nothing.
-      const checklistIndexClient = await this.pool.connect()
-      let checklistIndexV2Created = false
-      try {
-        await checklistIndexClient.query('BEGIN')
-        await checklistIndexClient.query(`
-          create unique index if not exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2}
-            on checklists (template_id, coalesce(cycle_due_date, due_date), stage_index)
-            where deleted_at is null and template_id is not null
-        `)
-        checklistIndexV2Created = true
-        await checklistIndexClient.query(`drop index if exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX}`)
-        await checklistIndexClient.query('COMMIT')
-      } catch (error) {
+      //
+      // ONLY WHILE v3 DOES NOT EXIST YET. Once v3 has replaced v2, running this
+      // block again would rebuild v2 on every later boot, and once a split pair
+      // exists that rebuild fails and logs a false "duplicate rows" warning. A
+      // boot that died between this block and the v3 swap leaves both; v3's swap
+      // below drops v2 on the next boot.
+      const checklistIndexV3Probe = await this.pool.query(
+        `select to_regclass('${CHECKLIST_INSTANCE_UNIQUE_INDEX_V3}') is null as missing`,
+      )
+      const checklistIndexV3Missing = checklistIndexV3Probe?.rows?.[0]?.missing !== false
+      if (checklistIndexV3Missing) {
+        const checklistIndexClient = await this.pool.connect()
+        let checklistIndexV2Created = false
         try {
-          await checklistIndexClient.query('ROLLBACK')
-        } catch {
-          /* already rolled back, or the connection is gone */
+          await checklistIndexClient.query('BEGIN')
+          await checklistIndexClient.query(`
+            create unique index if not exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2}
+              on checklists (template_id, coalesce(cycle_due_date, due_date), stage_index)
+              where deleted_at is null and template_id is not null
+          `)
+          checklistIndexV2Created = true
+          await checklistIndexClient.query(`drop index if exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX}`)
+          await checklistIndexClient.query('COMMIT')
+        } catch (error) {
+          try {
+            await checklistIndexClient.query('ROLLBACK')
+          } catch {
+            /* already rolled back, or the connection is gone */
+          }
+          // Two different failures, two different things to go look at. Only the
+          // first is the dirty-data case everyone is waiting on.
+          if (checklistIndexV2Created) {
+            console.warn(
+              `[init] built ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} but could not finish the swap, so ` +
+                `the whole swap was rolled back and ${CHECKLIST_INSTANCE_UNIQUE_INDEX} is still the ` +
+                `backstop. Not a data problem — this will be retried on the next boot. Reason:`,
+              error && error.message ? error.message : error,
+            )
+          } else {
+            console.warn(
+              `[init] could not create ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} — most likely duplicate ` +
+                `(template_id, cycle date, stage_index) rows still present. New duplicates are still ` +
+                `blocked in code; this will be retried on the next boot. Reason:`,
+              error && error.message ? error.message : error,
+            )
+          }
+        } finally {
+          checklistIndexClient.release()
         }
-        // Two different failures, two different things to go look at. Only the
-        // first is the dirty-data case everyone is waiting on.
-        if (checklistIndexV2Created) {
-          console.warn(
-            `[init] built ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} but could not finish the swap, so ` +
-              `the whole swap was rolled back and ${CHECKLIST_INSTANCE_UNIQUE_INDEX} is still the ` +
-              `backstop. Not a data problem — this will be retried on the next boot. Reason:`,
-            error && error.message ? error.message : error,
-          )
-        } else {
-          console.warn(
-            `[init] could not create ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} — most likely duplicate ` +
-              `(template_id, cycle date, stage_index) rows still present. New duplicates are still ` +
-              `blocked in code; this will be retried on the next boot. Reason:`,
-            error && error.message ? error.message : error,
-          )
-        }
-      } finally {
-        checklistIndexClient.release()
       }
 
       // SPLIT PUSH CHANGED THE TUPLE AGAIN — not the columns it reads (still
@@ -15912,6 +15939,7 @@ export class AppDataStore {
       if (!result.rowCount) {
         return null
       }
+      await this._clearPendingNoteItemStamps([itemId])
       const data = await this.read()
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
@@ -15937,7 +15965,41 @@ export class AppDataStore {
       return null
     }
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await this._clearPendingNoteItemStamps([itemId])
     return updatedChecklist
+  }
+
+  /**
+   * A client-page note of kind 'task' becomes a step named `item-pn-*` when it
+   * attaches. When that step is deleted the note's `attached_item_id` must not
+   * keep pointing at nothing. The note is NOT sent back to pending: the person
+   * who deleted the step does not want the task, and a pending note would attach
+   * it to the next checklist. It stays attached to its checklist as a note and
+   * only the step link is cleared. A no-op unless one of the ids is a note's
+   * step. Callers that already hold a Postgres transaction pass its `client`.
+   */
+  async _clearPendingNoteItemStamps(itemIds, client = null) {
+    const ids = (Array.isArray(itemIds) ? itemIds : []).filter(
+      (id) => typeof id === 'string' && id.startsWith('item-pn-'),
+    )
+    if (ids.length === 0) return
+    if (this.pool) {
+      await (client ?? this.pool).query(
+        `update client_pending_notes set attached_item_id = null
+          where attached_item_id = any($1::text[])`,
+        [ids],
+      )
+      return
+    }
+    const authState = await readJson(localAuthPath)
+    let changed = false
+    for (const note of Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []) {
+      if (ids.includes(note.attachedItemId)) {
+        note.attachedItemId = null
+        changed = true
+      }
+    }
+    if (changed) await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
   }
 
   /**
@@ -16116,6 +16178,7 @@ export class AppDataStore {
             where e.checklist_id = gone.checklist_id and e.item_id = gone.item_id`,
           [stepChecklistIds, stepItemIds],
         )
+        await this._clearPendingNoteItemStamps(stepItemIds, client)
         await client.query('commit')
         return { removedFromTemplate: Boolean(templateItemId), removedFromChecklists, keptOnChecklists }
       } catch (error) {
@@ -16191,6 +16254,7 @@ export class AppDataStore {
       }
     }
     if (queuesChanged) await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await this._clearPendingNoteItemStamps(removedSteps.map((step) => step.itemId))
     return { removedFromTemplate: Boolean(templateItem), removedFromChecklists, keptOnChecklists }
   }
 
@@ -16655,7 +16719,11 @@ export class AppDataStore {
         }
         await client.query('commit')
       } catch (error) {
-        await client.query('rollback')
+        try {
+          await client.query('rollback')
+        } catch {
+          /* already rolled back, or the connection is gone */
+        }
         throw error
       } finally {
         client.release()
@@ -19591,7 +19659,8 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, client_id, name, day_of_month, sort_order
-           from client_statement_accounts where client_id = $1 order by sort_order asc`,
+           from client_statement_accounts where client_id = $1
+          order by sort_order asc, id asc`,
         [clientId],
       )
       return result.rows.map((row) => ({
@@ -19609,7 +19678,9 @@ export class AppDataStore {
     return list
       .filter((row) => row.clientId === clientId)
       .slice()
-      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+      .sort(
+        (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || String(a.id).localeCompare(String(b.id)),
+      )
   }
 
   /**
@@ -19680,7 +19751,8 @@ export class AppDataStore {
         ])
         const stored = await client.query(
           `select id, client_id, name, day_of_month, sort_order
-             from client_statement_accounts where client_id = $1 order by sort_order asc`,
+             from client_statement_accounts where client_id = $1
+            order by sort_order asc, id asc`,
           [clientId],
         )
         const current = stored.rows.map((row) => ({
@@ -19706,7 +19778,11 @@ export class AppDataStore {
         await client.query('commit')
         return clean
       } catch (error) {
-        await client.query('rollback')
+        try {
+          await client.query('rollback')
+        } catch {
+          /* already rolled back, or the connection is gone */
+        }
         throw error
       } finally {
         client.release()
@@ -19723,7 +19799,10 @@ export class AppDataStore {
         : []
       const current = all
         .filter((row) => row.clientId === clientId)
-        .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+        .sort(
+          (a, b) =>
+            (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || String(a.id).localeCompare(String(b.id)),
+        )
       if (expectedVersion && statementAccountsVersion(current) !== expectedVersion) {
         throw new StaleStatementAccountsError(staleMessage)
       }
@@ -19747,7 +19826,10 @@ export class AppDataStore {
   // notes attached in the last 90 days, so the client page can render the
   // short history alongside the live count.
 
-  /** A client's pending notes, newest first: pending + attached (last 90 days). */
+  /**
+   * A client's pending notes: pending first, then attached (last 90 days), each
+   * newest first, at most `MAX_LISTED_PENDING_NOTES` of them.
+   */
   async listClientPendingNotes(clientId) {
     if (!clientId) return []
     if (this.pool) {
@@ -19757,7 +19839,8 @@ export class AppDataStore {
            from client_pending_notes
           where client_id = $1
             and (attached_checklist_id is null or attached_at > now() - interval '90 days')
-          order by created_at desc`,
+          order by (attached_checklist_id is null) desc, created_at desc
+          limit ${MAX_LISTED_PENDING_NOTES}`,
         [clientId],
       )
       return result.rows.map(mapClientPendingNoteRow)
@@ -19769,7 +19852,12 @@ export class AppDataStore {
       .filter((note) => note.clientId === clientId)
       .filter((note) => !note.attachedAt || new Date(note.attachedAt).getTime() > cutoff)
       .slice()
-      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      .sort(
+        (a, b) =>
+          Number(Boolean(a.attachedChecklistId)) - Number(Boolean(b.attachedChecklistId)) ||
+          String(b.createdAt).localeCompare(String(a.createdAt)),
+      )
+      .slice(0, MAX_LISTED_PENDING_NOTES)
   }
 
   /**
@@ -19804,7 +19892,12 @@ export class AppDataStore {
       )
   }
 
-  /** Create a pending note. Returns the created note, or null on invalid input. */
+  /**
+   * Create a pending note. Returns the created note, or null on invalid input.
+   * Throws `TooManyPendingNotesError` when the client already holds
+   * `MAX_UNATTACHED_PENDING_NOTES` notes that have not attached yet (the count
+   * and the insert are one statement on Postgres).
+   */
   async createClientPendingNote(clientId, { templateId, kind, body, authorId, authorName } = {}) {
     if (!clientId || !templateId) return null
     const cleanKind = kind === 'task' ? 'task' : kind === 'note' ? 'note' : null
@@ -19826,17 +19919,27 @@ export class AppDataStore {
       attachedItemId: null,
       attachedAt: null,
     }
+    const tooMany = new TooManyPendingNotesError(
+      `This client already has ${MAX_UNATTACHED_PENDING_NOTES} notes waiting. Delete some first.`,
+    )
     if (this.pool) {
-      await this.pool.query(
+      const inserted = await this.pool.query(
         `insert into client_pending_notes
            (id, client_id, template_id, kind, body, author_id, author_name, created_at)
-         values ($1, $2, $3, $4, $5, $6, $7, now())`,
+         select $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text, now()
+          where (select count(*) from client_pending_notes
+                  where client_id = $2::text and attached_checklist_id is null) < ${MAX_UNATTACHED_PENDING_NOTES}`,
         [note.id, note.clientId, note.templateId, note.kind, note.body, note.authorId, note.authorName],
       )
+      if (inserted.rowCount === 0) throw tooMany
       return note
     }
     const authState = await readJson(localAuthPath)
     if (!Array.isArray(authState.clientPendingNotes)) authState.clientPendingNotes = []
+    const waiting = authState.clientPendingNotes.filter(
+      (entry) => entry.clientId === clientId && !entry.attachedChecklistId,
+    ).length
+    if (waiting >= MAX_UNATTACHED_PENDING_NOTES) throw tooMany
     authState.clientPendingNotes.push(note)
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return note
@@ -19885,8 +19988,8 @@ export class AppDataStore {
    * Internal helper for `attachPendingClientNotes` — cheap, so that method's
    * "nothing pending" fast path costs one query.
    *
-   * A note whose attached checklist has since been deleted (recycled) or has
-   * vanished is pending AGAIN, by decision: it was written for "the next
+   * A note whose attached checklist has since been deleted (recycled), SKIPPED,
+   * or has vanished is pending AGAIN, by decision: it was written for "the next
    * checklist", and the one it landed on no longer exists. Those notes are
    * returned with their stale stamp cleared, so the same pass can move them
    * onto the next live checklist (or leave them waiting on the client page).
@@ -19898,7 +20001,8 @@ export class AppDataStore {
                 (n.attached_checklist_id is not null) as stale
            from client_pending_notes n
            left join checklists c on c.id = n.attached_checklist_id
-          where (n.attached_checklist_id is null or c.id is null or c.deleted_at is not null)
+          where (n.attached_checklist_id is null or c.id is null or c.deleted_at is not null
+                 or c.skipped_at is not null)
             ${clientId ? 'and n.client_id = $1' : ''}`,
         clientId ? [clientId] : [],
       )
@@ -19912,6 +20016,7 @@ export class AppDataStore {
                 select 1 from checklists c
                  where c.id = client_pending_notes.attached_checklist_id
                    and c.deleted_at is null
+                   and c.skipped_at is null
               )`,
           [staleIds],
         )
@@ -19923,6 +20028,7 @@ export class AppDataStore {
         kind: row.kind === 'task' ? 'task' : 'note',
         body: row.body,
         createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+        stale: Boolean(row.stale),
       }))
     }
     const authState = await readJson(localAuthPath)
@@ -19933,14 +20039,16 @@ export class AppDataStore {
       const data = await readJson(localDataPath)
       liveChecklistIds = new Set(
         (Array.isArray(data.checklists) ? data.checklists : [])
-          .filter((checklist) => checklist && !checklist.deletedAt)
+          .filter((checklist) => checklist && !checklist.deletedAt && !checklist.skippedAt)
           .map((checklist) => checklist.id),
       )
     }
     let cleared = false
+    const staleIds = new Set()
     const pending = scoped.filter((note) => {
       if (!note.attachedChecklistId) return true
       if (liveChecklistIds?.has(note.attachedChecklistId)) return false
+      staleIds.add(note.id)
       note.attachedChecklistId = null
       note.attachedItemId = null
       note.attachedAt = null
@@ -19957,66 +20065,108 @@ export class AppDataStore {
       kind: note.kind === 'task' ? 'task' : 'note',
       body: note.body,
       createdAt: note.createdAt,
+      stale: staleIds.has(note.id),
     }))
   }
 
   /**
-   * The next checklist a pending note attaches to: this client's checklists
-   * of the note's template, not deleted, not skipped, whose `createdAt` is
-   * AFTER the note's `createdAt` (a checklist that already existed when the
-   * note was written is not "the next one that populates") — falling back to
+   * The next checklist each pending note attaches to, for ALL the notes given
+   * in ONE query (Postgres) / one read (file): this client's checklists of the
+   * note's template, not deleted, not skipped, whose `createdAt` is AFTER the
+   * note's `createdAt` (a checklist that already existed when the note was
+   * written is not "the next one that populates") — falling back to
    * `dueDate > note.createdAt's date` for rows that truly carry no
-   * `createdAt` — picking the earliest by due date. Returns `{ id }` or null.
+   * `createdAt` — picking the earliest by due date. Returns a Map of note id
+   * to `{ id }`; a note with no target is absent.
    *
    * A split push's new row (`pushedFromChecklistId` set) never qualifies: it is
    * the same occurrence carried forward, stamped `createdAt = now` only because
-   * it is a new row, and a note must wait for the next REAL occurrence.
+   * it is a new row, and a note must wait for the next REAL occurrence. Neither
+   * does the completed RECORD a split leaves behind (`pushedToChecklistId` set).
+   *
+   * A note that went back to pending (`stale`: its checklist was deleted or
+   * skipped) also skips a checklist whose steps are all done: attaching to
+   * finished work would only reopen it.
    *
    * Only a cycle's FIRST stage qualifies (`stageIndex` 0, or no stage at all).
    * On a multi-stage template, "the next checklist that populates" is the next
    * CYCLE; a stage-advance spawn (stageIndex > 0) is the same cycle's later
    * step, and a note written for the cycle belongs on its first stage.
    */
-  async _findNextChecklistForPendingNote(note) {
-    const noteDateOnly = String(note.createdAt ?? '').slice(0, 10)
+  async _findNextChecklistsForPendingNotes(notes) {
+    const found = new Map()
+    const list = Array.isArray(notes) ? notes : []
+    if (list.length === 0) return found
     if (this.pool) {
       const result = await this.pool.query(
-        `select id
-           from checklists
-          where template_id = $1
-            and client_id = $2
-            and deleted_at is null
-            and skipped_at is null
-            and pushed_from_checklist_id is null
-            and coalesce(stage_index, 0) = 0
-            and (
-              (created_at is not null and created_at > $3)
-              or (created_at is null and due_date > $4)
-            )
-          order by due_date asc
-          limit 1`,
-        [note.templateId, note.clientId, note.createdAt, noteDateOnly],
+        `select n.id as note_id, found.id as checklist_id
+           from unnest($1::text[], $2::text[], $3::text[], $4::timestamptz[], $5::text[], $6::boolean[])
+                as n(id, template_id, client_id, created_at, created_date, stale)
+          cross join lateral (
+            select c.id
+              from checklists c
+             where c.template_id = n.template_id
+               and c.client_id = n.client_id
+               and c.deleted_at is null
+               and c.skipped_at is null
+               and c.pushed_from_checklist_id is null
+               and c.pushed_to_checklist_id is null
+               and coalesce(c.stage_index, 0) = 0
+               and (
+                 (c.created_at is not null and c.created_at > n.created_at)
+                 or (c.created_at is null and c.due_date > n.created_date::date)
+               )
+               and (
+                 not n.stale
+                 or not (
+                   exists (select 1 from checklist_items i where i.checklist_id = c.id)
+                   and not exists (
+                     select 1 from checklist_items i where i.checklist_id = c.id and not i.done
+                   )
+                 )
+               )
+             order by c.due_date asc, c.id asc
+             limit 1
+          ) found`,
+        [
+          list.map((note) => note.id),
+          list.map((note) => note.templateId),
+          list.map((note) => note.clientId),
+          list.map((note) => note.createdAt ?? null),
+          list.map((note) => (note.createdAt ? String(note.createdAt).slice(0, 10) : null)),
+          list.map((note) => Boolean(note.stale)),
+        ],
       )
-      return result.rowCount ? { id: result.rows[0].id } : null
+      for (const row of result.rows) found.set(row.note_id, { id: row.checklist_id })
+      return found
     }
     const data = await readJson(localDataPath)
-    const candidates = (Array.isArray(data.checklists) ? data.checklists : []).filter(
-      (checklist) => {
+    const checklists = Array.isArray(data.checklists) ? data.checklists : []
+    for (const note of list) {
+      const noteDateOnly = String(note.createdAt ?? '').slice(0, 10)
+      const candidates = checklists.filter((checklist) => {
         if (checklist.templateId !== note.templateId || checklist.clientId !== note.clientId) {
           return false
         }
         if (checklist.deletedAt || checklist.skippedAt) return false
-        if (checklist.pushedFromChecklistId) return false
+        if (checklist.pushedFromChecklistId || checklist.pushedToChecklistId) return false
         if (typeof checklist.stageIndex === 'number' && checklist.stageIndex !== 0) return false
+        if (note.stale) {
+          const items = Array.isArray(checklist.items) ? checklist.items : []
+          if (items.length > 0 && items.every((item) => item && item.done)) return false
+        }
         if (typeof checklist.createdAt === 'string' && checklist.createdAt) {
           return checklist.createdAt > note.createdAt
         }
         return typeof checklist.dueDate === 'string' && checklist.dueDate > noteDateOnly
-      },
-    )
-    if (candidates.length === 0) return null
-    candidates.sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)))
-    return { id: candidates[0].id }
+      })
+      if (candidates.length === 0) continue
+      candidates.sort(
+        (a, b) => String(a.dueDate).localeCompare(String(b.dueDate)) || String(a.id).localeCompare(String(b.id)),
+      )
+      found.set(note.id, { id: candidates[0].id })
+    }
+    return found
   }
 
   /**
@@ -20031,6 +20181,19 @@ export class AppDataStore {
       const client = await this.pool.connect()
       try {
         await client.query('begin')
+        // Lock the target first and re-check it: a split push may have turned it
+        // into a completed record (or it may have been deleted) since the lookup,
+        // and a step added there would land on finished history.
+        const lockedTarget = await client.query(
+          `select 1 from checklists
+            where id = $1 and deleted_at is null and pushed_to_checklist_id is null
+              for update`,
+          [checklistId],
+        )
+        if ((lockedTarget.rowCount ?? 0) === 0) {
+          await client.query('rollback')
+          return false
+        }
         // Item ids share one primary-key space, and a deleted checklist keeps
         // its rows. A note whose first checklist was deleted attaches again
         // (see `_listUnattachedPendingNotes`), and its old `item-pn-*` row must
@@ -20079,6 +20242,8 @@ export class AppDataStore {
 
     const data = await readJson(localDataPath)
     const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId)
+    // Same re-check as the Postgres lock: never a missing, deleted or split-record target.
+    if (!checklist || checklist.deletedAt || checklist.pushedToChecklistId) return false
     // Same rule as the Postgres branch: item ids share one namespace and a
     // deleted checklist keeps its items (in `recycledChecklists` here), so an
     // id already used by a DIFFERENT checklist gets this checklist's id appended.
@@ -20177,10 +20342,18 @@ export class AppDataStore {
     const pending = await this._listUnattachedPendingNotes(clientId)
     if (pending.length === 0) return 0
 
+    let targets
+    try {
+      targets = await this._findNextChecklistsForPendingNotes(pending)
+    } catch (error) {
+      console.error('[pending-notes] could not look up the next checklists:', error)
+      return 0
+    }
+
     let attached = 0
     for (const note of pending) {
       try {
-        const target = await this._findNextChecklistForPendingNote(note)
+        const target = targets.get(note.id)
         if (!target) continue
         let stamped = false
         if (note.kind === 'task') {
@@ -20644,6 +20817,7 @@ export class AppDataStore {
     if (!checklistId || !newDueDate) return null
     if (this.pool) {
       const client = await this.pool.connect()
+      let committed = null
       try {
         await client.query('begin')
         const checklistRow = (
@@ -20705,158 +20879,150 @@ export class AppDataStore {
             [checklistId, userId ?? null, newDueDate],
           )
           await client.query('commit')
-          const data = await this.read()
-          const checklist =
-            (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
-          return { checklist, completed: null }
-        }
+          committed = { liveId: checklistId, completedId: null }
+        } else {
+          // A genuine mix: split. The new row inherits the cycle identity the
+          // no-split branch above would have stamped onto THIS row.
+          const newChecklistId = `check-${randomUUID().slice(0, 8)}`
+          // One shared instant for pushed_at / created_at / updated_at, bound as
+          // a parameter rather than three separate `now()` calls - the balance
+          // check in db/store-staleness.test.mjs (column count == value count)
+          // walks these statements with a lazy paren match that stops at the
+          // FIRST `)`, so more than one `now()` inside one values list breaks it.
+          const splitNowIso = nowIso()
 
-        // A genuine mix: split. The new row inherits the cycle identity the
-        // no-split branch above would have stamped onto THIS row.
-        const newChecklistId = `check-${randomUUID().slice(0, 8)}`
-        // One shared instant for pushed_at / created_at / updated_at, bound as
-        // a parameter rather than three separate `now()` calls - the balance
-        // check in db/store-staleness.test.mjs (column count == value count)
-        // walks these statements with a lazy paren match that stops at the
-        // FIRST `)`, so more than one `now()` inside one values list breaks it.
-        const splitNowIso = nowIso()
+          // ORDER MATTERS here, and it is the whole point of this block. The
+          // unique index (CHECKLIST_INSTANCE_UNIQUE_INDEX_V3) excludes a row
+          // whose `pushed_to_checklist_id` is set, and a unique index is never
+          // deferrable - so the original must hand its identity off BEFORE the
+          // new row exists, or the INSERT collides with it (23505) on every
+          // checklist that came from a template. `pushed_to_checklist_id` has no
+          // foreign key, so pointing at an id that does not exist yet is legal
+          // inside this one transaction. Rows are locked above (the checklist and
+          // its items, `for update`), so no concurrent toggle can flip a step
+          // between the read that decided open-vs-done and the re-parent below.
+          //
+          // (1) The original hands its identity off.
+          await client.query(
+            `update checklists
+                set pushed_at = now(), pushed_by = $2, pushed_to_checklist_id = $3
+              where id = $1`,
+            [checklistId, userId ?? null, newChecklistId],
+          )
 
-        // ORDER MATTERS here, and it is the whole point of this block. The
-        // unique index (CHECKLIST_INSTANCE_UNIQUE_INDEX_V3) excludes a row
-        // whose `pushed_to_checklist_id` is set, and a unique index is never
-        // deferrable - so the original must hand its identity off BEFORE the
-        // new row exists, or the INSERT collides with it (23505) on every
-        // checklist that came from a template. `pushed_to_checklist_id` has no
-        // foreign key, so pointing at an id that does not exist yet is legal
-        // inside this one transaction. Rows are locked above (the checklist and
-        // its items, `for update`), so no concurrent toggle can flip a step
-        // between the read that decided open-vs-done and the re-parent below.
-        //
-        // (1) The original hands its identity off.
-        await client.query(
-          `update checklists
-              set pushed_at = now(), pushed_by = $2, pushed_to_checklist_id = $3
-            where id = $1`,
-          [checklistId, userId ?? null, newChecklistId],
-        )
+          // (2) The new row inherits the cycle identity the no-split branch above
+          // would have stamped onto THIS row.
+          await client.query(
+            `
+              insert into checklists (
+                id, title, client_id, assignee_id, template_id, frequency, due_date,
+                viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count,
+                category_id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id,
+                period_label, onboarding_for_client_id, created_by, created_at, updated_at
+              )
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+            `,
+            [
+              newChecklistId,
+              checklistRow.title,
+              checklistRow.client_id,
+              checklistRow.assignee_id,
+              checklistRow.template_id,
+              checklistRow.frequency,
+              newDueDate,
+              checklistRow.viewer_ids ?? [],
+              checklistRow.editor_ids ?? [],
+              checklistRow.case_id ?? checklistRow.id,
+              checklistRow.stage_id,
+              checklistRow.stage_index,
+              checklistRow.stage_count,
+              checklistRow.category_id,
+              // The lock select's to_char string, never the parsed `date` column:
+              // node-postgres turns that into a local-midnight Date, and binding it
+              // back can land on the neighboring day when Node is not in UTC.
+              checklistRow.identity_date,
+              splitNowIso,
+              userId ?? null,
+              checklistId,
+              checklistRow.period_label,
+              checklistRow.onboarding_for_client_id ?? null,
+              checklistRow.created_by ?? null,
+              splitNowIso,
+              splitNowIso,
+            ],
+          )
 
-        // (2) The new row inherits the cycle identity the no-split branch above
-        // would have stamped onto THIS row.
-        await client.query(
-          `
-            insert into checklists (
-              id, title, client_id, assignee_id, template_id, frequency, due_date,
-              viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count,
-              category_id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id,
-              period_label, onboarding_for_client_id, created_by, created_at, updated_at
+          // (3) Re-parent the OPEN items onto the new checklist, in one update per
+          // item rather than a rebuild: every other column (sub_items, waiting
+          // state, assignee, due date) rides along untouched, which is the only
+          // way to satisfy "with their sub-items, waits, assignees and order"
+          // without re-serializing anything.
+          for (const [index, item] of openItems.entries()) {
+            await client.query(
+              `update checklist_items set checklist_id = $1, sort_order = $2 where id = $3`,
+              [newChecklistId, index, item.id],
             )
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
-          `,
-          [
-            newChecklistId,
-            checklistRow.title,
-            checklistRow.client_id,
-            checklistRow.assignee_id,
-            checklistRow.template_id,
-            checklistRow.frequency,
-            newDueDate,
-            checklistRow.viewer_ids ?? [],
-            checklistRow.editor_ids ?? [],
-            checklistRow.case_id ?? checklistRow.id,
-            checklistRow.stage_id,
-            checklistRow.stage_index,
-            checklistRow.stage_count,
-            checklistRow.category_id,
-            // The lock select's to_char string, never the parsed `date` column:
-            // node-postgres turns that into a local-midnight Date, and binding it
-            // back can land on the neighboring day when Node is not in UTC.
-            checklistRow.identity_date,
-            splitNowIso,
-            userId ?? null,
-            checklistId,
-            checklistRow.period_label,
-            checklistRow.onboarding_for_client_id ?? null,
-            checklistRow.created_by ?? null,
-            splitNowIso,
-            splitNowIso,
-          ],
-        )
+          }
 
-        // (3) Re-parent the OPEN items onto the new checklist, in one update per
-        // item rather than a rebuild: every other column (sub_items, waiting
-        // state, assignee, due date) rides along untouched, which is the only
-        // way to satisfy "with their sub-items, waits, assignees and order"
-        // without re-serializing anything.
-        for (const [index, item] of openItems.entries()) {
+          // (4) Pending requests follow the work they are about. Both tables key
+          // on a plain text checklist_id (no FK), so without this an approval
+          // would look for the step on the original, find none, and the request
+          // would silently vanish. Requests about a MOVED step go with it; so do
+          // task-level edits (details / add_item), because the live task is now
+          // the new row. Requests about a step that stayed behind stay behind.
+          const openItemIds = openItems.map((item) => item.id)
           await client.query(
-            `update checklist_items set checklist_id = $1, sort_order = $2 where id = $3`,
-            [newChecklistId, index, item.id],
+            `update item_deletion_requests set checklist_id = $1
+              where checklist_id = $2 and item_id = any($3::text[])`,
+            [newChecklistId, checklistId, openItemIds],
           )
-        }
-
-        // (4) Pending requests follow the work they are about. Both tables key
-        // on a plain text checklist_id (no FK), so without this an approval
-        // would look for the step on the original, find none, and the request
-        // would silently vanish. Requests about a MOVED step go with it; so do
-        // task-level edits (details / add_item), because the live task is now
-        // the new row. Requests about a step that stayed behind stay behind.
-        const openItemIds = openItems.map((item) => item.id)
-        await client.query(
-          `update item_deletion_requests set checklist_id = $1
-            where checklist_id = $2 and item_id = any($3::text[])`,
-          [newChecklistId, checklistId, openItemIds],
-        )
-        await client.query(
-          `update pending_task_edits set checklist_id = $1
-            where checklist_id = $2
-              and (scope in ('details', 'add_item') or item_id = any($3::text[]))`,
-          [newChecklistId, checklistId, openItemIds],
-        )
-        // Notes from the client page follow the live work too: a task-kind
-        // note's item (`item-pn-*`) may have moved with the open steps, and a
-        // note-kind note belongs with the live work, not the done-only record.
-        await client.query(
-          `update client_pending_notes set attached_checklist_id = $1
-            where attached_checklist_id = $2
-              and (kind = 'note' or attached_item_id = any($3::text[]))`,
-          [newChecklistId, checklistId, openItemIds],
-        )
-
-        // (5) Waits on this task, held by steps elsewhere, follow the open work
-        // too: the "ready to continue" notice fires when the task they wait on
-        // is finished, and that is now the new row. A step's own wait is a
-        // column; a sub-step's lives inside the sub_items jsonb.
-        await client.query(
-          `update checklist_items set waiting_for_checklist_id = $1
-            where waiting_for_checklist_id = $2`,
-          [newChecklistId, checklistId],
-        )
-        const subWaiters = (
           await client.query(
-            `select id, sub_items from checklist_items
-              where position($1 in sub_items::text) > 0
-              for update`,
-            [checklistId],
+            `update pending_task_edits set checklist_id = $1
+              where checklist_id = $2
+                and (scope in ('details', 'add_item') or item_id = any($3::text[]))`,
+            [newChecklistId, checklistId, openItemIds],
           )
-        ).rows
-        for (const row of subWaiters) {
-          const subItems = Array.isArray(row.sub_items)
-            ? row.sub_items
-            : JSON.parse(row.sub_items ?? '[]')
-          if (!repointWaitingForChecklist(subItems, checklistId, newChecklistId)) continue
-          await client.query(`update checklist_items set sub_items = $2::jsonb where id = $1`, [
-            row.id,
-            JSON.stringify(subItems),
-          ])
-        }
+          // Notes from the client page follow the live work too: a task-kind
+          // note's item (`item-pn-*`) may have moved with the open steps, and a
+          // note-kind note belongs with the live work, not the done-only record.
+          await client.query(
+            `update client_pending_notes set attached_checklist_id = $1
+              where attached_checklist_id = $2
+                and (kind = 'note' or attached_item_id = any($3::text[]))`,
+            [newChecklistId, checklistId, openItemIds],
+          )
 
-        await client.query('commit')
-        const data = await this.read()
-        const checklist =
-          (data.checklists ?? []).find((entry) => entry.id === newChecklistId) ?? null
-        const completed =
-          (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
-        return { checklist, completed }
+          // (5) Waits on this task, held by steps elsewhere, follow the open work
+          // too: the "ready to continue" notice fires when the task they wait on
+          // is finished, and that is now the new row. A step's own wait is a
+          // column; a sub-step's lives inside the sub_items jsonb.
+          await client.query(
+            `update checklist_items set waiting_for_checklist_id = $1
+              where waiting_for_checklist_id = $2`,
+            [newChecklistId, checklistId],
+          )
+          const subWaiters = (
+            await client.query(
+              `select id, sub_items from checklist_items
+                where position($1 in sub_items::text) > 0
+                for update`,
+              [checklistId],
+            )
+          ).rows
+          for (const row of subWaiters) {
+            const subItems = Array.isArray(row.sub_items)
+              ? row.sub_items
+              : JSON.parse(row.sub_items ?? '[]')
+            if (!repointWaitingForChecklist(subItems, checklistId, newChecklistId)) continue
+            await client.query(`update checklist_items set sub_items = $2::jsonb where id = $1`, [
+              row.id,
+              JSON.stringify(subItems),
+            ])
+          }
+
+          await client.query('commit')
+          committed = { liveId: newChecklistId, completedId: checklistId }
+        }
       } catch (error) {
         try {
           await client.query('rollback')
@@ -20881,6 +21047,16 @@ export class AppDataStore {
       } finally {
         client.release()
       }
+      // The push is committed. This read is OUTSIDE the try on purpose: a read
+      // failure here must never reach the catch above (a rollback attempt and a
+      // push-conflict mapping for a push that already landed).
+      if (!committed) return null
+      const data = await this.read()
+      const checklist = (data.checklists ?? []).find((entry) => entry.id === committed.liveId) ?? null
+      const completed = committed.completedId
+        ? ((data.checklists ?? []).find((entry) => entry.id === committed.completedId) ?? null)
+        : null
+      return { checklist, completed }
     }
 
     const data = await readJson(localDataPath)
@@ -20940,8 +21116,10 @@ export class AppDataStore {
     target.pushedBy = userId ?? null
     target.pushedToChecklistId = newChecklist.id
 
-    // Waits on this task, held by steps elsewhere, follow the open work.
-    for (const other of data.checklists ?? []) {
+    // Waits on this task, held by steps elsewhere, follow the open work -
+    // including steps on recycled checklists (the Postgres update has no
+    // deleted_at filter, so a restored checklist must not differ by backend).
+    for (const other of [...(data.checklists ?? []), ...(data.recycledChecklists ?? [])]) {
       for (const item of other.items ?? []) {
         if (item.waitingForChecklistId === target.id) item.waitingForChecklistId = newChecklist.id
         repointWaitingForChecklist(item.subItems, target.id, newChecklist.id)
