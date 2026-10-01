@@ -934,6 +934,25 @@ export class InvoicePaymentProcessingError extends Error {
 }
 
 /**
+ * What she reads when a save finds the invoice's status moved under it.
+ */
+export const INVOICE_CHANGED_MESSAGE =
+  'This invoice changed while you were working - a payment may have just come in. Reload it and try again.'
+
+/**
+ * A save that lost a race: `updateInvoice` read the invoice, decided, and by the
+ * time it wrote, the status it had read was gone — most often a Stripe webhook
+ * moving it to `processing` or `paid`. Thrown instead of writing over the
+ * payment; nothing else the save was going to do has been kept.
+ */
+export class InvoiceChangedError extends Error {
+  constructor(message = INVOICE_CHANGED_MESSAGE) {
+    super(message)
+    this.name = 'InvoiceChangedError'
+  }
+}
+
+/**
  * A covered-date window the owner has been asked about and not yet answered,
  * standing between an invoice and being marked reviewed. Same shape and same
  * reason as `RetainerCreditError`: a fact about the data, said in a sentence.
@@ -13003,6 +13022,9 @@ export class AppDataStore {
     // wonder why that client was not rebuilt.
     const clearing = monthly.filter((invoice) => invoice.status === 'processing').length
 
+    // Open checkout sessions on the invoices this pass voids, for the route to
+    // expire after the void commits.
+    let sessionIds = []
     if (this.pool) {
       const dbClient = await this.pool.connect()
       try {
@@ -13016,6 +13038,18 @@ export class AppDataStore {
         )
         const ids = rows.map((row) => row.id)
         if (ids.length > 0) {
+          // The checkout sessions these invoices still hold, read on the SAME
+          // connection after the void: a voided row refuses a session swap, so
+          // what is read here is what a client could still be paying against.
+          // The route expires them once this commits.
+          const held = await dbClient.query(
+            `select stripe_checkout_session_id, stripe_card_session_id
+               from invoices where id = any($1::text[])`,
+            [ids],
+          )
+          sessionIds = held.rows
+            .flatMap((row) => [row.stripe_checkout_session_id, row.stripe_card_session_id])
+            .filter(Boolean)
           await dbClient.query(
             `update invoices
                 set applied_to_invoice_id = null, updated_at = now()
@@ -13029,7 +13063,7 @@ export class AppDataStore {
           await this._clearCoverageLedgerForPeriod(period, releasing, { dbClient })
         }
         await dbClient.query('COMMIT')
-        return { voided: ids.length, ids, clearing }
+        return { voided: ids.length, ids, clearing, sessionIds }
       } catch (error) {
         try {
           await dbClient.query('ROLLBACK')
@@ -13053,10 +13087,12 @@ export class AppDataStore {
       // which is the opposite of a stale generated snapshot.
       if ((invoice.kind ?? 'monthly') !== 'monthly') continue
       if (invoice.status !== 'draft' && invoice.status !== 'reviewed') continue
+      sessionIds.push(invoice.stripeCheckoutSessionId, invoice.stripeCardSessionId)
       invoice.status = 'void'
       invoice.updatedAt = nowIso()
       ids.push(invoice.id)
     }
+    sessionIds = sessionIds.filter(Boolean)
     // Same read-modify-write, which is this backend's version of the
     // transaction above.
     if (ids.length > 0) {
@@ -13076,7 +13112,7 @@ export class AppDataStore {
       }
       await writeFile(localDataPath, JSON.stringify(data, null, 2))
     }
-    return { voided: ids.length, ids, clearing }
+    return { voided: ids.length, ids, clearing, sessionIds }
   }
 
   /**
@@ -13408,6 +13444,17 @@ export class AppDataStore {
     return byTag
   }
 
+  /**
+   * Whether the invoice row is still there — asked after a guarded UPDATE
+   * matched nothing, to tell "deleted" (the route's 404) from "its status moved
+   * under the save" (`InvoiceChangedError`). `runner` is the connection the
+   * write ran on.
+   */
+  async _invoiceStillExists(runner, id) {
+    const { rows } = await runner.query('select 1 as present from invoices where id = $1', [id])
+    return rows.length > 0
+  }
+
   async updateInvoice(id, patch = {}, opts = {}) {
     const all = await this.listInvoices()
     const current = all.find((invoice) => invoice.id === id)
@@ -13513,11 +13560,15 @@ export class AppDataStore {
         !reviewEvent &&
         !entryTags
       ) {
+        // `and status = $8` is the status this save READ. A Stripe webhook can
+        // move the invoice to processing/paid between that read and this write;
+        // without it the write goes through and puts the old status back over
+        // the payment.
         const { rowCount } = await this.pool.query(
           `update invoices
               set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5,
                   blurb = $6, status = $7, updated_at = now()
-            where id = $1`,
+            where id = $1 and status = $8`,
           [
             id,
             JSON.stringify(next.lineItems),
@@ -13526,9 +13577,13 @@ export class AppDataStore {
             next.dueDate,
             next.blurb,
             next.status,
+            current.status,
           ],
         )
-        if (rowCount === 0) return null
+        if (rowCount === 0) {
+          if (await this._invoiceStillExists(this.pool, id)) throw new InvoiceChangedError()
+          return null
+        }
         return (await this.listInvoices()).find((invoice) => invoice.id === id) ?? null
       }
 
@@ -13545,7 +13600,7 @@ export class AppDataStore {
           `update invoices
               set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5,
                   blurb = $6, status = $7, updated_at = now()
-            where id = $1`,
+            where id = $1 and status = $8`,
           [
             id,
             JSON.stringify(next.lineItems),
@@ -13554,10 +13609,17 @@ export class AppDataStore {
             next.dueDate,
             next.blurb,
             next.status,
+            current.status,
           ],
         )
         if (rowCount === 0) {
+          // No row matched: the invoice is gone (null, the route's 404) or its
+          // status moved under this save (refused). Either way nothing else the
+          // save was going to do is kept — no review event, no ledger release,
+          // no tag.
+          const stillThere = await this._invoiceStillExists(dbClient, id)
           await dbClient.query('ROLLBACK')
+          if (stillThere) throw new InvoiceChangedError()
           return null
         }
 
@@ -13645,6 +13707,10 @@ export class AppDataStore {
     if (!Array.isArray(data.invoices)) data.invoices = []
     const index = data.invoices.findIndex((invoice) => invoice.id === id)
     if (index === -1) return null
+    // The file backend's `and status = $8`: the row as it is on disk NOW has to
+    // still carry the status this save read, or a payment moved it in between.
+    // Before a single field moves, so nothing is written.
+    if (data.invoices[index].status !== current.status) throw new InvoiceChangedError()
     // Against the SAME data this save is about to write, and before a single
     // field of it moves — the file backend's version of the in-transaction
     // check above.

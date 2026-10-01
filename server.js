@@ -12,6 +12,7 @@ import {
   CoverageConfirmationError,
   EntryTagError,
   InvoiceAiReviewError,
+  InvoiceChangedError,
   InvoiceLockedError,
   InvoicePaymentProcessingError,
   ManualPaymentError,
@@ -649,6 +650,27 @@ async function withCoverageChangeable(invoice) {
   } catch (error) {
     console.error('[invoices] covered-dates mark failed, answering unmarked:', error)
     return invoice
+  }
+}
+
+/**
+ * Close the checkout sessions an invoice can no longer be paid through — after
+ * Mark paid, and after a void. Each id is expired in its own try/catch and a
+ * failure is logged loudly, never thrown: the write that retired the invoice
+ * has committed and is the truth either way, so a Stripe hiccup must not fail
+ * the request. `label` names the caller in the log line.
+ */
+async function expireInvoiceSessions(sessionIds, invoiceId, label) {
+  for (const sessionId of sessionIds) {
+    if (!sessionId) continue
+    try {
+      await expireCheckoutSession(sessionId)
+    } catch (error) {
+      console.error(
+        `[invoices] ${label}: could not expire checkout session ${sessionId} for ${invoiceId} — a live pay link may remain:`,
+        error,
+      )
+    }
   }
 }
 
@@ -4459,17 +4481,11 @@ const server = createServer(async (request, response) => {
       // sessions are expired AFTER the mark commits — best-effort, because the
       // mark is the truth either way and a Stripe hiccup must not unrecord it;
       // a failure is logged loudly instead.
-      for (const sessionId of [updated.stripeCheckoutSessionId, updated.stripeCardSessionId]) {
-        if (!sessionId) continue
-        try {
-          await expireCheckoutSession(sessionId)
-        } catch (error) {
-          console.error(
-            `[invoices] mark-paid: could not expire checkout session ${sessionId} for ${invoiceId} — a live pay link may remain:`,
-            error,
-          )
-        }
-      }
+      await expireInvoiceSessions(
+        [updated.stripeCheckoutSessionId, updated.stripeCardSessionId],
+        invoiceId,
+        'mark-paid',
+      )
       sendJson(response, 200, { invoice: updated })
       return
     }
@@ -5231,6 +5247,13 @@ const server = createServer(async (request, response) => {
           sendJson(response, 409, { error: 'entry_tag_refused', message: error.message })
           return
         }
+        // The invoice's status moved between this save's read and its write —
+        // a payment webhook landed. Refused, nothing written; the page reloads
+        // to show what the invoice is now.
+        if (error instanceof InvoiceChangedError) {
+          sendJson(response, 409, { error: 'invoice_changed', message: error.message })
+          return
+        }
         console.error('[invoices] update failed:', error)
         sendJson(response, 500, {
           error: 'invoice_update_failed',
@@ -5241,6 +5264,16 @@ const server = createServer(async (request, response) => {
       if (!updated) {
         sendJson(response, 404, { error: 'Invoice not found' })
         return
+      }
+      // A void leaves the client's open payment pages live for up to a day, and
+      // money paid on one would arrive against an invoice that no longer
+      // exists. Expired AFTER the void commits, same as Mark paid.
+      if (updated.status === 'void' && payload?.status === 'void') {
+        await expireInvoiceSessions(
+          [updated.stripeCheckoutSessionId, updated.stripeCardSessionId],
+          invoiceId,
+          'void',
+        )
       }
       sendJson(response, 200, { invoice: await withCoverageChangeable(updated) })
       return
@@ -5581,6 +5614,10 @@ const server = createServer(async (request, response) => {
         })
         return
       }
+      // The voided drafts may still hold open payment pages (a draft can be
+      // sent back from "sent", or given a Payment link). Closed as soon as the
+      // void has committed, before the rebuild: nothing below may skip it.
+      await expireInvoiceSessions(voided.sessionIds ?? [], regenPeriod, 'regenerate')
 
       let rebuilt
       try {

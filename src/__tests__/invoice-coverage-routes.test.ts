@@ -241,7 +241,10 @@ describe('the mark-paid route', () => {
   it('expires BOTH open checkout sessions after the mark commits', () => {
     expect(block).toContain('updated.stripeCheckoutSessionId')
     expect(block).toContain('updated.stripeCardSessionId')
-    expect(block).toContain('expireCheckoutSession(sessionId)')
+    // The loop itself lives in the shared `expireInvoiceSessions` helper now
+    // (invoice-void-sessions-routes.test.ts pins it); this route hands it both.
+    expect(block).toContain('await expireInvoiceSessions(')
+    expect(block).toContain("'mark-paid'")
   })
 
   it('has the unmark route beside it, with the same guards', () => {

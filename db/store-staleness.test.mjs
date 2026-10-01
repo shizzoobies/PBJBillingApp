@@ -13,7 +13,9 @@ import {
   CREATED_AT_PRESERVED_TABLES,
   CoverageConfirmationError,
   EntryTagError,
+  INVOICE_CHANGED_MESSAGE,
   INVOICE_SELECT_COLUMNS,
+  InvoiceChangedError,
   InvoiceLockedError,
   InvoicePaymentProcessingError,
   MAX_LISTED_PENDING_NOTES,
@@ -1161,6 +1163,16 @@ function fakePostgres({
       if (!found) return { rows: [] }
       found.pay_token = found.pay_token ?? params?.[1]
       return { rows: [{ pay_token: found.pay_token }] }
+    }
+    // `updateInvoice`'s own write, with its status guard REPRODUCED: the row
+    // matches only while it still carries the status the save read ($8). A fake
+    // that answered rowCount 1 regardless would let the guard be deleted and
+    // every race test below keep passing.
+    if (/^update invoices\s+set line_items[\s\S]*where id = \$1 and status = \$8$/i.test(trimmed)) {
+      const found = invoices.find((invoice) => invoice.id === params?.[0])
+      return found && found.status === params?.[7]
+        ? { rows: [], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
     }
     if (/^update invoices\b[\s\S]*\breturning id$/i.test(trimmed)) {
       return { rows: invoices.map((invoice) => ({ id: invoice.id })) }
@@ -5010,6 +5022,7 @@ describe('voidUnsentInvoicesForPeriod (file backend)', () => {
       voided: 0,
       ids: [],
       clearing: 0,
+      sessionIds: [],
     })
   })
 
@@ -5029,7 +5042,7 @@ describe('voidUnsentInvoicesForPeriod (file backend)', () => {
 
     const result = await store.voidUnsentInvoicesForPeriod('2026-08')
 
-    expect(result).toEqual({ voided: 1, ids: ['draft'], clearing: 1 })
+    expect(result).toEqual({ voided: 1, ids: ['draft'], clearing: 1, sessionIds: [] })
     expect(await storedStatuses()).toEqual({
       clearing: 'processing',
       draft: 'void',
@@ -11660,6 +11673,308 @@ describe('voiding while a bank payment is clearing (postgres branch)', () => {
     // The void statement itself still names only draft and reviewed.
     const [voidStatement] = fake.matching(/set status = 'void'/i)
     expect(voidStatement.text).toMatch(/status in \('draft', 'reviewed'\)/i)
+  })
+
+  it('hands back the checkout sessions of the invoices it voided, read before the commit', async () => {
+    const fake = fakePostgres({
+      invoices: [
+        { id: 'inv-final', stripe_checkout_session_id: 'cs_ach_1', stripe_card_session_id: 'cs_card_1' },
+        { id: 'inv-bare', stripe_checkout_session_id: null, stripe_card_session_id: null },
+      ],
+    })
+
+    const result = await postgresStore(fake).voidUnsentInvoicesForPeriod('2026-08')
+
+    expect(result.sessionIds).toEqual(['cs_ach_1', 'cs_card_1'])
+    const voided = fake.indexOf(/set status = 'void'/i)
+    const held = fake.indexOf(/^select stripe_checkout_session_id, stripe_card_session_id\s+from invoices where id = any\(\$1::text\[\]\)$/i)
+    const commit = fake.indexOf(/^COMMIT$/i)
+    expect(held).toBeGreaterThan(voided)
+    expect(commit).toBeGreaterThan(held)
+    expect(fake.statements[held].params).toEqual([['inv-final', 'inv-bare']])
+  })
+})
+
+/**
+ * A save that races a payment is refused instead of overwriting it. The write
+ * names the status the save READ (`and status = $8`); a Stripe webhook that
+ * moved the invoice to processing or paid in between leaves it matching no row,
+ * and the store re-reads to tell "gone" (null, the route's 404) from "moved"
+ * (`InvoiceChangedError`). The fake REPRODUCES the guard (see `fakePostgres`),
+ * so deleting `and status = $8` fails these.
+ */
+describe('a save that races a payment (postgres branch)', () => {
+  const lines = [{ kind: 'plan', label: 'August work', detail: 'Monthly service', amount: 250 }]
+  const flat = (text) => text.replace(/\s+/g, ' ').trim()
+
+  /** A store whose FIRST invoice read is followed by `afterRead` — the window a webhook lands in. */
+  function raced(fake, afterRead) {
+    const store = postgresStore(fake)
+    const original = store.listInvoices.bind(store)
+    vi.spyOn(store, 'listInvoices').mockImplementationOnce(async (...args) => {
+      const rows = await original(...args)
+      afterRead()
+      return rows
+    })
+    return store
+  }
+
+  it('writes an ordinary save exactly as before, plus the status it read', async () => {
+    const fake = fakePostgres({ invoices: [{ ...existingInvoice }] })
+
+    await postgresStore(fake).updateInvoice('inv-1', {})
+
+    const writes = fake.matching(/^update invoices\s+set line_items/i)
+    expect(writes).toHaveLength(1)
+    expect(flat(writes[0].text)).toBe(
+      'update invoices set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5, blurb = $6, status = $7, updated_at = now() where id = $1 and status = $8',
+    )
+    expect(writes[0].params).toEqual([
+      'inv-1',
+      JSON.stringify(lines),
+      250,
+      250,
+      '2026-09-30',
+      '',
+      'sent',
+      'sent',
+    ])
+    // The re-read exists only for a write that matched nothing.
+    expect(fake.matching(/^select 1 as present from invoices/i)).toHaveLength(0)
+  })
+
+  it('writes an edit inside its transaction with the same guarded statement', async () => {
+    const fake = fakePostgres({ invoices: [{ ...existingInvoice }] })
+
+    await postgresStore(fake).updateInvoice('inv-1', { blurb: 'Thanks!' })
+
+    const writes = fake.matching(/^update invoices\s+set line_items/i)
+    expect(writes).toHaveLength(1)
+    expect(flat(writes[0].text)).toMatch(/where id = \$1 and status = \$8$/)
+    expect(writes[0].params).toEqual([
+      'inv-1',
+      JSON.stringify(lines),
+      250,
+      250,
+      '2026-09-30',
+      'Thanks!',
+      'sent',
+      'sent',
+    ])
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(1)
+    expect(fake.matching(/^insert into invoice_review_events/i)).toHaveLength(1)
+  })
+
+  it('refuses a single-statement save when a payment moved the status, and writes nothing else', async () => {
+    const row = { ...existingInvoice }
+    const fake = fakePostgres({ invoices: [row] })
+    const store = raced(fake, () => {
+      row.status = 'processing'
+    })
+
+    const error = await store.updateInvoice('inv-1', {}).then(() => null, (thrown) => thrown)
+
+    expect(error).toBeInstanceOf(InvoiceChangedError)
+    expect(error.message).toBe(INVOICE_CHANGED_MESSAGE)
+    expect(error.message).toBe(
+      'This invoice changed while you were working - a payment may have just come in. Reload it and try again.',
+    )
+    expect(fake.matching(/^update invoices\s+set line_items/i)).toHaveLength(1)
+    expect(fake.matching(/^select 1 as present from invoices where id = \$1$/i)[0].params).toEqual([
+      'inv-1',
+    ])
+    expect(fake.matching(/^(insert|delete)\b/i)).toHaveLength(0)
+    expect(row.status).toBe('processing')
+  })
+
+  it('refuses a void that lands on an invoice being paid, and rolls the whole transaction back', async () => {
+    const row = { ...existingInvoice }
+    const fake = fakePostgres({ invoices: [row] })
+    const store = raced(fake, () => {
+      row.status = 'paid'
+    })
+
+    await expect(store.updateInvoice('inv-1', { status: 'void' })).rejects.toBeInstanceOf(
+      InvoiceChangedError,
+    )
+
+    expect(fake.matching(/^BEGIN$/i)).toHaveLength(1)
+    expect(fake.matching(/^ROLLBACK$/i).length).toBeGreaterThanOrEqual(1)
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+    // No review event, no retainer or ledger write, no tag write: the guarded
+    // UPDATE is the first write and nothing runs after it.
+    expect(fake.matching(/^insert into invoice_review_events/i)).toHaveLength(0)
+    expect(fake.matching(/set applied_to_invoice_id/i)).toHaveLength(0)
+    expect(fake.matching(/^update time_entries/i)).toHaveLength(0)
+    expect(fake.matching(/^(insert|delete)\b/i)).toHaveLength(0)
+    expect(fake.matching(/^update invoices\b/i)).toHaveLength(1)
+    // The ROLLBACK is issued before the throw, after the re-read.
+    expect(fake.indexOf(/^ROLLBACK$/i)).toBeGreaterThan(fake.indexOf(/^select 1 as present/i))
+  })
+
+  it('refuses an ordinary edit of a sent invoice that a payment moved, instead of writing sent back over it', async () => {
+    const row = { ...existingInvoice }
+    const fake = fakePostgres({ invoices: [row] })
+    const store = raced(fake, () => {
+      row.status = 'processing'
+    })
+
+    await expect(store.updateInvoice('inv-1', { blurb: 'Thanks!' })).rejects.toBeInstanceOf(
+      InvoiceChangedError,
+    )
+
+    expect(fake.matching(/^insert into invoice_review_events/i)).toHaveLength(0)
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+    expect(row.status).toBe('processing')
+  })
+
+  it('still answers null (the route 404) when the invoice is gone, on both write paths', async () => {
+    for (const patch of [{}, { blurb: 'Thanks!' }]) {
+      const rows = [{ ...existingInvoice }]
+      const fake = fakePostgres({ invoices: rows })
+      const store = raced(fake, () => {
+        rows.splice(0, rows.length)
+      })
+
+      expect(await store.updateInvoice('inv-1', patch)).toBeNull()
+      expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+      expect(fake.matching(/^insert into invoice_review_events/i)).toHaveLength(0)
+    }
+  })
+})
+
+/**
+ * The same refusal on the FILE backend: the row as it is on disk, read for the
+ * write, has to still carry the status the save read.
+ */
+describe('a save that races a payment (file backend)', () => {
+  function invoice(overrides = {}) {
+    return {
+      id: 'inv-race',
+      clientId: 'c1',
+      period: '2026-08',
+      number: 'INV-2026-08-001',
+      status: 'sent',
+      lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+      subtotal: 400,
+      total: 400,
+      dueDate: '2026-09-15',
+      blurb: '',
+      scopeFlags: [],
+      sentAt: '2026-09-01T00:00:00.000Z',
+      paidAt: null,
+      paymentMethod: null,
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  async function seed(rows) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = rows
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  async function stored() {
+    return JSON.parse(await readFile(localDataPath, 'utf8')).invoices
+  }
+
+  /** The window a webhook lands in: after the save's first read, before its write. */
+  function webhookLandsAfterFirstRead(status) {
+    const original = store.listInvoices.bind(store)
+    vi.spyOn(store, 'listInvoices').mockImplementationOnce(async (...args) => {
+      const rows = await original(...args)
+      await seed((await stored()).map((entry) => ({ ...entry, status })))
+      return rows
+    })
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('refuses an edit when the status moved between the read and the write, and writes nothing', async () => {
+    await seed([invoice()])
+    webhookLandsAfterFirstRead('processing')
+
+    const error = await store
+      .updateInvoice('inv-race', { blurb: 'Thanks!' })
+      .then(() => null, (thrown) => thrown)
+
+    expect(error).toBeInstanceOf(InvoiceChangedError)
+    expect(error.message).toBe(INVOICE_CHANGED_MESSAGE)
+    const [row] = await stored()
+    expect(row.status).toBe('processing')
+    expect(row.blurb).toBe('')
+    expect(await store.listInvoiceReviewEvents({ invoiceId: 'inv-race' })).toEqual([])
+  })
+
+  it('refuses a void that would land on an invoice that has just been paid', async () => {
+    await seed([invoice()])
+    webhookLandsAfterFirstRead('paid')
+
+    await expect(store.updateInvoice('inv-race', { status: 'void' })).rejects.toBeInstanceOf(
+      InvoiceChangedError,
+    )
+    expect((await stored())[0].status).toBe('paid')
+  })
+
+  it('writes an ordinary save as before when nothing raced it', async () => {
+    await seed([invoice()])
+
+    const saved = await store.updateInvoice('inv-race', { blurb: 'Thanks!' })
+
+    expect(saved.blurb).toBe('Thanks!')
+    expect(saved.status).toBe('sent')
+    expect((await stored())[0].blurb).toBe('Thanks!')
+  })
+})
+
+describe('voidUnsentInvoicesForPeriod hands back the checkout sessions it closed over (file backend)', () => {
+  it('names the sessions of the voided drafts only, never those of a sent invoice', async () => {
+    const base = {
+      period: '2026-08',
+      kind: 'monthly',
+      lineItems: [],
+      subtotal: 0,
+      total: 0,
+      scopeFlags: [],
+      createdAt: '2026-08-01T00:00:00.000Z',
+    }
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        ...base,
+        id: 'draft-with-links',
+        clientId: 'c-1',
+        status: 'draft',
+        stripeCheckoutSessionId: 'cs_ach_draft',
+        stripeCardSessionId: 'cs_card_draft',
+      },
+      {
+        ...base,
+        id: 'reviewed-with-ach',
+        clientId: 'c-2',
+        status: 'reviewed',
+        stripeCheckoutSessionId: 'cs_ach_reviewed',
+      },
+      { ...base, id: 'draft-bare', clientId: 'c-3', status: 'draft' },
+      {
+        ...base,
+        id: 'sent',
+        clientId: 'c-4',
+        status: 'sent',
+        stripeCheckoutSessionId: 'cs_ach_sent',
+        stripeCardSessionId: 'cs_card_sent',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const result = await store.voidUnsentInvoicesForPeriod('2026-08')
+
+    expect(result.voided).toBe(3)
+    expect(result.sessionIds.sort()).toEqual(['cs_ach_draft', 'cs_ach_reviewed', 'cs_card_draft'])
   })
 })
 

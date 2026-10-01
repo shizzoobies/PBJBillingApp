@@ -23,6 +23,7 @@ import {
   useState,
   type Ref,
 } from 'react'
+import { flushSync } from 'react-dom'
 import {
   answerInvoiceAiReviewQuestionRequest,
   confirmInvoiceCoverageRequest,
@@ -1205,6 +1206,29 @@ export function InvoiceMonthRun({
         // before offering it to anybody else.
         setRetainerToken((token) => token + 1)
       }
+      // Three refusals mean "this invoice moved under you" — a payment landed, or
+      // another tab changed it. The row on screen is describing an invoice that
+      // is no longer that, and its buttons (Void, Save, Mark reviewed) are
+      // offers that no longer apply. Re-read the month so it shows what the
+      // invoice is NOW.
+      //
+      // Done BEFORE returning, and flushed, because the caller says the sentence
+      // as soon as it gets the result: if the row is about to leave this tab, the
+      // editor has to be gone by then so the sentence goes to the banner instead
+      // of an editor that is about to vanish. Either way it is said once.
+      if (
+        code === 'invoice_payment_processing' ||
+        code === 'invoice_locked' ||
+        code === 'invoice_changed'
+      ) {
+        const target = period
+        try {
+          const rows = await listInvoicesRequest(target)
+          if (shownPeriod.current === target) flushSync(() => setInvoices(rows))
+        } catch {
+          /* keep the list we have; the refusal below is the important part */
+        }
+      }
       // NO BANNER for any of them. Every caller of `patch` is the open editor
       // (Save, Mark reviewed, Back to draft, Void), and each says the refusal
       // itself in the slot beside its buttons; the banner above the whole list
@@ -2171,8 +2195,10 @@ function InvoiceEditor({
     if (errorTick === 0) return
     errorSlotRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
   }, [errorTick])
-  const sayRefusal = (message: string) => {
-    if (mountedRef.current) showError(message)
+  // `slot` is where the message shows while this editor is on screen — the
+  // shared error slot unless the action has its own (payment link, send, dates).
+  const sayRefusal = (message: string, slot: (message: string) => void = showError) => {
+    if (mountedRef.current) slot(message)
     else onRefusal(message)
   }
 
@@ -2363,8 +2389,9 @@ function InvoiceEditor({
       setCoverageOpenId(null)
       onInvoiceChanged(updated)
     } catch (err) {
-      setCoverageError(
+      sayRefusal(
         err instanceof Error ? err.message : 'Could not confirm those covered dates.',
+        setCoverageError,
       )
     } finally {
       setCoverageBusyId(null)
@@ -2402,7 +2429,10 @@ function InvoiceEditor({
       onInvoiceChanged(result.invoice)
     } catch (err) {
       // Stripe not configured, or Stripe declined — either way say which.
-      setPayError(err instanceof Error ? err.message : 'Could not create a payment link.')
+      sayRefusal(
+        err instanceof Error ? err.message : 'Could not create a payment link.',
+        setPayError,
+      )
     } finally {
       setPayBusy(false)
     }
@@ -2422,7 +2452,7 @@ function InvoiceEditor({
       setPicking(false)
       onInvoiceChanged(result.invoice)
     } catch (err) {
-      setSendError(err instanceof Error ? err.message : 'Could not send the invoice.')
+      sayRefusal(err instanceof Error ? err.message : 'Could not send the invoice.', setSendError)
     } finally {
       setSendBusy(false)
     }
@@ -2798,7 +2828,7 @@ function InvoiceEditor({
       const updated = await markInvoicePaidRequest(invoice.id)
       onInvoiceChanged(updated)
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Could not mark that paid.')
+      sayRefusal(error instanceof Error ? error.message : 'Could not mark that paid.')
     }
   }
 
@@ -2813,7 +2843,7 @@ function InvoiceEditor({
       const updated = await verifyInvoicePaymentRequest(invoice.id)
       onInvoiceChanged(updated)
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Could not check with Stripe.')
+      sayRefusal(error instanceof Error ? error.message : 'Could not check with Stripe.')
     }
   }
 
@@ -2848,7 +2878,7 @@ function InvoiceEditor({
       const updated = await unmarkInvoicePaidRequest(invoice.id)
       onInvoiceChanged(updated)
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Could not undo that.')
+      sayRefusal(error instanceof Error ? error.message : 'Could not undo that.')
     }
   }
 
