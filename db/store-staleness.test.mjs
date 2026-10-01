@@ -10,6 +10,7 @@ import {
   CHECKLIST_ITEM_SELECT_COLUMNS,
   CLIENT_SELECT_COLUMNS,
   CREATED_AT_PRESERVED_TABLES,
+  CoverageConfirmationError,
   EntryTagError,
   INVOICE_SELECT_COLUMNS,
   InvoiceLockedError,
@@ -40,7 +41,10 @@ import {
   tableVersionSql,
   workspaceVersionSql,
 } from '../lib/workspace-version.js'
-import { normalizeRecurringReimbursement } from '../lib/expense-coverage.js'
+import {
+  normalizeRecurringReimbursement,
+  resolveCoverageForPeriod,
+} from '../lib/expense-coverage.js'
 import { normalizedLabelSql, untouchedStepSql } from '../lib/series-step-delete.js'
 
 /**
@@ -13151,6 +13155,271 @@ describe('covered dates — confirming respects what she typed (file backend)', 
       // ...and March returns to the 31st rather than keeping February's day.
       ['2027-02-28', '2027-03-31', false],
     ])
+  })
+})
+
+// The window of a line nobody flagged — the first invoice for an expense carries
+// the dates typed at setup, so there is nothing to confirm and the owner still
+// needs to move it. Same method, same ledger write; what changes is that the
+// invoice is not asking.
+describe('covered dates — changing an unflagged window (file backend)', () => {
+  const period = '2026-09'
+
+  async function seedOne() {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 500 }],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [],
+        recurringReimbursements: [
+          {
+            id: 'recur-qbo',
+            clientId: 'c1',
+            description: 'QuickBooks Online',
+            amount: 90,
+            frequency: 'monthly',
+            startDate: '2026-07-01',
+            coverageEnabled: true,
+            coverageTemplate: '{description} — {range}',
+            coverageStart: '2026-09-13',
+            coverageEnd: '2026-10-13',
+            coverageAnchorDay: 13,
+            coveragePaused: false,
+            coverageResumePending: false,
+            coverageHistory: {},
+          },
+        ],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  const readExpense = async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return data.recurringReimbursements.find((entry) => entry.id === 'recur-qbo')
+  }
+
+  const recurringLineOf = (invoice) => invoice.lineItems.find((line) => line.kind === 'recurring')
+
+  /** September, billed from the seed: the window is the one typed at setup. */
+  async function seededSeptember() {
+    await seedOne()
+    const run = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+    const invoice = run.created[0]
+    expect(recurringLineOf(invoice)).toMatchObject({
+      coverageStart: '2026-09-13',
+      coverageEnd: '2026-10-13',
+    })
+    // Nothing flagged — this is the case the quiet control exists for.
+    expect(recurringLineOf(invoice).needsCoverageConfirmation).toBeFalsy()
+    return invoice
+  }
+
+  it('moves the line, re-renders the untouched wording and writes the ledger', async () => {
+    const invoice = await seededSeptember()
+
+    const changed = await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+      start: '2026-10-13',
+      end: '2026-11-13',
+    })
+
+    expect(recurringLineOf(changed)).toMatchObject({
+      label: 'QuickBooks Online — October 13 – November 13, 2026',
+      coverageStart: '2026-10-13',
+      coverageEnd: '2026-11-13',
+      needsCoverageConfirmation: false,
+    })
+    // The ledger holds the window she set for THIS period, so regenerating it
+    // lands on the same dates rather than the seed.
+    expect((await readExpense()).coverageHistory[period]).toMatchObject({
+      start: '2026-10-13',
+      end: '2026-11-13',
+      needsConfirmation: false,
+    })
+    // And it is what the invoice on file says.
+    const stored = JSON.parse(await readFile(localDataPath, 'utf8')).invoices.find(
+      (entry) => entry.id === invoice.id,
+    )
+    expect(recurringLineOf(stored).coverageEnd).toBe('2026-11-13')
+  })
+
+  it('makes the NEXT period step one cycle past the window she set', async () => {
+    const invoice = await seededSeptember()
+    await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+      start: '2026-10-13',
+      end: '2026-11-13',
+    })
+
+    const expense = normalizeRecurringReimbursement(await readExpense())
+    expect(resolveCoverageForPeriod(expense, '2026-10')).toMatchObject({
+      start: '2026-11-13',
+      end: '2026-12-13',
+      needsConfirmation: false,
+      source: 'advance',
+    })
+
+    const october = await store.generateInvoicesForPeriod('2026-10', { clientId: 'c1' })
+    expect(recurringLineOf(october.created[0])).toMatchObject({
+      coverageStart: '2026-11-13',
+      coverageEnd: '2026-12-13',
+    })
+    expect(recurringLineOf(october.created[0]).needsCoverageConfirmation).toBeFalsy()
+  })
+
+  it('leaves wording she typed herself alone', async () => {
+    const invoice = await seededSeptember()
+    await store.updateInvoice(invoice.id, {
+      lineItems: invoice.lineItems.map((line) =>
+        line.kind === 'recurring' ? { ...line, label: 'QBO subscription (per contract)' } : line,
+      ),
+    })
+
+    const changed = await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+      start: '2026-10-13',
+      end: '2026-11-13',
+    })
+
+    expect(recurringLineOf(changed).label).toBe('QBO subscription (per contract)')
+    expect(recurringLineOf(changed).coverageEnd).toBe('2026-11-13')
+  })
+
+  it('still allows a sent invoice that nobody has paid', async () => {
+    const invoice = await seededSeptember()
+    await store.updateInvoice(invoice.id, { status: 'sent' })
+
+    const changed = await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+      start: '2026-10-13',
+      end: '2026-11-13',
+    })
+
+    expect(recurringLineOf(changed).coverageEnd).toBe('2026-11-13')
+  })
+
+  it('refuses a paid invoice and writes nothing', async () => {
+    const invoice = await seededSeptember()
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices.find((entry) => entry.id === invoice.id).status = 'paid'
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    const ledgerBefore = (await readExpense()).coverageHistory
+
+    await expect(
+      store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+        start: '2026-10-13',
+        end: '2026-11-13',
+      }),
+    ).rejects.toThrow(/locked because it has been paid/i)
+    await expect(
+      store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+        start: '2026-10-13',
+        end: '2026-11-13',
+      }),
+    ).rejects.toBeInstanceOf(CoverageConfirmationError)
+
+    const after = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(recurringLineOf(after.invoices.find((entry) => entry.id === invoice.id)).coverageEnd).toBe(
+      '2026-10-13',
+    )
+    expect((await readExpense()).coverageHistory).toEqual(ledgerBefore)
+  })
+
+  it('refuses an invoice whose payment is still settling', async () => {
+    const invoice = await seededSeptember()
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices.find((entry) => entry.id === invoice.id).status = 'processing'
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    await expect(
+      store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+        start: '2026-10-13',
+        end: '2026-11-13',
+      }),
+    ).rejects.toThrow(/payment is going through/i)
+  })
+})
+
+describe('covered dates — changing an unflagged window (postgres branch)', () => {
+  const unflaggedRow = (status) => ({
+    ...existingInvoice,
+    id: 'inv-1',
+    period: '2026-09',
+    status,
+    line_items: [
+      {
+        kind: 'recurring',
+        label: 'QuickBooks Online — September 13 – October 13, 2026',
+        detail: 'monthly',
+        amount: 90,
+        recurringId: 'recur-qbo',
+        coverageStart: '2026-09-13',
+        coverageEnd: '2026-10-13',
+      },
+    ],
+    subtotal: '90.00',
+    total: '90.00',
+  })
+
+  const recurringRow = {
+    id: 'recur-qbo',
+    client_id: 'c1',
+    description: 'QuickBooks Online',
+    amount: '90.00',
+    frequency: 'monthly',
+    start_date: new Date(2026, 6, 1),
+    coverage_enabled: true,
+    coverage_template: '{description} — {range}',
+    coverage_start: new Date(2026, 8, 13),
+    coverage_end: new Date(2026, 9, 13),
+    coverage_anchor_day: 13,
+    coverage_paused: false,
+    coverage_resume_pending: false,
+    coverage_history: { '2026-09': { start: '2026-09-13', end: '2026-10-13', needsConfirmation: false } },
+  }
+
+  it('moves the line and the ledger in one transaction', async () => {
+    const fake = fakePostgres({ invoices: [unflaggedRow('sent')], recurringRows: [recurringRow] })
+
+    const changed = await postgresStore(fake).confirmExpenseCoverage('inv-1', 'recur-qbo', {
+      start: '2026-10-13',
+      end: '2026-11-13',
+    })
+
+    expect(changed.lineItems[0]).toMatchObject({
+      label: 'QuickBooks Online — October 13 – November 13, 2026',
+      coverageStart: '2026-10-13',
+      coverageEnd: '2026-11-13',
+    })
+    const begin = fake.indexOf(/^BEGIN$/i)
+    const line = fake.indexOf(/^update invoices set line_items/i)
+    const ledger = fake.indexOf(/jsonb_set\(/i)
+    const commit = fake.indexOf(/^COMMIT$/i)
+    expect(begin).toBeGreaterThan(-1)
+    expect(line).toBeGreaterThan(begin)
+    expect(ledger).toBeGreaterThan(begin)
+    expect(commit).toBeGreaterThan(Math.max(line, ledger))
+    const written = fake.matching(/jsonb_set\(/i)[0]
+    expect(written.params[1]).toBe('2026-09')
+    expect(JSON.parse(written.params[2])).toMatchObject({
+      start: '2026-10-13',
+      end: '2026-11-13',
+      needsConfirmation: false,
+    })
+  })
+
+  it('refuses a paid invoice before it opens a transaction or reads the expense', async () => {
+    const fake = fakePostgres({ invoices: [unflaggedRow('paid')], recurringRows: [recurringRow] })
+
+    await expect(
+      postgresStore(fake).confirmExpenseCoverage('inv-1', 'recur-qbo', {
+        start: '2026-10-13',
+        end: '2026-11-13',
+      }),
+    ).rejects.toBeInstanceOf(CoverageConfirmationError)
+
+    expect(fake.matching(/^BEGIN$/i)).toHaveLength(0)
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+    expect(fake.matching(/jsonb_set\(/i)).toHaveLength(0)
   })
 })
 

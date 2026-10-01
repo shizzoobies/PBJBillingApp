@@ -66,6 +66,7 @@ import {
 } from '../lib/checklist-period-label.js'
 import {
   RETAINER_LABEL,
+  invoiceLockMessage,
   invoiceLockRefusal,
   normalizeAdhocMode,
   normalizeTimeBreakdownMode,
@@ -11790,6 +11791,11 @@ export class AppDataStore {
         'This invoice has been voided — generate the month again to bill it.',
       )
     }
+
+    // A paid invoice has to keep matching what the client paid, and the dates
+    // are part of the line they read. The same sentence the PATCH route gives.
+    const lockMessage = invoiceLockMessage(current)
+    if (lockMessage) throw new CoverageConfirmationError(lockMessage)
 
     const index = current.lineItems.findIndex(
       (line) => line?.kind === 'recurring' && line?.recurringId === recurringId,

@@ -12846,6 +12846,17 @@ tr.is-inactive-client .client-name-link {
   padding-left: 10px;
 }
 
+/* The settled-window version: the same box, none of the warning color. */
+.invoice-run-coverage-quiet {
+  border-left-color: var(--line);
+}
+
+.invoice-run-coverage-change {
+  justify-self: start;
+  margin-top: 4px;
+  padding: 0;
+}
+
 .invoice-run-coverage-prompt {
   align-items: center;
   color: var(--danger, #c0392b);

@@ -244,6 +244,8 @@ type ScopePanelData = {
   timesheetLocks: TimesheetLock[]
   /** Preview, or an invoice past the point where its lines may change. */
   readOnly: boolean
+  /** Previewing as someone else — unlike `readOnly`, says nothing about status. */
+  previewMode: boolean
   onEntriesTagged?: (tags: Array<{ entryId: string; tag: ScopeTag }>) => void
 }
 
@@ -603,6 +605,7 @@ export function InvoiceMonthRun({
         timesheetLocks,
         readOnly:
           previewMode || (invoice.status !== 'draft' && invoice.status !== 'reviewed'),
+        previewMode,
         onEntriesTagged,
       }
     },
@@ -1724,20 +1727,60 @@ function InvoiceLineRow({
   onRemove: (index: number) => void
   /** Passed for ad hoc lines only; its absence is what makes a row scoped. */
   onModeChange?: (index: number, mode: AdhocMode) => void
-  /** Passed only for a recurring line whose covered dates are still a proposal. */
+  /**
+   * Passed for a recurring line that carries a covered window. `confirm` is the
+   * proposal she must answer before the invoice can be reviewed; `change` is a
+   * settled window she may move, collapsed until she asks.
+   */
   coverage?: {
+    mode: 'confirm' | 'change'
     start: string
     end: string
     busy: boolean
+    /** `change` only: the From / To boxes are showing. */
+    open: boolean
+    /** `change` only: set while previewing as someone, to say why it is dead. */
+    disabledTitle?: string
     onEdit: (range: { start: string; end: string }) => void
     onConfirm: () => void
+    onOpen: () => void
+    onCancel: () => void
   }
   /** The invoice has been paid: every field here is a record, not a draft. */
   locked?: boolean
 }) {
   const mode = normalizeAdhocMode(line.adhocMode)
+  // The same two boxes for the question she must answer and the change she may
+  // make, so the two cannot drift apart.
+  const coverageBoxes = coverage ? (
+    <>
+      <label>
+        <span>From</span>
+        <input
+          className="compact-input"
+          type="date"
+          value={coverage.start}
+          aria-label="Covered period start"
+          onChange={(event) => coverage.onEdit({ start: event.target.value, end: coverage.end })}
+        />
+      </label>
+      <label>
+        <span>To</span>
+        <input
+          className="compact-input"
+          type="date"
+          value={coverage.end}
+          aria-label="Covered period end"
+          onChange={(event) => coverage.onEdit({ start: coverage.start, end: event.target.value })}
+        />
+      </label>
+    </>
+  ) : null
+  const coverageMoved =
+    coverage !== undefined &&
+    (coverage.start !== (line.coverageStart ?? '') || coverage.end !== (line.coverageEnd ?? ''))
   return (
-    <tr className={coverage ? 'invoice-run-line-unconfirmed' : undefined}>
+    <tr className={coverage?.mode === 'confirm' ? 'invoice-run-line-unconfirmed' : undefined}>
       <td>
         <input
           className="input"
@@ -1759,7 +1802,7 @@ function InvoiceLineRow({
             it here, and the invoice cannot be marked reviewed until she has.
             Confirming also moves the ledger, so the NEXT cycle steps from what
             she approved rather than from what was proposed. */}
-        {coverage ? (
+        {coverage?.mode === 'confirm' ? (
           <div className="invoice-run-coverage" role="group" aria-label="Confirm the covered dates">
             <p className="invoice-run-coverage-prompt">
               <AlertTriangle size={13} />
@@ -1769,30 +1812,7 @@ function InvoiceLineRow({
               {coverageConfirmationPrompt(line.coverageReason)}
             </p>
             <div className="invoice-run-coverage-row">
-              <label>
-                <span>From</span>
-                <input
-                  className="compact-input"
-                  type="date"
-                  value={coverage.start}
-                  aria-label="Covered period start"
-                  onChange={(event) =>
-                    coverage.onEdit({ start: event.target.value, end: coverage.end })
-                  }
-                />
-              </label>
-              <label>
-                <span>To</span>
-                <input
-                  className="compact-input"
-                  type="date"
-                  value={coverage.end}
-                  aria-label="Covered period end"
-                  onChange={(event) =>
-                    coverage.onEdit({ start: coverage.start, end: event.target.value })
-                  }
-                />
-              </label>
+              {coverageBoxes}
               <button
                 type="button"
                 className="secondary-action"
@@ -1803,6 +1823,60 @@ function InvoiceLineRow({
               </button>
             </div>
           </div>
+        ) : null}
+        {/* THE QUIET VERSION. A window nobody flagged can still be wrong — the
+            first invoice for an expense carries the dates typed at setup, and
+            by the time she sees them the ledger already holds that month, so
+            editing the expense changes nothing. Collapsed, because most of the
+            time the dates are right and this must not read as a question. It
+            never gates Mark reviewed: that reads the flag, and there is none. */}
+        {coverage?.mode === 'change' ? (
+          coverage.open ? (
+            <div
+              className="invoice-run-coverage invoice-run-coverage-quiet"
+              role="group"
+              aria-label="Change the covered dates"
+            >
+              <p className="invoice-run-coverage-why">Next month continues from the end date.</p>
+              <div className="invoice-run-coverage-row">
+                {coverageBoxes}
+                <button
+                  type="button"
+                  className="secondary-action"
+                  disabled={
+                    coverage.busy ||
+                    Boolean(coverage.disabledTitle) ||
+                    !coverage.start ||
+                    !coverage.end ||
+                    coverage.end <= coverage.start ||
+                    !coverageMoved
+                  }
+                  title={coverage.disabledTitle}
+                  onClick={coverage.onConfirm}
+                >
+                  {coverage.busy ? 'Saving…' : 'Save dates'}
+                </button>
+                <button
+                  type="button"
+                  className="link-button"
+                  disabled={coverage.busy}
+                  onClick={coverage.onCancel}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="link-button invoice-run-coverage-change"
+              disabled={Boolean(coverage.disabledTitle)}
+              title={coverage.disabledTitle}
+              onClick={coverage.onOpen}
+            >
+              Change covered dates
+            </button>
+          )
         ) : null}
         {/* HER CONTROL (featreq-cfb1536a, answer revised in person): the
             hours are their own field, and the amount follows. Type 1.4 over a
@@ -2025,6 +2099,8 @@ function InvoiceEditor({
   >({})
   const [coverageBusyId, setCoverageBusyId] = useState<string | null>(null)
   const [coverageError, setCoverageError] = useState<string | null>(null)
+  /** The expense whose quiet "Change covered dates" boxes are open, if any. */
+  const [coverageOpenId, setCoverageOpenId] = useState<string | null>(null)
 
   /**
    * Answers being typed to the rating's questions, keyed by question id. Held
@@ -2149,6 +2225,7 @@ function InvoiceEditor({
         coverageStart: range.start,
         coverageEnd: range.end,
       })
+      setCoverageOpenId(null)
       onInvoiceChanged(updated)
     } catch (err) {
       setCoverageError(
@@ -2432,19 +2509,44 @@ function InvoiceEditor({
    * the same way — this is a gate on marking the invoice reviewed, and a block
    * that quietly skipped it would let an unconfirmed window through.
    */
-  const coverageFor = (line: PersistedInvoiceLine) =>
-    line.needsCoverageConfirmation && line.recurringId
-      ? {
-          ...coverageValue(line),
-          busy: coverageBusyId === line.recurringId,
-          onEdit: (range: { start: string; end: string }) =>
-            setCoverageEdits((current) => ({
-              ...current,
-              [line.recurringId as string]: range,
-            })),
-          onConfirm: () => void confirmCoverage(line.recurringId as string, coverageValue(line)),
-        }
-      : undefined
+  const coverageFor = (line: PersistedInvoiceLine) => {
+    const recurringId = line.recurringId
+    if (!recurringId) return undefined
+    const flagged = Boolean(line.needsCoverageConfirmation)
+    // A settled window is hers to move too, on any invoice still open to
+    // change. Paid and void ones are records.
+    const changeable =
+      line.kind === 'recurring' &&
+      Boolean(line.coverageStart) &&
+      Boolean(line.coverageEnd) &&
+      invoice.status !== 'void' &&
+      !invoiceLockMessage(invoice)
+    if (!flagged && !changeable) return undefined
+    return {
+      mode: flagged ? ('confirm' as const) : ('change' as const),
+      ...coverageValue(line),
+      busy: coverageBusyId === recurringId,
+      open: coverageOpenId === recurringId,
+      disabledTitle: !flagged && scope.previewMode ? 'Disabled in preview mode' : undefined,
+      onEdit: (range: { start: string; end: string }) =>
+        setCoverageEdits((current) => ({ ...current, [recurringId]: range })),
+      onConfirm: () => void confirmCoverage(recurringId, coverageValue(line)),
+      onOpen: () => {
+        setCoverageError(null)
+        setCoverageOpenId(recurringId)
+      },
+      // Closing throws the typed dates away — the boxes reopen on the line's own.
+      onCancel: () => {
+        setCoverageError(null)
+        setCoverageOpenId(null)
+        setCoverageEdits((current) => {
+          const next = { ...current }
+          delete next[recurringId]
+          return next
+        })
+      },
+    }
+  }
 
   const removeLine = (index: number) => {
     setLines((current) => current.filter((_, i) => i !== index))
