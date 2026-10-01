@@ -19,6 +19,7 @@
  */
 // @ts-expect-error - plain-JS module without type declarations
 import { materializeRecurringChecklists } from '../../db/store.js'
+import { firmToday } from '../../lib/firm-time.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 function daysAgo(n: number): string {
@@ -327,7 +328,9 @@ describe('materializeRecurringChecklists — biweekly cadence', () => {
 })
 
 describe('materializeRecurringChecklists — specific-months per-month due dates', () => {
-  const thisYear = new Date().getFullYear()
+  // The materializer's own year: the firm's, not the host clock's. They differ
+  // on a UTC runner for the last few hours of New Year's Eve in the east.
+  const thisYear = Number(firmToday().slice(0, 4))
 
   function makeSpecificMonthsTemplate(overrides: Record<string, unknown> = {}) {
     // January has started by any date the test could run on, so an occurrence
@@ -376,9 +379,9 @@ describe('materializeRecurringChecklists — specific-months per-month due dates
 })
 
 describe('materializeRecurringChecklists — specific-months auto-complete past months', () => {
-  // 2026-09-15 at local noon: the UTC date and the local date agree in every zone
-  // the suite runs in, so nothing below depends on the runner clock or zone.
-  const FROZEN = new Date(2026, 8, 15, 12, 0, 0)
+  // Noon Eastern on 2026-09-15, as an instant: the materializer reads the firm's
+  // day off it, which is the 15th whatever zone the runner is in.
+  const FROZEN = new Date('2026-09-15T16:00:00.000Z')
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(FROZEN)
@@ -621,7 +624,10 @@ describe('materializeRecurringChecklists — duplicate prevention', () => {
   })
 
   it('a specific-months template generates one instance per designated month, once', () => {
-    const thisMonth = new Date().getMonth() + 1
+    // The month the materializer is in — the firm's. Read off the host clock,
+    // this named October on a UTC runner while it was still September 30th in
+    // the east, and the month it designated had not started.
+    const thisMonth = Number(firmToday().slice(5, 7))
     const template = makeMonthlyTemplate({
       id: 'tpl-sm',
       frequency: 'specific-months',
@@ -799,9 +805,9 @@ describe('materializeRecurringChecklists — inactive clients', () => {
  * recipe from filling in the cycle it is genuinely due for.
  */
 describe('materializeRecurringChecklists — a recipe starts the day it is set up', () => {
-  // 2026-09-15 at local noon: the UTC date and the local date agree in every zone
-  // the suite runs in, so nothing below depends on the runner clock or zone.
-  const FROZEN = new Date(2026, 8, 15, 12, 0, 0)
+  // Noon Eastern on 2026-09-15, as an instant: the materializer reads the firm's
+  // day off it, which is the 15th whatever zone the runner is in.
+  const FROZEN = new Date('2026-09-15T16:00:00.000Z')
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(FROZEN)

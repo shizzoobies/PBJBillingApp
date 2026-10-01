@@ -5,11 +5,13 @@
  */
 
 /**
- * The earliest date a template may produce work for. `null` means the template
- * carries no creation stamp, which means NO floor (legacy behavior).
+ * The earliest date a template may produce work for: the day it was created,
+ * read in the firm's time zone (or `timeZone` when given). `null` means the
+ * template carries no creation stamp, which means NO floor (legacy behavior).
  */
 export declare function templateStartFloor(
   template: { createdAt?: string | null } | null | undefined,
+  timeZone?: string,
 ): string | null
 
 /**

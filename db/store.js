@@ -17,6 +17,7 @@ import {
   newTemplateCreatedAt,
   templateStartFloor,
 } from '../lib/checklist-start-floor.js'
+import { firmToday } from '../lib/firm-time.js'
 import {
   CHECKLIST_INSTANCE_UNIQUE_INDEX,
   CHECKLIST_INSTANCE_UNIQUE_INDEX_V2,
@@ -466,14 +467,16 @@ function addDays(dateString, days) {
  * a 30-day month lands on the 30th rather than overflowing into the next one
  * (the `new Date(y, m + 1, day)` trap documented on `advanceChecklistFrequency`).
  */
-function nextDateOnDayOfMonth(day, today = new Date()) {
+function nextDateOnDayOfMonth(day, today = firmToday()) {
   const wanted = Math.min(Math.max(Math.trunc(day) || 1, 1), 31)
   const clamp = (year, month) =>
     Math.min(wanted, new Date(Date.UTC(year, month + 1, 0)).getUTCDate())
-  const year = today.getUTCFullYear()
-  const month = today.getUTCMonth()
+  // `today` is the firm's day (YYYY-MM-DD), not a Date: the UTC getters of an
+  // instant are already tomorrow from 8 pm Eastern.
+  const year = Number(today.slice(0, 4))
+  const month = Number(today.slice(5, 7)) - 1
   const thisMonth = clamp(year, month)
-  if (thisMonth >= today.getUTCDate()) {
+  if (thisMonth >= Number(today.slice(8, 10))) {
     return formatDateOnly(new Date(Date.UTC(year, month, thisMonth)))
   }
   return formatDateOnly(new Date(Date.UTC(year, month + 1, clamp(year, month + 1))))
@@ -3161,7 +3164,31 @@ const MASTER_ESTIMATE_FIELDS = [
   'estimatedCfoHours',
 ]
 
-export function materializeRecurringChecklists(data) {
+/**
+ * Spawn the recurring checklist instances that are due.
+ *
+ * `today` is the ONE calendar date (YYYY-MM-DD) every comparison below is made
+ * against: the current year, whether a designated month has started, whether a
+ * due date already passed (born completed), and the cadence horizon. It
+ * defaults to the FIRM's day (`firmToday()`, America/New_York unless
+ * FIRM_TIME_ZONE says otherwise), not the server's.
+ *
+ * It used to be the UTC date for some of those and the host's local getters
+ * for the rest. Production runs in UTC and the firm works in US Eastern, so
+ * from 8 pm Eastern the server already believed it was tomorrow — the next
+ * month's occurrence spawned hours early and one due today was born finished —
+ * and on any host that was not UTC the two halves disagreed with each other.
+ * The browser's copy (`ensureRecurringChecklists`, src/lib/utils.ts) takes an
+ * explicit date for the same reason.
+ *
+ * Both backends call this from `read()` with no options, so they share the
+ * one clock.
+ *
+ * @param {object} data  a workspace snapshot
+ * @param {{ today?: string }} [options]  `today` as YYYY-MM-DD; anything else
+ *   is ignored in favor of the firm's day.
+ */
+export function materializeRecurringChecklists(data, options = {}) {
   const templates = Array.isArray(data.checklistTemplates) ? data.checklistTemplates : []
   if (templates.length === 0) {
     // No backfill pass here any more: `changed` reports real materialization
@@ -3170,7 +3197,10 @@ export function materializeRecurringChecklists(data) {
     return { changed: false, data }
   }
 
-  const today = formatDateOnly(new Date())
+  const today =
+    typeof options?.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(options.today)
+      ? options.today
+      : firmToday()
 
   let changed = false
   const nextTemplates = templates.map((template) => {
@@ -3229,8 +3259,10 @@ export function materializeRecurringChecklists(data) {
   const { instanceKeys: existingKeys, monthKeys: existingMonthKeys } =
     buildChecklistInstanceKeys(nextChecklists, recycled)
 
-  const todayDate = new Date()
-  const currentYear = todayDate.getFullYear()
+  // The year and month come off the same `today` string as everything else —
+  // never off a Date's local getters, which answer in the HOST's zone.
+  const currentYear = Number(today.slice(0, 4))
+  const currentMonth = Number(today.slice(5, 7))
   // Retired clients stop producing NEW work. Their existing instances are
   // untouched above and stay visible forever; this only closes the tap.
   const retiredClients = inactiveClientIds(data.clients)
@@ -3270,8 +3302,9 @@ export function materializeRecurringChecklists(data) {
       const months = Array.isArray(template.scheduledMonths) ? template.scheduledMonths : []
       for (const month of months) {
         if (!Number.isInteger(month) || month < 1 || month > 12) continue
-        const monthStart = new Date(currentYear, month - 1, 1)
-        if (todayDate < monthStart) continue
+        // Has this month started? Only this year's months are considered, so
+        // that is simply "it is this month or an earlier one".
+        if (month > currentMonth) continue
         const stageOne = stages[0]
         // `resolveSpecificMonthsStageDueDate` is guaranteed to stay inside the
         // designated month, so the due date's YYYY-MM IS the per-month key.
@@ -16247,7 +16280,9 @@ export class AppDataStore {
     if (existing) return null
 
     const assigneeId = (client.assignedBookkeeperIds ?? [])[0] || ''
-    const today = formatDateOnly(new Date())
+    // The firm's day, not the server's: from 8 pm Eastern the UTC date is
+    // already tomorrow, and the case would open due the day after it started.
+    const today = firmToday()
     const makeStage = (name, items) => ({
       id: `stage-${randomUUID().slice(0, 8)}`,
       name,
@@ -22909,7 +22944,7 @@ export class AppDataStore {
       frequency: typeof input?.frequency === 'string' ? input.frequency : 'monthly',
       nextDueDate: typeof input?.nextDueDate === 'string' && input.nextDueDate
         ? input.nextDueDate
-        : formatDateOnly(new Date()),
+        : firmToday(),
       active: false,
       isStandard: true,
       viewerIds: [],
@@ -22953,7 +22988,11 @@ export class AppDataStore {
 
     const migrated = ensureTemplateStages(source)
     const copyFrequency = typeof frequency === 'string' && frequency ? frequency : source.frequency
-    const today = formatDateOnly(new Date())
+    // The firm's day — the same one the materializer spawns against and
+    // `templateStartFloor` reads the stamp below as. On the UTC date, a recipe
+    // copied at 9 pm Eastern on the last day of a month was walked straight
+    // past the month it was set up in.
+    const today = firmToday()
     // Only a well-formed date counts as "the owner chose this" — anything else
     // falls through to the floored walk below rather than becoming a stamp.
     const explicitFirstDue =
@@ -23053,7 +23092,7 @@ export class AppDataStore {
     const stageOne = stages[0]
     const baseDate = typeof dueDate === 'string' && dueDate
       ? dueDate
-      : template.nextDueDate || formatDateOnly(new Date())
+      : template.nextDueDate || firmToday()
     const stageOneDue = resolveStageDueDate(stageOne, baseDate)
 
     // "Generate a task now" is idempotent: if this template already has a

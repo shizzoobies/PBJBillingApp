@@ -65,14 +65,20 @@ function template(over: Record<string, unknown> = {}) {
   }
 }
 
+// The materializer's own "today" is the FIRM's day, which from 8 pm Eastern is
+// a day behind the UTC date `dateOffset` builds from — so "due today" is handed
+// to it explicitly rather than left to whichever clock the suite runs under.
 const run = (tpl: Record<string, unknown>) =>
-  materializeRecurringChecklists({
-    clients: [{ id: 'client-1', name: 'Acme' }],
-    employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper' }],
-    checklists: [],
-    checklistTemplates: [tpl],
-    timeEntries: [],
-  })
+  materializeRecurringChecklists(
+    {
+      clients: [{ id: 'client-1', name: 'Acme' }],
+      employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper' }],
+      checklists: [],
+      checklistTemplates: [tpl],
+      timeEntries: [],
+    },
+    { today: dateOffset(0) },
+  )
 
 /** Anchored to the occurrence being generated, so it reads her window exactly. */
 const anchored = (over: Record<string, unknown> = {}) =>

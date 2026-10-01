@@ -77,6 +77,8 @@ import {
   seriesDeleteDenial,
   untouchedStepSql,
 } from '../lib/series-step-delete.js'
+import { templateStartFloor } from '../lib/checklist-start-floor.js'
+import { firmToday } from '../lib/firm-time.js'
 
 /**
  * End-to-end `appDataStore.write()` contracts on the FILE backend: the
@@ -12424,8 +12426,9 @@ describe("read()'s materializer write-back is guarded (file backend)", () => {
     vi.restoreAllMocks()
   })
 
-  // The materializer compares date-only strings from toISOString(), so "due
-  // yesterday, UTC" is always <= today and the template spawns on next read.
+  // The materializer compares date-only strings against the firm's day, which
+  // is never more than a day behind UTC, so "due yesterday, UTC" is always
+  // <= today and the template spawns on next read.
   const utcDaysAgo = (days) =>
     new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
 
@@ -20069,12 +20072,18 @@ describe('updateInvoice entryTags statement shape (postgres branch)', () => {
  * given, past or not: an owner who picks a date means it.
  */
 describe('copyTemplateToClient starts the copy today, not at the blueprint’s stale date', () => {
-  const today = new Date().toISOString().slice(0, 10)
-  const daysAgo = (n) => {
-    const d = new Date()
-    d.setDate(d.getDate() - n)
-    return d.toISOString().slice(0, 10)
-  }
+  // "Today" is the FIRM's day, which is what the store dates a copy by. Taking
+  // it from the UTC date made every assertion below a day off from 8 pm Eastern.
+  const shiftDays = (dateOnly, days) =>
+    new Date(Date.parse(`${dateOnly}T12:00:00Z`) + days * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10)
+  const today = firmToday()
+  const daysAgo = (n) => shiftDays(today, -n)
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
 
   const blueprint = (overrides = {}) => ({
     id: 'tpl-blueprint',
@@ -20117,9 +20126,7 @@ describe('copyTemplateToClient starts the copy today, not at the blueprint’s s
     // after today is two days out — the recipe keeps its own weekday.
     await store.write(workspace({ checklistTemplates: [blueprint({ nextDueDate: daysAgo(68) })] }))
     const copy = await store.copyTemplateToClient('tpl-blueprint', { clientId: 'c1' })
-    const inTwoDays = new Date()
-    inTwoDays.setDate(inTwoDays.getDate() + 2)
-    expect(copy.nextDueDate).toBe(inTwoDays.toISOString().slice(0, 10))
+    expect(copy.nextDueDate).toBe(shiftDays(today, 2))
   })
 
   it('honors an explicit firstDueDate even when it is in the past', async () => {
@@ -20181,7 +20188,8 @@ describe('copyTemplateToClient starts the copy today, not at the blueprint’s s
 
   it('stamps the copy with a creation date, which is what floors its spawning', async () => {
     const copy = await store.copyTemplateToClient('tpl-blueprint', { clientId: 'c1' })
-    expect(copy.createdAt.slice(0, 10)).toBe(today)
+    // Read the way the materializer reads it: as the firm's day, not the UTC one.
+    expect(templateStartFloor(copy)).toBe(today)
     // And the stamp survives the write — the file backend's "stored wins"
     // mirror of the Postgres `createdAtFor` snapshot.
     const persisted = (await store.read()).checklistTemplates.find((t) => t.id === copy.id)
@@ -20196,11 +20204,63 @@ describe('copyTemplateToClient starts the copy today, not at the blueprint’s s
   })
 
   /**
+   * The server runs in UTC and the firm works in US Eastern. At 9 pm Eastern on
+   * September 30th the UTC date is already October 1st, so a monthly recipe due
+   * on the 30th, copied that evening, used to be walked past September
+   * altogether: first due October 30th, and nothing for the month it was set
+   * up in.
+   */
+  describe('at 9 pm Eastern on the last day of a month', () => {
+    beforeEach(() => {
+      // Date only: the file backend's own I/O must keep its real timers.
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date('2026-10-01T01:00:00.000Z'))
+    })
+
+    it('starts a monthly copy in the month it was made, and generates that month', async () => {
+      await store.write(
+        workspace({
+          checklistTemplates: [blueprint({ frequency: 'monthly', nextDueDate: '2026-06-30' })],
+        }),
+      )
+      const copy = await store.copyTemplateToClient('tpl-blueprint', { clientId: 'c1' })
+      expect(copy.nextDueDate).toBe('2026-09-30')
+      expect(templateStartFloor(copy)).toBe('2026-09-30')
+
+      const after = await store.read()
+      const spawned = after.checklists.filter((c) => c.templateId === copy.id)
+      expect(spawned.map((c) => c.dueDate)).toEqual(['2026-09-30'])
+      // And the cycle moved on to October, where it belongs.
+      expect(after.checklistTemplates.find((t) => t.id === copy.id).nextDueDate).toBe('2026-10-30')
+    })
+
+    it('treats a first due date of that same evening’s day as today, not the past', async () => {
+      const copy = await store.copyTemplateToClient('tpl-blueprint', {
+        clientId: 'c1',
+        firstDueDate: '2026-09-30',
+      })
+      // Not backdated: an ordinary stamp, taken at the moment of the copy.
+      expect(copy.createdAt).toBe('2026-10-01T01:00:00.000Z')
+      const spawned = (await store.read()).checklists.filter((c) => c.templateId === copy.id)
+      expect(spawned.map((c) => c.dueDate)).toEqual(['2026-09-30'])
+    })
+  })
+
+  /**
    * Cardinal rule 1: the same floored date has to reach Postgres. The copy is
    * persisted through the bulk save, so what proves it is the value the
    * `insert into checklist_templates` statement carries.
    */
-  it('writes the floored date on the Postgres branch too', async () => {
+  it.each([
+    ['on the real clock', null],
+    ['at 9 pm Eastern on the last day of a month', '2026-10-01T01:00:00.000Z'],
+  ])('writes the floored date on the Postgres branch too — %s', async (_label, frozenAt) => {
+    if (frozenAt) {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date(frozenAt))
+    }
+    const expected = firmToday()
+    const staleDue = shiftDays(expected, -70)
     const fake = fakePostgres({
       clientRows: [
         {
@@ -20223,7 +20283,7 @@ describe('copyTemplateToClient starts the copy today, not at the blueprint’s s
           client_id: null,
           assignee_id: 'emp-1',
           frequency: 'weekly',
-          next_due_date: new Date(`${daysAgo(70)}T00:00:00.000Z`),
+          next_due_date: new Date(`${staleDue}T00:00:00.000Z`),
           active: false,
           is_standard: true,
           category_id: null,
@@ -20272,17 +20332,116 @@ describe('copyTemplateToClient starts the copy today, not at the blueprint’s s
     const copy = await postgresStore(fake).copyTemplateToClient('tpl-blueprint', {
       clientId: 'c1',
     })
-    expect(copy.nextDueDate).toBe(today)
+    expect(copy.nextDueDate).toBe(expected)
+    if (frozenAt) expect(expected).toBe('2026-09-30')
 
     const inserts = fake.matching(/^insert into checklist_templates\b/i)
     const copyInsert = inserts.find((statement) => statement.params[0] === copy.id)
     expect(copyInsert).toBeTruthy()
     // `next_due_date` is $6 — the sixth parameter, index 5.
-    expect(copyInsert.params[5]).toBe(today)
+    expect(copyInsert.params[5]).toBe(expected)
     // The blueprint itself is re-inserted unchanged: the floor applies to the
     // COPY, never to the source.
     const sourceInsert = inserts.find((statement) => statement.params[0] === 'tpl-blueprint')
-    expect(sourceInsert.params[5]).toBe(daysAgo(70))
+    expect(sourceInsert.params[5]).toBe(staleDue)
+  })
+})
+
+/**
+ * The two other places the store dates new checklist work "today". Both took
+ * the UTC day, so from 8 pm Eastern the work came out due tomorrow.
+ */
+describe('work the store dates today is dated on the firm’s clock', () => {
+  beforeEach(() => {
+    // 9 pm Eastern on September 30th. Date only: file I/O keeps real timers.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-01T01:00:00.000Z'))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('opens an onboarding case due the day it was started', async () => {
+    await store.write(workspace())
+    const started = await store.startOnboarding('c1')
+    expect(started.template.nextDueDate).toBe('2026-09-30')
+    expect(started.checklist.dueDate).toBe('2026-09-30')
+  })
+
+  it('dates a "generate now" checklist today when the recipe carries no cycle date', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [
+          {
+            id: 'tpl-sm',
+            title: 'Quarterly filing',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            frequency: 'specific-months',
+            scheduledMonths: [12],
+            nextDueDate: '',
+            active: true,
+            viewerIds: [],
+            editorIds: [],
+            stages: [
+              {
+                id: 'stage-1',
+                name: 'Stage 1',
+                assigneeId: 'emp-1',
+                offsetDays: 0,
+                viewerIds: [],
+                editorIds: [],
+                items: [{ id: 'ti-1', label: 'File' }],
+              },
+            ],
+          },
+        ],
+      }),
+    )
+    const checklist = await store.generateChecklistFromTemplate('tpl-sm')
+    expect(checklist.dueDate).toBe('2026-09-30')
+  })
+
+  it('dates a new blueprint with no due date today, not tomorrow', async () => {
+    await store.write(workspace())
+    const blueprint = await store.createStandardTemplate({ title: 'Evening blueprint' })
+    expect(blueprint.nextDueDate).toBe('2026-09-30')
+  })
+
+  it('turns a proposed day of the month into the firm’s next such day, today included', async () => {
+    // Dated on the 30th at 9 pm Eastern on the 30th: today itself. The UTC day
+    // is already October 1st, which would have said October 30th.
+    await store.write(workspace())
+    vi.spyOn(store, 'listPackages').mockResolvedValue([
+      { id: 'pkg-1', name: 'Full service', description: '', planIds: [], templateIds: [] },
+    ])
+    vi.spyOn(store, 'updatePackage').mockResolvedValue({ id: 'pkg-1', templateIds: [] })
+    const result = await store.createSuggestedPackageChecklists('pkg-1', [
+      { title: 'Month end', steps: [{ title: 'Close' }], dueDayOfMonth: 30 },
+      { title: 'First of the month', steps: [{ title: 'Open' }], dueDayOfMonth: 1 },
+    ])
+    expect(result.templates.map((t) => t.nextDueDate)).toEqual(['2026-09-30', '2026-10-01'])
+  })
+
+  it('writes the firm’s day to Postgres for a blueprint made that evening', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.listPackages = async () => [
+      { id: 'pkg-1', name: 'Full service', description: '', planIds: [], templateIds: [] },
+    ]
+    const result = await pgStore.createSuggestedPackageChecklists('pkg-1', [
+      { title: 'Month end', steps: [{ title: 'Close' }], dueDayOfMonth: 30 },
+      { title: 'No day given', steps: [{ title: 'Open' }] },
+    ])
+    expect(result.templates.map((t) => t.nextDueDate)).toEqual(['2026-09-30', '2026-09-30'])
+    const inserts = fake.matching(/^insert into checklist_templates\b/i)
+    for (const template of result.templates) {
+      const insert = inserts.find((statement) => statement.params[0] === template.id)
+      expect(insert).toBeTruthy()
+      // `next_due_date` is $6 — the sixth parameter, index 5.
+      expect(insert.params[5]).toBe('2026-09-30')
+    }
   })
 })
 

@@ -64,6 +64,7 @@ import { buildClientRecap, buildMasterRecap } from './lib/client-recap.js'
 import { buildInvoiceRecap } from './lib/invoice-recap.js'
 import { currentPeriod, isValidPeriod, isValidPeriodType } from './lib/periods.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
+import { firmToday } from './lib/firm-time.js'
 import {
   notify,
   sendDigestEmail,
@@ -845,7 +846,11 @@ function assistantReadTools() {
       const data = await appDataStore.read()
       return diagnoseRecurringChecklists(data, {
         subject: typeof input.subject === 'string' ? input.subject : '',
-        today: todayIso(),
+        // The materializer's clock (the firm's day), not `todayIso()`: this
+        // tool explains what the materializer will do, so it has to be asked
+        // about the same year. The time-logging tool above stays on
+        // `todayIso()` because the weekly gate it explains still runs on it.
+        today: firmToday(),
       })
     },
     recent_changes: async (input) => {

@@ -72,6 +72,7 @@ function makeData(): AppData {
 
 type Born = {
   dueDate: string
+  createdAt?: string
   items: Array<{
     done: boolean
     subItems?: Array<{ done: boolean; subItems?: Array<{ done: boolean }> }>
@@ -131,5 +132,34 @@ describe('ensureRecurringChecklists — the evening of the last day of the month
     // And an explicit date agrees with the ambient one.
     const explicit = septemberInstance(ensureRecurringChecklists(makeData(), '2026-10-01'))
     expect(everyLevelDone(explicit, true)).toBe(true)
+  })
+
+  it('stamps the new instance with the full instant, like the server spawn', () => {
+    // A bare day would sort before every timestamp of the same day in the
+    // pending-notes attach rule, so the stamp is the instant itself, not a day
+    // read off either the UTC or the local clock.
+    vi.setSystemTime(new Date('2026-10-01T01:00:00.000Z'))
+    const instance = septemberInstance(ensureRecurringChecklists(makeData()))
+    expect(instance.createdAt).toBe('2026-10-01T01:00:00.000Z')
+  })
+
+  it('stamps an instance later than a note written earlier that evening', () => {
+    // The "next checklist after this note" rule compares the two as instants. A
+    // bare day on the instance would sort before the note's timestamp.
+    const note = { createdAt: '2026-10-01T00:30:00.000Z' } // 8:30 pm Eastern, Sept 30
+    vi.setSystemTime(new Date('2026-10-01T01:00:00.000Z')) // 9 pm Eastern
+    const instance = septemberInstance(ensureRecurringChecklists(makeData()))
+    expect(instance.createdAt! > note.createdAt).toBe(true)
+  })
+
+  it('gives a recipe set up that evening its September occurrence', () => {
+    // Its stamp reads 2026-10-01 in UTC. Read that way the floor is October and
+    // September, the month it was created in, never generates.
+    vi.setSystemTime(new Date('2026-10-01T01:00:00.000Z'))
+    const data = makeData()
+    data.checklistTemplates[0].createdAt = new Date().toISOString()
+    const instance = septemberInstance(ensureRecurringChecklists(data))
+    expect(instance.dueDate).toBe('2026-09-30')
+    expect(everyLevelDone(instance, false)).toBe(true)
   })
 })

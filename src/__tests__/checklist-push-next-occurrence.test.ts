@@ -21,6 +21,7 @@
 // @ts-expect-error - plain-JS module without type declarations
 import { materializeRecurringChecklists } from '../../db/store.js'
 import { isChecklistSkipped } from '../../lib/checklist-skip.js'
+import { firmToday } from '../../lib/firm-time.js'
 import { describe, expect, it } from 'vitest'
 
 const TEMPLATE_ID = 'tpl-pushable'
@@ -185,8 +186,9 @@ describe('a monthly occurrence pushed onto the next cycle', () => {
 describe('a specific-months occurrence pushed across a month boundary', () => {
   // A specific-months template is deduped per MONTH, so pushing into the next
   // month is precisely the move that would free its own month to respawn.
-  const year = new Date().getFullYear()
-  const month = new Date().getMonth() + 1
+  // The materializer's own month — the firm's, which a UTC host is a few hours
+  // ahead of on the last evening of a month.
+  const [year, month] = firmToday().split('-').map(Number)
   const dayInMonth = `${year}-${String(month).padStart(2, '0')}-01`
   const nextMonth = addMonths(dayInMonth, 1)
 
