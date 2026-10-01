@@ -17,7 +17,11 @@
  */
 // @ts-expect-error - plain-JS module without type declarations
 import { materializeRecurringChecklists } from '../../db/store.js'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 function dateOffset(days: number): string {
   const d = new Date()
@@ -120,6 +124,10 @@ describe('“purely a label not to change anything we have already done”', () 
    * assignee, an item, a stage or a category, this fails.
    */
   it('changes nothing else about the generated instance', () => {
+    // Hold the clock still across both runs: each instance is stamped with the
+    // moment it was created, and two real runs can land a millisecond apart.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date())
     const withoutLabel = run(template()).data.checklists
     const withLabel = run(anchored()).data.checklists
 
