@@ -1779,6 +1779,8 @@ export async function deleteChecklistItemRequest(checklistId: string, itemId: st
 export type SeriesItemDeleteResult = {
   removedFromTemplate: boolean
   removedFromChecklists: string[]
+  /** Later checklists where a same-label copy stayed because work had started on it. */
+  keptOnChecklists: string[]
   checklists: Checklist[]
   template: ChecklistTemplate | null
 }

@@ -100,6 +100,7 @@ import {
   updateChecklistSubItemRequest,
   appendTemplateStageItemsRequest,
   updateTimeEntryRequest,
+  type SeriesItemDeleteResult,
 } from './lib/api'
 import { createEmptyAppData } from './lib/seed'
 import {
@@ -3102,11 +3103,17 @@ function App() {
   // transaction. Merge ALL of that into local state through the server-update
   // path (not the dirty-marking one): a stale template left in memory would be
   // written straight back by the next autosave and the step would reappear.
-  const deleteChecklistItemFromSeries = async (checklistId: string, itemId: string) => {
-    if (previewActiveRef.current) return
+  const deleteChecklistItemFromSeries = async (
+    checklistId: string,
+    itemId: string,
+  ): Promise<SeriesItemDeleteResult | null> => {
+    if (previewActiveRef.current) return null
     try {
       setDataSyncState('saving')
       const result = await deleteChecklistItemFromSeriesRequest(checklistId, itemId)
+      // The server's copy of the template REPLACES the one in this tab: any
+      // unsaved local edit to that same template is overwritten, which is what
+      // keeps the next autosave from writing the removed step back.
       applyServerDataUpdate((current) => ({
         ...current,
         checklists: current.checklists.map(
@@ -3117,14 +3124,22 @@ function App() {
         ),
       }))
       setDataSyncState('synced')
+      return result
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setSessionUser(null)
         setServerPersistenceEnabled(false)
         setDataSyncState('offline')
-        return
+        return null
+      }
+      if (error instanceof ApiError && error.status === 409) {
+        // A refusal, not a failure: nothing was written, so the tab is still in
+        // sync. The caller shows the server's sentence.
+        setDataSyncState('synced')
+        throw error
       }
       setDataSyncState('error')
+      return null
     }
   }
 

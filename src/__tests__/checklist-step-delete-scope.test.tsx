@@ -3,6 +3,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChecklistsPage } from '../pages/ChecklistsPage'
 import { checklistsVisibleTo } from '../lib/checklistVisibility'
+import { LAST_RECURRING_STEP_MESSAGE } from '../../lib/series-step-delete.js'
 import type { AppContextValue } from '../AppContext'
 import type { AppData, Checklist, Client } from '../lib/types'
 
@@ -155,6 +156,60 @@ describe('deleting a step on a recurring checklist', () => {
     expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument()
     expect(deleteChecklistItem).not.toHaveBeenCalled()
     expect(deleteChecklistItemFromSeries).not.toHaveBeenCalled()
+  })
+
+  describe('shows what the series delete did', () => {
+    const chooseSeries = async () => {
+      renderPage()
+      clickDelete('Recurring close')
+      fireEvent.click(within(prompt('Recurring close')).getByRole('button', { name: 'This + all future' }))
+    }
+
+    it('says how many upcoming checklists it removed the step from', async () => {
+      deleteChecklistItemFromSeries.mockResolvedValue({
+        removedFromTemplate: true,
+        removedFromChecklists: ['a', 'b'],
+        keptOnChecklists: [],
+      })
+      await chooseSeries()
+      expect(await screen.findByRole('status')).toHaveTextContent(
+        'Removed from the recurring checklist and 2 upcoming checklists.',
+      )
+      expect(screen.queryByRole('group', { name: 'Where to delete this step' })).not.toBeInTheDocument()
+    })
+
+    it('adds where it kept a copy because work had started', async () => {
+      deleteChecklistItemFromSeries.mockResolvedValue({
+        removedFromTemplate: true,
+        removedFromChecklists: ['a'],
+        keptOnChecklists: ['b', 'c'],
+      })
+      await chooseSeries()
+      expect(await screen.findByRole('status')).toHaveTextContent(
+        'Removed from the recurring checklist and 1 upcoming checklist. Kept on 2 where work had started.',
+      )
+    })
+
+    it('says so when the step was not on the recurring checklist under that name', async () => {
+      deleteChecklistItemFromSeries.mockResolvedValue({
+        removedFromTemplate: false,
+        removedFromChecklists: [],
+        keptOnChecklists: [],
+      })
+      await chooseSeries()
+      expect(await screen.findByRole('status')).toHaveTextContent(
+        'This step is not on the recurring checklist under that name, so only this checklist changed.',
+      )
+    })
+
+    it('keeps the question open and shows the refusal when it is the last recurring step', async () => {
+      deleteChecklistItemFromSeries.mockRejectedValue(new Error(LAST_RECURRING_STEP_MESSAGE))
+      await chooseSeries()
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'This is the last step of the recurring checklist. Delete or pause the recurring checklist instead.',
+      )
+      expect(prompt('Recurring close')).toBeInTheDocument()
+    })
   })
 
   it('staff are offered only "This checklist only"', () => {

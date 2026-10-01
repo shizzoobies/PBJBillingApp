@@ -2018,6 +2018,23 @@ function SkipTaskDialog({
   )
 }
 
+/** What the "this + all future" step delete did, in a sentence for the owner. */
+function seriesDeleteNotice(result: {
+  removedFromTemplate: boolean
+  removedFromChecklists: string[]
+  keptOnChecklists: string[]
+}): string {
+  const count = result.removedFromChecklists.length
+  const upcoming = `${count} upcoming ${count === 1 ? 'checklist' : 'checklists'}`
+  const kept =
+    result.keptOnChecklists.length > 0 ? ` Kept on ${result.keptOnChecklists.length} where work had started.` : ''
+  if (result.removedFromTemplate) return `Removed from the recurring checklist and ${upcoming}.${kept}`
+  const notOnTemplate = 'This step is not on the recurring checklist under that name'
+  return count > 0
+    ? `${notOnTemplate}, but it was removed from ${upcoming}.${kept}`
+    : `${notOnTemplate}, so only this checklist changed.${kept}`
+}
+
 export function ChecklistCard({
   activeEmployeeId,
   checklist,
@@ -2190,7 +2207,12 @@ export function ChecklistCard({
   // future" question is open. A checklist with no template has no series, so it
   // gets a plain confirm instead and never sets this.
   const [stepDeletePrompt, setStepDeletePrompt] = useState<{ itemId: string; label: string } | null>(null)
+  // What the series delete did (or why the server refused it), shown under the step list.
+  const [stepDeleteNote, setStepDeleteNote] = useState<string | null>(null)
+  const [stepDeleteError, setStepDeleteError] = useState<string | null>(null)
   const requestStepDelete = (itemId: string) => {
+    setStepDeleteNote(null)
+    setStepDeleteError(null)
     if (checklist.templateId) {
       setStepDeletePrompt({ itemId, label: checklist.items.find((item) => item.id === itemId)?.label ?? '' })
     } else if (window.confirm('Delete this step?')) {
@@ -2596,18 +2618,43 @@ export function ChecklistCard({
                 type="button"
                 className="primary-action"
                 onClick={() => {
-                  void deleteChecklistItemFromSeries(checklist.id, stepDeletePrompt.itemId)
-                  setStepDeletePrompt(null)
+                  void (async () => {
+                    try {
+                      const result = await deleteChecklistItemFromSeries(checklist.id, stepDeletePrompt.itemId)
+                      setStepDeletePrompt(null)
+                      if (result) setStepDeleteNote(seriesDeleteNotice(result))
+                    } catch (error) {
+                      // A refusal (the recurring checklist's last step): keep the prompt open and say why.
+                      setStepDeleteError(error instanceof Error ? error.message : 'Could not remove the step.')
+                    }
+                  })()
                 }}
               >
                 This + all future
               </button>
             ) : null}
-            <button type="button" className="link-button" onClick={() => setStepDeletePrompt(null)}>
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => {
+                setStepDeletePrompt(null)
+                setStepDeleteError(null)
+              }}
+            >
               Cancel
             </button>
           </div>
+          {stepDeleteError ? (
+            <p className="waiting-editor-error" role="alert">
+              {stepDeleteError}
+            </p>
+          ) : null}
         </div>
+      ) : null}
+      {stepDeleteNote ? (
+        <p className="series-scope-text" role="status">
+          {stepDeleteNote}
+        </p>
       ) : null}
       {canEditStructure
         ? (() => {

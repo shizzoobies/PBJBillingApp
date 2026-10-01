@@ -20,7 +20,7 @@ const appSource = readFileSync(path.join(root, 'src/App.tsx'), 'utf8')
 function seriesBlock(): string {
   const at = serverSource.indexOf("requestUrl.searchParams.get('scope') === 'series'")
   expect(at, 'series branch not found').toBeGreaterThan(-1)
-  return serverSource.slice(at, at + 2200)
+  return serverSource.slice(at, at + 4200)
 }
 
 describe('the series delete route', () => {
@@ -47,6 +47,28 @@ describe('the series delete route', () => {
     )
   })
 
+  it('refuses a shared template or another client\'s before it touches the store', () => {
+    const block = seriesBlock()
+    const refusal = block.indexOf('seriesTemplate.isStandard || seriesTemplate.clientId !== checklist.clientId')
+    expect(refusal).toBeGreaterThan(-1)
+    expect(block.slice(refusal, refusal + 200)).toContain('sendJson(response, 409,')
+    expect(refusal).toBeLessThan(block.indexOf('appDataStore.deleteChecklistItemFromSeries('))
+  })
+
+  it('answers the last recurring step with a 409 and writes nothing after it', () => {
+    const block = seriesBlock()
+    const store = block.indexOf('appDataStore.deleteChecklistItemFromSeries(')
+    const refusal = block.indexOf("'refusal' in removal")
+    expect(refusal).toBeGreaterThan(store)
+    expect(block.slice(refusal, refusal + 260)).toMatch(
+      /sendJson\(response, 409, \{ error: removal\.refusal, message: LAST_RECURRING_STEP_MESSAGE \}\)\s*return/,
+    )
+    // The refusal returns before the activity is logged and the other tabs are told.
+    expect(refusal).toBeLessThan(block.indexOf("'checklist_item_removed_series'"))
+    expect(refusal).toBeLessThan(block.indexOf('broadcastDataChanged()'))
+    expect(serverSource).toContain("from './lib/series-step-delete.js'")
+  })
+
   it('writes through the store, logs the activity and tells the other tabs', () => {
     const block = seriesBlock()
     const store = block.indexOf('appDataStore.deleteChecklistItemFromSeries(checklistId, itemId)')
@@ -69,8 +91,11 @@ describe('the tab merges the series delete as a server update', () => {
   it('uses applyServerDataUpdate for both the checklists and the template, never the dirty-marking path', () => {
     const at = appSource.indexOf('const deleteChecklistItemFromSeries = async')
     expect(at).toBeGreaterThan(-1)
-    const block = appSource.slice(at, at + 1600)
+    const block = appSource.slice(at, at + 2400)
     expect(block).toContain('applyServerDataUpdate(')
+    // The refusal reaches the prompt as a thrown ApiError instead of being swallowed.
+    expect(block).toContain('error.status === 409')
+    expect(block).toContain('throw error')
     expect(block).toContain('checklistTemplates: current.checklistTemplates.map')
     expect(block).not.toContain('updateWorkspaceData(')
   })
