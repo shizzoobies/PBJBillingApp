@@ -431,12 +431,28 @@ describe('drag and drop', () => {
 })
 
 // The check-off guards from the waiting work must survive a reordered or hidden list.
+// They are the STAFF guards: the owner may tick a waiting step (featreq-8a01fe08), so
+// these two read the page as the person doing the work.
+const STAFF = 'emp-avery'
+function viewAsStaff() {
+  const user = { id: STAFF, role: 'staff', staffRole: 'Bookkeeper' }
+  contextValue = {
+    ...contextValue,
+    role: 'staff',
+    ownerMode: false,
+    activeEmployeeId: STAFF,
+    effectiveUser: user,
+    sessionUser: user,
+  } as unknown as AppContextValue
+}
+
 describe('the waiting guards on reordered and hidden lists', () => {
   it('never hides a waiting step - it cannot be done - and its box stays disabled', () => {
     signInWith([
-      item('it-a', 'Alpha', { waiting: true }),
-      item('it-b', 'Bravo', { done: true }),
+      item('it-a', 'Alpha', { waiting: true, assigneeId: STAFF }),
+      item('it-b', 'Bravo', { done: true, assigneeId: STAFF }),
     ] as unknown as Checklist['items'])
+    viewAsStaff()
     const { container } = renderProgress()
     fireEvent.click(screen.getByRole('button', { name: 'Hide completed (1)' }))
 
@@ -449,12 +465,14 @@ describe('the waiting guards on reordered and hidden lists', () => {
     signInWith([
       item('it-1', 'Payroll', {
         waiting: true,
+        assigneeId: STAFF,
         subItems: [
           { id: 's1', title: 'Pull hours', done: true },
           { id: 's2', title: 'Run the file', done: false },
         ],
       }),
     ] as unknown as Checklist['items'])
+    viewAsStaff()
     const { container } = renderProgress()
     fireEvent.click(screen.getByRole('button', { name: 'Hide completed (1)' }))
 

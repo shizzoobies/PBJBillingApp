@@ -56,7 +56,7 @@ describe('POST /api/checklists/:id/items/:itemId/toggle refuses a waiting step',
 
   it('answers 409 STEP_IS_WAITING with the sentence the simulation chose', () => {
     const block = toggleBlock()
-    const at = block.indexOf('if (toggleRefusal) {')
+    const at = block.indexOf('if (toggleRefusal && !ownerClosesWaits) {')
     expect(at).toBeGreaterThan(-1)
     const guard = block.slice(at, at + 300)
     expect(guard).toContain('sendJson(response, toggleRefusal.status, {')
@@ -88,6 +88,62 @@ describe('POST /api/checklists/:id/items/:itemId/toggle refuses a waiting step',
   it('imports the helper from the shared module rather than inlining it', () => {
     expect(serverSource).toContain('waitingToggleRefusal,')
     expect(serverSource).toContain("from './lib/waiting-on-state.js'")
+  })
+})
+
+/**
+ * The owner is the exception (featreq-8a01fe08): she is usually the person being
+ * waited on, so her tick is not refused. The same simulation decides there is a
+ * wait to close, and the store closes it in the SAME write as the toggle when it
+ * is handed her id. What a closed wait looks like is pinned in
+ * `lib/waiting-on-state.test.mjs` (the pure function) and
+ * `db/store-staleness.test.mjs` (both backends); this is the route glue.
+ */
+describe('POST /api/checklists/:id/items/:itemId/toggle lets the owner tick a waiting step', () => {
+  // The loop that records the closed waits sits past the default slice.
+  const longToggleBlock = () =>
+    routeBlock(/const checklistToggleMatch = normalizedPath\.match\(/, 9000)
+
+  it('exempts only a signed-in owner, and only when there is a refusal to exempt', () => {
+    const block = longToggleBlock()
+    expect(block).toContain(
+      "const ownerClosesWaits = Boolean(toggleRefusal) && session.user.role === 'owner'",
+    )
+    // Staff (and anyone else) fall through to the very same 409 as before.
+    expect(block).toContain('if (toggleRefusal && !ownerClosesWaits) {')
+  })
+
+  it('hands the store the owner id so the wait closes in the same write, and nothing otherwise', () => {
+    const block = longToggleBlock()
+    const call = block.slice(block.indexOf('appDataStore.toggleChecklistItem('))
+    expect(call.slice(0, 400)).toContain(
+      'ownerClosesWaits ? { closeWaitsBy: session.user.id } : undefined,',
+    )
+  })
+
+  it('records one waiting_on_verified per wait the tick closed, worded like the verify route', () => {
+    const block = longToggleBlock()
+    const at = block.indexOf('for (const closed of toggleResult.closedWaits ?? []) {')
+    expect(at).toBeGreaterThan(-1)
+    const loop = block.slice(at, at + 400)
+    expect(loop).toContain("'waiting_on_verified',")
+    expect(loop).toContain('`${updatedChecklist.title}: ${closed.label}`')
+    // After the normal checked-off entry, which is still recorded.
+    expect(block.indexOf('checklist_item_checked')).toBeLessThan(at)
+  })
+
+  // Preview-as stays read-only: the write is rejected for the previewing owner
+  // before any route runs, so the exemption above can never fire under it.
+  it('is still behind the preview-mode write refusal', () => {
+    const gateAt = serverSource.indexOf("sendJson(response, 403, { error: 'Preview mode is read-only' })")
+    const routeAt = serverSource.search(/const checklistToggleMatch = normalizedPath\.match\(/)
+    expect(gateAt).toBeGreaterThan(-1)
+    expect(gateAt).toBeLessThan(routeAt)
+  })
+
+  it('does not widen the one place it must stay narrow: a non-owner never carries the option', () => {
+    // The only caller of closeWaitsBy in the server is this route, behind the owner gate.
+    expect(serverSource.match(/closeWaitsBy:/g)).toHaveLength(1)
   })
 })
 

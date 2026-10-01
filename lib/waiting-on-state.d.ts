@@ -80,6 +80,8 @@ export function waitingBlocksCompletion(
 export type StepSimulationItem = WaitingStepLike & { done?: boolean; subItems?: unknown[] }
 
 export const REMOVAL_WOULD_COMPLETE_WAITING_STEP: string
+/** The tooltip on a waiting checkbox the owner may tick anyway: her tick closes the wait. */
+export const OWNER_TICK_CLEARS_WAIT_TITLE: string
 /** One wording per place a blocked checkbox's wait comes from: the tooltip and the server answer. */
 export const WAITING_BLOCK_TITLES: Readonly<{ own: string; below: string; above: string }>
 export function operationCompletesWaitingStep(
@@ -101,6 +103,20 @@ export function toggleWouldCompleteWaitingStep(
   subItemId?: string,
   subSubItemId?: string,
 ): boolean
+/**
+ * The owner's tick: the item after the store's own toggle, with the waits closed
+ * on exactly the nodes the tick completed. `closedWaits` has one entry per wait
+ * closed. Null when the target does not exist.
+ */
+export function toggleClosingWaits(
+  item: StepSimulationItem | undefined,
+  subItemId: string | undefined,
+  subSubItemId: string | undefined,
+  closedBy: { userId: string; at: string },
+): {
+  item: StepSimulationItem
+  closedWaits: Array<{ path: string[]; label: string }>
+} | null
 export function removalWouldCompleteWaitingStep(
   item: StepSimulationItem | undefined,
   subItemId?: string,

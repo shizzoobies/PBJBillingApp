@@ -35,7 +35,7 @@ import {
   priceProposal,
   sanitizeProposalPricing,
 } from '../lib/proposal-pricing.js'
-import { isWaitingOnOpen, waitingOnStage } from '../lib/waiting-on-state.js'
+import { isWaitingOnOpen, toggleClosingWaits, waitingOnStage } from '../lib/waiting-on-state.js'
 import {
   normalizedLabelSql,
   normalizeStepLabel,
@@ -15315,28 +15315,76 @@ export class AppDataStore {
    *
    * Stored `done` flags are kept in sync at every level so every existing
    * `item.done` reader (progress, Gantt, stage hand-off) works unchanged.
+   *
+   * `closeWaitsBy` (a user id) is the OWNER's tick (featreq-8a01fe08): every
+   * waiting node the tick turns done has its wait closed - verified by that user
+   * - in the same write as the toggle (`toggleClosingWaits`,
+   * lib/waiting-on-state.js, runs the same simulation the guard does). The result
+   * then carries `closedWaits`, one `{ path, label }` per wait closed. Without it
+   * nothing here changes, and a waiting step is the route's to refuse.
    */
-  async toggleChecklistItem(checklistId, itemId, subItemId, subSubItemId) {
+  async toggleChecklistItem(checklistId, itemId, subItemId, subSubItemId, options = {}) {
+    const { closeWaitsBy } = options ?? {}
+    let closedWaits = []
     if (this.pool) {
       // Read-modify-write: roll-up can't be expressed as a single SQL update,
       // so load the item, mutate the JSONB, and persist atomically.
       const itemResult = await this.pool.query(
-        `select id, done, sub_items from checklist_items where checklist_id = $1 and id = $2`,
+        closeWaitsBy
+          ? `select id, label, done, waiting, waiting_on, waiting_ons, sub_items from checklist_items where checklist_id = $1 and id = $2`
+          : `select id, done, sub_items from checklist_items where checklist_id = $1 and id = $2`,
         [checklistId, itemId],
       )
       if (!itemResult.rowCount) {
         return null
       }
       const row = itemResult.rows[0]
-      const toggled = applyItemToggle(row.sub_items, row.done, { subItemId, subSubItemId })
+      let toggled
+      let closing = null
+      if (closeWaitsBy) {
+        const result = toggleClosingWaits(
+          {
+            label: row.label,
+            done: row.done,
+            // The same reading `mapChecklistItemRow` gives the page.
+            waiting: Boolean(row.waiting || row.waiting_on),
+            waitingOns: row.waiting_ons,
+            subItems: row.sub_items,
+          },
+          subItemId,
+          subSubItemId,
+          { userId: closeWaitsBy, at: nowIso() },
+        )
+        if (!result) return null
+        toggled = { subItems: result.item.subItems, done: result.item.done }
+        // Nothing waiting finished: the plain statement below, unchanged.
+        if (result.closedWaits.length > 0) closing = result
+      } else {
+        toggled = applyItemToggle(row.sub_items, row.done, { subItemId, subSubItemId })
+      }
       if (!toggled) return null
 
-      const updateResult = await this.pool.query(
-        `update checklist_items
+      const updateResult = closing
+        ? await this.pool.query(
+            `update checklist_items
+         set done = $3, sub_items = $4::jsonb, waiting = $5, waiting_ons = $6::jsonb, ${completedAtClause(3)}, updated_at = now()
+         where checklist_id = $1 and id = $2`,
+            [
+              checklistId,
+              itemId,
+              toggled.done,
+              JSON.stringify(toggled.subItems),
+              Boolean(closing.item.waiting),
+              JSON.stringify(normalizeWaitingOns(closing.item.waitingOns)),
+            ],
+          )
+        : await this.pool.query(
+            `update checklist_items
          set done = $3, sub_items = $4::jsonb, ${completedAtClause(3)}, updated_at = now()
          where checklist_id = $1 and id = $2`,
-        [checklistId, itemId, toggled.done, JSON.stringify(toggled.subItems)],
-      )
+            [checklistId, itemId, toggled.done, JSON.stringify(toggled.subItems)],
+          )
+      closedWaits = closing?.closedWaits ?? []
       // The step vanished (or moved to another checklist) between the read and
       // this write: report "not found" rather than a silent success.
       if (updateResult.rowCount === 0) return null
@@ -15351,7 +15399,7 @@ export class AppDataStore {
       if (lifecycleStage && updated) {
         await this.setClientLifecycleStage(updated.onboardingForClientId, lifecycleStage)
       }
-      return { checklist: updated, spawned: spawn }
+      return { checklist: updated, spawned: spawn, ...(closeWaitsBy ? { closedWaits } : {}) }
     }
 
     const data = await readJson(localDataPath)
@@ -15366,6 +15414,24 @@ export class AppDataStore {
       const items = checklist.items.map((item) => {
         if (item.id !== itemId) {
           return item
+        }
+
+        if (closeWaitsBy) {
+          const closing = toggleClosingWaits(item, subItemId, subSubItemId, {
+            userId: closeWaitsBy,
+            at: nowIso(),
+          })
+          if (!closing) return item
+          itemUpdated = true
+          closedWaits = closing.closedWaits
+          // Same shape as the plain toggle below, plus the item's own wait
+          // fields (only the ones it already carries).
+          const next = { ...item }
+          if (closing.item.subItems.length > 0) next.subItems = closing.item.subItems
+          for (const key of ['waiting', 'waitingOns']) {
+            if (key in closing.item) next[key] = closing.item[key]
+          }
+          return withCompletionStamp(next, closing.item.done)
         }
 
         const toggled = applyItemToggle(item.subItems, item.done, { subItemId, subSubItemId })
@@ -15413,7 +15479,7 @@ export class AppDataStore {
     }
 
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return { checklist: updatedChecklist, spawned: spawn }
+    return { checklist: updatedChecklist, spawned: spawn, ...(closeWaitsBy ? { closedWaits } : {}) }
   }
 
   /**

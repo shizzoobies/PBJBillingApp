@@ -29,6 +29,7 @@ import {
   hasLiveSavedWaitInTree,
   isClientWait,
   isWaitingOnOpen,
+  OWNER_TICK_CLEARS_WAIT_TITLE,
   REMOVAL_WOULD_COMPLETE_WAITING_STEP,
   removalWouldCompleteWaitingStep,
   WAITING_BLOCK_TITLES,
@@ -3644,14 +3645,20 @@ function StepDeletePrompt({
  * The tooltip for a checkbox the waiting guard disables, or undefined when the
  * tick is allowed. It asks the very simulation the toggle route refuses with, so
  * a disabled box is never a surprise 409 and an enabled one is never refused.
+ *
+ * For the owner (`ownerTicks`: the real owner, not previewing someone) the same
+ * simulation finds the same ticks, but they are NOT blocked: the title says her
+ * tick closes the wait, and the caller leaves the box enabled.
  */
 function toggleWaitTitle(
   item: Parameters<typeof waitingToggleRefusal>[0],
   subItemId?: string,
   subSubItemId?: string,
+  ownerTicks = false,
 ): string | undefined {
   const refusal = waitingToggleRefusal(item, subItemId, subSubItemId)
-  return refusal ? WAITING_BLOCK_TITLES[refusal.where] : undefined
+  if (!refusal) return undefined
+  return ownerTicks ? OWNER_TICK_CLEARS_WAIT_TITLE : WAITING_BLOCK_TITLES[refusal.where]
 }
 
 function DraggableTaskList({
@@ -3736,6 +3743,9 @@ function DraggableTaskList({
     previewMode,
   } = useAppContext()
   const isOwner = role === 'owner'
+  // The owner may tick a waiting step: it closes the wait. Previewing someone
+  // else stays read-only, so it is the real owner only.
+  const ownerTicksWaits = isOwner && !previewMode
   // "Hide completed" is a per-checklist, per-browser preference (like the
   // section collapse bools), never workspace data.
   const [hideDone, setHideDone] = useState(() => readHideDone(checklistId))
@@ -3970,7 +3980,7 @@ function DraggableTaskList({
         const allowToggle = onCanToggle(item)
         // The waiting guard's verdict for this step's own checkbox, asked once:
         // the box disables on it and titles with it.
-        const itemWaitTitle = toggleWaitTitle(item)
+        const itemWaitTitle = toggleWaitTitle(item, undefined, undefined, ownerTicksWaits)
         // Done sub-steps sit below the open ones, and fold away with the
         // checklist's "Hide completed" (an open step only - a done step is
         // hidden whole, or shown whole).
@@ -4038,7 +4048,7 @@ function DraggableTaskList({
               ) : null}
               <input
                 checked={item.done}
-                disabled={!allowToggle || itemWaitTitle !== undefined}
+                disabled={!allowToggle || (itemWaitTitle !== undefined && !ownerTicksWaits)}
                 onChange={() => void onToggle(checklistId, item.id)}
                 title={
                   !allowToggle
@@ -4269,7 +4279,7 @@ function DraggableTaskList({
                   const subOpenIndex = openSubIds.indexOf(sub.id)
                   const subInOpenGroup = !isStepDone(sub)
                   // Both verdicts of the waiting guard, asked once per row.
-                  const subWaitTitle = toggleWaitTitle(item, sub.id)
+                  const subWaitTitle = toggleWaitTitle(item, sub.id, undefined, ownerTicksWaits)
                   const subRemovalBlocked = removalWouldCompleteWaitingStep(item, sub.id)
                   const subRowClasses = ['sub-item-row']
                   if (sub.done) subRowClasses.push('done')
@@ -4323,7 +4333,7 @@ function DraggableTaskList({
                         ) : null}
                         <input
                           checked={sub.done}
-                          disabled={!allowToggle || subWaitTitle !== undefined}
+                          disabled={!allowToggle || (subWaitTitle !== undefined && !ownerTicksWaits)}
                           onChange={() => onToggleSubItem(item.id, sub.id)}
                           title={
                             !allowToggle
@@ -4499,7 +4509,12 @@ function DraggableTaskList({
                         <div className="sub-sub-item-list">
                           {subSubItems.map((subSub) => {
                             // Both verdicts of the waiting guard, asked once per row.
-                            const subSubWaitTitle = toggleWaitTitle(item, sub.id, subSub.id)
+                            const subSubWaitTitle = toggleWaitTitle(
+                              item,
+                              sub.id,
+                              subSub.id,
+                              ownerTicksWaits,
+                            )
                             const subSubRemovalBlocked = removalWouldCompleteWaitingStep(
                               item,
                               sub.id,
@@ -4514,7 +4529,9 @@ function DraggableTaskList({
                             >
                               <input
                                 checked={subSub.done}
-                                disabled={!allowToggle || subSubWaitTitle !== undefined}
+                                disabled={
+                                  !allowToggle || (subSubWaitTitle !== undefined && !ownerTicksWaits)
+                                }
                                 onChange={() =>
                                   onToggleSubSubItem(item.id, sub.id, subSub.id)
                                 }

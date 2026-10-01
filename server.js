@@ -10459,12 +10459,19 @@ const server = createServer(async (request, response) => {
       // checkboxes with the same helper, but this is what actually refuses it,
       // before the store ever sees the toggle. Un-checking is never blocked:
       // nothing becomes done.
+      //
+      // The OWNER is the one exception (featreq-8a01fe08): she is usually the
+      // person being waited on, so her tick goes through and the store closes the
+      // wait it finishes, in the same write (`closeWaitsBy`). Staff are refused
+      // exactly as before. Preview-as is read-only in the page and never reaches
+      // here.
       const toggleRefusal = waitingToggleRefusal(
         targetItem,
         toggleSubItemId,
         toggleSubSubItemId,
       )
-      if (toggleRefusal) {
+      const ownerClosesWaits = Boolean(toggleRefusal) && session.user.role === 'owner'
+      if (toggleRefusal && !ownerClosesWaits) {
         sendJson(response, toggleRefusal.status, {
           error: toggleRefusal.error,
           message: toggleRefusal.message,
@@ -10477,6 +10484,7 @@ const server = createServer(async (request, response) => {
         itemId,
         toggleSubItemId,
         toggleSubSubItemId,
+        ownerClosesWaits ? { closeWaitsBy: session.user.id } : undefined,
       )
       if (!toggleResult || !toggleResult.checklist) {
         sendJson(response, 404, { error: 'Checklist item not found' })
@@ -10491,6 +10499,15 @@ const server = createServer(async (request, response) => {
         action,
         `${updatedChecklist.title}: ${toggledItem?.label ?? ''}`.trim(),
       )
+      // One `waiting_on_verified` per wait this tick closed, worded like the
+      // verify route's own entry.
+      for (const closed of toggleResult.closedWaits ?? []) {
+        await appDataStore.recordActivity(
+          session.user.id,
+          'waiting_on_verified',
+          `${updatedChecklist.title}: ${closed.label}`,
+        )
+      }
 
       // "Waiting on a task" notifications: if this toggle just COMPLETED the
       // whole checklist, notify the assignee of any step elsewhere that was

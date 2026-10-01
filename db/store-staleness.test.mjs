@@ -24021,3 +24021,346 @@ describe('item deletion request scope (postgres branch)', () => {
     expect(none.find(/^select id, client_id/i)).toHaveLength(0)
   })
 })
+
+/**
+ * The OWNER's tick on a waiting step (featreq-8a01fe08): `toggleChecklistItem(...,
+ * { closeWaitsBy })` writes the toggle and the wait closure together. The pure
+ * function that decides WHICH nodes close is pinned in
+ * lib/waiting-on-state.test.mjs; this is the persistence, on both backends
+ * (cardinal rule 1). Without the option nothing here changes - a waiting step is
+ * the route's to refuse.
+ */
+const OWNER_ID = 'emp-brit'
+const openWait = (over = {}) => ({
+  id: 'wo-1',
+  blockerId: OWNER_ID,
+  requestedBy: 'emp-lisa',
+  note: 'needs your sign-off',
+  createdAt: '2026-09-30T12:00:00.000Z',
+  ...over,
+})
+
+describe('the owner ticks a waiting step (file backend)', () => {
+  const OWNER_WAITING_WORKSPACE = {
+    clients: [{ id: 'c1', name: 'Acme' }],
+    employees: [
+      { id: OWNER_ID, name: 'Brittany', role: 'owner' },
+      { id: 'emp-lisa', name: 'Lisa', role: 'bookkeeper' },
+    ],
+    checklists: [
+      {
+        id: 'cl-1',
+        title: 'August close',
+        clientId: 'c1',
+        items: [
+          {
+            id: 'it-1',
+            label: 'Reconcile',
+            done: false,
+            waiting: true,
+            waitingOn: 'client to send statements',
+            waitingOns: [openWait()],
+          },
+          {
+            id: 'it-2',
+            label: 'Payroll',
+            done: false,
+            subItems: [
+              { id: 'sub-1', title: 'Confirm the hours', done: false, waitingOns: [openWait({ id: 'wo-2' })] },
+              {
+                id: 'sub-2',
+                title: 'Approve',
+                done: false,
+                subItems: [
+                  { id: 'ss-1', title: 'Sign', done: false, waitingOns: [openWait({ id: 'wo-3' })] },
+                  { id: 'ss-2', title: 'File', done: false },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  }
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const itemOf = async (id) =>
+    (await persisted()).checklists[0].items.find((entry) => entry.id === id)
+
+  beforeEach(async () => {
+    await store.write(workspace(OWNER_WAITING_WORKSPACE))
+  })
+
+  it('closes the step\'s own wait in the same write as the toggle', async () => {
+    const result = await store.toggleChecklistItem('cl-1', 'it-1', undefined, undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+    expect(result.closedWaits).toEqual([{ path: [], label: 'Reconcile' }])
+
+    const returned = result.checklist.items.find((entry) => entry.id === 'it-1')
+    const stored = await itemOf('it-1')
+    for (const item of [returned, stored]) {
+      expect(item.done).toBe(true)
+      expect(item.waiting).toBe(false)
+      // The note stays: it is the "Was waiting on" record.
+      expect(item.waitingOn).toBe('client to send statements')
+      expect(item.waitingOns).toHaveLength(1)
+      expect(item.waitingOns[0]).toMatchObject({
+        id: 'wo-1',
+        resolvedBy: OWNER_ID,
+        verifiedBy: OWNER_ID,
+      })
+      expect(item.waitingOns[0].resolvedAt).toBeTruthy()
+      expect(item.waitingOns[0].verifiedAt).toBeTruthy()
+    }
+    expect(stored.completedAt).toBeTruthy()
+  })
+
+  it('closes a sub-step wait that lives inside the parent\'s sub_items', async () => {
+    const result = await store.toggleChecklistItem('cl-1', 'it-2', 'sub-1', undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+    expect(result.closedWaits).toEqual([{ path: ['sub-1'], label: 'Confirm the hours' }])
+    const item = await itemOf('it-2')
+    expect(item.done).toBe(false)
+    expect(item.subItems[0].done).toBe(true)
+    expect(item.subItems[0].waitingOns[0]).toMatchObject({ id: 'wo-2', verifiedBy: OWNER_ID })
+    // The sibling's wait is untouched.
+    expect(item.subItems[1].subItems[0].waitingOns[0].verifiedAt).toBeUndefined()
+  })
+
+  it('closes a parent tick\'s whole sweep: the sub-step wait and the sub-sub-step wait', async () => {
+    const result = await store.toggleChecklistItem('cl-1', 'it-2', undefined, undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+    expect(result.closedWaits.map(({ path }) => path)).toEqual([['sub-1'], ['sub-2', 'ss-1']])
+    const item = await itemOf('it-2')
+    expect(item.done).toBe(true)
+    expect(item.subItems[0].waitingOns[0].verifiedBy).toBe(OWNER_ID)
+    expect(item.subItems[1].subItems[0].waitingOns[0].verifiedBy).toBe(OWNER_ID)
+  })
+
+  it('without the option the store does what it always did: toggles, closes nothing', async () => {
+    const result = await store.toggleChecklistItem('cl-1', 'it-1')
+    expect(result).not.toHaveProperty('closedWaits')
+    const item = await itemOf('it-1')
+    expect(item.done).toBe(true)
+    expect(item.waiting).toBe(true)
+    expect(item.waitingOns[0].verifiedAt).toBeUndefined()
+  })
+
+  it('un-ticking with the option touches no wait', async () => {
+    await store.toggleChecklistItem('cl-1', 'it-1', undefined, undefined, { closeWaitsBy: OWNER_ID })
+    const closed = (await itemOf('it-1')).waitingOns
+    const result = await store.toggleChecklistItem('cl-1', 'it-1', undefined, undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+    expect(result.closedWaits).toEqual([])
+    const item = await itemOf('it-1')
+    expect(item.done).toBe(false)
+    expect(item.waitingOns).toEqual(closed)
+  })
+
+  it('answers null for a sub-step that is not there', async () => {
+    expect(
+      await store.toggleChecklistItem('cl-1', 'it-2', 'nope', undefined, { closeWaitsBy: OWNER_ID }),
+    ).toBeNull()
+  })
+})
+
+describe('the owner ticks a waiting step (postgres branch)', () => {
+  const PLAIN_SELECT =
+    'select id, done, sub_items from checklist_items where checklist_id = $1 and id = $2'
+  const PLAIN_UPDATE =
+    'update checklist_items\n         set done = $3, sub_items = $4::jsonb, completed_at = case when $3 then coalesce(completed_at, now()) else null end, updated_at = now()\n         where checklist_id = $1 and id = $2'
+  const CLOSING_SELECT =
+    'select id, label, done, waiting, waiting_on, waiting_ons, sub_items from checklist_items where checklist_id = $1 and id = $2'
+  const CLOSING_UPDATE =
+    'update checklist_items\n         set done = $3, sub_items = $4::jsonb, waiting = $5, waiting_ons = $6::jsonb, completed_at = case when $3 then coalesce(completed_at, now()) else null end, updated_at = now()\n         where checklist_id = $1 and id = $2'
+
+  const itemRow = (over = {}) => ({
+    id: 'it-1',
+    label: 'Reconcile',
+    done: false,
+    waiting: false,
+    waiting_on: null,
+    waiting_ons: [],
+    sub_items: [],
+    ...over,
+  })
+
+  /**
+   * A Postgres store whose per-item read answers `row`, and whose `read()` maps
+   * the row the UPDATE wrote back through the real `mapChecklistItemRow`, so the
+   * checklist the toggle returns is what a fresh read would show.
+   */
+  function pgStoreWithItem(row) {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    let current = row
+    const inner = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      const result = await inner(text, params)
+      const trimmed = String(text).trim()
+      if (/^select id, (label, )?done.*from checklist_items/is.test(trimmed)) {
+        return { rows: [current], rowCount: 1 }
+      }
+      if (/^update checklist_items\s+set done = \$3/i.test(trimmed)) {
+        current = {
+          ...current,
+          done: params[2],
+          sub_items: JSON.parse(params[3]),
+          ...(params.length > 4
+            ? { waiting: params[4], waiting_ons: JSON.parse(params[5]) }
+            : {}),
+        }
+        return { rows: [], rowCount: 1 }
+      }
+      return result
+    }
+    pgStore.read = async () => ({
+      checklists: [
+        { id: 'cl-1', title: 'August close', items: [mapChecklistItemRow(current)] },
+      ],
+    })
+    return { fake, pgStore }
+  }
+
+  it('without the option the statements are exactly what they always were', async () => {
+    const { fake, pgStore } = pgStoreWithItem(itemRow({ waiting: true }))
+    await pgStore.toggleChecklistItem('cl-1', 'it-1')
+
+    expect(fake.statements.find((entry) => /^select id, (label, )?done/i.test(entry.text)).text).toBe(
+      PLAIN_SELECT,
+    )
+    const update = fake.matching(/^update checklist_items\s+set done = \$3/i)
+    expect(update).toHaveLength(1)
+    expect(update[0].text).toBe(PLAIN_UPDATE)
+    expect(update[0].params).toEqual(['cl-1', 'it-1', true, '[]'])
+  })
+
+  it('with the option and a waiting step it widens the read and writes done + the closed waits in ONE update', async () => {
+    const { fake, pgStore } = pgStoreWithItem(
+      itemRow({ waiting: true, waiting_ons: [openWait(), openWait({ id: 'wo-9' })] }),
+    )
+    const result = await pgStore.toggleChecklistItem('cl-1', 'it-1', undefined, undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+
+    expect(fake.statements.find((entry) => /^select id, (label, )?done/i.test(entry.text)).text).toBe(
+      CLOSING_SELECT,
+    )
+    const updates = fake.matching(/^update checklist_items/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].text).toBe(CLOSING_UPDATE)
+    const [checklistId, itemId, done, subItems, waiting, waitingOns] = updates[0].params
+    expect([checklistId, itemId, done, subItems, waiting]).toEqual(['cl-1', 'it-1', true, '[]', false])
+    const written = JSON.parse(waitingOns)
+    expect(written.map((entry) => entry.id)).toEqual(['wo-1', 'wo-9'])
+    for (const entry of written) {
+      expect(entry).toMatchObject({ resolvedBy: OWNER_ID, verifiedBy: OWNER_ID })
+      expect(entry.resolvedAt).toBeTruthy()
+      expect(entry.verifiedAt).toBeTruthy()
+    }
+    // The note column is not in the statement: it stays as the record.
+    expect(updates[0].text).not.toMatch(/waiting_on\b/)
+
+    expect(result.closedWaits).toHaveLength(2)
+    const item = result.checklist.items[0]
+    expect(item.done).toBe(true)
+    expect(item.waiting).toBeUndefined()
+    expect(item.waitingOns.every((entry) => entry.verifiedBy === OWNER_ID)).toBe(true)
+  })
+
+  it('keeps an existing resolution and adds only the verification', async () => {
+    const { fake, pgStore } = pgStoreWithItem(
+      itemRow({
+        waiting_ons: [
+          openWait({ resolvedAt: '2026-09-30T13:00:00.000Z', resolvedBy: 'emp-lisa' }),
+        ],
+      }),
+    )
+    await pgStore.toggleChecklistItem('cl-1', 'it-1', undefined, undefined, { closeWaitsBy: OWNER_ID })
+    const [entry] = JSON.parse(fake.matching(/^update checklist_items/i)[0].params[5])
+    expect(entry).toMatchObject({
+      resolvedAt: '2026-09-30T13:00:00.000Z',
+      resolvedBy: 'emp-lisa',
+      verifiedBy: OWNER_ID,
+    })
+  })
+
+  it('writes a sub-step wait inside sub_items, with the top-level wait columns carried unchanged', async () => {
+    const { fake, pgStore } = pgStoreWithItem(
+      itemRow({
+        sub_items: [
+          { id: 'sub-1', title: 'Confirm the hours', done: false, waitingOns: [openWait({ id: 'wo-2' })] },
+          { id: 'sub-2', title: 'Approve', done: false },
+        ],
+      }),
+    )
+    const result = await pgStore.toggleChecklistItem('cl-1', 'it-1', 'sub-1', undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+    const [update] = fake.matching(/^update checklist_items/i)
+    expect(update.text).toBe(CLOSING_UPDATE)
+    const subItems = JSON.parse(update.params[3])
+    expect(subItems[0].done).toBe(true)
+    expect(subItems[0].waitingOns[0]).toMatchObject({ id: 'wo-2', verifiedBy: OWNER_ID })
+    expect(subItems[1]).toEqual({ id: 'sub-2', title: 'Approve', done: false })
+    // The step itself was not waiting and not finished.
+    expect(update.params[2]).toBe(false)
+    expect(update.params[4]).toBe(false)
+    expect(update.params[5]).toBe('[]')
+    expect(result.closedWaits).toEqual([{ path: ['sub-1'], label: 'Confirm the hours' }])
+    expect(result.checklist.items[0].subItems[0].waitingOns[0].verifiedBy).toBe(OWNER_ID)
+  })
+
+  it('reads a legacy note with the flag exactly as the page does, and closes that wait', async () => {
+    // mapChecklistItemRow treats a note as waiting, so the closure must too.
+    const { fake, pgStore } = pgStoreWithItem(itemRow({ waiting_on: 'client to send' }))
+    const result = await pgStore.toggleChecklistItem('cl-1', 'it-1', undefined, undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+    const [update] = fake.matching(/^update checklist_items/i)
+    expect(update.text).toBe(CLOSING_UPDATE)
+    expect(update.params[4]).toBe(false)
+    expect(result.closedWaits).toEqual([{ path: [], label: 'Reconcile' }])
+  })
+
+  it('with the option but nothing waiting finishing, falls back to the plain statement', async () => {
+    const { fake, pgStore } = pgStoreWithItem(itemRow())
+    const result = await pgStore.toggleChecklistItem('cl-1', 'it-1', undefined, undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+    const [update] = fake.matching(/^update checklist_items/i)
+    expect(update.text).toBe(PLAIN_UPDATE)
+    expect(update.params).toEqual(['cl-1', 'it-1', true, '[]'])
+    expect(result.closedWaits).toEqual([])
+  })
+
+  it('un-ticking with the option writes the plain statement and closes nothing', async () => {
+    const { fake, pgStore } = pgStoreWithItem(
+      itemRow({ done: true, waiting_ons: [openWait()] }),
+    )
+    const result = await pgStore.toggleChecklistItem('cl-1', 'it-1', undefined, undefined, {
+      closeWaitsBy: OWNER_ID,
+    })
+    const [update] = fake.matching(/^update checklist_items/i)
+    expect(update.text).toBe(PLAIN_UPDATE)
+    expect(update.params[2]).toBe(false)
+    expect(result.closedWaits).toEqual([])
+  })
+
+  it('answers null, not a silent success, when the UPDATE touches no row', async () => {
+    const { fake, pgStore } = pgStoreWithItem(itemRow({ waiting: true }))
+    const inner = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      if (/^update checklist_items/i.test(String(text).trim())) return { rows: [], rowCount: 0 }
+      return inner(text, params)
+    }
+    expect(
+      await pgStore.toggleChecklistItem('cl-1', 'it-1', undefined, undefined, {
+        closeWaitsBy: OWNER_ID,
+      }),
+    ).toBeNull()
+  })
+})

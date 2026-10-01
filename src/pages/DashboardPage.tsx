@@ -24,7 +24,11 @@ import {
 // THE bill-rate chain the invoice is priced with, and the pin rule, so the
 // revenue estimate below says what the month run will.
 import { billRateAt, ratePeriodAsOf } from '../../lib/rate-history.js'
-import { WAITING_BLOCK_TITLES, waitingToggleRefusal } from '../../lib/waiting-on-state.js'
+import {
+  OWNER_TICK_CLEARS_WAIT_TITLE,
+  WAITING_BLOCK_TITLES,
+  waitingToggleRefusal,
+} from '../../lib/waiting-on-state.js'
 import { useAppContext } from '../AppContext'
 import {
   fetchGlobalActivity,
@@ -588,18 +592,21 @@ function OwnerDashboardView() {
               checklists={queueToday}
               onToggle={toggleChecklistItem}
               clients={data.clients}
+              ownerTicks
             />
             <QueueGroup
               title="This week"
               checklists={queueWeek}
               onToggle={toggleChecklistItem}
               clients={data.clients}
+              ownerTicks
             />
             <QueueGroup
               title="Later"
               checklists={queueLater}
               onToggle={toggleChecklistItem}
               clients={data.clients}
+              ownerTicks
             />
           </div>
         )}
@@ -1097,6 +1104,7 @@ function EmployeeDashboardView() {
               onToggle={toggleChecklistItem}
               clients={data.clients}
               disabled={previewMode}
+              ownerTicks={role === 'owner' && !previewMode}
             />
             <QueueGroup
               title="This week"
@@ -1104,6 +1112,7 @@ function EmployeeDashboardView() {
               onToggle={toggleChecklistItem}
               clients={data.clients}
               disabled={previewMode}
+              ownerTicks={role === 'owner' && !previewMode}
             />
             <QueueGroup
               title="Later"
@@ -1111,6 +1120,7 @@ function EmployeeDashboardView() {
               onToggle={toggleChecklistItem}
               clients={data.clients}
               disabled={previewMode}
+              ownerTicks={role === 'owner' && !previewMode}
             />
           </div>
         )}
@@ -1245,12 +1255,15 @@ function QueueGroup({
   onToggle,
   clients,
   disabled = false,
+  ownerTicks = false,
 }: {
   title: string
   checklists: Checklist[]
   onToggle: (checklistId: string, itemId: string) => Promise<void>
   clients: { id: string; name: string }[]
   disabled?: boolean
+  /** The real owner: a waiting step stays tickable and her tick closes the wait. */
+  ownerTicks?: boolean
 }) {
   const navigate = useNavigate()
   if (checklists.length === 0) return null
@@ -1282,7 +1295,7 @@ function QueueGroup({
               <ul className={`queue-row-items${disabled ? ' preview-disabled' : ''}`}>
                 {c.items.map((item) => {
                   const waitRefusal = waitingToggleRefusal(item)
-                  const blocked = waitRefusal !== null
+                  const blocked = waitRefusal !== null && !ownerTicks
                   return (
                     <li key={item.id}>
                       <label
@@ -1290,7 +1303,9 @@ function QueueGroup({
                           disabled
                             ? 'Disabled in preview mode'
                             : waitRefusal
-                              ? WAITING_BLOCK_TITLES[waitRefusal.where]
+                              ? ownerTicks
+                                ? OWNER_TICK_CLEARS_WAIT_TITLE
+                                : WAITING_BLOCK_TITLES[waitRefusal.where]
                               : undefined
                         }
                       >

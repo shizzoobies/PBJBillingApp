@@ -12,11 +12,17 @@ import type { AppData, Checklist } from '../lib/types'
  * remaining piece — that the Checklists tab's own checkbox actually reads
  * `waitingBlocksCompletion` and disables itself, so the 409 is never reachable
  * from a control the page still offered.
+ *
+ * That is the STAFF rule. The owner is the one exception (featreq-8a01fe08): her
+ * checkbox on a waiting step stays enabled and says her tick clears the wait -
+ * see the last describe block. Every block above it views the page as staff.
  */
 
 vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
 
 const OWNER = 'emp-brit'
+// The person doing the work: the viewer in every staff expectation below.
+const WORKER = 'emp-avery'
 const CLIENT = { id: 'client-acme', name: 'Acme Dental' }
 
 const checklist = (items: Checklist['items']): Checklist =>
@@ -24,7 +30,7 @@ const checklist = (items: Checklist['items']): Checklist =>
     id: 'cl-1',
     clientId: CLIENT.id,
     title: 'August close',
-    assigneeId: OWNER,
+    assigneeId: WORKER,
     // Far enough out to land in the "Later" due-date bucket, which starts
     // collapsed — the "Overdue" / "This week" buckets start OPEN, and
     // `openDueGroups` below would toggle one of those CLOSED instead.
@@ -35,7 +41,10 @@ const checklist = (items: Checklist['items']): Checklist =>
 const data = (items: Checklist['items']) =>
   ({
     clients: [CLIENT],
-    employees: [{ id: OWNER, name: 'Brittany Fox', role: 'owner' }],
+    employees: [
+      { id: OWNER, name: 'Brittany Fox', role: 'owner' },
+      { id: WORKER, name: 'Avery Lane', role: 'Bookkeeper' },
+    ],
     checklists: [checklist(items)],
     checklistTemplates: [],
     recycledChecklists: [],
@@ -45,14 +54,19 @@ const data = (items: Checklist['items']) =>
 
 let contextValue: AppContextValue
 
-function signInWith(items: Checklist['items']) {
+function signInWith(items: Checklist['items'], viewer: 'staff' | 'owner' = 'staff') {
+  const me = viewer === 'owner' ? OWNER : WORKER
+  const user =
+    viewer === 'owner'
+      ? { id: OWNER, role: 'owner', staffRole: 'Owner' }
+      : { id: WORKER, role: 'staff', staffRole: 'Bookkeeper' }
   contextValue = {
     data: data(items),
-    ownerMode: true,
-    role: 'owner',
-    activeEmployeeId: OWNER,
-    effectiveUser: { id: OWNER, role: 'owner', staffRole: 'Owner' },
-    sessionUser: { id: OWNER, role: 'owner', staffRole: 'Owner' },
+    ownerMode: viewer === 'owner',
+    role: user.role,
+    activeEmployeeId: me,
+    effectiveUser: user,
+    sessionUser: user,
     visibleChecklists: data(items).checklists,
     visibleClients: [CLIENT],
     serviceCategories: [],
@@ -120,7 +134,7 @@ beforeEach(() => {
 
 describe('a waiting step', () => {
   it('disables the checkbox with "Clear the wait first"', () => {
-    signInWith([{ id: 'it-1', label: 'Bank rec', done: false, assigneeId: OWNER, waiting: true }])
+    signInWith([{ id: 'it-1', label: 'Bank rec', done: false, assigneeId: WORKER, waiting: true }])
     const { container } = renderProgress()
     const box = itemCheckbox(container, 'Bank rec')
     expect(box).toBeDisabled()
@@ -133,7 +147,7 @@ describe('a waiting step', () => {
         id: 'it-1',
         label: 'Bank rec',
         done: false,
-        assigneeId: OWNER,
+        assigneeId: WORKER,
         waitingOns: [{ id: 'wo-1', blockerId: 'emp-lisa', requestedBy: OWNER, createdAt: '2026-08-01T00:00:00.000Z' }],
       },
     ])
@@ -146,15 +160,15 @@ describe('a waiting step', () => {
   // bucket so the card renders under In progress at all.
   it('leaves a DONE-but-still-waiting step checkable, so it can be un-checked', () => {
     signInWith([
-      { id: 'it-1', label: 'Bank rec', done: true, assigneeId: OWNER, waiting: true },
-      { id: 'it-2', label: 'Payroll review', done: false, assigneeId: OWNER },
+      { id: 'it-1', label: 'Bank rec', done: true, assigneeId: WORKER, waiting: true },
+      { id: 'it-2', label: 'Payroll review', done: false, assigneeId: WORKER },
     ])
     const { container } = renderProgress()
     expect(itemCheckbox(container, 'Bank rec')).not.toBeDisabled()
   })
 
   it('leaves an ordinary, non-waiting step alone', () => {
-    signInWith([{ id: 'it-1', label: 'Bank rec', done: false, assigneeId: OWNER }])
+    signInWith([{ id: 'it-1', label: 'Bank rec', done: false, assigneeId: WORKER }])
     const { container } = renderProgress()
     const box = itemCheckbox(container, 'Bank rec')
     expect(box).not.toBeDisabled()
@@ -173,7 +187,7 @@ describe('a parent with a waiting sub-step', () => {
         id: 'it-1',
         label: 'Bank rec',
         done: false,
-        assigneeId: OWNER,
+        assigneeId: WORKER,
         subItems: [{ id: 'sub-1', title: 'Pull statements', done: false }, sub],
       },
     ] as unknown as Checklist['items']
@@ -237,7 +251,7 @@ describe('the last open sub-step of a waiting step', () => {
 
   const waitingParent = (subs: Array<Record<string, unknown>>) =>
     [
-      { id: 'it-1', label: 'Bank rec', done: false, assigneeId: OWNER, waiting: true, subItems: subs },
+      { id: 'it-1', label: 'Bank rec', done: false, assigneeId: WORKER, waiting: true, subItems: subs },
     ] as unknown as Checklist['items']
 
   it('disables the last open sub-item with "The step above is waiting - clear it first"', () => {
@@ -270,7 +284,7 @@ describe('the last open sub-step of a waiting step', () => {
         id: 'it-1',
         label: 'Bank rec',
         done: false,
-        assigneeId: OWNER,
+        assigneeId: WORKER,
         subItems: [{ id: 'sub-1', title: 'Match deposits', done: false }],
       },
     ] as unknown as Checklist['items'])
@@ -290,7 +304,7 @@ describe('the last open sub-step of a waiting step', () => {
         id: 'it-1',
         label: 'Bank rec',
         done: false,
-        assigneeId: OWNER,
+        assigneeId: WORKER,
         subItems: [
           {
             id: 'sub-1',
@@ -366,7 +380,7 @@ describe('deleting the last open sub-step of a waiting step', () => {
 
   const waitingParent = (subs: Array<Record<string, unknown>>) =>
     [
-      { id: 'it-1', label: 'Bank rec', done: false, assigneeId: OWNER, waiting: true, subItems: subs },
+      { id: 'it-1', label: 'Bank rec', done: false, assigneeId: WORKER, waiting: true, subItems: subs },
     ] as unknown as Checklist['items']
 
   it('disables the sub-step delete button and says why', () => {
@@ -401,7 +415,7 @@ describe('deleting the last open sub-step of a waiting step', () => {
         id: 'it-1',
         label: 'Bank rec',
         done: false,
-        assigneeId: OWNER,
+        assigneeId: WORKER,
         subItems: [
           {
             id: 'sub-1',
@@ -419,5 +433,199 @@ describe('deleting the last open sub-step of a waiting step', () => {
     const { container } = renderProgress()
     expect(deleteButton(container, 'File receipt')).toBeDisabled()
     expect(deleteButton(container, 'Chase client')).not.toBeDisabled()
+  })
+})
+
+// The owner is usually the person being waited ON, so she may check off a
+// waiting step directly and her tick closes the wait (featreq-8a01fe08). The
+// checkbox stays enabled and its title says so; the server does the closing
+// (pinned in waiting-blocks-checkoff-route.test.ts, db/store-staleness.test.mjs
+// and lib/waiting-on-state.test.mjs). Staff above are unchanged.
+describe('the owner on a waiting step', () => {
+  const TITLE = 'Checking this off clears the wait'
+  const rowBox = (container: HTMLElement, label: string) => {
+    const row = Array.from(container.querySelectorAll('.sub-item-row')).find((el) =>
+      el.textContent?.includes(label),
+    )
+    return row?.querySelector('input[type="checkbox"]') as HTMLInputElement
+  }
+
+  it('can tick the waiting step itself, and the title says it clears the wait', () => {
+    signInWith(
+      [{ id: 'it-1', label: 'Bank rec', done: false, assigneeId: WORKER, waiting: true }],
+      'owner',
+    )
+    const { container } = renderProgress()
+    const box = itemCheckbox(container, 'Bank rec')
+    expect(box).not.toBeDisabled()
+    expect(box.title).toBe(TITLE)
+    fireEvent.click(box)
+    expect(contextValue.toggleChecklistItem).toHaveBeenCalledWith('cl-1', 'it-1')
+  })
+
+  it('can tick a live structured wait too', () => {
+    signInWith(
+      [
+        {
+          id: 'it-1',
+          label: 'Bank rec',
+          done: false,
+          assigneeId: WORKER,
+          waitingOns: [
+            { id: 'wo-1', blockerId: OWNER, requestedBy: WORKER, createdAt: '2026-08-01T00:00:00.000Z' },
+          ],
+        },
+      ],
+      'owner',
+    )
+    const { container } = renderProgress()
+    const box = itemCheckbox(container, 'Bank rec')
+    expect(box).not.toBeDisabled()
+    expect(box.title).toBe(TITLE)
+  })
+
+  it('can tick a parent whose sub-step is waiting', () => {
+    signInWith(
+      [
+        {
+          id: 'it-1',
+          label: 'Bank rec',
+          done: false,
+          assigneeId: WORKER,
+          subItems: [
+            { id: 'sub-1', title: 'Pull statements', done: false },
+            { id: 'sub-2', title: 'Match deposits', done: false, waiting: true },
+          ],
+        },
+      ] as unknown as Checklist['items'],
+      'owner',
+    )
+    const { container } = renderProgress()
+    const box = itemCheckbox(container, 'Bank rec')
+    expect(box).not.toBeDisabled()
+    expect(box.title).toBe(TITLE)
+  })
+
+  it('can tick a waiting sub-step and a sub-step with a waiting sub-sub-step', () => {
+    signInWith(
+      [
+        {
+          id: 'it-1',
+          label: 'Bank rec',
+          done: false,
+          assigneeId: WORKER,
+          subItems: [
+            { id: 'sub-1', title: 'Pull statements', done: false, waiting: true },
+            {
+              id: 'sub-2',
+              title: 'Match deposits',
+              done: false,
+              subItems: [{ id: 'ss-1', title: 'Chase client', done: false, waiting: true }],
+            },
+          ],
+        },
+      ] as unknown as Checklist['items'],
+      'owner',
+    )
+    const { container } = renderProgress()
+    for (const label of ['Pull statements', 'Match deposits', 'Chase client']) {
+      expect(rowBox(container, label), label).not.toBeDisabled()
+      expect(rowBox(container, label).title, label).toBe(TITLE)
+    }
+  })
+
+  it('can tick the last open sub-step under a waiting step', () => {
+    signInWith(
+      [
+        {
+          id: 'it-1',
+          label: 'Bank rec',
+          done: false,
+          assigneeId: WORKER,
+          waiting: true,
+          subItems: [
+            { id: 'sub-1', title: 'Pull statements', done: true },
+            { id: 'sub-2', title: 'Match deposits', done: false },
+          ],
+        },
+      ] as unknown as Checklist['items'],
+      'owner',
+    )
+    const { container } = renderProgress()
+    expect(rowBox(container, 'Match deposits')).not.toBeDisabled()
+    expect(rowBox(container, 'Match deposits').title).toBe(TITLE)
+  })
+
+  it('can tick the last open sub-sub-step under a waiting sub-step', () => {
+    signInWith(
+      [
+        {
+          id: 'it-1',
+          label: 'Bank rec',
+          done: false,
+          assigneeId: WORKER,
+          subItems: [
+            {
+              id: 'sub-1',
+              title: 'Match deposits',
+              done: false,
+              waiting: true,
+              subItems: [
+                { id: 'ss-1', title: 'Chase client', done: true },
+                { id: 'ss-2', title: 'File receipt', done: false },
+              ],
+            },
+          ],
+        },
+      ] as unknown as Checklist['items'],
+      'owner',
+    )
+    const { container } = renderProgress()
+    expect(rowBox(container, 'File receipt')).not.toBeDisabled()
+    expect(rowBox(container, 'File receipt').title).toBe(TITLE)
+  })
+
+  it('after her tick the step is done and shows no live Waiting badge', () => {
+    // What the server hands back once the tick closes the wait.
+    signInWith(
+      [
+        {
+          id: 'it-1',
+          label: 'Bank rec',
+          done: true,
+          assigneeId: WORKER,
+          waiting: false,
+          waitingOns: [
+            {
+              id: 'wo-1',
+              blockerId: OWNER,
+              requestedBy: WORKER,
+              createdAt: '2026-08-01T00:00:00.000Z',
+              resolvedAt: '2026-10-01T10:00:00.000Z',
+              resolvedBy: OWNER,
+              verifiedAt: '2026-10-01T10:00:00.000Z',
+              verifiedBy: OWNER,
+            },
+          ],
+        },
+        { id: 'it-2', label: 'Payroll review', done: false, assigneeId: WORKER },
+      ],
+      'owner',
+    )
+    const { container } = renderProgress()
+    expect(itemCheckbox(container, 'Bank rec').checked).toBe(true)
+    expect(container.querySelector('.task-row-waiting')).toBeNull()
+  })
+
+  it('does not change anything in preview mode: the box stays disabled with the staff sentence', () => {
+    signInWith(
+      [{ id: 'it-1', label: 'Bank rec', done: false, assigneeId: WORKER, waiting: true }],
+      'owner',
+    )
+    contextValue = { ...contextValue, previewMode: true } as unknown as AppContextValue
+    const { container } = renderProgress()
+    const box = itemCheckbox(container, 'Bank rec')
+    expect(box).toBeDisabled()
+    expect(box.title).toBe('Clear the wait first')
   })
 })
