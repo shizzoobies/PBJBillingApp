@@ -491,7 +491,7 @@ Header actions: **Accept** turns a new prospect into an Onboarding client billed
 >
 > **No badge means no news yet** — sent a moment ago, or before this existed. The badge never changes the invoice's status: a bounce does not un-send it, the bill stands and the due date has not moved. **A bounce or a spam complaint also notifies every owner** through the bell.
 >
-> **The invoice email is built to stay out of spam.** It comes from the firm's name, not a bare address ("PB&J Strategic Accounting <billing@pbjsa.com>"), replies go to the billing mailbox, one plain sentence before the pay button says what is owed and when, and the footer carries the firm's address, phone and email — the same details as the PDF letterhead.
+> **The invoice email is built to stay out of spam.** It comes from the firm's name, not a bare address ("PB&J Strategic Accounting <billing@pbjsa.com>"), replies go to the billing mailbox, one plain sentence before the pay button says what is owed and when, and the footer carries the firm's address, phone and email — the same details as the PDF letterhead. A client's own footer note, if it has one, also appears in the email body after the totals.
 >
 > **Choosing who gets it.** When a client has **more than one** address, Send opens a checkbox list — one line per address, showing whose it is — with **everything ticked**. Untick any you do not want; the invoice goes only to the confirmed addresses, and the email log records exactly those. A single address sends with no dialog. The per-client **Email invoice** button shows the same list. The server only accepts a choice from that client's own addresses; it cannot be asked to email anyone else.
 >

@@ -5074,6 +5074,10 @@ const server = createServer(async (request, response) => {
         client: sendClient,
         payUrl,
         cardPayUrl,
+        // The same per-client note the printed sheet and the PDF carry. It is
+        // the INVOICE's client, the one whose name and address the email uses:
+        // a billing master's invoice carries the master's note, not a sub's.
+        footerNote: sendClient.footerNote ?? '',
         firmName: firmSettings?.name || undefined,
         // Phone, address and email in the footer, from the same settings the
         // PDF letterhead reads. A client who can see how to reach the firm is
