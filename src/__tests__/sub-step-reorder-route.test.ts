@@ -101,4 +101,19 @@ describe('the reorder routes check the request origin', () => {
     expect(guardAt).toBeGreaterThan(routeBlock.indexOf("if (request.method !== 'POST') {"))
     expect(guardAt).toBeLessThan(routeBlock.indexOf('await appDataStore.read()'))
   })
+
+  it.each([
+    ['sub-step reorder', 'const checklistSubItemsReorderMatch = normalizedPath.match('],
+    ['step reorder', 'const checklistItemsReorderMatch = normalizedPath.match('],
+  ])('%s requires application/json (415) beside the origin check, before the body is read', (_name, routeMarker) => {
+    const routeBlock = blockFor(routeMarker)
+    const guardAt = routeBlock.indexOf(guard)
+    const jsonAt = routeBlock.indexOf('if (!isJsonContentType(request)) {')
+    expect(jsonAt).toBeGreaterThan(guardAt)
+    expect(routeBlock.slice(jsonAt, jsonAt + 150)).toContain(
+      "sendJson(response, 415, { error: 'application/json required' })",
+    )
+    expect(jsonAt).toBeLessThan(routeBlock.indexOf('await readJsonBody(request)'))
+    expect(jsonAt).toBeLessThan(routeBlock.indexOf('await appDataStore.read()'))
+  })
 })

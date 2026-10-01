@@ -23,6 +23,7 @@ import {
   StaleStatementAccountsError,
   statementAccountsVersion,
   TimeEntrySplitError,
+  TooManyPendingNotesError,
 } from './db/store.js'
 import {
   allocateGroupMinutes,
@@ -6392,13 +6393,23 @@ const server = createServer(async (request, response) => {
       }
       const member = await appDataStore.getTeamMember(session.user.id)
       const authorName = member?.name ?? session.user.name ?? null
-      const note = await appDataStore.createClientPendingNote(clientId, {
-        templateId: template.id,
-        kind,
-        body,
-        authorId: session.user.id,
-        authorName,
-      })
+      let note
+      try {
+        note = await appDataStore.createClientPendingNote(clientId, {
+          templateId: template.id,
+          kind,
+          body,
+          authorId: session.user.id,
+          authorName,
+        })
+      } catch (error) {
+        // The client already holds the most notes it may have waiting.
+        if (error instanceof TooManyPendingNotesError) {
+          sendJson(response, 409, { error: 'too_many_pending_notes', message: error.message })
+          return
+        }
+        throw error
+      }
       if (!note) {
         sendJson(response, 400, { error: 'A note body is required' })
         return
@@ -6421,6 +6432,13 @@ const server = createServer(async (request, response) => {
       }
       const clientId = decodeURIComponent(clientPendingNoteDeleteMatch[1])
       const noteId = decodeURIComponent(clientPendingNoteDeleteMatch[2])
+      // A person who cannot see the client gets the same 404 as a missing
+      // note, so this route never confirms that a client or note exists.
+      const data = await appDataStore.read()
+      if (!visibleClientIdSet(session, data).has(clientId)) {
+        sendJson(response, 404, { error: 'Note not found' })
+        return
+      }
       const note = await appDataStore.getClientPendingNote(noteId)
       // The path names a client; the note must belong to it, or this route
       // would delete any client's note through any other client's URL.
@@ -6439,11 +6457,18 @@ const server = createServer(async (request, response) => {
         return
       }
       const removed = await appDataStore.deleteClientPendingNote(noteId)
-      if (removed) {
-        await appDataStore.recordActivity(session.user.id, 'client_pending_note_deleted', clientId)
+      if (!removed) {
+        sendJson(response, 404, { error: 'Note not found' })
+        return
       }
+      const client = (data.clients ?? []).find((entry) => entry.id === clientId)
+      await appDataStore.recordActivity(
+        session.user.id,
+        'client_pending_note_deleted',
+        client?.name ?? clientId,
+      )
       broadcastDataChanged()
-      sendJson(response, removed ? 200 : 404, removed ? { ok: true } : { error: 'Note not found' })
+      sendJson(response, 200, { ok: true })
       return
     }
 
@@ -6490,7 +6515,11 @@ const server = createServer(async (request, response) => {
       const visibleIds = (data.checklists ?? [])
         .filter((checklist) => wanted.has(checklist.id) && allowed.has(checklist.clientId))
         .map((checklist) => checklist.id)
-      const notes = await appDataStore.listPendingNotesForChecklists(visibleIds)
+      // A note is also gated by its OWN client: one that rode a checklist the
+      // caller can see but belongs to a client they cannot is left out.
+      const notes = (await appDataStore.listPendingNotesForChecklists(visibleIds)).filter((note) =>
+        allowed.has(note.clientId),
+      )
       sendJson(response, 200, { notes })
       return
     }
@@ -10656,6 +10685,10 @@ const server = createServer(async (request, response) => {
         sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
 
       const checklistId = checklistSubItemsReorderMatch[1]
       const itemId = checklistSubItemsReorderMatch[2]
@@ -11376,6 +11409,10 @@ const server = createServer(async (request, response) => {
       // A write: refuse a cross-site request before the body is even read.
       if (isCrossSiteOrigin(request)) {
         sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
         return
       }
 

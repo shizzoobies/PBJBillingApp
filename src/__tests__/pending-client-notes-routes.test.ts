@@ -33,7 +33,7 @@ describe('the attach pass hook is wired once, near the store', () => {
 })
 
 describe('POST /api/clients/:id/pending-notes', () => {
-  const block = () => routeBlock(/const clientPendingNotesMatch = normalizedPath\.match/, 4800)
+  const block = () => routeBlock(/const clientPendingNotesMatch = normalizedPath\.match/, 5600)
 
   it('gates on isJsonContentType and isCrossSiteOrigin before touching the store', () => {
     const text = block()
@@ -78,6 +78,17 @@ describe('POST /api/clients/:id/pending-notes', () => {
     expect(refuseAt).toBeLessThan(text.indexOf('createClientPendingNote('))
   })
 
+  it('answers 409 too_many_pending_notes when the client already holds the most notes allowed', () => {
+    const text = block()
+    expect(serverSource).toMatch(/import \{[^}]*\bTooManyPendingNotesError\b[^}]*\} from '\.\/db\/store\.js'/)
+    const catchAt = text.indexOf('error instanceof TooManyPendingNotesError')
+    expect(catchAt).toBeGreaterThan(text.indexOf('createClientPendingNote('))
+    const reply = text.slice(catchAt, catchAt + 220)
+    expect(reply).toContain("sendJson(response, 409, { error: 'too_many_pending_notes', message: error.message })")
+    // Nothing is recorded or broadcast for a refused note.
+    expect(catchAt).toBeLessThan(text.indexOf("'pending_note_added'"))
+  })
+
   it('records activity and broadcasts after a successful create', () => {
     const text = block()
     expect(text).toContain("recordActivity(session.user.id, 'pending_note_added', template.title)")
@@ -90,7 +101,7 @@ describe('POST /api/clients/:id/pending-notes', () => {
 })
 
 describe('DELETE /api/clients/:id/pending-notes/:noteId', () => {
-  const block = () => routeBlock(/const clientPendingNoteDeleteMatch = normalizedPath\.match/, 2200)
+  const block = () => routeBlock(/const clientPendingNoteDeleteMatch = normalizedPath\.match/, 3000)
 
   it('checks the cross-site origin', () => {
     expect(block()).toContain('isCrossSiteOrigin(request)')
@@ -102,14 +113,27 @@ describe('DELETE /api/clients/:id/pending-notes/:noteId', () => {
     expect(text).toContain('if (!note || note.clientId !== clientId) {')
   })
 
-  it('records the deletion in the activity log', () => {
+  it('404s a person who cannot see the client, before looking the note up', () => {
+    const text = block()
+    const gateAt = text.indexOf('if (!visibleClientIdSet(session, data).has(clientId)) {')
+    expect(gateAt).toBeGreaterThan(-1)
+    expect(text.slice(gateAt, gateAt + 160)).toContain("sendJson(response, 404, { error: 'Note not found' })")
+    expect(gateAt).toBeLessThan(text.indexOf('appDataStore.getClientPendingNote(noteId)'))
+  })
+
+  it('records the deletion under the client NAME, and only when a note was actually removed', () => {
     const text = block()
     const deleteAt = text.indexOf('appDataStore.deleteClientPendingNote(noteId)')
-    const recordAt = text.indexOf(
-      "recordActivity(session.user.id, 'client_pending_note_deleted', clientId)",
-    )
+    const refuseAt = text.indexOf('if (!removed) {', deleteAt)
+    const recordAt = text.indexOf("'client_pending_note_deleted',")
+    const broadcastAt = text.indexOf('broadcastDataChanged()')
     expect(deleteAt).toBeGreaterThan(-1)
-    expect(recordAt).toBeGreaterThan(deleteAt)
+    expect(refuseAt).toBeGreaterThan(deleteAt)
+    // Nothing removed: a 404 and neither a log entry nor a broadcast.
+    expect(text.slice(refuseAt, refuseAt + 120)).toContain("sendJson(response, 404, { error: 'Note not found' })")
+    expect(recordAt).toBeGreaterThan(refuseAt)
+    expect(text.slice(recordAt, recordAt + 120)).toContain('client?.name ?? clientId')
+    expect(broadcastAt).toBeGreaterThan(recordAt)
   })
 
   it('allows the owner, or the author while still unattached — never the author of an attached note', () => {
@@ -143,6 +167,13 @@ describe('GET /api/pending-notes/attached (one request per page of cards)', () =
     expect(text).toContain('await previewScopedSession(request, session, response')
     expect(text).toContain('visibleClientIdSet(scoped, data)')
     expect(text).toContain('wanted.has(checklist.id) && allowed.has(checklist.clientId)')
+  })
+
+  it('also drops a note whose OWN client the caller cannot see', () => {
+    const text = block()
+    const callAt = text.indexOf('listPendingNotesForChecklists(visibleIds)')
+    expect(text.slice(callAt, callAt + 200)).toContain('.filter((note) =>')
+    expect(text.slice(callAt, callAt + 200)).toContain('allowed.has(note.clientId)')
   })
 
   it('answers from the pending-notes table for only the visible ids, in one store call', () => {
