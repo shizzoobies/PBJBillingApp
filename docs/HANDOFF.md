@@ -759,11 +759,18 @@ routes/permissions, frontend), one post-review fix pass and a delta review; ship
   wait should be deletable at all (only the roll-up is guarded); recurring notes are not built.
 - **Follow-ups (not blocking):** toggle/removal can undo a concurrent sub-step reorder (order
   only); an owner edit within ~2.5 s of any targeted write can hit the stale-tab reload notice;
-  time logged before a split stays on the completed record. STILL OPEN (tracker
-  featreq-6bb0d8a5): `addWaitingOn` is an unlocked read-modify-write, so a wait
-  written from a read taken BEFORE a tick can erase that tick (the toggle only protects against
-  a wait committed before its lock); the seven `/api/checklist-templates/**` write routes lack
-  the origin check. Closed 2026-10-01 (62510ff; rolled-back production trial passed):
+  time logged before a split stays on the completed record. Closed by the
+  `fix/checklist-followups` commit (tracker featreq-6bb0d8a5): a wait is written against the
+  step's row as it is NOW - `addWaitingOn` and the resolve / verify / send-back / question
+  writes (`_mutateWaitingOn`) read the row `for update` in one transaction on Postgres and
+  read-change-write inside one queue slot on the file backend, so a tick committed after the
+  caller's read is kept; all seven `/api/checklist-templates/**` write routes check the origin;
+  the toggle's locked select uses `CHECKLIST_ITEM_SELECT_COLUMNS`; a deletion request re-filed
+  after the pending one vanished is not created for a step the approval just deleted (the
+  requester gets the route's own "not found" sentence). STILL OPEN: other step writers with the
+  same unlocked read-modify-write shape (sub-step add / update / reorder, and the file
+  backend's `updateChecklistItem`); the deletion re-check is a read before the insert, not
+  atomic with it. Closed 2026-10-01 (62510ff; rolled-back production trial passed):
   every `/api/checklists/**` write route checks the origin; the toggle's waiting refusal is decided inside the store
   (`StepIsWaitingError`; Postgres reads the row `for update` in a transaction, the file backend
   reads inside the queue slot) so the route no longer asks first; the step chip, the Board and the

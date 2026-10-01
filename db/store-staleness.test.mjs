@@ -55,6 +55,7 @@ import { waitingToggleRefusal } from '../lib/waiting-on-state.js'
 import {
   LAST_RECURRING_STEP_MESSAGE,
   approvalDenial,
+  deletionTargetStillExists,
   normalizedLabelSql,
   reuseDuplicateDeletionRequest,
   runSeriesStepDelete,
@@ -6179,7 +6180,9 @@ describe('markWaitingOnSentBack (file backend)', () => {
  * `_persistItemWaitingOns` update, the same one Done and Approve use. What IS
  * new is a key inside that JSONB payload (`sendBacks[]`), and a JSONB field the
  * normalizer doesn't carry is erased on the next read — which is why this
- * asserts on the parameter, not just the SQL text.
+ * asserts on the parameter, not just the SQL text. (The update now runs inside
+ * the transaction that locked the step's row; its order is pinned further down,
+ * with the other waiting-on writers.)
  */
 describe('markWaitingOnSentBack statement shape (postgres branch)', () => {
   const ASKED = 'emp-brit'
@@ -6202,6 +6205,11 @@ describe('markWaitingOnSentBack statement shape (postgres branch)', () => {
     pgStore.read = async () => ({
       checklists: [{ id: 'cl-1', clientId: 'c1', title: 'August close', items }],
     })
+    // The write itself starts with the step's own row, read `for update`. Taken
+    // from a copy made now: `read()` hands the same objects to the method, which
+    // changes them in memory, and the database row is not that object.
+    const rows = items.map((item) => lockedRowOf(structuredClone(item)))
+    answerLockedChecklistItem(fake, (_checklistId, itemId) => rows.find((row) => row.id === itemId) ?? null)
     return { fake, pgStore }
   }
 
@@ -6450,7 +6458,7 @@ describe('completed_at on checklist items (postgres branch)', () => {
     const inner = fake.pool.query.bind(fake.pool)
     fake.pool.query = async (text, params) => {
       const result = await inner(text, params)
-      if (/^select (id, (label, )?done|done|sub_items).*from checklist_items/is.test(String(text).trim())) {
+      if (/^select (id, (checklist_id, label, |label, )?done|done|sub_items).*from checklist_items/is.test(String(text).trim())) {
         return { rows: [row], rowCount: 1 }
       }
       return result
@@ -25417,7 +25425,7 @@ describe('the owner ticks a waiting step (postgres branch)', () => {
     'update checklist_items\n         set done = $3, sub_items = $4::jsonb, completed_at = case when $3 then coalesce(completed_at, now()) else null end, updated_at = now()\n         where checklist_id = $1 and id = $2'
   // ONE read for every tick, locked: the waiting guard decides on this very row.
   const ROW_SELECT =
-    'select id, label, done, waiting, waiting_on, waiting_ons, sub_items from checklist_items where checklist_id = $1 and id = $2 for update'
+    `select ${CHECKLIST_ITEM_SELECT_COLUMNS} from checklist_items where checklist_id = $1 and id = $2 for update`
   const CLOSING_UPDATE =
     'update checklist_items\n         set done = $3, sub_items = $4::jsonb, waiting = $5, waiting_ons = $6::jsonb, completed_at = case when $3 then coalesce(completed_at, now()) else null end, updated_at = now()\n         where checklist_id = $1 and id = $2'
 
@@ -25445,7 +25453,7 @@ describe('the owner ticks a waiting step (postgres branch)', () => {
     fake.pool.query = async (text, params) => {
       const result = await inner(text, params)
       const trimmed = String(text).trim()
-      if (/^select id, (label, )?done.*from checklist_items/is.test(trimmed)) {
+      if (/^select id, (checklist_id, label, |label, )?done.*from checklist_items/is.test(trimmed)) {
         return { rows: [current], rowCount: 1 }
       }
       if (/^update checklist_items\s+set done = \$3/i.test(trimmed)) {
@@ -25479,7 +25487,7 @@ describe('the owner ticks a waiting step (postgres branch)', () => {
     const { fake, pgStore } = pgStoreWithItem(itemRow())
     await pgStore.toggleChecklistItem('cl-1', 'it-1')
 
-    expect(fake.statements.find((entry) => /^select id, (label, )?done/i.test(entry.text)).text).toBe(
+    expect(fake.statements.find((entry) => /^select id, (checklist_id, label, |label, )?done/i.test(entry.text)).text).toBe(
       ROW_SELECT,
     )
     const update = fake.matching(/^update checklist_items\s+set done = \$3/i)
@@ -25572,7 +25580,7 @@ describe('the owner ticks a waiting step (postgres branch)', () => {
       closeWaitsBy: OWNER_ID,
     })
 
-    expect(fake.statements.find((entry) => /^select id, (label, )?done/i.test(entry.text)).text).toBe(
+    expect(fake.statements.find((entry) => /^select id, (checklist_id, label, |label, )?done/i.test(entry.text)).text).toBe(
       ROW_SELECT,
     )
     const updates = fake.matching(/^update checklist_items/i)
@@ -26000,5 +26008,628 @@ describe('bulk save refuses to delete a client with history (postgres branch)', 
 
     expect(fake.matching(/^delete from clients$/i)).toHaveLength(1)
     expect(fake.statements.map((s) => s.text)).toContain('commit')
+  })
+})
+
+/**
+ * A wait is written against the step's row as it is NOW, not as it was when the
+ * workspace was read (tracker featreq-6bb0d8a5).
+ *
+ * `addWaitingOn` and `_mutateWaitingOn` (resolve / verify / send back /
+ * question) used to read the whole workspace, change the step in memory and write
+ * `sub_items` (or, on the file backend, the whole file) back with no lock. A tick
+ * committed in between was overwritten, and the person who ticked had already
+ * been answered 200. Postgres now reads the step `for update` inside one
+ * transaction and applies the same pure change to that row; the file backend
+ * reads, changes and writes inside one queue slot.
+ */
+const LOCKED_ITEM_SELECT = new RegExp(
+  `^select ${CHECKLIST_ITEM_SELECT_COLUMNS.trim().replace(/\s+/g, '\\s+')}\\s+from checklist_items where checklist_id = \\$1 and id = \\$2 for update$`,
+  'i',
+)
+
+/** One `checklist_items` row, as the locked select returns it, from the app-shape step. */
+function lockedRowOf(item) {
+  return {
+    id: item.id,
+    checklist_id: 'cl-1',
+    label: item.label,
+    done: Boolean(item.done),
+    sort_order: 0,
+    due_date: null,
+    due_day_of_month: null,
+    assignee_id: item.assigneeId ?? null,
+    waiting_on: null,
+    waiting: false,
+    waiting_for_checklist_id: item.waitingForChecklistId ?? null,
+    waiting_ons: item.waitingOns ?? [],
+    sub_items: item.subItems ?? [],
+    completed_at: null,
+  }
+}
+
+/**
+ * Teach a recording fake to answer the locked read a step writer starts with.
+ * `rowFor(checklistId, itemId)` returns the row (or null: no such row). The
+ * writer runs on ONE connection, which answers through the same patched query.
+ */
+function answerLockedChecklistItem(fake, rowFor) {
+  const inner = fake.pool.query.bind(fake.pool)
+  fake.pool.query = async (text, params) => {
+    const result = await inner(text, params)
+    if (LOCKED_ITEM_SELECT.test(String(text).trim())) {
+      const row = rowFor(params[0], params[1])
+      return row ? { rows: [row], rowCount: 1 } : { rows: [], rowCount: 0 }
+    }
+    return result
+  }
+  fake.pool.connect = async () => ({
+    query: (text, params) => fake.pool.query(text, params),
+    release() {},
+  })
+}
+
+/** Count `release()` calls on the connections the fake hands out. */
+function countReleases(fake) {
+  const counter = { released: 0 }
+  const connect = fake.pool.connect
+  fake.pool.connect = async () => {
+    const client = await connect()
+    return {
+      ...client,
+      release: () => {
+        counter.released += 1
+      },
+    }
+  }
+  return counter
+}
+
+/** Make every `update checklist_items` throw, after recording it. */
+function failUpdates(fake) {
+  const inner = fake.pool.query
+  fake.pool.query = async (text, params) => {
+    const result = await inner(text, params)
+    if (/^update checklist_items/i.test(String(text).trim())) throw new Error('boom')
+    return result
+  }
+}
+
+const UPDATE_WAITING_ONS =
+  /^update checklist_items set waiting_ons = \$3::jsonb, updated_at = now\(\)\s+where checklist_id = \$1 and id = \$2$/i
+const UPDATE_SUB_ITEMS =
+  /^update checklist_items set sub_items = \$3::jsonb, updated_at = now\(\)\s+where checklist_id = \$1 and id = \$2$/i
+const UPDATE_WAIT_LINK =
+  /^update checklist_items set waiting_for_checklist_id = \$3, updated_at = now\(\)\s+where checklist_id = \$1 and id = \$2$/i
+
+describe('a wait is written against the row as it is now (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const seed = () =>
+    store.write(
+      workspace({
+        employees: [
+          { id: OWNER_ID, name: 'Brittany', role: 'owner' },
+          { id: 'emp-lisa', name: 'Lisa', role: 'bookkeeper' },
+        ],
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'August close',
+            clientId: 'c1',
+            items: [
+              {
+                id: 'it-1',
+                label: 'Reconcile',
+                done: false,
+                assigneeId: 'emp-lisa',
+                subItems: [
+                  { id: 'sub-1', title: 'Confirm the hours', done: false },
+                  { id: 'sub-2', title: 'Approve', done: false },
+                ],
+              },
+              { id: 'it-2', label: 'Payroll', done: false },
+            ],
+          },
+        ],
+      }),
+    )
+  const wait = { blockerId: OWNER_ID, requestedBy: 'emp-lisa', note: 'needs your sign-off' }
+
+  beforeEach(seed)
+
+  // The tick is queued right behind the wait's read: the old code read in one
+  // queue entry and wrote in another, and the tick's whole-file write landed in
+  // between and was then overwritten by the stale copy.
+  it('keeps a sub-step tick that lands right after the wait is read', async () => {
+    const [added, ticked] = await Promise.all([
+      store.addWaitingOn('cl-1', { itemId: 'it-1', subItemId: 'sub-1' }, wait),
+      store.toggleChecklistItem('cl-1', 'it-1', 'sub-2'),
+    ])
+    expect(added.entry.blockerId).toBe(OWNER_ID)
+    expect(ticked).not.toBeNull()
+
+    const item = (await persisted()).checklists[0].items[0]
+    expect(item.subItems[1].done).toBe(true)
+    expect(item.subItems[0].waitingOns).toHaveLength(1)
+    expect(item.subItems[0].waitingOns[0].id).toBe(added.entry.id)
+  })
+
+  it('keeps a tick on another step that lands right after a wait on this one is read', async () => {
+    await Promise.all([
+      store.addWaitingOn('cl-1', { itemId: 'it-1' }, wait),
+      store.toggleChecklistItem('cl-1', 'it-2'),
+    ])
+    const items = (await persisted()).checklists[0].items
+    expect(items[1].done).toBe(true)
+    expect(items[0].waitingOns).toHaveLength(1)
+  })
+
+  it('keeps two waits added at the same instant to one step', async () => {
+    await Promise.all([
+      store.addWaitingOn('cl-1', { itemId: 'it-1' }, wait),
+      store.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, note: 'and the bank page' }),
+    ])
+    const notes = (await persisted()).checklists[0].items[0].waitingOns.map((entry) => entry.note)
+    expect(notes).toHaveLength(2)
+    expect(notes).toEqual(expect.arrayContaining(['needs your sign-off', 'and the bank page']))
+  })
+
+  it('keeps a tick that lands right after a wait is resolved', async () => {
+    const added = await store.addWaitingOn('cl-1', { itemId: 'it-1' }, wait)
+    const [resolved] = await Promise.all([
+      store.markWaitingOnDone('cl-1', added.entry.id, { userId: OWNER_ID }),
+      store.toggleChecklistItem('cl-1', 'it-2'),
+    ])
+    expect(resolved.entry.resolvedBy).toBe(OWNER_ID)
+    const items = (await persisted()).checklists[0].items
+    expect(items[1].done).toBe(true)
+    expect(items[0].waitingOns[0].resolvedBy).toBe(OWNER_ID)
+  })
+
+  it('keeps a sub-step tick that lands right after a sub-step wait is verified', async () => {
+    const added = await store.addWaitingOn('cl-1', { itemId: 'it-1', subItemId: 'sub-1' }, wait)
+    await store.markWaitingOnDone('cl-1', added.entry.id, { userId: OWNER_ID })
+    await Promise.all([
+      store.markWaitingOnVerified('cl-1', added.entry.id, { userId: 'emp-lisa' }),
+      store.toggleChecklistItem('cl-1', 'it-1', 'sub-2'),
+    ])
+    const item = (await persisted()).checklists[0].items[0]
+    expect(item.subItems[1].done).toBe(true)
+    expect(item.subItems[0].waitingOns[0].verifiedBy).toBe('emp-lisa')
+  })
+
+  // What the method has always done for a step that is already done: it allows
+  // the wait. The tick is preserved either way.
+  it('adds a wait to a step that was ticked a moment earlier, and the step stays done', async () => {
+    await store.toggleChecklistItem('cl-1', 'it-2')
+    const added = await store.addWaitingOn('cl-1', { itemId: 'it-2' }, wait)
+    expect(added).not.toBeNull()
+    const item = (await persisted()).checklists[0].items[1]
+    expect(item.done).toBe(true)
+    expect(item.waitingOns).toHaveLength(1)
+  })
+
+  it('answers exactly as before when nothing races: the entry, the node, and the checklist', async () => {
+    const added = await store.addWaitingOn('cl-1', { itemId: 'it-1', subItemId: 'sub-1' }, wait)
+    expect(added.node).toEqual({ assigneeId: 'emp-lisa', label: 'Confirm the hours' })
+    expect(added.entry).toMatchObject({
+      blockerId: OWNER_ID,
+      requestedBy: 'emp-lisa',
+      note: 'needs your sign-off',
+    })
+    expect(added.checklist.id).toBe('cl-1')
+    expect(added.checklist.items[0].subItems[0].waitingOns).toEqual([added.entry])
+  })
+
+  it('answers null, writing nothing, for a step or wait that is not there', async () => {
+    const before = await readFile(localDataPath, 'utf8')
+    expect(await store.addWaitingOn('cl-1', { itemId: 'nope' }, wait)).toBeNull()
+    expect(await store.addWaitingOn('cl-1', { itemId: 'it-1', subItemId: 'nope' }, wait)).toBeNull()
+    expect(await store.addWaitingOn('cl-nope', { itemId: 'it-1' }, wait)).toBeNull()
+    expect(await store.markWaitingOnDone('cl-1', 'wo-nope', { userId: OWNER_ID })).toBeNull()
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+})
+
+describe('addWaitingOn on Postgres: one transaction on the locked row', () => {
+  const wait = { blockerId: 'emp-lisa', requestedBy: OWNER_ID, note: 'the March page' }
+
+  const calledStep = () => ({
+    id: 'it-1',
+    label: 'Reconcile',
+    done: false,
+    assigneeId: 'emp-lisa',
+    subItems: [
+      { id: 'sub-1', title: 'Confirm the hours', done: false },
+      { id: 'sub-2', title: 'Approve', done: false },
+    ],
+  })
+
+  /**
+   * `read()` answers what the CALLER saw (`calledCopy`); the locked select answers
+   * the row as it is now (`lockedStep`), which may carry a tick committed since.
+   */
+  function pgStoreWhere({ lockedStep = calledStep(), calledCopy = calledStep() } = {}) {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.read = async () => ({
+      checklists: [
+        {
+          id: 'cl-1',
+          clientId: 'c1',
+          title: 'August close',
+          items: [calledCopy, { id: 'it-9', label: 'Other', done: false }],
+        },
+      ],
+    })
+    answerLockedChecklistItem(fake, (_checklistId, itemId) =>
+      itemId === lockedStep?.id ? lockedRowOf(lockedStep) : null,
+    )
+    return { fake, pgStore }
+  }
+
+  it('runs begin, the locked select, the update and commit, in that order, on one connection', async () => {
+    const { fake, pgStore } = pgStoreWhere()
+    let connects = 0
+    const connect = fake.pool.connect
+    fake.pool.connect = async () => {
+      connects += 1
+      return connect()
+    }
+    await pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, wait)
+
+    expect(connects).toBe(1)
+    const order = [/^begin$/i, LOCKED_ITEM_SELECT, UPDATE_WAITING_ONS, /^commit$/i].map((pattern) =>
+      fake.indexOf(pattern),
+    )
+    expect(order.every((at) => at >= 0)).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+    const [lock] = fake.matching(LOCKED_ITEM_SELECT)
+    expect(lock.params).toEqual(['cl-1', 'it-1'])
+    const updates = fake.matching(/^update checklist_items/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].params.slice(0, 2)).toEqual(['cl-1', 'it-1'])
+    const written = JSON.parse(updates[0].params[2])
+    expect(written).toHaveLength(1)
+    expect(written[0]).toMatchObject({ blockerId: 'emp-lisa', requestedBy: OWNER_ID, note: 'the March page' })
+    expect(fake.indexOf(/^rollback$/i)).toBe(-1)
+  })
+
+  it('a top-level wait never writes the step\'s done, sub_items or completed_at', async () => {
+    const { fake, pgStore } = pgStoreWhere({ lockedStep: { ...calledStep(), done: true } })
+    await pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, wait)
+    const [update] = fake.matching(/^update checklist_items/i)
+    expect(update.text).not.toMatch(/\bdone\b|sub_items|completed_at/i)
+  })
+
+  it('writes the sub_items it locked: a sub-step tick committed after the caller read is kept', async () => {
+    const lockedStep = calledStep()
+    lockedStep.subItems[1] = { ...lockedStep.subItems[1], done: true } // ticked after the read
+    const { fake, pgStore } = pgStoreWhere({ lockedStep })
+    await pgStore.addWaitingOn('cl-1', { itemId: 'it-1', subItemId: 'sub-1' }, wait)
+
+    const updates = fake.matching(/^update checklist_items/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].text).toMatch(UPDATE_SUB_ITEMS)
+    const written = JSON.parse(updates[0].params[2])
+    expect(written[1].done).toBe(true)
+    expect(written[0].waitingOns).toHaveLength(1)
+    expect(written[0].waitingOns[0].note).toBe('the March page')
+  })
+
+  it('writes the waiting_ons it locked: a wait committed after the caller read is kept beside the new one', async () => {
+    const lockedStep = { ...calledStep(), waitingOns: [openWait({ id: 'wo-early', blockerId: 'emp-lisa' })] }
+    const { fake, pgStore } = pgStoreWhere({ lockedStep })
+    await pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, wait)
+
+    const written = JSON.parse(fake.matching(UPDATE_WAITING_ONS)[0].params[2])
+    expect(written.map((entry) => entry.id)).toEqual(['wo-early', expect.stringMatching(/^wo-/)])
+  })
+
+  it('still adds a wait to a step that is already done, and writes nothing about the tick', async () => {
+    const { fake, pgStore } = pgStoreWhere({ lockedStep: { ...calledStep(), done: true } })
+    const added = await pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, wait)
+    expect(added).not.toBeNull()
+    expect(fake.matching(UPDATE_WAITING_ONS)).toHaveLength(1)
+    expect(fake.indexOf(/^commit$/i)).toBeGreaterThan(-1)
+  })
+
+  it('writes the task link in the same transaction, with the same statement, after the waits', async () => {
+    const { fake, pgStore } = pgStoreWhere()
+    await pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: 'cl-2' })
+
+    const [link] = fake.matching(UPDATE_WAIT_LINK)
+    expect(link.params).toEqual(['cl-1', 'it-1', 'cl-2'])
+    expect(fake.indexOf(UPDATE_WAIT_LINK)).toBeGreaterThan(fake.indexOf(UPDATE_WAITING_ONS))
+    expect(fake.indexOf(/^commit$/i)).toBeGreaterThan(fake.indexOf(UPDATE_WAIT_LINK))
+  })
+
+  it('clearing the link writes null; a sub-step link rides sub_items and has no column write', async () => {
+    const cleared = pgStoreWhere()
+    await cleared.pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, { ...wait, waitingForChecklistId: null })
+    expect(cleared.fake.matching(UPDATE_WAIT_LINK)[0].params).toEqual(['cl-1', 'it-1', null])
+
+    const sub = pgStoreWhere()
+    await sub.pgStore.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1', subItemId: 'sub-1' },
+      { ...wait, waitingForChecklistId: 'cl-2' },
+    )
+    expect(sub.fake.matching(UPDATE_WAIT_LINK)).toHaveLength(0)
+    const written = JSON.parse(sub.fake.matching(UPDATE_SUB_ITEMS)[0].params[2])
+    expect(written[0].waitingForChecklistId).toBe('cl-2')
+  })
+
+  it('answers with the locked row\'s assignee and the step label, and the re-read checklist', async () => {
+    const { pgStore } = pgStoreWhere({ lockedStep: { ...calledStep(), assigneeId: 'emp-new' } })
+    const added = await pgStore.addWaitingOn('cl-1', { itemId: 'it-1', subItemId: 'sub-1' }, wait)
+    expect(added.node).toEqual({ assigneeId: 'emp-new', label: 'Confirm the hours' })
+    expect(added.checklist.id).toBe('cl-1')
+    expect(added.entry.note).toBe('the March page')
+  })
+
+  it('rolls back and writes nothing when the step row is gone', async () => {
+    const { fake, pgStore } = pgStoreWhere({ lockedStep: null })
+    expect(await pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, wait)).toBeNull()
+    expect(fake.matching(/^update checklist_items/i)).toHaveLength(0)
+    expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(fake.indexOf(LOCKED_ITEM_SELECT))
+    expect(fake.indexOf(/^commit$/i)).toBe(-1)
+  })
+
+  it('rolls back and writes nothing when the sub-step is gone from the locked row', async () => {
+    const lockedStep = { ...calledStep(), subItems: [calledStep().subItems[1]] }
+    const { fake, pgStore } = pgStoreWhere({ lockedStep })
+    expect(await pgStore.addWaitingOn('cl-1', { itemId: 'it-1', subItemId: 'sub-1' }, wait)).toBeNull()
+    expect(fake.matching(/^update checklist_items/i)).toHaveLength(0)
+    expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(-1)
+    expect(fake.indexOf(/^commit$/i)).toBe(-1)
+  })
+
+  it('does not even open a transaction when the checklist or step is missing from the caller\'s read', async () => {
+    const { fake, pgStore } = pgStoreWhere()
+    expect(await pgStore.addWaitingOn('cl-nope', { itemId: 'it-1' }, wait)).toBeNull()
+    expect(await pgStore.addWaitingOn('cl-1', { itemId: 'nope' }, wait)).toBeNull()
+    expect(fake.indexOf(/^begin$/i)).toBe(-1)
+  })
+
+  it('rolls back, releases the connection and rethrows when the update throws', async () => {
+    const { fake, pgStore } = pgStoreWhere()
+    failUpdates(fake)
+    const counter = countReleases(fake)
+    await expect(pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, wait)).rejects.toThrow('boom')
+    expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(-1)
+    expect(fake.indexOf(/^commit$/i)).toBe(-1)
+    expect(counter.released).toBe(1)
+  })
+
+  it('releases the connection on the success path too', async () => {
+    const { fake, pgStore } = pgStoreWhere()
+    const counter = countReleases(fake)
+    await pgStore.addWaitingOn('cl-1', { itemId: 'it-1' }, wait)
+    expect(counter.released).toBe(1)
+  })
+})
+
+describe('resolving a wait on Postgres: one transaction on the locked row', () => {
+  const entry = () => openWait({ id: 'wo-1', blockerId: 'emp-lisa', requestedBy: OWNER_ID })
+
+  function pgStoreWhere({ calledCopy, lockedStep }) {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.read = async () => ({
+      checklists: [{ id: 'cl-1', clientId: 'c1', title: 'August close', items: [calledCopy] }],
+    })
+    answerLockedChecklistItem(fake, (_checklistId, itemId) =>
+      itemId === lockedStep?.id ? lockedRowOf(lockedStep) : null,
+    )
+    return { fake, pgStore }
+  }
+
+  it('a top-level resolve is begin / locked select / waiting_ons update / commit', async () => {
+    const step = { id: 'it-1', label: 'Reconcile', done: false, waitingOns: [entry()] }
+    const { fake, pgStore } = pgStoreWhere({ calledCopy: step, lockedStep: step })
+    const result = await pgStore.markWaitingOnDone('cl-1', 'wo-1', { userId: 'emp-lisa' })
+
+    expect(result.entry.resolvedBy).toBe('emp-lisa')
+    const order = [/^begin$/i, LOCKED_ITEM_SELECT, UPDATE_WAITING_ONS, /^commit$/i].map((pattern) =>
+      fake.indexOf(pattern),
+    )
+    expect(order.every((at) => at >= 0)).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+    expect(fake.matching(/^update checklist_items/i)).toHaveLength(1)
+    expect(fake.matching(LOCKED_ITEM_SELECT)[0].params).toEqual(['cl-1', 'it-1'])
+  })
+
+  it('a sub-step resolve writes the sub_items it locked: a tick committed after the caller read is kept', async () => {
+    const calledCopy = {
+      id: 'it-1',
+      label: 'Reconcile',
+      done: false,
+      subItems: [
+        { id: 'sub-1', title: 'Confirm', done: false, waitingOns: [entry()] },
+        { id: 'sub-2', title: 'Approve', done: false },
+      ],
+    }
+    const lockedStep = {
+      ...calledCopy,
+      subItems: [calledCopy.subItems[0], { ...calledCopy.subItems[1], done: true }],
+    }
+    const { fake, pgStore } = pgStoreWhere({ calledCopy, lockedStep })
+    const result = await pgStore.markWaitingOnVerified('cl-1', 'wo-1', { userId: OWNER_ID })
+
+    expect(result.entry.verifiedBy).toBe(OWNER_ID)
+    const [update] = fake.matching(UPDATE_SUB_ITEMS)
+    const written = JSON.parse(update.params[2])
+    expect(written[1].done).toBe(true)
+    expect(written[0].waitingOns[0].verifiedBy).toBe(OWNER_ID)
+    expect(fake.matching(/^update checklist_items/i)).toHaveLength(1)
+  })
+
+  it('rolls back and answers null when the locked row no longer holds the wait', async () => {
+    const calledCopy = { id: 'it-1', label: 'Reconcile', done: false, waitingOns: [entry()] }
+    const lockedStep = { ...calledCopy, waitingOns: [] }
+    const { fake, pgStore } = pgStoreWhere({ calledCopy, lockedStep })
+    expect(await pgStore.markWaitingOnSentBack('cl-1', 'wo-1', { userId: OWNER_ID, note: 'again' })).toBeNull()
+    expect(fake.matching(/^update checklist_items/i)).toHaveLength(0)
+    expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(fake.indexOf(LOCKED_ITEM_SELECT))
+    expect(fake.indexOf(/^commit$/i)).toBe(-1)
+  })
+
+  it('rolls back and answers null when the step row is gone', async () => {
+    const calledCopy = { id: 'it-1', label: 'Reconcile', done: false, waitingOns: [entry()] }
+    const { fake, pgStore } = pgStoreWhere({ calledCopy, lockedStep: null })
+    expect(await pgStore.addWaitingOnQuestion('cl-1', 'wo-1', { userId: OWNER_ID, note: 'which?' })).toBeNull()
+    expect(fake.matching(/^update checklist_items/i)).toHaveLength(0)
+    expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(-1)
+  })
+
+  it('rolls back, releases the connection and rethrows when the update throws', async () => {
+    const step = { id: 'it-1', label: 'Reconcile', done: false, waitingOns: [entry()] }
+    const { fake, pgStore } = pgStoreWhere({ calledCopy: step, lockedStep: step })
+    failUpdates(fake)
+    const counter = countReleases(fake)
+    await expect(pgStore.markWaitingOnDone('cl-1', 'wo-1', { userId: 'emp-lisa' })).rejects.toThrow('boom')
+    expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(-1)
+    expect(fake.indexOf(/^commit$/i)).toBe(-1)
+    expect(counter.released).toBe(1)
+  })
+})
+
+/**
+ * The toggle's own locked select lists its columns by the shared constant, so a
+ * column added to `mapChecklistItemRow` later cannot read as undefined on
+ * Postgres only. The parity test above pins the constant against the mapper;
+ * this pins that the toggle's statement IS the constant.
+ */
+describe('the toggle\'s locked select carries every column the mapper reads (postgres branch)', () => {
+  it('selects CHECKLIST_ITEM_SELECT_COLUMNS, and so every column mapChecklistItemRow reads', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    const row = lockedRowOf({ id: 'it-1', label: 'Reconcile', done: false })
+    answerLockedChecklistItem(fake, () => row)
+    pgStore.read = async () => ({
+      checklists: [{ id: 'cl-1', title: 'August close', items: [mapChecklistItemRow(row)] }],
+    })
+    await pgStore.toggleChecklistItem('cl-1', 'it-1')
+
+    const [lock] = fake.matching(LOCKED_ITEM_SELECT)
+    expect(lock).toBeDefined()
+    const selected = new Set(
+      lock.text
+        .replace(/^select\s+/i, '')
+        .replace(/\s+from checklist_items[\s\S]*$/i, '')
+        .split(',')
+        .map((column) => column.trim()),
+    )
+    const readColumns = new Set()
+    mapChecklistItemRow(
+      new Proxy(
+        {},
+        {
+          get(_target, key) {
+            if (typeof key === 'string') readColumns.add(key)
+            return undefined
+          },
+        },
+      ),
+    )
+    expect([...readColumns].filter((column) => !selected.has(column))).toEqual([])
+  })
+})
+
+/**
+ * A re-filed deletion request is not created for a step the approval just
+ * deleted. `fileItemDeletionRequest` (server.js) re-reads the checklist before
+ * creating and asks `deletionTargetStillExists`; the route glue is pinned in
+ * src/__tests__/checklist-step-delete-series-route.test.ts. This is the rule and
+ * the sequence it guards, on the file backend (the check reads through
+ * `store.read()`, so it is the same on Postgres).
+ */
+describe('a deletion request is not filed for a step that is already gone (file backend)', () => {
+  const clearRequests = async () => {
+    const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    authState.itemDeletionRequests = []
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+  const path = { checklistId: 'cl-1', itemId: 'it-1', requestedBy: 'emp-lisa' }
+
+  beforeEach(async () => {
+    await clearRequests()
+    await store.write(
+      workspace({
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'August close',
+            clientId: 'c1',
+            items: [
+              {
+                id: 'it-1',
+                label: 'Reconcile',
+                done: false,
+                subItems: [
+                  {
+                    id: 'sub-1',
+                    title: 'Confirm',
+                    done: false,
+                    subItems: [{ id: 'ss-1', title: 'Deep', done: false }],
+                  },
+                ],
+              },
+              { id: 'it-2', label: 'Payroll', done: false },
+            ],
+          },
+        ],
+      }),
+    )
+  })
+
+  it('reads the step as there at every depth, and as gone for a path that is not', () => {
+    const checklist = {
+      items: [{ id: 'it-1', subItems: [{ id: 'sub-1', subItems: [{ id: 'ss-1' }] }] }],
+    }
+    expect(deletionTargetStillExists(checklist, { itemId: 'it-1' })).toBe(true)
+    expect(deletionTargetStillExists(checklist, { itemId: 'it-1', subItemId: 'sub-1' })).toBe(true)
+    expect(
+      deletionTargetStillExists(checklist, { itemId: 'it-1', subItemId: 'sub-1', subSubItemId: 'ss-1' }),
+    ).toBe(true)
+    expect(deletionTargetStillExists(checklist, { itemId: 'it-9' })).toBe(false)
+    expect(deletionTargetStillExists(checklist, { itemId: 'it-1', subItemId: 'sub-9' })).toBe(false)
+    expect(
+      deletionTargetStillExists(checklist, { itemId: 'it-1', subItemId: 'sub-1', subSubItemId: 'ss-9' }),
+    ).toBe(false)
+    expect(deletionTargetStillExists(null, { itemId: 'it-1' })).toBe(false)
+    expect(deletionTargetStillExists(undefined, { itemId: 'it-1' })).toBe(false)
+    expect(deletionTargetStillExists({}, { itemId: 'it-1' })).toBe(false)
+  })
+
+  it('the owner approves while the requester re-files with a new scope: the re-check finds the step gone', async () => {
+    const created = await store.createItemDeletionRequest({
+      clientId: 'c1',
+      checklistId: 'cl-1',
+      itemId: 'it-1',
+      label: 'Reconcile',
+      requestedBy: 'emp-lisa',
+      requestedByName: 'Lisa',
+    })
+    const staleList = await store.listItemDeletionRequests() // her read, before the owner acts
+    // The owner approves: the step is deleted and the request goes with it.
+    expect(await store.deleteChecklistItem('cl-1', 'it-1')).not.toBeNull()
+    expect(await store.deleteItemDeletionRequest(created.id)).toBe(true)
+
+    // Her re-file finds nothing pending (the existing rule)...
+    expect(await reuseDuplicateDeletionRequest(store, staleList, { ...path, scope: 'series' })).toBeNull()
+    // ...and the re-check the caller now makes before creating says the step is gone.
+    const current = (await store.read()).checklists.find((c) => c.id === 'cl-1')
+    expect(deletionTargetStillExists(current, { itemId: 'it-1' })).toBe(false)
+    expect(deletionTargetStillExists(current, { itemId: 'it-2' })).toBe(true)
+  })
+
+  it('a step that is still there passes the re-check, so an ordinary request is filed as before', async () => {
+    const current = (await store.read()).checklists.find((c) => c.id === 'cl-1')
+    expect(deletionTargetStillExists(current, { itemId: 'it-1' })).toBe(true)
+    expect(
+      deletionTargetStillExists(current, { itemId: 'it-1', subItemId: 'sub-1', subSubItemId: 'ss-1' }),
+    ).toBe(true)
   })
 })

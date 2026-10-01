@@ -132,6 +132,7 @@ import {
 } from './lib/checklist-write-permission.js'
 import {
   approvalDenial,
+  deletionTargetStillExists,
   reuseDuplicateDeletionRequest,
   runSeriesStepDelete,
   seriesDeleteDenial,
@@ -1030,8 +1031,9 @@ function checklistOutOfScope(checklist, visibleClientIds) {
  * deletion REQUEST (capturing the path + a label snapshot) instead of deleting,
  * skipping duplicates, and notifies every owner. Mirrors the whole-checklist
  * deletion-request flow. Returns the created (or existing) request so the
- * handler can 200 it back. The caller must have already confirmed the client is
- * in the user's visible set.
+ * handler can 200 it back, or null when the step is gone by now (the handler
+ * answers with its own "not found" sentence). The caller must have already
+ * confirmed the client is in the user's visible set.
  */
 async function fileItemDeletionRequest(
   request,
@@ -1059,6 +1061,15 @@ async function fileItemDeletionRequest(
     },
   )
   if (duplicate && !duplicate.scopeChanged) return duplicate.request
+
+  // About to CREATE a request: the step must still be there. The pending one this
+  // is replacing may have been approved a moment ago, which deleted the step;
+  // filing a new request for it would hand the owner a 404 and lose the choice.
+  // Null tells the caller to answer with its own "not found" sentence.
+  if (!duplicate) {
+    const current = (await appDataStore.read()).checklists.find((c) => c.id === checklist.id)
+    if (!deletionTargetStillExists(current, { itemId, subItemId, subSubItemId })) return null
+  }
 
   const requesterName =
     (data.employees ?? []).find((e) => e.id === session.user.id)?.name ??
@@ -10859,6 +10870,10 @@ const server = createServer(async (request, response) => {
             subSubItemId,
             label: targetSubSub.title ?? '',
           })
+          if (!filed) {
+            sendJson(response, 404, { error: 'Sub-sub-item not found' })
+            return
+          }
           sendJson(response, 200, { request: filed, checklist })
           return
         }
@@ -11068,6 +11083,10 @@ const server = createServer(async (request, response) => {
             subSubItemId: null,
             label: targetSub.title ?? '',
           })
+          if (!filed) {
+            sendJson(response, 404, { error: 'Sub-item not found' })
+            return
+          }
           sendJson(response, 200, { request: filed, checklist })
           return
         }
@@ -11926,6 +11945,10 @@ const server = createServer(async (request, response) => {
               label: targetItem.label ?? '',
               scope: 'series',
             })
+            if (!filed) {
+              sendJson(response, 404, { error: 'Checklist item not found' })
+              return
+            }
             sendJson(response, 200, { request: filed, checklist })
             return
           }
@@ -11948,6 +11971,10 @@ const server = createServer(async (request, response) => {
             subSubItemId: null,
             label: targetItem.label ?? '',
           })
+          if (!filed) {
+            sendJson(response, 404, { error: 'Checklist item not found' })
+            return
+          }
           sendJson(response, 200, { request: filed, checklist })
           return
         }
@@ -12026,6 +12053,10 @@ const server = createServer(async (request, response) => {
 
       if (session.user.role !== 'owner') {
         sendJson(response, 403, { error: 'Only owners can update template viewers' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
 
@@ -12800,6 +12831,10 @@ const server = createServer(async (request, response) => {
         sendJson(response, 403, { error: 'Only owners can reorder stages' })
         return
       }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
       const templateId = templateStageReorderMatch[1]
       const payload = await readJsonBody(request)
       const stageIds = Array.isArray(payload?.stageIds)
@@ -12826,6 +12861,10 @@ const server = createServer(async (request, response) => {
     if (templateStageAppendMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) return
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
       const templateId = templateStageAppendMatch[1]
       const stageId = templateStageAppendMatch[2]
       const data = await appDataStore.read()
@@ -12880,6 +12919,10 @@ const server = createServer(async (request, response) => {
       if (!session) return
       if (session.user.role !== 'owner') {
         sendJson(response, 403, { error: 'Only owners can update template stages' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
       const templateId = templateStageItemMatch[1]
@@ -12961,6 +13004,10 @@ const server = createServer(async (request, response) => {
         sendJson(response, 403, { error: 'Only owners can create standard templates' })
         return
       }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
       const payload = await readJsonBody(request)
       const template = await appDataStore.createStandardTemplate(payload ?? {})
       await appDataStore.recordActivity(
@@ -12995,6 +13042,10 @@ const server = createServer(async (request, response) => {
       const roleDenial = templateApplyRoleDenial(session.user)
       if (roleDenial) {
         sendJson(response, roleDenial.status, { error: roleDenial.error })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
       const sourceId = applyToClientMatch[1]
@@ -13067,6 +13118,10 @@ const server = createServer(async (request, response) => {
     if (templateGenerateMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) return
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
       const templateId = templateGenerateMatch[1]
       const payload = await readJsonBody(request)
       const dueDate = typeof payload?.dueDate === 'string' ? payload.dueDate : undefined

@@ -15677,7 +15677,7 @@ export class AppDataStore {
       try {
         await client.query('begin')
         const itemResult = await client.query(
-          `select id, label, done, waiting, waiting_on, waiting_ons, sub_items from checklist_items where checklist_id = $1 and id = $2 for update`,
+          `select ${CHECKLIST_ITEM_SELECT_COLUMNS} from checklist_items where checklist_id = $1 and id = $2 for update`,
           [checklistId, itemId],
         )
         if (!itemResult.rowCount) {
@@ -17491,10 +17491,13 @@ export class AppDataStore {
    * Persist a mutated top-level item's `waitingOns` (PG: the column; sub/sub-sub
    * ride the item's sub_items JSONB, so we rewrite that instead). `item` is the
    * in-memory item AFTER mutation; `location.itemId` identifies the row.
+   *
+   * `db` is whatever runs the statement: the transaction's connection when the
+   * caller holds the row locked (`_withLockedChecklistItem`), the pool otherwise.
    */
-  async _persistItemWaitingOns(checklistId, item, isSubNode) {
+  async _persistItemWaitingOns(checklistId, item, isSubNode, db = this.pool) {
     if (isSubNode) {
-      await this.pool.query(
+      await db.query(
         `update checklist_items set sub_items = $3::jsonb, updated_at = now()
          where checklist_id = $1 and id = $2`,
         [
@@ -17504,11 +17507,52 @@ export class AppDataStore {
         ],
       )
     } else {
-      await this.pool.query(
+      await db.query(
         `update checklist_items set waiting_ons = $3::jsonb, updated_at = now()
          where checklist_id = $1 and id = $2`,
         [checklistId, item.id, JSON.stringify(normalizeWaitingOns(item.waitingOns))],
       )
+    }
+  }
+
+  /**
+   * Postgres: run `change` against one step's row AS IT IS NOW. One transaction
+   * on one connection: `begin`, the row read `for update`, whatever `change`
+   * writes through `client`, `commit`. A tick (or another wait) committed after
+   * the caller's own `read()` is on the row we lock, so a write built from the
+   * stale copy can no longer erase it; one that commits after us waits for this
+   * commit. `change` gets the row mapped exactly as `read()` maps it and returns
+   * the result to hand back, or null to write nothing (rolled back).
+   *
+   * Returns null when the row is gone, or `change` answered null. Rolls back and
+   * releases on every other exit path, the way `toggleChecklistItem` does.
+   */
+  async _withLockedChecklistItem(checklistId, itemId, change) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('begin')
+      const itemResult = await client.query(
+        `select ${CHECKLIST_ITEM_SELECT_COLUMNS} from checklist_items where checklist_id = $1 and id = $2 for update`,
+        [checklistId, itemId],
+      )
+      const result = itemResult.rowCount
+        ? await change(client, mapChecklistItemRow(itemResult.rows[0]))
+        : null
+      if (!result) {
+        await client.query('rollback')
+        return null
+      }
+      await client.query('commit')
+      return result
+    } catch (error) {
+      try {
+        await client.query('rollback')
+      } catch {
+        /* already rolled back, or the connection is gone */
+      }
+      throw error
+    } finally {
+      client.release()
     }
   }
 
@@ -17556,44 +17600,62 @@ export class AppDataStore {
     }
 
     if (this.pool) {
+      // The whole-workspace read only answers "is there such a checklist". The
+      // step's own columns come from the row locked below, so a tick committed
+      // after this read is still there when the wait is written.
       const data = await this.read()
       const checklist = data.checklists.find((c) => c.id === checklistId)
+      if (!checklist) return null
+      if (!this._findChecklistNode(checklist, location)) return null
+      const written = await this._withLockedChecklistItem(
+        checklistId,
+        location.itemId,
+        async (client, row) => {
+          const found = this._findChecklistNode({ items: [row] }, location)
+          if (!found) return null
+          found.node.waitingOns = [...(found.node.waitingOns ?? []), entry]
+          applyTaskLink(found.node)
+          await this._persistItemWaitingOns(checklistId, found.item, Boolean(location.subItemId), client)
+          // A sub-node's link rides the `sub_items` JSONB the line above just
+          // rewrote; a top-level item keeps it in its own column.
+          if (!location.subItemId && waitingForChecklistId !== undefined) {
+            await client.query(
+              `update checklist_items set waiting_for_checklist_id = $3, updated_at = now()
+           where checklist_id = $1 and id = $2`,
+              [checklistId, found.item.id, found.node.waitingForChecklistId ?? null],
+            )
+          }
+          return found
+        },
+      )
+      if (!written) return null
+      const fresh = await this.read()
+      return {
+        checklist: fresh.checklists.find((c) => c.id === checklistId) ?? checklist,
+        entry,
+        node: { assigneeId: written.item.assigneeId ?? null, label: this._nodeLabel(written.node) },
+      }
+    }
+
+    // Read, change and write inside ONE file-queue slot (raw fs calls only in
+    // here: `readJson`/`writeFile` enqueue behind this very slot and would
+    // deadlock). As two queue entries another request's write could land between
+    // the read and the write, and the whole file written back would erase it.
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const checklist = (data.checklists ?? []).find((c) => c.id === checklistId)
       if (!checklist) return null
       const found = this._findChecklistNode(checklist, location)
       if (!found) return null
       found.node.waitingOns = [...(found.node.waitingOns ?? []), entry]
       applyTaskLink(found.node)
-      await this._persistItemWaitingOns(checklistId, found.item, Boolean(location.subItemId))
-      // A sub-node's link rides the `sub_items` JSONB the line above just
-      // rewrote; a top-level item keeps it in its own column.
-      if (!location.subItemId && waitingForChecklistId !== undefined) {
-        await this.pool.query(
-          `update checklist_items set waiting_for_checklist_id = $3, updated_at = now()
-           where checklist_id = $1 and id = $2`,
-          [checklistId, found.item.id, found.node.waitingForChecklistId ?? null],
-        )
-      }
-      const fresh = await this.read()
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       return {
-        checklist: fresh.checklists.find((c) => c.id === checklistId) ?? checklist,
+        checklist,
         entry,
         node: { assigneeId: found.item.assigneeId ?? null, label: this._nodeLabel(found.node) },
       }
-    }
-
-    const data = await readJson(localDataPath)
-    const checklist = (data.checklists ?? []).find((c) => c.id === checklistId)
-    if (!checklist) return null
-    const found = this._findChecklistNode(checklist, location)
-    if (!found) return null
-    found.node.waitingOns = [...(found.node.waitingOns ?? []), entry]
-    applyTaskLink(found.node)
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return {
-      checklist,
-      entry,
-      node: { assigneeId: found.item.assigneeId ?? null, label: this._nodeLabel(found.node) },
-    }
+    })
   }
 
   /**
@@ -17681,12 +17743,26 @@ export class AppDataStore {
     }
 
     if (this.pool) {
+      // The whole-workspace read only says WHICH step holds the wait (`locate`
+      // mutates its copy, which is thrown away). The change itself is applied
+      // again to that step's row, locked, so a tick committed after this read
+      // is still there when the wait is written.
       const data = await this.read()
       const checklist = data.checklists.find((c) => c.id === checklistId)
       if (!checklist) return null
-      const hit = locate(checklist)
+      const holder = locate(checklist)
+      if (!holder) return null
+      const hit = await this._withLockedChecklistItem(
+        checklistId,
+        holder.item.id,
+        async (client, row) => {
+          const locked = locate({ items: [row] })
+          if (!locked) return null
+          await this._persistItemWaitingOns(checklistId, locked.item, locked.isSubNode, client)
+          return locked
+        },
+      )
       if (!hit) return null
-      await this._persistItemWaitingOns(checklistId, hit.item, hit.isSubNode)
       const fresh = await this.read()
       return {
         checklist: fresh.checklists.find((c) => c.id === checklistId) ?? checklist,
@@ -17696,18 +17772,22 @@ export class AppDataStore {
       }
     }
 
-    const data = await readJson(localDataPath)
-    const checklist = (data.checklists ?? []).find((c) => c.id === checklistId)
-    if (!checklist) return null
-    const hit = locate(checklist)
-    if (!hit) return null
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return {
-      checklist,
-      entry: hit.entry,
-      assigneeId: hit.item.assigneeId ?? null,
-      label: hit.label,
-    }
+    // One file-queue slot for the read, the change and the write (raw fs calls
+    // only in here; see `addWaitingOn`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const checklist = (data.checklists ?? []).find((c) => c.id === checklistId)
+      if (!checklist) return null
+      const hit = locate(checklist)
+      if (!hit) return null
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return {
+        checklist,
+        entry: hit.entry,
+        assigneeId: hit.item.assigneeId ?? null,
+        label: hit.label,
+      }
+    })
   }
 
   /**

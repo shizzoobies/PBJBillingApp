@@ -40,7 +40,7 @@ function approveSeriesBlock(): string {
 function fileRequestBlock(): string {
   const at = serverSource.indexOf('async function fileItemDeletionRequest(')
   expect(at, 'fileItemDeletionRequest not found').toBeGreaterThan(-1)
-  return serverSource.slice(at, at + 2600)
+  return serverSource.slice(at, at + 3200)
 }
 
 describe('the series delete route', () => {
@@ -60,7 +60,7 @@ describe('the series delete route', () => {
     expect(filing).toBeGreaterThan(gate)
     expect(block.slice(filing, filing + 300)).toContain("scope: 'series'")
     // Answers exactly like the existing staff branch.
-    expect(block.slice(filing, filing + 400)).toContain('sendJson(response, 200, { request: filed, checklist })')
+    expect(block.slice(filing, filing + 600)).toContain('sendJson(response, 200, { request: filed, checklist })')
   })
 
   it('checks the origin and the denial (recurring, own template) before it files OR deletes', () => {
@@ -127,6 +127,50 @@ describe('a team member\'s request (fileItemDeletionRequest)', () => {
     expect(reuse).toBeGreaterThan(-1)
     expect(create).toBeGreaterThan(reuse)
     expect(block.slice(create, create + 400)).toContain('scope: requestScope')
+  })
+
+  // The pending request this re-file replaces may have been approved a moment
+  // ago, which deleted the step: a fresh request for it would give the owner a 404
+  // and lose the requester's choice. So the step is re-read and re-checked before
+  // anything is created, and each caller answers with its own "not found" sentence.
+  it('re-checks that the step still exists, on a fresh read, before it creates a request', () => {
+    const block = fileRequestBlock()
+    const reuse = block.indexOf('reuseDuplicateDeletionRequest(')
+    const read = block.indexOf('(await appDataStore.read()).checklists.find((c) => c.id === checklist.id)')
+    const check = block.indexOf('deletionTargetStillExists(current, { itemId, subItemId, subSubItemId })')
+    const create = block.indexOf('appDataStore.createItemDeletionRequest({')
+    expect(reuse).toBeGreaterThan(-1)
+    expect(read).toBeGreaterThan(reuse)
+    expect(check).toBeGreaterThan(read)
+    expect(create).toBeGreaterThan(check)
+    // Only when a request is about to be CREATED: a changed pending request is reused as it was.
+    expect(block.slice(read - 60, read)).toContain('if (!duplicate) {')
+    expect(block.slice(check, check + 120)).toContain('return null')
+    // Nothing is logged or announced for a step that is gone.
+    expect(check).toBeLessThan(block.indexOf("'checklist_item_deletion_requested',"))
+  })
+
+  it('every caller answers a missing step with the sentence its route already uses', () => {
+    const calls = serverSource.split('const filed = await fileItemDeletionRequest(request, session, data, checklist, {')
+    expect(calls).toHaveLength(5)
+    const sentences = calls.slice(1).map((piece) => {
+      const answer = piece.indexOf('sendJson(response, 200, { request: filed, checklist })')
+      const refusal = piece.indexOf('if (!filed) {')
+      expect(refusal, 'a caller does not handle a null answer').toBeGreaterThan(-1)
+      expect(refusal).toBeLessThan(answer)
+      return /sendJson\(response, 404, \{ error: '([^']+)' \}\)/.exec(piece.slice(refusal, answer))?.[1]
+    })
+    // Sub-sub-step, sub-step, series (top-level step), top-level step.
+    expect(sentences).toEqual([
+      'Sub-sub-item not found',
+      'Sub-item not found',
+      'Checklist item not found',
+      'Checklist item not found',
+    ])
+    // ...which are the sentences those routes already answer a missing step with.
+    for (const sentence of new Set(sentences)) {
+      expect(serverSource.split(`error: '${sentence}'`).length - 1, sentence).toBeGreaterThan(2)
+    }
   })
 
   it('only the requester can change a pending request, and a change is announced like a new request', () => {

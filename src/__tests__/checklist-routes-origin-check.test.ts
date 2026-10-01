@@ -45,6 +45,36 @@ const ROUTES: [string, string][] = [
   ['PUT /api/checklists/:id/viewers', 'if (checklistViewersMatch) {'],
 ]
 
+/**
+ * The checklist TEMPLATE routes: the same wiring. None of them had the check
+ * (the review of the checklist release found it on /api/checklists only), and
+ * they write the recipes every future task is generated from.
+ */
+const TEMPLATE_ROUTES: [string, string][] = [
+  ['PUT /api/checklist-templates/:id/viewers', 'if (checklistTemplateViewersMatch) {'],
+  [
+    'POST /api/checklist-templates/:id/stages/reorder',
+    "if (templateStageReorderMatch && request.method === 'POST') {",
+  ],
+  [
+    'POST /api/checklist-templates/:id/stages/:stageId/items',
+    "if (templateStageAppendMatch && request.method === 'POST') {",
+  ],
+  ['POST|PATCH|DELETE /api/checklist-templates/:id/stages[/:stageId]', 'if (templateStageItemMatch) {'],
+  [
+    'POST /api/checklist-templates/standard',
+    "if (normalizedPath === '/api/checklist-templates/standard' && request.method === 'POST') {",
+  ],
+  [
+    'POST /api/checklist-templates/:id/apply-to-client',
+    "if (applyToClientMatch && request.method === 'POST') {",
+  ],
+  [
+    'POST /api/checklist-templates/:id/generate',
+    "if (templateGenerateMatch && request.method === 'POST') {",
+  ],
+]
+
 /** The block of one route, from its opening line to its closing brace at route level. */
 function routeBlock(opening: string): string {
   const at = serverSource.indexOf(`    ${opening}\n`)
@@ -55,7 +85,7 @@ function routeBlock(opening: string): string {
 }
 
 describe('every state-changing checklist route checks the request origin', () => {
-  it.each(ROUTES)('%s refuses a cross-site origin with 403, before the body or the store', (_label, opening) => {
+  it.each([...ROUTES, ...TEMPLATE_ROUTES])('%s refuses a cross-site origin with 403, before the body or the store', (_label, opening) => {
     const block = routeBlock(opening)
     const guardAt = block.search(GUARD)
     expect(guardAt).toBeGreaterThan(-1)
@@ -77,6 +107,7 @@ describe('every state-changing checklist route checks the request origin', () =>
       'if (checklistDeleteMatch) {',
       'if (checklistToggleMatch) {',
       'if (checklistViewersMatch) {',
+      'if (checklistTemplateViewersMatch) {',
     ]) {
       const block = routeBlock(opening)
       expect(block.search(GUARD), opening).toBeGreaterThan(block.indexOf("sendJson(response, 405"))
@@ -88,6 +119,14 @@ describe('every state-changing checklist route checks the request origin', () =>
       ["if (normalizedPath === '/api/checklists/recycle-bin') {", 'Only owners can empty the recycle bin'],
       ['if (checklistRestoreMatch) {', 'Only owners can restore a checklist'],
       ['if (checklistViewersMatch) {', 'Only owners can update checklist viewers'],
+      ['if (checklistTemplateViewersMatch) {', 'Only owners can update template viewers'],
+      ['if (templateStageReorderMatch && request.method === \'POST\') {', 'Only owners can reorder stages'],
+      ['if (templateStageItemMatch) {', 'Only owners can update template stages'],
+      [
+        "if (normalizedPath === '/api/checklist-templates/standard' && request.method === 'POST') {",
+        'Only owners can create standard templates',
+      ],
+      ['if (applyToClientMatch && request.method === \'POST\') {', 'templateApplyRoleDenial(session.user)'],
     ]) {
       const block = routeBlock(opening)
       expect(block.search(GUARD), opening).toBeGreaterThan(block.indexOf(denial))
@@ -108,5 +147,30 @@ describe('every state-changing checklist route checks the request origin', () =>
       expect(known.has(name), `${name} has no origin check listed`).toBe(true)
     }
     expect(declared.length).toBeGreaterThan(10)
+  })
+
+  // The same for /api/checklist-templates: a matcher constant or a literal path
+  // comparison that is not in TEMPLATE_ROUTES fails here.
+  it('lists every /api/checklist-templates route in server.js (none can be added unchecked)', () => {
+    const declared = [
+      ...serverSource.matchAll(
+        /const (\w+) = normalizedPath\.match\(\s*\/\^\\\/api\\\/checklist-templates/g,
+      ),
+    ].map((match) => match[1])
+    const literals = [
+      ...serverSource.matchAll(/normalizedPath === '(\/api\/checklist-templates[^']*)'/g),
+    ].map((match) => match[1])
+    const knownMatchers = new Set(TEMPLATE_ROUTES.map(([, opening]) => /if \((\w+)/.exec(opening)?.[1]))
+    for (const name of declared) {
+      expect(knownMatchers.has(name), `${name} has no origin check listed`).toBe(true)
+    }
+    for (const literal of literals) {
+      expect(
+        TEMPLATE_ROUTES.some(([, opening]) => opening.includes(`'${literal}'`)),
+        `${literal} has no origin check listed`,
+      ).toBe(true)
+    }
+    expect(declared.length).toBe(6)
+    expect(literals.length).toBe(1)
   })
 })

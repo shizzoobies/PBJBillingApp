@@ -39,6 +39,10 @@ export declare function reuseDuplicateDeletionRequest<T extends DeletionRequestP
   existing: T[],
   path: DeletionRequestPath & { scope?: string; requestedBy?: string | null },
 ): Promise<{ request: T; scopeChanged: boolean } | null>
+export declare function deletionTargetStillExists(
+  checklist: { items?: { id: string; subItems?: { id: string; subItems?: { id: string }[] }[] }[] } | null | undefined,
+  path: { itemId: string; subItemId?: string | null; subSubItemId?: string | null },
+): boolean
 export declare const REQUEST_CHANGED_MESSAGE: string
 export declare const SERIES_SUBSTEP_MESSAGE: string
 export declare function approvalDenial(
