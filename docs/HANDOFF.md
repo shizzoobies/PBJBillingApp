@@ -25,7 +25,20 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-09-30, late evening):** `main` = `a4f78ac` (+ this handoff),
+**State right now (2026-10-01, late morning):** `main` = `a064405` (+ this handoff), pushed,
+deployed, `/health` 200 with that commit, voice agent re-provisioned. Suite **4722 tests /
+240 files**, green. Working tree clean. Two ships today on top of last night's queue run - read
+the 2026-10-01 entry at the top of section 5: the Plans/Packages tabs fix (`81ab2ae`) and the
+invoice date rule + due wording + month prompt on Print (`a064405`), the second one made while
+Brittany was MID-INVOICING September (38 drafts built Oct 1, none sent when it shipped). Alex
+replied to her email himself. One follow-up chip is waiting for Alex to start: "Stamp the send
+time before building the invoice email and PDF". The two worktree sessions from last night
+(`claude/mystifying-kirch-5efa06`, `claude/unruffled-nash-04ccfe`) still have to rebase onto
+main. Resilience: Alex said "next week probably" (week of 10-05) and will hand over a
+Cloudflare token by `setx CLOUDFLARE_API_TOKEN` in his own terminal, never in chat. The manifest
+is at 203,744 bytes against the 205,000 tripwire: CONDENSE BEFORE THE NEXT MANIFEST EDIT.
+
+**Before that (2026-09-30, late evening):** `main` = `a4f78ac` (+ this handoff),
 pushed, deployed, `/health` 200 with that commit, voice agent re-provisioned. Suite
 **4692 tests / 238 files**, green. Working tree clean. **The 2026-09-30 queue run
 shipped seven Brittany items plus one bug found on the way** - read the 2026-09-30 (late) entry at
@@ -420,6 +433,58 @@ with instructions rather than failing. Run it by hand after any print change.
 
 ## 5. Where things stand (newest first)
 
+**2026-10-01 - the Plans/Packages tabs fix, and the invoice date rule (shipped mid-invoicing).**
+
+- **Plans tab / Packages tab each showed BOTH lists** (`featreq-9a2e7bcd`, `81ab2ae`). Both
+  panels stay mounted and the closed one carries `hidden`, but `.client-tab-panel { display: flex }`
+  outranks the browser's built-in `[hidden]` rule. Fix: `.client-tab-panel[hidden] { display: none }`
+  in `src/App.css`, the same shape as `.invoice-view[hidden]`. THE LESSON: jsdom loads no
+  stylesheet, so `toBeVisible()` on a `hidden` attribute passes while a real browser shows the
+  element. Any `hidden={...}` on an element whose class sets `display` needs its own `[hidden]`
+  rule and a stylesheet pin test (`packages-ui.test.tsx` has the pattern). Only two elements use
+  `hidden={` today (PlansPage panels, InvoicesPage `.invoice-view`); both are covered.
+- **Invoice Date = the last day of the billing month** (`a064405`, tracker `featreq-cd933cda`).
+  Brittany emailed Oct 1: her September invoices printed "October 1" and the list said "due
+  10/31". Alex decided: date them the month they bill, START WITH SEPTEMBER, keep the follow-up
+  clock on the SEND day. The rule is ONE pure helper, `invoiceDisplayDate({ period, kind, sentAt,
+  createdAt })` in `lib/invoice-draft.js`, used by the print sheet (`InvoicesPage.tsx`), the PDF
+  (`lib/invoice-pdf.js`) and the email (`lib/invoice-email.js`) - never format `sentAt ??
+  createdAt` directly again. Monthly invoice, period >= `PERIOD_END_INVOICE_DATE_FROM` (`2026-09`):
+  the period end when it is EARLIER than the issue day (UTC day of `sentAt ?? createdAt`);
+  otherwise the issue day (never post-dated). Retainers and earlier periods keep the issue day,
+  so an August reprint still says September 1. The live per-client preview uses the same helper
+  with today as the issue day. Checked read-only over every production invoice: exactly the 38
+  September drafts change (Oct 1 -> Sept 30), nothing else.
+- **"due Oct 31" was never client-facing.** The stored `dueDate` is the firm's internal past-due
+  line (30 days from the send; provisional from generate) - Alex's 2026-09-15 rule, unchanged.
+  The month-run row now says `Due on receipt · follow up Oct 31` for on-receipt clients (every
+  client today: 51 "Due on receipt", 4 blank). `dueDateFromTerms` / `customerNetDays` /
+  `paymentTermsLabel` were NOT touched. A client with longer terms of their own would see a gap
+  one day longer than their terms (dated the 30th, due counted from the send); none exist.
+- **"Print invoice" (lower section of the Invoices page) asks which month.** That button prints
+  the LIVE per-client calculation for the top-bar Billing month, which sits on the CURRENT month,
+  while the month run keeps its own picker - so on Oct 1 it printed an October invoice. It now
+  opens a dialog (`PrintInvoiceDialog`, the `AddModal` shell) defaulting to the month run's month;
+  the page's own month prints the on-screen invoice with Customize edits, any other month prints
+  that month's calculation through a `monthPrint` state that mirrors the `storedPrint` pattern.
+  Row Print and History Print are unchanged (stored invoice, fixed month).
+- **Known, NOT fixed (chip filed, Alex has not started it):** the send route builds the email and
+  the PDF (`server.js` ~4883 / ~4900) BEFORE `recordInvoiceSent` stamps `sent_at` (~4943), so a
+  first send dates from `createdAt` while a reprint and the receipt PDF date from `sentAt`. They
+  differ only for an invoice built before its month ends and sent on a later day (or any
+  pre-cutoff invoice built and sent on different days). None of the 38 drafts are affected. The
+  chip also carries: the live preview date is memoized (stale if the page stays open overnight),
+  the dialog has no autofocus / Enter-to-print.
+- **Pre-existing, raised with Alex, no decision yet:** the lower Print prints the live
+  calculation, NOT the stored invoice, so lines edited on a draft in the month run do not appear
+  on it. Brittany was told to use the row's Print for the real invoice.
+- **When she reports a date or "due" on an invoice:** first pin down the SURFACE (list row, print
+  sheet, PDF, email) and WHICH Print button. The row date is internal; the client copies say Due
+  on receipt. This one was two interpretation gaps and one real default problem, not a bug in
+  the money.
+- **Local dev sign-in:** test runs can reset `tmp/auth-state.json`, after which the seeded owner
+  lands on `/two-factor/setup`; enroll in the page (reveal the setup code, compute the code
+  in-page). Stop both preview servers before running vitest - they share `tmp/`.
 **2026-09-30 (late) - the queue run: two client-page items, five checklist items, and the
 evening date bug.** Spec `docs/plans/queue-2026-09-30.md`. Built in three parallel worktree
 lanes by subagents, every task reviewed and re-reviewed, three whole-branch reviews (storage,
