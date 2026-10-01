@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/re
 import App from '../App'
 import { createSeedData } from '../lib/seed'
 import { REMOVAL_WOULD_COMPLETE_WAITING_STEP } from '../../lib/waiting-on-state.js'
-import { installFetchMock, OWNER_SESSION } from './helpers'
+import { installFetchMock, openNavLink, OWNER_SESSION } from './helpers'
 import type { Checklist } from '../lib/types'
 
 /**
@@ -102,7 +102,7 @@ async function openApproveButton(waitingOnPage: boolean) {
   const { container } = render(<App />)
   const page = within(container)
   await page.findByRole('navigation')
-  fireEvent.click(page.getByRole('link', { name: 'Checklists' }))
+  await openNavLink(page, 'Checklists')
   const heading = await page.findByText('Item deletions')
   const row = heading.parentElement?.querySelector('.pending-deletion-item') as HTMLElement
   expect(row).toBeTruthy()

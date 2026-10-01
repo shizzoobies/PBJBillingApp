@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
 import App from '../App'
 import { createSeedData } from '../lib/seed'
-import { installFetchMock, OWNER_SESSION } from './helpers'
+import { installFetchMock, openNavLink, OWNER_SESSION } from './helpers'
 import type { Checklist } from '../lib/types'
 
 /**
@@ -108,7 +108,7 @@ it('adds the new checklist AND keeps the done-only original — not a replace, a
   const { container } = render(<App />)
   const page = within(container)
   await page.findByRole('navigation')
-  fireEvent.click(page.getByRole('link', { name: 'Checklists' }))
+  await openNavLink(page, 'Checklists')
 
   // The Dashboard (where the app starts) also lists "Mixed close" in its queue,
   // so a bare findByText('Mixed close') can resolve against that row before the

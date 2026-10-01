@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/re
 import App from '../App'
 import { createSeedData } from '../lib/seed'
 import { localDateOnly } from '../lib/utils'
-import { installFetchMock, OWNER_SESSION } from './helpers'
+import { installFetchMock, openNavLink, OWNER_SESSION } from './helpers'
 import type { AppData, Checklist, ChecklistTemplate } from '../lib/types'
 
 /**
@@ -110,7 +110,7 @@ function boot(extraRoutes: Array<(path: string, method: string, body: unknown) =
 /** A local edit the bulk autosave carries: add a plan on the Plans page. */
 async function makeALocalEdit(page: ReturnType<typeof within>) {
   const plansBefore = createSeedData().plans.length
-  fireEvent.click(page.getByRole('link', { name: 'Plans' }))
+  await openNavLink(page, 'Plans')
   fireEvent.click(await page.findByRole('button', { name: 'Add plan' }))
   const submit = page.getAllByRole('button', { name: 'Add plan' }).at(-1) as HTMLElement
   fireEvent.click(submit)

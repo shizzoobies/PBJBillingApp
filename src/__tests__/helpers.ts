@@ -1,3 +1,4 @@
+import { fireEvent, waitFor } from '@testing-library/react'
 import { vi } from 'vitest'
 import { createSeedData } from '../lib/seed'
 import { DEFAULT_FIRM_SETTINGS, type AppData, type SessionUser } from '../lib/types'
@@ -116,4 +117,28 @@ export function installFetchMock(options: FetchMockOptions): void {
   })
 
   vi.stubGlobal('fetch', handler)
+}
+
+/** Anything with `getByRole` - `screen`, or `within(container)`. */
+type NavQueries = { getByRole: (role: string, options: { name: string }) => HTMLElement }
+
+/**
+ * Open a page by its sidebar link, the way a person does - but only once the
+ * app has finished booting.
+ *
+ * `<App>` redirects exactly once as it boots ('/' -> '/dashboard'). The sidebar
+ * renders before that redirect lands, so a test that clicks a link the moment
+ * the nav appears can have its navigation undone by the redirect: the test then
+ * waits on a page that never opens. It only showed under a loaded run, where
+ * the redirect arrives late. So: wait for the redirect, click, and wait until
+ * the link is the current page.
+ */
+export async function openNavLink(queries: NavQueries, name: string): Promise<void> {
+  await waitFor(() => expect(window.location.pathname).not.toBe('/'))
+  await waitFor(() => {
+    const link = queries.getByRole('link', { name })
+    // Click again if a late redirect took the page back.
+    if (link.getAttribute('aria-current') !== 'page') fireEvent.click(link)
+    expect(queries.getByRole('link', { name }).getAttribute('aria-current')).toBe('page')
+  })
 }

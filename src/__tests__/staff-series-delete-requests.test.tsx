@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, configure, fireEvent, render, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
 import App from '../App'
 import { createSeedData } from '../lib/seed'
 import { LAST_RECURRING_STEP_MESSAGE } from '../../lib/series-step-delete.js'
-import { installFetchMock, OWNER_SESSION } from './helpers'
+import { installFetchMock, openNavLink, OWNER_SESSION } from './helpers'
 import type { Checklist, ChecklistTemplate, ItemDeletionRequest, SessionUser } from '../lib/types'
 
 /**
@@ -19,12 +19,8 @@ import type { Checklist, ChecklistTemplate, ItemDeletionRequest, SessionUser } f
  *     and the request stays.
  */
 
-// A whole-app render is slow when the full suite runs in parallel; give the finders room.
-configure({ asyncUtilTimeout: 5000 })
-// And give each test more than one finder's worth: with the default 5 s test
-// limit, a single slow finder used the whole budget and the test timed out
-// instead of failing (or passing) on its assertion.
-vi.setConfig({ testTimeout: 20_000 })
+// Time limits for a whole-app render under load are set once for the suite:
+// vite.config.ts (per-test limit) and src/test/setup.ts (finder limit).
 
 const STAFF_SESSION: SessionUser = {
   id: 'emp-jordan',
@@ -137,7 +133,7 @@ const openChecklists = async () => {
   const { container } = render(<App />)
   const page = within(container)
   await page.findByRole('navigation')
-  fireEvent.click(page.getByRole('link', { name: 'Checklists' }))
+  await openNavLink(page, 'Checklists')
   return page
 }
 

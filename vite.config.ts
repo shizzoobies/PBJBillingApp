@@ -21,5 +21,11 @@ export default defineConfig({
     // server-side libs get .test.mjs files (outside tsc's reach, so a TS
     // test can never import a JS lib and break the clean build).
     include: ['src/**/*.{test,spec}.{ts,tsx}', 'lib/**/*.test.mjs', 'db/**/*.test.mjs'],
+    // The whole-app tests mount <App> and wait on several mocked fetches. On a
+    // loaded machine (two working copies running the suite at once) the 5 s
+    // default turned slow-but-correct tests into timeouts. A passing test is
+    // no slower for this; only a genuinely failing wait takes longer to say so.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
   },
 })

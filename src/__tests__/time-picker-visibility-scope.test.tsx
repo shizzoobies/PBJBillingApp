@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../App'
 import { createSeedData } from '../lib/seed'
 import type { AppData, ChecklistTemplate, SessionUser } from '../lib/types'
-import { installFetchMock } from './helpers'
+import { installFetchMock, openNavLink } from './helpers'
 
 /**
  * What a STAFF member may pick in the time dropdowns, and count as a visible
@@ -139,7 +139,7 @@ describe('a staff member’s time picker and visible clients', () => {
 
     // The summary strip on /time renders for non-owner views; its "Visible
     // clients" tile reads `visibleClients`.
-    fireEvent.click(screen.getByRole('link', { name: 'Time' }))
+    await openNavLink(screen, 'Time')
     await screen.findByText('Visible clients')
 
     await waitFor(() => {
