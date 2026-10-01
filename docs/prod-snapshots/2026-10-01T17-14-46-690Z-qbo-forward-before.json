@@ -1,0 +1,1109 @@
+{
+ "takenAt": "2026-10-01T17:14:46.690Z",
+ "what": "QuickBooks recurring lines on September 2026 drafts set to Oct 13 - Nov 13, 2026; expenses switched to moving dates",
+ "period": "2026-09",
+ "window": {
+  "start": "2026-10-13",
+  "end": "2026-11-13"
+ },
+ "includeWorkforce": false,
+ "invoices": [
+  {
+   "id": "inv-ce2be366",
+   "number": "INV-2026-09-036",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.244Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 0.08,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 6,
+     "detail": "0.08h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-202a1cdd",
+   "number": "INV-2026-09-037",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.253Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 0.27,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 20.25,
+     "detail": "0.27h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-6256bebe",
+   "number": "INV-2026-09-038",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.258Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 125,
+     "hours": 0.04,
+     "label": "Billable hours — Brittany Ferguson",
+     "amount": 5,
+     "detail": "0.04h at $125.00/hr",
+     "roleTier": "CFO"
+    },
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 2.85,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 213.75,
+     "detail": "2.85h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: Workforce Payroll recurring charge & Worker Charge",
+     "amount": 46.04,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-faae7ebe",
+   "number": "INV-2026-09-039",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.267Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "The Jelly Royale",
+     "amount": 2100,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: Workforce Premium Worker Charge + Multistate recurring charge",
+     "amount": 218.1,
+     "detail": "monthly"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Online Plus recurring charge",
+     "amount": 98,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-ba83f5f1",
+   "number": "INV-2026-09-044",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.295Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "The Jelly Royale",
+     "amount": 1000,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: Workforce Premium recurring charge",
+     "amount": 27.1,
+     "detail": "monthly"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Online Plus recurring charge",
+     "amount": 98,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-c410729a",
+   "number": "INV-2026-09-045",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.300Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "Just the Crust",
+     "amount": 115,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-67cbd7fa",
+   "number": "INV-2026-09-047",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.310Z",
+   "line_items": [
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-52b6c9f9",
+   "number": "INV-2026-09-048",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.315Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "The Jelly Royale",
+     "amount": 1200,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Online Plus recurring charge",
+     "amount": 98,
+     "detail": "monthly"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: Workforce Payroll recurring charge",
+     "amount": 51.56,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-c43d48f7",
+   "number": "INV-2026-09-050",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.325Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "Monthly service",
+     "amount": 0,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "QuickBooks Ledger recurring charge — September 13 – October 13, 2026",
+     "amount": 10,
+     "detail": "monthly",
+     "coverageEnd": "2026-10-13",
+     "recurringId": "recur-063e49f3",
+     "coverageStart": "2026-09-13",
+     "needsCoverageConfirmation": false
+    }
+   ]
+  },
+  {
+   "id": "inv-8e2aa2d9",
+   "number": "INV-2026-09-052",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.340Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "Just the Crust",
+     "amount": 60,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-e1b5ad6a",
+   "number": "INV-2026-09-053",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.345Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 0.35,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 26.25,
+     "detail": "0.35h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-8799fc2e",
+   "number": "INV-2026-09-055",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.354Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "Monthly service",
+     "amount": 0,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge Sep 13, 2026 - Oct 13, 2026",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-c6019f74",
+   "number": "INV-2026-09-056",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.359Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 125,
+     "hours": 0.1,
+     "label": "Billable hours — Brittany Ferguson",
+     "amount": 12.5,
+     "detail": "0.10h at $125.00/hr",
+     "roleTier": "CFO"
+    },
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 0.82,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 61.5,
+     "detail": "0.82h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-67f56df7",
+   "number": "INV-2026-09-057",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.364Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "Just the Crust",
+     "amount": 100,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-147aee83",
+   "number": "INV-2026-09-058",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.369Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "Just the Crust",
+     "amount": 140,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-513b34a3",
+   "number": "INV-2026-09-059",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.373Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "Just the Crust",
+     "amount": 185,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Online Payroll Core recurring charge",
+     "amount": 40.52,
+     "detail": "monthly"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-d5fb4043",
+   "number": "INV-2026-09-060",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.378Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "Just the Crust",
+     "amount": 400,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Online Payroll Core recurring charge",
+     "amount": 46.9,
+     "detail": "monthly"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Online Essentials recurring charge",
+     "amount": 59,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-d296793a",
+   "number": "INV-2026-09-061",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.382Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 125,
+     "hours": 3.65,
+     "label": "Billable hours — Brittany Ferguson",
+     "amount": 456.25,
+     "detail": "3.65h at $125.00/hr",
+     "roleTier": "CFO"
+    },
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 1.95,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 146.25,
+     "detail": "1.95h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-db85684d",
+   "number": "INV-2026-09-062",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.387Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 0.79,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 59.25,
+     "detail": "0.79h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-e6eeafbe",
+   "number": "INV-2026-09-063",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.392Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 125,
+     "hours": 5.55,
+     "label": "Billable hours — Brittany Ferguson",
+     "amount": 693.75,
+     "detail": "5.55h at $125.00/hr",
+     "roleTier": "CFO"
+    },
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 4.89,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 366.75,
+     "detail": "4.89h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-d29c3933",
+   "number": "INV-2026-09-064",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.397Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 0.16,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 12,
+     "detail": "0.16h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-323134a4",
+   "number": "INV-2026-09-065",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.402Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "Just the Crust",
+     "amount": 175,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-2e4e2f3d",
+   "number": "INV-2026-09-066",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.408Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 125,
+     "hours": 0.16,
+     "label": "Billable hours — Brittany Ferguson",
+     "amount": 20,
+     "detail": "0.16h at $125.00/hr",
+     "roleTier": "CFO"
+    },
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 0.14,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 10.5,
+     "detail": "0.14h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-e3da57fb",
+   "number": "INV-2026-09-068",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.417Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "Just the Crust",
+     "amount": 225,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-c677e383",
+   "number": "INV-2026-09-069",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.421Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "Just the Crust",
+     "amount": 225,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-aeca641e",
+   "number": "INV-2026-09-070",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.427Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 0.19,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 14.25,
+     "detail": "0.19h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-83c061d8",
+   "number": "INV-2026-09-071",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.431Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 125,
+     "hours": 0.96,
+     "label": "Billable hours — Brittany Ferguson",
+     "amount": 120,
+     "detail": "0.96h at $125.00/hr",
+     "roleTier": "CFO"
+    },
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 1.19,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 89.25,
+     "detail": "1.19h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-a0b249d0",
+   "number": "INV-2026-09-073",
+   "status": "draft",
+   "updated_at": "2026-10-01T12:53:02.442Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "Just the Crust",
+     "amount": 75,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: QuickBooks Ledger recurring charge",
+     "amount": 10,
+     "detail": "monthly"
+    }
+   ]
+  }
+ ],
+ "expenses": [
+  {
+   "id": "recur-221020e0",
+   "client_id": "client-wdmb88x",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-a54b97de",
+   "client_id": "client-rryq1yn",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-5be79fd0",
+   "client_id": "client-j1kaxr2",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-a8f90ee3",
+   "client_id": "client-bp4il41",
+   "description": "QuickBooks Online Plus recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-f61794de",
+   "client_id": "client-fv8gray",
+   "description": "QuickBooks Online Plus recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-b81bc221",
+   "client_id": "client-2drk4li",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-7a4fb851",
+   "client_id": "client-9as12jy",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-1ef5f754",
+   "client_id": "client-f7hi3ir",
+   "description": "QuickBooks Online Plus recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-063e49f3",
+   "client_id": "client-aebc739b",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-09-13T04:00:00.000Z",
+   "coverage_end": "2026-10-13T04:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-10-13",
+     "start": "2026-09-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T12:53:02.325Z"
+  },
+  {
+   "id": "recur-49522ed1",
+   "client_id": "client-5eqylk0",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T12:53:02.332Z"
+  },
+  {
+   "id": "recur-6abd8495",
+   "client_id": "client-h8rwhnn",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-3e4ec42d",
+   "client_id": "client-o4zfkfz",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-b36b1807",
+   "client_id": "client-7e51c20c",
+   "description": "QuickBooks Ledger recurring charge Sep 13, 2026 - Oct 13, 2026",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-391873e5",
+   "client_id": "client-yqkey3m",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-687c96fc",
+   "client_id": "client-96svwyc",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-42483b60",
+   "client_id": "client-viov05e",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-79fa3b66",
+   "client_id": "client-p8u5b1p",
+   "description": "QuickBooks Online Payroll Core recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-cff4dbc2",
+   "client_id": "client-p8u5b1p",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-cf52afbc",
+   "client_id": "client-urv06ij",
+   "description": "QuickBooks Online Payroll Core recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-fd405c24",
+   "client_id": "client-urv06ij",
+   "description": "QuickBooks Online Essentials recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-045ef124",
+   "client_id": "client-mv4vrwv",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-cd8d99d6",
+   "client_id": "client-j17sdts",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-f0bef0d7",
+   "client_id": "client-fc88ygp",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-ebde7621",
+   "client_id": "client-xmozesp",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-3952c049",
+   "client_id": "client-vjecmxj",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-6b8a336a",
+   "client_id": "client-p483k7v",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-a766939c",
+   "client_id": "client-lz1wlvi",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-57ab7f86",
+   "client_id": "client-u8i5dcj",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-a79703cd",
+   "client_id": "client-tjfzeqv",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-f0762a88",
+   "client_id": "client-5dxovmv",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-71d2746a",
+   "client_id": "client-dks8yp5",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-09-13T04:00:00.000Z",
+   "coverage_end": "2026-10-13T04:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-08": {
+     "end": "2026-10-13",
+     "start": "2026-09-13",
+     "reason": null,
+     "needsConfirmation": false
+    },
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T12:53:02.436Z"
+  },
+  {
+   "id": "recur-22a1af6a",
+   "client_id": "client-nn18dtd",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  }
+ ]
+}

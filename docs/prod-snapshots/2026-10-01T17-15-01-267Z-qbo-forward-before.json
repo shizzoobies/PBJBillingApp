@@ -1,0 +1,867 @@
+{
+ "takenAt": "2026-10-01T17:15:01.267Z",
+ "what": "QuickBooks recurring lines on September 2026 drafts set to Oct 13 - Nov 13, 2026; expenses switched to moving dates",
+ "period": "2026-09",
+ "window": {
+  "start": "2026-10-13",
+  "end": "2026-11-13"
+ },
+ "includeWorkforce": true,
+ "invoices": [
+  {
+   "id": "inv-6256bebe",
+   "number": "INV-2026-09-038",
+   "status": "draft",
+   "updated_at": "2026-10-01T17:14:47.142Z",
+   "line_items": [
+    {
+     "kind": "hourly",
+     "rate": 125,
+     "hours": 0.04,
+     "label": "Billable hours — Brittany Ferguson",
+     "amount": 5,
+     "detail": "0.04h at $125.00/hr",
+     "roleTier": "CFO"
+    },
+    {
+     "kind": "hourly",
+     "rate": 75,
+     "hours": 2.85,
+     "label": "Billable hours — Lisa Mockabee",
+     "amount": 213.75,
+     "detail": "2.85h at $75.00/hr",
+     "roleTier": "Bookkeeper"
+    },
+    {
+     "kind": "recurring",
+     "label": "QuickBooks Ledger recurring charge — October 13 – November 13, 2026",
+     "amount": 10,
+     "detail": "monthly",
+     "coverageEnd": "2026-11-13",
+     "recurringId": "recur-5be79fd0",
+     "coverageStart": "2026-10-13"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: Workforce Payroll recurring charge & Worker Charge",
+     "amount": 46.04,
+     "detail": "monthly"
+    }
+   ]
+  },
+  {
+   "id": "inv-faae7ebe",
+   "number": "INV-2026-09-039",
+   "status": "draft",
+   "updated_at": "2026-10-01T17:14:47.142Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "The Jelly Royale",
+     "amount": 2100,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: Workforce Premium Worker Charge + Multistate recurring charge",
+     "amount": 218.1,
+     "detail": "monthly"
+    },
+    {
+     "kind": "recurring",
+     "label": "QuickBooks Online Plus recurring charge — October 13 – November 13, 2026",
+     "amount": 98,
+     "detail": "monthly",
+     "coverageEnd": "2026-11-13",
+     "recurringId": "recur-a8f90ee3",
+     "coverageStart": "2026-10-13"
+    }
+   ]
+  },
+  {
+   "id": "inv-ba83f5f1",
+   "number": "INV-2026-09-044",
+   "status": "draft",
+   "updated_at": "2026-10-01T17:14:47.142Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "The Jelly Royale",
+     "amount": 1000,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: Workforce Premium recurring charge",
+     "amount": 27.1,
+     "detail": "monthly"
+    },
+    {
+     "kind": "recurring",
+     "label": "QuickBooks Online Plus recurring charge — October 13 – November 13, 2026",
+     "amount": 98,
+     "detail": "monthly",
+     "coverageEnd": "2026-11-13",
+     "recurringId": "recur-f61794de",
+     "coverageStart": "2026-10-13"
+    }
+   ]
+  },
+  {
+   "id": "inv-52b6c9f9",
+   "number": "INV-2026-09-048",
+   "status": "draft",
+   "updated_at": "2026-10-01T17:14:47.142Z",
+   "line_items": [
+    {
+     "kind": "plan",
+     "label": "The Jelly Royale",
+     "amount": 1200,
+     "detail": "Monthly service"
+    },
+    {
+     "kind": "recurring",
+     "label": "QuickBooks Online Plus recurring charge — October 13 – November 13, 2026",
+     "amount": 98,
+     "detail": "monthly",
+     "coverageEnd": "2026-11-13",
+     "recurringId": "recur-1ef5f754",
+     "coverageStart": "2026-10-13"
+    },
+    {
+     "kind": "recurring",
+     "label": "Recurring: Workforce Payroll recurring charge",
+     "amount": 51.56,
+     "detail": "monthly"
+    }
+   ]
+  }
+ ],
+ "expenses": [
+  {
+   "id": "recur-221020e0",
+   "client_id": "client-wdmb88x",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-a54b97de",
+   "client_id": "client-rryq1yn",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-5be79fd0",
+   "client_id": "client-j1kaxr2",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-bccf50b9",
+   "client_id": "client-j1kaxr2",
+   "description": "Workforce Payroll recurring charge & Worker Charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-9d4b0460",
+   "client_id": "client-bp4il41",
+   "description": "Workforce Premium Worker Charge + Multistate recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-a8f90ee3",
+   "client_id": "client-bp4il41",
+   "description": "QuickBooks Online Plus recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-584a3cdc",
+   "client_id": "client-6ygp3wp",
+   "description": "Workforce Payroll recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T12:53:02.273Z"
+  },
+  {
+   "id": "recur-edfcc6ff",
+   "client_id": "client-fv8gray",
+   "description": "Workforce Premium recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-f61794de",
+   "client_id": "client-fv8gray",
+   "description": "QuickBooks Online Plus recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-b81bc221",
+   "client_id": "client-2drk4li",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-7a4fb851",
+   "client_id": "client-9as12jy",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-1ef5f754",
+   "client_id": "client-f7hi3ir",
+   "description": "QuickBooks Online Plus recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-8439655e",
+   "client_id": "client-f7hi3ir",
+   "description": "Workforce Payroll recurring charge",
+   "coverage_enabled": false,
+   "coverage_template": "",
+   "coverage_start": null,
+   "coverage_end": null,
+   "coverage_anchor_day": null,
+   "coverage_history": {},
+   "updated_at": "2026-10-01T00:01:59.845Z"
+  },
+  {
+   "id": "recur-063e49f3",
+   "client_id": "client-aebc739b",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-49522ed1",
+   "client_id": "client-5eqylk0",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-197a37b2",
+   "client_id": "client-6t9crg6",
+   "description": "Workforce Payroll recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T12:53:02.332Z"
+  },
+  {
+   "id": "recur-2d2aea7b",
+   "client_id": "client-yw0a4eo",
+   "description": "Workforce Payroll recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-09-15T04:00:00.000Z",
+   "coverage_end": "2026-10-13T04:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-08": {
+     "end": "2026-10-13",
+     "start": "2026-09-15",
+     "reason": null,
+     "needsConfirmation": false
+    },
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T12:53:02.332Z"
+  },
+  {
+   "id": "recur-6abd8495",
+   "client_id": "client-h8rwhnn",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-3e4ec42d",
+   "client_id": "client-o4zfkfz",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-b36b1807",
+   "client_id": "client-7e51c20c",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-391873e5",
+   "client_id": "client-yqkey3m",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-687c96fc",
+   "client_id": "client-96svwyc",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-42483b60",
+   "client_id": "client-viov05e",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-79fa3b66",
+   "client_id": "client-p8u5b1p",
+   "description": "QuickBooks Online Payroll Core recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-cff4dbc2",
+   "client_id": "client-p8u5b1p",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-cf52afbc",
+   "client_id": "client-urv06ij",
+   "description": "QuickBooks Online Payroll Core recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-fd405c24",
+   "client_id": "client-urv06ij",
+   "description": "QuickBooks Online Essentials recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-045ef124",
+   "client_id": "client-mv4vrwv",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-cd8d99d6",
+   "client_id": "client-j17sdts",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-f0bef0d7",
+   "client_id": "client-fc88ygp",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-ebde7621",
+   "client_id": "client-xmozesp",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-3952c049",
+   "client_id": "client-vjecmxj",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-6b8a336a",
+   "client_id": "client-p483k7v",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-a766939c",
+   "client_id": "client-lz1wlvi",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-57ab7f86",
+   "client_id": "client-u8i5dcj",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-a79703cd",
+   "client_id": "client-tjfzeqv",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-f0762a88",
+   "client_id": "client-5dxovmv",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-71d2746a",
+   "client_id": "client-dks8yp5",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-09-13T04:00:00.000Z",
+   "coverage_end": "2026-10-13T04:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-08": {
+     "end": "2026-10-13",
+     "start": "2026-09-13",
+     "reason": null,
+     "needsConfirmation": false
+    },
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  },
+  {
+   "id": "recur-22a1af6a",
+   "client_id": "client-nn18dtd",
+   "description": "QuickBooks Ledger recurring charge",
+   "coverage_enabled": true,
+   "coverage_template": "{description} — {range}",
+   "coverage_start": "2026-10-13T04:00:00.000Z",
+   "coverage_end": "2026-11-13T05:00:00.000Z",
+   "coverage_anchor_day": 13,
+   "coverage_history": {
+    "2026-09": {
+     "end": "2026-11-13",
+     "start": "2026-10-13",
+     "reason": null,
+     "needsConfirmation": false
+    }
+   },
+   "updated_at": "2026-10-01T17:14:47.142Z"
+  }
+ ]
+}
