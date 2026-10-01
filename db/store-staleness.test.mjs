@@ -7316,6 +7316,49 @@ describe('pending client notes — attach pass (file backend)', () => {
     }
   })
 
+  it("ignores a split push's new checklist: the note waits for the next real occurrence", async () => {
+    const note = await store.createClientPendingNote('c-pn-split', {
+      templateId: 'tpl-pn',
+      kind: 'task',
+      body: 'New hire starting',
+    })
+    const t = new Date(note.createdAt).getTime()
+    const iso = (offsetMs) => new Date(t + offsetMs).toISOString()
+    await store.write(
+      workspace({
+        clients: [{ id: 'c-pn-split', name: 'Split' }],
+        checklists: [
+          // The split's new row: created NOW for an OLD occurrence, due sooner
+          // than the real next one - the earliest-created-after rule alone
+          // would pick it.
+          checklistFixture('chk-split-new', {
+            createdAt: iso(1000),
+            dueDate: '2026-09-05',
+            clientId: 'c-pn-split',
+          }),
+          checklistFixture('chk-real-next', {
+            createdAt: iso(2000),
+            dueDate: '2026-10-01',
+            clientId: 'c-pn-split',
+          }),
+        ],
+      }),
+    )
+    // A bulk save never authors the push stamps, so stamp the row as the split
+    // would have.
+    const data = await persisted()
+    data.checklists.find((c) => c.id === 'chk-split-new').pushedFromChecklistId = 'chk-old-occurrence'
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-split' })).toBe(1)
+
+    const updated = await store.getClientPendingNote(note.id)
+    expect(updated.attachedChecklistId).toBe('chk-real-next')
+    const after = await persisted()
+    expect(after.checklists.find((c) => c.id === 'chk-split-new').items).toHaveLength(1)
+    expect(after.checklists.find((c) => c.id === 'chk-real-next').items).toHaveLength(2)
+  })
+
   it('is idempotent: a second pass attaches nothing more and does not duplicate the item', async () => {
     // Its own client: a note an earlier test attached to a checklist this
     // workspace no longer holds is pending AGAIN (by decision), and would
@@ -7950,6 +7993,7 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
             // Honored only when the SQL actually asks for it, so the
             // first-stage pin below proves the clause, not the fixture.
             (!/coalesce\(stage_index, 0\) = 0/i.test(trimmed) || (c.stage_index ?? 0) === 0) &&
+            (!/pushed_from_checklist_id is null/i.test(trimmed) || !c.pushed_from_checklist_id) &&
             (c.created_at ? c.created_at > createdAfter : c.due_date > dueAfter),
         )
         .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)))
@@ -8051,6 +8095,45 @@ describe('pending client notes — attach pass (postgres branch)', () => {
     expect(stamp.inTransaction).toBe(true)
     expect(fake.matching(/^begin$/i)).toHaveLength(1)
     expect(fake.matching(/^commit$/i)).toHaveLength(1)
+  })
+
+  it("never attaches to a split push's new checklist (pushed_from_checklist_id is set)", async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        {
+          id: 'pnote-split',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'note',
+          body: 'Heads up',
+          created_at: '2026-09-01T00:00:00.000Z',
+          attached_checklist_id: null,
+        },
+      ],
+      checklists: [
+        {
+          id: 'chk-split-new',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-09-05',
+          created_at: '2026-09-20T00:00:00.000Z',
+          pushed_from_checklist_id: 'chk-old-occurrence',
+        },
+        {
+          id: 'chk-real-next',
+          template_id: 'tpl-pn',
+          client_id: 'c1',
+          due_date: '2026-10-01',
+          created_at: '2026-09-21T00:00:00.000Z',
+        },
+      ],
+    })
+
+    expect(await postgresStore(fake).attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+    expect(fake.notes[0].attached_checklist_id).toBe('chk-real-next')
+    // The clause is in the SQL itself, not only in the fixture.
+    const [lookup] = fake.matching(/^select id\s+from checklists/i)
+    expect(lookup.text).toMatch(/pushed_from_checklist_id is null/i)
   })
 
   it('is idempotent: on conflict do nothing on the item insert, second pass attaches nothing', async () => {
@@ -8986,6 +9069,57 @@ describe('quiet skip (file backend)', () => {
     expect(pte['pte-add']).toBe(moved.id)
   })
 
+  it('moves attached client-page notes with the open work (task notes by item, note-kind notes always)', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          instance({
+            id: 'cl-notes',
+            items: [
+              { id: 'item-done', label: 'Reconcile', done: true },
+              { id: 'item-pn-done', label: 'A task note already finished', done: true },
+              { id: 'item-open', label: 'Send statements', done: false },
+              { id: 'item-pn-open', label: 'A task note still open', done: false },
+            ],
+          }),
+        ],
+        checklistTemplates: [skippableTemplate],
+      }),
+    )
+    const note = (id, over) => ({
+      id,
+      clientId: 'c1',
+      templateId: 'tmpl-skip',
+      kind: 'note',
+      body: id,
+      attachedChecklistId: 'cl-notes',
+      attachedItemId: null,
+      ...over,
+    })
+    const authState = await authPersisted()
+    authState.clientPendingNotes = [
+      note('pn-task-open', { kind: 'task', attachedItemId: 'item-pn-open' }),
+      note('pn-task-done', { kind: 'task', attachedItemId: 'item-pn-done' }),
+      note('pn-note', {}),
+      note('pn-elsewhere', { attachedChecklistId: 'cl-else' }),
+      note('pn-pending', { attachedChecklistId: null }),
+    ]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+
+    const { checklist: moved } = await store.pushChecklistInstance('cl-notes', 'emp-1', '2026-09-30')
+
+    const after = Object.fromEntries(
+      (await authPersisted()).clientPendingNotes.map((entry) => [entry.id, entry.attachedChecklistId]),
+    )
+    expect(after['pn-task-open']).toBe(moved.id)
+    // The finished task note's item stayed on the done-only record, so it stays.
+    expect(after['pn-task-done']).toBe('cl-notes')
+    // A note-kind note has no item: it belongs with the live work.
+    expect(after['pn-note']).toBe(moved.id)
+    expect(after['pn-elsewhere']).toBe('cl-else')
+    expect(after['pn-pending']).toBeNull()
+  })
+
   it('re-points waits held by steps elsewhere (items and sub-steps) at the new checklist', async () => {
     await store.write(
       workspace({
@@ -9385,6 +9519,7 @@ describe('quiet skip (postgres branch)', () => {
         if (/^update checklist_items set checklist_id/i.test(text)) return 'reparent'
         if (/^update item_deletion_requests/i.test(text)) return 'repoint-deletions'
         if (/^update pending_task_edits/i.test(text)) return 'repoint-edits'
+        if (/^update client_pending_notes/i.test(text)) return 'repoint-notes'
         if (/^update checklist_items set waiting_for_checklist_id/i.test(text)) return 'repoint-waits'
         if (/^select id, sub_items from checklist_items/i.test(text)) return 'find-sub-waits'
         if (/^update checklist_items set sub_items/i.test(text)) return 'repoint-sub-waits'
@@ -9413,6 +9548,7 @@ describe('quiet skip (postgres branch)', () => {
       'reparent',
       'repoint-deletions',
       'repoint-edits',
+      'repoint-notes',
       'repoint-waits',
       'find-sub-waits',
       'commit',
@@ -9457,6 +9593,25 @@ describe('quiet skip (postgres branch)', () => {
     // The item rows are locked before the open/done decision is made.
     const [itemLock] = fake.matching(/^select id, checklist_id, label[\s\S]*for update$/i)
     expect(itemLock).toBeTruthy()
+  })
+
+  it('re-points attached client-page notes in the same transaction as the split', async () => {
+    const fake = fakePostgres({
+      pushChecklistRows: [splitPushRow],
+      pushItemRows: splitPushItems,
+    })
+
+    await postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
+
+    const [insert] = fake.matching(/^insert into checklists \(/i)
+    const [notes] = fake.matching(/^update client_pending_notes/i)
+    // (The statement order test above pins that it runs between begin and commit.)
+    // new id, original id, the ids of the items that moved.
+    expect(notes.params).toEqual([insert.params[0], 'cl-mixed', ['item-open']])
+    expect(notes.text).toMatch(/set attached_checklist_id = \$1/i)
+    expect(notes.text).toMatch(/where attached_checklist_id = \$2/i)
+    // Note-kind notes always follow; task-kind notes only when their item moved.
+    expect(notes.text).toMatch(/kind = 'note' or attached_item_id = any\(\$3::text\[\]\)/i)
   })
 
   it('the fake REFUSES the old order — insert before hand-off raises 23505', async () => {

@@ -19953,6 +19953,10 @@ export class AppDataStore {
    * `dueDate > note.createdAt's date` for rows that truly carry no
    * `createdAt` — picking the earliest by due date. Returns `{ id }` or null.
    *
+   * A split push's new row (`pushedFromChecklistId` set) never qualifies: it is
+   * the same occurrence carried forward, stamped `createdAt = now` only because
+   * it is a new row, and a note must wait for the next REAL occurrence.
+   *
    * Only a cycle's FIRST stage qualifies (`stageIndex` 0, or no stage at all).
    * On a multi-stage template, "the next checklist that populates" is the next
    * CYCLE; a stage-advance spawn (stageIndex > 0) is the same cycle's later
@@ -19968,6 +19972,7 @@ export class AppDataStore {
             and client_id = $2
             and deleted_at is null
             and skipped_at is null
+            and pushed_from_checklist_id is null
             and coalesce(stage_index, 0) = 0
             and (
               (created_at is not null and created_at > $3)
@@ -19986,6 +19991,7 @@ export class AppDataStore {
           return false
         }
         if (checklist.deletedAt || checklist.skippedAt) return false
+        if (checklist.pushedFromChecklistId) return false
         if (typeof checklist.stageIndex === 'number' && checklist.stageIndex !== 0) return false
         if (typeof checklist.createdAt === 'string' && checklist.createdAt) {
           return checklist.createdAt > note.createdAt
@@ -20791,6 +20797,15 @@ export class AppDataStore {
               and (scope in ('details', 'add_item') or item_id = any($3::text[]))`,
           [newChecklistId, checklistId, openItemIds],
         )
+        // Notes from the client page follow the live work too: a task-kind
+        // note's item (`item-pn-*`) may have moved with the open steps, and a
+        // note-kind note belongs with the live work, not the done-only record.
+        await client.query(
+          `update client_pending_notes set attached_checklist_id = $1
+            where attached_checklist_id = $2
+              and (kind = 'note' or attached_item_id = any($3::text[]))`,
+          [newChecklistId, checklistId, openItemIds],
+        )
 
         // (5) Waits on this task, held by steps elsewhere, follow the open work
         // too: the "ready to continue" notice fires when the task they wait on
@@ -20938,6 +20953,18 @@ export class AppDataStore {
         (req.scope === 'details' || req.scope === 'add_item' || openItemIds.has(req.itemId))
       ) {
         req.checklistId = newChecklist.id
+        authChanged = true
+      }
+    }
+    // Attached client-page notes follow the live work (see the Postgres branch).
+    for (const note of Array.isArray(authState.clientPendingNotes)
+      ? authState.clientPendingNotes
+      : []) {
+      if (
+        note.attachedChecklistId === target.id &&
+        (note.kind === 'note' || openItemIds.has(note.attachedItemId))
+      ) {
+        note.attachedChecklistId = newChecklist.id
         authChanged = true
       }
     }
