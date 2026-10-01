@@ -142,7 +142,7 @@ function GanttView({
     const dueDateOnly = checklist.dueDate
     const dueDate = new Date(`${dueDateOnly}T12:00:00`)
     const startSource = checklist.createdAt
-      ? new Date(`${checklist.createdAt}T12:00:00`)
+      ? new Date(`${checklist.createdAt.slice(0, 10)}T12:00:00`)
       : new Date(dueDate.getTime() - 7 * 24 * 60 * 60 * 1000)
 
     const startMs = Math.max(rangeStart.getTime(), startSource.getTime())

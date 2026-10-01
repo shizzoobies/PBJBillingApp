@@ -1965,9 +1965,11 @@ export function ActiveChecklistsBody({ client, data }: { client: Client; data: A
     ? checklists.filter((entry) => isDueThisMonth(entry.dueDate, today))
     : checklists
 
-  // The notes attached to the cards below, fetched ONCE for all of them.
+  // The notes attached to the cards below, fetched ONCE for all of them. Keyed
+  // on every checklist of the client, not the "due this month" subset, so
+  // flipping that toggle does not refetch.
   const attachedNotesFor = useAttachedClientNotes(
-    shownChecklists.filter((entry) => !entry.projected).map((entry) => entry.id),
+    checklists.filter((entry) => !entry.projected).map((entry) => entry.id),
   )
 
   if (checklists.length === 0) {

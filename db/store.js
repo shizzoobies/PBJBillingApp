@@ -6766,11 +6766,34 @@ export class AppDataStore {
   }
 
   async read() {
+    return (await this.readWithVersion()).data
+  }
+
+  /**
+   * `read()` plus the workspace version (staleness-guard token) that is SAFE to
+   * hand a tab together with the returned data: it was captured BEFORE the
+   * final workspace read that produced that data, never after. A write that
+   * lands in between (another request's pending-note attach, say) therefore
+   * moves the persisted state PAST the version the tab holds, and the tab's
+   * next save is refused (409) instead of passing the guard and wiping rows it
+   * never saw. Computing the version after `read()` returns (the old shape of
+   * `GET /api/app-data`) left exactly that window open.
+   *
+   * `afterWriteBack` is internal: the re-read that follows a successful
+   * materializer write-back. It serves what was persisted and does NOT run the
+   * materializer again.
+   *
+   * @returns {Promise<{ data: object, version: string }>}
+   */
+  async readWithVersion({ afterWriteBack = false } = {}) {
     if (this.pool) {
+      const firstVersion = await postgresWorkspaceVersion(this.pool)
       const data = await this._readPostgresWorkspace()
-      const materialized = materializeRecurringChecklists(data)
+      const materialized = afterWriteBack
+        ? { changed: false, data }
+        : materializeRecurringChecklists(data)
       if (!materialized.changed) {
-        return data
+        return { data, version: firstVersion }
       }
 
       // Persist the freshly-materialized checklists — GUARDED. The write-back
@@ -6790,34 +6813,33 @@ export class AppDataStore {
       // load; if this write-back throws (e.g. a constraint violation on one
       // bad row), an unguarded throw turns a single bad record into a TOTAL
       // outage for every user (the 2026-06-17 incident).
+      //
+      // Whatever is served carries the version captured before the read it
+      // came from: `firstVersion` for the first snapshot, `expectedVersion`
+      // (the one the write-back is guarded by) for the re-read.
       let served = materialized.data
+      let servedVersion = firstVersion
+      let wroteBack = false
       try {
         const expectedVersion = await postgresWorkspaceVersion(this.pool)
         const fresh = await this._readPostgresWorkspace()
         const freshMaterialized = materializeRecurringChecklists(fresh)
         if (!freshMaterialized.changed) {
           // Another server (or a concurrent read) already persisted the spawn.
-          return fresh
+          return { data: fresh, version: expectedVersion }
         }
         served = freshMaterialized.data
+        servedVersion = expectedVersion
         await this.write(freshMaterialized.data, { expectedVersion })
+        wroteBack = true
         // The write-back landed, so any pending note waiting on a template
         // that just spawned may now have a checklist to attach to. Only runs
         // on this SUCCESS path — never against a write that got refused.
-        let attachedCount = 0
         try {
-          attachedCount = await this.attachPendingClientNotes({})
+          await this.attachPendingClientNotes({})
         } catch (attachError) {
           console.error('[read] pending-notes attach pass failed:', attachError)
         }
-        // A task-kind attachment inserted an `item-pn-*` row AFTER the snapshot
-        // we hold was taken, and the GET handler computes the workspace version
-        // from the persisted state AFTER this returns. Serving the pre-attach
-        // snapshot under the post-attach version would let the tab's next save
-        // pass the staleness guard and delete that item — so hand back what is
-        // actually persisted, and data and version agree.
-        if (attachedCount > 0) return await this.read()
-        return freshMaterialized.data
       } catch (error) {
         if (error instanceof StaleWorkspaceError) {
           console.warn(
@@ -6829,8 +6851,23 @@ export class AppDataStore {
         // The freshest snapshot we materialized (the re-read when it got that
         // far, the first read otherwise). Its spawned ids were never
         // persisted; the next read's write-back mints its own.
-        return served
+        return { data: served, version: servedVersion }
       }
+      // The write-back (and any attach pass) persisted changes our snapshot
+      // does not carry — a task-kind attachment inserts an `item-pn-*` row — so
+      // hand back what is actually persisted, under a version captured just
+      // before THAT read. OUTSIDE the try above on purpose, so a failed attach
+      // pass can never skip it. If the re-read itself fails, the snapshot we
+      // hold is still safe to serve: its version predates it, so anything the
+      // attach pass added only makes the tab's next save 409.
+      if (wroteBack) {
+        try {
+          return await this.readWithVersion({ afterWriteBack: true })
+        } catch (rereadError) {
+          console.error('[read] re-read after materialize write-back failed; serving in-memory data:', rereadError)
+        }
+      }
+      return { data: served, version: servedVersion }
     }
 
     const data = await readJson(localDataPath)
@@ -6954,8 +6991,10 @@ export class AppDataStore {
       backfilled = true
     }
 
-    const materialized = materializeRecurringChecklists(data)
-    if (materialized.changed || backfilled) {
+    const materialized = afterWriteBack
+      ? { changed: false, data }
+      : materializeRecurringChecklists(data)
+    if (!afterWriteBack && (materialized.changed || backfilled)) {
       // Same guarded write-back as the Postgres branch above: the fingerprint
       // captured right after the file was read gates the save, so a write that
       // landed mid-read refuses this snapshot instead of being erased by it.
@@ -6984,21 +7023,27 @@ export class AppDataStore {
       // when the write-back actually persisted — a refused/failed write-back
       // leaves every pending note exactly as pending as it was.
       if (writeBackSucceeded) {
-        let attachedCount = 0
         try {
-          attachedCount = await this.attachPendingClientNotes({})
+          await this.attachPendingClientNotes({})
         } catch (attachError) {
           console.error('[read] pending-notes attach pass failed:', attachError)
         }
-        // Same reasoning as the Postgres branch: an attached task item is not in
-        // the snapshot we hold, and the version is computed from the file after
-        // we return — so return the persisted workspace, not the stale one.
-        if (attachedCount > 0) return await this.read()
+        // Same reasoning as the Postgres branch: the write-back and an attached
+        // task item changed the file past the snapshot we hold, so return the
+        // persisted workspace under a version taken before THAT read. The
+        // `persistedVersion` below is the fingerprint of the file BEFORE this
+        // write-back, so it would make the tab's very next save 409 against
+        // our own write; the re-read's own pre-read fingerprint does not.
+        try {
+          return await this.readWithVersion({ afterWriteBack: true })
+        } catch (rereadError) {
+          console.error('[read] re-read after materialize write-back failed; serving in-memory data:', rereadError)
+        }
       }
-      return materialized.data
+      return { data: materialized.data, version: persistedVersion }
     }
 
-    return data
+    return { data, version: persistedVersion }
   }
 
   /**
@@ -19621,7 +19666,12 @@ export class AppDataStore {
         await this.pool.query(
           `update client_pending_notes
               set attached_checklist_id = null, attached_item_id = null, attached_at = null
-            where id = any($1::text[])`,
+            where id = any($1::text[])
+              and not exists (
+                select 1 from checklists c
+                 where c.id = client_pending_notes.attached_checklist_id
+                   and c.deleted_at is null
+              )`,
           [staleIds],
         )
       }
@@ -19782,11 +19832,27 @@ export class AppDataStore {
 
     const data = await readJson(localDataPath)
     const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId)
+    // Same rule as the Postgres branch: item ids share one namespace and a
+    // deleted checklist keeps its items (in `recycledChecklists` here), so an
+    // id already used by a DIFFERENT checklist gets this checklist's id appended.
+    const takenByOther = [
+      ...(Array.isArray(data.checklists) ? data.checklists : []),
+      ...(Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []),
+    ].some(
+      (entry) =>
+        entry &&
+        entry.id !== checklistId &&
+        Array.isArray(entry.items) &&
+        entry.items.some((item) => item && item.id === itemId),
+    )
+    const finalItemId = takenByOther
+      ? `${itemId}-${String(checklistId).replace(/^check-/, '')}`
+      : itemId
     let itemAdded = false
     if (checklist) {
       if (!Array.isArray(checklist.items)) checklist.items = []
-      if (!checklist.items.some((item) => item.id === itemId)) {
-        checklist.items.push({ id: itemId, label, done: false })
+      if (!checklist.items.some((item) => item.id === finalItemId)) {
+        checklist.items.push({ id: finalItemId, label, done: false })
         itemAdded = true
       }
     }
@@ -19798,7 +19864,7 @@ export class AppDataStore {
     const note = list.find((entry) => entry.id === noteId)
     if (note && !note.attachedChecklistId) {
       note.attachedChecklistId = checklistId
-      note.attachedItemId = itemId
+      note.attachedItemId = finalItemId
       note.attachedAt = nowIso()
       await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
       return true

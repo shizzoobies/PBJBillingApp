@@ -159,7 +159,12 @@ export async function fetchAppData(signal: AbortSignal, previewAs?: string | nul
   return (await response.json()) as AppData
 }
 
-export async function saveAppData(data: AppData) {
+/**
+ * Saves the workspace. Resolves `{ refetch: true }` when the server changed
+ * the workspace beyond what this tab sent (a pending note attached to a
+ * checklist), so the caller can ask for its normal live-sync refetch.
+ */
+export async function saveAppData(data: AppData): Promise<{ refetch: boolean }> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (workspaceVersion) {
     headers[WORKSPACE_VERSION_HEADER] = workspaceVersion
@@ -198,6 +203,13 @@ export async function saveAppData(data: AppData) {
   // The write moved the fingerprint; adopt the new one or this tab's very next
   // save would be refused as stale against its own change.
   workspaceVersion = response.headers.get(WORKSPACE_VERSION_HEADER) ?? workspaceVersion
+  let refetch = false
+  try {
+    refetch = ((await response.json()) as { refetch?: boolean } | null)?.refetch === true
+  } catch {
+    // An empty or non-JSON body just means "nothing to refetch".
+  }
+  return { refetch }
 }
 
 export async function fetchSession(signal: AbortSignal) {

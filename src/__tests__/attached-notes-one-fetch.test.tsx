@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ActiveChecklistsBody } from '../pages/ClientDetailPage'
 import type { AppContextValue } from '../AppContext'
@@ -31,8 +31,12 @@ const checklist = (over: Partial<Checklist>): Checklist =>
     ...over,
   }) as Checklist
 
+// Due on a day of THIS month (local), so the page's "Due this month" filter keeps it.
+const now = new Date()
+const DUE_THIS_MONTH = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-28`
+
 const CHECKLISTS = [
-  checklist({ id: 'cl-a', title: 'Payroll A' }),
+  checklist({ id: 'cl-a', title: 'Payroll A', dueDate: DUE_THIS_MONTH }),
   checklist({ id: 'cl-b', title: 'Payroll B' }),
   checklist({ id: 'cl-c', title: 'Payroll C' }),
 ]
@@ -126,4 +130,16 @@ describe('a client page with many checklist cards', () => {
     expect(await screen.findByText('Now C has one too')).toBeInTheDocument()
     expect(listAttached).toHaveBeenCalledTimes(1)
   })
+  it('does not ask again when the Due this month filter narrows the cards - the set it keys on is every checklist', async () => {
+    render(<ActiveChecklistsBody client={CLIENT} data={data} />)
+    await screen.findByText('Only B has this')
+    await waitFor(() => expect(listAttached).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByLabelText(/Due this month/i))
+    await waitFor(() => expect(screen.queryByText('Payroll B')).not.toBeInTheDocument())
+    expect(screen.getByText('Payroll A')).toBeInTheDocument()
+
+    expect(listAttached).toHaveBeenCalledTimes(1)
+  })
+
 })

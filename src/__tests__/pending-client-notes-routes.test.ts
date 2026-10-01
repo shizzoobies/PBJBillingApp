@@ -67,7 +67,9 @@ describe('POST /api/clients/:id/pending-notes', () => {
 
   it('refuses a template that is standard or inactive - it could never spawn a checklist', () => {
     const text = block()
-    const refuseAt = text.indexOf('template.isStandard || template.active === false')
+    // `active !== true`, not `=== false`: the materializer skips any recipe
+    // whose `active` is not truthy, so a missing flag could never spawn either.
+    const refuseAt = text.indexOf('template.isStandard || template.active !== true')
     expect(refuseAt).toBeGreaterThan(-1)
     expect(text.slice(refuseAt, refuseAt + 250)).toContain("error: 'template_not_recurring'")
     expect(text.slice(refuseAt, refuseAt + 250)).toContain('sendJson(response, 409')
@@ -155,43 +157,87 @@ describe('GET /api/pending-notes/attached (one request per page of cards)', () =
 })
 
 describe('the bulk PUT runs the attach pass after a successful save', () => {
-  it("computes the fingerprint BEFORE the attach pass, so the tab's next save 409s instead of erasing the attached item", () => {
+  it("hands the tab a version taken right after write(), BEFORE the attach pass, so the tab's next save 409s instead of erasing the attached item", () => {
     // The attach pass inserts an item row the saving tab's payload does not
     // have. A version taken AFTER it would let that tab's very next autosave
     // pass the staleness guard and delete the item (the note would stay
     // stamped attached). Taken BEFORE, the next save is refused and the tab
-    // refetches. The period-label restamp is the one write that must still
-    // come first: it is this server's own change to the same tab's data.
-    const restampAt = serverSource.indexOf(
-      "console.log(`[bulk-save] re-stamped ${restampedLabels} period label(s)`)",
-    )
-    const versionAt = serverSource.indexOf(
-      'const nextVersion = await appDataStore.computeWorkspaceVersion()',
+    // refetches.
+    const writeAt = serverSource.indexOf('await appDataStore.write(data, { expectedVersion })')
+    const postWriteAt = serverSource.indexOf(
+      'postWriteVersion = await appDataStore.computeWorkspaceVersion()',
     )
     const attachAt = serverSource.indexOf('appDataStore.attachPendingClientNotes({})')
-    expect(restampAt).toBeGreaterThan(-1)
-    expect(versionAt).toBeGreaterThan(restampAt)
-    expect(attachAt).toBeGreaterThan(versionAt)
+    expect(writeAt).toBeGreaterThan(-1)
+    expect(postWriteAt).toBeGreaterThan(writeAt)
+    // Nothing else is awaited between the write and its version: any other
+    // request's write landing there would be folded into the version.
+    expect(serverSource.slice(writeAt, postWriteAt).match(/await /g)).toHaveLength(1)
+    expect(attachAt).toBeGreaterThan(postWriteAt)
   })
 
-  it('hands the tab the version it computed before the attach pass', () => {
-    const versionAt = serverSource.indexOf(
-      'const nextVersion = await appDataStore.computeWorkspaceVersion()',
+  it('re-takes the version only when the label restamp actually changed rows', () => {
+    const restampAt = serverSource.indexOf(
+      "[bulk-save] re-stamped",
     )
-    const sendAt = serverSource.indexOf(
-      'sendJson(response, 200, { ok: true }, { [WORKSPACE_VERSION_HEADER]: nextVersion })',
-    )
-    expect(sendAt).toBeGreaterThan(versionAt)
-    // Exactly one version is computed in the PUT after the write: no second
-    // computation sneaks in after the attach pass.
+    const nextAt = serverSource.indexOf('const nextVersion =')
+    const attachAt = serverSource.indexOf('appDataStore.attachPendingClientNotes({})')
+    expect(nextAt).toBeGreaterThan(restampAt)
+    expect(attachAt).toBeGreaterThan(nextAt)
+    const decl = serverSource.slice(nextAt, nextAt + 200)
+    expect(decl).toContain('restampedLabels > 0')
+    expect(decl).toContain('postWriteVersion')
+    // The only computation after the write sits in that ternary.
     expect(
-      serverSource.slice(versionAt, sendAt).match(/computeWorkspaceVersion\(\)/g),
+      serverSource.slice(nextAt, attachAt).match(/computeWorkspaceVersion\(\)/g),
     ).toHaveLength(1)
+  })
+
+  it('answers with that version, and tells the tab to refetch when notes attached', () => {
+    const nextAt = serverSource.indexOf('const nextVersion =')
+    const attachAt = serverSource.indexOf('appDataStore.attachPendingClientNotes({})')
+    const sendAt = serverSource.indexOf('{ [WORKSPACE_VERSION_HEADER]: nextVersion }')
+    expect(sendAt).toBeGreaterThan(attachAt)
+    expect(attachAt).toBeGreaterThan(nextAt)
+    const reply = serverSource.slice(sendAt - 250, sendAt)
+    expect(reply).toContain('attachedNotes > 0 ? { ok: true, refetch: true } : { ok: true }')
+    expect(serverSource.slice(attachAt - 40, attachAt)).toContain('attachedNotes = await')
   })
 
   it('never lets an attach-pass failure fail an accepted save', () => {
     const attachAt = serverSource.indexOf('appDataStore.attachPendingClientNotes({})')
     expect(serverSource.slice(attachAt - 100, attachAt)).toContain('try {')
     expect(serverSource.slice(attachAt, attachAt + 200)).toContain('} catch (error) {')
+  })
+})
+
+describe('GET /api/app-data hands out the version that came WITH its data', () => {
+  const block = () =>
+    routeBlock(/if \(normalizedPath === '\/api\/app-data'\) \{/, 2600)
+
+  it('reads data and version together and never computes a version after the read', () => {
+    const text = block()
+    const getEnd = text.indexOf("if (request.method === 'PUT')")
+    expect(getEnd).toBeGreaterThan(-1)
+    const getBlock = text.slice(0, getEnd)
+    expect(getBlock).toContain(
+      'const { data, version: workspaceVersion } = await appDataStore.readWithVersion()',
+    )
+    expect(getBlock).not.toContain('computeWorkspaceVersion')
+    expect(getBlock).toContain('[WORKSPACE_VERSION_HEADER]: workspaceVersion')
+  })
+})
+
+describe('deleting a checklist puts its notes back on the client page right away', () => {
+  it('both delete callers re-run the attach pass for that checklist client', () => {
+    const calls = [...serverSource.matchAll(/await appDataStore\.deleteChecklist\(checklistId\)/g)]
+    expect(calls).toHaveLength(2)
+    for (const call of calls) {
+      const after = serverSource.slice(call.index, call.index + 1100)
+      expect(after).toContain('appDataStore.attachPendingClientNotes({ clientId: target.clientId })')
+      expect(after.indexOf('attachPendingClientNotes')).toBeLessThan(
+        after.indexOf("'checklist_deleted'"),
+      )
+    }
   })
 })

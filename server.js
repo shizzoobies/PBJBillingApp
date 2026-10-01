@@ -873,13 +873,13 @@ const PREVIEW_AWARE_API_PATHS = new Set([
   '/api/events',
 ])
 
+// Most checklist ids one batched pending-notes request may ask about.
+const PENDING_NOTES_BATCH_LIMIT = 500
+
 // Each of these matches ONE path segment. They used to allow slashes as well,
 // which meant any deeper path under a prefix was allowlisted by a parent it has
 // nothing to do with. `normalizedPath` carries no query string, but `?` stays
 // excluded too so a normalizer change cannot quietly widen them.
-// Most checklist ids one batched pending-notes request may ask about.
-const PENDING_NOTES_BATCH_LIMIT = 500
-
 const PREVIEW_AWARE_API_PATTERNS = [
   /^\/api\/auth\/[^/?]*$/,
   // Named rather than swept in by the line above: `GET /api/auth/totp/status`
@@ -6355,7 +6355,7 @@ const server = createServer(async (request, response) => {
       // standard blueprint or an inactive recipe, so a note against one would
       // wait forever. The UI already filters these out; this is the server's
       // own answer for anything that gets past it.
-      if (template.isStandard || template.active === false) {
+      if (template.isStandard || template.active !== true) {
         sendJson(response, 409, {
           error: 'template_not_recurring',
           message:
@@ -6495,7 +6495,11 @@ const server = createServer(async (request, response) => {
       }
 
       if (request.method === 'GET') {
-        const data = await appDataStore.read()
+        // The version comes WITH the data: it was captured before the snapshot
+        // we serve was read (see `readWithVersion`), so a write that lands
+        // after that can only make this tab's next save 409, never pass the
+        // guard and wipe rows the tab never saw.
+        const { data, version: workspaceVersion } = await appDataStore.readWithVersion()
         // Preview-as: an owner may request the dataset another user would see.
         // The identity travels as `X-Preview-As` (every route reads it now);
         // the older `?previewAs=<userId>` query is still accepted here, which
@@ -6519,12 +6523,11 @@ const server = createServer(async (request, response) => {
             scopingSession.user.id,
           )
         }
-        // Staleness guard token. Computed AFTER read() so it reflects any
-        // materializer write-back that read() just performed, and from the FULL
-        // workspace rather than the scoped view — the fingerprint describes the
-        // persisted state, not what this particular user is allowed to see.
-        // Staff receive it too and simply never use it (PUT is owner-only).
-        const workspaceVersion = await appDataStore.computeWorkspaceVersion()
+        // Staleness guard token (`workspaceVersion`, from readWithVersion above):
+        // it already reflects any materializer write-back that read just
+        // performed, and describes the FULL persisted workspace rather than the
+        // scoped view. Staff receive it too and simply never use it (PUT is
+        // owner-only).
         sendJson(response, 200, scopeAppDataForSession(scopingSession, data), {
           [WORKSPACE_VERSION_HEADER]: workspaceVersion,
         })
@@ -6586,8 +6589,16 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // The version of the state this save just produced, taken the moment
+        // write() returns with NO other await in between: nothing below (the
+        // label restamp, the attach pass) may sit between the write and the
+        // version, or another request's write landing during it would be
+        // folded into the version this tab is handed without being in the data
+        // it holds.
+        let postWriteVersion
         try {
           await appDataStore.write(data, { expectedVersion })
+          postWriteVersion = await appDataStore.computeWorkspaceVersion()
         } catch (error) {
           if (error instanceof StaleWorkspaceError) {
             // Nothing was written — the transaction rolled back.
@@ -6656,16 +6667,21 @@ const server = createServer(async (request, response) => {
 
         // The write changed the workspace, so the fingerprint moved. Hand the
         // new one back or the tab's very next save would 409 against itself.
-        // Computed AFTER the restamp above, which touches checklists — a
-        // fingerprint taken before it would 409 the tab against this server's
-        // own write — but BEFORE the pending-notes attach pass below, on
-        // purpose. The attach pass inserts a task-kind note's `item-pn-*` row
-        // into `checklist_items`, which this tab's payload does not have; a
-        // fingerprint taken after it would let the tab's very next autosave
-        // pass the staleness guard and have `write()` delete that item (the
-        // note would stay stamped attached with nothing to show for it). With
-        // the version taken first, that next save 409s and the tab refetches.
-        const nextVersion = await appDataStore.computeWorkspaceVersion()
+        // It is the one taken right after write() above — BEFORE the
+        // pending-notes attach pass below, on purpose. The attach pass inserts
+        // a task-kind note's `item-pn-*` row into `checklist_items`, which
+        // this tab's payload does not have; a fingerprint taken after it would
+        // let the tab's very next autosave pass the staleness guard and have
+        // `write()` delete that item (the note would stay stamped attached
+        // with nothing to show for it). With the version taken first, that next
+        // save 409s and the tab refetches.
+        // The restamp above touches checklists, so when it actually changed
+        // rows the version has to be taken again (a fingerprint from before it
+        // would 409 the tab against this server's own write). That re-take can
+        // observe another request's write that landed during the restamp - a
+        // narrow window, and only on saves that re-labeled something.
+        const nextVersion =
+          restampedLabels > 0 ? await appDataStore.computeWorkspaceVersion() : postWriteVersion
 
         // Pending notes for future recurring checklists (featreq-b688e73c): a
         // bulk save can create/change checklists too, not only the
@@ -6673,8 +6689,9 @@ const server = createServer(async (request, response) => {
         // cheap when nothing is pending. `onPendingNotesAttached` (set above,
         // near the store's construction) broadcasts for us when it attaches
         // anything.
+        let attachedNotes = 0
         try {
-          await appDataStore.attachPendingClientNotes({})
+          attachedNotes = await appDataStore.attachPendingClientNotes({})
         } catch (error) {
           console.error('[bulk-save] pending-notes attach pass failed:', error)
         }
@@ -6689,7 +6706,14 @@ const server = createServer(async (request, response) => {
         console.log(
           `[bulk-save] ${session.user.id} saved ${data.clients.length} clients, ${Array.isArray(data.timeEntries) ? data.timeEntries.length : 0} time entries (${expectedVersion} -> ${nextVersion})`,
         )
-        sendJson(response, 200, { ok: true }, { [WORKSPACE_VERSION_HEADER]: nextVersion })
+        // `refetch`: the attach pass changed the workspace beyond this tab's
+        // payload, so the tab should pick it up as soon as it is clean.
+        sendJson(
+          response,
+          200,
+          attachedNotes > 0 ? { ok: true, refetch: true } : { ok: true },
+          { [WORKSPACE_VERSION_HEADER]: nextVersion },
+        )
         return
       }
 
@@ -9333,6 +9357,14 @@ const server = createServer(async (request, response) => {
           sendJson(response, 404, { error: 'Checklist not found' })
           return
         }
+        // A pending note stamped onto this checklist is waiting again now (the
+        // store clears a stale stamp lazily); re-run the attach pass for the client
+        // so the client page shows it right away, or moves it to the next one.
+        try {
+          await appDataStore.attachPendingClientNotes({ clientId: target.clientId })
+        } catch (error) {
+          console.error('[checklist-delete] pending-notes attach pass failed:', error)
+        }
         await appDataStore.recordActivity(session.user.id, 'checklist_deleted', target.title)
         sendJson(response, 200, { ok: true, removed: checklistId })
         return
@@ -10106,6 +10138,14 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // A pending note stamped onto this checklist is waiting again now (the
+      // store clears a stale stamp lazily); re-run the attach pass for the client
+      // so the client page shows it right away, or moves it to the next one.
+      try {
+        await appDataStore.attachPendingClientNotes({ clientId: target.clientId })
+      } catch (error) {
+        console.error('[checklist-delete] pending-notes attach pass failed:', error)
+      }
       await appDataStore.recordActivity(session.user.id, 'checklist_deleted', target.title)
       sendJson(response, 200, { ok: true, removed: checklistId })
       return

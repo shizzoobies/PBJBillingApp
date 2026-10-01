@@ -1672,9 +1672,25 @@ function ChecklistInProgressSection({
   )
 
   // The notes attached to the rendered cards, fetched ONCE for all of them (a
-  // projected card has no id the server knows).
+  // projected card has no id the server knows). Keyed on the set WITHOUT the
+  // search box applied, so typing in it does not refetch (the dropdown
+  // filters still bound the set, which one request is capped on).
+  const notesScope = useMemo(
+    () =>
+      filterInProgressChecklists(checklists, {
+        reportPeriod,
+        assignee,
+        client,
+        status,
+        today: todayDateOnly,
+        query: '',
+        clients,
+        focusId,
+      }),
+    [checklists, assignee, client, status, todayDateOnly, clients, reportPeriod, focusId],
+  )
   const attachedNotesFor = useAttachedClientNotes(
-    filtered.filter((checklist) => !checklist.projected).map((checklist) => checklist.id),
+    notesScope.filter((checklist) => !checklist.projected).map((checklist) => checklist.id),
   )
 
   // Status grouping (current behavior, unchanged).

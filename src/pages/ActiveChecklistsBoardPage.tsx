@@ -252,15 +252,16 @@ export function ActiveChecklistsBoardPage() {
   }, [board.columns, query, data.clients])
 
   // The notes attached to the cards on the board, fetched ONCE for all of them
-  // (a projected ghost has no id the server knows).
+  // (a projected ghost has no id the server knows). Taken from the board BEFORE
+  // the search box narrows it, so typing in it does not refetch.
   const boardCardIds = useMemo(
     () =>
-      filteredColumns.flatMap((col) =>
+      board.columns.flatMap((col) =>
         col.clients.flatMap((clientRow) =>
           clientRow.checklists.filter((c) => !c.projected).map((c) => c.id),
         ),
       ),
-    [filteredColumns],
+    [board.columns],
   )
   const attachedNotesFor = useAttachedClientNotes(boardCardIds)
 

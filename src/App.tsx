@@ -361,6 +361,10 @@ function App() {
   // companion state drives the blocking notice. Never un-latches — the only
   // recovery is a reload.
   const staleWorkspaceRef = useRef(false)
+  // The live-sync refetch scheduler (the SSE effect below sets it), so a save
+  // the server answered with `refetch: true` can ask for the same deferred
+  // refetch a `data-changed` ping gets, instead of waiting for the ping.
+  const requestLiveRefetchRef = useRef<(() => void) | null>(null)
   const [staleWorkspaceMessage, setStaleWorkspaceMessage] = useState<string | null>(null)
   // Real-time sync support: timestamp of the last local workspace edit (so an
   // incoming refetch never clobbers an in-flight edit), plus a live mirror of
@@ -749,8 +753,10 @@ function App() {
 
     const source = new EventSource('/api/events')
     source.addEventListener('data-changed', schedule)
+    requestLiveRefetchRef.current = schedule
 
     return () => {
+      requestLiveRefetchRef.current = null
       cancelled = true
       window.clearTimeout(refetchTimer)
       source.close()
@@ -993,8 +999,9 @@ function App() {
         firstPass = false
         const payloadSnapshot = workspaceSnapshot(dataRef.current)
         setDataSyncState('saving')
+        let saveResult: { refetch: boolean } | undefined
         try {
-          await saveAppData(dataRef.current)
+          saveResult = await saveAppData(dataRef.current)
         } catch (error) {
           if (error instanceof ApiError && error.status === 401) {
             setSessionUser(null)
@@ -1024,6 +1031,10 @@ function App() {
           dirtyRef.current = false
           setDataSyncState('synced')
         }
+        // The server changed the workspace beyond this payload (a pending note
+        // attached to a checklist): ask for the normal live-sync refetch. It
+        // defers while the tab is dirty or being typed in, like any other ping.
+        if (saveResult?.refetch) requestLiveRefetchRef.current?.()
       }
     } finally {
       saveInFlightRef.current = false

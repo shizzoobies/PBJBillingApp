@@ -1030,7 +1030,10 @@ function buildChecklistFromStage(
     dueDate,
     viewerIds: [...stage.viewerIds],
     editorIds: [...stage.editorIds],
-    createdAt: new Date().toISOString().slice(0, 10),
+    // A full timestamp, like the server's spawn: the pending-notes attach rule
+    // compares it against the note's own timestamp, and a bare date sorts
+    // BEFORE every timestamp of the same day.
+    createdAt: new Date().toISOString(),
     caseId,
     stageId: stage.id,
     stageIndex,

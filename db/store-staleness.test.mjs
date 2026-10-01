@@ -31,6 +31,7 @@ import {
   BULK_SAVE_TABLES,
   StaleWorkspaceError,
   fileWorkspaceVersion,
+  foldVersionRows,
   tableVersionSql,
   workspaceVersionSql,
 } from '../lib/workspace-version.js'
@@ -1311,7 +1312,12 @@ describe('read() derives assignedEmployeeIds from the client row (postgres branc
     const fake = fakePostgres({ clientRows: [clientRow] })
     await postgresStore(fake).read()
 
-    expect(fake.matching(/client_assignments/i)).toEqual([])
+    // The workspace fingerprint read() now captures names every table the bulk
+    // save owns, `client_assignments` included; it is the only statement that
+    // may mention the table.
+    expect(
+      fake.matching(/client_assignments/i).filter((statement) => !/union all/i.test(statement.text)),
+    ).toEqual([])
   })
 
   it('emits an empty team as an empty array on both names', async () => {
@@ -7496,6 +7502,54 @@ describe('pending client notes — attach pass (file backend)', () => {
       store.onPendingNotesAttached = undefined
     }
   })
+  it('an item id already used by ANOTHER checklist (recycled ones included) gets this checklist id appended', async () => {
+    const note = await store.createClientPendingNote('c-pn-sfx', {
+      templateId: 'tpl-pn',
+      kind: 'task',
+      body: 'New hire starting',
+    })
+    const plainItemId = `item-pn-${note.id.replace(/^pnote-/, '')}`
+    const later = new Date(new Date(note.createdAt).getTime() + 1000).toISOString()
+    // The note's first checklist was deleted and still holds its item row, so
+    // the plain id is TAKEN when the note attaches again.
+    const recycled = {
+      ...checklistFixture('check-sfx-old', {
+        createdAt: later,
+        dueDate: '2026-09-10',
+        clientId: 'c-pn-sfx',
+        deletedAt: new Date().toISOString(),
+      }),
+      items: [{ id: plainItemId, label: 'New hire starting', done: false }],
+    }
+    await store.write(
+      workspace({
+        clients: [{ id: 'c-pn-sfx', name: 'Sfx' }],
+        checklists: [
+          checklistFixture('check-sfx-live', {
+            createdAt: later,
+            dueDate: '2026-10-10',
+            clientId: 'c-pn-sfx',
+          }),
+        ],
+        recycledChecklists: [recycled],
+      }),
+    )
+
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-sfx' })).toBe(1)
+
+    const finalItemId = `${plainItemId}-sfx-live`
+    expect((await store.getClientPendingNote(note.id)).attachedItemId).toBe(finalItemId)
+    const target = (await persisted()).checklists.find((c) => c.id === 'check-sfx-live')
+    expect(target.items.at(-1)).toMatchObject({ id: finalItemId, label: 'New hire starting' })
+
+    // And a second pass is still idempotent.
+    expect(await store.attachPendingClientNotes({ clientId: 'c-pn-sfx' })).toBe(0)
+    expect(
+      (await persisted()).checklists
+        .find((c) => c.id === 'check-sfx-live')
+        .items.filter((item) => item.id === finalItemId),
+    ).toHaveLength(1)
+  })
 })
 
 /**
@@ -7745,9 +7799,16 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
     }
     if (/^update client_pending_notes\s+set attached_checklist_id = null/i.test(trimmed)) {
       const ids = params[0]
+      // The statement's own guard: a stamp whose checklist is live again (it was
+      // restored between the select and this update) is not cleared.
+      const guarded = /and not exists \(\s*select 1 from checklists c/i.test(trimmed)
+      const liveAgain = (note) => {
+        const checklist = checklists.find((entry) => entry.id === note.attached_checklist_id)
+        return Boolean(checklist) && !checklist.deleted_at
+      }
       let cleared = 0
       for (const note of notes) {
-        if (ids.includes(note.id)) {
+        if (ids.includes(note.id) && !(guarded && liveAgain(note))) {
           note.attached_checklist_id = null
           note.attached_item_id = null
           note.attached_at = null
@@ -8138,6 +8199,46 @@ describe('pending client notes — attach pass (postgres branch)', () => {
     expect(await pgStore.listPendingNotesForChecklists([])).toEqual([])
     expect(fake.statements).toHaveLength(before)
   })
+  it('the stale-stamp clearing update is guarded: a checklist restored in between keeps its note', async () => {
+    // The select sees the checklist as deleted; by the time the clearing update
+    // runs it is live again (a restore from the bin landed in between).
+    let reads = 0
+    const restored = {
+      id: 'check-restored',
+      template_id: 'tpl-pn',
+      client_id: 'c1',
+      due_date: '2026-09-10',
+      created_at: '2026-09-05T00:00:00.000Z',
+      get deleted_at() {
+        reads += 1
+        return reads <= 1 ? '2026-09-08T00:00:00.000Z' : null
+      },
+    }
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        {
+          id: 'pnote-20',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'note',
+          body: 'x',
+          created_at: '2026-09-01T00:00:00.000Z',
+          attached_checklist_id: 'check-restored',
+          attached_item_id: null,
+          attached_at: '2026-09-06T00:00:00.000Z',
+        },
+      ],
+      checklists: [restored],
+    })
+
+    await postgresStore(fake).attachPendingClientNotes({ clientId: 'c1' })
+
+    const [cleared] = fake.matching(/^update client_pending_notes\s+set attached_checklist_id = null/i)
+    expect(cleared.text).toMatch(
+      /and not exists \(\s*select 1 from checklists c\s+where c\.id = client_pending_notes\.attached_checklist_id\s+and c\.deleted_at is null\s*\)/i,
+    )
+    expect(fake.notes[0].attached_checklist_id).toBe('check-restored')
+  })
 })
 
 /**
@@ -8223,18 +8324,21 @@ describe("read()'s attach pass hands back the persisted workspace (postgres bran
     expect(served.checklists[0].items.map((item) => item.id)).toContain('item-pn-1')
   })
 
-  it('serves the materialized snapshot as-is when nothing attached', async () => {
+  it('re-reads after a write-back even when nothing attached, so the version matches the data', async () => {
     const pgStore = postgresStore(fakePostgres())
     const reader = vi
       .spyOn(pgStore, '_readPostgresWorkspace')
       .mockResolvedValueOnce(spawnable())
       .mockResolvedValueOnce(spawnable())
+      .mockResolvedValue(persistedAfterAttach())
     vi.spyOn(pgStore, 'write').mockResolvedValue(undefined)
     vi.spyOn(pgStore, 'attachPendingClientNotes').mockResolvedValue(0)
 
     const served = await pgStore.read()
 
-    expect(reader).toHaveBeenCalledTimes(2)
+    // The write-back moved the persisted state past the snapshot we hold, and
+    // the version handed out has to be one captured before the state served.
+    expect(reader).toHaveBeenCalledTimes(3)
     expect(served.checklists.some((c) => c.templateId === 'tpl-1')).toBe(true)
   })
 })
@@ -8242,9 +8346,10 @@ describe("read()'s attach pass hands back the persisted workspace (postgres bran
 /**
  * `generateChecklistFromTemplate` (the "Generate a task now" / onboarding
  * spawn path) is the third attach-pass call site — the one outside `read()`
- * and outside the bulk PUT. FILE backend: a generated instance carries no
- * `createdAt` (same as a materializer spawn), so the match goes through the
- * `dueDate` fallback — hence a future due date here.
+ * and outside the bulk PUT. FILE backend: a generated instance carries a
+ * `createdAt` (same as a materializer spawn), so the match goes through it
+ * rather than the `dueDate` fallback; the future due date in the first case
+ * is incidental.
  */
 describe('generateChecklistFromTemplate runs the pending-notes attach pass (file backend)', () => {
   const genTemplate = {
@@ -10379,6 +10484,64 @@ describe("read()'s materializer write-back is guarded (file backend)", () => {
     const final = await persisted()
     expect(final.clients[0].name).toBe('Unguarded')
   })
+  // N1 on the file backend: the version handed out is the fingerprint of the
+  // file as it was when the served snapshot was read - never of the file after
+  // whatever landed since.
+  const addItemOnDisk = async (checklistId, item) => {
+    const raw = await persisted()
+    raw.checklists.find((c) => c.id === checklistId).items.push(item)
+    await writeFile(localDataPath, JSON.stringify(raw, null, 2))
+  }
+
+  it('hands out the fingerprint of the snapshot it served, so a write landing afterwards makes the next save stale', async () => {
+    await store.write(spawnableWorkspace())
+    // Settle the spawn first so the read below has nothing to write back.
+    await store.read()
+    const onDisk = fileWorkspaceVersion(await persisted())
+
+    const { data, version } = await store.readWithVersion()
+    expect(version).toBe(onDisk)
+
+    // A write lands after the read (an item insert, as a task-kind note attach
+    // does): the persisted state is now past the tab's version.
+    await addItemOnDisk('chk-1', { id: 'item-landed-late', label: 'Landed late', done: false })
+    expect(await store.computeWorkspaceVersion()).not.toBe(version)
+
+    await expect(store.write(data, { expectedVersion: version })).rejects.toBeInstanceOf(
+      StaleWorkspaceError,
+    )
+    const checklist = (await persisted()).checklists.find((c) => c.id === 'chk-1')
+    expect(checklist.items.map((item) => item.id)).toContain('item-landed-late')
+
+    // read() itself still returns just the workspace.
+    expect(Object.keys(await store.read())).not.toContain('version')
+  })
+
+  it('after a write-back, serves what was persisted under a version that matches it (no self-409, no attach window)', async () => {
+    await store.write(spawnableWorkspace())
+    const preReadVersion = fileWorkspaceVersion(await persisted())
+    const note = await store.createClientPendingNote('c1', {
+      templateId: 'tpl-1',
+      kind: 'task',
+      body: 'New hire this cycle',
+    })
+    // The spawn's createdAt has to land strictly after the note's.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+
+    const { data, version } = await store.readWithVersion()
+
+    // The spawn was written back and the note attached to it - and the data
+    // served carries that attached item.
+    const spawned = data.checklists.find((c) => c.templateId === 'tpl-1')
+    expect(spawned.items.map((item) => item.id)).toContain(
+      `item-pn-${note.id.replace(/^pnote-/, '')}`,
+    )
+    // Not the pre-write-back fingerprint (which would 409 the tab against our
+    // own write): the one of the file the data was read from.
+    expect(version).not.toBe(preReadVersion)
+    expect(version).toBe(await store.computeWorkspaceVersion())
+    await expect(store.write(data, { expectedVersion: version })).resolves.not.toThrow()
+  })
 })
 
 /**
@@ -10751,8 +10914,10 @@ describe('reimbursed-expense covered dates (postgres branch)', () => {
       .read()
       .catch(() => {})
 
-    const select = fake.statements.find((statement) =>
-      /^select[\s\S]*from recurring_reimbursements/i.test(statement.text),
+    const select = fake.statements.find(
+      (statement) =>
+        /^select[\s\S]*from recurring_reimbursements/i.test(statement.text) &&
+        !/union all/i.test(statement.text),
     )
     expect(select).toBeDefined()
     for (const column of COVERAGE_COLUMNS) {
@@ -11109,13 +11274,17 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
     const fake = spawnableFake()
     const data = await postgresStore(fake).read()
 
-    // The spawn happened and was written back.
-    expect(data.checklists.some((c) => c.templateId === 'tpl-mat')).toBe(true)
+    // The spawn happened and was written back. (`data` is now the re-read of
+    // what was persisted, which this recorder does not keep - so the write is
+    // proven by the statements, not by the returned rows.)
+    expect(data).toBeDefined()
     expect(fake.matching(/^insert into checklists\b/i).length).toBeGreaterThan(0)
 
     // Fingerprint captured BEFORE the snapshot that gets written: the template
-    // table is read once to detect the spawn, then again AFTER the capture.
-    const captureAt = nthIndexOf(fake, VERSION_SQL, 1)
+    // table is read once to detect the spawn, then again AFTER the capture. (The
+    // very first fingerprint belongs to the first read, for the version the
+    // caller is handed; the write-back's own capture is the second.)
+    const captureAt = nthIndexOf(fake, VERSION_SQL, 2)
     const secondTemplateReadAt = nthIndexOf(
       fake,
       /\bnext_due_date\b[\s\S]*from checklist_templates\b/i,
@@ -11127,7 +11296,7 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
 
     // And write() re-checked it INSIDE the transaction.
     const beginAt = fake.indexOf(/^begin$/i)
-    const recheckAt = nthIndexOf(fake, VERSION_SQL, 2)
+    const recheckAt = nthIndexOf(fake, VERSION_SQL, 3)
     const firstDeleteAt = fake.indexOf(/^delete from /i)
     expect(beginAt).toBeGreaterThan(-1)
     expect(recheckAt).toBeGreaterThan(beginAt)
@@ -11138,6 +11307,7 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const fake = spawnableFake({
       versionResponses: [
+        [{ t: 'clients', h: 'before' }],
         [{ t: 'clients', h: 'before' }],
         [{ t: 'clients', h: 'after-a-concurrent-write' }],
       ],
@@ -11151,6 +11321,113 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
     expect(fake.matching(/^insert into checklists\b/i)).toEqual([])
     expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(-1)
     expect(warn).toHaveBeenCalled()
+  })
+  // N1 (the app's "GET-side ordering gap"). The version a tab is handed has to
+  // be taken BEFORE the snapshot it is served - a write that lands after the
+  // final workspace read then moves the persisted state PAST the tab's version,
+  // so its next save is refused instead of passing the guard and wiping rows
+  // the tab never saw.
+  const rowsFor = (hash) => [{ t: 'clients', h: hash }]
+
+  it('hands out the version captured BEFORE the final read, so a later write makes the next save stale', async () => {
+    const responses = [rowsFor('v1'), rowsFor('v2'), rowsFor('v2'), rowsFor('v3')]
+    const fake = spawnableFake({ versionResponses: responses })
+    const pgStore = postgresStore(fake)
+    const realRead = pgStore._readPostgresWorkspace.bind(pgStore)
+    let reads = 0
+    vi.spyOn(pgStore, '_readPostgresWorkspace').mockImplementation(async () => {
+      const snapshot = await realRead()
+      reads += 1
+      // The write lands right after the FINAL workspace read: the next
+      // fingerprint the database would give is a different one.
+      if (reads === 3) responses.push(rowsFor('v4-after-the-final-read'))
+      return snapshot
+    })
+
+    const { data, version } = await pgStore.readWithVersion()
+
+    // read -> re-read (guarded write-back) -> final read of what was persisted.
+    expect(reads).toBe(3)
+    expect(fake.matching(/^insert into checklists\b/i).length).toBeGreaterThan(0)
+    expect(version).toBe(foldVersionRows(rowsFor('v3')))
+    expect(version).not.toBe(foldVersionRows(rowsFor('v4-after-the-final-read')))
+
+    // A save built from that snapshot, under that version, is refused.
+    const deletesBefore = fake.matching(/^delete from /i).length
+    await expect(pgStore.write(data, { expectedVersion: version })).rejects.toBeInstanceOf(
+      StaleWorkspaceError,
+    )
+    expect(fake.matching(/^delete from /i)).toHaveLength(deletesBefore)
+  })
+
+  it('serves the snapshot it already holds, under the version that predates it, when nothing is spawned', async () => {
+    const responses = [rowsFor('v1')]
+    const fake = fakePostgres({ clientRows: [clientRow], versionResponses: responses })
+    const pgStore = postgresStore(fake)
+    const realRead = pgStore._readPostgresWorkspace.bind(pgStore)
+    vi.spyOn(pgStore, '_readPostgresWorkspace').mockImplementation(async () => {
+      const snapshot = await realRead()
+      responses.push(rowsFor('v2-after-the-read'))
+      return snapshot
+    })
+
+    const { data, version } = await pgStore.readWithVersion()
+
+    expect(version).toBe(foldVersionRows(rowsFor('v1')))
+    await expect(pgStore.write(data, { expectedVersion: version })).rejects.toBeInstanceOf(
+      StaleWorkspaceError,
+    )
+    // read() is unchanged for every other caller: the same data, no version.
+    const plain = await postgresStore(fakePostgres({ clientRows: [clientRow] })).read()
+    expect(Object.keys(plain)).not.toContain('version')
+    expect(Object.keys(plain).sort()).toEqual(Object.keys(data).sort())
+  })
+
+  it('a refused write-back serves the in-memory data under the version captured before the re-read', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fake = spawnableFake({
+      versionResponses: [rowsFor('v1'), rowsFor('v2'), rowsFor('after-a-concurrent-write')],
+    })
+    const pgStore = postgresStore(fake)
+
+    const { data, version } = await pgStore.readWithVersion()
+
+    expect(data.checklists.some((c) => c.templateId === 'tpl-mat')).toBe(true)
+    expect(version).toBe(foldVersionRows(rowsFor('v2')))
+  })
+
+  it('a failed re-read after the write-back serves the pre-attach snapshot under its own, older, version', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const responses = [rowsFor('v1'), rowsFor('v2'), rowsFor('v2'), rowsFor('v3')]
+    const fake = spawnableFake({ versionResponses: responses })
+    const pgStore = postgresStore(fake)
+    const realRead = pgStore._readPostgresWorkspace.bind(pgStore)
+    let reads = 0
+    vi.spyOn(pgStore, '_readPostgresWorkspace').mockImplementation(async () => {
+      reads += 1
+      if (reads === 3) throw new Error('connection reset')
+      return realRead()
+    })
+    vi.spyOn(pgStore, 'attachPendingClientNotes').mockResolvedValue(1)
+
+    const { data, version } = await pgStore.readWithVersion()
+
+    expect(data.checklists.some((c) => c.templateId === 'tpl-mat')).toBe(true)
+    // The version taken for the snapshot we hold - older than the attach, so
+    // the tab's next save is refused rather than allowed to delete its item.
+    expect(version).toBe(foldVersionRows(rowsFor('v2')))
+  })
+
+  it('a failed attach pass still re-reads what was persisted (the re-read is not inside the write-back try)', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fake = spawnableFake()
+    const pgStore = postgresStore(fake)
+    const reader = vi.spyOn(pgStore, '_readPostgresWorkspace')
+    vi.spyOn(pgStore, 'attachPendingClientNotes').mockRejectedValue(new Error('boom'))
+
+    await pgStore.readWithVersion()
+
+    expect(reader).toHaveBeenCalledTimes(3)
   })
 })
 
