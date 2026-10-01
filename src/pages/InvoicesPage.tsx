@@ -754,14 +754,23 @@ export function InvoicesPage() {
     setSendBusy(true)
     try {
       const invoices = await listInvoicesRequest(billingPeriod)
-      const forClient = invoices.filter((entry) => entry.clientId === selectedClient.id)
       // Only a LIVE invoice can be sent. Rows that are all void count as no
       // invoice rather than as a refusal: "Void & regenerate" makes void-only a
       // routine state (voided, then skipped on the rebuild because there was
       // nothing left to bill), and dead-ending on it would be telling her the
       // one thing she cannot act on instead of offering the thing she can.
-      const stored = forClient.find((entry) => entry.status !== 'void') ?? null
+      // The MONTH's invoice, never a retainer by accident: the lower Print
+      // picks by the same rule.
+      const { saved: stored, retainerOnly } = monthInvoiceForClient(invoices, selectedClient.id)
 
+      if (retainerOnly) {
+        // A retainer is another document, sent from its own row. Nothing to
+        // build and nothing to confirm, so nothing is offered or sent here.
+        fail(
+          `This month has only a retainer invoice for ${selectedClient.name}; no monthly invoice has been generated yet. Send the retainer invoice from its row in the list above.`,
+        )
+        return
+      }
       if (!stored) {
         const buildIt = window.confirm(
           `${selectedClient.name} has no invoice for ${billingPeriodLabel} yet. Generate it now? (Just this client — nothing else is created.)`,
@@ -1168,6 +1177,19 @@ export function InvoicesPage() {
 }
 
 /**
+ * The client's invoice for the month, picked out of that month's rows: a LIVE
+ * row only (void rows count as none), and the MONTHLY one when the client also
+ * has a retainer invoice issued that month. The lower Print and the lower Email
+ * invoice both mean the month's invoice, and a retainer is another document, so
+ * both choose through here. `retainerOnly` says the only live row is a retainer.
+ */
+function monthInvoiceForClient(invoices: PersistedInvoice[], clientId: string) {
+  const live = invoices.filter((entry) => entry.clientId === clientId && entry.status !== 'void')
+  const saved = live.find((entry) => entry.kind !== 'retainer') ?? null
+  return { saved, retainerOnly: !saved && live.length > 0 }
+}
+
+/**
  * "Which month is this invoice for?" — asked before the live invoice prints, so
  * the sheet cannot quietly be the top-bar month (the current one) while she is
  * invoicing the month before. Nothing prints until Print; Escape and Cancel
@@ -1218,14 +1240,7 @@ function PrintInvoiceDialog({
     void (async () => {
       try {
         const invoices = await listInvoicesRequest(period)
-        // A live row only (void rows count as none), and the MONTHLY one when
-        // the client also has a retainer invoice issued that month: the lower
-        // Print is the month's invoice, and a retainer is another document.
-        const live = invoices.filter(
-          (entry) => entry.clientId === clientId && entry.status !== 'void',
-        )
-        const saved = live.find((entry) => entry.kind !== 'retainer') ?? null
-        const retainerOnly = !saved && live.length > 0
+        const { saved, retainerOnly } = monthInvoiceForClient(invoices, clientId)
         if (!stale) setLookup({ key: lookupKey, saved, retainerOnly, failed: false })
       } catch {
         if (!stale) setLookup({ key: lookupKey, saved: null, retainerOnly: false, failed: true })
