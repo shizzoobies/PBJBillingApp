@@ -25,19 +25,31 @@ export function waitingStepCount(checklist: Checklist): number {
  * Filter-bar status bucket for a checklist. Moved here from ChecklistsPage so
  * the page and the tab count share one definition rather than two that can
  * drift apart.
- *
- * 'waiting' is checked BEFORE overdue / active so a checklist with a step
- * waiting reads Waiting even when it is also past due; a finished checklist is
- * never waiting.
  */
 export function statusForChecklist(checklist: Checklist, todayDateOnly: string) {
   const completed = checklist.items.filter((item) => item.done).length
   const total = checklist.items.length
   const allDone = total > 0 && completed === total
   if (allDone) return 'completed'
-  if (waitingStepCount(checklist) > 0) return 'waiting'
   if (checklist.dueDate < todayDateOnly) return 'overdue'
   return 'active'
+}
+
+/**
+ * Does a checklist belong under a Status filter option? Per-option predicates,
+ * NOT one derived status: Waiting is a lens over open work, so a checklist that
+ * is both waiting and overdue shows under Overdue, Waiting and Active alike.
+ * Overdue work is never buried by a wait.
+ */
+export function matchesStatusFilter(checklist: Checklist, status: string, todayDateOnly: string): boolean {
+  if (!status || status === 'all') return true
+  const complete = statusForChecklist(checklist, todayDateOnly) === 'completed'
+  if (status === 'completed') return complete
+  if (complete) return false
+  if (status === 'waiting') return waitingStepCount(checklist) > 0
+  if (status === 'overdue') return checklist.dueDate < todayDateOnly
+  if (status === 'active') return true
+  return false
 }
 
 /**
@@ -101,9 +113,7 @@ export function filterInProgressChecklists(
     if (!isInReportPeriod(effectiveChecklistDue(checklist), scope.reportPeriod)) return false
     if (scope.assignee && checklist.assigneeId !== scope.assignee) return false
     if (scope.client && checklist.clientId !== scope.client) return false
-    if (scope.status && scope.status !== 'all') {
-      if (statusForChecklist(checklist, scope.today) !== scope.status) return false
-    }
+    if (!matchesStatusFilter(checklist, scope.status ?? '', scope.today)) return false
     if (q) {
       const nameMatch = clientName(clients, checklist.clientId).toLowerCase().includes(q)
       const titleMatch = checklist.title.toLowerCase().includes(q)
