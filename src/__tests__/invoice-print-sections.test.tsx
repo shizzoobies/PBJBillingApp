@@ -626,8 +626,9 @@ describe('InvoicesPage — a $0 monthly service line is left off the sheet', () 
     await printStored(zeroPlanInvoice)
 
     const text = printed()
-    expect(text).not.toContain('Subscription Plan')
-    expect(text).not.toContain('Total Subscription Plan')
+    // Case-insensitive on purpose: the section title is "Subscription Plan" and
+    // the header's billing-type label is "Subscription plan" - neither prints.
+    expect(text.toLowerCase()).not.toContain('subscription plan')
     expect(text).toContain('Client Reimbursed Expenses')
     expect(text).toContain('Recurring: Software')
     expect(text).toContain('Total Client Reimbursed Expenses')

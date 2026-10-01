@@ -41,6 +41,7 @@ import {
   invoiceDetailRows,
   invoiceDocumentRenderMode,
   invoiceSections,
+  isEmptyPlanLine,
   normalizeTimeBreakdownMode,
   renderedInvoiceLines,
 } from '../../lib/invoice-lines.js'
@@ -1605,6 +1606,8 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
   }
   const combined = invoiceDocumentRenderMode(printDocument, billingClient) === 'combined'
   const printLines = clientFacingInvoiceLines(printDocument, billingClient)
+  const planLines = display.lines.filter((line) => line.kind === 'plan')
+  const onlyEmptyPlanLines = planLines.length > 0 && planLines.every(isEmptyPlanLine)
   /*
    * The three sections she asked for, and the detailed-hours appendix.
    *
@@ -1663,7 +1666,10 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
           ) : null}
           <span>Invoice Date</span>
           <strong>{invoiceDate}</strong>
-          {serviceLabel ? <small>{serviceLabel}</small> : null}
+          {/* A client whose only plan line is $0 has no monthly service on this
+              invoice (that line is left off their copy), so the sheet does not
+              call it a subscription plan either. */}
+          {serviceLabel && !onlyEmptyPlanLines ? <small>{serviceLabel}</small> : null}
           <small>Billing Period: {invoice.periodLabel}</small>
         </div>
       </div>

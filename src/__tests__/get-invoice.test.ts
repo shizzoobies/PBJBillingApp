@@ -270,11 +270,11 @@ describe('getInvoice — annual billing', () => {
     expect(getInvoice(bareClient, [], plans, '2026-05').lines[0].label).toBe('Annual service')
   })
 
-  it('treats a missing annualRate as 0 in the billing month, with no $0 plan line', () => {
+  it('treats a missing annualRate as 0 in the billing month', () => {
     const client = makeClient({ billingMode: 'annual', annualBillingMonth: 5 })
     const invoice = getInvoice(client, [], plans, '2026-05')
     expect(invoice.total).toBe(0)
-    expect(invoice.lines).toHaveLength(0)
+    expect(invoice.lines).toHaveLength(1)
   })
 })
 
@@ -331,8 +331,8 @@ describe('getInvoice — reimbursements', () => {
       reimb({ id: 'r-b', date: '2026-06-20', description: 'Later' }),
       reimb({ id: 'r-a', date: '2026-06-02', description: 'Earlier' }),
     ])
-    // A monthly rate of 0 leaves no $0 plan line ahead of them.
     expect(invoice.lines.map((line) => line.label)).toEqual([
+      'Monthly service',
       'Reimbursement: Earlier',
       'Reimbursement: Later',
     ])
