@@ -141,6 +141,12 @@ export function adhocLineForMode<T extends { adhocAmount?: number; amount: numbe
 export function renderedInvoiceLines<T extends { kind?: string; adhocMode?: string }>(
   lines: T[] | null | undefined,
 ): T[]
+/** A `plan` line at exactly $0 — left off the client's copy. */
+export function isEmptyPlanLine(line: { kind?: string; amount?: number } | null | undefined): boolean
+/** The lines minus any empty plan line: what `clientFacingInvoiceLines` and the month-run count use. */
+export function withoutEmptyPlanLines<T extends { kind?: string; amount?: number }>(
+  lines: T[] | null | undefined,
+): T[]
 
 /* -- the rendering mode: what a client-facing document shows ---------------- */
 

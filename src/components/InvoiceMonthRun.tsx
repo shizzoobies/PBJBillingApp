@@ -47,6 +47,7 @@ import {
   invoiceLockMessage,
   normalizeAdhocMode,
   renderedInvoiceLines,
+  withoutEmptyPlanLines,
   retainerCreditLine,
 } from '../../lib/invoice-lines.js'
 import {
@@ -1571,11 +1572,15 @@ function InvoiceRow({
             ) : null}
           </span>
           <span className="invoice-run-meta">
-            {/* What the client will SEE — an ad hoc line she left off is on the
-                draft but not on their invoice, and counting it here would make
-                the row promise a line that never prints. */}
-            {renderedInvoiceLines(invoice.lineItems).length} line
-            {renderedInvoiceLines(invoice.lineItems).length === 1 ? '' : 's'} ·{' '}
+            {/* What the client will SEE — an ad hoc line she left off, or a $0
+                monthly service line, is on the draft but not on their invoice,
+                and counting it here would make the row promise a line that never
+                prints. */}
+            {withoutEmptyPlanLines(renderedInvoiceLines(invoice.lineItems)).length} line
+            {withoutEmptyPlanLines(renderedInvoiceLines(invoice.lineItems)).length === 1
+              ? ''
+              : 's'}{' '}
+            ·{' '}
             <span
               title={
                 dueOnReceipt

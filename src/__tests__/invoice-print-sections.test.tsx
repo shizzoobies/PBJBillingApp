@@ -601,3 +601,36 @@ describe('InvoicesPage — live per-client preview does not double-list hourly w
     expect(occurrences('$500.00')).toBe(2)
   })
 })
+
+/**
+ * featreq-87b20ed7: a section prints only when the client has something in it.
+ * K & A Performance's stored September invoice carries a $0.00 plan line beside
+ * a $10 recurring expense; the client's copy must not print a Subscription Plan
+ * section for it. The stored invoice is NOT regenerated or rewritten.
+ */
+describe('InvoicesPage — a $0 monthly service line is left off the sheet', () => {
+  const zeroPlanInvoice: PersistedInvoice = {
+    ...fullInvoice,
+    id: 'inv-ka',
+    number: 'INV-2026-09-050',
+    period: '2026-09',
+    lineItems: lines([
+      { kind: 'plan', label: 'Monthly service', detail: 'Monthly service', amount: 0 },
+      { kind: 'recurring', label: 'Recurring: Software', detail: 'monthly', amount: 10 },
+    ]),
+    subtotal: 10,
+    total: 10,
+  }
+
+  it('prints no Subscription Plan section, and still prints the expense and the total', async () => {
+    await printStored(zeroPlanInvoice)
+
+    const text = printed()
+    expect(text).not.toContain('Subscription Plan')
+    expect(text).not.toContain('Total Subscription Plan')
+    expect(text).toContain('Client Reimbursed Expenses')
+    expect(text).toContain('Recurring: Software')
+    expect(text).toContain('Total Client Reimbursed Expenses')
+    expect(text).toContain('$10.00')
+  })
+})
