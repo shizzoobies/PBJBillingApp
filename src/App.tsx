@@ -2408,6 +2408,15 @@ function App() {
         setDataSyncState('offline')
         return
       }
+      if (isCleanRejection(error) && error instanceof ApiError) {
+        // A refused delete (an open wait on the sub-step, or a waiting parent it
+        // would finish): the button is disabled ahead of this, so a 409 means the
+        // render was stale. Say why, and refetch.
+        setDataSyncState('synced')
+        window.alert(error.message)
+        if (error.status === 409) requestLiveRefetchRef.current?.()
+        return
+      }
       setDataSyncState('error')
     }
   }
@@ -2520,6 +2529,13 @@ function App() {
         setSessionUser(null)
         setServerPersistenceEnabled(false)
         setDataSyncState('offline')
+        return
+      }
+      if (isCleanRejection(error) && error instanceof ApiError) {
+        // See removeSubItem above.
+        setDataSyncState('synced')
+        window.alert(error.message)
+        if (error.status === 409) requestLiveRefetchRef.current?.()
         return
       }
       setDataSyncState('error')

@@ -25,6 +25,7 @@ import {
   RetainerCreditError,
   StaleStatementAccountsError,
   statementAccountsVersion,
+  StepHasOpenWaitError,
   StepIsWaitingError,
   TimeEntrySplitError,
   TooManyPendingNotesError,
@@ -176,6 +177,7 @@ import {
   isSelfWait,
   REFUSED_WAITING_ON_ACTIONS,
   REMOVAL_WOULD_COMPLETE_WAITING_STEP,
+  removalOpenWaitRefusal,
   removalWouldCompleteWaitingStep,
   SELF_WAIT_REFUSAL,
   WAIT_ALREADY_CLOSED,
@@ -1098,6 +1100,20 @@ async function previewScopedSession(request, session, response, { previewAs = nu
  */
 function checklistOutOfScope(checklist, visibleClientIds) {
   return !visibleClientIds.has(checklist?.clientId)
+}
+
+/**
+ * The body of the 409 a sub-step / sub-sub-step removal is refused with, or null
+ * when `error` is not one of the store's removal refusals (an open wait on the
+ * node or beneath it, or a waiting parent the removal would roll up to done).
+ * The store decides on the row as it is now, so this is the answer that counts;
+ * the routes' own early checks give the same bodies from their copy.
+ */
+function removalRefusalBody(error) {
+  if (error instanceof StepHasOpenWaitError || error instanceof StepIsWaitingError) {
+    return { error: error.refusal.error, message: error.refusal.message }
+  }
+  return null
 }
 
 /**
@@ -9900,6 +9916,14 @@ const server = createServer(async (request, response) => {
           (entry) => entry.id === req.checklistId,
         )
         const approvalItem = approvalChecklist?.items.find((entry) => entry.id === req.itemId)
+        const approvalOpenWait = removalOpenWaitRefusal(approvalItem, req.subItemId, req.subSubItemId)
+        if (approvalOpenWait) {
+          sendJson(response, approvalOpenWait.status, {
+            error: approvalOpenWait.error,
+            message: approvalOpenWait.message,
+          })
+          return
+        }
         if (removalWouldCompleteWaitingStep(approvalItem, req.subItemId, req.subSubItemId)) {
           sendJson(response, 409, {
             error: 'STEP_IS_WAITING',
@@ -9909,23 +9933,32 @@ const server = createServer(async (request, response) => {
         }
       }
 
-      // approve → execute the real delete by the stored path.
+      // approve → execute the real delete by the stored path. The store re-decides
+      // the two removal refusals on the row as it is now; a refusal here leaves the
+      // request in place, exactly like the early checks above.
       let updated = null
-      if (req.subSubItemId) {
-        updated = await appDataStore.removeChecklistSubSubItem(
-          req.checklistId,
-          req.itemId,
-          req.subItemId,
-          req.subSubItemId,
-        )
-      } else if (req.subItemId) {
-        updated = await appDataStore.removeChecklistSubItem(
-          req.checklistId,
-          req.itemId,
-          req.subItemId,
-        )
-      } else {
-        updated = await appDataStore.deleteChecklistItem(req.checklistId, req.itemId)
+      try {
+        if (req.subSubItemId) {
+          updated = await appDataStore.removeChecklistSubSubItem(
+            req.checklistId,
+            req.itemId,
+            req.subItemId,
+            req.subSubItemId,
+          )
+        } else if (req.subItemId) {
+          updated = await appDataStore.removeChecklistSubItem(
+            req.checklistId,
+            req.itemId,
+            req.subItemId,
+          )
+        } else {
+          updated = await appDataStore.deleteChecklistItem(req.checklistId, req.itemId)
+        }
+      } catch (error) {
+        const refusalBody = removalRefusalBody(error)
+        if (!refusalBody) throw error
+        sendJson(response, 409, refusalBody)
+        return
       }
       // Drop the request regardless — if the target is already gone the request
       // is stale and should not linger.
@@ -11021,6 +11054,17 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // A sub-sub-step with an open wait on it cannot be deleted, by anyone,
+        // and no request is filed for it (see the sub-step DELETE above).
+        const openWaitRefusal = removalOpenWaitRefusal(targetItem, subItemId, subSubItemId)
+        if (openWaitRefusal) {
+          sendJson(response, openWaitRefusal.status, {
+            error: openWaitRefusal.error,
+            message: openWaitRefusal.message,
+          })
+          return
+        }
+
         // Removing the last open sub-sub-step would roll a waiting sub-step (or
         // step) up to done; the simulation says so before anything is filed or
         // removed.
@@ -11047,12 +11091,20 @@ const server = createServer(async (request, response) => {
           return
         }
 
-        const updated = await appDataStore.removeChecklistSubSubItem(
-          checklistId,
-          itemId,
-          subItemId,
-          subSubItemId,
-        )
+        let updated
+        try {
+          updated = await appDataStore.removeChecklistSubSubItem(
+            checklistId,
+            itemId,
+            subItemId,
+            subSubItemId,
+          )
+        } catch (error) {
+          const refusalBody = removalRefusalBody(error)
+          if (!refusalBody) throw error
+          sendJson(response, 409, refusalBody)
+          return
+        }
         if (!updated) {
           sendJson(response, 404, { error: 'Sub-sub-item not found' })
           return
@@ -11235,6 +11287,18 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // A sub-step with an open wait on it (or on a sub-sub-step beneath it)
+        // cannot be deleted, by anyone, and no request is filed for it: the wait
+        // record would go with it. The store re-decides on the row as it is now.
+        const openWaitRefusal = removalOpenWaitRefusal(targetItem, subItemId)
+        if (openWaitRefusal) {
+          sendJson(response, openWaitRefusal.status, {
+            error: openWaitRefusal.error,
+            message: openWaitRefusal.message,
+          })
+          return
+        }
+
         // Removing the last open sub-step would roll a waiting step up to done;
         // the simulation says so before anything is filed or removed.
         if (removalWouldCompleteWaitingStep(targetItem, subItemId)) {
@@ -11260,7 +11324,15 @@ const server = createServer(async (request, response) => {
           return
         }
 
-        const updated = await appDataStore.removeChecklistSubItem(checklistId, itemId, subItemId)
+        let updated
+        try {
+          updated = await appDataStore.removeChecklistSubItem(checklistId, itemId, subItemId)
+        } catch (error) {
+          const refusalBody = removalRefusalBody(error)
+          if (!refusalBody) throw error
+          sendJson(response, 409, refusalBody)
+          return
+        }
         if (!updated) {
           sendJson(response, 404, { error: 'Sub-item not found' })
           return

@@ -122,6 +122,20 @@ export function removalWouldCompleteWaitingStep(
   subItemId?: string,
   subSubItemId?: string,
 ): boolean
+export const STEP_HAS_OPEN_WAIT: string
+/** The sentence a delete (or request, or approval) of a step with an open wait is refused with. */
+export const STEP_HAS_OPEN_WAIT_MESSAGE: string
+/** Would removing this sub-step / sub-sub-step delete a saved wait that is still open? */
+export function removalWouldDropOpenWait(
+  item: StepSimulationItem | undefined,
+  subItemId?: string,
+  subSubItemId?: string,
+): boolean
+export function removalOpenWaitRefusal(
+  item: StepSimulationItem | undefined,
+  subItemId?: string,
+  subSubItemId?: string,
+): { status: number; error: string; message: string } | null
 export function waitForTaskLinkDenial(args: {
   checklist: { id?: string; clientId?: string } | undefined
   pool?: Array<{ id?: string; clientId?: string }>

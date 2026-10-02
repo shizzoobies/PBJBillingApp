@@ -32,6 +32,8 @@ import {
   OWNER_TICK_CLEARS_WAIT_TITLE,
   REMOVAL_WOULD_COMPLETE_WAITING_STEP,
   removalWouldCompleteWaitingStep,
+  removalWouldDropOpenWait,
+  STEP_HAS_OPEN_WAIT_MESSAGE,
   WAITING_BLOCK_TITLES,
   waitingOnStage,
   waitingToggleRefusal,
@@ -1314,13 +1316,21 @@ function PendingDeletionsSection({
             {pendingItems.map((req) => {
               // Approving would finish a step that is waiting, so the server
               // would refuse it. Ask the same simulation up front and say why.
-              const approveBlocked = removalWouldCompleteWaitingStep(
-                checklists
-                  .find((c) => c.id === req.checklistId)
-                  ?.items.find((entry) => entry.id === req.itemId),
+              const approveItem = checklists
+                .find((c) => c.id === req.checklistId)
+                ?.items.find((entry) => entry.id === req.itemId)
+              const approveHasOpenWait = removalWouldDropOpenWait(
+                approveItem,
                 req.subItemId ?? undefined,
                 req.subSubItemId ?? undefined,
               )
+              const approveBlocked =
+                approveHasOpenWait ||
+                removalWouldCompleteWaitingStep(
+                  approveItem,
+                  req.subItemId ?? undefined,
+                  req.subSubItemId ?? undefined,
+                )
               return (
               <li
                 key={req.id}
@@ -1355,7 +1365,9 @@ function PendingDeletionsSection({
                     disabled={approveBlocked}
                     onClick={() => void onApproveItem(req.id, req.scope ?? 'checklist')}
                     title={
-                      approveBlocked
+                      approveHasOpenWait
+                        ? STEP_HAS_OPEN_WAIT_MESSAGE
+                        : approveBlocked
                         ? REMOVAL_WOULD_COMPLETE_WAITING_STEP
                         : req.scope === 'series'
                           ? 'Approve — remove this step here and from the recurring checklist and upcoming copies'
@@ -4281,6 +4293,8 @@ function DraggableTaskList({
                   // Both verdicts of the waiting guard, asked once per row.
                   const subWaitTitle = toggleWaitTitle(item, sub.id, undefined, ownerTicksWaits)
                   const subRemovalBlocked = removalWouldCompleteWaitingStep(item, sub.id)
+                  // An open wait on this sub-step (or beneath it) blocks deleting it.
+                  const subHasOpenWait = removalWouldDropOpenWait(item, sub.id)
                   const subRowClasses = ['sub-item-row']
                   if (sub.done) subRowClasses.push('done')
                   if (draggingSub?.subId === sub.id) subRowClasses.push('dragging')
@@ -4409,11 +4423,17 @@ function DraggableTaskList({
                             type="button"
                             aria-label="Delete sub-step"
                             className="item-delete-btn sub-item-delete"
-                            disabled={hasPendingDeletion(item.id, sub.id) || subRemovalBlocked}
+                            disabled={
+                              hasPendingDeletion(item.id, sub.id) ||
+                              subHasOpenWait ||
+                              subRemovalBlocked
+                            }
                             title={
                               hasPendingDeletion(item.id, sub.id)
                                 ? 'Deletion already requested — waiting on owner approval'
-                                : subRemovalBlocked
+                                : subHasOpenWait
+                                  ? STEP_HAS_OPEN_WAIT_MESSAGE
+                                  : subRemovalBlocked
                                   ? REMOVAL_WOULD_COMPLETE_WAITING_STEP
                                   : 'Delete sub-step'
                             }
@@ -4520,6 +4540,11 @@ function DraggableTaskList({
                               sub.id,
                               subSub.id,
                             )
+                            const subSubHasOpenWait = removalWouldDropOpenWait(
+                              item,
+                              sub.id,
+                              subSub.id,
+                            )
                             return (
                             <div
                               key={subSub.id}
@@ -4550,12 +4575,15 @@ function DraggableTaskList({
                                   className="item-delete-btn sub-item-delete"
                                   disabled={
                                     hasPendingDeletion(item.id, sub.id, subSub.id) ||
+                                    subSubHasOpenWait ||
                                     subSubRemovalBlocked
                                   }
                                   title={
                                     hasPendingDeletion(item.id, sub.id, subSub.id)
                                       ? 'Deletion already requested — waiting on owner approval'
-                                      : subSubRemovalBlocked
+                                      : subSubHasOpenWait
+                                        ? STEP_HAS_OPEN_WAIT_MESSAGE
+                                        : subSubRemovalBlocked
                                         ? REMOVAL_WOULD_COMPLETE_WAITING_STEP
                                         : 'Delete sub-step'
                                   }

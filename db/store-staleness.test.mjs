@@ -27,6 +27,7 @@ import {
   PushedRecordError,
   RateVersionError,
   StaleStatementAccountsError,
+  StepHasOpenWaitError,
   StepIsWaitingError,
   TooManyPendingNotesError,
   WaitRefusedError,
@@ -53,7 +54,10 @@ import {
 } from '../lib/expense-coverage.js'
 import { rollUpItemDone } from '../lib/checklist-step-done.js'
 import {
+  REMOVAL_WOULD_COMPLETE_WAITING_STEP,
+  removalWouldDropOpenWait,
   SAVED_WAIT_FIELDS_ARE_LOCKED,
+  STEP_HAS_OPEN_WAIT_MESSAGE,
   waitingLockRefusal,
   waitingOnStage,
   waitingToggleRefusal,
@@ -28243,5 +28247,280 @@ describe('sub-step writers on Postgres work on the locked row', () => {
     const written = JSON.parse(update.params[2])
     expect(written.map((sub) => sub.id)).toEqual(['sub-3', 'sub-1', 'sub-2'])
     expect(written[1].waitingOns[0].id).toBe('wo-late')
+  })
+})
+
+/**
+ * A sub-step or sub-sub-step that still has an open saved wait (stage `waiting`
+ * or `resolved`) cannot be removed, by anyone (featreq-1f352c4f): the wait record
+ * would be deleted with it. A node is blocked when it carries one itself or any
+ * node beneath it does; a `verified` wait is closed and does not block. The
+ * refusal is decided inside the store on the step as it is NOW (the row locked
+ * `for update`, the file queue slot), so a wait added after the caller read its
+ * copy still blocks, and nothing is written. The removal writers also re-ask the
+ * existing "this would finish a waiting step" guard there.
+ */
+const OPEN_WAIT_REFUSAL = {
+  status: 409,
+  error: 'STEP_HAS_OPEN_WAIT',
+  message:
+    'This step has an open wait on it. Close the wait first (mark it done and approve it), then delete the step.',
+}
+const waitedSteps = () => [
+  { id: 'sub-1', title: 'Confirm', done: false, waitingOns: [waitAtStage('waiting')] },
+  {
+    id: 'sub-2',
+    title: 'Approve',
+    done: false,
+    waitingOns: [waitAtStage('verified', { id: 'wo-closed' })],
+  },
+  {
+    id: 'sub-3',
+    title: 'Review',
+    done: false,
+    subItems: [
+      {
+        id: 'ss-1',
+        title: 'Tie out',
+        done: false,
+        waitingOns: [waitAtStage('resolved', { id: 'wo-ss' })],
+      },
+      { id: 'ss-2', title: 'Sign', done: false },
+    ],
+  },
+  { id: 'sub-4', title: 'Plain', done: false },
+]
+
+describe('removing a step that has an open wait is refused (file backend)', () => {
+  const persistedText = () => readFile(localDataPath, 'utf8')
+  const seed = () =>
+    store.write(
+      workspace({
+        employees: [
+          { id: OWNER_ID, name: 'Brittany', role: 'owner' },
+          { id: 'emp-lisa', name: 'Lisa', role: 'bookkeeper' },
+        ],
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'August close',
+            clientId: 'c1',
+            items: [{ id: 'it-1', label: 'Reconcile', done: false, subItems: waitedSteps() }],
+          },
+        ],
+      }),
+    )
+
+  beforeEach(() => seed())
+
+  // A client save keeps the waits the server already holds, so a different shape
+  // is put on disk directly.
+  const reseed = async (itemOver, subItems) => {
+    const data = JSON.parse(await persistedText())
+    data.checklists[0].items = [
+      { id: 'it-1', label: 'Reconcile', done: false, ...itemOver, subItems },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('carries the sentence the owner approved, word for word', () => {
+    expect(STEP_HAS_OPEN_WAIT_MESSAGE).toBe(OPEN_WAIT_REFUSAL.message)
+  })
+
+  const refused = [
+    ['a sub-step with its own waiting wait', () => store.removeChecklistSubItem('cl-1', 'it-1', 'sub-1')],
+    [
+      'a sub-step with an open wait on a sub-sub-step beneath it',
+      () => store.removeChecklistSubItem('cl-1', 'it-1', 'sub-3'),
+    ],
+    [
+      'a sub-sub-step with a resolved (not yet approved) wait',
+      () => store.removeChecklistSubSubItem('cl-1', 'it-1', 'sub-3', 'ss-1'),
+    ],
+  ]
+  for (const [name, remove] of refused) {
+    it(`refuses ${name}, throws the typed error and writes nothing`, async () => {
+      const before = await persistedText()
+      const error = await remove().catch((caught) => caught)
+      expect(error).toBeInstanceOf(StepHasOpenWaitError)
+      expect(error.refusal).toEqual(OPEN_WAIT_REFUSAL)
+      expect(error.message).toBe(OPEN_WAIT_REFUSAL.message)
+      expect(await persistedText()).toBe(before)
+    })
+  }
+
+  it('still removes a sub-step whose wait is verified, one with no wait, and a sibling of a waited sub-sub-step', async () => {
+    const afterClosed = await store.removeChecklistSubItem('cl-1', 'it-1', 'sub-2')
+    expect(afterClosed.items[0].subItems.map((sub) => sub.id)).toEqual(['sub-1', 'sub-3', 'sub-4'])
+    const afterPlain = await store.removeChecklistSubItem('cl-1', 'it-1', 'sub-4')
+    expect(afterPlain.items[0].subItems.map((sub) => sub.id)).toEqual(['sub-1', 'sub-3'])
+    const afterSibling = await store.removeChecklistSubSubItem('cl-1', 'it-1', 'sub-3', 'ss-2')
+    expect(afterSibling.items[0].subItems[1].subItems.map((subSub) => subSub.id)).toEqual(['ss-1'])
+    // The waits that stayed are untouched.
+    expect(afterSibling.items[0].subItems[0].waitingOns).toHaveLength(1)
+    expect(afterSibling.items[0].subItems[1].subItems[0].waitingOns).toHaveLength(1)
+  })
+
+  it('a wait added after the caller read its copy still blocks the removal', async () => {
+    const staleCopy = await store.read()
+    expect(staleCopy.checklists[0].items[0].subItems[3].waitingOns).toBeUndefined()
+    await store.addWaitingOn(
+      'cl-1',
+      { itemId: 'it-1', subItemId: 'sub-4' },
+      { blockerId: 'emp-lisa', requestedBy: OWNER_ID, note: 'late wait' },
+    )
+    const before = await persistedText()
+    await expect(store.removeChecklistSubItem('cl-1', 'it-1', 'sub-4')).rejects.toBeInstanceOf(
+      StepHasOpenWaitError,
+    )
+    expect(await persistedText()).toBe(before)
+  })
+
+  it('a wait that was closed in the meantime no longer blocks', async () => {
+    await store.markWaitingOnVerified('cl-1', 'wo-ss', { userId: OWNER_ID })
+    const removed = await store.removeChecklistSubSubItem('cl-1', 'it-1', 'sub-3', 'ss-1')
+    expect(removed.items[0].subItems[2].subItems.map((subSub) => subSub.id)).toEqual(['ss-2'])
+  })
+
+  it('the legacy waiting flag with no saved wait does not block removing that sub-step', async () => {
+    await reseed({}, [
+      { id: 'sub-1', title: 'Confirm', done: false, waiting: true, waitingOn: 'the bank' },
+      { id: 'sub-2', title: 'Approve', done: false },
+    ])
+    const removed = await store.removeChecklistSubItem('cl-1', 'it-1', 'sub-1')
+    expect(removed.items[0].subItems.map((sub) => sub.id)).toEqual(['sub-2'])
+  })
+
+  it('re-asks the "would finish a waiting step" guard on the step as it is now', async () => {
+    await reseed({ waitingOns: [waitAtStage('waiting', { id: 'wo-parent' })] }, [
+      { id: 'a', title: 'Done part', done: true },
+      { id: 'b', title: 'Open part', done: false },
+    ])
+    const before = await persistedText()
+    const error = await store.removeChecklistSubItem('cl-1', 'it-1', 'b').catch((caught) => caught)
+    expect(error).toBeInstanceOf(StepIsWaitingError)
+    expect(error.refusal).toEqual({
+      status: 409,
+      error: 'STEP_IS_WAITING',
+      message: REMOVAL_WOULD_COMPLETE_WAITING_STEP,
+    })
+    expect(await persistedText()).toBe(before)
+  })
+
+  it('a removal that finishes nothing waiting, or a missing target, behaves as before', async () => {
+    await reseed({ waitingOns: [waitAtStage('waiting', { id: 'wo-parent' })] }, [
+      { id: 'a', title: 'First', done: false },
+      { id: 'b', title: 'Second', done: false },
+    ])
+    expect(await store.removeChecklistSubItem('cl-1', 'it-1', 'nope')).toBeNull()
+    expect(await store.removeChecklistSubSubItem('cl-1', 'it-1', 'a', 'nope')).toBeNull()
+    const removed = await store.removeChecklistSubItem('cl-1', 'it-1', 'b')
+    expect(removed.items[0].subItems.map((sub) => sub.id)).toEqual(['a'])
+  })
+})
+
+describe('removing a step that has an open wait is refused (Postgres, on the locked row)', () => {
+  // The row as it is NOW: the waits below were committed after the caller read.
+  const lockedStep = (over = {}) => ({
+    id: 'it-1',
+    label: 'Reconcile',
+    done: false,
+    subItems: waitedSteps(),
+    ...over,
+  })
+  const calledCopy = () => ({
+    ...lockedStep(),
+    subItems: waitedSteps().map(({ waitingOns: _waits, ...sub }) => ({
+      ...sub,
+      ...(sub.subItems
+        ? { subItems: sub.subItems.map(({ waitingOns: _subWaits, ...subSub }) => subSub) }
+        : {}),
+    })),
+  })
+
+  function pgStoreWhere({ locked = lockedStep() } = {}) {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.read = async () => ({
+      checklists: [{ id: 'cl-1', clientId: 'c1', title: 'August close', items: [calledCopy()] }],
+    })
+    answerLockedChecklistItem(fake, (_checklistId, itemId) =>
+      itemId === 'it-1' && locked ? lockedRowOf(locked) : null,
+    )
+    tagConnection(fake)
+    return { fake, pgStore }
+  }
+
+  const refused = [
+    ['a sub-step with its own waiting wait', (target) => target.removeChecklistSubItem('cl-1', 'it-1', 'sub-1')],
+    [
+      'a sub-step with an open wait on a sub-sub-step beneath it',
+      (target) => target.removeChecklistSubItem('cl-1', 'it-1', 'sub-3'),
+    ],
+    [
+      'a sub-sub-step with a resolved wait',
+      (target) => target.removeChecklistSubSubItem('cl-1', 'it-1', 'sub-3', 'ss-1'),
+    ],
+  ]
+  for (const [name, call] of refused) {
+    it(`refuses ${name}: locked read, rollback, nothing written, connection released`, async () => {
+      const { fake, pgStore } = pgStoreWhere()
+      const counter = countReleases(fake)
+      const error = await call(pgStore).catch((caught) => caught)
+      expect(error).toBeInstanceOf(StepHasOpenWaitError)
+      expect(error.refusal).toEqual(OPEN_WAIT_REFUSAL)
+      expectRolledBackWithNothingWritten(fake)
+      expect(counter.released).toBe(1)
+    })
+  }
+
+  it('the caller\'s copy had no waits: only the locked row decides', async () => {
+    // The route's own copy would have let this through.
+    expect(removalWouldDropOpenWait(calledCopy(), 'sub-1')).toBe(false)
+    const { fake, pgStore } = pgStoreWhere()
+    await expect(pgStore.removeChecklistSubItem('cl-1', 'it-1', 'sub-1')).rejects.toBeInstanceOf(
+      StepHasOpenWaitError,
+    )
+    expect(fake.matching(/^update checklist_items/i)).toHaveLength(0)
+  })
+
+  it('removes a sub-step whose wait is verified, in one locked transaction, keeping the other waits', async () => {
+    const { fake, pgStore } = pgStoreWhere()
+    const result = await pgStore.removeChecklistSubItem('cl-1', 'it-1', 'sub-2')
+    expect(result.id).toBe('cl-1')
+    expectOneLockedTransaction(fake, UPDATE_SUB_ITEMS_AND_DONE)
+    const [written] = fake.matching(UPDATE_SUB_ITEMS_AND_DONE)
+    const subItems = JSON.parse(written.params[2])
+    expect(subItems.map((sub) => sub.id)).toEqual(['sub-1', 'sub-3', 'sub-4'])
+    expect(subItems[0].waitingOns.map((entry) => entry.id)).toEqual(['wo-1'])
+  })
+
+  it('removes a sub-sub-step beside a waited one', async () => {
+    const { fake, pgStore } = pgStoreWhere()
+    await pgStore.removeChecklistSubSubItem('cl-1', 'it-1', 'sub-3', 'ss-2')
+    expectOneLockedTransaction(fake, UPDATE_SUB_ITEMS_AND_DONE)
+    const subItems = JSON.parse(fake.matching(UPDATE_SUB_ITEMS_AND_DONE)[0].params[2])
+    expect(subItems[2].subItems.map((subSub) => subSub.id)).toEqual(['ss-1'])
+  })
+
+  it('re-asks the "would finish a waiting step" guard on the locked row and rolls back', async () => {
+    const locked = lockedStep({
+      waitingOns: [waitAtStage('waiting', { id: 'wo-parent' })],
+      subItems: [
+        { id: 'a', title: 'Done part', done: true },
+        { id: 'b', title: 'Open part', done: false },
+      ],
+    })
+    const { fake, pgStore } = pgStoreWhere({ locked })
+    const counter = countReleases(fake)
+    const error = await pgStore.removeChecklistSubItem('cl-1', 'it-1', 'b').catch((caught) => caught)
+    expect(error).toBeInstanceOf(StepIsWaitingError)
+    expect(error.refusal).toEqual({
+      status: 409,
+      error: 'STEP_IS_WAITING',
+      message: REMOVAL_WOULD_COMPLETE_WAITING_STEP,
+    })
+    expectRolledBackWithNothingWritten(fake)
+    expect(counter.released).toBe(1)
   })
 })

@@ -199,7 +199,9 @@ describe('removing a sub-step cannot finish a waiting step', () => {
   // Approving a deletion request executes the same removal, so it asks the same
   // question - and a refused approval leaves the request in place.
   it('refuses an approval that would finish a waiting step, and keeps the request', () => {
-    const block = routeBlock(/const itemDeletionDecisionMatch = normalizedPath\.match\(/, 6000)
+    // The window is wide enough to reach the approve branch's drop of the request
+    // past the early open-wait check and the store-refusal catch.
+    const block = routeBlock(/const itemDeletionDecisionMatch = normalizedPath\.match\(/, 7500)
     const guardAt = block.indexOf(
       'if (removalWouldCompleteWaitingStep(approvalItem, req.subItemId, req.subSubItemId)) {',
     )
@@ -231,5 +233,103 @@ describe('un-checking a done step is never blocked', () => {
   it('passes the real stored item, which carries its own done, waiting and waitingOns', () => {
     expect(waitingBlocksCompletion({ done: true, waiting: true })).toBe(false)
     expect(waitingBlocksCompletion({ done: true, waitingOns: [{ id: 'wo-1' }] })).toBe(false)
+  })
+})
+
+/**
+ * A sub-step or sub-sub-step with an open saved wait cannot be deleted
+ * (featreq-1f352c4f). The decision is the store's, on the row as it is now
+ * (`StepHasOpenWaitError`, pinned in `db/store-staleness.test.mjs`); the routes
+ * also ask early from their own copy so a staff member's request is never filed
+ * for a node that can never be approved, and an approval is refused with the
+ * request left in place. Same glue-reading shape as the block above.
+ */
+describe('a step with an open wait cannot be deleted', () => {
+  const GUARD_BODY = `sendJson(response, openWaitRefusal.status, {
+            error: openWaitRefusal.error,
+            message: openWaitRefusal.message,
+          })`
+
+  it('refuses the sub-step DELETE for owners and staff alike, before any request is filed or anything removed', () => {
+    const block = routeBlock(/--- DELETE: remove a sub-item ---/, 3500)
+    const guardAt = block.indexOf('const openWaitRefusal = removalOpenWaitRefusal(targetItem, subItemId)')
+    expect(guardAt).toBeGreaterThan(-1)
+    expect(block).toContain(GUARD_BODY)
+    expect(guardAt).toBeLessThan(block.indexOf('removalWouldCompleteWaitingStep('))
+    expect(guardAt).toBeLessThan(block.indexOf("session.user.role !== 'owner'"))
+    expect(guardAt).toBeLessThan(block.indexOf('fileItemDeletionRequest('))
+    expect(guardAt).toBeLessThan(block.indexOf('appDataStore.removeChecklistSubItem('))
+  })
+
+  it('refuses the sub-sub-step DELETE the same way', () => {
+    const block = routeBlock(/--- DELETE: remove a sub-sub-item ---/, 3500)
+    const guardAt = block.indexOf(
+      'const openWaitRefusal = removalOpenWaitRefusal(targetItem, subItemId, subSubItemId)',
+    )
+    expect(guardAt).toBeGreaterThan(-1)
+    expect(block).toContain(GUARD_BODY)
+    expect(guardAt).toBeLessThan(block.indexOf('removalWouldCompleteWaitingStep('))
+    expect(guardAt).toBeLessThan(block.indexOf("session.user.role !== 'owner'"))
+    expect(guardAt).toBeLessThan(block.indexOf('fileItemDeletionRequest('))
+    expect(guardAt).toBeLessThan(block.indexOf('appDataStore.removeChecklistSubSubItem('))
+  })
+
+  it('refuses an approval, before it removes anything, and keeps the request', () => {
+    const block = routeBlock(/const itemDeletionDecisionMatch = normalizedPath\.match\(/, 7500)
+    const guardAt = block.indexOf(
+      'const approvalOpenWait = removalOpenWaitRefusal(approvalItem, req.subItemId, req.subSubItemId)',
+    )
+    expect(guardAt).toBeGreaterThan(-1)
+    expect(block.slice(guardAt, guardAt + 400)).toContain('sendJson(response, approvalOpenWait.status, {')
+    expect(guardAt).toBeLessThan(block.indexOf('removalWouldCompleteWaitingStep(approvalItem'))
+    expect(guardAt).toBeLessThan(block.indexOf('appDataStore.removeChecklistSubSubItem('))
+    expect(guardAt).toBeLessThan(block.indexOf('appDataStore.removeChecklistSubItem('))
+    // The refusal returns before the request is dropped.
+    const refusalReturnAt = block.indexOf('return', guardAt)
+    expect(block.slice(guardAt, refusalReturnAt)).not.toContain('deleteItemDeletionRequest')
+  })
+
+  it('answers the store\'s own refusal as the same 409 on all three paths, and leaves the request in place', () => {
+    expect(serverSource).toContain('StepHasOpenWaitError,')
+    expect(serverSource).toContain('removalOpenWaitRefusal,')
+    const helper = serverSource.slice(serverSource.indexOf('function removalRefusalBody(error) {'))
+    expect(helper.slice(0, 400)).toContain(
+      'if (error instanceof StepHasOpenWaitError || error instanceof StepIsWaitingError) {',
+    )
+    // Three callers: the two DELETE routes and the approval.
+    expect(serverSource.split('const refusalBody = removalRefusalBody(error)').length - 1).toBe(3)
+    expect(serverSource.split('if (!refusalBody) throw error').length - 1).toBe(3)
+    const approval = routeBlock(/const itemDeletionDecisionMatch = normalizedPath\.match\(/, 7500)
+    const catchAt = approval.indexOf('const refusalBody = removalRefusalBody(error)')
+    const dropAt = approval.indexOf('await appDataStore.deleteItemDeletionRequest(requestId)', catchAt)
+    expect(catchAt).toBeGreaterThan(-1)
+    expect(dropAt).toBeGreaterThan(catchAt)
+    expect(approval.slice(catchAt, dropAt)).toContain('sendJson(response, 409, refusalBody)')
+    expect(approval.slice(catchAt, dropAt)).toContain('return')
+  })
+
+  it('the store decides inside the locked row / queue slot, before it writes (both backends)', () => {
+    for (const method of ['async removeChecklistSubItem(', 'async removeChecklistSubSubItem(']) {
+      const start = storeSource.indexOf(method)
+      const end = storeSource.indexOf('// ---- Structured', start)
+      expect(start).toBeGreaterThan(-1)
+      const body = storeSource.slice(start, method.includes('SubSub') ? end : storeSource.indexOf('async reorderChecklistSubItems(', start))
+      // Postgres: inside the callback `_withLockedChecklistItem` runs on the locked row.
+      const pgGuard = body.indexOf('assertRemovalAllowed(mapped,')
+      expect(pgGuard).toBeGreaterThan(body.indexOf('_withLockedChecklistItem('))
+      expect(pgGuard).toBeLessThan(body.indexOf('update checklist_items'))
+      // File: inside the queue slot's edit callback, before the removal math.
+      const fileGuard = body.indexOf('assertRemovalAllowed(item,')
+      expect(fileGuard).toBeGreaterThan(body.indexOf('_withFileChecklistItem('))
+    }
+    expect(storeSource).toContain('removalOpenWaitRefusal,')
+  })
+
+  // Top-level steps are NOT covered by this rule: `deleteChecklistItem` and the
+  // series delete are different writers (they delete the whole row), and the
+  // owner's answer was about sub-steps.
+  it('leaves the top-level step DELETE and the series delete alone', () => {
+    const block = routeBlock(/--- DELETE \/api\/checklists\/:id\/items\/:itemId ---/, 4500)
+    expect(block).not.toContain('removalOpenWaitRefusal')
   })
 })

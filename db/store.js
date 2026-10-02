@@ -37,6 +37,9 @@ import {
 } from '../lib/proposal-pricing.js'
 import {
   isWaitingOnOpen,
+  REMOVAL_WOULD_COMPLETE_WAITING_STEP,
+  removalOpenWaitRefusal,
+  removalWouldCompleteWaitingStep,
   toggleClosingWaits,
   waitingLockRefusal,
   waitingOnStage,
@@ -2534,6 +2537,41 @@ export class StepIsWaitingError extends Error {
     super(refusal.message)
     this.name = 'StepIsWaitingError'
     this.refusal = refusal
+  }
+}
+
+/**
+ * Thrown by `removeChecklistSubItem` and `removeChecklistSubSubItem` when the
+ * node being removed, or any node beneath it, still carries an open saved wait
+ * (stage `waiting` or `resolved`): the wait record would be deleted with it. As
+ * with `StepIsWaitingError`, the answer is decided on the row as it is now, the
+ * route sends `refusal` (`{ status, error, message }`) as it is, and nothing was
+ * written.
+ */
+export class StepHasOpenWaitError extends Error {
+  constructor(refusal) {
+    super(refusal.message)
+    this.name = 'StepHasOpenWaitError'
+    this.refusal = refusal
+  }
+}
+
+/**
+ * The two refusals a sub-step / sub-sub-step removal can be answered with,
+ * decided on the step as it is now (the row locked `for update`, or the file
+ * queue slot): an open saved wait on the removed node or beneath it, and a
+ * removal that would roll a waiting parent up to done. Throws before anything is
+ * written; the routes map both.
+ */
+function assertRemovalAllowed(item, subItemId, subSubItemId) {
+  const openWait = removalOpenWaitRefusal(item, subItemId, subSubItemId)
+  if (openWait) throw new StepHasOpenWaitError(openWait)
+  if (removalWouldCompleteWaitingStep(item, subItemId, subSubItemId)) {
+    throw new StepIsWaitingError({
+      status: 409,
+      error: 'STEP_IS_WAITING',
+      message: REMOVAL_WOULD_COMPLETE_WAITING_STEP,
+    })
   }
 }
 
@@ -17244,7 +17282,11 @@ export class AppDataStore {
       const removedFrom = await this._withLockedChecklistItem(
         checklistId,
         itemId,
-        async (client, _mapped, row) => {
+        async (client, mapped, row) => {
+          // Refused on the row as it is now, before anything is written: an open
+          // wait on the sub-step or beneath it, or a waiting parent it would roll
+          // up to done.
+          assertRemovalAllowed(mapped, subItemId)
           // With sub-items the parent is the roll-up; with none left, keep its
           // current stored `done`. (The pure math: lib/checklist-step-ops.js.)
           const removed = applySubItemRemoval(row.sub_items, row.done, subItemId)
@@ -17264,6 +17306,7 @@ export class AppDataStore {
     }
 
     return this._withFileChecklistItem(checklistId, itemId, (item) => {
+      assertRemovalAllowed(item, subItemId)
       const removed = applySubItemRemoval(item.subItems, item.done, subItemId)
       if (!removed) return null
       return withCompletionStamp({ ...item, subItems: removed.subItems }, removed.done)
@@ -17475,7 +17518,9 @@ export class AppDataStore {
       const removedFrom = await this._withLockedChecklistItem(
         checklistId,
         itemId,
-        async (client, _mapped, row) => {
+        async (client, mapped, row) => {
+          // Refused on the row as it is now (see `removeChecklistSubItem`).
+          assertRemovalAllowed(mapped, subItemId, subSubItemId)
           // The pure math (sub-item roll-up, then the top item's) lives in
           // lib/checklist-step-ops.js.
           const removed = applySubSubItemRemoval(row.sub_items, { subItemId, subSubItemId })
@@ -17495,6 +17540,7 @@ export class AppDataStore {
     }
 
     return this._withFileChecklistItem(checklistId, itemId, (item) => {
+      assertRemovalAllowed(item, subItemId, subSubItemId)
       const removed = applySubSubItemRemoval(item.subItems, { subItemId, subSubItemId })
       if (!removed) return null
       return withCompletionStamp({ ...item, subItems: removed.subItems }, removed.done)
