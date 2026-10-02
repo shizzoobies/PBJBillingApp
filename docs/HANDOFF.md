@@ -40,6 +40,27 @@ COMMIT, then rebase (unpiped), then verify, then push; never rebase a dirty tree
 no `[bulk-save] write committed` line in the Railway log: no real whole-workspace save
 has run since the lock shipped.
 
+**Pick up here (in this order):**
+1. Railway log → `[bulk-save] write committed in <N>ms after <K> lock attempt(s)` after
+   Brittany's first real save; over ~8 s or repeated `workspace_busy` = batch the inserts
+   (B2 on `featreq-c8e5f169`). Nothing has run yet.
+2. Re-read the board: Brittany's three Needs-input items above may be answered — each
+   answer is a build (autopay is the big one; the Software section needs a new group in
+   `PROPOSAL_GROUPS`, a code change; the questionnaire is the intake half of
+   `featreq-79b6d974`). Her questions go to HER on the ticket, never to Alex in chat.
+3. Alex's open decisions, still unanswered: Rivercity / answer 8 (opt-out switch →
+   "generate, never email, mark sent on review"); a server-preserved `clients.invoice_note`;
+   ship `feat/invoice-role-lines` @ `0b12038` (hours lines labeled by role — reviewed safe,
+   waits on wording); ask Brittany whether a client's own hourly rate replaces staff rates;
+   backups (he said the week of 10-05, Cloudflare token by `setx` in his terminal, never in
+   chat); `railway.json` → `.railway/railway.ts` before 2026-12-01 (`featreq-d84ddb16`).
+4. Housekeeping: the two `.claude/worktrees/` (mystifying-kirch, unruffled-nash) hold
+   superseded 09-30 work — remove them; `AP-laneB`/`AP-laneC` can stay for the next lanes.
+5. Watch for a send-back on the firm-day change: Saturday entries made 8 pm–midnight
+   Eastern are now gated like the rest of the week (by design); and a Net-30 invoice sent
+   in that window now prints and is due from the Eastern date (copies sent before 10-02
+   keep their date).
+
 **Earlier (2026-10-01, about 11:30 pm Eastern - end of the night run):** `main` =
 `90b9063` (+ this handoff), deployed, `/health` 200 with that commit, voice agent re-provisioned.
 Suite **6102 tests / 287 files**, green; manifest 198,614 bytes (tripwire 205,000). THE
