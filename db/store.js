@@ -1124,6 +1124,22 @@ export class WorkspaceBusyError extends Error {
 }
 
 /**
+ * A server-side read-modify-write (a template stage edit, a standard template,
+ * a copy onto a client, starting onboarding) found the workspace changed under
+ * it on every one of its attempts. Nothing was written. The route answers 503
+ * `workspace_changed` with this sentence, and the person tries again.
+ */
+export class WorkspaceChangedError extends Error {
+  constructor(message = 'The workspace changed while this was being saved. Try again.') {
+    super(message)
+    this.name = 'WorkspaceChangedError'
+  }
+}
+
+/** How many times a server-side read-modify-write redoes itself on a stale read. */
+export const WORKSPACE_RMW_ATTEMPTS = 3
+
+/**
  * Every table `write()` deletes, parents first. The bulk save locks all of them
  * in EXCLUSIVE mode before it looks at anything, so a single-row write that is
  * in flight finishes first (the save then sees one consistent state) and one
@@ -16748,6 +16764,30 @@ export class AppDataStore {
   }
 
   /**
+   * Run a server-side read-modify-write that reads with `readWithVersion()` and
+   * writes with that `expectedVersion`, redoing the WHOLE thing (a fresh read,
+   * a fresh decision) when the write is refused as stale - a change committed
+   * between the read and the write used to be silently wiped by it. After
+   * `WORKSPACE_RMW_ATTEMPTS` stale answers it gives up with a typed, retryable
+   * `WorkspaceChangedError`. Every other error propagates untouched.
+   */
+  async _retryOnStaleWorkspace(operation) {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await operation()
+      } catch (error) {
+        if (!(error instanceof StaleWorkspaceError)) throw error
+        if (attempt >= WORKSPACE_RMW_ATTEMPTS) {
+          console.warn(
+            `[workspace] a read-modify-write found the workspace changed on all ${attempt} attempts; refusing`,
+          )
+          throw new WorkspaceChangedError()
+        }
+      }
+    }
+  }
+
+  /**
    * Owner action — begin a client's onboarding. Creates the ONE onboarding
    * checklist as a 3-stage case (Proposal → Onboarding → Client), tags the
    * template with `onboardingForClientId` so each stage syncs the client's
@@ -16758,7 +16798,30 @@ export class AppDataStore {
    * Owner-only — caller enforces auth.
    */
   async startOnboarding(clientId) {
-    const data = await this.read()
+    // Only the read-modify-write is redone on a stale read. What follows it
+    // (the Stage-1 checklist, the re-read) runs once, after the case exists.
+    const opened = await this._retryOnStaleWorkspace(() => this._openOnboardingCase(clientId))
+    if (!opened) return null
+    const { template, today } = opened
+
+    // Materialise the Stage-1 (Proposal) instance via the shared generate path
+    // so it goes through createChecklist + visibility grant like every other
+    // instance. It inherits `onboardingForClientId` from the template.
+    const checklist = await this.generateChecklistFromTemplate(template.id, { dueDate: today })
+    const refreshed = await this.read()
+    const updatedClient = (refreshed.clients ?? []).find((c) => c.id === clientId) ?? null
+    return { template, checklist, client: updatedClient }
+  }
+
+  /**
+   * The read-modify-write half of `startOnboarding`: reads the workspace WITH
+   * its version, adds the onboarding template and moves the client to
+   * 'proposal', and writes under that version (StaleWorkspaceError if anything
+   * moved). Returns { template, today }, or null when the client is missing or
+   * already has an onboarding case.
+   */
+  async _openOnboardingCase(clientId) {
+    const { data, version } = await this.readWithVersion()
     const client = (data.clients ?? []).find((c) => c.id === clientId)
     if (!client) return null
     // Idempotent: don't open a second onboarding case for the same client.
@@ -16823,15 +16886,8 @@ export class AppDataStore {
         c.id === clientId ? { ...c, lifecycleStage: 'proposal' } : c,
       ),
     }
-    await this.write(nextData)
-
-    // Materialise the Stage-1 (Proposal) instance via the shared generate path
-    // so it goes through createChecklist + visibility grant like every other
-    // instance. It inherits `onboardingForClientId` from the template.
-    const checklist = await this.generateChecklistFromTemplate(template.id, { dueDate: today })
-    const refreshed = await this.read()
-    const updatedClient = (refreshed.clients ?? []).find((c) => c.id === clientId) ?? null
-    return { template, checklist, client: updatedClient }
+    await this.write(nextData, { expectedVersion: version })
+    return { template, today }
   }
 
   async setChecklistViewers(checklistId, viewerIds, editorIds) {
@@ -23381,30 +23437,40 @@ export class AppDataStore {
 
   async _readTemplateForStageUpdate(templateId) {
     if (this.pool) {
-      const data = await this.read()
+      const { data, version } = await this.readWithVersion()
       const template = (data.checklistTemplates ?? []).find((t) => t.id === templateId) ?? null
-      return { data, template, source: 'pg' }
+      return { data, template, source: 'pg', version }
     }
     const data = await readJson(localDataPath)
+    // The version of the file exactly as read, taken before the normalisation
+    // below touches it - `write()` compares it with the file's own fingerprint.
+    const version = fileWorkspaceVersion(data)
     if (Array.isArray(data.checklists)) {
       // ensure stage normalisation runs even before persistence
     }
     const templates = (data.checklistTemplates ?? []).map((t) => ensureTemplateStages(t))
     data.checklistTemplates = templates
     const template = templates.find((t) => t.id === templateId) ?? null
-    return { data, template, source: 'file' }
+    return { data, template, source: 'file', version }
   }
 
-  async _persistTemplate(data, source) {
-    if (source === 'pg') {
-      await this.write(data)
-    } else {
-      await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    }
+  /**
+   * Persist what a stage edit built, under the version it was read at: a change
+   * committed since (a tick, a note) refuses it with StaleWorkspaceError instead
+   * of being wiped, and the edit - wrapped in `_retryOnStaleWorkspace` - is
+   * redone from a fresh read. Both backends go through `write()`, so both get
+   * the same guard (the file branch used to overwrite the whole file raw).
+   */
+  async _persistTemplate(data, source, version) {
+    await this.write(data, { expectedVersion: version })
   }
 
   async addTemplateStage(templateId, stageInput) {
-    const { data, template, source } = await this._readTemplateForStageUpdate(templateId)
+    return this._retryOnStaleWorkspace(() => this._addTemplateStageOnce(templateId, stageInput))
+  }
+
+  async _addTemplateStageOnce(templateId, stageInput) {
+    const { data, template, source, version } = await this._readTemplateForStageUpdate(templateId)
     if (!template) return null
     const stages = Array.isArray(template.stages) ? template.stages : []
     const newStage = {
@@ -23424,12 +23490,16 @@ export class AppDataStore {
       t.id === templateId ? { ...t, stages: [...stages, newStage] } : t,
     )
     const nextData = { ...data, checklistTemplates: nextTemplates }
-    await this._persistTemplate(nextData, source)
+    await this._persistTemplate(nextData, source, version)
     return { template: nextTemplates.find((t) => t.id === templateId), stage: newStage }
   }
 
   async removeTemplateStage(templateId, stageId) {
-    const { data, template, source } = await this._readTemplateForStageUpdate(templateId)
+    return this._retryOnStaleWorkspace(() => this._removeTemplateStageOnce(templateId, stageId))
+  }
+
+  async _removeTemplateStageOnce(templateId, stageId) {
+    const { data, template, source, version } = await this._readTemplateForStageUpdate(templateId)
     if (!template) return null
     const stages = Array.isArray(template.stages) ? template.stages : []
     const filtered = stages.filter((stage) => stage.id !== stageId)
@@ -23438,12 +23508,16 @@ export class AppDataStore {
       t.id === templateId ? { ...t, stages: filtered } : t,
     )
     const nextData = { ...data, checklistTemplates: nextTemplates }
-    await this._persistTemplate(nextData, source)
+    await this._persistTemplate(nextData, source, version)
     return nextTemplates.find((t) => t.id === templateId)
   }
 
   async patchTemplateStage(templateId, stageId, patch) {
-    const { data, template, source } = await this._readTemplateForStageUpdate(templateId)
+    return this._retryOnStaleWorkspace(() => this._patchTemplateStageOnce(templateId, stageId, patch))
+  }
+
+  async _patchTemplateStageOnce(templateId, stageId, patch) {
+    const { data, template, source, version } = await this._readTemplateForStageUpdate(templateId)
     if (!template) return null
     const stages = Array.isArray(template.stages) ? template.stages : []
     let mutated = false
@@ -23478,12 +23552,16 @@ export class AppDataStore {
       t.id === templateId ? { ...t, stages: nextStages } : t,
     )
     const nextData = { ...data, checklistTemplates: nextTemplates }
-    await this._persistTemplate(nextData, source)
+    await this._persistTemplate(nextData, source, version)
     return nextTemplates.find((t) => t.id === templateId)
   }
 
   async reorderTemplateStages(templateId, orderedStageIds) {
-    const { data, template, source } = await this._readTemplateForStageUpdate(templateId)
+    return this._retryOnStaleWorkspace(() => this._reorderTemplateStagesOnce(templateId, orderedStageIds))
+  }
+
+  async _reorderTemplateStagesOnce(templateId, orderedStageIds) {
+    const { data, template, source, version } = await this._readTemplateForStageUpdate(templateId)
     if (!template) return null
     const stages = Array.isArray(template.stages) ? template.stages : []
     const byId = new Map(stages.map((stage) => [stage.id, stage]))
@@ -23497,7 +23575,7 @@ export class AppDataStore {
       t.id === templateId ? { ...t, stages: nextStages } : t,
     )
     const nextData = { ...data, checklistTemplates: nextTemplates }
-    await this._persistTemplate(nextData, source)
+    await this._persistTemplate(nextData, source, version)
     return nextTemplates.find((t) => t.id === templateId)
   }
 
@@ -23509,7 +23587,11 @@ export class AppDataStore {
    * materializes checklists on its own. Owner-only — caller enforces auth.
    */
   async createStandardTemplate(input) {
-    const data = await this.read()
+    return this._retryOnStaleWorkspace(() => this._createStandardTemplateOnce(input))
+  }
+
+  async _createStandardTemplateOnce(input) {
+    const { data, version } = await this.readWithVersion()
     const stagesInput = Array.isArray(input?.stages) ? input.stages : []
     const stages = stagesInput.map((stage, index) => ({
       id: `stage-${randomUUID().slice(0, 8)}`,
@@ -23565,7 +23647,7 @@ export class AppDataStore {
       ...data,
       checklistTemplates: [...(data.checklistTemplates ?? []), template],
     }
-    await this.write(nextData)
+    await this.write(nextData, { expectedVersion: version })
     return template
   }
 
@@ -23575,11 +23657,15 @@ export class AppDataStore {
    * template and every stage/item. The copy's isStandard is always false.
    * Owner-only — caller enforces auth.
    */
-  async copyTemplateToClient(sourceTemplateId, { clientId, firstDueDate, frequency } = {}) {
+  async copyTemplateToClient(sourceTemplateId, options = {}) {
+    return this._retryOnStaleWorkspace(() => this._copyTemplateToClientOnce(sourceTemplateId, options))
+  }
+
+  async _copyTemplateToClientOnce(sourceTemplateId, { clientId, firstDueDate, frequency } = {}) {
     // A recurring recipe on a master would spawn tasks on a client that collects
     // nothing — the same refusal the one-off checklist path makes.
     await this._refuseBillingMasterWrite(clientId, 'recurring task recipes')
-    const data = await this.read()
+    const { data, version } = await this.readWithVersion()
     const source = (data.checklistTemplates ?? []).find((t) => t.id === sourceTemplateId)
     if (!source) return null
 
@@ -23662,7 +23748,7 @@ export class AppDataStore {
       ...data,
       checklistTemplates: [...(data.checklistTemplates ?? []), copy],
     }
-    await this.write(nextData)
+    await this.write(nextData, { expectedVersion: version })
     return copy
   }
 

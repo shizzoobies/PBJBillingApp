@@ -35,6 +35,7 @@ import {
   TooManyPendingNotesError,
   WaitRefusedError,
   WorkspaceBusyError,
+  WorkspaceChangedError,
   mapChecklistItemRow,
   mapClientRow,
   mapInvoiceRow,
@@ -32919,5 +32920,330 @@ describe('forgetStripeEvent takes an id back out of the dedup ledger', () => {
     const insert = fake.matching(/^insert into stripe_events/i)[0]
     expect(insert.text).toMatch(/on conflict \(id\) do nothing/i)
     expect(insert.params).toEqual(['evt_a', 'x'])
+  })
+})
+
+/**
+ * Template and onboarding saves notice a change made while they were working,
+ * and redo their work instead of undoing it (tracker featreq-6a5c6162).
+ *
+ * `startOnboarding`, the template-stage edits (`_persistTemplate`),
+ * `createStandardTemplate` and `copyTemplateToClient` read the whole workspace
+ * and write it back with the bulk save but WITHOUT an expected version, so any
+ * change committed between their read and their write - a checklist tick, a
+ * pending note - was silently wiped. They now read with `readWithVersion()`,
+ * write under that version, and redo the whole read-modify-write (up to three
+ * times) when the write is refused as stale.
+ */
+describe('server-side read-modify-writes are guarded by a version (postgres branch)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const FINGERPRINT = /md5\(coalesce\(string_agg/i
+  const rowsFor = (hash) => [{ t: 'clients', h: hash }]
+  const control = (fake) =>
+    fake.statements.map((s) => s.text).filter((t) => /^(begin|commit|rollback)$/i.test(t))
+  const RETRY_SENTENCE = 'The workspace changed while this was being saved. Try again.'
+
+  const clientRow = {
+    id: 'c1',
+    name: 'Acme',
+    contact: 'Pat',
+    billing_mode: 'hourly',
+    hourly_rate: 0,
+    plan_id: null,
+    plan_ids: [],
+    contact_ids: [],
+    assigned_bookkeeper_ids: ['emp-1'],
+    lifecycle_stage: 'active',
+  }
+  // An INACTIVE standard blueprint: the materializer never spawns from it, so a
+  // read never writes back and every fingerprint in a script is one this code asked for.
+  const blueprintRows = {
+    clientRows: [clientRow],
+    templateRows: [
+      {
+        id: 'tpl-bp',
+        title: 'Blueprint',
+        client_id: null,
+        assignee_id: 'emp-1',
+        frequency: 'monthly',
+        next_due_date: new Date('2026-09-30T00:00:00.000Z'),
+        active: false,
+        is_standard: true,
+        category_id: null,
+        skip_allowed: false,
+        onboarding_for_client_id: null,
+        source_template_id: null,
+        viewer_ids: [],
+        editor_ids: [],
+        scheduled_months: null,
+        due_day_of_month: null,
+        monthly_due_days: null,
+        repeat_annually: true,
+        schedule_year: null,
+        lead_days: null,
+      },
+    ],
+    templateStageRows: [
+      {
+        id: 'stage-1',
+        template_id: 'tpl-bp',
+        name: 'Stage 1',
+        assignee_id: 'emp-1',
+        offset_days: 0,
+        due_date: null,
+        due_day_of_month: null,
+        position: 0,
+        viewer_ids: [],
+        editor_ids: [],
+      },
+    ],
+    templateItemRows: [
+      {
+        id: 'ti-1',
+        template_id: 'tpl-bp',
+        label: 'Reconcile',
+        sort_order: 0,
+        due_date: null,
+        due_day_of_month: null,
+        assignee_id: null,
+        stage_id: 'stage-1',
+        sub_items: [],
+      },
+    ],
+  }
+
+  // The seven entry points, and what the template they added is called.
+  const operations = {
+    createStandardTemplate: (s) => s.createStandardTemplate({ title: 'New blueprint' }),
+    copyTemplateToClient: (s) => s.copyTemplateToClient('tpl-bp', { clientId: 'c1' }),
+    startOnboarding: (s) => s.startOnboarding('c1'),
+    addTemplateStage: (s) => s.addTemplateStage('tpl-bp', { name: 'Stage 2' }),
+    patchTemplateStage: (s) => s.patchTemplateStage('tpl-bp', 'stage-1', { name: 'Renamed' }),
+    removeTemplateStage: (s) => s.removeTemplateStage('tpl-bp', 'stage-1'),
+    reorderTemplateStages: (s) => s.reorderTemplateStages('tpl-bp', ['stage-1']),
+  }
+  const names = Object.keys(operations)
+
+  it.each(names)('%s: a non-racing call is the old statements plus the two fingerprints that guard it', async (name) => {
+    const guarded = fakePostgres(blueprintRows)
+    await operations[name](postgresStore(guarded))
+
+    // The old behavior, exactly: a plain read() and an unguarded write().
+    const legacy = fakePostgres(blueprintRows)
+    const legacyStore = postgresStore(legacy)
+    legacyStore.readWithVersion = async () => ({ data: await legacyStore.read(), version: null })
+    await operations[name](legacyStore)
+
+    const texts = (fake) => fake.statements.map((s) => s.text)
+    const withoutFingerprints = texts(guarded).filter((t) => !FINGERPRINT.test(t))
+    expect(withoutFingerprints).toEqual(texts(legacy).filter((t) => !FINGERPRINT.test(t)))
+    // Capture before the read, and the guard inside the write's transaction.
+    expect(guarded.matching(FINGERPRINT)).toHaveLength(2)
+    const beginAt = guarded.indexOf(/^begin$/i)
+    const fingerprintAts = guarded.statements
+      .map((s, index) => (FINGERPRINT.test(s.text) ? index : -1))
+      .filter((index) => index >= 0)
+    expect(fingerprintAts[0]).toBeLessThan(beginAt)
+    expect(fingerprintAts[1]).toBeGreaterThan(beginAt)
+    expect(legacy.matching(FINGERPRINT)).toHaveLength(0)
+  })
+
+  it.each(names)('%s: a change committed between the read and the write is kept - it redoes its work and succeeds', async (name) => {
+    // read #1 sees A; by the write the state is B (a tick landed): stale. The
+    // redo reads B and writes under B.
+    const fake = fakePostgres({
+      ...blueprintRows,
+      versionResponses: [rowsFor('A'), rowsFor('B'), rowsFor('B'), rowsFor('B')],
+    })
+    const result = await operations[name](postgresStore(fake))
+
+    expect(result).not.toBeNull()
+    expect(result).toBeDefined()
+    // Two attempts: the first rolled back before a single delete, the second committed.
+    expect(control(fake)).toEqual(['begin', 'rollback', 'begin', 'commit'])
+    expect(fake.matching(/^delete from /i)).toHaveLength(14)
+    // The whole read was redone, not just the write.
+    expect(fake.matching(/\bnext_due_date\b[\s\S]*from checklist_templates\b/i).length).toBeGreaterThanOrEqual(2)
+  })
+
+  it.each(names)('%s: three stale answers surface a clear, retryable error and write nothing', async (name) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fake = fakePostgres({
+      ...blueprintRows,
+      versionResponses: [
+        rowsFor('A'), rowsFor('B'),
+        rowsFor('B'), rowsFor('C'),
+        rowsFor('C'), rowsFor('D'),
+      ],
+    })
+    const error = await operations[name](postgresStore(fake)).catch((e) => e)
+
+    expect(error).toBeInstanceOf(WorkspaceChangedError)
+    expect(error).not.toBeInstanceOf(StaleWorkspaceError)
+    expect(error.message).toBe(RETRY_SENTENCE)
+    expect(control(fake)).toEqual(['begin', 'rollback', 'begin', 'rollback', 'begin', 'rollback'])
+    expect(fake.matching(/^(delete from|insert into) /i)).toEqual([])
+    warn.mockRestore()
+  })
+
+  it('any other failure is not retried and propagates unchanged', async () => {
+    const failure = new Error('constraint')
+    const fake = fakePostgres({
+      ...blueprintRows,
+      failOn: { pattern: /^delete from clients$/i, error: failure },
+    })
+    const error = await postgresStore(fake)
+      .createStandardTemplate({ title: 'X' })
+      .catch((e) => e)
+
+    expect(error).toBe(failure)
+    expect(control(fake)).toEqual(['begin', 'rollback'])
+  })
+
+  it('a missing source template or client still answers null without writing', async () => {
+    const fake = fakePostgres({ clientRows: [clientRow] })
+    const pgStore = postgresStore(fake)
+
+    expect(await pgStore.copyTemplateToClient('nope', { clientId: 'c1' })).toBeNull()
+    expect(await pgStore.startOnboarding('nobody')).toBeNull()
+    expect(await pgStore.addTemplateStage('nope', {})).toBeNull()
+    expect(fake.matching(/^(begin$|delete from |insert into )/i)).toEqual([])
+  })
+
+  it('the route maps the exhausted retry to a 503 sentence, not a bare 500', async () => {
+    const serverSource = await readFile(path.join(projectRoot, 'server.js'), 'utf8')
+    const at = serverSource.lastIndexOf('if (error instanceof WorkspaceChangedError) {')
+    expect(at).toBeGreaterThan(-1)
+    expect(serverSource.slice(at, at + 200)).toContain(
+      "sendJson(response, 503, { error: 'workspace_changed', message: error.message })",
+    )
+    expect(at).toBeLessThan(serverSource.indexOf("sendJson(response, 500, { error: 'Server error' })", at))
+  })
+})
+
+describe('server-side read-modify-writes are guarded by a version (file backend)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const blueprint = () => ({
+    id: 'tpl-bp',
+    title: 'Blueprint',
+    clientId: '',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2026-09-30',
+    active: false,
+    isStandard: true,
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      {
+        id: 'stage-1',
+        name: 'Stage 1',
+        assigneeId: 'emp-1',
+        offsetDays: 0,
+        viewerIds: [],
+        editorIds: [],
+        items: [{ id: 'ti-1', label: 'Reconcile' }],
+      },
+    ],
+  })
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  // A write that lands between the operation's read and its write: a time entry
+  // appended straight to the file, which moves the workspace fingerprint.
+  let ticks = 0
+  const tick = async () => {
+    ticks += 1
+    const data = await persisted()
+    data.timeEntries = [...(data.timeEntries ?? []), { id: `t-tick-${ticks}`, minutes: 5, clientId: 'c1' }]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  // Wraps `method` so that, after its first `times` calls return, a tick lands.
+  function tickAfter(method, times) {
+    const real = store[method].bind(store)
+    let calls = 0
+    vi.spyOn(store, method).mockImplementation(async (...args) => {
+      const result = await real(...args)
+      calls += 1
+      if (calls <= times) await tick()
+      return result
+    })
+  }
+
+  beforeEach(async () => {
+    ticks = 0
+    await store.write(workspace({ checklistTemplates: [blueprint()] }))
+  })
+
+  const cases = {
+    createStandardTemplate: {
+      readHook: 'readWithVersion',
+      run: () => store.createStandardTemplate({ title: 'New blueprint' }),
+      landed: (data, result) => data.checklistTemplates.some((t) => t.id === result.id),
+    },
+    copyTemplateToClient: {
+      readHook: 'readWithVersion',
+      run: () => store.copyTemplateToClient('tpl-bp', { clientId: 'c1' }),
+      landed: (data, result) => data.checklistTemplates.some((t) => t.id === result.id),
+    },
+    startOnboarding: {
+      readHook: 'readWithVersion',
+      run: () => store.startOnboarding('c1'),
+      landed: (data, result) => data.checklistTemplates.some((t) => t.id === result.template.id),
+    },
+    addTemplateStage: {
+      readHook: '_readTemplateForStageUpdate',
+      run: () => store.addTemplateStage('tpl-bp', { name: 'Stage 2' }),
+      landed: (data, result) =>
+        data.checklistTemplates.find((t) => t.id === 'tpl-bp').stages.some((s) => s.id === result.stage.id),
+    },
+    patchTemplateStage: {
+      readHook: '_readTemplateForStageUpdate',
+      run: () => store.patchTemplateStage('tpl-bp', 'stage-1', { name: 'Renamed' }),
+      landed: (data) =>
+        data.checklistTemplates.find((t) => t.id === 'tpl-bp').stages[0].name === 'Renamed',
+    },
+  }
+
+  it.each(Object.keys(cases))('%s: a tick landing between the read and the write is kept, and the work is redone', async (name) => {
+    const { readHook, run, landed } = cases[name]
+    tickAfter(readHook, 1)
+    const result = await run()
+
+    const data = await persisted()
+    expect(result).not.toBeNull()
+    expect(landed(data, result)).toBe(true)
+    // The change that landed mid-operation is still there.
+    expect(data.timeEntries.map((entry) => entry.id)).toContain('t-tick-1')
+  })
+
+  it.each(Object.keys(cases))('%s: three ticks in a row surface the retryable error and write nothing', async (name) => {
+    const { readHook, run } = cases[name]
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    tickAfter(readHook, 99)
+    const before = await persisted()
+    const error = await run().catch((e) => e)
+
+    expect(error).toBeInstanceOf(WorkspaceChangedError)
+    const after = await persisted()
+    // Only the ticks changed the file: no template or stage was written, and the
+    // client was not moved to onboarding.
+    expect(after.checklistTemplates).toEqual(before.checklistTemplates)
+    expect(after.clients[0].lifecycleStage).not.toBe('proposal')
+    expect(after.timeEntries.map((entry) => entry.id)).toEqual(
+      expect.arrayContaining(['t-tick-1', 't-tick-2', 't-tick-3']),
+    )
+  })
+
+  it.each(Object.keys(cases))('%s: with nothing racing it writes once and answers as before', async (name) => {
+    const { run, landed } = cases[name]
+    const result = await run()
+    expect(result).not.toBeNull()
+    expect(landed(await persisted(), result)).toBe(true)
   })
 })

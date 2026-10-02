@@ -31,6 +31,7 @@ import {
   TooManyPendingNotesError,
   WaitRefusedError,
   WorkspaceBusyError,
+  WorkspaceChangedError,
 } from './db/store.js'
 import {
   allocateGroupMinutes,
@@ -14427,6 +14428,14 @@ const server = createServer(async (request, response) => {
     // plainly instead of a bare 500.
     if (error instanceof WorkspaceBusyError) {
       sendJson(response, 503, { error: 'workspace_busy', message: error.message })
+      return
+    }
+    // A read-modify-write (template stage edit, standard template, copy onto a
+    // client, onboarding) that found the workspace changed on every attempt.
+    // Nothing was written. 503, not 409: the onboarding button reads a 409 as
+    // "already started" and goes quiet, and this one is plainly worth retrying.
+    if (error instanceof WorkspaceChangedError) {
+      sendJson(response, 503, { error: 'workspace_changed', message: error.message })
       return
     }
     // A BILLING MASTER refusing a write is a fact about the data, not a server
