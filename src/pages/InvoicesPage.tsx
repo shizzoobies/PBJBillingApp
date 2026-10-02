@@ -490,7 +490,19 @@ function persistedToDisplay(
   }
 }
 
-export function InvoicesPage() {
+export function InvoicesPage({
+  openPeriod = null,
+  onOpenPeriodHandled,
+}: {
+  /**
+   * A billing month (`YYYY-MM`) the page was opened on, from the URL's `period`
+   * query (a payment notification links to `/invoices?period=2026-09`). The month
+   * run moves to it and the page tells its caller it has done so, so the query is
+   * dropped and the same link works again later.
+   */
+  openPeriod?: string | null
+  onOpenPeriodHandled?: () => void
+} = {}) {
   const {
     data,
     selectedClientId,
@@ -628,6 +640,31 @@ export function InvoicesPage() {
   const monthRunRef = useRef<InvoiceMonthRunHandle>(null)
   // Why a click in History did nothing. See `openMonthRun`.
   const [historyNote, setHistoryNote] = useState<string | null>(null)
+
+  // Land on the month a link asked for. The page is put on the month run, which
+  // is where that month lives - adjusted while rendering (React's own pattern for
+  // state that follows a prop) rather than in an effect...
+  const [seenOpenPeriod, setSeenOpenPeriod] = useState<string | null>(null)
+  if ((openPeriod ?? null) !== seenOpenPeriod) {
+    setSeenOpenPeriod(openPeriod ?? null)
+    if (openPeriod) setView('month')
+  }
+  // ...and the run is moved by the same guarded move the month picker makes (an
+  // open editor with unsaved edits asks first). The page renders NOTHING until its
+  // data (the selected client) has loaded, so on a cold load the run is not
+  // mounted yet: the request is held until it is, and only cleared from the URL
+  // after `showPeriod` has actually run.
+  const runIsMounted = Boolean(ownerMode && selectedClient && baseInvoice && display)
+  useEffect(() => {
+    if (!openPeriod || !runIsMounted) return
+    const run = monthRunRef.current
+    if (!run) return
+    if (/^\d{4}-(0[1-9]|1[0-2])$/.test(openPeriod)) run.showPeriod(openPeriod)
+    onOpenPeriodHandled?.()
+    // Keyed on the requested month and the run's mount only: the callback is a
+    // fresh function every render of the router and must not re-run this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openPeriod, runIsMounted])
 
   const showView = (next: 'month' | 'history') => {
     setHistoryNote(null)

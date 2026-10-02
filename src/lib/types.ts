@@ -782,7 +782,25 @@ export interface InvoiceAmountMismatchEntry {
   at: string
   paymentIntentId: string | null
   expectedCents: number
-  receivedCents: number
+  /** Null only for a duplicate whose amount Stripe did not report. */
+  receivedCents: number | null
+  /** 'duplicate': a SECOND payment on an invoice that was already paid. */
+  reason?: 'duplicate'
+  /** A duplicate bank payment that was only started, not settled (it can still fail). */
+  settling?: true
+}
+
+/**
+ * Money that arrived for a VOIDED invoice, written by the Stripe webhook. Log
+ * only (a voided row shows no flag); `amount` is dollars.
+ */
+export interface InvoicePaymentOnVoidedEntry {
+  kind: 'payment'
+  event: 'on-voided'
+  at: string
+  paymentIntentId: string | null
+  amount: number | null
+  detail?: string
 }
 
 /** An owner's "Mark as handled" for the mismatch on the same payment. */
@@ -800,6 +818,7 @@ export type InvoiceEmailLogEntry =
   | InvoicePaymentFailureEntry
   | InvoiceAmountMismatchEntry
   | InvoiceAmountMismatchHandledEntry
+  | InvoicePaymentOnVoidedEntry
 
 /**
  * One thing the rater wants a second look at. `warn` is "this could be wrong";

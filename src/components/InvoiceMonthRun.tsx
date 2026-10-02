@@ -45,7 +45,11 @@ import {
 } from '../lib/api'
 import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
 import { editChangesWhatClientSees } from '../../lib/invoice-sent-change.js'
-import { paymentInProgress, unhandledAmountMismatch } from '../../lib/payment-amount-mismatch.js'
+import {
+  paymentInProgress,
+  unhandledAmountMismatch,
+  unhandledCountSentence,
+} from '../../lib/payment-amount-mismatch.js'
 import { invoiceAddressee } from '../lib/completeness'
 import { ListSearch } from './ListSearch'
 import {
@@ -274,16 +278,50 @@ function needsALook(invoice: PersistedInvoice) {
  * What she reads, on the row and in the editor, about a payment for a different
  * amount than the invoice total.
  */
-function amountMismatchNotice(
-  mismatch: { expectedCents: number; receivedCents: number },
-  inProgress: boolean,
-) {
+type AmountMismatchView = {
+  expectedCents: number
+  receivedCents: number | null
+  reason: 'amount' | 'duplicate'
+  /** A duplicate BANK payment that has only been started (it can still fail). */
+  settling?: boolean
+  count: number
+}
+
+function amountMismatchNotice(mismatch: AmountMismatchView, inProgress: boolean) {
+  // More than one waiting: say so, so the newest is not mistaken for the only one.
+  const more = unhandledCountSentence(mismatch.count)
+  // A SECOND payment on an invoice that was already paid: the store applied
+  // nothing, so the money is in Stripe and not on the invoice.
+  if (mismatch.reason === 'duplicate' && mismatch.settling) {
+    const ofAmount =
+      mismatch.receivedCents === null ? '' : ` of ${currency.format(mismatch.receivedCents / 100)}`
+    return `A second bank payment${ofAmount} was started for this invoice after it was already paid. It was not applied to the invoice. Once it settles, refund it or apply it by hand, then mark this as handled. If it fails, this clears by itself.${more}`
+  }
+  if (mismatch.reason === 'duplicate') {
+    const amount =
+      mismatch.receivedCents === null ? 'A payment' : `A payment of ${currency.format(mismatch.receivedCents / 100)}`
+    return `${amount} arrived for this invoice again after it was already paid. It was not applied to the invoice. Refund it or apply it by hand, then mark this as handled.${more}`
+  }
+  const received = currency.format((mismatch.receivedCents ?? 0) / 100)
   // A bank payment still settling has not put the money in, and can still fail:
   // nothing may say it is recorded as paid.
   if (inProgress) {
-    return `The client's payment in progress is for ${currency.format(mismatch.receivedCents / 100)}; this invoice's total is ${currency.format(mismatch.expectedCents / 100)}. Once it settles, bill or refund the difference, then mark this as handled.`
+    return `The client's payment in progress is for ${received}; this invoice's total is ${currency.format(mismatch.expectedCents / 100)}. Once it settles, bill or refund the difference, then mark this as handled.${more}`
   }
-  return `The client paid ${currency.format(mismatch.receivedCents / 100)}; this invoice's total is ${currency.format(mismatch.expectedCents / 100)}. It is recorded as paid. Bill or refund the difference, then mark this as handled.`
+  return `The client paid ${received}; this invoice's total is ${currency.format(mismatch.expectedCents / 100)}. It is recorded as paid. Bill or refund the difference, then mark this as handled.${more}`
+}
+
+/** The short flag on the row. */
+function amountMismatchFlagText(mismatch: AmountMismatchView, inProgress: boolean) {
+  const unhandled = mismatch.count > 1 ? ` (${mismatch.count} unhandled)` : ''
+  if (mismatch.reason === 'duplicate') {
+    return `Second payment${
+      mismatch.receivedCents === null ? '' : ` ${currency.format(mismatch.receivedCents / 100)}`
+    }${unhandled}`
+  }
+  return `${inProgress ? 'Paying' : 'Paid'} ${currency.format((mismatch.receivedCents ?? 0) / 100)}, total ${currency.format(
+    mismatch.expectedCents / 100,
+  )}${unhandled}`
 }
 
 /**
@@ -1779,9 +1817,7 @@ function InvoiceRow({
             <span className="invoice-run-flags">
               <span className="invoice-run-flag" title={amountMismatchNotice(amountMismatch, paymentInProgress(invoice))}>
                 <AlertTriangle size={13} />
-                {paymentInProgress(invoice) ? 'Paying' : 'Paid'}{' '}
-                {currency.format(amountMismatch.receivedCents / 100)}, total{' '}
-                {currency.format(amountMismatch.expectedCents / 100)}
+                {amountMismatchFlagText(amountMismatch, paymentInProgress(invoice))}
               </span>
             </span>
           ) : null}

@@ -68,6 +68,7 @@ import { currentPeriod, isValidPeriod, isValidPeriodType } from './lib/periods.j
 import { detectUsagePatterns } from './lib/usage-patterns.js'
 import { firmToday } from './lib/firm-time.js'
 import {
+  INTERNAL_EMAIL_KIND,
   notify,
   sendDigestEmail,
   sendFeatureRequestEmail,
@@ -83,7 +84,13 @@ import {
 } from './lib/invoice-email.js'
 import { resolveSendRecipients } from './lib/invoice-recipients.js'
 import { invoiceContentChanged, totalsDiffer } from './lib/invoice-sent-change.js'
-import { flagPaymentAmountMismatch } from './lib/payment-amount-mismatch.js'
+import {
+  clearDuplicatePaymentOnFailure,
+  flagDuplicatePayment,
+  flagPaymentAmountMismatch,
+  flagPaymentOnVoidedInvoice,
+  invoicePeriodLink,
+} from './lib/payment-amount-mismatch.js'
 import {
   isResendWebhookConfigured,
   resendDeliveryEventFor,
@@ -4223,6 +4230,9 @@ const server = createServer(async (request, response) => {
       // something after it failed" - which must NOT be redelivered, or the
       // owners are told twice.
       let paymentApplied = false
+      // The invoice the event named, as first found. Read after the try by the
+      // voided-invoice step, which needs its id when the apply answered null.
+      let lookedUpInvoice = null
       const applyPayment = async (invoiceId, patch) => {
         const settled = await appDataStore.applyInvoicePayment(invoiceId, patch)
         paymentApplied = true
@@ -4245,6 +4255,8 @@ const server = createServer(async (request, response) => {
           sendJson(response, 200, { received: true, matched: false })
           return
         }
+
+        lookedUpInvoice = invoice
 
         // Which channel paid, and which link that leaves stale. A card-enabled
         // client holds two live sessions for one invoice and the two are treated
@@ -4315,6 +4327,15 @@ const server = createServer(async (request, response) => {
             console.warn(
               `[stripe] ignored a stale payment_failed (${object.id}) for invoice ${invoice.id}: ${invoice.status === 'paid' ? 'already paid' : `now processing on ${invoice.stripePaymentIntentId}`}`,
             )
+            // A failure for the intent of a second bank payment we flagged on this
+            // PAID invoice means nothing arrived: clear the flag, say so.
+            await clearDuplicatePaymentOnFailure({
+              store: appDataStore,
+              notify,
+              event,
+              invoice,
+              appPublicUrl: getPublicAppUrl(request),
+            })
             sendJson(response, 200, { received: true, ignored: 'stale_payment_failure' })
             return
           }
@@ -4341,6 +4362,15 @@ const server = createServer(async (request, response) => {
             console.warn(
               `[stripe] ignored a payment_failed (${object.id}) for invoice ${invoice.id}: it no longer applies`,
             )
+            // The same, for a payment that landed while this ran: the store's own
+            // row is the invoice to look at.
+            await clearDuplicatePaymentOnFailure({
+              store: appDataStore,
+              notify,
+              event,
+              invoice: failedInvoice,
+              appPublicUrl: getPublicAppUrl(request),
+            })
             sendJson(response, 200, { received: true, ignored: 'stale_payment_failure' })
             return
           }
@@ -4369,7 +4399,7 @@ const server = createServer(async (request, response) => {
           for (const owner of members.filter((member) => member.role === 'owner')) {
             await notify(appDataStore, owner.id, 'invoice_payment_failed', {
               message: `Payment failed on invoice ${invoice.number ?? invoice.id} to ${failedClientName} — ${failureMessage}`,
-              link: '/invoices',
+              link: invoicePeriodLink(invoice),
               clientId: invoice.clientId,
               appPublicUrl: getPublicAppUrl(request),
             })
@@ -4399,22 +4429,46 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      // The money that arrived against the invoice as it now stands - flagged
-      // when they differ (lib/payment-amount-mismatch.js). Only after a
-      // SUCCESSFUL apply (`settledInvoice` is null otherwise), and it never
-      // throws: it must not turn a recorded payment into a 500, nor into a
-      // forget of the event, so a redelivery cannot flag or notify twice.
-      if (
-        settledInvoice &&
-        (event.type === 'checkout.session.completed' || event.type === 'payment_intent.succeeded')
-      ) {
-        await flagPaymentAmountMismatch({
-          store: appDataStore,
-          notify,
-          event,
-          invoice: settledInvoice,
-          appPublicUrl: getPublicAppUrl(request),
-        })
+      // What the money that arrived says about the invoice, once the apply has
+      // answered. All three steps run only AFTER the apply returned, and never
+      // throw: they must not turn a recorded payment into a 500, nor into a forget
+      // of the event, so a redelivery cannot flag or notify twice.
+      //  - a SECOND payment on an already-paid invoice (the store applied nothing
+      //    and says so): recorded as an unhandled payment, reason 'duplicate';
+      //  - a normal apply: flagged when what Stripe collected differs from the
+      //    invoice as it now stands (lib/payment-amount-mismatch.js);
+      //  - an apply that answered null for a payment (the invoice is void, or
+      //    gone): money for a voided invoice is logged and the owners told.
+      if (event.type === 'checkout.session.completed' || event.type === 'payment_intent.succeeded') {
+        if (settledInvoice?.duplicatePayment) {
+          await flagDuplicatePayment({
+            store: appDataStore,
+            notify,
+            event,
+            invoice: settledInvoice,
+            isCard: settledByCard,
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        } else if (settledInvoice) {
+          await flagPaymentAmountMismatch({
+            store: appDataStore,
+            notify,
+            event,
+            invoice: settledInvoice,
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        } else if (paymentApplied && lookedUpInvoice) {
+          await flagPaymentOnVoidedInvoice({
+            store: appDataStore,
+            notify,
+            event,
+            invoice: lookedUpInvoice,
+            isCard: settledByCard,
+            getInvoice: async (id) =>
+              (await appDataStore.listInvoices()).find((entry) => entry.id === id) ?? null,
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        }
       }
 
       // Tell the CLIENT their money arrived: an acknowledgment when a bank
@@ -4536,6 +4590,13 @@ const server = createServer(async (request, response) => {
           sendJson(response, 200, { received: true, matched })
           return
         }
+        // Internal mail (notifications, sign-in links, reports) carries
+        // `kind: internal` and is about no invoice: nothing to file, nothing
+        // worth a warning, and no reason to scan the invoices for it.
+        if (tagBag.kind === INTERNAL_EMAIL_KIND) {
+          sendJson(response, 200, { received: true, matched: false, internal: true })
+          return
+        }
         const taggedInvoiceId =
           typeof tagBag.invoice_id === 'string' ? tagBag.invoice_id : null
         // The tag is the answer when it is there. The provider id is the
@@ -4548,6 +4609,13 @@ const server = createServer(async (request, response) => {
             : null) ??
           (providerId ? await appDataStore.findInvoiceByEmailProviderId(providerId) : null)
         if (!deliveryInvoice) {
+          // Mail that never named an invoice (sent before internal mail was
+          // tagged, say) is not a problem to report on every event: answered
+          // quietly. Only a tagged invoice id with no invoice behind it warns.
+          if (!taggedInvoiceId) {
+            sendJson(response, 200, { received: true, matched: false })
+            return
+          }
           // 200 anyway: an event about a message we cannot place is not
           // something Resend can fix by retrying it for three days.
           console.warn(

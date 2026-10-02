@@ -53,6 +53,16 @@ export interface InvoiceAmountMismatchLogEntry {
   paymentIntentId: string | null
 }
 
+/** Money that arrived for a voided invoice. Not a failed payment. */
+export interface InvoicePaymentOnVoidedLogEntry {
+  kind: 'payment'
+  event: 'on-voided'
+  at: string
+  paymentIntentId: string | null
+  amount: number | null
+  detail?: string
+}
+
 /** The owner was told once that this invoice passed its past-due line. */
 export interface InvoicePastDueLogEntry {
   kind: 'past-due'
@@ -66,6 +76,7 @@ export type InvoiceLogEntry =
   | InvoiceDeliveryLogEntry
   | InvoicePaymentFailureLogEntry
   | InvoiceAmountMismatchLogEntry
+  | InvoicePaymentOnVoidedLogEntry
   | InvoicePastDueLogEntry
 
 /** Everything these rules read off an invoice, and nothing more. */

@@ -89,10 +89,38 @@ describe('what the Resend webhook may and may not do to an invoice', () => {
     const text = block()
     const missingAt = text.indexOf('if (!deliveryInvoice) {')
     expect(missingAt).toBeGreaterThan(-1)
-    expect(text.slice(missingAt, missingAt + 500)).toContain(
+    expect(text.slice(missingAt, missingAt + 1200)).toContain(
       'sendJson(response, 200, { received: true, matched: false })',
     )
-    expect(text.slice(missingAt, missingAt + 500)).toContain('console.warn(')
+    // An event for a message that CLAIMED an invoice (tagged) and cannot be placed
+    // is worth a warning.
+    const warnAt = text.indexOf('console.warn(', missingAt)
+    expect(warnAt).toBeGreaterThan(-1)
+    expect(text.slice(missingAt, warnAt)).toContain('if (!taggedInvoiceId) {')
+  })
+
+  // featreq-c8e5f169 (B ii): notification, sign-in and report mail goes through
+  // Resend with no invoice tag. Every event for it used to log an "unknown
+  // invoice" warning; it must be answered quietly instead.
+  it('does not warn for mail that names no invoice, and skips internal mail before any lookup', () => {
+    const text = block()
+    const missingAt = text.indexOf('if (!deliveryInvoice) {')
+    const untaggedAt = text.indexOf('if (!taggedInvoiceId) {', missingAt)
+    const warnAt = text.indexOf('console.warn(', missingAt)
+    expect(untaggedAt).toBeGreaterThan(missingAt)
+    expect(untaggedAt).toBeLessThan(warnAt)
+    const untagged = text.slice(untaggedAt, warnAt)
+    // Silent: no warn (Node's console.debug prints too, so there is no line at all).
+    expect(untagged).not.toContain('console.warn(')
+    expect(untagged).not.toContain('console.debug(')
+    expect(untagged).not.toContain('console.log(')
+    expect(untagged).toContain('sendJson(response, 200, { received: true, matched: false })')
+
+    const internalAt = text.indexOf('if (tagBag.kind === INTERNAL_EMAIL_KIND) {')
+    expect(internalAt).toBeGreaterThan(-1)
+    expect(internalAt).toBeLessThan(text.indexOf('appDataStore.listInvoices()'))
+    expect(internalAt).toBeLessThan(text.indexOf('findInvoiceByEmailProviderId'))
+    expect(text.slice(internalAt, internalAt + 200)).toContain('sendJson(response, 200,')
   })
 
   it('acknowledges an event type it does not record, without touching the store', () => {

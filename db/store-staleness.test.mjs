@@ -34181,3 +34181,716 @@ describe('a payment-failed event for a superseded payment intent (file backend)'
     })
   })
 })
+
+/**
+ * featreq-c8e5f169 (smaller items): a SECOND payment on an already-paid invoice,
+ * a late payment-failed event on a paid one (N1), and the log entries for a
+ * duplicate and for money that arrived for a VOIDED invoice. Both backends.
+ */
+describe('a second payment on a paid invoice, and a late failure on one (file backend)', () => {
+  const feeLine = { kind: 'card-fee', label: 'Card processing fee', detail: 'Paid by card', amount: 3.3 }
+
+  async function seed(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-dup',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-021',
+        status: 'paid',
+        lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+        subtotal: 100,
+        total: 100,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-05T00:00:00.000Z',
+        paidAt: '2026-08-20T00:00:00.000Z',
+        paymentMethod: 'us_bank_account',
+        stripePaymentIntentId: 'pi_1',
+        stripeCheckoutSessionId: 'cs_ach',
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+        ...overrides,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  const secondBank = {
+    status: 'paid',
+    paidAt: '2026-08-25T00:00:00.000Z',
+    paymentIntentId: 'pi_2',
+    paymentMethod: 'us_bank_account',
+  }
+  const secondCardCompleted = {
+    status: 'processing',
+    cardCheckoutSessionId: 'cs_card_2',
+    paymentIntentId: 'pi_2',
+    appendLines: [feeLine],
+  }
+
+  it.each([
+    ['a second bank payment (payment_intent.succeeded)', secondBank],
+    ['a card checkout (checkout.session.completed) with a fee line', secondCardCompleted],
+  ])('%s applies NOTHING and says it was a duplicate', async (_name, patch) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await seed()
+    const before = await readFile(localDataPath, 'utf8')
+    const result = await store.applyInvoicePayment('inv-dup', patch)
+
+    expect(result.duplicatePayment).toBe(true)
+    expect(result.statusChanged).toBe(false)
+    expect(result.status).toBe('paid')
+    expect(result.stripePaymentIntentId).toBe('pi_1')
+    expect(result.lineItems).toHaveLength(1)
+    expect(result.total).toBe(100)
+    // Not one byte of the stored invoice moved: no ids, no paid date, no fee line.
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+    vi.restoreAllMocks()
+  })
+
+  it('an invoice paid by hand (no intent stored) counts a Stripe payment as the second one', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await seed({ stripePaymentIntentId: undefined, paymentMethod: 'check' })
+    const result = await store.applyInvoicePayment('inv-dup', secondBank)
+
+    expect(result.duplicatePayment).toBe(true)
+    expect(result.paymentMethod).toBe('check')
+    vi.restoreAllMocks()
+  })
+
+  it('the SAME intent arriving again (a card payment\'s second event) applies as before', async () => {
+    await seed()
+    const result = await store.applyInvoicePayment('inv-dup', {
+      status: 'processing',
+      paymentIntentId: 'pi_1',
+      cardCheckoutSessionId: 'cs_card_1',
+    })
+
+    expect(result.duplicatePayment).toBeFalsy()
+    // Paid is still sticky, and the late event's other facts still land.
+    expect(result.status).toBe('paid')
+    expect(result.stripeCardSessionId).toBe('cs_card_1')
+  })
+
+  it('an event that names no intent is not a duplicate', async () => {
+    await seed()
+    const result = await store.applyInvoicePayment('inv-dup', { status: 'processing' })
+    expect(result.duplicatePayment).toBeFalsy()
+  })
+
+  it('an invoice that is not paid yet takes a payment on a new intent as the payment', async () => {
+    for (const status of ['sent', 'processing']) {
+      await seed({ status, paidAt: null, stripePaymentIntentId: 'pi_old' })
+      const result = await store.applyInvoicePayment('inv-dup', secondBank)
+
+      expect(result.duplicatePayment).toBeFalsy()
+      expect(result.status).toBe('paid')
+      expect(result.stripePaymentIntentId).toBe('pi_2')
+    }
+  })
+
+  it('keeps duplicatePayment out of the JSON and off the stored row', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await seed()
+    const result = await store.applyInvoicePayment('inv-dup', secondBank)
+
+    expect(JSON.parse(JSON.stringify(result))).not.toHaveProperty('duplicatePayment')
+    expect(JSON.parse(await readFile(localDataPath, 'utf8')).invoices[0]).not.toHaveProperty(
+      'duplicatePayment',
+    )
+    vi.restoreAllMocks()
+  })
+
+  // N1 (the re-review of the bulk-save lock stack): a late payment-failed event
+  // must not move a PAID row, and in particular must not overwrite the intent
+  // that paid it.
+  it.each([
+    ['carrying the intent that paid it', 'pi_1'],
+    ['paid by hand, with no intent stored', undefined],
+  ])('a late failed event for another attempt cannot touch a paid invoice %s', async (_n, stored) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await seed({ stripePaymentIntentId: stored })
+    const before = await readFile(localDataPath, 'utf8')
+    const result = await store.applyInvoicePayment('inv-dup', {
+      status: 'sent',
+      paymentIntentId: 'pi_failed',
+      onlyIfPaymentIntent: 'pi_failed',
+    })
+
+    expect(result.status).toBe('paid')
+    expect(result.stripePaymentIntentId).toBe(stored)
+    expect(result.statusChanged).toBe(false)
+    expect(result.duplicatePayment).toBeFalsy()
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+    vi.restoreAllMocks()
+  })
+})
+
+describe('a second payment on a paid invoice, and a late failure on one (postgres branch)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  const paidRow = {
+    ...existingInvoice,
+    id: 'inv-1',
+    status: 'paid',
+    paid_at: new Date('2026-09-10T00:00:00.000Z'),
+    payment_method: 'us_bank_account',
+    stripe_payment_intent_id: 'pi_1',
+  }
+  const UPDATE = /^update invoices\s+set status = \$2/i
+  const control = (fake) =>
+    fake.statements.map((s) => s.text).filter((t) => /^(begin|commit|rollback)$/i.test(t))
+
+  it('a different intent on a paid row: no UPDATE, rolled back, answered unchanged and flagged', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fake = fakePostgres({ invoices: [{ ...paidRow }] })
+    const result = await postgresStore(fake).applyInvoicePayment('inv-1', {
+      status: 'paid',
+      paidAt: '2026-09-12T00:00:00.000Z',
+      paymentIntentId: 'pi_2',
+      paymentMethod: 'card',
+      appendLines: [{ kind: 'card-fee', label: 'Card processing fee', detail: '', amount: 3.3 }],
+    })
+
+    expect(result.duplicatePayment).toBe(true)
+    expect(result.statusChanged).toBe(false)
+    expect(result.stripePaymentIntentId).toBe('pi_1')
+    expect(fake.matching(UPDATE)).toHaveLength(0)
+    expect(control(fake)).toEqual(['begin', 'rollback'])
+  })
+
+  it('the same intent on a paid row still writes, and is not a duplicate', async () => {
+    const fake = fakePostgres({ invoices: [{ ...paidRow }] })
+    const result = await postgresStore(fake).applyInvoicePayment('inv-1', {
+      status: 'processing',
+      paymentIntentId: 'pi_1',
+      cardCheckoutSessionId: 'cs_card_1',
+    })
+
+    expect(result.duplicatePayment).toBeFalsy()
+    expect(result.status).toBe('paid')
+    expect(fake.matching(UPDATE)).toHaveLength(1)
+  })
+
+  it('a late failed event on a paid row writes nothing, whatever intent the row carries', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    for (const stored of ['pi_1', null]) {
+      const fake = fakePostgres({ invoices: [{ ...paidRow, stripe_payment_intent_id: stored }] })
+      const result = await postgresStore(fake).applyInvoicePayment('inv-1', {
+        status: 'sent',
+        paymentIntentId: 'pi_failed',
+        onlyIfPaymentIntent: 'pi_failed',
+      })
+
+      expect(result.status).toBe('paid')
+      expect(result.stripePaymentIntentId).toBe(stored)
+      expect(result.statusChanged).toBe(false)
+      expect(fake.matching(UPDATE)).toHaveLength(0)
+      expect(control(fake)).toEqual(['begin', 'rollback'])
+    }
+  })
+})
+
+describe('a duplicate payment rides the amount-mismatch entry (file backend)', () => {
+  async function seed(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-1',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-031',
+        status: 'paid',
+        lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+        subtotal: 400,
+        total: 400,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-28T12:00:00.000Z',
+        paidAt: '2026-09-10T12:00:00.000Z',
+        paymentMethod: 'us_bank_account',
+        stripePaymentIntentId: 'pi_1',
+        emailLog: [],
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+        ...overrides,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const duplicate = (over = {}) => ({
+    at: '2026-09-12T14:00:00.000Z',
+    paymentIntentId: 'pi_2',
+    expectedCents: 40000,
+    receivedCents: 40000,
+    reason: 'duplicate',
+    ...over,
+  })
+
+  it('writes the entry with its reason, flags the invoice, and leaves status and dates alone', async () => {
+    await seed()
+    const updated = await store.recordInvoiceAmountMismatch('inv-1', duplicate())
+
+    expect(updated.emailLog[0]).toEqual({
+      kind: 'payment',
+      event: 'amount-mismatch',
+      at: '2026-09-12T14:00:00.000Z',
+      paymentIntentId: 'pi_2',
+      expectedCents: 40000,
+      receivedCents: 40000,
+      reason: 'duplicate',
+    })
+    expect(updated.status).toBe('paid')
+    expect(updated.paidAt).toBe('2026-09-10T12:00:00.000Z')
+    expect(unhandledAmountMismatch(updated)).toMatchObject({ reason: 'duplicate', count: 1 })
+    expect(unresolvedPaymentFailure(updated)).toBeNull()
+  })
+
+  it('is idempotent on the intent, and a second duplicate makes the count two', async () => {
+    await seed()
+    expect(await store.recordInvoiceAmountMismatch('inv-1', duplicate())).not.toBeNull()
+    expect(await store.recordInvoiceAmountMismatch('inv-1', duplicate())).toBeNull()
+    const second = await store.recordInvoiceAmountMismatch(
+      'inv-1',
+      duplicate({ paymentIntentId: 'pi_3', at: '2026-09-13T14:00:00.000Z' }),
+    )
+    expect(unhandledAmountMismatch(second)).toMatchObject({ count: 2, paymentIntentId: 'pi_3' })
+  })
+
+  it('takes a duplicate whose amount is unknown (null), but not an ordinary mismatch without one', async () => {
+    await seed()
+    const updated = await store.recordInvoiceAmountMismatch(
+      'inv-1',
+      duplicate({ receivedCents: undefined }),
+    )
+    expect(updated.emailLog[0].receivedCents).toBeNull()
+    expect(unhandledAmountMismatch(updated).receivedCents).toBeNull()
+    expect(
+      await store.recordInvoiceAmountMismatch(
+        'inv-1',
+        duplicate({ reason: undefined, paymentIntentId: 'pi_4', receivedCents: undefined }),
+      ),
+    ).toBeNull()
+  })
+
+  it('"Mark as handled" clears the duplicate the same way it clears a mismatch', async () => {
+    await seed()
+    await store.recordInvoiceAmountMismatch('inv-1', duplicate())
+    const updated = await store.acknowledgeInvoiceAmountMismatch('inv-1', { byUserId: 'owner-1' })
+    expect(unhandledAmountMismatch(updated)).toBeNull()
+  })
+})
+
+describe('a duplicate payment entry statement shape (postgres branch)', () => {
+  it('appends the entry with its reason, and the guard names the payment and the reason', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoiceAmountMismatch('inv-1', {
+      at: '2026-09-12T14:00:00.000Z',
+      paymentIntentId: 'pi_2',
+      expectedCents: 25000,
+      receivedCents: null,
+      reason: 'duplicate',
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.text).not.toMatch(/\bstatus\b/)
+    expect(JSON.parse(update.params[1])[0]).toEqual({
+      kind: 'payment',
+      event: 'amount-mismatch',
+      at: '2026-09-12T14:00:00.000Z',
+      paymentIntentId: 'pi_2',
+      expectedCents: 25000,
+      receivedCents: null,
+      reason: 'duplicate',
+    })
+    expect(JSON.parse(update.params[2])).toEqual([
+      { kind: 'payment', event: 'amount-mismatch', paymentIntentId: 'pi_2', reason: 'duplicate' },
+    ])
+  })
+})
+
+describe('recordInvoicePaymentOnVoided (file backend)', () => {
+  async function seed(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-void',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-041',
+        status: 'void',
+        lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+        subtotal: 400,
+        total: 400,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-28T12:00:00.000Z',
+        paidAt: null,
+        paymentMethod: null,
+        emailLog: [
+          {
+            at: '2026-08-28T12:00:00.000Z',
+            to: ['ann@acme.com'],
+            subject: 'Invoice INV-2026-08-041',
+            ok: true,
+            total: 400,
+            providerId: 'ee-1',
+          },
+        ],
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+        ...overrides,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const onVoided = (over = {}) => ({
+    at: '2026-09-12T14:00:00.000Z',
+    paymentIntentId: 'pi_late',
+    amount: 400,
+    detail: 'payment_intent.succeeded arrived after the invoice was voided',
+    ...over,
+  })
+
+  it('appends an on-voided entry beside the send and never changes the status', async () => {
+    await seed()
+    const updated = await store.recordInvoicePaymentOnVoided('inv-void', onVoided())
+
+    expect(updated.emailLog).toHaveLength(2)
+    expect(updated.emailLog[1]).toEqual({
+      kind: 'payment',
+      event: 'on-voided',
+      at: '2026-09-12T14:00:00.000Z',
+      paymentIntentId: 'pi_late',
+      amount: 400,
+      detail: 'payment_intent.succeeded arrived after the invoice was voided',
+    })
+    expect(updated.status).toBe('void')
+    expect(updated.paidAt).toBeNull()
+    expect(latestInvoiceSend(updated.emailLog).providerId).toBe('ee-1')
+    // Not a flag, and not a failed payment: a void invoice shows nothing for it.
+    expect(unhandledAmountMismatch(updated)).toBeNull()
+    expect(unresolvedPaymentFailure({ ...updated, status: 'sent' })).toBeNull()
+    expect(JSON.parse(await readFile(localDataPath, 'utf8')).invoices[0].status).toBe('void')
+  })
+
+  it('is idempotent on the intent (a card payment fires two events) and keeps a second intent', async () => {
+    await seed()
+    expect(await store.recordInvoicePaymentOnVoided('inv-void', onVoided())).not.toBeNull()
+    expect(await store.recordInvoicePaymentOnVoided('inv-void', onVoided())).toBeNull()
+    const other = await store.recordInvoicePaymentOnVoided('inv-void', onVoided({ paymentIntentId: 'pi_two' }))
+    expect(other.emailLog.filter((entry) => entry.event === 'on-voided')).toHaveLength(2)
+  })
+
+  it('with no intent, is idempotent on the amount instead', async () => {
+    await seed()
+    const noIntent = onVoided({ paymentIntentId: null })
+    expect(await store.recordInvoicePaymentOnVoided('inv-void', noIntent)).not.toBeNull()
+    expect(await store.recordInvoicePaymentOnVoided('inv-void', noIntent)).toBeNull()
+    expect(await store.recordInvoicePaymentOnVoided('inv-void', { ...noIntent, amount: 150 })).not.toBeNull()
+  })
+
+  it('answers null for an unknown invoice, and keeps a missing amount as null', async () => {
+    await seed()
+    expect(await store.recordInvoicePaymentOnVoided('nope', onVoided())).toBeNull()
+    expect(await store.recordInvoicePaymentOnVoided('', onVoided())).toBeNull()
+    const updated = await store.recordInvoicePaymentOnVoided('inv-void', onVoided({ amount: undefined }))
+    expect(updated.emailLog[1].amount).toBeNull()
+  })
+
+  it('writes concurrent duplicates once', async () => {
+    await seed()
+    const results = await Promise.all([
+      store.recordInvoicePaymentOnVoided('inv-void', onVoided()),
+      store.recordInvoicePaymentOnVoided('inv-void', onVoided()),
+    ])
+    expect(results.filter(Boolean)).toHaveLength(1)
+    const stored = JSON.parse(await readFile(localDataPath, 'utf8')).invoices[0]
+    expect(stored.emailLog.filter((entry) => entry.event === 'on-voided')).toHaveLength(1)
+  })
+})
+
+describe('recordInvoicePaymentOnVoided statement shape (postgres branch)', () => {
+  const voidedRow = { ...existingInvoice, status: 'void', email_log: [] }
+  const args = { paymentIntentId: 'pi_late', amount: 400, detail: 'late' }
+  const marker = {
+    kind: 'payment',
+    event: 'on-voided',
+    at: '2026-09-12T14:00:00.000Z',
+    paymentIntentId: 'pi_late',
+    amount: 400,
+    detail: 'late',
+  }
+
+  it('appends to email_log behind a containment guard and touches nothing else', async () => {
+    const fake = fakePostgres({ invoices: [voidedRow] })
+    const written = await postgresStore(fake).recordInvoicePaymentOnVoided('inv-1', {
+      ...args,
+      at: '2026-09-12T14:00:00.000Z',
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.text).toMatch(/email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb/)
+    expect(update.text).toMatch(/and not \(coalesce\(email_log, '\[\]'::jsonb\) @> \$3::jsonb\)/)
+    expect(update.text).not.toMatch(/\bstatus\b/)
+    expect(update.text).not.toMatch(/\bpaid_at\b|\bstripe_payment_intent_id\b|\bline_items\b|\btotal\b/)
+    expect(JSON.parse(update.params[1])[0]).toEqual(marker)
+    expect(JSON.parse(update.params[2])).toEqual([
+      { kind: 'payment', event: 'on-voided', paymentIntentId: 'pi_late' },
+    ])
+    expect(written).not.toBeNull()
+  })
+
+  it('guards on the amount when no intent is known', async () => {
+    const fake = fakePostgres({ invoices: [voidedRow] })
+    await postgresStore(fake).recordInvoicePaymentOnVoided('inv-1', { amount: 400 })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(JSON.parse(update.params[2])).toEqual([
+      { kind: 'payment', event: 'on-voided', paymentIntentId: null, amount: 400 },
+    ])
+  })
+
+  it('writes nothing at all for a payment it has already logged', async () => {
+    const fake = fakePostgres({ invoices: [{ ...voidedRow, email_log: [marker] }] })
+    const written = await postgresStore(fake).recordInvoicePaymentOnVoided('inv-1', args)
+
+    expect(written).toBeNull()
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+  })
+
+  describe('a guarded UPDATE that matched no row', () => {
+    function storeWhereUpdateMatchesNothing(invoices, during = () => {}) {
+      const fake = fakePostgres({ invoices })
+      const query = fake.pool.query
+      fake.pool.query = async (text, params) => {
+        if (/^update invoices/i.test(String(text).trim())) {
+          await query(text, params)
+          during()
+          return { rows: [], rowCount: 0 }
+        }
+        return query(text, params)
+      }
+      return postgresStore(fake)
+    }
+
+    it('is a duplicate (null) when a racing writer put the entry there', async () => {
+      const row = { ...voidedRow, email_log: [] }
+      const pg = storeWhereUpdateMatchesNothing([row], () => {
+        row.email_log = [marker]
+      })
+      expect(await pg.recordInvoicePaymentOnVoided('inv-1', args)).toBeNull()
+    })
+
+    it('is null when the invoice is gone', async () => {
+      const rows = [{ ...voidedRow }]
+      const pg = storeWhereUpdateMatchesNothing(rows, () => rows.splice(0, rows.length))
+      expect(await pg.recordInvoicePaymentOnVoided('inv-1', args)).toBeNull()
+    })
+
+    it('THROWS when the entry is not there, so the webhook logs it and still notifies', async () => {
+      const pg = storeWhereUpdateMatchesNothing([{ ...voidedRow }])
+      await expect(pg.recordInvoicePaymentOnVoided('inv-1', args)).rejects.toThrow(
+        /on-voided marker for invoice inv-1 matched no row and is not on its log/,
+      )
+    })
+  })
+})
+
+
+/**
+ * Review round: a duplicate is a DIFFERENT marker from an amount mismatch on the
+ * same intent. Sequence: pi_A (a bank payment) is flagged for a different amount,
+ * pi_B (a card) pays the invoice, and pi_A then settles - the duplicate for pi_A
+ * must be recorded, not swallowed by pi_A's earlier mismatch marker.
+ */
+describe('a duplicate payment is not swallowed by an earlier mismatch on the same intent', () => {
+  async function seed(emailLog) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-1',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-051',
+        status: 'paid',
+        lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+        subtotal: 400,
+        total: 400,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-28T12:00:00.000Z',
+        paidAt: '2026-09-10T12:00:00.000Z',
+        paymentMethod: 'card',
+        stripePaymentIntentId: 'pi_B',
+        emailLog,
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const mismatchA = {
+    kind: 'payment',
+    event: 'amount-mismatch',
+    at: '2026-09-09T10:00:00.000Z',
+    paymentIntentId: 'pi_A',
+    expectedCents: 40000,
+    receivedCents: 35000,
+  }
+  const duplicateA = {
+    at: '2026-09-12T10:00:00.000Z',
+    paymentIntentId: 'pi_A',
+    expectedCents: 40000,
+    receivedCents: 35000,
+    reason: 'duplicate',
+  }
+
+  it('file backend: records the duplicate beside the mismatch, and then is idempotent', async () => {
+    await seed([mismatchA])
+    const written = await store.recordInvoiceAmountMismatch('inv-1', duplicateA)
+
+    expect(written).not.toBeNull()
+    expect(written.emailLog.map((entry) => entry.reason ?? 'amount')).toEqual(['amount', 'duplicate'])
+    expect(unhandledAmountMismatch(written)).toMatchObject({ reason: 'duplicate', count: 2 })
+    expect(await store.recordInvoiceAmountMismatch('inv-1', duplicateA)).toBeNull()
+  })
+
+  it('file backend: an ordinary mismatch is still swallowed by an earlier ordinary one, and a duplicate by an earlier duplicate', async () => {
+    await seed([mismatchA, { ...mismatchA, reason: 'duplicate', paymentIntentId: 'pi_C' }])
+    expect(
+      await store.recordInvoiceAmountMismatch('inv-1', {
+        at: mismatchA.at,
+        paymentIntentId: 'pi_A',
+        expectedCents: 40000,
+        receivedCents: 35000,
+      }),
+    ).toBeNull()
+    expect(
+      await store.recordInvoiceAmountMismatch('inv-1', { ...duplicateA, paymentIntentId: 'pi_C' }),
+    ).toBeNull()
+  })
+
+  it('postgres: the pre-check does not see pi_A mismatch as the duplicate, and the guard names the reason', async () => {
+    const fake = fakePostgres({ invoices: [{ ...existingInvoice, email_log: [mismatchA] }] })
+    const written = await postgresStore(fake).recordInvoiceAmountMismatch('inv-1', duplicateA)
+
+    expect(written).not.toBeNull()
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(JSON.parse(update.params[1])[0]).toMatchObject({ paymentIntentId: 'pi_A', reason: 'duplicate' })
+    expect(JSON.parse(update.params[2])).toEqual([
+      { kind: 'payment', event: 'amount-mismatch', paymentIntentId: 'pi_A', reason: 'duplicate' },
+    ])
+  })
+
+  it('postgres: with no intent the guard carries the reason too', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoiceAmountMismatch('inv-1', {
+      expectedCents: 25000,
+      receivedCents: 25000,
+      reason: 'duplicate',
+    })
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(JSON.parse(update.params[2])[0]).toMatchObject({ reason: 'duplicate', paymentIntentId: null })
+  })
+})
+
+describe('a duplicate bank payment that was only started (settling)', () => {
+  const base = {
+    at: '2026-09-12T10:00:00.000Z',
+    paymentIntentId: 'pi_2',
+    expectedCents: 40000,
+    receivedCents: 40000,
+    reason: 'duplicate',
+  }
+
+  it('file backend: the entry carries settling only for a duplicate that asked for it', async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-1',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-052',
+        status: 'paid',
+        lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+        subtotal: 400,
+        total: 400,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-28T12:00:00.000Z',
+        paidAt: '2026-09-10T12:00:00.000Z',
+        paymentMethod: 'us_bank_account',
+        stripePaymentIntentId: 'pi_1',
+        emailLog: [],
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const started = await store.recordInvoiceAmountMismatch('inv-1', { ...base, settling: true })
+    expect(started.emailLog[0].settling).toBe(true)
+    expect(unhandledAmountMismatch(started).settling).toBe(true)
+
+    const settled = await store.recordInvoiceAmountMismatch('inv-1', {
+      ...base,
+      paymentIntentId: 'pi_3',
+    })
+    expect(settled.emailLog[1]).not.toHaveProperty('settling')
+
+    // Never on an ordinary mismatch.
+    const ordinary = await store.recordInvoiceAmountMismatch('inv-1', {
+      ...base,
+      reason: undefined,
+      paymentIntentId: 'pi_4',
+      settling: true,
+    })
+    expect(ordinary.emailLog[2]).not.toHaveProperty('settling')
+  })
+
+  it('a later failed entry for the intent clears it, on the real failure writer (file backend)', async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-1',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-053',
+        status: 'paid',
+        lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+        subtotal: 400,
+        total: 400,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-28T12:00:00.000Z',
+        paidAt: '2026-09-10T12:00:00.000Z',
+        paymentMethod: 'us_bank_account',
+        stripePaymentIntentId: 'pi_1',
+        emailLog: [],
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await store.recordInvoiceAmountMismatch('inv-1', { ...base, settling: true })
+
+    const cleared = await store.recordInvoicePaymentFailure('inv-1', {
+      at: '2026-09-15T10:00:00.000Z',
+      paymentIntentId: 'pi_2',
+      detail: 'Account closed',
+    })
+    expect(unhandledAmountMismatch(cleared)).toBeNull()
+    // Status-free: the invoice is still paid, and it is not a "Payment failed" row.
+    expect(cleared.status).toBe('paid')
+    expect(unresolvedPaymentFailure(cleared)).toBeNull()
+  })
+})

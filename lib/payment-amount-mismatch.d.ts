@@ -6,15 +6,34 @@
 
 export declare const AMOUNT_MISMATCH_EVENT: 'amount-mismatch'
 export declare const AMOUNT_MISMATCH_HANDLED_EVENT: 'amount-mismatch-handled'
+export declare const PAYMENT_ON_VOIDED_EVENT: 'on-voided'
+export declare const DUPLICATE_PAYMENT_REASON: 'duplicate'
 
-/** The `email_log` entry the webhook appends; `kind: 'payment'`. */
+/**
+ * The `email_log` entry the webhook appends; `kind: 'payment'`. `reason` is
+ * 'duplicate' for a second payment on an already-paid invoice (then
+ * `receivedCents` may be null) and absent for the "different amount" kind.
+ */
 export interface AmountMismatchLogEntry {
   kind: 'payment'
   event: 'amount-mismatch'
   at: string
   paymentIntentId: string | null
   expectedCents: number
-  receivedCents: number
+  receivedCents: number | null
+  reason?: 'duplicate'
+  /** A duplicate bank payment that was only started, not settled. */
+  settling?: true
+}
+
+/** Money that arrived for a VOIDED invoice. Log-only; `amount` is dollars. */
+export interface PaymentOnVoidedLogEntry {
+  kind: 'payment'
+  event: 'on-voided'
+  at: string
+  paymentIntentId: string | null
+  amount: number | null
+  detail: string
 }
 
 /** The entry an owner's "Mark as handled" appends. */
@@ -31,9 +50,17 @@ export interface AmountMismatch {
   receivedCents: number
 }
 
-export interface UnhandledAmountMismatch extends AmountMismatch {
+export interface UnhandledAmountMismatch {
+  expectedCents: number
+  /** Null only for a duplicate payment whose amount Stripe did not report. */
+  receivedCents: number | null
   at: string | null
   paymentIntentId: string | null
+  reason: 'amount' | 'duplicate'
+  /** A duplicate bank payment that has only been started (it can still fail). */
+  settling: boolean
+  /** How many payments on the invoice are waiting; this describes the newest. */
+  count: number
 }
 
 export declare function receivedPaymentCents(
@@ -72,7 +99,65 @@ export declare function amountMismatchOwnerMessage(args: {
   receivedCents: number
   /** The payment has not settled: say so instead of "recorded as paid". */
   inProgress?: boolean
+  /** More than one waiting: the notice says how many. */
+  unhandledCount?: number
 }): string
+
+export declare function unhandledCountSentence(count: number | undefined): string
+
+/** `/invoices?period=YYYY-MM` for the invoice's month, else `/invoices`. */
+export declare function invoicePeriodLink(
+  invoice: { period?: string | null } | null | undefined,
+): string
+
+export declare function duplicatePaymentOwnerMessage(args: {
+  number: string
+  clientName: string
+  receivedCents: number | null
+  unhandledCount?: number
+  settling?: boolean
+}): string
+
+export declare function duplicateFailedOwnerMessage(args: {
+  number: string
+  clientName: string
+  detail?: string
+}): string
+
+export declare function paymentOnVoidedOwnerMessage(args: {
+  number: string
+  clientName: string
+  receivedCents: number | null
+  settling?: boolean
+}): string
+
+/** A failed second bank payment clears its duplicate marker and tells the owners. */
+export declare function clearDuplicatePaymentOnFailure(args: {
+  store: {
+    recordInvoicePaymentFailure(
+      invoiceId: string,
+      entry: { at: string; paymentIntentId: string; detail: string },
+    ): Promise<unknown>
+    getClientNameById(clientId: string): Promise<string | null | undefined>
+    getTeamMembers(): Promise<Array<{ id: string; role: string }>>
+  }
+  notify: (
+    store: never,
+    userId: string,
+    kind: string,
+    payload: Record<string, unknown>,
+  ) => Promise<unknown>
+  event: { type: string; created?: number; data?: { object?: unknown } }
+  invoice: {
+    id: string
+    status?: string
+    number?: string | null
+    clientId: string
+    period?: string
+    emailLog?: ReadonlyArray<unknown> | null
+  } | null
+  appPublicUrl?: string
+}): Promise<void>
 
 export declare function flagPaymentAmountMismatch(args: {
   store: {
@@ -82,7 +167,9 @@ export declare function flagPaymentAmountMismatch(args: {
         at: string
         paymentIntentId: string | null
         expectedCents: number
-        receivedCents: number
+        receivedCents: number | null
+        reason?: 'duplicate'
+        settling?: boolean
       },
     ): Promise<unknown>
     getClientNameById(clientId: string): Promise<string | null | undefined>
@@ -95,6 +182,46 @@ export declare function flagPaymentAmountMismatch(args: {
     payload: Record<string, unknown>,
   ) => Promise<unknown>
   event: { type: string; created?: number; data?: { object?: unknown } }
-  invoice: { id: string; number?: string | null; clientId: string; total: number } | null
+  invoice: {
+    id: string
+    number?: string | null
+    clientId: string
+    total: number
+    period?: string
+  } | null
+  appPublicUrl?: string
+}): Promise<void>
+
+/** A second payment on an already-paid invoice: logged as unhandled, owners told once. */
+export declare const flagDuplicatePayment: typeof flagPaymentAmountMismatch
+
+/** Money for a voided invoice: logged (`on-voided`), owners told once. */
+export declare function flagPaymentOnVoidedInvoice(args: {
+  store: {
+    recordInvoicePaymentOnVoided(
+      invoiceId: string,
+      entry: {
+        at: string
+        paymentIntentId: string | null
+        amount: number | null
+        detail: string
+      },
+    ): Promise<unknown>
+    getClientNameById(clientId: string): Promise<string | null | undefined>
+    getTeamMembers(): Promise<Array<{ id: string; role: string }>>
+  }
+  notify: (
+    store: never,
+    userId: string,
+    kind: string,
+    payload: Record<string, unknown>,
+  ) => Promise<unknown>
+  event: { type: string; created?: number; data?: { object?: unknown } }
+  invoice: { id: string } | null
+  getInvoice: (
+    id: string,
+  ) => Promise<
+    { id: string; status: string; number?: string | null; clientId: string; period?: string } | null | undefined
+  >
   appPublicUrl?: string
 }): Promise<void>

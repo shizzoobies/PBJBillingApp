@@ -231,3 +231,120 @@ describe('a payment for a different amount than the invoice total', () => {
     expect(needALookStat()).toHaveTextContent('1')
   })
 })
+
+/**
+ * featreq-c8e5f169 (smaller items): a SECOND payment on an already-paid invoice
+ * rides the same flag with its own wording, the notice says how many payments
+ * are waiting, and money for a voided invoice (a log-only entry) shows nothing.
+ */
+describe('a second payment on a paid invoice, and how many are waiting', () => {
+  const duplicate = {
+    kind: 'payment',
+    event: 'amount-mismatch',
+    at: '2026-09-12T14:00:00.000Z',
+    paymentIntentId: 'pi_2',
+    expectedCents: 40000,
+    receivedCents: 40000,
+    reason: 'duplicate',
+  } as const
+
+  const DUPLICATE_NOTICE =
+    'A payment of $400.00 arrived for this invoice again after it was already paid. It was not applied to the invoice. Refund it or apply it by hand, then mark this as handled.'
+
+  it('flags a duplicate on a Paid invoice, counts it, and words it as a second payment', async () => {
+    mockList.mockResolvedValue([makeInvoice({ emailLog: [duplicate] })])
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+
+    await waitFor(() => expect(needALookStat()).toHaveTextContent('1'))
+    fireEvent.click(await screen.findByRole('tab', { name: /Paid/ }))
+    expect(await screen.findByText('Second payment $400.00')).toBeInTheDocument()
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+
+    expect(await screen.findByText(DUPLICATE_NOTICE)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Mark as handled' })).toBeInTheDocument()
+  })
+
+  it('says it was a payment without an amount when Stripe did not report one', async () => {
+    mockList.mockResolvedValue([
+      makeInvoice({ emailLog: [{ ...duplicate, receivedCents: null }] } as Partial<PersistedInvoice>),
+    ])
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('tab', { name: /Paid/ }))
+
+    expect(await screen.findByText('Second payment')).toBeInTheDocument()
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+    expect(
+      await screen.findByText(/^A payment arrived for this invoice again after it was already paid\./),
+    ).toBeInTheDocument()
+  })
+
+  it('says how many payments are waiting, not only the newest', async () => {
+    const newest = { ...duplicate, paymentIntentId: 'pi_3', at: '2026-09-13T14:00:00.000Z' }
+    mockList.mockResolvedValue([makeInvoice({ emailLog: [marker, newest] })])
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+
+    // One invoice, however many payments: the stat counts invoices.
+    await waitFor(() => expect(needALookStat()).toHaveTextContent('1'))
+    fireEvent.click(await screen.findByRole('tab', { name: /Paid/ }))
+    expect(await screen.findByText('Second payment $400.00 (2 unhandled)')).toBeInTheDocument()
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+
+    expect(
+      await screen.findByText(
+        DUPLICATE_NOTICE + ' 2 payments on this invoice are waiting to be marked handled (this is the newest).',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('does not say anything about a count when only one is waiting', async () => {
+    mockList.mockResolvedValue([makeInvoice({ emailLog: [marker] })])
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('tab', { name: /Paid/ }))
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+
+    expect(await screen.findByText(NOTICE)).toBeInTheDocument()
+    expect(screen.queryByText(/waiting to be marked handled/)).not.toBeInTheDocument()
+  })
+
+  it('money for a voided invoice (an on-voided log entry) flags nothing', async () => {
+    const onVoided = {
+      kind: 'payment',
+      event: 'on-voided',
+      at: '2026-09-12T14:00:00.000Z',
+      paymentIntentId: 'pi_late',
+      amount: 400,
+    } as const
+    mockList.mockResolvedValue([
+      makeInvoice({ status: 'void', paidAt: null, emailLog: [onVoided] } as Partial<PersistedInvoice>),
+    ])
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+
+    await waitFor(() => expect(needALookStat()).toHaveTextContent('0'))
+  })
+})
+
+describe('a second BANK payment that was only started', () => {
+  it('says it was started, not that money arrived, and that it clears itself if it fails', async () => {
+    const started = {
+      kind: 'payment',
+      event: 'amount-mismatch',
+      at: '2026-09-12T14:00:00.000Z',
+      paymentIntentId: 'pi_2',
+      expectedCents: 40000,
+      receivedCents: 40000,
+      reason: 'duplicate',
+      settling: true,
+    } as const
+    mockList.mockResolvedValue([makeInvoice({ emailLog: [started] })])
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('tab', { name: /Paid/ }))
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+
+    expect(
+      await screen.findByText(
+        'A second bank payment of $400.00 was started for this invoice after it was already paid. It was not applied to the invoice. Once it settles, refund it or apply it by hand, then mark this as handled. If it fails, this clears by itself.',
+      ),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/arrived/)).not.toBeInTheDocument()
+  })
+})

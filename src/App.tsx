@@ -4475,7 +4475,10 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           path="/invoices"
           element={
             <OwnerOnly ownerMode={ownerMode}>
-              <InvoicesPage />
+              <InvoicesPage
+                openPeriod={new URLSearchParams(location.search).get('period')}
+                onOpenPeriodHandled={() => navigate('/invoices', { replace: true })}
+              />
             </OwnerOnly>
           }
         />

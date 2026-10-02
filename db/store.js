@@ -101,6 +101,8 @@ import { latestInvoiceSend } from '../lib/invoice-overdue.js'
 import {
   AMOUNT_MISMATCH_EVENT,
   AMOUNT_MISMATCH_HANDLED_EVENT,
+  DUPLICATE_PAYMENT_REASON,
+  PAYMENT_ON_VOIDED_EVENT,
   unhandledAmountMismatches,
 } from '../lib/payment-amount-mismatch.js'
 import { editChangesWhatClientSees, totalsDiffer } from '../lib/invoice-sent-change.js'
@@ -1692,6 +1694,22 @@ function withStatusChanged(invoice, statusChanged) {
   if (!invoice) return invoice
   Object.defineProperty(invoice, 'statusChanged', {
     value: Boolean(statusChanged),
+    enumerable: false,
+    configurable: true,
+  })
+  return invoice
+}
+
+/**
+ * Tag the invoice `applyInvoicePayment` answers with whether the payment was a
+ * SECOND one on an invoice that was already paid - applied to nothing, so the
+ * webhook records it as an unhandled payment instead. Same shape and reason as
+ * `withStatusChanged`: a fact about the write, non-enumerable, never a column.
+ */
+function withDuplicatePayment(invoice, duplicate) {
+  if (!invoice) return invoice
+  Object.defineProperty(invoice, 'duplicatePayment', {
+    value: Boolean(duplicate),
     enumerable: false,
     configurable: true,
   })
@@ -14972,16 +14990,47 @@ export class AppDataStore {
       // took first was a whole save old. Only 'processing' ties an invoice to a
       // live intent: a 'sent' one just carries the attempt that failed last (the
       // pay link mints a new intent per click), so a failure there always applies.
+      //
+      // A PAID row answers the same way, whatever intent it carries (even none, as
+      // after a manual mark): the money is in, and a late failure for some other
+      // attempt must not overwrite the intent that paid it.
       if (
         patch.onlyIfPaymentIntent &&
-        current.status === 'processing' &&
-        current.stripePaymentIntentId &&
-        current.stripePaymentIntentId !== patch.onlyIfPaymentIntent
+        (current.status === 'paid' ||
+          (current.status === 'processing' &&
+            current.stripePaymentIntentId &&
+            current.stripePaymentIntentId !== patch.onlyIfPaymentIntent))
       ) {
         console.warn(
-          `[invoices] applyInvoicePayment skipped: ${invoiceId} is now on ${current.stripePaymentIntentId}, not ${patch.onlyIfPaymentIntent}`,
+          `[invoices] applyInvoicePayment skipped: ${invoiceId} is ${current.status === 'paid' ? 'already paid' : `now on ${current.stripePaymentIntentId}`}, not ${patch.onlyIfPaymentIntent}`,
         )
         return { next: current, statusChanged: false, linesChanged: false, unchanged: true }
+      }
+
+      // A SECOND payment on an invoice that is already paid: a different
+      // PaymentIntent than the one that paid it (bank then card, or two bank
+      // payments; a manual mark carries none). Nothing is re-applied - no status,
+      // no ids, no card fee line - and the invoice comes back flagged so the
+      // webhook records it as an unhandled payment. The SAME intent arriving
+      // again (a card payment's second event) falls through and applies as
+      // before. Decided here, on the row as it stands, like everything above.
+      if (
+        current.status === 'paid' &&
+        (patch.status === 'processing' || patch.status === 'paid') &&
+        typeof patch.paymentIntentId === 'string' &&
+        patch.paymentIntentId &&
+        current.stripePaymentIntentId !== patch.paymentIntentId
+      ) {
+        console.warn(
+          `[invoices] applyInvoicePayment: ${invoiceId} is already paid; ${patch.paymentIntentId} is a second payment`,
+        )
+        return {
+          next: current,
+          statusChanged: false,
+          linesChanged: false,
+          unchanged: true,
+          duplicate: true,
+        }
       }
 
       const next = { ...current }
@@ -15053,8 +15102,11 @@ export class AppDataStore {
       if (index === -1) return null
       const planned = planPayment(normalizeStoredInvoice(data.invoices[index]))
       if (!planned) return null
-      // A superseded payment-failed event: nothing to write.
-      if (planned.unchanged) return withStatusChanged(planned.next, false)
+      // A superseded payment-failed event, or a second payment on a paid
+      // invoice: nothing to write.
+      if (planned.unchanged) {
+        return withDuplicatePayment(withStatusChanged(planned.next, false), planned.duplicate)
+      }
       data.invoices[index] = planned.next
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       return withStatusChanged(planned.next, planned.statusChanged)
@@ -15103,9 +15155,10 @@ export class AppDataStore {
         return null
       }
       if (planned.unchanged) {
-        // A superseded payment-failed event: the row stands as it is.
+        // A superseded payment-failed event, or a second payment on a paid
+        // invoice: the row stands as it is.
         await dbClient.query('rollback')
-        return withStatusChanged(current, false)
+        return withDuplicatePayment(withStatusChanged(current, false), planned.duplicate)
       }
       const { next, statusChanged, linesChanged } = planned
 
@@ -15911,14 +15964,25 @@ export class AppDataStore {
    */
   async recordInvoiceAmountMismatch(
     invoiceId,
-    { at = null, paymentIntentId = null, expectedCents, receivedCents } = {},
+    {
+      at = null,
+      paymentIntentId = null,
+      expectedCents,
+      receivedCents,
+      reason = null,
+      settling = false,
+    } = {},
   ) {
     if (!invoiceId) return null
-    if (!Number.isFinite(expectedCents) || !Number.isFinite(receivedCents)) return null
+    // A SECOND payment on a paid invoice (`reason: 'duplicate'`) rides this same
+    // entry. It may not know what Stripe collected; the amount is then null.
+    const duplicate = reason === DUPLICATE_PAYMENT_REASON
+    if (!Number.isFinite(expectedCents)) return null
+    if (!Number.isFinite(receivedCents) && !duplicate) return null
 
     const intentId = paymentIntentId ? String(paymentIntentId) : null
     const expected = Math.round(expectedCents)
-    const received = Math.round(receivedCents)
+    const received = Number.isFinite(receivedCents) ? Math.round(receivedCents) : null
     const stamp = at && !Number.isNaN(new Date(at).getTime())
       ? new Date(at).toISOString()
       : nowIso()
@@ -15929,15 +15993,108 @@ export class AppDataStore {
       paymentIntentId: intentId,
       expectedCents: expected,
       receivedCents: received,
+      ...(duplicate ? { reason: DUPLICATE_PAYMENT_REASON } : {}),
+      // A duplicate bank payment that was only STARTED (not settled yet).
+      ...(duplicate && settling ? { settling: true } : {}),
     }
     // What "the same marker" means: the intent when there is one, else the pair.
+    // A duplicate is a DIFFERENT marker from an amount mismatch on the same
+    // intent (pi_A mismatched, pi_B paid, pi_A then settles): the earlier marker
+    // must not swallow it, so the reason is part of the question.
     const sameMarker = (logged) =>
       logged?.kind === 'payment' &&
       logged?.event === AMOUNT_MISMATCH_EVENT &&
+      (logged?.reason === DUPLICATE_PAYMENT_REASON) === duplicate &&
       (logged?.paymentIntentId ?? null) === intentId &&
       (intentId !== null ||
-        (logged?.expectedCents === expected && logged?.receivedCents === received))
+        (logged?.expectedCents === expected && (logged?.receivedCents ?? null) === received))
 
+    const guard =
+      intentId !== null
+        ? {
+            kind: 'payment',
+            event: AMOUNT_MISMATCH_EVENT,
+            paymentIntentId: intentId,
+            ...(duplicate ? { reason: DUPLICATE_PAYMENT_REASON } : {}),
+          }
+        : {
+            kind: 'payment',
+            event: AMOUNT_MISMATCH_EVENT,
+            paymentIntentId: null,
+            expectedCents: expected,
+            receivedCents: received,
+            ...(duplicate ? { reason: DUPLICATE_PAYMENT_REASON } : {}),
+          }
+    return this._appendPaymentLogEntry(invoiceId, {
+      entry,
+      guard,
+      sameMarker,
+      label: 'amount-mismatch',
+    })
+  }
+
+  /**
+   * Record that money arrived for a VOIDED invoice: the Stripe webhook's apply
+   * refuses a void row, and the money is still in Stripe - so a person has to
+   * refund it or re-apply it by hand, and has to be told. This is the trace, on
+   * the same append-only `email_log`, `kind: 'payment'`, `event: 'on-voided'`.
+   * Nothing derives a flag from it (a void invoice shows none); the owners'
+   * notification is the alert. THE STATUS IS NEVER TOUCHED.
+   *
+   * `amount` is dollars (or null when Stripe did not say). Idempotent on
+   * `paymentIntentId` - a card payment fires two events for one intent - or, with
+   * no intent, on the amount. Same contract as `recordInvoiceAmountMismatch`: the
+   * invoice when THIS call wrote the entry, null when it was already there or the
+   * invoice is gone, and a throw when the guarded write matched no row and the
+   * entry is not on the log (so the webhook still notifies).
+   */
+  async recordInvoicePaymentOnVoided(
+    invoiceId,
+    { at = null, paymentIntentId = null, amount = null, detail = '' } = {},
+  ) {
+    if (!invoiceId) return null
+    const intentId = paymentIntentId ? String(paymentIntentId) : null
+    const dollars = Number.isFinite(amount) ? Math.round(amount * 100) / 100 : null
+    const stamp = at && !Number.isNaN(new Date(at).getTime())
+      ? new Date(at).toISOString()
+      : nowIso()
+    const entry = {
+      kind: 'payment',
+      event: PAYMENT_ON_VOIDED_EVENT,
+      at: stamp,
+      paymentIntentId: intentId,
+      amount: dollars,
+      detail: String(detail ?? ''),
+    }
+    const sameMarker = (logged) =>
+      logged?.kind === 'payment' &&
+      logged?.event === PAYMENT_ON_VOIDED_EVENT &&
+      (logged?.paymentIntentId ?? null) === intentId &&
+      (intentId !== null || (logged?.amount ?? null) === dollars)
+    const guard =
+      intentId !== null
+        ? { kind: 'payment', event: PAYMENT_ON_VOIDED_EVENT, paymentIntentId: intentId }
+        : { kind: 'payment', event: PAYMENT_ON_VOIDED_EVENT, paymentIntentId: null, amount: dollars }
+    return this._appendPaymentLogEntry(invoiceId, {
+      entry,
+      guard,
+      sameMarker,
+      label: 'on-voided',
+    })
+  }
+
+  /**
+   * Append ONE `kind: 'payment'` marker to an invoice's `email_log`, once: the
+   * shared writer behind `recordInvoiceAmountMismatch` and
+   * `recordInvoicePaymentOnVoided`. `sameMarker(logged)` says whether an existing
+   * entry is this marker; `guard` is the same question as a jsonb containment
+   * document for the Postgres statement.
+   *
+   * @returns the invoice when THIS call wrote the marker, null when it was already
+   * there or the invoice is gone. Throws when the guarded write matched no row
+   * and the marker is not on the log.
+   */
+  async _appendPaymentLogEntry(invoiceId, { entry, guard, sameMarker, label }) {
     if (this.pool) {
       const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
       if (!current) return null
@@ -15945,16 +16102,6 @@ export class AppDataStore {
 
       // Appended in SQL, not read-modify-write, and guarded in the same
       // statement. `status` is deliberately absent from it.
-      const guard =
-        intentId !== null
-          ? { kind: 'payment', event: AMOUNT_MISMATCH_EVENT, paymentIntentId: intentId }
-          : {
-              kind: 'payment',
-              event: AMOUNT_MISMATCH_EVENT,
-              paymentIntentId: null,
-              expectedCents: expected,
-              receivedCents: received,
-            }
       const { rows } = await this.pool.query(
         `update invoices
             set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
@@ -15976,7 +16123,7 @@ export class AppDataStore {
         if (!after) return null
         if ((after.emailLog ?? []).some(sameMarker)) return null
         throw new Error(
-          `amount-mismatch marker for invoice ${invoiceId} matched no row and is not on its log`,
+          `${label} marker for invoice ${invoiceId} matched no row and is not on its log`,
         )
       }
       return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null

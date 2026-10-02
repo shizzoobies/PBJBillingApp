@@ -44,10 +44,10 @@ describe('the Stripe webhook flags a payment for a different amount', () => {
   })
 
   it('only after an apply that answered an invoice, and only for the two payment events', () => {
-    const guard = route.slice(Math.max(0, stepAt - 400), stepAt)
-    expect(guard).toContain('settledInvoice &&')
+    const guard = route.slice(Math.max(0, stepAt - 700), stepAt)
     expect(guard).toContain("event.type === 'checkout.session.completed'")
     expect(guard).toContain("event.type === 'payment_intent.succeeded'")
+    expect(guard).toContain('} else if (settledInvoice) {')
     expect(guard).not.toContain('payment_failed')
   })
 
@@ -59,7 +59,8 @@ describe('the Stripe webhook flags a payment for a different amount', () => {
   })
 
   it('imports the helper from lib', () => {
-    expect(serverSource).toContain("import { flagPaymentAmountMismatch } from './lib/payment-amount-mismatch.js'")
+    expect(serverSource).toContain("  flagPaymentAmountMismatch,")
+    expect(serverSource).toContain("} from './lib/payment-amount-mismatch.js'")
   })
 })
 
@@ -88,5 +89,80 @@ describe('POST /api/invoices/:id/amount-mismatch/handled', () => {
     expect(handler).toContain("sendJson(response, 404, { error: 'Invoice not found' })")
     expect(handler).toContain('invoice: await withCoverageChangeable(updated)')
     expect(handler).toContain('byUserId: session.user.id')
+  })
+})
+
+/**
+ * featreq-c8e5f169 (smaller items): a payment for a VOIDED invoice, and a second
+ * payment on an already PAID one. Same rule as above - after the try/catch, so a
+ * failure cannot become a forget or a 500.
+ */
+describe('the Stripe webhook records a payment for a voided or already-paid invoice', () => {
+  const duplicateAt = route.indexOf('await flagDuplicatePayment(')
+  const voidedAt = route.indexOf('await flagPaymentOnVoidedInvoice(')
+
+  it('has both steps, after the try/catch that can forget the event', () => {
+    expect(duplicateAt).toBeGreaterThan(catchAt)
+    expect(voidedAt).toBeGreaterThan(catchAt)
+    const after = route.slice(Math.min(duplicateAt, voidedAt))
+    expect(after).not.toContain('forgetStripeEvent')
+    expect(after).not.toContain("'webhook_failed'")
+  })
+
+  it('a duplicate is what the STORE says it is, and the amount check is the other branch', () => {
+    const guard = route.slice(duplicateAt - 200, duplicateAt)
+    expect(guard).toContain('settledInvoice?.duplicatePayment')
+    expect(route.indexOf('await flagPaymentAmountMismatch(')).toBeGreaterThan(duplicateAt)
+  })
+
+  it('the voided step runs only when an apply RETURNED null, with the invoice first found', () => {
+    const guard = route.slice(voidedAt - 120, voidedAt + 500)
+    expect(guard).toContain('paymentApplied && lookedUpInvoice')
+    expect(guard).toContain('invoice: lookedUpInvoice')
+    expect(guard).toContain('getInvoice:')
+    expect(route).toContain('lookedUpInvoice = invoice')
+  })
+
+  it('imports all three steps from lib', () => {
+    expect(serverSource).toContain('flagDuplicatePayment,')
+    expect(serverSource).toContain('flagPaymentOnVoidedInvoice,')
+  })
+})
+
+/**
+ * Review round: a failed second BANK payment clears its own flag, the bank-vs-card
+ * fact reaches the notices, and the payment-failed notice opens the invoice month.
+ */
+describe('a failure for a started second payment, and the notices\' wording and link', () => {
+  const clearCalls = [...route.matchAll(/await clearDuplicatePaymentOnFailure\(\{/g)].map(
+    (match) => match.index as number,
+  )
+
+  it('clears the duplicate in BOTH stale-failure returns, before answering, never after a status write', () => {
+    expect(clearCalls).toHaveLength(2)
+    for (const at of clearCalls) {
+      const after = route.slice(at, at + 400)
+      expect(after).toContain('store: appDataStore')
+      expect(after).toContain('sendJson(response, 200, { received: true, ignored: \'stale_payment_failure\' })')
+    }
+    // The first return looks at the pre-read invoice, the second at the store's own row.
+    expect(route.slice(clearCalls[0], clearCalls[0] + 300)).toContain('invoice,')
+    expect(route.slice(clearCalls[1], clearCalls[1] + 300)).toContain('invoice: failedInvoice')
+  })
+
+  it('tells the duplicate and voided steps which channel paid', () => {
+    expect(route.slice(route.indexOf('await flagDuplicatePayment('), route.indexOf('await flagDuplicatePayment(') + 300)).toContain(
+      'isCard: settledByCard',
+    )
+    expect(
+      route.slice(route.indexOf('await flagPaymentOnVoidedInvoice('), route.indexOf('await flagPaymentOnVoidedInvoice(') + 400),
+    ).toContain('isCard: settledByCard')
+  })
+
+  it('the payment-failed notice opens the invoice month, like the others', () => {
+    const at = route.indexOf("'invoice_payment_failed', {")
+    expect(at).toBeGreaterThan(-1)
+    expect(route.slice(at, at + 400)).toContain('link: invoicePeriodLink(invoice)')
+    expect(serverSource).toContain('invoicePeriodLink,')
   })
 })
