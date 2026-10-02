@@ -14705,103 +14705,142 @@ export class AppDataStore {
    * payment, and two fee lines for one fee would be an overcharge on the record.
    */
   async applyInvoicePayment(invoiceId, patch = {}) {
-    const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
-    if (!current) return null
-    // Same race as `recordInvoiceSent`: a webhook or a payment-link request can
-    // land after "Void & regenerate" voided the row it names. Reviving it would
-    // break the live-per-(client, period) index on Postgres and duplicate the
-    // live invoice on the file backend, so the late write is dropped instead.
-    if (current.status === 'void') {
-      console.warn(`[invoices] applyInvoicePayment skipped: ${invoiceId} is void`)
-      return null
-    }
+    // What this payment event does to the invoice AS IT STANDS. A function so it
+    // is always run on the row the write is about to change: Postgres runs it on
+    // the row it reads `for update` inside its own transaction, and the file
+    // backend on the row it reads inside its queue slot. Null: nothing to apply.
+    const planPayment = (current) => {
+      // Same race as `recordInvoiceSent`: a webhook or a payment-link request can
+      // land after "Void & regenerate" voided the row it names. Reviving it would
+      // break the live-per-(client, period) index on Postgres and duplicate the
+      // live invoice on the file backend, so the late write is dropped instead.
+      if (current.status === 'void') {
+        console.warn(`[invoices] applyInvoicePayment skipped: ${invoiceId} is void`)
+        return null
+      }
 
-    const next = { ...current }
-    if (PAYMENT_INVOICE_STATUSES.has(patch.status)) next.status = patch.status
-    /**
-     * PAID IS STICKY against payment-side writes. A card payment fires two
-     * webhook events nearly at once, and Stripe does not promise their order:
-     * when `payment_intent.succeeded` lands first (status -> 'paid') and
-     * `checkout.session.completed` lands second, the second used to write its
-     * 'processing' over the settled truth — INV-2026-08-003 sat that way for
-     * twelve days with paid_at and the card method already on the row. The
-     * late event's OTHER facts (session ids, the fee line) still apply below;
-     * only the status cannot go backwards. Nothing here touches void — that
-     * is updateInvoice's machinery, deliberately.
-     */
-    if (current.status === 'paid' && next.status !== 'paid') next.status = 'paid'
-    // Surfaced to the caller (never persisted) so the webhook can tell a real
-    // transition from a replay before it emails the client about it.
-    const statusChanged = next.status !== current.status
-    if (typeof patch.checkoutSessionId === 'string') {
-      next.stripeCheckoutSessionId = patch.checkoutSessionId
-    }
-    if (typeof patch.cardCheckoutSessionId === 'string') {
-      next.stripeCardSessionId = patch.cardCheckoutSessionId
-    }
-    if (typeof patch.paymentIntentId === 'string') {
-      next.stripePaymentIntentId = patch.paymentIntentId
-    }
-    if (typeof patch.paymentMethod === 'string') next.paymentMethod = patch.paymentMethod
-    if (patch.paidAt === null || typeof patch.paidAt === 'string') next.paidAt = patch.paidAt
-    if (patch.sentAt === null || typeof patch.sentAt === 'string') next.sentAt = patch.sentAt
+      const next = { ...current }
+      if (PAYMENT_INVOICE_STATUSES.has(patch.status)) next.status = patch.status
+      /**
+       * PAID IS STICKY against payment-side writes. A card payment fires two
+       * webhook events nearly at once, and Stripe does not promise their order:
+       * when `payment_intent.succeeded` lands first (status -> 'paid') and
+       * `checkout.session.completed` lands second, the second used to write its
+       * 'processing' over the settled truth — INV-2026-08-003 sat that way for
+       * twelve days with paid_at and the card method already on the row. The
+       * late event's OTHER facts (session ids, the fee line) still apply below;
+       * only the status cannot go backwards. Nothing here touches void — that
+       * is updateInvoice's machinery, deliberately.
+       */
+      if (current.status === 'paid' && next.status !== 'paid') next.status = 'paid'
+      // Surfaced to the caller (never persisted) so the webhook can tell a real
+      // transition from a replay before it emails the client about it.
+      const statusChanged = next.status !== current.status
+      if (typeof patch.checkoutSessionId === 'string') {
+        next.stripeCheckoutSessionId = patch.checkoutSessionId
+      }
+      if (typeof patch.cardCheckoutSessionId === 'string') {
+        next.stripeCardSessionId = patch.cardCheckoutSessionId
+      }
+      if (typeof patch.paymentIntentId === 'string') {
+        next.stripePaymentIntentId = patch.paymentIntentId
+      }
+      if (typeof patch.paymentMethod === 'string') next.paymentMethod = patch.paymentMethod
+      if (patch.paidAt === null || typeof patch.paidAt === 'string') next.paidAt = patch.paidAt
+      if (patch.sentAt === null || typeof patch.sentAt === 'string') next.sentAt = patch.sentAt
 
-    // Additive only, and only for a kind the invoice does not already carry.
-    const appended = sanitizeInvoiceLines(patch.appendLines, {
-      invoiceKind: current.kind,
-    }).filter(
-      (line) => !(current.lineItems ?? []).some((existing) => existing.kind === line.kind),
-    )
-    const linesChanged = appended.length > 0
-    if (linesChanged) {
-      next.lineItems = [...(current.lineItems ?? []), ...appended]
-      Object.assign(next, recomputeInvoiceMoney(next.lineItems))
+      // Additive only, and only for a kind the invoice does not already carry.
+      const appended = sanitizeInvoiceLines(patch.appendLines, {
+        invoiceKind: current.kind,
+      }).filter(
+        (line) => !(current.lineItems ?? []).some((existing) => existing.kind === line.kind),
+      )
+      const linesChanged = appended.length > 0
+      if (linesChanged) {
+        next.lineItems = [...(current.lineItems ?? []), ...appended]
+        Object.assign(next, recomputeInvoiceMoney(next.lineItems))
+      }
+      next.updatedAt = nowIso()
+      return { next, statusChanged, linesChanged }
     }
-    next.updatedAt = nowIso()
 
     if (this.pool) {
-      // The money columns are only in the statement when a line was actually
-      // appended. Writing them on every payment event would turn this into a
-      // read-modify-write over the lines, and an edit made between the read
-      // above and this update would be silently reverted by a webhook.
-      const params = [
-        invoiceId,
-        next.status,
-        next.stripeCheckoutSessionId ?? null,
-        next.stripePaymentIntentId ?? null,
-        next.paymentMethod ?? null,
-        next.paidAt ?? null,
-        next.sentAt ?? null,
-        next.stripeCardSessionId ?? null,
-      ]
-      if (linesChanged) params.push(JSON.stringify(next.lineItems), next.subtotal, next.total)
-      const { rowCount } = await this.pool.query(
-        `update invoices
-            set status = $2, stripe_checkout_session_id = $3, stripe_payment_intent_id = $4,
-                payment_method = $5, paid_at = $6, sent_at = $7,
-                stripe_card_session_id = $8${
-                  linesChanged
-                    ? ', line_items = $9::jsonb, subtotal = $10, total = $11'
-                    : ''
-                },
-                updated_at = now()
-          where id = $1`,
-        params,
-      )
-      if (rowCount === 0) return null
-      return withStatusChanged(
-        (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null,
-        statusChanged,
-      )
+
+      // THE DECISION IS TAKEN ON THE ROW AS IT IS WHEN THE WRITE RUNS. A plain
+      // read taken before the write is no basis for it: the bulk save holds the
+      // invoices table EXCLUSIVE for seconds, so an UPDATE can wait behind it
+      // while its plan goes stale, and a card payment's two events a second
+      // apart would then undo each other (the second writing `processing` and a
+      // null paid_at over a paid row, or blanking a session id the first one
+      // wrote). `for update` waits at that table lock, reads the row as the save
+      // left it, and holds it until the commit - so the plan, `statusChanged`
+      // (which drives the client's email) and the write all describe one row, and
+      // the UPDATE cannot match nothing: the lock keeps the row from being
+      // deleted under us.
+      const dbClient = await this.pool.connect()
+      try {
+        await dbClient.query('begin')
+        const locked = await dbClient.query(
+          `select ${INVOICE_SELECT_COLUMNS}
+             from invoices where id = $1 for update`,
+          [invoiceId],
+        )
+        const planned = locked.rows.length > 0 ? planPayment(mapInvoiceRow(locked.rows[0])) : null
+        if (!planned) {
+          // Gone, or void: nothing to write.
+          await dbClient.query('rollback')
+          return null
+        }
+        const { next, statusChanged, linesChanged } = planned
+
+        // The money columns are only in the statement when a line was actually
+        // appended.
+        const params = [
+          invoiceId,
+          next.status,
+          next.stripeCheckoutSessionId ?? null,
+          next.stripePaymentIntentId ?? null,
+          next.paymentMethod ?? null,
+          next.paidAt ?? null,
+          next.sentAt ?? null,
+          next.stripeCardSessionId ?? null,
+        ]
+        if (linesChanged) params.push(JSON.stringify(next.lineItems), next.subtotal, next.total)
+        // `returning` hands back the row this statement wrote, so the answer needs
+        // no second read that could fail after the payment was already recorded.
+        const written = await dbClient.query(
+          `update invoices
+              set status = $2, stripe_checkout_session_id = $3, stripe_payment_intent_id = $4,
+                  payment_method = $5, paid_at = $6, sent_at = $7,
+                  stripe_card_session_id = $8${
+                    linesChanged
+                      ? ', line_items = $9::jsonb, subtotal = $10, total = $11'
+                      : ''
+                  },
+                  updated_at = now()
+            where id = $1
+            returning ${INVOICE_SELECT_COLUMNS}`,
+          params,
+        )
+        await dbClient.query('commit')
+        return withStatusChanged(mapInvoiceRow(written.rows[0]), statusChanged)
+      } catch (error) {
+        await dbClient.query('rollback')
+        throw error
+      } finally {
+        dbClient.release()
+      }
     }
 
     const data = await readJson(localDataPath)
     if (!Array.isArray(data.invoices)) data.invoices = []
     const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
     if (index === -1) return null
-    data.invoices[index] = next
+    const planned = planPayment(normalizeStoredInvoice(data.invoices[index]))
+    if (!planned) return null
+    data.invoices[index] = planned.next
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return withStatusChanged(next, statusChanged)
+    return withStatusChanged(planned.next, planned.statusChanged)
   }
 
   /**
@@ -14899,19 +14938,28 @@ export class AppDataStore {
    * paid by check is the one disaster this feature could cause.
    */
   async markInvoicePaidManually(invoiceId, { actorUserId = null } = {}) {
+    // The refusals, as a function of the invoice: Postgres runs them again on the
+    // row it reads `for update` (below), the file backend on the row it reads.
+    const refuseUnlessPayable = (invoice) => {
+      if (invoice.status === 'void') {
+        throw new ManualPaymentError('This invoice was voided — a withdrawn invoice cannot be paid.')
+      }
+      if (invoice.status === 'paid') {
+        throw new ManualPaymentError('This invoice is already paid.')
+      }
+      if (invoice.status === 'processing') {
+        throw new ManualPaymentError(
+          'A bank payment is already going through against this invoice — let it settle instead of marking it by hand.',
+        )
+      }
+    }
+    // A first look, for the quick answer. It is NOT the decision on Postgres: a
+    // bank payment can move this invoice to 'processing' between this read and
+    // the write (and a bulk save can hold the table in between), so the write
+    // below refuses again on the row it locks.
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
     if (!current) return null
-    if (current.status === 'void') {
-      throw new ManualPaymentError('This invoice was voided — a withdrawn invoice cannot be paid.')
-    }
-    if (current.status === 'paid') {
-      throw new ManualPaymentError('This invoice is already paid.')
-    }
-    if (current.status === 'processing') {
-      throw new ManualPaymentError(
-        'A bank payment is already going through against this invoice — let it settle instead of marking it by hand.',
-      )
-    }
+    refuseUnlessPayable(current)
 
     const paidAt = nowIso()
     const reviewEvent = {
@@ -14929,17 +14977,32 @@ export class AppDataStore {
       const dbClient = await this.pool.connect()
       try {
         await dbClient.query('begin')
-        const { rowCount } = await dbClient.query(
+        // Decided on the row as it IS: `for update` waits at a running bulk save's
+        // table lock and holds the row, so a bank payment that moved it to
+        // 'processing' (or a void, or another click) is refused here instead of
+        // being overwritten by an UPDATE that never looked.
+        const locked = await dbClient.query(
+          `select ${INVOICE_SELECT_COLUMNS}
+             from invoices where id = $1 for update`,
+          [invoiceId],
+        )
+        if (locked.rows.length === 0) {
+          await dbClient.query('rollback')
+          return null
+        }
+        const before = mapInvoiceRow(locked.rows[0])
+        refuseUnlessPayable(before)
+        await dbClient.query(
           `update invoices
               set status = 'paid', payment_method = 'manual', paid_at = $2, updated_at = now()
             where id = $1`,
           [invoiceId, paidAt],
         )
-        if (rowCount === 0) {
-          await dbClient.query('rollback')
-          return null
-        }
-        await this._insertInvoiceReviewEvent(reviewEvent, { dbClient })
+        // The audit names the status actually replaced, not the one first read.
+        await this._insertInvoiceReviewEvent(
+          { ...reviewEvent, changes: { status: { before: before.status, after: 'paid' } } },
+          { dbClient },
+        )
         await dbClient.query('commit')
       } catch (error) {
         await dbClient.query('rollback')
@@ -15237,7 +15300,9 @@ export class AppDataStore {
       //
       // `sent_at`, `status` and `due_date` are decided from the row's OWN
       // values for the same reason, and a failed attempt (ok = false) is logged
-      // without touching any of them. The void guard stays a pre-read above.
+      // without touching any of them. The void guard is a pre-read above AND a
+      // condition of the UPDATE: a void that commits while this statement waits
+      // (a save can hold the table) must not be revived to 'sent'.
       //
       // `due_date` moves on the FIRST send only. `sent_at is null` reads the
       // row's PRE-update value (every expression in a SET list does), so two
@@ -15269,7 +15334,7 @@ export class AppDataStore {
                 due_date = case when $3::boolean and sent_at is null and $5::date is not null
                                 then $5::date::text else due_date end,
                 updated_at = now()
-          where id = $1
+          where id = $1 and status <> 'void'
           returning ${INVOICE_SELECT_COLUMNS}`,
         [invoiceId, JSON.stringify([entry]), marksSent, entry.at, firstSendDueDate],
       )

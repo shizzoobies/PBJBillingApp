@@ -1213,6 +1213,29 @@ function fakePostgres({
     if (/^update invoices\b[\s\S]*\breturning id$/i.test(trimmed)) {
       return { rows: invoices.map((invoice) => ({ id: invoice.id })) }
     }
+    // `applyInvoicePayment`'s own write: absolute values from its plan, answered
+    // with the row it wrote (`returning`). The row is REPLACED in `invoices`
+    // rather than mutated - the fixtures are shared across tests - so a second
+    // call decides on what the first one left.
+    if (/^update invoices\s+set status = \$2[\s\S]*\breturning id, client_id\b/i.test(trimmed)) {
+      const index = invoices.findIndex((invoice) => invoice.id === params?.[0])
+      if (index === -1) return { rows: [], rowCount: 0 }
+      const merged = {
+        ...invoices[index],
+        status: params[1],
+        stripe_checkout_session_id: params[2],
+        stripe_payment_intent_id: params[3],
+        payment_method: params[4],
+        paid_at: params[5],
+        sent_at: params[6],
+        stripe_card_session_id: params[7],
+        ...(params.length > 8
+          ? { line_items: JSON.parse(params[8]), subtotal: params[9], total: params[10] }
+          : {}),
+      }
+      invoices[index] = merged
+      return { rows: [merged], rowCount: 1 }
+    }
     // The two statements that hand back the row they WROTE rather than
     // re-listing every invoice afterwards — `recordInvoiceSent` and
     // `recordInvoicePastDueNoticed`. The fake has to answer with the row AND a
@@ -2445,7 +2468,8 @@ describe('applyInvoicePayment statement shape (postgres branch)', () => {
     })
 
     const update = fake.matching(/^update invoices/i)[0]
-    expect(update.text).not.toMatch(/line_items/)
+    // The SET clause, not the `returning` list (which names every column).
+    expect(update.text.split(/\breturning\b/i)[0]).not.toMatch(/line_items/)
     expect(update.text).toMatch(/stripe_card_session_id/)
   })
 
@@ -31806,5 +31830,305 @@ describe('recordInvoiceSent with one-time addresses (postgres branch)', () => {
     expect(JSON.parse(fake.matching(/^update invoices/i)[0].params[1])[0]).not.toHaveProperty(
       'oneTime',
     )
+  })
+})
+
+/**
+ * A payment is recorded against the invoice as it stands at that moment
+ * (tracker featreq-6a5c6162, review finding I1 / M16).
+ *
+ * Planning on a plain read and then writing absolute values is only safe while
+ * the gap between the two is milliseconds. A bulk save holds the invoices table
+ * EXCLUSIVE for seconds, so a payment write can wait behind it with a stale
+ * plan: a card payment's two events a second apart would undo each other.
+ * `applyInvoicePayment` and `markInvoicePaidManually` now decide on the row they
+ * read `for update` inside their own transaction.
+ */
+describe('payment writes decide on the locked row (postgres branch)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const paidRow = {
+    ...existingInvoice,
+    id: 'inv-1',
+    status: 'paid',
+    paid_at: new Date('2026-09-10T00:00:00.000Z'),
+    payment_method: 'card',
+    stripe_payment_intent_id: 'pi_1',
+    stripe_card_session_id: 'cs_card_1',
+    line_items: [
+      { kind: 'plan', label: 'Monthly service', detail: '', amount: 100 },
+      { kind: 'card-fee', label: 'Card processing fee', detail: '', amount: 3.3 },
+    ],
+    subtotal: '103.30',
+    total: '103.30',
+  }
+  const sentRow = {
+    ...existingInvoice,
+    id: 'inv-1',
+    status: 'sent',
+    paid_at: null,
+    payment_method: null,
+    line_items: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+    subtotal: '100.00',
+    total: '100.00',
+  }
+  const LOCKED = /^select[\s\S]*from invoices where id = \$1 for update$/i
+  const UPDATE = /^update invoices\s+set status = \$2/i
+  const control = (fake) =>
+    fake.statements.map((s) => s.text).filter((t) => /^(begin|commit|rollback)$/i.test(t))
+
+  // The one connection write paths check out, with release counted.
+  async function watchedClient(fake) {
+    const client = await fake.pool.connect()
+    client.release = vi.fn()
+    return client
+  }
+
+  it('begin, the locked select, the UPDATE, commit - on one connection, released once', async () => {
+    const fake = fakePostgres({ invoices: [{ ...sentRow }] })
+    const client = await watchedClient(fake)
+    let connects = 0
+    const connect = fake.pool.connect.bind(fake.pool)
+    fake.pool.connect = async () => {
+      connects += 1
+      return connect()
+    }
+    const result = await postgresStore(fake).applyInvoicePayment('inv-1', { status: 'processing' })
+
+    expect(result.status).toBe('processing')
+    expect(result.statusChanged).toBe(true)
+    const all = fake.statements.map((s) => s.text)
+    const beginAt = fake.indexOf(/^begin$/i)
+    expect(LOCKED.test(all[beginAt + 1])).toBe(true)
+    expect(UPDATE.test(all[beginAt + 2])).toBe(true)
+    expect(all[beginAt + 3]).toBe('commit')
+    expect(fake.statements[beginAt + 1].params).toEqual(['inv-1'])
+    // No plain read of the invoice decides anything.
+    expect(fake.matching(/^select[\s\S]*from invoices/i).every((s) => LOCKED.test(s.text))).toBe(true)
+    expect(connects).toBe(1)
+    expect(client.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('a locked row that is already paid stays paid, keeps its paid_at and method, and reports no change', async () => {
+    const fake = fakePostgres({ invoices: [{ ...paidRow }] })
+    const result = await postgresStore(fake).applyInvoicePayment('inv-1', {
+      status: 'processing',
+      cardCheckoutSessionId: 'cs_card_2',
+    })
+
+    const [update] = fake.matching(UPDATE)
+    // status, checkout session, intent, method, paid_at, sent_at, card session
+    expect(update.params[1]).toBe('paid')
+    expect(update.params[4]).toBe('card')
+    expect(update.params[5]).toBe(paidRow.paid_at.toISOString())
+    expect(update.params[7]).toBe('cs_card_2')
+    expect(result.status).toBe('paid')
+    expect(result.statusChanged).toBe(false)
+  })
+
+  it('a card payment\'s two events a second apart cannot undo each other, in either order', async () => {
+    const paidPatch = {
+      status: 'paid',
+      paidAt: '2026-09-10T00:00:00.000Z',
+      paymentIntentId: 'pi_1',
+      paymentMethod: 'card',
+    }
+    const completedPatch = { status: 'processing', cardCheckoutSessionId: 'cs_card_9', paymentIntentId: 'pi_1' }
+
+    for (const order of [[paidPatch, completedPatch], [completedPatch, paidPatch]]) {
+      const fake = fakePostgres({ invoices: [{ ...sentRow }] })
+      const pgStore = postgresStore(fake)
+      const first = await pgStore.applyInvoicePayment('inv-1', order[0])
+      const second = await pgStore.applyInvoicePayment('inv-1', order[1])
+      const final = await pgStore.listInvoices()
+
+      expect(final[0].status).toBe('paid')
+      expect(final[0].paidAt).toBe('2026-09-10T00:00:00.000Z')
+      expect(final[0].paymentMethod).toBe('card')
+      expect(final[0].stripeCardSessionId).toBe('cs_card_9')
+      // Exactly one of the two moved the status into paid; the other changed nothing it would email about.
+      expect([first.statusChanged, second.statusChanged].filter(Boolean).length).toBeGreaterThanOrEqual(1)
+      if (order[0] === paidPatch) expect(second.statusChanged).toBe(false)
+    }
+  })
+
+  it('a void locked row writes nothing and answers null', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fake = fakePostgres({ invoices: [{ ...sentRow, status: 'void' }] })
+    const result = await postgresStore(fake).applyInvoicePayment('inv-1', { status: 'paid' })
+
+    expect(result).toBeNull()
+    expect(fake.matching(UPDATE)).toHaveLength(0)
+    expect(control(fake)).toEqual(['begin', 'rollback'])
+    warn.mockRestore()
+  })
+
+  it('a fee line already on the locked row is not appended again', async () => {
+    const fake = fakePostgres({ invoices: [{ ...paidRow, status: 'processing', paid_at: null }] })
+    await postgresStore(fake).applyInvoicePayment('inv-1', {
+      status: 'paid',
+      appendLines: [{ kind: 'card-fee', label: 'Card processing fee', detail: '', amount: 3.3 }],
+    })
+
+    const [update] = fake.matching(UPDATE)
+    expect(update.text.split(/\breturning\b/i)[0]).not.toMatch(/line_items/)
+    expect(update.params).toHaveLength(8)
+  })
+
+  it('a locked read that finds nothing answers null with no UPDATE', async () => {
+    const fake = fakePostgres({ invoices: [] })
+    const result = await postgresStore(fake).applyInvoicePayment('inv-1', { status: 'paid' })
+
+    expect(result).toBeNull()
+    expect(fake.matching(UPDATE)).toHaveLength(0)
+    expect(control(fake)).toEqual(['begin', 'rollback'])
+  })
+
+  it('rolls back and releases the connection once when the UPDATE fails', async () => {
+    const failure = new Error('connection reset')
+    const fake = fakePostgres({
+      invoices: [{ ...sentRow }],
+      failOn: { pattern: UPDATE, error: failure },
+    })
+    const client = await watchedClient(fake)
+    const error = await postgresStore(fake)
+      .applyInvoicePayment('inv-1', { status: 'paid' })
+      .catch((e) => e)
+
+    expect(error).toBe(failure)
+    expect(control(fake)).toEqual(['begin', 'rollback'])
+    expect(client.release).toHaveBeenCalledTimes(1)
+  })
+
+  describe('markInvoicePaidManually', () => {
+    it('refuses on the locked row, not on the read before it: a bank payment that moved it to processing wins', async () => {
+      const fake = fakePostgres({ invoices: [{ ...sentRow }] })
+      const client = await watchedClient(fake)
+      const inner = client.query.bind(client)
+      client.query = async (text, params) => {
+        const result = await inner(text, params)
+        // By the time the lock is granted the invoice is 'processing'.
+        return LOCKED.test(String(text).trim())
+          ? { rows: result.rows.map((r) => ({ ...r, status: 'processing' })), rowCount: 1 }
+          : result
+      }
+
+      await expect(
+        postgresStore(fake).markInvoicePaidManually('inv-1', { actorUserId: 'owner-1' }),
+      ).rejects.toBeInstanceOf(ManualPaymentError)
+
+      expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+      expect(fake.matching(/^insert into invoice_review_events/i)).toHaveLength(0)
+      expect(control(fake)).toEqual(['begin', 'rollback'])
+      expect(client.release).toHaveBeenCalledTimes(1)
+    })
+
+    it('marks a payable locked row paid and names the status it actually replaced in the audit', async () => {
+      const fake = fakePostgres({ invoices: [{ ...sentRow, status: 'overdue' }] })
+      const client = await watchedClient(fake)
+      const inner = client.query.bind(client)
+      client.query = async (text, params) => {
+        const result = await inner(text, params)
+        // The pre-lock read said 'overdue'; the row the lock grants says 'reviewed'.
+        return LOCKED.test(String(text).trim())
+          ? { rows: result.rows.map((r) => ({ ...r, status: 'reviewed' })), rowCount: 1 }
+          : result
+      }
+
+      await postgresStore(fake).markInvoicePaidManually('inv-1', { actorUserId: 'owner-1' })
+
+      const all = fake.statements.map((s) => s.text)
+      const beginAt = fake.indexOf(/^begin$/i)
+      expect(LOCKED.test(all[beginAt + 1])).toBe(true)
+      expect(/^update invoices/i.test(all[beginAt + 2])).toBe(true)
+      expect(/^insert into invoice_review_events/i.test(all[beginAt + 3])).toBe(true)
+      expect(all[beginAt + 4]).toBe('commit')
+      const event = fake.matching(/^insert into invoice_review_events/i)[0]
+      expect(JSON.parse(event.params[6])).toEqual({ status: { before: 'reviewed', after: 'paid' } })
+    })
+
+    it('a locked read that finds nothing answers null', async () => {
+      const fake = fakePostgres({ invoices: [{ ...sentRow }] })
+      const client = await watchedClient(fake)
+      const inner = client.query.bind(client)
+      client.query = async (text, params) =>
+        LOCKED.test(String(text).trim()) ? { rows: [], rowCount: 0 } : inner(text, params)
+
+      expect(await postgresStore(fake).markInvoicePaidManually('inv-1', {})).toBeNull()
+      expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+    })
+  })
+
+  describe('recordInvoiceSent', () => {
+    it('will not revive an invoice that was voided while its UPDATE waited', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const fake = fakePostgres({ invoices: [{ ...sentRow }] })
+      const inner = fake.pool.query.bind(fake.pool)
+      fake.pool.query = async (text, params) =>
+        /^update invoices[\s\S]*returning id, client_id/i.test(String(text).trim())
+          ? (fake.statements.push({ text: String(text).trim(), params }), { rows: [], rowCount: 0 })
+          : inner(text, params)
+
+      const result = await postgresStore(fake).recordInvoiceSent('inv-1', { to: ['a@b.co'], ok: true })
+
+      expect(result).toBeNull()
+      const [update] = fake.matching(/^update invoices/i)
+      expect(update.text).toMatch(/where id = \$1 and status <> 'void'/)
+      warn.mockRestore()
+    })
+  })
+})
+
+describe('a card payment\'s two events cannot undo each other (file backend)', () => {
+  const paidPatch = {
+    status: 'paid',
+    paidAt: '2026-09-10T00:00:00.000Z',
+    paymentIntentId: 'pi_1',
+    paymentMethod: 'card',
+  }
+  const completedPatch = { status: 'processing', cardCheckoutSessionId: 'cs_card_9', paymentIntentId: 'pi_1' }
+
+  async function seed() {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-two',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-005',
+        status: 'sent',
+        lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+        subtotal: 100,
+        total: 100,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-05T00:00:00.000Z',
+        paidAt: null,
+        paymentMethod: null,
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it.each([
+    ['paid first', [paidPatch, completedPatch]],
+    ['processing first', [completedPatch, paidPatch]],
+  ])('%s: the invoice ends paid with its paid stamp, method and card session', async (_label, events) => {
+    await seed()
+    const first = await store.applyInvoicePayment('inv-two', events[0])
+    const second = await store.applyInvoicePayment('inv-two', events[1])
+
+    const stored = JSON.parse(await readFile(localDataPath, 'utf8')).invoices[0]
+    expect(stored.status).toBe('paid')
+    expect(stored.paidAt).toBe('2026-09-10T00:00:00.000Z')
+    expect(stored.paymentMethod).toBe('card')
+    expect(stored.stripeCardSessionId).toBe('cs_card_9')
+    if (events[0] === paidPatch) expect(second.statusChanged).toBe(false)
+    expect(first.statusChanged).toBe(true)
   })
 })
