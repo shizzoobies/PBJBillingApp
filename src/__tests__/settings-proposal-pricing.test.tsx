@@ -60,9 +60,9 @@ describe('Proposal pricing in Settings', () => {
   it('saves a role rate', () => {
     const onCommit = renderSection()
     const input = screen.getByLabelText('Bookkeeper (B) rate')
-    fireEvent.change(input, { target: { value: '75' } })
+    fireEvent.change(input, { target: { value: '80' } })
     fireEvent.blur(input)
-    expect(lastSaved(onCommit).rates.bookkeeper).toBe(75)
+    expect(lastSaved(onCommit).rates.bookkeeper).toBe(80)
   })
 
   it('edits a factor, and the edit round-trips through the sanitizer', () => {
@@ -260,6 +260,18 @@ describe('Proposal pricing in Settings', () => {
     )
     const saved = lastSaved(onCommit)
     expect(saved.services.find((row) => row.id === 'budget')?.defaultQuantity).toBeNull()
+  })
+
+  it('warns beside a $0 rate and nowhere else', () => {
+    renderSection({ ...defaultProposalPricing(), rates: { bookkeeper: 75, accountant: 0, controller: 125 } })
+    const warnings = screen.getAllByText(/Proposal rate not set/)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0].closest('label')?.textContent).toContain('Accountant (A) rate')
+  })
+
+  it('shows no rate warning at the confirmed seed rates', () => {
+    renderSection()
+    expect(screen.queryByText(/Proposal rate not set/)).toBeNull()
   })
 
   it('shows the standard-values hint under the section', () => {

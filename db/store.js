@@ -238,7 +238,7 @@ function rowToFirmSettings(row) {
     }
   }
   // The proposal catalog (featreq-311473e2). A null column is the SEED — her
-  // sheet with zero rates — so the Settings page always has a catalog to edit
+  // sheet with her confirmed rates — so the Settings page always has a catalog to edit
   // and nothing has to be written to production to get one.
   const rawPricing =
     typeof row.proposal_pricing === 'string'
@@ -11148,15 +11148,26 @@ export class AppDataStore {
       const clientIdGuard = has('clientId')
         ? ` and client_id is not distinct from $${params.length + 1}`
         : ''
+      // The explicit "Reprice at today's catalog" rewrites the snapshot at
+      // today's rates, which a SENT proposal must never get: re-check draft in
+      // the WHERE, not only in the read above.
+      const draftGuard = isExplicitReprice ? " and status = 'draft'" : ''
       const queryParams = has('clientId') ? [...params, current.clientId] : params
       const { rows } = await this.pool.query(
         `update proposals
             set ${sets.join(', ')}
-          where id = $1 and status not in ('accepted', 'declined')${clientIdGuard}
+          where id = $1 and status not in ('accepted', 'declined')${draftGuard}${clientIdGuard}
           returning ${PROPOSAL_COLUMNS}`,
         queryParams,
       )
       if (rows[0]) return AppDataStore.mapProposal(rows[0])
+      if (isExplicitReprice) {
+        // The explicit reprice is draft-only at WRITE time too: a concurrent
+        // Send moved it to 'sent' after this call read it as a draft.
+        throw new ProposalStateError(
+          'Only a draft can be repriced — this proposal was sent or decided in the meantime.',
+        )
+      }
       // Zero rows for an id we just confirmed exists and was editable: a
       // concurrent write moved it to accepted/declined, or (for a `clientId`
       // patch) linked a different client, in between.
@@ -11177,6 +11188,11 @@ export class AppDataStore {
     if (target.status === 'accepted' || target.status === 'declined') {
       throw new ProposalStateError(
         `This proposal is ${target.status} — copy it to a new proposal to change anything.`,
+      )
+    }
+    if (isExplicitReprice && target.status !== 'draft') {
+      throw new ProposalStateError(
+        `Only a draft can be repriced — this proposal is ${target.status}.`,
       )
     }
     if (has('clientId') && (target.clientId ?? null) !== (current.clientId ?? null)) {

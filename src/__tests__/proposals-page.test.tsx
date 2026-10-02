@@ -362,6 +362,24 @@ describe('the Proposals list', () => {
     expect(screen.getByText('Beta Farms')).toBeTruthy()
   })
 
+  it('warns, with a link to Settings, while a catalog rate is $0', async () => {
+    api.fetchFirmSettings = vi.fn(async () => ({
+      name: 'PB&J',
+      proposalPricing: { ...defaultProposalPricing(), rates: { bookkeeper: 75, accountant: 0, controller: 125 } },
+    }))
+    renderList()
+    const banner = await screen.findByRole('alert')
+    expect(banner.textContent).toContain('Proposal rates are not set')
+    expect(within(banner).getByRole('link', { name: 'Settings > Proposal pricing' })).toBeTruthy()
+  })
+
+  it('shows no rates warning when every rate is set', async () => {
+    renderList()
+    await screen.findByText('Acme Books')
+    await waitFor(() => expect(api.fetchFirmSettings).toHaveBeenCalled())
+    expect(screen.queryByText(/Proposal rates are not set/)).toBeNull()
+  })
+
   it('New proposal creates a draft and opens it', async () => {
     renderList()
     await screen.findByText('Acme Books')
@@ -657,6 +675,122 @@ describe('the proposal editor', () => {
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Reprice at today’s catalog' }))
     await waitFor(() => expect(api.repriceProposalRequest).toHaveBeenCalledWith('prop-1'))
+  })
+
+  describe('rates that are not set (2026-10-02 incident)', () => {
+    const ZERO_RATES = { bookkeeper: 0, accountant: 0, controller: 0 }
+    const ZERO_PRICING = { ...defaultProposalPricing(), rates: ZERO_RATES }
+    const NO_RATE_PROPOSAL: Proposal = {
+      ...PROPOSAL,
+      id: 'prop-drilling',
+      selections: [{ serviceId: 'payroll', payrollRun: 'biweekly' }],
+      pricingSnapshot: {
+        rates: ZERO_RATES,
+        lines: [
+          {
+            serviceId: 'payroll',
+            group: 'Payroll',
+            name: 'Payroll',
+            tier: null,
+            cadence: null,
+            amount: 0,
+            computedAmount: 0,
+            formula: 'No accountant rate set - not yet priced',
+            flag: 'no-rate',
+          },
+        ],
+        totals: { monthly: 0, annual: 0, oneTime: 0, cleanup: 0 },
+        catalogAt: '2026-10-02T12:00:00.000Z',
+      },
+    }
+
+    it('a no-rate line reads Not yet priced with its reason, and the banner links to Settings', async () => {
+      api.getProposalRequest = vi.fn(async () => NO_RATE_PROPOSAL)
+      api.fetchFirmSettings = vi.fn(async () => ({ name: 'PB&J', proposalPricing: ZERO_PRICING }))
+      renderEditor('/proposals/prop-drilling')
+      expect(await screen.findByText('No accountant rate set - not yet priced')).toBeTruthy()
+      expect(document.querySelector('.proposal-line-amount')?.textContent).toBe('Not yet priced')
+      expect(screen.queryByText('$0.00', { selector: '.proposal-line-amount' })).toBeNull()
+      const banner = screen.getByRole('alert')
+      expect(banner.textContent).toContain('Proposal rates are not set')
+      expect(within(banner).getByRole('link', { name: 'Settings > Proposal pricing' }).getAttribute('href')).toBe(
+        '/settings',
+      )
+    })
+
+    it('shows no banner when every catalog rate is set', async () => {
+      renderEditor()
+      await screen.findByText('120 transactions x 0.07 x $75/hr = $630.00')
+      expect(screen.queryByText(/Proposal rates are not set/)).toBeNull()
+    })
+
+    it('a hand-set override on a no-rate line shows as a price, not Not yet priced', async () => {
+      const overridden: Proposal = {
+        ...NO_RATE_PROPOSAL,
+        pricingSnapshot: {
+          ...NO_RATE_PROPOSAL.pricingSnapshot!,
+          lines: [{ ...NO_RATE_PROPOSAL.pricingSnapshot!.lines[0], amount: 300 }],
+        },
+      }
+      api.getProposalRequest = vi.fn(async () => overridden)
+      api.fetchFirmSettings = vi.fn(async () => ({ name: 'PB&J', proposalPricing: ZERO_PRICING }))
+      renderEditor('/proposals/prop-drilling')
+      await screen.findByText('No accountant rate set - not yet priced')
+      expect(document.querySelector('.proposal-line-amount')?.textContent).toBe('$300.00')
+    })
+
+    it('opening a draft whose snapshot rates differ from the catalog reprices it once and says so', async () => {
+      const repriced: Proposal = { ...PROPOSAL, id: 'prop-drilling' }
+      api.getProposalRequest = vi.fn(async () => NO_RATE_PROPOSAL)
+      api.repriceProposalRequest = vi.fn(async () => repriced)
+      renderEditor('/proposals/prop-drilling')
+      await waitFor(() => expect(api.repriceProposalRequest).toHaveBeenCalledWith('prop-drilling'))
+      expect(await screen.findByText('Repriced at today’s rates')).toBeTruthy()
+      expect(await screen.findByText('120 transactions x 0.07 x $75/hr = $630.00')).toBeTruthy()
+      expect(api.repriceProposalRequest).toHaveBeenCalledTimes(1)
+    })
+
+    it('the on-open notice is cleared by her next save, and not shown for an answer about another proposal', async () => {
+      const repriced: Proposal = { ...PROPOSAL, id: 'prop-drilling' }
+      api.getProposalRequest = vi.fn(async () => NO_RATE_PROPOSAL)
+      api.repriceProposalRequest = vi.fn(async () => repriced)
+      renderEditor('/proposals/prop-drilling')
+      expect(await screen.findByText('Repriced at today’s rates')).toBeTruthy()
+      fireEvent.click(await screen.findByLabelText('Reconciliations: Reconciliations'))
+      await waitFor(() => expect(api.updateProposalRequest).toHaveBeenCalled())
+      expect(screen.queryByText('Repriced at today’s rates')).toBeNull()
+    })
+
+    it('a line that is $0 without a flag also reads Not yet priced, as in the PDF and the letter', async () => {
+      const unflagged: Proposal = {
+        ...PROPOSAL,
+        pricingSnapshot: {
+          ...PROPOSAL.pricingSnapshot!,
+          lines: [{ ...PROPOSAL.pricingSnapshot!.lines[0], amount: 0, computedAmount: 0, flag: null }],
+        },
+      }
+      api.getProposalRequest = vi.fn(async () => unflagged)
+      renderEditor()
+      await screen.findByText(/120 transactions/)
+      expect(document.querySelector('.proposal-line-amount')?.textContent).toBe('Not yet priced')
+    })
+
+    it('does not reprice a draft whose snapshot already carries the catalog rates', async () => {
+      renderEditor()
+      await screen.findByText('120 transactions x 0.07 x $75/hr = $630.00')
+      expect(api.repriceProposalRequest).not.toHaveBeenCalled()
+      expect(screen.queryByText('Repriced at today’s rates')).toBeNull()
+    })
+
+    for (const status of ['sent', 'accepted', 'declined'] as const) {
+      it(`never reprices a ${status} proposal on open - it keeps its snapshot`, async () => {
+        api.getProposalRequest = vi.fn(async () => ({ ...NO_RATE_PROPOSAL, status }))
+        renderEditor('/proposals/prop-drilling')
+        await screen.findByText('No accountant rate set - not yet priced')
+        expect(api.repriceProposalRequest).not.toHaveBeenCalled()
+        expect(screen.queryByText('Repriced at today’s rates')).toBeNull()
+      })
+    }
   })
 
   it('a retired tier stays checked and disabled in the picker; picking another tier replaces it (review I2)', async () => {

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
-import { formatProposalMoney } from '../../lib/proposal-pricing.js'
-import { createProposalRequest, listProposalsRequest } from '../lib/api'
+import { defaultProposalPricing, formatProposalMoney } from '../../lib/proposal-pricing.js'
+import { ProposalRatesBanner } from '../components/proposals/RatesBanner'
+import { createProposalRequest, fetchFirmSettings, listProposalsRequest } from '../lib/api'
 import { PROPOSAL_STATUS_LABELS, proposalDate, proposalTitle } from '../lib/proposals'
-import { ApiError, type Proposal, type ProposalStatus } from '../lib/types'
+import { ApiError, type Proposal, type ProposalRates, type ProposalStatus } from '../lib/types'
 
 const STATUSES = Object.keys(PROPOSAL_STATUS_LABELS) as ProposalStatus[]
 
@@ -23,6 +24,24 @@ export function ProposalsPage() {
   const [status, setStatus] = useState<'all' | ProposalStatus>('all')
   const [query, setQuery] = useState('')
   const [creating, setCreating] = useState(false)
+  const [rates, setRates] = useState<ProposalRates | null>(null)
+
+  // The catalog's rates, only to warn when one is still $0. A failed read
+  // just means no banner - the editor shows the same warning.
+  useEffect(() => {
+    if (!ownerMode) return
+    let cancelled = false
+    void fetchFirmSettings()
+      .then((firm) => {
+        if (!cancelled) setRates((firm.proposalPricing ?? defaultProposalPricing()).rates)
+      })
+      .catch(() => {
+        if (!cancelled) setRates(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [ownerMode])
 
   useEffect(() => {
     if (!ownerMode) return
@@ -88,6 +107,8 @@ export function ProposalsPage() {
             New proposal
           </button>
         </div>
+
+        <ProposalRatesBanner rates={rates} />
 
         <div className="form-grid two-col">
           <label className="field">

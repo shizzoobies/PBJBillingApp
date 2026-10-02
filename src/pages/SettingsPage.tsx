@@ -842,9 +842,10 @@ export function ProposalPricingSection({
       <p className="muted-text" style={{ marginTop: 0 }}>
         Every proposal line is a count from their books × a factor × one of these rates × a
         multiplier. These rates are for proposals only — they are not your team’s bill rates. A
-        draft reprices at today’s rates when counts or services change; a sent proposal keeps the
-        rates it was sent with; a catalog change alone never touches a proposal — open a draft and
-        choose “Reprice at today’s catalog” to move it forward.
+        draft reprices at today’s rates when counts or services change, and also once when it is
+        opened after the rates changed; a sent proposal keeps the rates it was sent with; a catalog
+        change alone never touches a proposal — open a draft and choose “Reprice at today’s
+        catalog” to move it forward.
       </p>
       <div className="form-grid two-col">
         {PROPOSAL_ROLES.map((role) => (
@@ -857,6 +858,11 @@ export function ProposalPricingSection({
               step="0.01"
               onCommit={(value) => setRate(role, value)}
             />
+            {pricing.rates[role] > 0 ? null : (
+              <span className="form-error" role="alert">
+                Proposal rate not set — lines that use it read “Not yet priced”
+              </span>
+            )}
           </label>
         ))}
       </div>

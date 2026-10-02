@@ -28,6 +28,7 @@ import {
   changedKeys,
   proposalTitle,
   resolveProposalTab,
+  snapshotRatesDiffer,
   type ProposalPatchBuilder,
   type ProposalTab,
 } from '../lib/proposals'
@@ -212,15 +213,45 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     queueRef.current = run
   }
 
+  // Opening a DRAFT whose snapshot was priced at other rates than the
+  // catalog's today (e.g. all $0, before the rates were set) reprices it
+  // once, through the same path as "Reprice at today's catalog". Opening is
+  // her action; a sent / accepted / declined proposal keeps its snapshot, and
+  // a catalog change alone never touches one.
+  const openCheckDoneRef = useRef(false)
+  useEffect(() => {
+    if (openCheckDoneRef.current || !proposal || !pricing) return
+    openCheckDoneRef.current = true
+    if (
+      proposal.status === 'draft' &&
+      proposal.pricingSnapshot?.rates &&
+      snapshotRatesDiffer(proposal.pricingSnapshot.rates, pricing.rates)
+    ) {
+      // Deferred a tick: `enqueue` sets state, which an effect body must not do
+      // synchronously.
+      queueMicrotask(() =>
+        enqueue(async () => {
+          const repriced = await repriceProposalRequest(proposalId)
+          if (repriced.id === proposalId) setNotice('Repriced at today’s rates')
+          return repriced
+        }),
+      )
+    }
+    // Once per open: the ref above, not the dependencies, is the guard.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proposal, pricing])
+
   const save = (build: ProposalPatchBuilder) => {
     // Her own edit ends the "what the chat just changed" marking.
     setHighlight(new Set())
+    setNotice('')
     enqueue((latest) => updateProposalRequest(proposalId, build(latest)))
   }
   const reprice = () => {
     // A reprice is her own action ending the "what the chat just changed"
     // marking, same as a manual save.
     setHighlight(new Set())
+    setNotice('')
     enqueue(() => repriceProposalRequest(proposalId))
   }
 

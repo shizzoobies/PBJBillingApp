@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { formatProposalMoney } from '../../../lib/proposal-pricing.js'
 import { SavingNumberInput, SavingTextarea, SavingTextInput } from '../SectionKit'
+import { ProposalRatesBanner } from './RatesBanner'
 import {
   PROPOSAL_TOTAL_LABELS,
   pickerGroups,
@@ -37,10 +38,11 @@ const fieldClass = (base: string, changed: boolean) => (changed ? `${base} propo
 
 // A short note for each flag the calculator can put on a line (landed fix
 // pass to lib/proposal-pricing.js `priceLine` / `priceProposal`). 'retired'
-// is left out — the line's own formula already says so (review M4).
+// and 'no-rate' are left out — the line's own formula already says so (review
+// M4).
 const FLAG_NOTES: Record<string, string> = {
   'needs-count': 'needs a count',
-  'invalid-input': 'invalid input — priced at $0.00',
+  'invalid-input': 'invalid input',
   'unknown-input': 'names an input the catalog no longer has',
 }
 
@@ -126,6 +128,7 @@ export function EstimateTab({
 
   return (
     <div className="proposal-estimate">
+      <ProposalRatesBanner rates={pricing.rates} />
       <fieldset className="proposal-fieldset" disabled={locked}>
         <section className="panel">
           <h3>Prospect</h3>
@@ -233,16 +236,22 @@ export function EstimateTab({
                       (entry) => entry.serviceId === line.serviceId,
                     )
                     const retired = line.flag === 'retired'
+                    // A line at or below $0 is "Not yet priced", never $0.00 -
+                    // the same rule the PDF and the letter apply. A hand-set
+                    // override above zero is a real price and shows as one.
+                    const notYetPriced = !(line.amount > 0)
                     return (
                       <tr key={line.serviceId ?? index}>
                         <td>
                           <strong>{line.tier ? `${line.name} (${line.tier})` : line.name}</strong>
                           <div className="proposal-line-formula">{line.formula}</div>
-                          {line.flag && !retired ? (
+                          {line.flag && !retired && line.flag !== 'no-rate' ? (
                             <div className="form-error">{FLAG_NOTES[line.flag] ?? line.flag}</div>
                           ) : null}
                         </td>
-                        <td className="proposal-line-amount">{formatProposalMoney(line.amount)}</td>
+                        <td className="proposal-line-amount">
+                          {notYetPriced ? 'Not yet priced' : formatProposalMoney(line.amount)}
+                        </td>
                         <td>
                           {retired ? (
                             <button

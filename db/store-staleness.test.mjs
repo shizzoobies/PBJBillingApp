@@ -23336,9 +23336,10 @@ describe('proposal pricing in firm settings (file backend)', () => {
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
   })
 
-  it('reads the seed catalog, with zero rates, before anything is saved', async () => {
+  it('reads the seed catalog, with her confirmed rates, before anything is saved', async () => {
     const settings = await store.getFirmSettings()
-    expect(settings.proposalPricing.rates).toEqual({ bookkeeper: 0, accountant: 0, controller: 0 })
+    // A null catalog (production today) reads the seed - no data write needed.
+    expect(settings.proposalPricing.rates).toEqual({ bookkeeper: 75, accountant: 115, controller: 125 })
     expect(settings.proposalPricing.services).toHaveLength(41)
   })
 
@@ -23534,9 +23535,9 @@ describe('firm settings catalog seeding via read() and a fresh-file bulk save (f
   it('read() seeds and sanitizes the catalog on an empty file, matching Postgres', async () => {
     const data = await store.read()
     expect(data.firmSettings.proposalPricing.rates).toEqual({
-      bookkeeper: 0,
-      accountant: 0,
-      controller: 0,
+      bookkeeper: 75,
+      accountant: 115,
+      controller: 125,
     })
     expect(data.firmSettings.proposalPricing.services).toHaveLength(41)
   })
@@ -23765,6 +23766,20 @@ describe('proposals (file backend)', () => {
     const final = await store.getProposal(created.id)
     expect(final.status).toBe('accepted')
     expect(final.inputs).toEqual({ transactions: 120 })
+  })
+
+  it('an explicit reprice refuses a proposal a concurrent Send moved to sent mid-update (M2)', async () => {
+    const created = await store.createProposal({ inputs: { transactions: 120 } })
+    const firmSettings = await store.getFirmSettings()
+    const spy = vi.spyOn(store, 'getFirmSettings').mockImplementationOnce(async () => {
+      await store.setProposalStatus(created.id, 'sent')
+      return firmSettings
+    })
+    await expect(store.updateProposal(created.id, {})).rejects.toBeInstanceOf(ProposalStateError)
+    spy.mockRestore()
+    const final = await store.getProposal(created.id)
+    expect(final.status).toBe('sent')
+    expect(final.pricingSnapshot).toEqual(created.pricingSnapshot)
   })
 
   it('a stale "existing client" PATCH cannot overwrite a client link a concurrent Accept just made mid-update (N2, final fix wave round 2)', async () => {
@@ -24002,6 +24017,11 @@ function fakeProposalPostgres(
       // between the initial read and this write to simulate a concurrent
       // link landing in between; a mismatch answers zero rows, same as real
       // Postgres would.
+      // The explicit reprice's draft predicate: a row that is no longer a
+      // draft matches nothing, as in real Postgres.
+      if (/^update proposals[\s\S]*and status = 'draft'/i.test(trimmed) && row && row.status !== 'draft') {
+        return { rows: [], rowCount: 0 }
+      }
       const casMatch = trimmed.match(/^update proposals[\s\S]*client_id is not distinct from \$(\d+)/i)
       if (casMatch && row) {
         const prevParam = params?.[Number(casMatch[1]) - 1] ?? null
@@ -24196,6 +24216,28 @@ describe('proposals (postgres branch)', () => {
     const fake = fakeProposalPostgres(proposalRow())
     await postgresStore(fake).updateProposal('prop-1', {})
     expect(fake.matching(/^update proposals/i)[0].text).toMatch(/status not in \('accepted', 'declined'\)/)
+  })
+
+  it('the explicit reprice (empty patch) carries a draft predicate in the WHERE; an ordinary patch does not (M2)', async () => {
+    const reprice = fakeProposalPostgres(proposalRow())
+    await postgresStore(reprice).updateProposal('prop-1', {})
+    expect(reprice.matching(/^update proposals/i)[0].text).toMatch(/and status = 'draft'/)
+    const ordinary = fakeProposalPostgres(proposalRow())
+    await postgresStore(ordinary).updateProposal('prop-1', { prospect: { company: 'Acme' } })
+    expect(ordinary.matching(/^update proposals/i)[0].text).not.toMatch(/status = 'draft'/)
+  })
+
+  it('a reprice that lost a race to Send (draft -> sent mid-update) writes nothing and is refused (M2)', async () => {
+    const row = proposalRow()
+    const fake = fakeProposalPostgres(row)
+    const pgStore = postgresStore(fake)
+    const firmSettings = await pgStore.getFirmSettings()
+    const spy = vi.spyOn(pgStore, 'getFirmSettings').mockImplementationOnce(async () => {
+      row.status = 'sent'
+      return firmSettings
+    })
+    await expect(pgStore.updateProposal('prop-1', {})).rejects.toBeInstanceOf(ProposalStateError)
+    spy.mockRestore()
   })
 
   it('an empty patch on a sent proposal is refused before any update runs (I1)', async () => {

@@ -1,5 +1,5 @@
 import { dollarFiguresInCents } from '../../lib/money-figures.js'
-import { proposalSelectionDefaults, roundCents } from '../../lib/proposal-pricing.js'
+import { PROPOSAL_ROLES, proposalSelectionDefaults, roundCents } from '../../lib/proposal-pricing.js'
 import type {
   Proposal,
   ProposalChatPatch,
@@ -317,4 +317,19 @@ export function staleLetterFigureCount(
     dollarFiguresInCents(text).filter((cents) => cents > 0 && !allowed.has(cents)),
   )
   return foreign.size
+}
+
+/** The roles whose proposal rate is not above $0 — a line that uses one is "Not yet priced". */
+export function unsetRateRoles(rates: Partial<Record<ProposalRole, number>> | null | undefined): ProposalRole[] {
+  return PROPOSAL_ROLES.filter((role) => !(Number(rates?.[role]) > 0))
+}
+
+/** True when a snapshot's role rates are not the catalog's current ones. */
+export function snapshotRatesDiffer(
+  snapshotRates: Partial<Record<ProposalRole, number>> | null | undefined,
+  catalogRates: Partial<Record<ProposalRole, number>> | null | undefined,
+): boolean {
+  return PROPOSAL_ROLES.some(
+    (role) => (Number(snapshotRates?.[role]) || 0) !== (Number(catalogRates?.[role]) || 0),
+  )
 }
