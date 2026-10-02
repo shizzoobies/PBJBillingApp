@@ -25,7 +25,28 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-01, evening - the New-queue run):** `main` = the same-instant
+**State right now (2026-10-01, about 11:30 pm Eastern - end of the night run):** `main` =
+`90b9063` (+ this handoff), deployed, `/health` 200 with that commit, voice agent re-provisioned.
+Suite **6102 tests / 287 files**, green; manifest 198,614 bytes (tripwire 205,000). THE
+PLANNED QUEUE IS EMPTY: everything Alex put in Planned on 10-01 is Shipped. About thirty-five
+single-item deploys across the day, each reviewed, verified and health-checked on its own (Alex's
+rule: a couple at a time, deploy each as it finishes, never a batch). READ THE "2026-10-01 (late
+night)" ENTRY AT THE TOP OF SECTION 5 FIRST. **Three things to do first thing:** (1) after
+Brittany's first save of the day, read the Railway log for `[bulk-save] write committed in <N>ms
+after <K> lock attempt(s)` - the whole-workspace save now takes its 14 tables EXCLUSIVE before it
+runs (`featreq-6a5c6162`), and no real save had run when this was written; anything over about 8
+seconds, or repeated `workspace_busy`, is the signal to batch the inserts (follow-up B2). (2) Ask
+Alex for his seven open decisions (list at the end of that entry) - nothing else is buildable
+without him. (3) Tell Brittany to refresh her tab once. NOTHING IS HELD except
+`feat/invoice-role-lines` @ `0b12038` (generated hours lines labeled by role title instead of the
+person; reviewed safe; waits on Alex's OK on the client-facing wording; rebase first). The
+send-route bundle that the paragraph below calls HELD shipped in full that evening - ignore its
+hashes. Worktrees: `D:\PBJ Accounting Work\AP-laneB` and `D:\PBJ Accounting Work\AP-laneC` each
+have a `node_modules` JUNCTION to the primary tree - remove the LINK (never its target), then
+`git worktree remove`. Railway CLI commands only work from the primary folder. The run's ledger is
+`.superpowers/sdd/new-queue-2026-10-01.md` (git-ignored, this machine).
+
+**Earlier that evening (the New-queue run, to `22f4b6e` - superseded by the paragraph above):** `main` = the same-instant
 checklist ship (`8c211c0` + this handoff), deployed, `/health` 200. Alex's instruction for the
 run: WORK THE NEW TICKETS A COUPLE AT A TIME, IN THE ORDER YOU JUDGE BEST, AND DEPLOY EACH AS
 IT FINISHES - never a batch deploy. Twelve more ships since the paragraph below (list and
@@ -493,6 +514,119 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-01 (late night) - the rest of the run: Brittany's answers, her "Invoice" item, and the four Planned tickets.**
+
+This continues the entry below (which stops at `22f4b6e`). Same method: brief -> builder ->
+independent reviewer -> fix round -> re-review -> my own `npm run verify` at that commit ->
+read-only check that no invoice was touched in the last five minutes -> push -> `/health` shows
+the commit -> voice re-provision when the manifest changed -> tracker note in Brittany's words.
+
+- **The send-route bundle is no longer held.** It shipped that evening, one commit at a time:
+  `c0cb408` the email, the PDF and a reprint carry the same sent time (`featreq-29c6dac1`);
+  `0034b73` a void that lands before the email leaves stops the send (`featreq-051122e4`);
+  `757340d` the lower Email button never picks a retainer invoice (`featreq-beec1ccc`);
+  `0e5edd1` the client's footer note is in the invoice email (item 8 of `featreq-459bdfc2`).
+- **Brittany's answers on `featreq-21d0bba8` (invoices), built:** `d7c5589` Payment link works
+  only on a sent invoice (answer 1); `6030ca2` the mailing address is on the emailed PDF and one
+  address rule (`lib/mailing-address.js`, "City, ST 12345") is used everywhere (answer 2);
+  `8e60b97` an invoice changed after it was sent says "Changed since sent", offers Send again,
+  and closes the old payment page when the total changed (answer 6; the mark is derived on the
+  way out by `withChangedSinceSent`, never stored); `0c26a5b` "Send to other addresses..." adds
+  one-time extra recipients to a send (answer 3). Answers 5 and 7 need nothing. STILL OPEN from
+  that ticket, both waiting on Alex: answer 4 (a note kept for future invoices - needs a
+  `clients.invoice_note` column) and answer 8 (a client whose invoice generates but is never
+  emailed - Rivercity is the only client with the existing platform-invoicing opt-out; either
+  change what that switch does or add a second one).
+- **Her answers on `featreq-1f352c4f` (checklists), built:** `a22b28f` a sub-step with an open
+  wait cannot be deleted; `a6c41a0` a client note can repeat on every month's checklist until it
+  is stopped (four nullable columns on `client_pending_notes`, added at start-up by a look-first
+  block; a copy is an ordinary attached row with `repeat_of`; "never twice" is decided by the copy
+  rows). Then the leftovers (`featreq-e8aa2abe`): `448a6d5` a TOP-LEVEL step with an open wait
+  cannot be deleted either - `deleteChecklistItem` now decides on the row locked `for update`;
+  the series delete refuses when the CLICKED step has an open wait and otherwise keeps (and
+  reports) any later copy that carries a wait, so a wait is never deleted with a step; `d8b5bc1`
+  one month's copy of a repeating NOTE can be dismissed from its checklist (`dismissed_at`, one
+  more nullable column, same look-first block; readers that SHOW notes hide a dismissed row,
+  readers that GUARD "this checklist already holds a copy" still see it). Review minors are
+  ticket `featreq-6b38110c`.
+- **Her new "Invoice" item (`featreq-ee6ffbf1`):** `0a89927` the hourly section offers three
+  role rows she can fill in, the rate on an hours line can be changed (`rateManual`), and an
+  empty row stays off the client's copy; `62759c1` the hours box refuses an impossible number.
+- **The four Planned tickets Alex asked for that night:**
+  - `featreq-8c535f42` server clock: `c3de100`, `lib/firm-time.js` `firmToday()` (US Eastern;
+    `FIRM_TIME_ZONE` is server-only). Recurring checklists spawn on the firm's day. The places
+    that still use the UTC day (weekly time gate, past-due, issue dates, month lock, the
+    assistant's "today") are listed on `featreq-52362eac` and need Alex's decision per group.
+  - `featreq-e8aa2abe` checklists: above.
+  - `featreq-6a5c6162` the whole-workspace save race - SIX deploys, in this order:
+    `8a0adc8` `applyInvoicePayment` and `markInvoicePaidManually` (Postgres) decide on the row
+    read `for update` inside a short transaction, and `recordInvoiceSent` cannot revive a void;
+    `0cc2afb` `write()` runs `set local lock_timeout` then `lock table <14 tables> in exclusive
+    mode` (`BULK_SAVE_LOCK_SQL`) as its first statements, retries up to three times on 55P03 /
+    40P01 (tiers 1500 / 1500 / 3000 ms - an autovacuum in the way is only cancelled after
+    `deadlock_timeout`, 1 s) and then throws `WorkspaceBusyError` -> 503 `workspace_busy`; the
+    owner's tab keeps its edits and retries every 4 s; the materializer write-back swallows it;
+    `e04850c` the version a tab gets back is computed inside the save's transaction
+    (`write(data, { expectedVersion, returnVersion })`); `ba25af2` file backend only: a bulk save
+    takes invoices and the Stripe ledger from the stored file, and the money writers are
+    one-slot read-modify-write; `3d3ad05` the webhook: when an apply throws it calls
+    `forgetStripeEvent(event.id)` and answers 500 so Stripe redelivers (ledger-first is kept),
+    and a stale redelivered `payment_failed` is skipped; `600e582` `startOnboarding` and the
+    template writers read with a version and redo their work on `StaleWorkspaceError`
+    (`_retryOnStaleWorkspace`; a third stale answer is 503 `workspace_changed`). Plus
+    `90b9063`: a locked read that finds no row while the invoice still exists throws instead of dropping the payment, a failed rollback destroys its connection, and a stale `payment_failed` is skipped ONLY while the invoice is `processing` on a newer intent (a second decline on a `sent` invoice is logged and announced). NO schema change. Why a table lock and not row locks: a single-row writer
+    that arrives during the save waits at the TABLE lock, before its statement takes its
+    snapshot, so it then sees the rows the save re-inserted; proven on production with
+    rolled-back trials (`prod-bulk-save-lock-trial.mjs`: pg_locks shows the waiter on the
+    relation lock, and a transaction id burned while it waited is already finished in its
+    snapshot). COST: for the few seconds a save runs (about 8,400 row inserts), every write to
+    those 14 tables waits; plain reads do not. DO NOT revert `0cc2afb` by itself.
+  - `featreq-9cc3c370` payment amount mismatch: `0554434`. After a successful apply the
+    webhook compares what Stripe collected (`amount_total` / `amount_received`, usd only) with
+    `Math.round(invoice.total * 100)`; on a difference the payment is still recorded and an
+    append-only `email_log` entry `{ kind: 'payment', event: 'amount-mismatch', ... }` is written
+    by a guarded SQL append (one marker per payment intent). The flag is DERIVED from the log
+    (`lib/payment-amount-mismatch.js` `unhandledAmountMismatch`): counted in Need a look, shown on
+    the row and in the editor with both amounts and "Mark as handled"
+    (`POST /api/invoices/:id/amount-mismatch/handled`); owners are notified once
+    (`invoice_amount_mismatch`, under the Invoice alerts email toggle). A later `failed` entry
+    for the same intent resolves it. Checked on production before deploy: all 40 live invoices
+    compare EQUAL for a normal bank and card payment. NOT covered: money arriving for a VOID
+    invoice (still only a log line) and a duplicate payment.
+- **Rules that bind, learned that night:**
+  - NEVER read `invoices.updated_at` as the time something happened: the bulk save re-stamps it
+    on every invoice it restores. I told Alex that Brittany voided Rivercity's September invoice
+    "at 6:32 PM today"; she voided it on 2026-09-16. Use the review events and `email_log`.
+  - A rolled-back trial that calls the real `write()` (or a `read()` that can run the materializer
+    write-back) now takes EXCLUSIVE locks on 14 tables until the outer rollback. Stub `read()`
+    and `write()` in trials; never replay the full `write()` over the public proxy (section 4).
+  - A step with an open wait can still disappear two ways, both unchanged: the owner's
+    whole-workspace save when her tab's copy omits the step (only the stale-tab check protects
+    it), and emptying the recycle bin / deleting a client.
+  - `applyInvoicePayment` returning null means "gone or void"; with the follow-up commit a
+    locked read that finds nothing while the row exists throws `InvoicePaymentNotAppliedError`
+    instead, so the webhook asks Stripe again.
+  - The pg pool is the default (max 10, no `connectionTimeoutMillis`). Writers queued behind a
+    save each hold a connection. Look at it before the load-balancer work (Tier 2).
+- **Tickets filed that night:** `featreq-52362eac` (remaining UTC-today sites), `featreq-6b38110c`
+  (checklist rough edges), `featreq-c8e5f169` (payments and saving leftovers - READ ITS DEV NOTES), `featreq-d84ddb16` (Railway `railway.json` is deprecated; works until
+  2026-12-01), plus the ones in the entry below.
+- **Alex's open decisions (asked in chat, not answered when he signed off):** (1) Rivercity /
+  answer 8: change the existing opt-out switch to "generate, never email, mark sent on review"
+  (my recommendation) or add a second switch; rebuild its September invoice? (2) the kept invoice
+  note needs `clients.invoice_note` (server-preserved in `write()`, fingerprint-ignored) - OK?
+  (3) ship `0b12038` (hours lines labeled by role)? (4) ask Brittany through the tracker whether
+  a client's own hourly rate should replace staff rates (Flourish 90 vs staff 125)? (5) the
+  UTC-day sites on `featreq-52362eac`; (6) off-site backups `featreq-4caec5d3` - he said the week
+  of 10-05, token by `setx` in his own terminal, never in chat; (7) `featreq-d84ddb16`.
+- **Not built, from the reviews (small, each on its ticket or here):** covered-dates events in
+  the AI corrections feed; the stale-tab mark after a send; the unnamed-master sentence on the
+  lower Email button; `updateInvoice` takes its lines from a pre-read and guards only on status
+  (a covered-dates confirm landing between its read and write could be overwritten); the other
+  single-row `update` statements on the 14 locked tables were not scanned for the same
+  read-then-write shape; batching the save's inserts (B2); restamping period labels inside the
+  save's transaction (B0); item 3 of `featreq-459bdfc2` (a preview of what the client receives).
 
 **2026-10-01 (evening and night) - the New-queue run: twelve ships, one at a time.**
 
