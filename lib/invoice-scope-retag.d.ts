@@ -29,6 +29,9 @@ export type ScopeTag = 'in-scope' | 'out-of-scope' | 'adhoc'
 
 export const SCOPE_TAGS: readonly ScopeTag[]
 
+/** Where a new hours line goes in a line list: with the other hours lines. */
+export function hourlyInsertIndex(lines: ReadonlyArray<{ kind?: string } | null | undefined>): number
+
 /** What one entry is tagged as right now, read off its own two booleans. */
 export function scopeTagOfEntry(entry: {
   billable?: boolean

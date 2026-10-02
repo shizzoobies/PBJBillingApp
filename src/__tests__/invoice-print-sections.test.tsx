@@ -637,3 +637,55 @@ describe('InvoicesPage — a $0 monthly service line is left off the sheet', () 
     expect(text).toContain('$10.00')
   })
 })
+
+/**
+ * An hours row with no hours is on the draft (she fills it later) and off the
+ * client's copy. The sheet reaches `clientFacingInvoiceLines` through the page's
+ * display mapping, which used to drop `hours` — so the same rule that hides the
+ * row from the PDF could not see it here. This pins that the sheet hides the row
+ * the PDF hides, and the role heading with it.
+ */
+describe('InvoicesPage — an hours row with no hours is left off the sheet', () => {
+  const emptyRowsInvoice: PersistedInvoice = {
+    ...fullInvoice,
+    id: 'inv-empty-rows',
+    number: 'INV-2026-09-051',
+    period: '2026-09',
+    lineItems: lines([
+      {
+        kind: 'hourly',
+        label: 'Bookkeeping Services',
+        detail: '2.00h at $75.00/hr',
+        hours: 2,
+        rate: 75,
+        amount: 150,
+        roleTier: 'Bookkeeper',
+        // Stamped by Generate; bookkeeping only, never on the sheet.
+        employeeId: 'emp-stamp-4d2f',
+      },
+      {
+        kind: 'hourly',
+        label: 'Zebra Advisory Row',
+        detail: '0.00h at $150.00/hr',
+        hours: 0,
+        rate: 150,
+        amount: 0,
+        roleTier: 'CFO',
+      },
+    ]),
+    subtotal: 150,
+    total: 150,
+  }
+
+  it('prints the row with hours, and neither the empty row nor its role heading', async () => {
+    await printStored(emptyRowsInvoice)
+
+    const text = printed()
+    expect(text).toContain('Bookkeeping Services')
+    expect(text).toContain('Total Ad-Hoc/Billable Hours')
+    expect(text).toContain('$150.00')
+    expect(text).not.toContain('Zebra Advisory Row')
+    expect(text).not.toContain('CFO / Advisory Services')
+    expect(text).not.toContain('emp-stamp-4d2f')
+  })
+})

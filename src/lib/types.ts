@@ -535,6 +535,20 @@ export type PersistedInvoiceLine = {
    */
   roleTier?: 'CFO' | 'Accountant' | 'Bookkeeper' | 'Other'
   rate?: number
+  /**
+   * `hourly` lines only: true when she typed the rate herself in the month run.
+   * A re-tag keeps such a line (and its rate) even when it drains to zero hours,
+   * so hours that come back bill at her rate. Absent everywhere else.
+   */
+  rateManual?: boolean
+  /**
+   * `hourly` lines only: whose hours the line holds. Generate stamps it on each
+   * per-person line, and a re-tag stamps the lines it creates. It lets the hours
+   * panel find the line by person after she retypes the label; a line without
+   * one (a draft stored before the stamp, or a row she typed by hand) is matched
+   * by a label that carries the person's name, as before.
+   */
+  employeeId?: string
   /** `adhoc` lines only. Absent is read as 'billed'. */
   adhocMode?: AdhocMode
   /**
@@ -1899,6 +1913,9 @@ export type InvoiceLine = {
   label: string
   detail: string
   amount: number
+  /** An `hourly` line's billed hours. Carried so the print sheet can leave a
+   *  zero-hours row off exactly as the PDF does (`isEmptyHoursLine`). */
+  hours?: number
   /** See {@link PersistedInvoiceLine.sourceClientId}. Absent = the invoice's
    *  own client, which is every line the live per-client calculation builds. */
   sourceClientId?: string | null

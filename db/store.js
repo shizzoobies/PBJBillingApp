@@ -76,6 +76,7 @@ import {
   sanitizePeriodLabel,
 } from '../lib/checklist-period-label.js'
 import {
+  MAX_HOURLY_RATE,
   RETAINER_LABEL,
   invoiceLockMessage,
   invoiceLockRefusal,
@@ -1273,12 +1274,25 @@ function classifyInvoiceReviewEvent(current, next) {
  * correction would crowd out the draft being rated. Lines are matched by label,
  * which is how a person reads an invoice — a re-priced line is a change, not a
  * delete plus an add.
+ *
+ * A label is not unique on an invoice (two hours rows under one heading can
+ * share a title), and a map keyed by label alone would let the second silently
+ * overwrite the first. So a line is keyed by its label AND which time that label
+ * has appeared so far: the first "X", the second "X", and so on. The first one
+ * reads exactly as it always did; a later one reads "X (#2)".
  */
 function summarizeLineItemChange(before, after) {
   const byLabel = (lines) => {
     const map = new Map()
+    const seen = new Map()
     for (const line of Array.isArray(lines) ? lines : []) {
-      map.set(String(line?.label ?? ''), Number(line?.amount) || 0)
+      const label = String(line?.label ?? '')
+      const nth = (seen.get(label) ?? 0) + 1
+      seen.set(label, nth)
+      map.set(`${label}\u0000${nth}`, {
+        name: nth === 1 ? label : `${label} (#${nth})`,
+        amount: Number(line?.amount) || 0,
+      })
     }
     return map
   }
@@ -1287,12 +1301,13 @@ function summarizeLineItemChange(before, after) {
   const removed = []
   const added = []
   const changed = []
-  for (const [label, amount] of from) {
-    if (!to.has(label)) removed.push(`${label} ($${amount})`)
-    else if (to.get(label) !== amount) changed.push(`${label}: $${amount} → $${to.get(label)}`)
+  for (const [key, { name, amount }] of from) {
+    const now = to.get(key)
+    if (!now) removed.push(`${name} ($${amount})`)
+    else if (now.amount !== amount) changed.push(`${name}: $${amount} → $${now.amount}`)
   }
-  for (const [label] of to) {
-    if (!from.has(label)) added.push(`${label} ($${to.get(label)})`)
+  for (const [key, { name, amount }] of to) {
+    if (!from.has(key)) added.push(`${name} ($${amount})`)
   }
   const cap = (list) => list.slice(0, 4)
   return { removed: cap(removed), added: cap(added), changed: cap(changed) }
@@ -1414,6 +1429,17 @@ function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly' } = {}) {
        * an old invoice edited today is not silently repriced.
        */
       if (kind === 'hourly') {
+        // Two optional marks the hours editor and the hours panel hang on an
+        // hours line, kept ONLY when well-formed and ONLY here (any other kind
+        // that sends them loses them, like every other unnamed prop):
+        //   - `rateManual`: she typed the rate. A re-tag then keeps the line, and
+        //     its rate, even when it drains to zero hours.
+        //   - `employeeId`: whose hours the line holds, so a re-tag still finds
+        //     the line after she retypes its label.
+        if (line?.rateManual === true) base.rateManual = true
+        if (typeof line?.employeeId === 'string' && line.employeeId && line.employeeId.length <= 200) {
+          base.employeeId = line.employeeId
+        }
         const hours = Number(line?.hours)
         const rate = Number(line?.rate)
         if (
@@ -1421,7 +1447,11 @@ function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly' } = {}) {
           hours >= 0 &&
           hours <= 100000 &&
           Number.isFinite(rate) &&
-          rate >= 0
+          rate >= 0 &&
+          // A rate over the cap is refused the way an over-cap hours value is
+          // (falls through to the legacy path below: amount as sent, no hours or
+          // rate stored). It is a typo like an extra zero, not a real rate.
+          rate <= MAX_HOURLY_RATE
         ) {
           const cleanHours = Math.round(hours * 100) / 100
           const cleanRate = Math.round(rate * 100) / 100

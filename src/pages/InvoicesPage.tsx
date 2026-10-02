@@ -199,6 +199,7 @@ function seedDraft(display: DisplayInvoice, client: Client, hasFirmLogo: boolean
       id: makeLineId(),
       kind: line.kind,
       roleTier: line.roleTier,
+      hours: line.hours,
       label: line.label,
       detail: line.detail,
       amount: line.amount,
@@ -212,6 +213,7 @@ function draftToDisplay(draft: InvoiceDraft, baseInvoice: Invoice): DisplayInvoi
   const lines: DisplayLine[] = draft.lines.map((line) => ({
     kind: line.kind,
     roleTier: line.roleTier,
+    hours: line.hours,
     label: line.label,
     detail: line.detail,
     amount: line.amount,
@@ -456,6 +458,9 @@ function persistedToDisplay(
   >(stored.lineItems).map((line) => ({
     kind: line.kind,
     roleTier: line.roleTier,
+    // `hours` too: the sheet leaves an hours row with no hours off, as the PDF
+    // does, and `isEmptyHoursLine` can only recognize one that still has it.
+    hours: line.hours,
     label: line.label,
     detail: line.detail,
     amount: line.amount,

@@ -21,6 +21,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactElement,
   type Ref,
 } from 'react'
 import { flushSync } from 'react-dom'
@@ -44,11 +45,15 @@ import {
 import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
 import { ListSearch } from './ListSearch'
 import {
+  INVOICE_HOURS_ROLE_ROWS,
+  MAX_HOURLY_RATE,
   adhocLineForMode,
+  defaultHoursRowRate,
+  hourlyLineDetail,
   invoiceLockMessage,
   normalizeAdhocMode,
   renderedInvoiceLines,
-  withoutEmptyPlanLines,
+  withoutEmptyLines,
   retainerCreditLine,
 } from '../../lib/invoice-lines.js'
 import {
@@ -57,6 +62,7 @@ import {
 } from '../../lib/expense-coverage.js'
 import {
   applyScopeRetag,
+  hourlyInsertIndex,
   savedAdhocModesForEntries,
   scopeTagOfEntry,
   unaccountedScopeEntries,
@@ -1638,11 +1644,11 @@ function InvoiceRow({
           </span>
           <span className="invoice-run-meta">
             {/* What the client will SEE — an ad hoc line she left off, or a $0
-                monthly service line, is on the draft but not on their invoice,
-                and counting it here would make the row promise a line that never
-                prints. */}
-            {withoutEmptyPlanLines(renderedInvoiceLines(invoice.lineItems)).length} line
-            {withoutEmptyPlanLines(renderedInvoiceLines(invoice.lineItems)).length === 1
+                monthly service line or an hours row with no hours, is on the
+                draft but not on their invoice, and counting it here would make
+                the row promise a line that never prints. */}
+            {withoutEmptyLines(renderedInvoiceLines(invoice.lineItems)).length} line
+            {withoutEmptyLines(renderedInvoiceLines(invoice.lineItems)).length === 1
               ? ''
               : 's'}{' '}
             ·{' '}
@@ -1795,10 +1801,19 @@ function InvoiceLineRow({
   coverage,
   locked = false,
   busy = false,
+  blank,
 }: {
   line: PersistedInvoiceLine
   /** Position in the SAVED array — every edit addresses a line by this. */
   index: number
+  /**
+   * Set for a role row that is NOT in `lines` yet — the empty row each role
+   * heading offers. `line` is then a stand-in, `onChange` turns it into a real
+   * line on the first keystroke, and it has no Remove button (there is nothing
+   * to remove). The row's own aria-labels name the role, so they never answer
+   * to the labels a stored line's inputs carry.
+   */
+  blank?: { title: string }
   onChange: (index: number, patch: Partial<PersistedInvoiceLine>) => void
   onRemove: (index: number) => void
   /** Passed for ad hoc lines only; its absence is what makes a row scoped. */
@@ -1849,6 +1864,11 @@ function InvoiceLineRow({
   busy?: boolean
 }) {
   const mode = normalizeAdhocMode(line.adhocMode)
+  // What the hours and rate boxes SHOW while she types (null: show the line's own
+  // value). Kept apart from the line so a cleared box can read empty without the
+  // line taking a value for it.
+  const [hoursDraft, setHoursDraft] = useState<string | null>(null)
+  const [rateDraft, setRateDraft] = useState<string | null>(null)
   // The same two boxes for the question she must answer and the change she may
   // make, so the two cannot drift apart.
   const coverageBoxes = coverage ? (
@@ -1886,14 +1906,14 @@ function InvoiceLineRow({
         <input
           className="input"
           value={line.label}
-          aria-label="Line description"
+          aria-label={blank ? `Description of new ${blank.title} row` : 'Line description'}
           readOnly={locked || busy}
           onChange={(event) => onChange(index, { label: event.target.value })}
         />
         <input
           className="input invoice-run-detail"
           value={line.detail}
-          aria-label="Line detail"
+          aria-label={blank ? `Detail of new ${blank.title} row` : 'Line detail'}
           placeholder="Detail (optional)"
           readOnly={locked || busy}
           onChange={(event) => onChange(index, { detail: event.target.value })}
@@ -2007,7 +2027,14 @@ function InvoiceLineRow({
             document says the same hours she typed, and the server re-derives
             the amount from these fields again on save. Only lines the
             generator stamped with hours+rate get this; legacy lines keep
-            their editable amount. */}
+            their editable amount.
+
+            THE RATE IS HERS TOO (the owner's ask: a client whose rate is $90 an
+            hour came over at $125 and the line had to be deleted and re-added).
+            Typing one sets `rateManual`, which is what makes it stick: a re-tag
+            keeps a line she priced by hand rather than re-pricing it, and the AI
+            check reads it as a decision rather than an arithmetic slip. The
+            amount and the detail follow, the same way they follow the hours. */}
         {line.kind === 'hourly' &&
         typeof line.hours === 'number' &&
         typeof line.rate === 'number' ? (
@@ -2019,22 +2046,72 @@ function InvoiceLineRow({
                 type="number"
                 step="0.01"
                 min="0"
-                value={line.hours}
-                aria-label="Billed hours"
+                value={hoursDraft ?? (blank ? '' : line.hours)}
+                aria-label={blank ? `Hours for ${blank.title}` : 'Billed hours'}
                 readOnly={locked || busy}
+                onBlur={() => setHoursDraft(null)}
                 onChange={(event) => {
-                  const typed = Number(event.target.value)
-                  const hours = Number.isFinite(typed) && typed >= 0 ? typed : 0
+                  const raw = event.target.value
+                  const typed = Number(raw)
+                  const valid = raw !== '' && Number.isFinite(typed) && typed >= 0
+                  // What is on screen while she types is what she typed: a box
+                  // forced back to "0" the moment it is cleared turned the next
+                  // digit into "05". A value it cannot take snaps back.
+                  setHoursDraft(raw === '' || valid ? raw : null)
+                  const hours = valid ? typed : 0
                   const rate = line.rate as number
                   onChange(index, {
                     hours,
                     amount: Math.round(hours * rate * 100) / 100,
-                    detail: `${hours.toFixed(2)}h at ${currency.format(rate)}/hr`,
+                    detail: hourlyLineDetail(hours, rate),
                   })
                 }}
               />
             </label>
-            <span className="invoice-run-hours-rate">× {currency.format(line.rate)}/hr</span>
+            <label>
+              <span>Rate</span>
+              <input
+                className="compact-input"
+                type="number"
+                step="0.01"
+                min="0"
+                max={MAX_HOURLY_RATE}
+                value={rateDraft ?? line.rate}
+                aria-label={blank ? `Rate for ${blank.title}` : 'Hourly rate'}
+                readOnly={locked || busy}
+                onBlur={() => setRateDraft(null)}
+                onChange={(event) => {
+                  const raw = event.target.value
+                  // An EMPTY box is not a rate: while she clears it to retype, the
+                  // line keeps its last rate and amount, and it is not marked hers.
+                  // (Some browsers also report "" for a half-typed "90.".)
+                  if (raw === '') {
+                    setRateDraft('')
+                    return
+                  }
+                  const typed = Number(raw)
+                  // Negative, not a number, or over the cap (a typo like an extra
+                  // zero; the server refuses it the way it refuses over-cap
+                  // hours): nothing changes and the box snaps back.
+                  if (!Number.isFinite(typed) || typed < 0 || typed > MAX_HOURLY_RATE) {
+                    setRateDraft(null)
+                    return
+                  }
+                  setRateDraft(raw)
+                  // Whole cents, the way the server stores it, so the detail the
+                  // client reads and the rate that is saved are the same number.
+                  const rate = Math.round(typed * 100) / 100
+                  const hours = line.hours as number
+                  onChange(index, {
+                    rate,
+                    rateManual: true,
+                    amount: Math.round(hours * rate * 100) / 100,
+                    detail: hourlyLineDetail(hours, rate),
+                  })
+                }}
+              />
+              <span>/hr</span>
+            </label>
           </div>
         ) : null}
         {onModeChange ? (
@@ -2080,7 +2157,7 @@ function InvoiceLineRow({
           type="number"
           step="0.01"
           value={line.amount}
-          aria-label="Amount"
+          aria-label={blank ? `Amount for new ${blank.title} row` : 'Amount'}
           readOnly={
             locked ||
             busy ||
@@ -2100,7 +2177,7 @@ function InvoiceLineRow({
         {/* Not merely disabled: there is no version of this invoice in which a
             line comes off, so a greyed-out control would be a door that never
             unlocks. */}
-        {locked ? null : (
+        {locked || blank ? null : (
           <button
             type="button"
             className="icon-button"
@@ -2868,6 +2945,203 @@ function InvoiceEditor({
         })
       : null
 
+  /**
+   * THE HOURS BLOCK: the invoice's hourly lines under the three role headings
+   * the client's copy prints them under, with a row she can fill under each.
+   *
+   * She asked for CFO / Advisory, Accounting and Bookkeeping rows "in case I
+   * need to add hours" — and an added line used to land under Reimbursed
+   * Expenses, because Add a line makes a `custom` one. Rows here are `hourly`
+   * lines of that role, so they print where hours print.
+   *
+   * THE EMPTY ROW IS NOT IN `lines`. A heading with no stored line shows one
+   * stand-in row; it is not sent on Save, does not make the editor dirty and never
+   * reaches `originalLineItems`. The first thing she types into it turns it into
+   * a real line (`startHoursLine`). Its React key is `hours-<tier>-<ordinal>`, the
+   * same key that line's row carries once it is stored, so it is the SAME mounted
+   * row before and after and the input she is typing in keeps focus.
+   *
+   * Lines with no tier (or `Other`) lead as an untitled group, which is where
+   * `roleGroups` puts a row it cannot place, and keeps old invoices in the order
+   * they always had. Stored lines are shown whatever the invoice's state; only
+   * the EMPTY rows and the Add links are withheld where adding would be wrong — a
+   * billing master (grouped by company instead), a retainer, a locked or void
+   * invoice, and preview-as.
+   */
+  const hoursRowsOffered =
+    !isBillingMaster &&
+    invoice.kind !== 'retainer' &&
+    !lockMessage &&
+    invoice.status !== 'void' &&
+    !scope.previewMode
+  const hourlyRows = scopedRows.filter((row) => row.line.kind === 'hourly')
+  const otherScopedRows = scopedRows.filter((row) => row.line.kind !== 'hourly')
+  const roleOf = (row: { line: PersistedInvoiceLine }) =>
+    INVOICE_HOURS_ROLE_ROWS.find((role) => role.tier === row.line.roleTier)
+  const untitledHourlyRows = hourlyRows.filter((row) => !roleOf(row))
+  const hasHoursBlock = !isBillingMaster && (hoursRowsOffered || hourlyRows.length > 0)
+  // Where the block sits among the other scoped rows: where the first hourly
+  // line was, else ahead of the reimbursements the invoice ends with (a
+  // subscription invoice has none of its own), else last. An hours line she ADDS
+  // is appended to the end of the saved array, past the reimbursements, so only
+  // an hourly line that sits ahead of them can place the block — otherwise the
+  // first line she added would carry the whole block down under the expenses.
+  const firstTrailingIndex =
+    otherScopedRows.find((row) => row.line.kind === 'reimbursement' || row.line.kind === 'recurring')
+      ?.index ?? Infinity
+  const hoursAnchor = !hasHoursBlock
+    ? Infinity
+    : (hourlyRows.find((row) => row.index < firstTrailingIndex)?.index ?? firstTrailingIndex)
+  const rowsBeforeHours = otherScopedRows.filter((row) => row.index < hoursAnchor)
+  const rowsAfterHours = otherScopedRows.filter((row) => row.index >= hoursAnchor)
+
+  const defaultRateFor = (tier: string) =>
+    defaultHoursRowRate({
+      tier,
+      lines,
+      employees: scope.employees,
+      billRateVersions: scope.billRateVersions,
+      client: scope.client,
+      period: invoice.period,
+    })
+  /**
+   * What a row she adds under a heading is called. The role's title, unless a
+   * line under that heading already carries it (a generated line is titled by
+   * role, and two rows with one label cannot be told apart on the invoice or in
+   * the corrections record): then "<Title> — additional hours", and if that is
+   * taken too, "<Title> — additional hours 2", 3, and so on. She can retype it.
+   */
+  const newHoursLabel = (role: { tier: string; title: string }) => {
+    const taken = new Set(
+      hourlyRows
+        .filter((row) => roleOf(row)?.tier === role.tier)
+        .map((row) => row.line.label.trim().toLowerCase()),
+    )
+    if (!taken.has(role.title.toLowerCase())) return role.title
+    const base = `${role.title} — additional hours`
+    if (!taken.has(base.toLowerCase())) return base
+    for (let n = 2; ; n += 1) {
+      if (!taken.has(`${base} ${n}`.toLowerCase())) return `${base} ${n}`
+    }
+  }
+  const newHoursLine = (role: { tier: string; title: string }): PersistedInvoiceLine => {
+    const rate = defaultRateFor(role.tier)
+    return {
+      kind: 'hourly',
+      roleTier: role.tier as PersistedInvoiceLine['roleTier'],
+      label: newHoursLabel(role),
+      detail: '',
+      hours: 0,
+      rate,
+      amount: 0,
+    }
+  }
+  /**
+   * A new hours line goes in with the other hours lines (where a re-tag puts
+   * one), NOT on the end: appended after the reimbursements it would reach
+   * Stripe checkout, the QuickBooks export and the AI after the expenses. Rows
+   * are keyed by role and ordinal rather than position, so a line landing in the
+   * middle of the saved array does not remount the one she is typing in.
+   */
+  const insertHoursLine = (line: PersistedInvoiceLine) =>
+    setLines((current) => {
+      const at = hourlyInsertIndex(current)
+      return [...current.slice(0, at), line, ...current.slice(at)]
+    })
+  /** The empty row's first keystroke: the stand-in becomes a stored line. */
+  const startHoursLine = (standIn: PersistedInvoiceLine, patch: Partial<PersistedInvoiceLine>) => {
+    setRetainerError(null)
+    const next: PersistedInvoiceLine = { ...standIn, ...patch }
+    if (patch.detail === undefined) next.detail = hourlyLineDetail(next.hours ?? 0, next.rate ?? 0)
+    insertHoursLine(next)
+    setSaved(false)
+  }
+  const addHoursLine = (role: { tier: string; title: string }) => {
+    const line = newHoursLine(role)
+    setRetainerError(null)
+    insertHoursLine({ ...line, detail: hourlyLineDetail(line.hours ?? 0, line.rate ?? 0) })
+    setSaved(false)
+  }
+
+  const scopedLineRow = ({ line, index }: { line: PersistedInvoiceLine; index: number }) => (
+    <InvoiceLineRow
+      key={`${line.kind}-${index}`}
+      line={line}
+      index={index}
+      onChange={setLine}
+      onRemove={removeLine}
+      locked={Boolean(lockMessage)}
+      busy={savingDates}
+      coverage={coverageFor(line)}
+    />
+  )
+  const hoursLineRow = (
+    row: { line: PersistedInvoiceLine; index: number },
+    key: string,
+  ): ReactElement => (
+    <InvoiceLineRow
+      key={key}
+      line={row.line}
+      index={row.index}
+      onChange={setLine}
+      onRemove={removeLine}
+      locked={Boolean(lockMessage)}
+      busy={savingDates}
+      coverage={coverageFor(row.line)}
+    />
+  )
+  const hoursBlockRows: ReactElement[] = []
+  if (hasHoursBlock) {
+    untitledHourlyRows.forEach((row, ordinal) =>
+      hoursBlockRows.push(hoursLineRow(row, `hours-untitled-${ordinal}`)),
+    )
+    for (const role of INVOICE_HOURS_ROLE_ROWS) {
+      const stored = hourlyRows.filter((row) => roleOf(row)?.tier === role.tier)
+      if (stored.length === 0 && !hoursRowsOffered) continue
+      hoursBlockRows.push(
+        <tr className="invoice-run-hours-heading" key={`hours-heading-${role.tier}`}>
+          <th colSpan={3} scope="colgroup">
+            {role.title}
+          </th>
+        </tr>,
+      )
+      stored.forEach((row, ordinal) =>
+        hoursBlockRows.push(hoursLineRow(row, `hours-${role.tier}-${ordinal}`)),
+      )
+      if (stored.length === 0) {
+        const standIn = newHoursLine(role)
+        hoursBlockRows.push(
+          <InvoiceLineRow
+            key={`hours-${role.tier}-0`}
+            blank={{ title: role.title }}
+            line={standIn}
+            index={-1}
+            onChange={(_, patch) => startHoursLine(standIn, patch)}
+            onRemove={removeLine}
+            busy={savingDates}
+          />,
+        )
+      }
+      if (hoursRowsOffered) {
+        hoursBlockRows.push(
+          <tr className="invoice-run-hours-add" key={`hours-add-${role.tier}`}>
+            <td colSpan={3}>
+              <button
+                type="button"
+                className="link-button"
+                aria-label={`Add hours line under ${role.title}`}
+                disabled={savingDates}
+                onClick={() => addHoursLine(role)}
+              >
+                Add hours line
+              </button>
+            </td>
+          </tr>,
+        )
+      }
+    }
+  }
+
   const applyRetainerCredit = () => {
     if (!offeredCredit) return
     setLines((current) => [...current, offeredCredit as PersistedInvoiceLine])
@@ -3057,18 +3331,9 @@ function InvoiceEditor({
             : null}
           {sourceGroups.length > 0 ? null : (
             <tbody>
-              {scopedRows.map(({ line, index }) => (
-                <InvoiceLineRow
-                  key={`${line.kind}-${index}`}
-                  line={line}
-                  index={index}
-                  onChange={setLine}
-                  onRemove={removeLine}
-                  locked={Boolean(lockMessage)}
-                  busy={savingDates}
-                  coverage={coverageFor(line)}
-                />
-              ))}
+              {rowsBeforeHours.map(scopedLineRow)}
+              {hoursBlockRows}
+              {rowsAfterHours.map(scopedLineRow)}
             </tbody>
           )}
           {/* Out-of-scope work, set off in its own block so it can be reviewed as
@@ -3135,6 +3400,15 @@ function InvoiceEditor({
             <Plus size={15} />
             Add a line
           </button>
+          {/* A true extra, not hours: it lands in the untitled charges that print
+              below the sections. Said once, quietly, because the old surprise
+              was an hours line turning up under Reimbursed Expenses. Only where
+              the role rows above exist to be used instead. */}
+          {hoursRowsOffered ? (
+            <span className="invoice-run-line-help">
+              Prints below the sections. For hours, use Add hours line under a role above.
+            </span>
+          ) : null}
           {/* The credit, offered and never taken. Disabled rather than hidden when
               there is nothing left to credit, so a $0 invoice explains itself
               instead of quietly dropping the button she was looking for.

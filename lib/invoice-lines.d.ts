@@ -44,6 +44,10 @@ export type InvoiceLineOut = {
   hours?: number
   /** The employee's bill rate this line was priced at. */
   rate?: number
+  /** `hourly` lines only: true when she typed the rate herself. Re-tag keeps it. */
+  rateManual?: boolean
+  /** `hourly` lines only: whose hours this line holds, once something has stamped it. */
+  employeeId?: string
   /* -- presentation -------------------------------------------------------- */
   /** Which role heading this row prints under. Presentational ONLY: no money
    *  is derived from it, and a line without one renders ungrouped. */
@@ -147,6 +151,32 @@ export function isEmptyPlanLine(line: { kind?: string; amount?: number } | null 
 export function withoutEmptyPlanLines<T extends { kind?: string; amount?: number }>(
   lines: T[] | null | undefined,
 ): T[]
+/** An `hourly` line with a numeric `hours` of exactly 0 and $0 — left off the client's copy. */
+export function isEmptyHoursLine(
+  line: { kind?: string; hours?: number; amount?: number } | null | undefined,
+): boolean
+/** The lines minus an empty plan line and an empty hours row: what `clientFacingInvoiceLines` and the month-run count use. */
+export function withoutEmptyLines<T extends { kind?: string; hours?: number; amount?: number }>(
+  lines: T[] | null | undefined,
+): T[]
+/** The most an hours line's hourly rate may be ($10,000). */
+export const MAX_HOURLY_RATE: number
+/** "1.50h at $75.00/hr" — the one wording of an hours line's detail. */
+export function hourlyLineDetail(hours: number, rate: number): string
+/** The three role rows the editor's hours block always offers, in print order. */
+export const INVOICE_HOURS_ROLE_ROWS: ReadonlyArray<{
+  readonly tier: 'CFO' | 'Accountant' | 'Bookkeeper'
+  readonly title: string
+}>
+/** The rate a new hours row for `tier` starts at (a default she can overtype). */
+export function defaultHoursRowRate(args: {
+  tier: string
+  lines?: Array<{ kind?: string; roleTier?: string; rate?: number }> | null
+  employees?: Array<{ id: string; name?: string; role?: string; billRate?: number | null; inactiveAt?: string | null }> | null
+  billRateVersions?: readonly import('./rate-history.js').BillRateVersion[] | null
+  client?: { hourlyRate?: number; hourlyRatePeriod?: string | null } | null
+  period?: string
+}): number
 
 /* -- the rendering mode: what a client-facing document shows ---------------- */
 
@@ -193,7 +223,14 @@ export const COMBINED_KEPT_KINDS: ReadonlySet<string>
  * `invoice.total`.
  */
 export function clientFacingInvoiceLines<
-  T extends { kind?: string; adhocMode?: string; label: string; detail: string; amount: number },
+  T extends {
+    kind?: string
+    adhocMode?: string
+    hours?: number
+    label: string
+    detail: string
+    amount: number
+  },
 >(
   invoice:
     | { kind?: string; period?: string; total?: number; lineItems?: T[] | null }

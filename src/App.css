@@ -12374,9 +12374,27 @@ tr.is-inactive-client .client-name-link {
   width: 90px;
 }
 
-.invoice-run-hours-rate {
-  font-size: 12px;
+/* The role headings of the editor's hours block, and the quiet link under each
+   that adds another hours line. Same small-caps voice as the ad hoc heading, in
+   the muted color: they are labels, not a state. */
+.invoice-run-hours-heading th {
+  border-top: 1px solid var(--line);
   color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  padding: 10px 6px 4px 0;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.invoice-run-hours-add td {
+  padding: 2px 0 6px;
+}
+
+.invoice-run-line-help {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .invoice-run-error {

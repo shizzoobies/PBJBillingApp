@@ -94,10 +94,11 @@ afterEach(() => {
 })
 
 describe('the billed-hours field', () => {
-  it('renders the hours as their own input, with the rate standing beside them', async () => {
+  it('renders the hours as their own input, with the rate in a box beside them', async () => {
     await openEditor()
     expect(screen.getByLabelText('Billed hours')).toHaveValue(1.31)
-    expect(screen.getByText('× $75.00/hr')).toBeInTheDocument()
+    // The rate is hers to change now (it used to be static "× $75.00/hr" text).
+    expect(screen.getByLabelText('Hourly rate')).toHaveValue(75)
   })
 
   it('recalculates the amount when she rounds the hours up', async () => {

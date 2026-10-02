@@ -100,6 +100,7 @@ import { billRateAt, ratePeriodAsOf } from './lib/rate-history.js'
 import { invoiceAsSent, previousPeriod } from './lib/invoice-draft.js'
 import { pastDueInvoice } from './lib/invoice-overdue.js'
 import { rateInvoiceDraft } from './lib/invoice-confidence.js'
+import { recapStaffTier } from './lib/staff-tiers.js'
 import { EMAIL_PREF_TYPES, sanitizeEmailPrefs } from './lib/notification-prefs.js'
 import {
   listBlockingWeeks,
@@ -1854,6 +1855,16 @@ function buildInvoiceHoursSummary(data, client, period, billRateVersions = []) {
     employees: [...byEmployee.entries()]
       .map(([employeeId, bucket]) => ({
         name: employeeById.get(employeeId)?.name ?? 'Unknown',
+        // The person's role, in the two vocabularies an hours line can use: the
+        // staff role, and the `roleTier` the line carries (Owner is the CFO).
+        // An hours line is titled by role and may name nobody, so this is how
+        // the model matches a line to a person's hours.
+        ...(employeeById.get(employeeId)
+          ? {
+              role: employeeById.get(employeeId).role,
+              roleTier: recapStaffTier(employeeById.get(employeeId).role),
+            }
+          : {}),
         billRate: rateFor(employeeId),
         scopedHours: hours(bucket.scoped),
         adhocHours: hours(bucket.adhoc),
@@ -1906,6 +1917,7 @@ function buildMasterInvoiceHoursSummary(data, master, period, billRateVersions =
     if (new Set(rows.map((row) => row.billRate)).size <= 1) {
       employees.push({
         name,
+        ...(rows[0].role ? { role: rows[0].role, roleTier: rows[0].roleTier } : {}),
         billRate: rows[0].billRate,
         scopedHours: addHours(rows.map((row) => row.scopedHours)),
         adhocHours: addHours(rows.map((row) => row.adhocHours)),
@@ -1918,6 +1930,7 @@ function buildMasterInvoiceHoursSummary(data, master, period, billRateVersions =
     for (const row of rows) {
       employees.push({
         name,
+        ...(row.role ? { role: row.role, roleTier: row.roleTier } : {}),
         billRate: row.billRate,
         scopedHours: row.scopedHours,
         adhocHours: row.adhocHours,
@@ -1986,6 +1999,7 @@ async function rateInvoiceAndPersist(invoice, session, preloaded = null) {
     invoice,
     client,
     hoursSummary: buildInvoiceHoursSummary(data, client, invoice.period, billRateVersions),
+    employees: data.employees ?? [], // resolves an hours line's `employeeId`
     priorInvoice,
     // Stays per-invoice: it is scoped to the client, and the firm-wide slice it
     // adds deliberately EXCLUDES that client, so no two invoices want the same

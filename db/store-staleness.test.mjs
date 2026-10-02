@@ -63,6 +63,8 @@ import {
   waitingToggleRefusal,
 } from '../lib/waiting-on-state.js'
 import { invoiceAsSent, invoiceDisplayDate } from '../lib/invoice-draft.js'
+import { applyScopeRetag } from '../lib/invoice-scope-retag.js'
+import { buildInvoiceLines } from '../lib/invoice-lines.js'
 import { buildInvoiceEmail } from '../lib/invoice-email.js'
 import { buildInvoicePdf } from '../lib/invoice-pdf.js'
 import {
@@ -16726,6 +16728,32 @@ describe('invoice learning context (file backend)', () => {
     expect(context.corrections[0].added).toEqual([])
   })
 
+  // Two hours rows under one heading can share a label. Keyed by label alone the
+  // second overwrote the first and the record said something that did not happen.
+  it('tells two lines that share a label apart in a correction', async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices[0].lineItems = [
+      { kind: 'hourly', label: 'Bookkeeping Services', detail: '', amount: 100 },
+      { kind: 'hourly', label: 'Bookkeeping Services', detail: '', amount: 50 },
+      { kind: 'custom', label: 'Cleanup', detail: '', amount: 75 },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    // The SECOND one is re-priced, a THIRD with the same label is added, Cleanup goes.
+    await store.updateInvoice('inv-1', {
+      lineItems: [
+        { kind: 'hourly', label: 'Bookkeeping Services', detail: '', amount: 100 },
+        { kind: 'hourly', label: 'Bookkeeping Services', detail: '', amount: 70 },
+        { kind: 'hourly', label: 'Bookkeeping Services', detail: '', amount: 25 },
+      ],
+    })
+
+    const [correction] = (await store.listInvoiceLearningContext('c1')).corrections
+    expect(correction.changed).toEqual(['Bookkeeping Services (#2): $50 → $70'])
+    expect(correction.added).toEqual(['Bookkeeping Services (#3) ($25)'])
+    expect(correction.removed).toEqual(['Cleanup ($75)'])
+  })
+
   it('does not count a skipped question as an answer', async () => {
     await store.createInvoiceAiReview({
       invoiceId: 'inv-1',
@@ -18986,6 +19014,345 @@ describe('hourly lines re-derive amount from hours × rate (file backend)', () =
     // Falls back to the legacy path: amount as sent, no hours stored.
     expect(updated.lineItems[0].amount).toBe(42)
     expect(updated.lineItems[0].hours).toBeUndefined()
+  })
+
+  // The hours editor's rate box and the hours panel's re-tag hang two marks on
+  // an hours line. `sanitizeInvoiceLines` is the one chokepoint BOTH backends
+  // share (the Postgres path stores what it returns in a jsonb column, with no
+  // field list of its own), so this pins it through the file backend's write.
+  describe('rateManual and employeeId (the sanitizer both backends share)', () => {
+    const hourly = (over = {}) => ({
+      kind: 'hourly',
+      label: 'Billable hours — Lisa',
+      detail: '2.00h at $90.00/hr',
+      hours: 2,
+      rate: 90,
+      amount: 180,
+      ...over,
+    })
+
+    it('round-trips a typed rate: rate, rateManual and the derived amount', async () => {
+      const updated = await store.updateInvoice('inv-hours', {
+        // A stale amount rides in; the hours and the typed rate decide it.
+        lineItems: [hourly({ rateManual: true, amount: 250 })],
+      })
+      const line = updated.lineItems[0]
+      expect(line.rate).toBe(90)
+      expect(line.rateManual).toBe(true)
+      expect(line.amount).toBe(180)
+      expect(updated.total).toBe(180)
+    })
+
+    it('keeps employeeId, and neither mark appears when it was not sent', async () => {
+      const marked = await store.updateInvoice('inv-hours', {
+        lineItems: [hourly({ employeeId: 'emp-1' })],
+      })
+      expect(marked.lineItems[0].employeeId).toBe('emp-1')
+      expect(marked.lineItems[0]).not.toHaveProperty('rateManual')
+
+      const plain = await store.updateInvoice('inv-hours', { lineItems: [hourly()] })
+      expect(plain.lineItems[0]).not.toHaveProperty('rateManual')
+      expect(plain.lineItems[0]).not.toHaveProperty('employeeId')
+    })
+
+    it('keeps them only when well-formed', async () => {
+      const updated = await store.updateInvoice('inv-hours', {
+        lineItems: [
+          hourly({ rateManual: 'yes', employeeId: '' }),
+          hourly({ rateManual: 1, employeeId: 42, label: 'B' }),
+          hourly({ employeeId: 'x'.repeat(201), label: 'C' }),
+        ],
+      })
+      for (const line of updated.lineItems) {
+        expect(line).not.toHaveProperty('rateManual')
+        expect(line).not.toHaveProperty('employeeId')
+      }
+    })
+
+    it('does not let any other kind of line carry them, or any other unknown field', async () => {
+      const updated = await store.updateInvoice('inv-hours', {
+        lineItems: [
+          {
+            kind: 'custom',
+            label: 'Setup',
+            detail: '',
+            amount: 50,
+            rateManual: true,
+            employeeId: 'emp-1',
+            invented: 'x',
+          },
+          hourly({ invented: 'x' }),
+        ],
+      })
+      expect(updated.lineItems[0]).not.toHaveProperty('rateManual')
+      expect(updated.lineItems[0]).not.toHaveProperty('employeeId')
+      expect(updated.lineItems[0]).not.toHaveProperty('invented')
+      expect(updated.lineItems[1]).not.toHaveProperty('invented')
+    })
+
+    // A rate with an extra zero is a typo, not a rate. Refused the way an over-cap
+    // hours value is: the line falls to the legacy path (amount as sent, no hours
+    // or rate stored), and $10,000 itself is still fine.
+    it('refuses a rate over $10,000 the way it refuses over-cap hours, and takes $10,000', async () => {
+      const over = await store.updateInvoice('inv-hours', {
+        lineItems: [hourly({ rate: 10000.01, rateManual: true, amount: 42 })],
+      })
+      expect(over.lineItems[0].amount).toBe(42)
+      expect(over.lineItems[0]).not.toHaveProperty('hours')
+      expect(over.lineItems[0]).not.toHaveProperty('rate')
+
+      const hoursOver = await store.updateInvoice('inv-hours', {
+        lineItems: [hourly({ hours: 100001, amount: 42 })],
+      })
+      expect(hoursOver.lineItems[0].amount).toBe(42)
+      expect(hoursOver.lineItems[0]).not.toHaveProperty('hours')
+
+      const atCap = await store.updateInvoice('inv-hours', {
+        lineItems: [hourly({ rate: 10000, hours: 1, amount: 1 })],
+      })
+      expect(atCap.lineItems[0]).toMatchObject({ rate: 10000, hours: 1, amount: 10000 })
+    })
+
+    it('keeps a zero-hours row on the invoice and leaves the total where it was', async () => {
+      const updated = await store.updateInvoice('inv-hours', {
+        lineItems: [
+          hourly(),
+          {
+            kind: 'hourly',
+            roleTier: 'Accountant',
+            label: 'Accounting Services',
+            detail: '0.00h at $135.00/hr',
+            hours: 0,
+            rate: 135,
+            amount: 99,
+          },
+        ],
+      })
+      expect(updated.lineItems).toHaveLength(2)
+      expect(updated.lineItems[1]).toMatchObject({ hours: 0, rate: 135, amount: 0 })
+      expect(updated.total).toBe(180)
+    })
+  })
+})
+
+/**
+ * The rate she typed STICKS (the owner's Flourish case: $90 an hour, came over
+ * at $125, deleted and re-added). End to end on the file backend, with the real
+ * pieces in the order she uses them: type the rate and Save, re-tag one entry
+ * out of scope and back in (the hours panel's `applyScopeRetag`, saved with the
+ * tags in the same write), Mark reviewed — then read the stored line and the
+ * client's PDF. Nothing in that sequence may put the person's own rate back.
+ */
+describe('a hand-set hourly rate survives re-tag and review (file backend)', () => {
+  const clientRecord = { id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 125 }
+  const employees = [{ id: 'emp-1', name: 'Lisa', role: 'Bookkeeper', billRate: 125 }]
+  const entry = (id) => ({
+    id,
+    clientId: 'c1',
+    employeeId: 'emp-1',
+    date: '2026-08-04',
+    minutes: 60,
+    description: 'Month-end close',
+    billable: true,
+    approvalStatus: 'approved',
+    approvedBy: 'emp-owner',
+    approvedAt: '2026-08-05T00:00:00.000Z',
+  })
+
+  const stored = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  /** What the editor sends after a re-tag: the lines, plus the tag, in one request. */
+  async function retagAndSave(tag) {
+    const data = await stored()
+    const { lines } = applyScopeRetag({
+      lines: data.invoices[0].lineItems,
+      entries: data.timeEntries,
+      tagEdits: { t1: { tag } },
+      employees,
+      client: clientRecord,
+      period: '2026-08',
+      defaultHourlyRate: 125,
+    })
+    return store.updateInvoice('inv-rate', {
+      lineItems: lines,
+      entryTags: [{ entryId: 't1', tag }],
+    })
+  }
+
+  it('keeps $90, through a re-tag out and back and Mark reviewed, and the PDF says $90.00/hr', async () => {
+    const data = await stored()
+    data.clients = [clientRecord]
+    data.employees = employees
+    data.timeEntries = [entry('t1'), entry('t2')]
+    data.invoices = [
+      {
+        id: 'inv-rate',
+        clientId: 'c1',
+        kind: 'monthly',
+        period: '2026-08',
+        number: 'INV-2026-08-090',
+        status: 'draft',
+        // A draft stored BEFORE Generate stamped employeeId: the person's own
+        // rate, found by its label alone (the label fallback).
+        lineItems: [
+          {
+            kind: 'hourly',
+            label: 'Billable hours — Lisa',
+            detail: '2.00h at $125.00/hr',
+            hours: 2,
+            rate: 125,
+            amount: 250,
+            roleTier: 'Bookkeeper',
+          },
+        ],
+        subtotal: 250,
+        total: 250,
+        dueDate: '2026-09-30',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: null,
+        paidAt: null,
+        paymentMethod: null,
+        appliedToInvoiceId: null,
+        emailLog: [],
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    // 1. She types 90 over 125. The editor rewrites the amount and the detail.
+    const typed = await store.updateInvoice('inv-rate', {
+      lineItems: [
+        {
+          kind: 'hourly',
+          label: 'Billable hours — Lisa',
+          detail: '2.00h at $90.00/hr',
+          hours: 2,
+          rate: 90,
+          rateManual: true,
+          amount: 180,
+          roleTier: 'Bookkeeper',
+        },
+      ],
+    })
+    expect(typed.lineItems[0]).toMatchObject({ rate: 90, rateManual: true, amount: 180 })
+
+    // 2. One entry out of scope: its hour leaves her line, at HER rate.
+    const out = await retagAndSave('out-of-scope')
+    expect(out.lineItems[0]).toMatchObject({ hours: 1, rate: 90, rateManual: true, amount: 90 })
+
+    // 3. ... and back in: the hour returns at $90, not at Lisa's own $125.
+    const back = await retagAndSave('in-scope')
+    expect(back.lineItems[0]).toMatchObject({ hours: 2, rate: 90, rateManual: true, amount: 180 })
+    expect(back.total).toBe(180)
+
+    // 4. Mark reviewed.
+    const reviewed = await store.updateInvoice('inv-rate', { status: 'reviewed' })
+    expect(reviewed.status).toBe('reviewed')
+    expect(reviewed.lineItems[0]).toMatchObject({ rate: 90, rateManual: true, amount: 180 })
+    expect((await stored()).invoices[0].lineItems[0].rate).toBe(90)
+
+    // 5. What the client reads.
+    const raw = (
+      await buildInvoicePdf({ invoice: reviewed, client: clientRecord, compress: false })
+    ).toString('latin1')
+    const runs = []
+    for (const match of raw.matchAll(/\[([^\]]*)\]\s*TJ/g)) runs.push(match[1])
+    for (const match of raw.matchAll(/<([0-9A-Fa-f]+)>\s*Tj/g)) runs.push(`<${match[1]}>`)
+    const pdf = runs
+      .map((run) =>
+        [...run.matchAll(/<([0-9A-Fa-f]*)>/g)]
+          .map((hex) => Buffer.from(hex[1], 'hex').toString('latin1'))
+          .join(''),
+      )
+      .join('\n')
+    expect(pdf).toContain('2.00h at $90.00/hr')
+    expect(pdf).not.toContain('$125.00/hr')
+    expect(buildInvoiceEmail({ invoice: reviewed, client: clientRecord }).text).toContain(
+      '2.00h at $90.00/hr',
+    )
+  })
+
+  /**
+   * The September case: Generate writes the line, she RENAMES it
+   * "CFO/Advisory Services" and sets the rate to $90, saves, re-tags an entry
+   * out and back, and marks the invoice reviewed. Generate stamps the line with
+   * whose hours it holds, so the re-tag finds the renamed line for both the
+   * departure and the arrival: one line, her label, her rate, the hours back.
+   */
+  it('a generated line she renames and re-rates is found by the re-tag, out and back', async () => {
+    const entries = [entry('t1'), entry('t2')]
+    const built = buildInvoiceLines({
+      client: clientRecord,
+      entries,
+      employees,
+      billingPeriod: '2026-08',
+      defaultHourlyRate: 125,
+    })
+    const data = await stored()
+    data.clients = [clientRecord]
+    data.employees = employees
+    data.timeEntries = entries
+    data.invoices = [
+      {
+        id: 'inv-rate',
+        clientId: 'c1',
+        kind: 'monthly',
+        period: '2026-08',
+        number: 'INV-2026-08-091',
+        status: 'draft',
+        lineItems: built.lines,
+        subtotal: built.total,
+        total: built.total,
+        dueDate: '2026-09-30',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: null,
+        paidAt: null,
+        paymentMethod: null,
+        appliedToInvoiceId: null,
+        emailLog: [],
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    expect(built.lines[0].employeeId).toBe('emp-1')
+
+    // Rename, re-rate to $90, Save.
+    const renamed = await store.updateInvoice('inv-rate', {
+      lineItems: [
+        {
+          ...built.lines[0],
+          label: 'CFO/Advisory Services',
+          rate: 90,
+          rateManual: true,
+          amount: 180,
+          detail: '2.00h at $90.00/hr',
+        },
+      ],
+    })
+    expect(renamed.lineItems[0]).toMatchObject({ employeeId: 'emp-1', rate: 90, amount: 180 })
+
+    // One entry out of scope and back in, each saved with its tag.
+    const out = await retagAndSave('out-of-scope')
+    expect(out.lineItems).toHaveLength(1)
+    expect(out.lineItems[0]).toMatchObject({ label: 'CFO/Advisory Services', hours: 1, rate: 90 })
+    const back = await retagAndSave('in-scope')
+
+    const reviewed = await store.updateInvoice('inv-rate', { status: 'reviewed' })
+    expect(back.lineItems).toHaveLength(1)
+    expect(reviewed.lineItems).toHaveLength(1)
+    expect(reviewed.lineItems[0]).toMatchObject({
+      label: 'CFO/Advisory Services',
+      hours: 2,
+      rate: 90,
+      rateManual: true,
+      amount: 180,
+      employeeId: 'emp-1',
+    })
+    expect(reviewed.total).toBe(180)
   })
 })
 
