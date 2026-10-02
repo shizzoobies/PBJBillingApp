@@ -173,6 +173,19 @@ export const INVOICE_HOURS_ROLE_ROWS: ReadonlyArray<{
   readonly tier: 'CFO' | 'Accountant' | 'Bookkeeper'
   readonly title: string
 }>
+/**
+ * What a person's hours line is called: the role's title, with the name appended
+ * when `shared` (another person in the same role holds a line), and
+ * "Billable hours — <name>" for `Other` or no record.
+ */
+export function hoursLineLabel(
+  employee: { name?: string; role?: string } | null | undefined,
+  opts?: { shared?: boolean },
+): string
+/** The name-bearing labels that identify a person's hours line when it has no `employeeId`. */
+export function hoursLineLabelShapes(
+  employee: { name?: string; role?: string } | null | undefined,
+): { old: string; titled: string[]; tier: string | null }
 /** The rate a new hours row for `tier` starts at (a default she can overtype). */
 export function defaultHoursRowRate(args: {
   tier: string

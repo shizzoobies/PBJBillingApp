@@ -95,7 +95,9 @@ describe('getInvoice — monthly billing', () => {
     // 600 minutes = 10h * $100 = $1000
     expect(invoice.total).toBe(1000)
     expect(invoice.lines).toHaveLength(1)
-    expect(invoice.lines[0].label).toBe('Billable hours — Alice')
+    // Alice is a Bookkeeper: her line is called by her role, and carries her id.
+    expect(invoice.lines[0].label).toBe('Bookkeeping Services')
+    expect(invoice.lines[0]).toMatchObject({ employeeId: 'emp-1', roleTier: 'Bookkeeper' })
   })
 })
 
@@ -128,11 +130,27 @@ describe('getInvoice — hourly billing (per-employee bill rate)', () => {
     const invoice = getInvoice(client, entries, plans, period, [], [], employees, 50)
     expect(invoice.total).toBe(500)
     expect(invoice.lines).toHaveLength(2)
-    // Lines are sorted by label: Alice then Bob.
-    expect(invoice.lines[0].label).toBe('Billable hours — Alice')
-    expect(invoice.lines[0].amount).toBe(200)
-    expect(invoice.lines[1].label).toBe('Billable hours — Bob')
-    expect(invoice.lines[1].amount).toBe(300)
+    // Lines sit by role, then name: Bob (Accountant) before Alice (Bookkeeper).
+    // Each is called by its role's title — one person per role, so no name.
+    expect(invoice.lines[0].label).toBe('Accounting Services')
+    expect(invoice.lines[0].amount).toBe(300)
+    expect(invoice.lines[1].label).toBe('Bookkeeping Services')
+    expect(invoice.lines[1].amount).toBe(200)
+  })
+
+  it('appends the name when two people share a role, so two rows never share a label', () => {
+    const client = makeClient({ billingMode: 'hourly' })
+    const entries = [
+      makeEntry({ id: 'a', employeeId: 'emp-1', minutes: 120 }), // Alice, Bookkeeper
+      makeEntry({ id: 'b', employeeId: 'emp-3', minutes: 60 }), // Carol, Bookkeeper
+      makeEntry({ id: 'c', employeeId: 'emp-2', minutes: 90 }), // Bob, the only Accountant
+    ]
+    const invoice = getInvoice(client, entries, plans, period, [], [], employees, 75)
+    expect(invoice.lines.map((line) => line.label)).toEqual([
+      'Accounting Services',
+      'Bookkeeping Services — Alice',
+      'Bookkeeping Services — Carol',
+    ])
   })
 
   it('falls back to the default hourly rate for an employee with no bill rate', () => {
@@ -140,7 +158,7 @@ describe('getInvoice — hourly billing (per-employee bill rate)', () => {
     const entries = [makeEntry({ id: 'c', employeeId: 'emp-3', minutes: 120 })] // 2h * $75 default
     const invoice = getInvoice(client, entries, plans, period, [], [], employees, 75)
     expect(invoice.total).toBe(150)
-    expect(invoice.lines[0].label).toBe('Billable hours — Carol')
+    expect(invoice.lines[0].label).toBe('Bookkeeping Services')
     expect(invoice.lines[0].amount).toBe(150)
   })
 
@@ -204,7 +222,7 @@ describe('getInvoice — hourly billing cutover (historical stays exact)', () =>
     const invoice = getInvoice(client, [tenHours('2026-06-10')], plans, '2026-06', [], [], employees, 0)
     // 10h * $999 (Alice's bill rate) = $9990.
     expect(invoice.total).toBe(9990)
-    expect(invoice.lines[0].label).toBe('Billable hours — Alice')
+    expect(invoice.lines[0].label).toBe('Bookkeeping Services')
   })
 })
 
