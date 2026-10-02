@@ -1754,6 +1754,12 @@ export type ClientPendingNote = {
   lastAttachedDueDate?: string | null
   /** On a copy a repeating note left on a checklist: the repeating note it came from. */
   repeatOf?: string
+  /**
+   * On a copy that someone took off its checklist ("Dismiss"): when. The row stays
+   * as a hidden tombstone so the repeating note is not added to that checklist
+   * again; the server never lists it, so a client normally never sees this set.
+   */
+  dismissedAt?: string
 }
 
 /**

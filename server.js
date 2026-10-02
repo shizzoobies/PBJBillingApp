@@ -1045,6 +1045,16 @@ const PREVIEW_AWARE_API_PATHS = new Set([
 // Most checklist ids one batched pending-notes request may ask about.
 const PENDING_NOTES_BATCH_LIMIT = 500
 
+// What a month's copy of a repeating note says when it cannot be deleted, or
+// dismissed, the way it was asked. A note has no step to remove: it is dismissed
+// from that month's checklist. A task became a step: that step is removed.
+const REPEAT_NOTE_COPY_NOT_DELETABLE =
+  'This note was added by a repeating note. Use Dismiss on the checklist to take it off this month, or stop the repeating note.'
+const REPEAT_TASK_COPY_NOT_DELETABLE =
+  'This note was added by a repeating note. Remove the step on the checklist instead, or stop the repeating note.'
+const NOT_A_REPEAT_COPY_MESSAGE =
+  'Only a note that a repeating note added to a checklist can be dismissed.'
+
 // Each of these matches ONE path segment. They used to allow slashes as well,
 // which meant any deeper path under a prefix was allowlisted by a parent it has
 // nothing to do with. `normalizedPath` carries no query string, but `?` stays
@@ -6901,8 +6911,9 @@ const server = createServer(async (request, response) => {
       if (note.repeatOf) {
         sendJson(response, 409, {
           error: 'REPEAT_COPY_NOT_DELETABLE',
-          message:
-            'This note was added by a repeating note. Remove the step on the checklist instead, or stop the repeating note.',
+          // Worded by kind: a note has no step to remove, so it is dismissed; a task
+          // became a step, so that step is removed.
+          message: note.kind === 'note' ? REPEAT_NOTE_COPY_NOT_DELETABLE : REPEAT_TASK_COPY_NOT_DELETABLE,
         })
         return
       }
@@ -6929,6 +6940,81 @@ const server = createServer(async (request, response) => {
       )
       broadcastDataChanged()
       sendJson(response, 200, { ok: true })
+      return
+    }
+
+    // Dismiss ONE month's copy of a repeating NOTE: it leaves that checklist's card
+    // and the client's list, but its row stays as a hidden tombstone, because the
+    // "this checklist already holds a copy" guards read it (see
+    // `dismissPendingNoteCopy`). Same gates as the DELETE route beside it, and the
+    // same write boundary as adding a note (`pendingNoteWriteDenial`).
+    const clientPendingNoteDismissMatch = normalizedPath.match(
+      /^\/api\/clients\/([^/]+)\/pending-notes\/([^/]+)\/dismiss$/,
+    )
+    if (clientPendingNoteDismissMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const clientId = decodeURIComponent(clientPendingNoteDismissMatch[1])
+      const noteId = decodeURIComponent(clientPendingNoteDismissMatch[2])
+      // A person who cannot see the client gets the same 404 as a missing note.
+      const data = await appDataStore.read()
+      if (!visibleClientIdSet(session, data).has(clientId)) {
+        sendJson(response, 404, { error: 'Note not found' })
+        return
+      }
+      const note = await appDataStore.getClientPendingNote(noteId)
+      // The note must belong to the client the path names.
+      if (!note || note.clientId !== clientId) {
+        sendJson(response, 404, { error: 'Note not found' })
+        return
+      }
+      const denial = pendingNoteWriteDenial({
+        user: session.user,
+        clientVisible: true,
+        template: (data.checklistTemplates ?? []).find(
+          (entry) => entry.id === note.templateId && entry.clientId === clientId,
+        ),
+        checklists: (data.checklists ?? []).filter(
+          (checklist) =>
+            checklist.templateId === note.templateId &&
+            checklist.clientId === clientId &&
+            !checklist.deletedAt,
+        ),
+        error:
+          'Only the owner, or someone who can write this client’s checklists, may dismiss a note.',
+      })
+      if (denial) {
+        sendJson(response, denial.status, { error: denial.error })
+        return
+      }
+      const outcome = await appDataStore.dismissPendingNoteCopy(noteId)
+      if (!outcome.dismissed && outcome.reason === 'not_found') {
+        sendJson(response, 404, { error: 'Note not found' })
+        return
+      }
+      if (!outcome.dismissed && outcome.reason === 'not_a_copy') {
+        sendJson(response, 409, { error: 'NOT_A_REPEAT_COPY', message: NOT_A_REPEAT_COPY_MESSAGE })
+        return
+      }
+      if (!outcome.dismissed && outcome.reason === 'task_copy') {
+        sendJson(response, 409, { error: 'REPEAT_TASK_COPY', message: REPEAT_TASK_COPY_NOT_DELETABLE })
+        return
+      }
+      // Dismissed now, or already (the second click is the same answer, no second write).
+      if (outcome.dismissed) {
+        const client = (data.clients ?? []).find((entry) => entry.id === clientId)
+        await appDataStore.recordActivity(
+          session.user.id,
+          'client_pending_note_dismissed',
+          client?.name ?? clientId,
+        )
+        broadcastDataChanged()
+      }
+      sendJson(response, 200, { ok: true, dismissed: true })
       return
     }
 

@@ -47,6 +47,7 @@ import {
   type SkipReasonCategory,
 } from '../../lib/checklist-skip.js'
 import { useAppContext } from '../AppContext'
+import { dismissClientPendingNoteRequest } from '../lib/api'
 import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { PeriodLabelChip } from '../components/PeriodLabelChip'
@@ -2192,7 +2193,11 @@ function seriesDeleteNotice(result: {
  * are excluded here: they already landed as an ordinary item.
  */
 export function AttachedClientNotes({ notes: attached }: { notes: ClientPendingNote[] }) {
-  const notes = attached.filter((note) => note.kind === 'note')
+  // Notes dismissed from this card: gone at once, while the page's own list (one
+  // fetch for every card) catches up on the server's data-changed signal.
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
+  const [dismissError, setDismissError] = useState<{ id: string; message: string } | null>(null)
+  const notes = attached.filter((note) => note.kind === 'note' && !dismissed.has(note.id))
   if (notes.length === 0) return null
 
   return (
@@ -2212,10 +2217,73 @@ export function AttachedClientNotes({ notes: attached }: { notes: ClientPendingN
                 })}
               </span>
             ) : null}
+            {note.repeatOf ? (
+              <>
+                <span className="muted-text"> (repeat)</span>
+                <DismissRepeatNoteButton
+                  note={note}
+                  onDismissed={() => {
+                    setDismissError(null)
+                    setDismissed((current) => new Set(current).add(note.id))
+                  }}
+                  onRefused={(message) => setDismissError({ id: note.id, message })}
+                />
+                {dismissError?.id === note.id ? (
+                  <p className="waiting-editor-error" role="alert">
+                    {dismissError.message}
+                  </p>
+                ) : null}
+              </>
+            ) : null}
           </li>
         ))}
       </ul>
     </div>
+  )
+}
+
+/** What the Dismiss control says it does, as its tooltip. */
+const DISMISS_REPEAT_NOTE_TITLE =
+  "Take this note off this month's checklist. It will still be added to future months until the repeating note is stopped."
+
+/**
+ * "Dismiss" on a note a repeating note put on this checklist: it leaves the card
+ * (and the client's list) but the server keeps the row as a hidden tombstone, so
+ * the note is not added here again. A text button with its own name, no
+ * confirmation; a refusal shows the server's sentence under the note.
+ */
+function DismissRepeatNoteButton({
+  note,
+  onDismissed,
+  onRefused,
+}: {
+  note: ClientPendingNote
+  onDismissed: () => void
+  onRefused: (message: string) => void
+}) {
+  const { previewMode } = useAppContext()
+  const [busy, setBusy] = useState(false)
+  return (
+    <button
+      type="button"
+      className="link-button"
+      disabled={busy || Boolean(previewMode)}
+      title={previewMode ? 'Disabled in preview mode' : DISMISS_REPEAT_NOTE_TITLE}
+      onClick={() => {
+        void (async () => {
+          setBusy(true)
+          try {
+            await dismissClientPendingNoteRequest(note.clientId, note.id)
+            onDismissed()
+          } catch (error) {
+            setBusy(false)
+            onRefused(error instanceof Error ? error.message : 'Could not dismiss the note.')
+          }
+        })()
+      }}
+    >
+      Dismiss
+    </button>
   )
 }
 

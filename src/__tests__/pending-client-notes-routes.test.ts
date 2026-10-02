@@ -101,7 +101,7 @@ describe('POST /api/clients/:id/pending-notes', () => {
 })
 
 describe('DELETE /api/clients/:id/pending-notes/:noteId', () => {
-  const block = () => routeBlock(/const clientPendingNoteDeleteMatch = normalizedPath\.match/, 3000)
+  const block = () => routeBlock(/const clientPendingNoteDeleteMatch = normalizedPath\.match/, 3400)
 
   it('checks the cross-site origin', () => {
     expect(block()).toContain('isCrossSiteOrigin(request)')
@@ -343,11 +343,19 @@ describe('a note that repeats on every checklist', () => {
     const text = routeBlock(/const clientPendingNoteDeleteMatch = normalizedPath.match/, 3200)
     const refusalAt = text.indexOf('if (note.repeatOf) {')
     expect(refusalAt).toBeGreaterThan(-1)
-    const refusal = text.slice(refusalAt, refusalAt + 520)
+    const refusal = text.slice(refusalAt, refusalAt + 620)
     expect(refusal).toContain('sendJson(response, 409, {')
     expect(refusal).toContain("error: 'REPEAT_COPY_NOT_DELETABLE',")
+    // Worded by kind: a note is dismissed, a task's step is removed.
     expect(refusal).toContain(
-      "'This note was added by a repeating note. Remove the step on the checklist instead, or stop the repeating note.',",
+      "message: note.kind === 'note' ? REPEAT_NOTE_COPY_NOT_DELETABLE : REPEAT_TASK_COPY_NOT_DELETABLE,",
+    )
+    const flat = serverSource.replaceAll('\r\n', '\n')
+    expect(flat).toContain(
+      "const REPEAT_NOTE_COPY_NOT_DELETABLE =\n  'This note was added by a repeating note. Use Dismiss on the checklist to take it off this month, or stop the repeating note.'",
+    )
+    expect(flat).toContain(
+      "const REPEAT_TASK_COPY_NOT_DELETABLE =\n  'This note was added by a repeating note. Remove the step on the checklist instead, or stop the repeating note.'",
     )
     expect(refusal).toContain('return')
     // Decided from the row the route already loads, after the 404s and the client
@@ -362,5 +370,98 @@ describe('a note that repeats on every checklist', () => {
     const text = routeBlock(/const clientPendingNotesMatch = normalizedPath\.match/, 1400)
     expect(text).toContain('const notes = await appDataStore.listClientPendingNotes(clientId)')
     expect(text).toContain('sendJson(response, 200, { notes })')
+  })
+})
+
+/**
+ * Dismiss ONE month's copy of a repeating note (featreq-e8aa2abe): a POST under the
+ * same client path, with the DELETE route's gates and the create route's write
+ * boundary. The decisions (what may be dismissed, both backends) are pinned in
+ * db/store-staleness.test.mjs; this is the glue.
+ */
+describe('POST /api/clients/:id/pending-notes/:noteId/dismiss', () => {
+  const block = () => routeBlock(/const clientPendingNoteDismissMatch = normalizedPath\.match/, 4200)
+
+  it("is a POST on its own path, which the DELETE route's pattern cannot match", () => {
+    const text = block()
+    expect(text).toContain(String.raw`/^\/api\/clients\/([^/]+)\/pending-notes\/([^/]+)\/dismiss$/`)
+    expect(text).toContain("clientPendingNoteDismissMatch && request.method === 'POST'")
+    const deleteMatch = /^\/api\/clients\/([^/]+)\/pending-notes\/([^/]+)$/
+    expect(deleteMatch.test('/api/clients/c1/pending-notes/n1/dismiss')).toBe(false)
+  })
+
+  it('checks the session and the cross-site origin before touching the store', () => {
+    const text = block()
+    expect(text).toContain('const session = await requireSession(request, response)')
+    const originAt = text.indexOf('isCrossSiteOrigin(request)')
+    expect(originAt).toBeGreaterThan(-1)
+    expect(originAt).toBeLessThan(text.indexOf('appDataStore.read()'))
+  })
+
+  it('404s a person who cannot see the client, and a note of another client, before the write gate', () => {
+    const text = block()
+    const gateAt = text.indexOf('if (!visibleClientIdSet(session, data).has(clientId)) {')
+    expect(gateAt).toBeGreaterThan(-1)
+    expect(text.slice(gateAt, gateAt + 160)).toContain("sendJson(response, 404, { error: 'Note not found' })")
+    expect(gateAt).toBeLessThan(text.indexOf('appDataStore.getClientPendingNote(noteId)'))
+    expect(text).toContain('if (!note || note.clientId !== clientId) {')
+    expect(text.indexOf('if (!note || note.clientId !== clientId) {')).toBeLessThan(
+      text.indexOf('pendingNoteWriteDenial({'),
+    )
+  })
+
+  it("uses the same write boundary as adding a note, with the note's own template and live checklists", () => {
+    const text = block()
+    const at = text.indexOf('pendingNoteWriteDenial({')
+    expect(at).toBeGreaterThan(-1)
+    const denial = text.slice(at, at + 700)
+    expect(denial).toContain('user: session.user')
+    expect(denial).toContain('clientVisible: true')
+    expect(denial).toContain('(entry) => entry.id === note.templateId && entry.clientId === clientId')
+    expect(denial).toContain('checklist.templateId === note.templateId')
+    expect(denial).toContain('!checklist.deletedAt')
+    expect(at).toBeLessThan(text.indexOf('appDataStore.dismissPendingNoteCopy(noteId)'))
+    expect(text).not.toContain('checklistWriteDenial({')
+  })
+
+  it("answers the store's refusals with the right sentence and writes nothing", () => {
+    const text = block()
+    expect(text).toContain("outcome.reason === 'not_found'")
+    expect(text).toContain(
+      "sendJson(response, 409, { error: 'NOT_A_REPEAT_COPY', message: NOT_A_REPEAT_COPY_MESSAGE })",
+    )
+    expect(text).toContain(
+      "sendJson(response, 409, { error: 'REPEAT_TASK_COPY', message: REPEAT_TASK_COPY_NOT_DELETABLE })",
+    )
+    // The task-kind sentence says to remove the step on the checklist.
+    expect(serverSource).toContain("Remove the step on the checklist instead, or stop the repeating note.'")
+  })
+
+  it('records the activity and broadcasts only when this call dismissed it; a repeat answers the same 200', () => {
+    const text = block()
+    const dismissedAt = text.indexOf('if (outcome.dismissed) {')
+    expect(dismissedAt).toBeGreaterThan(-1)
+    const recordAt = text.indexOf("'client_pending_note_dismissed',")
+    const broadcastAt = text.indexOf('broadcastDataChanged()')
+    expect(recordAt).toBeGreaterThan(dismissedAt)
+    expect(text.slice(recordAt, recordAt + 120)).toContain('client?.name ?? clientId')
+    expect(broadcastAt).toBeGreaterThan(recordAt)
+    const sendAt = text.indexOf('sendJson(response, 200, { ok: true, dismissed: true })')
+    expect(sendAt).toBeGreaterThan(broadcastAt)
+  })
+
+  it('is not preview-aware: a preview write is refused before any route, and the read allow-list is unchanged', () => {
+    // Writes under X-Preview-As / X-Preview-Mode are refused by the central guard.
+    expect(serverSource).toContain("sendJson(response, 403, { error: 'Preview mode is read-only' })")
+    const listAt = serverSource.indexOf('const PREVIEW_AWARE_API_PATTERNS = [')
+    const list = serverSource.slice(listAt, serverSource.indexOf('function isPreviewAwareApiPath', listAt))
+    expect(list).toContain('pending-notes$/')
+    expect(list).not.toContain('dismiss')
+  })
+
+  it('is a data mutation to the central hook like its neighbors (any non-GET /api path), and also broadcasts itself', () => {
+    const at = serverSource.indexOf('const isDataMutation =')
+    expect(serverSource.slice(at, at + 400)).toContain("method !== 'GET'")
+    expect(block()).toContain('broadcastDataChanged()')
   })
 })

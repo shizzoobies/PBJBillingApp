@@ -3914,6 +3914,29 @@ export async function deleteClientPendingNoteRequest(clientId: string, noteId: s
 }
 
 /**
+ * Take ONE month's copy of a repeating note off its checklist. The server keeps
+ * the row as a hidden tombstone, so the note is not added to that checklist again
+ * but still goes on every later month's until the repeating note is stopped. A
+ * refusal (the note is not a copy, or it is a task whose step is removed on the
+ * checklist) carries the server's own sentence.
+ */
+export async function dismissClientPendingNoteRequest(clientId: string, noteId: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/pending-notes/${encodeURIComponent(noteId)}/dismiss`,
+    { method: 'POST', credentials: 'same-origin' },
+  )
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to dismiss the note (${response.status})`,
+      code,
+    )
+  }
+  return (await response.json()) as { ok: boolean; dismissed: boolean }
+}
+
+/**
  * Ids per request - under the server's 500 cap, and short enough
  * that the id list never threatens a URL length limit.
  */

@@ -8466,6 +8466,42 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
       inTransaction = false
       return { rows: [] }
     }
+    // Dismissing a copy: the ONE guarded update. Each condition is honored only when
+    // the SQL names it, so the pins prove the clause rather than the fixture.
+    if (/^update client_pending_notes set dismissed_at = now\(\)/i.test(trimmed)) {
+      const note = notes.find(
+        (entry) =>
+          entry.id === params[0] &&
+          (!/repeat_of is not null/i.test(trimmed) || Boolean(entry.repeat_of)) &&
+          (!/kind = 'note'/i.test(trimmed) || entry.kind === 'note') &&
+          (!/attached_checklist_id is not null/i.test(trimmed) || Boolean(entry.attached_checklist_id)) &&
+          (!/dismissed_at is null/i.test(trimmed) || !entry.dismissed_at),
+      )
+      if (note) note.dismissed_at = new Date()
+      return { rows: note ? [{ id: note.id }] : [], rowCount: note ? 1 : 0 }
+    }
+    // The follow-up that names why the guarded update changed nothing.
+    if (/^select repeat_of, kind, attached_checklist_id, dismissed_at\s+from client_pending_notes where id = \$1$/i.test(trimmed)) {
+      const note = notes.find((entry) => entry.id === params[0])
+      return { rows: note ? [note] : [], rowCount: note ? 1 : 0 }
+    }
+    // The two reads that SHOW notes: a dismissed row is left out only when the SQL says so.
+    if (/^select id, client_id, template_id, kind, body, author_id, author_name,\s+created_at, attached_checklist_id[\s\S]*from client_pending_notes\s+where attached_checklist_id = any\(\$1::text\[\]\)/i.test(trimmed)) {
+      const rows = notes
+        .filter((entry) => params[0].includes(entry.attached_checklist_id))
+        .filter((entry) => !/and dismissed_at is null/i.test(trimmed) || !entry.dismissed_at)
+      return { rows, rowCount: rows.length }
+    }
+    if (/^select id, client_id, template_id, kind, body, author_id, author_name,\s+created_at, attached_checklist_id[\s\S]*from client_pending_notes\s+where client_id = \$1/i.test(trimmed)) {
+      const rows = notes
+        .filter((entry) => entry.client_id === params[0])
+        .filter((entry) => !/and dismissed_at is null/i.test(trimmed) || !entry.dismissed_at)
+      return { rows, rowCount: rows.length }
+    }
+    if (/^select id, client_id, template_id, kind, body, author_id, author_name,\s+created_at, attached_checklist_id[\s\S]*from client_pending_notes where id = \$1$/i.test(trimmed)) {
+      const note = notes.find((entry) => entry.id === params[0])
+      return { rows: note ? [note] : [], rowCount: note ? 1 : 0 }
+    }
     // The copy a repeating note leaves on one checklist (its own, already attached row).
     if (/^insert into client_pending_notes\s+\(id, client_id, template_id, kind, body, author_id, author_name, created_at,\s+attached_checklist_id/i.test(trimmed)) {
       const [id, clientId, templateId, kind, body, authorId, authorName, checklistId, itemId, repeatOf] = params
@@ -29995,11 +30031,11 @@ describe('a client note that repeats on every checklist (postgres branch)', () =
       .catch(() => {})
     const [created] = fake.matching(/create table if not exists client_pending_notes/i)
     expect(created.text).toMatch(
-      /released_at timestamptz,\s+repeats boolean default false,\s+repeat_of text,\s+last_attached_checklist_id text,\s+last_attached_due_date text\s+\)/,
+      /released_at timestamptz,\s+repeats boolean default false,\s+repeat_of text,\s+last_attached_checklist_id text,\s+last_attached_due_date text,\s+dismissed_at timestamptz\s+\)/,
     )
     const [alter] = fake.matching(/^alter table client_pending_notes\s+add column if not exists repeats/i)
     expect(alter.text.replace(/\s+/g, ' ')).toBe(
-      'alter table client_pending_notes add column if not exists repeats boolean default false, add column if not exists repeat_of text, add column if not exists last_attached_checklist_id text, add column if not exists last_attached_due_date text',
+      'alter table client_pending_notes add column if not exists repeats boolean default false, add column if not exists repeat_of text, add column if not exists last_attached_checklist_id text, add column if not exists last_attached_due_date text, add column if not exists dismissed_at timestamptz',
     )
     // The released_at statement it follows is untouched.
     expect(fake.matching(/^alter table client_pending_notes add column if not exists released_at timestamptz$/i)).toHaveLength(1)
@@ -30094,7 +30130,7 @@ describe('a client note that repeats on every checklist (postgres branch)', () =
     })
     const listed = await pgStore.listClientPendingNotes('c1')
     expect(statements[0].text.replace(/\s+/g, ' ')).toContain(
-      'created_at, attached_checklist_id, attached_item_id, attached_at, repeats, repeat_of, last_attached_checklist_id, last_attached_due_date from client_pending_notes where client_id = $1',
+      'created_at, attached_checklist_id, attached_item_id, attached_at, repeats, repeat_of, last_attached_checklist_id, last_attached_due_date, dismissed_at from client_pending_notes where client_id = $1',
     )
     expect(statements[0].params).toEqual(['c1'])
     expect(listed[0]).toMatchObject({
@@ -30490,6 +30526,157 @@ describe('a repeating note never copies onto one checklist twice (file backend)'
     expect(await copiesOf(clientId, note.id)).toHaveLength(0)
   })
 
+  describe('dismissing one month\'s copy of a repeating NOTE (featreq-e8aa2abe)', () => {
+    // Ids are reused from test to test, so each test reads its own client's notes only.
+    const shownOn = async (clientId, checklistId) =>
+      (await store.listPendingNotesForChecklists([checklistId]))
+        .filter((entry) => entry.clientId === clientId)
+        .map((entry) => entry.id)
+    const authText = () => readFile(localAuthPath, 'utf8')
+
+    it('hides the copy on the checklist and on the client list, keeps its row as a tombstone, and never adds it again - even after the due date moves later', async () => {
+      const clientId = newClient()
+      const note = await repeating(clientId, { kind: 'note' })
+      await addChecklists(checklistRow('chk-c1', clientId, '2026-10-10'))
+      expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+      const [copy] = await copiesOf(clientId, note.id)
+      expect(await shownOn(clientId, 'chk-c1')).toEqual([copy.id])
+      expect((await store.listClientPendingNotes(clientId)).map((entry) => entry.id)).toContain(copy.id)
+
+      expect(await store.dismissPendingNoteCopy(copy.id)).toEqual({ dismissed: true })
+      // Hidden on both lists...
+      expect(await shownOn(clientId, 'chk-c1')).toEqual([])
+      expect((await store.listClientPendingNotes(clientId)).map((entry) => entry.id)).not.toContain(copy.id)
+      // ...but the row stays, stamped, and the mapper carries the stamp.
+      const stored = (await copiesOf(clientId, note.id))[0]
+      expect(stored.dismissedAt).toEqual(expect.any(String))
+      expect(await store.getClientPendingNote(copy.id)).toMatchObject({ id: copy.id, repeatOf: note.id, dismissedAt: stored.dismissedAt })
+
+      // The guard still sees it: not added again by any pass, not even once the
+      // checklist's due date is later than the pointer (the H1 case of a6c41a0).
+      expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+      await store.updateChecklistMeta('chk-c1', { dueDate: '2026-11-10' })
+      for (let pass = 0; pass < 3; pass += 1) {
+        expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+      }
+      await changeChecklist('chk-c1', (checklist) => {
+        checklist.dueDate = '2026-12-31'
+      })
+      expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+      expect(await copiesOf(clientId, note.id)).toHaveLength(1)
+      expect(await shownOn(clientId, 'chk-c1')).toEqual([])
+
+      // The next month's checklist still gets its own copy, shown as usual.
+      await addChecklists(checklistRow('chk-c2', clientId, '2027-01-20'))
+      expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+      expect(await copiesOn(clientId, note.id, 'chk-c2')).toHaveLength(1)
+      expect(await shownOn(clientId, 'chk-c2')).toHaveLength(1)
+      expect(await shownOn(clientId, 'chk-c1')).toEqual([])
+    })
+
+    it('dismisses only that checklist\'s copy: another month\'s stays on its card', async () => {
+      const clientId = newClient()
+      const note = await repeating(clientId, { kind: 'note' })
+      await addChecklists(checklistRow('chk-c1', clientId, '2026-10-10'), checklistRow('chk-c2', clientId, '2026-11-10'))
+      expect(await store.attachPendingClientNotes({ clientId })).toBe(2)
+      const first = (await copiesOn(clientId, note.id, 'chk-c1'))[0]
+      await store.dismissPendingNoteCopy(first.id)
+      expect(await shownOn(clientId, 'chk-c1')).toEqual([])
+      expect(await shownOn(clientId, 'chk-c2')).toHaveLength(1)
+    })
+
+    it('dismissing twice is one write: the second answers the same without touching the file', async () => {
+      const clientId = newClient()
+      const note = await repeating(clientId, { kind: 'note' })
+      await addChecklists(checklistRow('chk-c1', clientId, '2026-10-10'))
+      await store.attachPendingClientNotes({ clientId })
+      const [copy] = await copiesOf(clientId, note.id)
+      expect(await store.dismissPendingNoteCopy(copy.id)).toEqual({ dismissed: true })
+      const afterFirst = await authText()
+      expect(await store.dismissPendingNoteCopy(copy.id)).toEqual({ dismissed: false, reason: 'already_dismissed' })
+      expect(await authText()).toBe(afterFirst)
+    })
+
+    it('refuses a task-kind copy, an ordinary note, the repeating note itself, and an unknown id, writing nothing', async () => {
+      const clientId = newClient()
+      const task = await repeating(clientId)
+      await addChecklists(checklistRow('chk-c1', clientId, '2026-10-10'))
+      await store.attachPendingClientNotes({ clientId })
+      const [taskCopy] = await copiesOf(clientId, task.id)
+      const once = await store.createClientPendingNote(clientId, { templateId: 'tpl-pn', kind: 'note', body: 'once' })
+      const before = await authText()
+      expect(await store.dismissPendingNoteCopy(taskCopy.id)).toEqual({ dismissed: false, reason: 'task_copy' })
+      expect(await store.dismissPendingNoteCopy(once.id)).toEqual({ dismissed: false, reason: 'not_a_copy' })
+      expect(await store.dismissPendingNoteCopy(task.id)).toEqual({ dismissed: false, reason: 'not_a_copy' })
+      expect(await store.dismissPendingNoteCopy('pnote-nope')).toEqual({ dismissed: false, reason: 'not_found' })
+      expect(await store.dismissPendingNoteCopy('')).toEqual({ dismissed: false, reason: 'not_found' })
+      expect(await authText()).toBe(before)
+      // The task copy's step is still on the checklist, shown as before.
+      expect((await itemsOf('chk-c1')).map((item) => item.id)).toContain(taskCopy.attachedItemId)
+    })
+
+    it('a repeating NOTE parent is not a copy; a note-kind parent and an unattached copy are refused too', async () => {
+      const clientId = newClient()
+      const parent = await repeating(clientId, { kind: 'note' })
+      expect(await store.dismissPendingNoteCopy(parent.id)).toEqual({ dismissed: false, reason: 'not_a_copy' })
+      const authState = await authNow()
+      authState.clientPendingNotes.push({
+        id: 'pnote-loose-copy',
+        clientId,
+        templateId: 'tpl-pn',
+        kind: 'note',
+        body: 'x',
+        createdAt: new Date().toISOString(),
+        attachedChecklistId: null,
+        attachedItemId: null,
+        attachedAt: null,
+        repeatOf: parent.id,
+      })
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+      expect(await store.dismissPendingNoteCopy('pnote-loose-copy')).toEqual({ dismissed: false, reason: 'not_a_copy' })
+    })
+
+    it('stopping the repeating note leaves its copies where they are (rows kept, repeatOf dangling), dismissed or not', async () => {
+      const clientId = newClient()
+      const note = await repeating(clientId, { kind: 'note' })
+      await addChecklists(checklistRow('chk-c1', clientId, '2026-10-10'), checklistRow('chk-c2', clientId, '2026-11-10'))
+      await store.attachPendingClientNotes({ clientId })
+      const first = (await copiesOn(clientId, note.id, 'chk-c1'))[0]
+      await store.dismissPendingNoteCopy(first.id)
+      expect(await store.deleteClientPendingNote(note.id)).toBe(true)
+      const left = await copiesOf(clientId, note.id)
+      expect(left.map((entry) => entry.attachedChecklistId).sort()).toEqual(['chk-c1', 'chk-c2'])
+      expect(left.find((entry) => entry.id === first.id).dismissedAt).toEqual(expect.any(String))
+      expect(await shownOn(clientId, 'chk-c1')).toEqual([])
+      expect(await shownOn(clientId, 'chk-c2')).toHaveLength(1)
+    })
+
+    it('a split push carries the tombstone to the live row: it stays hidden there and is not added again', async () => {
+      const clientId = newClient()
+      const note = await repeating(clientId, { kind: 'note' })
+      await addChecklists(
+        checklistRow('chk-c1', clientId, '2026-10-10', {
+          items: [
+            { id: 'c1-done', label: 'Done', done: true },
+            { id: 'c1-open', label: 'Open', done: false },
+          ],
+        }),
+      )
+      await store.attachPendingClientNotes({ clientId })
+      const [copy] = await copiesOf(clientId, note.id)
+      await store.dismissPendingNoteCopy(copy.id)
+      const pushed = await store.pushChecklistInstance('chk-c1', 'emp-1', '2026-11-12')
+      expect(pushed.checklist.id).not.toBe('chk-c1')
+      expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+      const copies = await copiesOf(clientId, note.id)
+      expect(copies).toHaveLength(1)
+      expect(copies[0].dismissedAt).toEqual(expect.any(String))
+      expect(copies[0].attachedChecklistId).toBe(pushed.checklist.id)
+      expect(await shownOn(clientId, pushed.checklist.id)).toEqual([])
+      expect(await shownOn(clientId, 'chk-c1')).toEqual([])
+    })
+  })
+
   it('skips a FINISHED checklist (every step done by the roll-up) and goes on the next one with work left', async () => {
     const clientId = newClient()
     const note = await repeating(clientId)
@@ -30815,7 +31002,7 @@ describe('a repeating note never copies onto one checklist twice (postgres branc
       },
     })
     const columns =
-      'created_at, attached_checklist_id, attached_item_id, attached_at, repeats, repeat_of, last_attached_checklist_id, last_attached_due_date from client_pending_notes'
+      'created_at, attached_checklist_id, attached_item_id, attached_at, repeats, repeat_of, last_attached_checklist_id, last_attached_due_date, dismissed_at from client_pending_notes'
     const one = await pgStore.getClientPendingNote('pnote-r')
     expect(statements[0]).toContain(`${columns} where id = $1`)
     expect(one).toMatchObject({ repeats: true, lastAttachedChecklistId: 'chk-a', lastAttachedDueDate: '2026-10-10' })
@@ -30827,7 +31014,129 @@ describe('a repeating note never copies onto one checklist twice (postgres branc
     expect(onChecklists[2]).not.toHaveProperty('repeatOf')
   })
 
-  it('start-up runs the alter only when a column is missing, and skips it (no lock) once all four are there', async () => {
+  describe('dismissing one month\'s copy of a repeating NOTE (featreq-e8aa2abe)', () => {
+    const DISMISS = /^update client_pending_notes set dismissed_at = now\(\)/i
+    const noteParent = () => noteRow({ kind: 'note' })
+    const attachedCopy = (fake, checklistId) => copiesOn(fake, checklistId)[0]
+    const shownOn = async (pgStore, checklistId) =>
+      (await pgStore.listPendingNotesForChecklists([checklistId])).map((entry) => entry.id)
+
+    it('is ONE guarded UPDATE (a copy, kind note, attached, not yet dismissed), not a read-then-write', async () => {
+      const fake = fakePendingNotesPostgres({
+        notes: [noteParent()],
+        checklists: [checklistRow('chk-c1', '2026-10-10')],
+      })
+      const pgStore = postgresStore(fake)
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+      const copy = attachedCopy(fake, 'chk-c1')
+      expect(await pgStore.dismissPendingNoteCopy(copy.id)).toEqual({ dismissed: true })
+      const [update] = fake.matching(DISMISS)
+      expect(update.text.replace(/\s+/g, ' ')).toBe(
+        "update client_pending_notes set dismissed_at = now() where id = $1 and repeat_of is not null and kind = 'note' and attached_checklist_id is not null and dismissed_at is null returning id",
+      )
+      expect(update.params).toEqual([copy.id])
+      // A success needs no second read.
+      expect(fake.matching(/^select repeat_of, kind, attached_checklist_id, dismissed_at/i)).toHaveLength(0)
+    })
+
+    it('hides the copy on the checklist read and the client list; both SQL texts say so', async () => {
+      const fake = fakePendingNotesPostgres({
+        notes: [noteParent()],
+        checklists: [checklistRow('chk-c1', '2026-10-10')],
+      })
+      const pgStore = postgresStore(fake)
+      await pgStore.attachPendingClientNotes({ clientId: 'c1' })
+      const copy = attachedCopy(fake, 'chk-c1')
+      expect(await shownOn(pgStore, 'chk-c1')).toEqual([copy.id])
+      expect((await pgStore.listClientPendingNotes('c1')).map((entry) => entry.id)).toContain(copy.id)
+
+      await pgStore.dismissPendingNoteCopy(copy.id)
+      expect(await shownOn(pgStore, 'chk-c1')).toEqual([])
+      expect((await pgStore.listClientPendingNotes('c1')).map((entry) => entry.id)).not.toContain(copy.id)
+      // The tombstone is still a row the store can read by id, with its stamp.
+      expect(await pgStore.getClientPendingNote(copy.id)).toMatchObject({ repeatOf: 'pnote-r', dismissedAt: expect.any(String) })
+      for (const read of [
+        /^select id, client_id[\s\S]*where attached_checklist_id = any\(\$1::text\[\]\)/i,
+        /^select id, client_id[\s\S]*where client_id = \$1/i,
+      ]) {
+        const statements = fake.matching(read)
+        expect(statements.length).toBeGreaterThan(0)
+        for (const statement of statements) expect(statement.text).toMatch(/\band dismissed_at is null\b/)
+      }
+    })
+
+    it('the guards do NOT filter dismissed rows: a later pass, even after the due date moves later, adds nothing; the next month gets its copy', async () => {
+      const fake = fakePendingNotesPostgres({
+        notes: [noteParent()],
+        checklists: [checklistRow('chk-c1', '2026-10-10')],
+      })
+      const pgStore = postgresStore(fake)
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+      await pgStore.dismissPendingNoteCopy(attachedCopy(fake, 'chk-c1').id)
+      fake.checklists[0].due_date = '2026-11-10'
+      for (let pass = 0; pass < 3; pass += 1) {
+        expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+      }
+      fake.checklists[0].due_date = '2026-12-31'
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+      expect(copiesOn(fake, 'chk-c1')).toHaveLength(1)
+      expect(await shownOn(pgStore, 'chk-c1')).toEqual([])
+
+      fake.checklists.push(checklistRow('chk-c2', '2027-01-20'))
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+      expect(copiesOn(fake, 'chk-c2')).toHaveLength(1)
+      expect(await shownOn(pgStore, 'chk-c2')).toHaveLength(1)
+
+      // The statements that decide "does this checklist already hold a copy" never mention dismissed_at.
+      for (const guard of [
+        ...fake.matching(/^select n\.id as note_id, found\.id as checklist_id/i),
+        ...fake.matching(/^select 1 from client_pending_notes where repeat_of = \$1 and attached_checklist_id = \$2$/i),
+        ...fake.matching(/^update client_pending_notes\s+set last_attached_checklist_id/i),
+      ]) {
+        expect(guard.text).not.toMatch(/dismissed_at/)
+      }
+    })
+
+    it('dismissing twice is one change: the second finds it already dismissed and answers the same, keeping the first stamp', async () => {
+      const fake = fakePendingNotesPostgres({
+        notes: [noteParent()],
+        checklists: [checklistRow('chk-c1', '2026-10-10')],
+      })
+      const pgStore = postgresStore(fake)
+      await pgStore.attachPendingClientNotes({ clientId: 'c1' })
+      const copy = attachedCopy(fake, 'chk-c1')
+      await pgStore.dismissPendingNoteCopy(copy.id)
+      const stamp = copy.dismissed_at
+      expect(await pgStore.dismissPendingNoteCopy(copy.id)).toEqual({ dismissed: false, reason: 'already_dismissed' })
+      expect(copy.dismissed_at).toBe(stamp)
+      // The guarded update ran twice, changed one row; the second explanation is a read.
+      expect(fake.matching(DISMISS)).toHaveLength(2)
+      expect(fake.matching(/^select repeat_of, kind, attached_checklist_id, dismissed_at\s+from client_pending_notes where id = \$1$/i)).toHaveLength(1)
+    })
+
+    it('refuses a task-kind copy, an ordinary note, the parent and an unknown id with the matching reason', async () => {
+      const fake = fakePendingNotesPostgres({
+        notes: [
+          noteRow(),
+          noteRow({ id: 'pnote-once', repeats: null, kind: 'note', body: 'once', attached_checklist_id: 'chk-c1' }),
+        ],
+        checklists: [checklistRow('chk-c1', '2026-10-10')],
+      })
+      const pgStore = postgresStore(fake)
+      // The repeating parent is a TASK here, so its copy is a task copy.
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBeGreaterThan(0)
+      const taskCopy = attachedCopy(fake, 'chk-c1')
+      expect(taskCopy.kind).toBe('task')
+      expect(await pgStore.dismissPendingNoteCopy(taskCopy.id)).toEqual({ dismissed: false, reason: 'task_copy' })
+      expect(await pgStore.dismissPendingNoteCopy('pnote-once')).toEqual({ dismissed: false, reason: 'not_a_copy' })
+      expect(await pgStore.dismissPendingNoteCopy('pnote-r')).toEqual({ dismissed: false, reason: 'not_a_copy' })
+      expect(await pgStore.dismissPendingNoteCopy('pnote-nope')).toEqual({ dismissed: false, reason: 'not_found' })
+      expect(await pgStore.dismissPendingNoteCopy('')).toEqual({ dismissed: false, reason: 'not_found' })
+      expect(fake.notes.every((entry) => !entry.dismissed_at)).toBe(true)
+    })
+  })
+
+  it('start-up runs the alter only when a column is missing, and skips it (no lock) once all five are there', async () => {
     const check = /^select column_name from information_schema\.columns\s+where table_schema = current_schema\(\) and table_name = 'client_pending_notes'\s+and column_name = any\(\$1::text\[\]\)$/i
     const missing = fakePostgres()
     await postgresStore(missing).initialize().catch(() => {})
@@ -30835,7 +31144,7 @@ describe('a repeating note never copies onto one checklist twice (postgres branc
     expect(lookup.text.replace(/\s+/g, ' ')).toBe(
       "select column_name from information_schema.columns where table_schema = current_schema() and table_name = 'client_pending_notes' and column_name = any($1::text[])",
     )
-    expect(lookup.params).toEqual([['repeats', 'repeat_of', 'last_attached_checklist_id', 'last_attached_due_date']])
+    expect(lookup.params).toEqual([['repeats', 'repeat_of', 'last_attached_checklist_id', 'last_attached_due_date', 'dismissed_at']])
     expect(missing.matching(/^alter table client_pending_notes\s+add column if not exists repeats/i)).toHaveLength(1)
 
     const present = fakePostgres()
@@ -30843,7 +31152,7 @@ describe('a repeating note never copies onto one checklist twice (postgres branc
     present.pool.query = async (text, params) => {
       const result = await inner(text, params)
       if (check.test(String(text).trim())) {
-        return { rows: lookup.params[0].map((column_name) => ({ column_name })), rowCount: 4 }
+        return { rows: lookup.params[0].map((column_name) => ({ column_name })), rowCount: 5 }
       }
       return result
     }
@@ -30852,12 +31161,16 @@ describe('a repeating note never copies onto one checklist twice (postgres branc
     expect(present.matching(/^alter table client_pending_notes\s+add column if not exists repeats/i)).toHaveLength(0)
     // The released_at alter is untouched: it still runs on every start.
     expect(present.matching(/^alter table client_pending_notes add column if not exists released_at timestamptz$/i)).toHaveLength(1)
-    // And three of four is still a missing column.
+    // And a partial set (even four of five, the dismissed_at one missing) is still a missing column.
     const partial = fakePostgres()
     const innerPartial = partial.pool.query.bind(partial.pool)
     partial.pool.query = async (text, params) => {
       const result = await innerPartial(text, params)
-      if (check.test(String(text).trim())) return { rows: [{ column_name: 'repeats' }], rowCount: 1 }
+      if (check.test(String(text).trim())) {
+        // The four columns that shipped earlier are there; only dismissed_at is new.
+        const earlier = ['repeats', 'repeat_of', 'last_attached_checklist_id', 'last_attached_due_date']
+        return { rows: earlier.map((column_name) => ({ column_name })), rowCount: 4 }
+      }
       return result
     }
     await postgresStore(partial).initialize().catch(() => {})

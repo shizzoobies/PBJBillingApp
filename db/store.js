@@ -3599,10 +3599,29 @@ function mapClientPendingNoteRow(row) {
     note.lastAttachedDueDate = row.last_attached_due_date ?? null
   }
   if (row.repeat_of) note.repeatOf = row.repeat_of
+  // Only a dismissed copy carries this (a tombstone: hidden from every list, still
+  // read by the "this checklist already holds a copy" guards).
+  if (row.dismissed_at) note.dismissedAt = new Date(row.dismissed_at).toISOString()
   return note
 }
 
-/** A file-backend note without its internal `releasedAt` flag (Postgres rows never carry it). */
+/**
+ * Why a note cannot be dismissed (or has been already), or null when it can: the
+ * one reading of `dismissPendingNoteCopy`'s guard that the file backend decides
+ * on and the Postgres branch uses to name why its guarded UPDATE changed nothing.
+ * Only a copy (`repeatOf`) of kind 'note' attached to a checklist qualifies.
+ */
+function pendingNoteDismissBlock({ repeatOf, kind, attachedChecklistId, dismissedAt }) {
+  if (!repeatOf) return 'not_a_copy'
+  if (kind === 'task') return 'task_copy'
+  if (!attachedChecklistId) return 'not_a_copy'
+  return dismissedAt ? 'already_dismissed' : null
+}
+
+/**
+ * A file-backend note without its internal `releasedAt` flag (Postgres rows never
+ * carry it). A dismissed copy keeps its `dismissedAt`, as the Postgres mapper does.
+ */
 function publicPendingNote(note) {
   const copy = { ...note }
   delete copy.releasedAt
@@ -4202,7 +4221,8 @@ export class AppDataStore {
           repeats boolean default false,
           repeat_of text,
           last_attached_checklist_id text,
-          last_attached_due_date text
+          last_attached_due_date text,
+          dismissed_at timestamptz
         )
       `)
       // A note released from a deleted or skipped checklist stays marked
@@ -4221,19 +4241,26 @@ export class AppDataStore {
       // even when every column is already there, so look first and run the DDL only
       // on the first boot after this shipped (a fresh database has the columns from
       // the create above).
+      //
+      // `dismissed_at` rides the same look-first step: one month's copy of a
+      // repeating NOTE that someone took off its checklist keeps its row as a
+      // tombstone with this stamp, hidden from every list but still read by the
+      // "this checklist already holds a copy" guards, so the note is not added
+      // to that checklist again. Existing rows read as not dismissed (null).
       const repeatColumns = await this.pool.query(
         `select column_name from information_schema.columns
           where table_schema = current_schema() and table_name = 'client_pending_notes'
             and column_name = any($1::text[])`,
-        [['repeats', 'repeat_of', 'last_attached_checklist_id', 'last_attached_due_date']],
+        [['repeats', 'repeat_of', 'last_attached_checklist_id', 'last_attached_due_date', 'dismissed_at']],
       )
-      if ((repeatColumns.rows?.length ?? 0) < 4) {
+      if ((repeatColumns.rows?.length ?? 0) < 5) {
         await this.pool.query(
           `alter table client_pending_notes
              add column if not exists repeats boolean default false,
              add column if not exists repeat_of text,
              add column if not exists last_attached_checklist_id text,
-             add column if not exists last_attached_due_date text`,
+             add column if not exists last_attached_due_date text,
+             add column if not exists dismissed_at timestamptz`,
         )
       }
       await this.pool.query(
@@ -20902,7 +20929,9 @@ export class AppDataStore {
 
   /**
    * A client's pending notes: pending first, then attached (last 90 days), each
-   * newest first, at most `MAX_LISTED_PENDING_NOTES` of them.
+   * newest first, at most `MAX_LISTED_PENDING_NOTES` of them. A DISMISSED copy of
+   * a repeating note is not listed: it is a hidden tombstone, like an ordinary
+   * note that was deleted.
    */
   async listClientPendingNotes(clientId) {
     if (!clientId) return []
@@ -20910,10 +20939,12 @@ export class AppDataStore {
       const result = await this.pool.query(
         `select id, client_id, template_id, kind, body, author_id, author_name,
                 created_at, attached_checklist_id, attached_item_id, attached_at,
-                repeats, repeat_of, last_attached_checklist_id, last_attached_due_date
+                repeats, repeat_of, last_attached_checklist_id, last_attached_due_date,
+                dismissed_at
            from client_pending_notes
           where client_id = $1
             and (attached_checklist_id is null or attached_at > now() - interval '90 days')
+            and dismissed_at is null
           order by (attached_checklist_id is null) desc, created_at desc
           limit ${MAX_LISTED_PENDING_NOTES}`,
         [clientId],
@@ -20925,6 +20956,7 @@ export class AppDataStore {
     const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000
     return list
       .filter((note) => note.clientId === clientId)
+      .filter((note) => !note.dismissedAt)
       .filter((note) => !note.attachedAt || new Date(note.attachedAt).getTime() > cutoff)
       .slice()
       .sort(
@@ -20939,7 +20971,9 @@ export class AppDataStore {
   /**
    * Notes attached to ANY of the given checklists, oldest attachment first
    * (kind 'note' to show, kind 'task' for the link back). One query for the
-   * whole page of cards — a checklist page asks once, not once per card.
+   * whole page of cards — a checklist page asks once, not once per card. A
+   * dismissed copy is not returned (the guards that decide whether a checklist
+   * already holds a copy read the table themselves and still see it).
    */
   async listPendingNotesForChecklists(checklistIds) {
     const ids = [
@@ -20950,9 +20984,11 @@ export class AppDataStore {
       const result = await this.pool.query(
         `select id, client_id, template_id, kind, body, author_id, author_name,
                 created_at, attached_checklist_id, attached_item_id, attached_at,
-                repeats, repeat_of, last_attached_checklist_id, last_attached_due_date
+                repeats, repeat_of, last_attached_checklist_id, last_attached_due_date,
+                dismissed_at
            from client_pending_notes
           where attached_checklist_id = any($1::text[])
+            and dismissed_at is null
           order by attached_at asc nulls last, created_at asc`,
         [ids],
       )
@@ -20962,7 +20998,7 @@ export class AppDataStore {
     const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
     const wanted = new Set(ids)
     return list
-      .filter((note) => wanted.has(note.attachedChecklistId))
+      .filter((note) => wanted.has(note.attachedChecklistId) && !note.dismissedAt)
       .slice()
       .sort((a, b) =>
         String(a.attachedAt ?? a.createdAt).localeCompare(String(b.attachedAt ?? b.createdAt)),
@@ -21042,7 +21078,8 @@ export class AppDataStore {
       const result = await this.pool.query(
         `select id, client_id, template_id, kind, body, author_id, author_name,
                 created_at, attached_checklist_id, attached_item_id, attached_at,
-                repeats, repeat_of, last_attached_checklist_id, last_attached_due_date
+                repeats, repeat_of, last_attached_checklist_id, last_attached_due_date,
+                dismissed_at
            from client_pending_notes where id = $1`,
         [noteId],
       )
@@ -21073,6 +21110,64 @@ export class AppDataStore {
     const removed = authState.clientPendingNotes.length < before
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return removed
+  }
+
+  /**
+   * Take ONE month's copy of a repeating NOTE off its checklist: the row stays as
+   * a hidden tombstone (`dismissed_at`), because the "this checklist already holds
+   * a copy" guards read it, and deleting it would let a later pass add the note
+   * to that checklist again (for example after its due date is pushed later).
+   *
+   * Only a copy (`repeat_of` set) of kind 'note' that is attached to a checklist
+   * and not yet dismissed is changed, in ONE guarded UPDATE (not read-then-write).
+   * Dismissing twice is the same answer without a second write.
+   *
+   * @returns {Promise<{ dismissed: true } | { dismissed: false, reason:
+   *   'already_dismissed' | 'not_a_copy' | 'task_copy' | 'not_found' }>}
+   *   `already_dismissed` is a success the caller answers like the first dismiss;
+   *   the other reasons wrote nothing.
+   */
+  async dismissPendingNoteCopy(noteId) {
+    if (!noteId) return { dismissed: false, reason: 'not_found' }
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update client_pending_notes set dismissed_at = now()
+          where id = $1 and repeat_of is not null and kind = 'note'
+            and attached_checklist_id is not null and dismissed_at is null
+          returning id`,
+        [noteId],
+      )
+      if ((result.rowCount ?? 0) > 0) return { dismissed: true }
+      const current = await this.pool.query(
+        `select repeat_of, kind, attached_checklist_id, dismissed_at
+           from client_pending_notes where id = $1`,
+        [noteId],
+      )
+      const row = current.rows?.[0]
+      return {
+        dismissed: false,
+        reason: row
+          ? pendingNoteDismissBlock({
+              repeatOf: row.repeat_of,
+              kind: row.kind,
+              attachedChecklistId: row.attached_checklist_id,
+              dismissedAt: row.dismissed_at,
+            }) ?? 'not_a_copy'
+          : 'not_found',
+      }
+    }
+    // File backend: read, decide and write in ONE queue slot (raw fs calls only).
+    return enqueueFileOperation(localAuthPath, async () => {
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+      const note = list.find((entry) => entry.id === noteId)
+      if (!note) return { dismissed: false, reason: 'not_found' }
+      const block = pendingNoteDismissBlock(note)
+      if (block) return { dismissed: false, reason: block }
+      note.dismissedAt = nowIso()
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return { dismissed: true }
+    })
   }
 
   /**
