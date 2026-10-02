@@ -104,6 +104,10 @@ describe('a redelivered payment_failed that no longer applies is dropped, not an
     expect(applyAt).toBeGreaterThan(guardAt)
     const guard = failed.slice(guardAt, applyAt)
     expect(guard).toContain('invoice.stripePaymentIntentId !== object.id')
+    // A different intent supersedes only while the invoice is mid-payment: a
+    // 'sent' invoice carries whichever attempt failed last, and the pay link
+    // mints a new intent per click, so a second decline must still be announced.
+    expect(guard).toContain("invoice.status === 'processing' &&")
     // Acknowledged (200), so Stripe stops retrying, with one log line and a return.
     expect(guard).toContain("sendJson(response, 200, { received: true, ignored: 'stale_payment_failure' })")
     expect(guard).toContain('console.warn(')
@@ -112,13 +116,30 @@ describe('a redelivered payment_failed that no longer applies is dropped, not an
 
   it('skips the failure log and the owner notification when the store left the invoice paid (or there is nothing to write on)', () => {
     const applyAt = failed.indexOf('await applyPayment(invoice.id')
-    const checkAt = failed.indexOf("if (!failedInvoice || failedInvoice.status === 'paid') {")
+    const checkAt = failed.indexOf('!failedInvoice ||')
     const logAt = failed.indexOf('recordInvoicePaymentFailure(')
     const notifyAt = failed.indexOf("'invoice_payment_failed'")
     expect(checkAt).toBeGreaterThan(applyAt)
     expect(logAt).toBeGreaterThan(checkAt)
     expect(notifyAt).toBeGreaterThan(checkAt)
     expect(failed.slice(checkAt, logAt)).toContain('return')
+  })
+
+  it('passes the failed intent to the store, which refuses on the LOCKED row; the skip also covers a different intent', () => {
+    const applyAt = failed.indexOf('await applyPayment(invoice.id')
+    const call = failed.slice(applyAt, failed.indexOf('})', applyAt))
+    expect(call).toContain('onlyIfPaymentIntent: object.id')
+    const checkAt = failed.indexOf('!failedInvoice ||')
+    const check = failed.slice(checkAt, failed.indexOf('{', checkAt))
+    expect(check).toContain("failedInvoice.status === 'paid'")
+    expect(check).toContain('failedInvoice.stripePaymentIntentId !== object.id')
+  })
+
+  it('still forgets the event and answers 500 when an apply throws (the typed not-applied error included)', () => {
+    const catchAt = route.indexOf("console.error('[stripe] webhook handling failed:', error)")
+    const block = route.slice(catchAt, route.indexOf("sendJson(response, 500, { error: 'webhook_failed' })", catchAt) + 60)
+    expect(block).toContain('if (!paymentApplied) {')
+    expect(block).toContain('await appDataStore.forgetStripeEvent(event.id)')
   })
 
   it('does not drop a decline on an invoice that is simply still sent (nothing moves, owners still hear)', () => {

@@ -970,6 +970,27 @@ export class InvoiceChangedError extends Error {
   }
 }
 
+/** What the locked read of `applyInvoicePayment` answers when it finds no row. */
+const INVOICE_ROW_NOT_FOUND = Symbol('invoice row not found')
+
+/**
+ * `applyInvoicePayment` could not find the row it was asked to record a payment
+ * on, but the invoice still exists. With the bulk save's table lock live that
+ * cannot happen (the locked read waits at the lock and then sees the re-inserted
+ * row); it is the guard that keeps a payment from being dropped silently if that
+ * lock were ever taken out on its own. Thrown rather than answering null,
+ * because null means "the invoice is gone" and the webhook would keep the event
+ * ledgered: its catch takes the event back out of the ledger and answers 500, so
+ * Stripe redelivers.
+ */
+export class InvoicePaymentNotAppliedError extends Error {
+  constructor(invoiceId) {
+    super(`The payment could not be recorded on invoice ${invoiceId}; it will be retried.`)
+    this.name = 'InvoicePaymentNotAppliedError'
+    this.invoiceId = invoiceId
+  }
+}
+
 /**
  * A covered-date window the owner has been asked about and not yet answered,
  * standing between an invoice and being marked reviewed. Same shape and same
@@ -1188,10 +1209,12 @@ export const BULK_SAVE_LOCK_SQL = `lock table ${BULK_SAVE_LOCK_TABLES.join(', ')
  *
  * `lock_timeout` is deliberately left in force for the whole transaction, not
  * just the table lock: a save that then waits on a row outside the 14 tables
- * (a `users` row, say) gives way and retries rather than sitting on its table
- * locks while a writer queued behind them waits for it - a deadlock the
- * database would otherwise only break after `deadlock_timeout`. Do not "fix"
- * that by resetting it after the lock is granted.
+ * (a `users` row, say) gives way after the tier and retries, instead of waiting
+ * there without limit while it sits on its table locks and every writer queued
+ * behind them waits for it. (The tiers are longer than `deadlock_timeout`, so a
+ * true lock cycle is broken by Postgres's deadlock detector, which may pick
+ * either side - the 40P01 the loop retries when the save is the one picked.) Do
+ * not "fix" this by resetting `lock_timeout` after the lock is granted.
  */
 export const BULK_SAVE_LOCK_TIMEOUTS = ['1500ms', '1500ms', '3000ms']
 
@@ -14937,6 +14960,28 @@ export class AppDataStore {
         return null
       }
 
+      // A payment-FAILED event names the payment intent that failed
+      // (`onlyIfPaymentIntent`). If the row is now 'processing' on a DIFFERENT
+      // intent the client has started another payment that is going through, and
+      // this late failure no longer describes the invoice: it must not move it
+      // back to 'sent' or point it at the dead intent. The invoice comes back
+      // unchanged, `statusChanged` false, nothing written - decided here, on the
+      // row as it stands, so it holds even when the unlocked look the webhook
+      // took first was a whole save old. Only 'processing' ties an invoice to a
+      // live intent: a 'sent' one just carries the attempt that failed last (the
+      // pay link mints a new intent per click), so a failure there always applies.
+      if (
+        patch.onlyIfPaymentIntent &&
+        current.status === 'processing' &&
+        current.stripePaymentIntentId &&
+        current.stripePaymentIntentId !== patch.onlyIfPaymentIntent
+      ) {
+        console.warn(
+          `[invoices] applyInvoicePayment skipped: ${invoiceId} is now on ${current.stripePaymentIntentId}, not ${patch.onlyIfPaymentIntent}`,
+        )
+        return { next: current, statusChanged: false, linesChanged: false, unchanged: true }
+      }
+
       const next = { ...current }
       if (PAYMENT_INVOICE_STATUSES.has(patch.status)) next.status = patch.status
       /**
@@ -14983,71 +15028,16 @@ export class AppDataStore {
     }
 
     if (this.pool) {
-
-      // THE DECISION IS TAKEN ON THE ROW AS IT IS WHEN THE WRITE RUNS. A plain
-      // read taken before the write is no basis for it: the bulk save holds the
-      // invoices table EXCLUSIVE for seconds, so an UPDATE can wait behind it
-      // while its plan goes stale, and a card payment's two events a second
-      // apart would then undo each other (the second writing `processing` and a
-      // null paid_at over a paid row, or blanking a session id the first one
-      // wrote). `for update` waits at that table lock, reads the row as the save
-      // left it, and holds it until the commit - so the plan, `statusChanged`
-      // (which drives the client's email) and the write all describe one row, and
-      // the UPDATE cannot match nothing: the lock keeps the row from being
-      // deleted under us.
-      const dbClient = await this.pool.connect()
-      try {
-        await dbClient.query('begin')
-        const locked = await dbClient.query(
-          `select ${INVOICE_SELECT_COLUMNS}
-             from invoices where id = $1 for update`,
-          [invoiceId],
-        )
-        const planned = locked.rows.length > 0 ? planPayment(mapInvoiceRow(locked.rows[0])) : null
-        if (!planned) {
-          // Gone, or void: nothing to write.
-          await dbClient.query('rollback')
-          return null
-        }
-        const { next, statusChanged, linesChanged } = planned
-
-        // The money columns are only in the statement when a line was actually
-        // appended.
-        const params = [
-          invoiceId,
-          next.status,
-          next.stripeCheckoutSessionId ?? null,
-          next.stripePaymentIntentId ?? null,
-          next.paymentMethod ?? null,
-          next.paidAt ?? null,
-          next.sentAt ?? null,
-          next.stripeCardSessionId ?? null,
-        ]
-        if (linesChanged) params.push(JSON.stringify(next.lineItems), next.subtotal, next.total)
-        // `returning` hands back the row this statement wrote, so the answer needs
-        // no second read that could fail after the payment was already recorded.
-        const written = await dbClient.query(
-          `update invoices
-              set status = $2, stripe_checkout_session_id = $3, stripe_payment_intent_id = $4,
-                  payment_method = $5, paid_at = $6, sent_at = $7,
-                  stripe_card_session_id = $8${
-                    linesChanged
-                      ? ', line_items = $9::jsonb, subtotal = $10, total = $11'
-                      : ''
-                  },
-                  updated_at = now()
-            where id = $1
-            returning ${INVOICE_SELECT_COLUMNS}`,
-          params,
-        )
-        await dbClient.query('commit')
-        return withStatusChanged(mapInvoiceRow(written.rows[0]), statusChanged)
-      } catch (error) {
-        await dbClient.query('rollback')
-        throw error
-      } finally {
-        dbClient.release()
+      const applied = await this._applyPaymentLocked(invoiceId, planPayment)
+      if (applied !== INVOICE_ROW_NOT_FOUND) return applied
+      // The locked read found no row. Do not take that to mean the invoice is
+      // gone: ask again, with a plain read outside the rolled-back transaction.
+      // Truly gone: null, as always. Still there: say so, so the webhook takes
+      // the event back out of its ledger and Stripe redelivers it.
+      if (await this._invoiceStillExists(this.pool, invoiceId)) {
+        throw new InvoicePaymentNotAppliedError(invoiceId)
       }
+      return null
     }
 
     // The file backend: read, decide and write inside ONE queue slot, so a save
@@ -15061,10 +15051,105 @@ export class AppDataStore {
       if (index === -1) return null
       const planned = planPayment(normalizeStoredInvoice(data.invoices[index]))
       if (!planned) return null
+      // A superseded payment-failed event: nothing to write.
+      if (planned.unchanged) return withStatusChanged(planned.next, false)
       data.invoices[index] = planned.next
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       return withStatusChanged(planned.next, planned.statusChanged)
     })
+  }
+
+  /**
+   * The Postgres half of `applyInvoicePayment`: begin, read the row `for update`,
+   * plan on THAT row, write it, commit - on one connection. Returns the invoice
+   * as written (or unchanged, for a superseded payment-failed event), null for a
+   * void invoice, and `INVOICE_ROW_NOT_FOUND` when the locked read found no row.
+   *
+   * THE DECISION IS TAKEN ON THE ROW AS IT IS WHEN THE WRITE RUNS. A plain read
+   * taken before the write is no basis for it: the bulk save holds the invoices
+   * table EXCLUSIVE for seconds, so an UPDATE can wait behind it while its plan
+   * goes stale, and a card payment's two events a second apart would then undo
+   * each other (the second writing `processing` and a null paid_at over a paid
+   * row, or blanking a session id the first one wrote). `for update` waits at
+   * that table lock, reads the row as the save left it, and holds it until the
+   * commit - so the plan, `statusChanged` (which drives the client's email) and
+   * the write all describe one row, and the UPDATE cannot match nothing: the lock
+   * keeps the row from being deleted under us.
+   */
+  async _applyPaymentLocked(invoiceId, planPayment) {
+    const dbClient = await this.pool.connect()
+    // Set only when a rollback itself fails: the connection is then in an unknown
+    // state and is released WITH the error, so `pg` destroys it instead of
+    // handing it to the next request.
+    let releaseError
+    try {
+      await dbClient.query('begin')
+      const locked = await dbClient.query(
+        `select ${INVOICE_SELECT_COLUMNS}
+           from invoices where id = $1 for update`,
+        [invoiceId],
+      )
+      if (locked.rows.length === 0) {
+        await dbClient.query('rollback')
+        return INVOICE_ROW_NOT_FOUND
+      }
+      const current = mapInvoiceRow(locked.rows[0])
+      const planned = planPayment(current)
+      if (!planned) {
+        // Void: nothing to write.
+        await dbClient.query('rollback')
+        return null
+      }
+      if (planned.unchanged) {
+        // A superseded payment-failed event: the row stands as it is.
+        await dbClient.query('rollback')
+        return withStatusChanged(current, false)
+      }
+      const { next, statusChanged, linesChanged } = planned
+
+      // The money columns are only in the statement when a line was actually
+      // appended.
+      const params = [
+        invoiceId,
+        next.status,
+        next.stripeCheckoutSessionId ?? null,
+        next.stripePaymentIntentId ?? null,
+        next.paymentMethod ?? null,
+        next.paidAt ?? null,
+        next.sentAt ?? null,
+        next.stripeCardSessionId ?? null,
+      ]
+      if (linesChanged) params.push(JSON.stringify(next.lineItems), next.subtotal, next.total)
+      // `returning` hands back the row this statement wrote, so the answer needs
+      // no second read that could fail after the payment was already recorded.
+      const written = await dbClient.query(
+        `update invoices
+            set status = $2, stripe_checkout_session_id = $3, stripe_payment_intent_id = $4,
+                payment_method = $5, paid_at = $6, sent_at = $7,
+                stripe_card_session_id = $8${
+                  linesChanged
+                    ? ', line_items = $9::jsonb, subtotal = $10, total = $11'
+                    : ''
+                },
+                updated_at = now()
+          where id = $1
+          returning ${INVOICE_SELECT_COLUMNS}`,
+        params,
+      )
+      await dbClient.query('commit')
+      return withStatusChanged(mapInvoiceRow(written.rows[0]), statusChanged)
+    } catch (error) {
+      try {
+        await dbClient.query('rollback')
+      } catch (rollbackError) {
+        releaseError = rollbackError
+        console.error('[invoices] rollback failed; discarding the connection:', rollbackError)
+      }
+      // The ORIGINAL error is what the caller needs to see.
+      throw error
+    } finally {
+      dbClient.release(releaseError)
+    }
   }
 
   /**
@@ -15202,6 +15287,9 @@ export class AppDataStore {
 
     if (this.pool) {
       const dbClient = await this.pool.connect()
+      // Set only when a rollback itself fails: released WITH the error, so `pg`
+      // destroys the connection instead of pooling it.
+      let releaseError
       try {
         await dbClient.query('begin')
         // Decided on the row as it IS: `for update` waits at a running bulk save's
@@ -15232,10 +15320,16 @@ export class AppDataStore {
         )
         await dbClient.query('commit')
       } catch (error) {
-        await dbClient.query('rollback')
+        try {
+          await dbClient.query('rollback')
+        } catch (rollbackError) {
+          releaseError = rollbackError
+          console.error('[invoices] rollback failed; discarding the connection:', rollbackError)
+        }
+        // The ORIGINAL error is what the caller needs to see.
         throw error
       } finally {
-        dbClient.release()
+        dbClient.release(releaseError)
       }
       return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
     }

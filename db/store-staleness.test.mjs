@@ -20,6 +20,7 @@ import {
   INVOICE_SELECT_COLUMNS,
   InvoiceChangedError,
   InvoiceLockedError,
+  InvoicePaymentNotAppliedError,
   InvoicePaymentProcessingError,
   MAX_LISTED_PENDING_NOTES,
   ManualPaymentError,
@@ -32602,6 +32603,172 @@ describe('payment writes decide on the locked row (postgres branch)', () => {
     expect(client.release).toHaveBeenCalledTimes(1)
   })
 
+  describe('a rollback that itself fails (both payment transactions)', () => {
+    // Throws on `rollback` only, and counts the release.
+    async function brokenRollbackClient(fake, rollbackError) {
+      const client = await watchedClient(fake)
+      const inner = client.query.bind(client)
+      client.query = async (text, params) => {
+        if (/^rollback$/i.test(String(text).trim())) throw rollbackError
+        return inner(text, params)
+      }
+      return client
+    }
+
+    it('applyInvoicePayment rethrows the ORIGINAL error and releases the client WITH the rollback error', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const original = new Error('connection reset')
+      const brokenRollback = new Error('connection terminated')
+      const fake = fakePostgres({
+        invoices: [{ ...sentRow }],
+        failOn: { pattern: UPDATE, error: original },
+      })
+      const client = await brokenRollbackClient(fake, brokenRollback)
+      const error = await postgresStore(fake)
+        .applyInvoicePayment('inv-1', { status: 'paid' })
+        .catch((e) => e)
+
+      expect(error).toBe(original)
+      expect(client.release).toHaveBeenCalledTimes(1)
+      expect(client.release).toHaveBeenCalledWith(brokenRollback)
+    })
+
+    it('markInvoicePaidManually rethrows the ORIGINAL error and releases the client WITH the rollback error', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const original = new Error('connection reset')
+      const brokenRollback = new Error('connection terminated')
+      const fake = fakePostgres({
+        invoices: [{ ...sentRow }],
+        failOn: { pattern: /^update invoices\s+set status = 'paid'/i, error: original },
+      })
+      const client = await brokenRollbackClient(fake, brokenRollback)
+      const error = await postgresStore(fake)
+        .markInvoicePaidManually('inv-1', { actorUserId: 'owner-1' })
+        .catch((e) => e)
+
+      expect(error).toBe(original)
+      expect(client.release).toHaveBeenCalledTimes(1)
+      expect(client.release).toHaveBeenCalledWith(brokenRollback)
+    })
+
+    it('a clean connection is released once with no error argument, on success and on a refusal (both methods)', async () => {
+      for (const run of [
+        (s) => s.applyInvoicePayment('inv-1', { status: 'processing' }),
+        (s) => s.markInvoicePaidManually('inv-1', {}),
+        (s) => s.markInvoicePaidManually('inv-1', {}).then(() => s.markInvoicePaidManually('inv-1', {})),
+      ]) {
+        const fake = fakePostgres({ invoices: [{ ...sentRow }] })
+        const client = await watchedClient(fake)
+        await run(postgresStore(fake)).catch(() => {})
+
+        expect(client.release.mock.calls.length).toBeGreaterThanOrEqual(1)
+        for (const call of client.release.mock.calls) expect(call[0]).toBeUndefined()
+      }
+    })
+  })
+
+  describe('a locked read that finds no row', () => {
+    // The locked read answers nothing although the fixture HAS the row: what a
+    // server without the bulk save's table lock can see mid-save.
+    async function lockedReadEmpty(fake) {
+      const client = await watchedClient(fake)
+      const inner = client.query.bind(client)
+      client.query = async (text, params) =>
+        LOCKED.test(String(text).trim()) ? (fake.statements.push({ text: String(text).trim(), params }), { rows: [], rowCount: 0 }) : inner(text, params)
+      return client
+    }
+
+    it('and the invoice is truly gone: answers null, no UPDATE, rolled back', async () => {
+      const fake = fakePostgres({ invoices: [] })
+      const client = await watchedClient(fake)
+      const result = await postgresStore(fake).applyInvoicePayment('inv-1', { status: 'paid' })
+
+      expect(result).toBeNull()
+      expect(fake.matching(UPDATE)).toHaveLength(0)
+      expect(control(fake)).toEqual(['begin', 'rollback'])
+      // The probe is a plain read on the pool, after the rollback.
+      const probeAt = fake.indexOf(/^select 1 as present from invoices where id = \$1$/i)
+      expect(probeAt).toBeGreaterThan(fake.indexOf(/^rollback$/i))
+      expect(client.release).toHaveBeenCalledTimes(1)
+    })
+
+    it('but the invoice is still there: throws InvoicePaymentNotAppliedError, rolled back, client released once', async () => {
+      const fake = fakePostgres({ invoices: [{ ...sentRow }] })
+      const client = await lockedReadEmpty(fake)
+      const error = await postgresStore(fake)
+        .applyInvoicePayment('inv-1', { status: 'paid' })
+        .catch((e) => e)
+
+      expect(error).toBeInstanceOf(InvoicePaymentNotAppliedError)
+      expect(error.invoiceId).toBe('inv-1')
+      expect(fake.matching(UPDATE)).toHaveLength(0)
+      expect(control(fake)).toEqual(['begin', 'rollback'])
+      expect(client.release).toHaveBeenCalledTimes(1)
+      expect(client.release.mock.calls[0][0]).toBeUndefined()
+    })
+  })
+
+  describe('a payment-failed event for a superseded payment intent (postgres)', () => {
+    const processingOnNewIntent = {
+      ...sentRow,
+      status: 'processing',
+      stripe_payment_intent_id: 'pi_new',
+    }
+    const failedPatch = (intent) => ({
+      status: 'sent',
+      paymentIntentId: intent,
+      onlyIfPaymentIntent: intent,
+    })
+
+    it('leaves a row on a DIFFERENT intent alone: unchanged, statusChanged false, nothing written', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const fake = fakePostgres({ invoices: [{ ...processingOnNewIntent }] })
+      const result = await postgresStore(fake).applyInvoicePayment('inv-1', failedPatch('pi_old'))
+
+      expect(result.status).toBe('processing')
+      expect(result.stripePaymentIntentId).toBe('pi_new')
+      expect(result.statusChanged).toBe(false)
+      expect(fake.matching(UPDATE)).toHaveLength(0)
+      expect(control(fake)).toEqual(['begin', 'rollback'])
+    })
+
+    it('still applies to the SAME intent, and to a row with no intent stored yet', async () => {
+      for (const stored of ['pi_old', null]) {
+        const fake = fakePostgres({
+          invoices: [{ ...processingOnNewIntent, stripe_payment_intent_id: stored }],
+        })
+        const result = await postgresStore(fake).applyInvoicePayment('inv-1', failedPatch('pi_old'))
+
+        expect(result.status).toBe('sent')
+        expect(result.statusChanged).toBe(true)
+        expect(fake.matching(UPDATE)).toHaveLength(1)
+      }
+    })
+
+    it('a SENT invoice carrying an older failed intent is not superseded: the new failure applies and re-points the intent', async () => {
+      const fake = fakePostgres({
+        invoices: [{ ...processingOnNewIntent, status: 'sent', stripe_payment_intent_id: 'pi_1' }],
+      })
+      const result = await postgresStore(fake).applyInvoicePayment('inv-1', failedPatch('pi_2'))
+
+      expect(result.status).toBe('sent')
+      expect(result.stripePaymentIntentId).toBe('pi_2')
+      expect(fake.matching(UPDATE)).toHaveLength(1)
+      expect(control(fake)).toEqual(['begin', 'commit'])
+    })
+
+    it('without the option (every other event) a different intent does not stop the write', async () => {
+      const fake = fakePostgres({ invoices: [{ ...processingOnNewIntent }] })
+      const result = await postgresStore(fake).applyInvoicePayment('inv-1', {
+        status: 'paid',
+        paymentIntentId: 'pi_other',
+      })
+
+      expect(result.status).toBe('paid')
+      expect(fake.matching(UPDATE)).toHaveLength(1)
+    })
+  })
+
   describe('markInvoicePaidManually', () => {
     it('refuses on the locked row, not on the read before it: a bank payment that moved it to processing wins', async () => {
       const fake = fakePostgres({ invoices: [{ ...sentRow }] })
@@ -33799,5 +33966,123 @@ describe('server-side read-modify-writes are guarded by a version (file backend)
     const result = await run()
     expect(result).not.toBeNull()
     expect(landed(await persisted(), result)).toBe(true)
+  })
+})
+
+describe('a payment-failed event for a superseded payment intent (file backend)', () => {
+  async function seed(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-intent',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-006',
+        status: 'processing',
+        lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+        subtotal: 100,
+        total: 100,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-05T00:00:00.000Z',
+        paidAt: null,
+        paymentMethod: null,
+        stripePaymentIntentId: 'pi_new',
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+        ...overrides,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const failed = (intent) => ({ status: 'sent', paymentIntentId: intent, onlyIfPaymentIntent: intent })
+
+  it('leaves a row on a different intent exactly as it is and writes nothing', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await seed()
+    const before = await readFile(localDataPath, 'utf8')
+    const result = await store.applyInvoicePayment('inv-intent', failed('pi_old'))
+
+    expect(result.status).toBe('processing')
+    expect(result.stripePaymentIntentId).toBe('pi_new')
+    expect(result.statusChanged).toBe(false)
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+    vi.restoreAllMocks()
+  })
+
+  it('still applies to the same intent and to a row with no intent', async () => {
+    for (const stored of ['pi_old', undefined]) {
+      await seed({ stripePaymentIntentId: stored })
+      const result = await store.applyInvoicePayment('inv-intent', failed('pi_old'))
+
+      expect(result.status).toBe('sent')
+      expect(result.statusChanged).toBe(true)
+    }
+  })
+
+  it('a SENT invoice carrying an older failed intent is not superseded: the new failure applies and re-points the intent', async () => {
+    await seed({ status: 'sent', stripePaymentIntentId: 'pi_1' })
+    const result = await store.applyInvoicePayment('inv-intent', failed('pi_2'))
+
+    expect(result.status).toBe('sent')
+    expect(result.stripePaymentIntentId).toBe('pi_2')
+    const stored = JSON.parse(await readFile(localDataPath, 'utf8')).invoices[0]
+    expect(stored.stripePaymentIntentId).toBe('pi_2')
+  })
+
+  /**
+   * The webhook's decision for a payment_failed, replayed against the real store
+   * on the four cases that matter. The two predicates are copied from the route
+   * (a source test in stripe-webhook-retry-route.test.ts pins their text), so a
+   * change to either side fails one of the two files.
+   */
+  describe('what the webhook does with the failure (decision table)', () => {
+    const preCheckIgnores = (invoice, intent) =>
+      invoice.status === 'paid' ||
+      (invoice.status === 'processing' &&
+        Boolean(invoice.stripePaymentIntentId) &&
+        invoice.stripePaymentIntentId !== intent)
+    const postCheckIgnores = (failedInvoice, intent) =>
+      !failedInvoice || failedInvoice.status === 'paid' || failedInvoice.stripePaymentIntentId !== intent
+
+    async function decide(storedOverrides, intent) {
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      await seed(storedOverrides)
+      const invoice = (await store.listInvoices())[0]
+      if (preCheckIgnores(invoice, intent)) return { announced: false, at: 'pre-check', stored: invoice }
+      const after = await store.applyInvoicePayment('inv-intent', failed(intent))
+      return { announced: !postCheckIgnores(after, intent), at: 'post-check', stored: after }
+    }
+
+    it('sent on pi_1, failure for pi_2 (a second decline): applied, announced', async () => {
+      const result = await decide({ status: 'sent', stripePaymentIntentId: 'pi_1' }, 'pi_2')
+      expect(result.announced).toBe(true)
+      expect(result.stored.status).toBe('sent')
+      expect(result.stored.stripePaymentIntentId).toBe('pi_2')
+    })
+
+    it('first decline with nothing stored: announced as before', async () => {
+      const result = await decide({ status: 'sent', stripePaymentIntentId: undefined }, 'pi_1')
+      expect(result.announced).toBe(true)
+      expect(result.stored.stripePaymentIntentId).toBe('pi_1')
+    })
+
+    it('processing on pi_2, failure for pi_1: ignored, invoice untouched', async () => {
+      const result = await decide({ status: 'processing', stripePaymentIntentId: 'pi_2' }, 'pi_1')
+      expect(result.announced).toBe(false)
+      expect(result.stored.status).toBe('processing')
+      expect(result.stored.stripePaymentIntentId).toBe('pi_2')
+      // The store alone agrees if the unlocked look were stale (a save old):
+      const direct = await store.applyInvoicePayment('inv-intent', failed('pi_1'))
+      expect(postCheckIgnores(direct, 'pi_1')).toBe(true)
+      expect(direct.status).toBe('processing')
+    })
+
+    it('paid: ignored as before', async () => {
+      const result = await decide({ status: 'paid', paidAt: '2026-09-10T00:00:00.000Z', stripePaymentIntentId: 'pi_2' }, 'pi_1')
+      expect(result.announced).toBe(false)
+      expect(result.at).toBe('pre-check')
+    })
   })
 })

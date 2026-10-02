@@ -443,7 +443,9 @@ savepoint-wrapping pool holds EXCLUSIVE locks on those 14 tables until your
 outer `ROLLBACK`: every write in the live app queues behind it (plain reads and
 `pg_dump` are not blocked). Keep such a trial to a second or two, and never run
 the full `write()` over the public proxy (thousands of statements, each a round
-trip, all of it under the locks).
+trip, all of it under the locks). The lock and the Stripe webhook's
+forget-and-retry (`forgetStripeEvent`, `InvoicePaymentNotAppliedError`) belong
+together: do not revert the lock commit by itself.
 
 **Schema surprises** (the app-shaped names differ from the columns):
 - `time_entries`: `user_id` (not employee_id), `entry_date` (not date),

@@ -4294,29 +4294,49 @@ const server = createServer(async (request, response) => {
           // A failure that was FORGOTTEN and redelivered can arrive hours after
           // the invoice moved on, and then it no longer applies: the invoice is
           // already paid, or the client has since started a different payment
-          // (the invoice now carries another payment intent). Putting it back to
-          // 'sent', pointing it at the dead intent and telling the owners would
-          // all be wrong, so it is acknowledged and dropped. (A decline on an
-          // invoice that is still just 'sent' is NOT dropped: nothing moves, but
-          // the owners still need to hear about it.)
+          // that is going through (the invoice is 'processing' on another
+          // payment intent). Putting it back to 'sent', pointing it at the dead
+          // intent and telling the owners would all be wrong, so it is
+          // acknowledged and dropped.
+          //
+          // A different intent only supersedes while the invoice is MID-PAYMENT.
+          // A 'sent' invoice is tied to no live intent: it carries whichever
+          // attempt failed last, and the pay link mints a new session (a new
+          // intent) on every click, so a client's second decline always arrives
+          // on a new intent. That one is genuine - applied, logged, announced -
+          // as is a first decline (nothing stored) or one on the same intent.
           if (
             invoice.status === 'paid' ||
-            (invoice.stripePaymentIntentId && invoice.stripePaymentIntentId !== object.id)
+            (invoice.status === 'processing' &&
+              invoice.stripePaymentIntentId &&
+              invoice.stripePaymentIntentId !== object.id)
           ) {
             console.warn(
-              `[stripe] ignored a stale payment_failed (${object.id}) for invoice ${invoice.id}: ${invoice.status === 'paid' ? 'already paid' : `now on ${invoice.stripePaymentIntentId}`}`,
+              `[stripe] ignored a stale payment_failed (${object.id}) for invoice ${invoice.id}: ${invoice.status === 'paid' ? 'already paid' : `now processing on ${invoice.stripePaymentIntentId}`}`,
             )
             sendJson(response, 200, { received: true, ignored: 'stale_payment_failure' })
             return
           }
+          // `onlyIfPaymentIntent` makes the STORE refuse, on the locked row, to
+          // let this failure move an invoice that has since gone 'processing' on
+          // another payment intent (the look above is unlocked and can be a save
+          // old). The store's refusal looks, to this route, like an invoice that
+          // is still on a different intent - a normal apply writes THIS event's
+          // intent onto the row - which is what the check below recognizes.
           const failedInvoice = await applyPayment(invoice.id, {
             status: 'sent',
             paymentIntentId: object.id,
+            onlyIfPaymentIntent: object.id,
           })
-          // The store has the final say (paid is sticky, void is untouched): when
-          // it left the invoice paid - the payment landed while this ran - or
-          // there is nothing to write on, there is no failure to log or announce.
-          if (!failedInvoice || failedInvoice.status === 'paid') {
+          // The store has the final say (paid is sticky, void is untouched, a
+          // superseded intent is left alone): when it left the invoice paid - the
+          // payment landed while this ran - or on a different intent, or there is
+          // nothing to write on, there is no failure to log or announce.
+          if (
+            !failedInvoice ||
+            failedInvoice.status === 'paid' ||
+            failedInvoice.stripePaymentIntentId !== object.id
+          ) {
             console.warn(
               `[stripe] ignored a payment_failed (${object.id}) for invoice ${invoice.id}: it no longer applies`,
             )
