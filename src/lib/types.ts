@@ -732,6 +732,11 @@ export interface InvoiceEmailSendEntry {
   kind?: 'ack' | 'receipt' | 'link'
   /** Resend's own id for the message — the join key to its delivery events. */
   providerId?: string | null
+  /**
+   * The addresses in `to` that were typed for THIS send only and are not on the
+   * client or its contacts. Absent when there were none.
+   */
+  oneTime?: string[]
 }
 
 /**

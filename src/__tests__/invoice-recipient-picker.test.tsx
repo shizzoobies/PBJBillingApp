@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoiceMonthRun } from '../components/InvoiceMonthRun'
 import type { Client, Contact, PersistedInvoice } from '../lib/types'
@@ -164,11 +164,13 @@ describe('InvoiceMonthRun — who the invoice goes to', () => {
   it('will not send to nobody', async () => {
     await openEditor([invoice()])
     fireEvent.click(screen.getByRole('button', { name: /^Send$/ }))
-    await screen.findByRole('dialog')
+    const dialog = await screen.findByRole('dialog')
 
     for (const box of screen.getAllByRole('checkbox')) fireEvent.click(box)
 
-    expect(screen.getByRole('button', { name: /^Send to /i })).toBeDisabled()
+    // Scoped to the dialog: the footer's "Send to other addresses..." link
+    // also starts with "Send to ".
+    expect(within(dialog).getByRole('button', { name: /^Send to /i })).toBeDisabled()
     expect(screen.getByText(/Pick at least one address/)).toBeInTheDocument()
     expect(mockSend).not.toHaveBeenCalled()
   })

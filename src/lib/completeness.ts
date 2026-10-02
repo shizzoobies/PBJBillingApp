@@ -85,6 +85,26 @@ const isPositive = (value: unknown): boolean =>
  * (Billing, Clients), then Team, Plans, Contacts. Within a category, issues are
  * in input order so the list is stable.
  */
+/**
+ * Whose addresses an invoice for this client is emailed to — the client-side
+ * mirror of `invoiceEmailAddressee` in server.js, the ONE copy on this side:
+ * the setup checklist, the month run's recipient list and the lower Email invoice
+ * button all ask it, so none of them can promise addresses the send will not use.
+ *
+ *   * a BILLING MASTER has no contacts of its own; its invoice goes to the ONE
+ *     sub named by `invoiceRecipientClientId` (and only while that company is
+ *     still one of the master's subs). Named nobody, or a company that is no
+ *     longer its sub, is null: the send refuses rather than guessing.
+ *   * everyone else answers for itself.
+ */
+export function invoiceAddressee(client: Client | null | undefined, clients: Client[]): Client | null {
+  if (!client) return null
+  if (!client.isBillingMaster) return client
+  const named =
+    typeof client.invoiceRecipientClientId === 'string' ? client.invoiceRecipientClientId : ''
+  return clients.find((entry) => entry.id === named && entry.billToClientId === client.id) ?? null
+}
+
 export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
   const { clients, contacts, plans, employees, checklistTemplates } = input
   const issues: SetupIssue[] = []
@@ -143,13 +163,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     //     moves the MONTHLY invoice onto the master, but retainers stay
     //     per-sub documents (db/store.js), so a sub still gets emailed and is
     //     still asked for an address.
-    const namedRecipientId =
-      typeof client.invoiceRecipientClientId === 'string' ? client.invoiceRecipientClientId : ''
-    const addressee: Client | undefined = client.isBillingMaster
-      ? clients.find(
-          (entry) => entry.id === namedRecipientId && entry.billToClientId === client.id,
-        )
-      : client
+    const addressee: Client | undefined = invoiceAddressee(client, clients) ?? undefined
 
     // A master with no receiving company CANNOT send its combined invoice at
     // all — the send route refuses rather than addressing four companies each

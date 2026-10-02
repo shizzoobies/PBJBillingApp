@@ -19,6 +19,8 @@ export interface InvoiceSendLogEntry {
   error?: string
   kind?: 'ack' | 'receipt' | 'link'
   providerId?: string | null
+  /** The addresses in `to` typed for this send only; absent when there were none. */
+  oneTime?: string[]
 }
 
 /** What the mail provider did with one of those sends. */

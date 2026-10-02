@@ -44,6 +44,7 @@ import {
 } from '../lib/api'
 import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
 import { editChangesWhatClientSees } from '../../lib/invoice-sent-change.js'
+import { invoiceAddressee } from '../lib/completeness'
 import { ListSearch } from './ListSearch'
 import {
   INVOICE_HOURS_ROLE_ROWS,
@@ -242,6 +243,10 @@ const INVOICE_MOVED_CODES: ReadonlySet<string | undefined> = new Set([
   'invoice_changed',
   'invoice_voided',
 ])
+
+/** Why a billing master that names no receiving company cannot be sent: the server's own sentence. */
+const MASTER_RECIPIENT_UNSET_REASON =
+  'This master has no receiving company set for its invoices yet — pick one on its client page, under Billing.'
 
 /** Appended when that reload threw away edits she had not saved. */
 const UNSAVED_NOT_KEPT = 'Your unsaved changes were not kept.'
@@ -616,11 +621,18 @@ export function InvoiceMonthRun({
    * which is the same shape a client with no addresses produces.
    */
   const recipientsFor = useCallback(
-    (clientId: string): ResolvedInvoiceRecipients =>
-      resolveInvoiceRecipients({
-        client: clients.find((c) => c.id === clientId) ?? null,
-        contacts,
-      }),
+    (clientId: string): ResolvedInvoiceRecipients => {
+      const owner = clients.find((c) => c.id === clientId) ?? null
+      // A billing master's invoice goes to the ONE company it names, not to the
+      // master's own (empty) list: the same addressee rule the send uses.
+      const addressee = invoiceAddressee(owner, clients)
+      const resolved = resolveInvoiceRecipients({ client: addressee, contacts })
+      // A master that names nobody cannot send at all; "add an email to the
+      // client" would point at the wrong record, so it says what is missing.
+      return owner?.isBillingMaster && !addressee
+        ? { ...resolved, reason: MASTER_RECIPIENT_UNSET_REASON }
+        : resolved
+    },
     [clients, contacts],
   )
 
@@ -2633,11 +2645,14 @@ function InvoiceEditor({
    * the id — and on failure we keep the invoice we have, because pushing a new
    * one up would remount this editor and wipe the message before it was read.
    */
-  const sendInvoice = async (to?: string[]) => {
+  const sendInvoice = async (to?: string[], extra?: string[]) => {
     setSendBusy(true)
     setSendError(null)
     try {
-      const result = await sendInvoiceRequest(invoice.id, to)
+      // `extra` is only passed when the picker added some for this one send.
+      const result = await (extra && extra.length > 0
+        ? sendInvoiceRequest(invoice.id, to, extra)
+        : sendInvoiceRequest(invoice.id, to))
       setPicking(false)
       onInvoiceChanged(result.invoice)
     } catch (err) {
@@ -2662,6 +2677,17 @@ function InvoiceEditor({
       void sendInvoice()
       return
     }
+    setSendError(null)
+    setPicking(true)
+  }
+
+  /**
+   * "Send to other addresses..." — the picker even when there is nothing to
+   * choose between. A client with ONE address on file sends straight out from
+   * Send, so without this she would have nowhere to add an extra one; a client
+   * with none can only be reached this way, by typing the address for this send.
+   */
+  const startSendToOthers = () => {
     setSendError(null)
     setPicking(true)
   }
@@ -3787,7 +3813,10 @@ function InvoiceEditor({
           </summary>
           <ul>
             {lastSent.to.map((email) => (
-              <li key={email}>{email}</li>
+              <li key={email}>
+                {email}
+                {lastSent.oneTime?.includes(email) ? ' (this send only)' : ''}
+              </li>
             ))}
           </ul>
         </details>
@@ -3832,7 +3861,7 @@ function InvoiceEditor({
           invoiceLabel={`${invoice.number ? `Invoice ${invoice.number}` : 'This invoice'} for ${clientName}`}
           details={recipients.details}
           busy={sendBusy}
-          onSend={(to) => void sendInvoice(to)}
+          onSend={(to, extra) => void sendInvoice(to, extra)}
           onCancel={() => setPicking(false)}
         />
       ) : null}
@@ -4008,6 +4037,30 @@ function InvoiceEditor({
             >
               <Mail size={15} />
               {sendBusy ? 'Sending…' : lastSent ? 'Send again' : 'Send'}
+            </button>
+          ) : null}
+          {/* The quiet way to add an address for this one send. Beside Send, not
+              instead of it: the one-click Send is unchanged. Open to a client
+              with one address, or none, which Send cannot reach. */}
+          {invoice.status !== 'void' ? (
+            <button
+              type="button"
+              className="invoice-send-others"
+              disabled={
+                busy || savingDates || sendBusy || dirty || optedOut || invoice.status === 'draft'
+              }
+              title={
+                dirty
+                  ? 'Save your changes first'
+                  : optedOut
+                    ? 'This client is invoiced outside the app'
+                    : invoice.status === 'draft'
+                      ? 'Mark this invoice reviewed first'
+                      : 'Email this invoice to an address that is not on file, just this once'
+              }
+              onClick={startSendToOthers}
+            >
+              Send to other addresses...
             </button>
           ) : null}
           {/* Money that arrived outside the app. Offered exactly where the

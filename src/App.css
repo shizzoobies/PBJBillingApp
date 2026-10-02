@@ -13229,6 +13229,50 @@ details.invoice-run-sent ul,
   overflow-wrap: anywhere;
 }
 
+/* An address typed for this one send: the same row as the ones on file, with
+   its Remove beside it. */
+.invoice-recipient-extra {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.invoice-recipient-add {
+  display: grid;
+  font-size: 13px;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.invoice-recipient-add-row {
+  display: flex;
+  gap: 8px;
+}
+
+.invoice-recipient-add-row .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The quiet "Send to other addresses..." beside a Send button. */
+.invoice-send-others {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 4px 2px;
+  text-decoration: underline;
+}
+
+.invoice-send-others:disabled {
+  cursor: default;
+  opacity: 0.55;
+  text-decoration: none;
+}
+
 .invoice-status.is-sent {
   background: rgba(55, 138, 221, 0.14);
   color: #185fa5;

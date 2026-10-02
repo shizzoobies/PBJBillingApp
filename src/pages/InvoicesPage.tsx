@@ -59,6 +59,7 @@ import {
   sendInvoiceRequest,
 } from '../lib/api'
 import { selectableClients } from '../lib/clientLifecycle'
+import { invoiceAddressee } from '../lib/completeness'
 import { generateSkipMessage } from '../lib/invoiceSkipMessage'
 
 /**
@@ -753,7 +754,7 @@ export function InvoicesPage() {
    * review comes before send, always, so she is pointed at the month run
    * rather than having an email leave on the back of one confirm.
    */
-  const emailInvoice = async () => {
+  const emailInvoice = async (chooseAddresses = false) => {
     // Stamped with the invoice on screen when the click happened.
     const fail = (message: string) => setSendResult({ key: seedKey, error: message })
     setSendResult(null)
@@ -824,18 +825,23 @@ export function InvoicesPage() {
       // uses. Nobody on file stops here with the reason, rather than making her
       // sit through a confirm to be told no.
       const recipients = resolveInvoiceRecipients({
-        client: selectedClient,
+        // Whose addresses the send will use: a billing master's go to the company
+        // it names, exactly as the server decides it.
+        client: invoiceAddressee(selectedClient, data.clients),
         contacts: data.contacts,
       })
-      if (recipients.to.length === 0) {
+      // "Send to other addresses..." is the way to reach a client with no
+      // address on file yet: she types the address for this one send.
+      if (recipients.to.length === 0 && !chooseAddresses) {
         fail(recipients.reason ?? 'No email address on file for this client.')
         return
       }
 
       const label = stored.number ? `Invoice ${stored.number}` : 'This invoice'
       // One address goes straight out; two or more get the checkbox list, all
-      // ticked, so she can leave one off. Same rule as the month run.
-      if (recipients.to.length > 1) {
+      // ticked, so she can leave one off. Same rule as the month run. The
+      // "other addresses" link opens it regardless, to add one for this send.
+      if (recipients.to.length > 1 || chooseAddresses) {
         setPickingSend({
           invoiceId: stored.id,
           label: `${label} for ${selectedClient.name}`,
@@ -860,10 +866,13 @@ export function InvoicesPage() {
    * reads afterwards names the addresses that actually went out, read back off
    * the server's email log rather than off what was asked for.
    */
-  const performSend = async (invoiceId: string, to?: string[]) => {
+  const performSend = async (invoiceId: string, to?: string[], extra?: string[]) => {
     setSendBusy(true)
     try {
-      const { invoice: updated } = await sendInvoiceRequest(invoiceId, to)
+      // `extra` is only passed when the picker added some for this one send.
+      const { invoice: updated } = await (extra && extra.length > 0
+        ? sendInvoiceRequest(invoiceId, to, extra)
+        : sendInvoiceRequest(invoiceId, to))
       setPickingSend(null)
       const lastSent = latestInvoiceSend(updated.emailLog)
       setSendResult({
@@ -871,7 +880,9 @@ export function InvoicesPage() {
         note: lastSent
           ? `Sent to ${recipientCountLabel(lastSent.to.length)} on ${formatSentOn(
               lastSent.at,
-            )} — ${lastSent.to.join(', ')}`
+            )} — ${lastSent.to
+              .map((email) => (lastSent.oneTime?.includes(email) ? `${email} (this send only)` : email))
+              .join(', ')}`
           : 'Sent.',
         // Carried so the badge beside the note reads the same log the note
         // does. Delivery events arrive seconds to hours later, so this is
@@ -958,7 +969,7 @@ export function InvoicesPage() {
           invoiceLabel={pickingSend.label}
           details={pickingSend.details}
           busy={sendBusy}
-          onSend={(to) => void performSend(pickingSend.invoiceId, to)}
+          onSend={(to, extra) => void performSend(pickingSend.invoiceId, to, extra)}
           onCancel={() => setPickingSend(null)}
         />
       ) : null}
@@ -1054,6 +1065,22 @@ export function InvoicesPage() {
                 >
                   <Mail size={16} />
                   {sendBusy ? 'Sending…' : 'Email invoice'}
+                </button>
+                {/* Beside the button, not instead of it: Email invoice is
+                    unchanged. This opens the address picker even for a client
+                    with one address (or none), to add one for this send only. */}
+                <button
+                  className="invoice-send-others"
+                  disabled={sendBusy || customizing}
+                  onClick={() => void emailInvoice(true)}
+                  title={
+                    customizing
+                      ? 'Email sends the stored invoice — close Customize first; edit lines in the month run'
+                      : 'Email this invoice to an address that is not on file, just this once'
+                  }
+                  type="button"
+                >
+                  Send to other addresses...
                 </button>
                 <button
                   className="primary-action"

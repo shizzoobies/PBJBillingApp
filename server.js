@@ -79,7 +79,7 @@ import {
   resolveInvoiceRecipients,
   sendInvoicePaymentEmail,
 } from './lib/invoice-email.js'
-import { chooseInvoiceRecipients } from './lib/invoice-recipients.js'
+import { resolveSendRecipients } from './lib/invoice-recipients.js'
 import { invoiceContentChanged, totalsDiffer } from './lib/invoice-sent-change.js'
 import {
   isResendWebhookConfigured,
@@ -5010,12 +5010,6 @@ const server = createServer(async (request, response) => {
         client: sendAddressee.addressee,
         contacts: sendAppData.contacts ?? [],
       })
-      if (recipients.to.length === 0) {
-        // Carry the reason through: "no email on file for this client" is
-        // something she can act on, "could not send" is not.
-        sendJson(response, 409, { error: 'invoice_no_recipient', message: recipients.reason })
-        return
-      }
 
       // A submitted `to` is a FILTER over the addresses this invoice's own
       // client resolves to — never a list of addresses to email. Anything else
@@ -5023,15 +5017,30 @@ const server = createServer(async (request, response) => {
       // an authenticated owner session into an open relay. Omitting the field
       // means "everyone", which is what every caller predating the send dialog
       // does, the webhook's payment emails included.
-      const chosen = chooseInvoiceRecipients(recipients.to, sendPayload?.to)
-      if (chosen.to.length === 0) {
-        sendJson(response, 400, {
-          error: 'invoice_no_chosen_recipient',
-          message: chosen.reason,
+      //
+      // `extra` is the separate list: addresses typed for THIS send only. Each
+      // must be a valid single address (at most three), they ride alongside the
+      // chosen on-file ones, and they are never saved to the client or its
+      // contacts. At least one on-file address must still be on the send, unless
+      // the client has none at all (a contact with no email yet), where `extra`
+      // alone may be used. "No email on file" is still the 409 she can act on.
+      // Everything is decided before a Stripe call or an email, in
+      // `resolveSendRecipients`, so a refusal sends nothing.
+      const sendRecipients = resolveSendRecipients({
+        allowed: recipients.to,
+        to: sendPayload?.to,
+        extra: sendPayload?.extra,
+      })
+      if (!sendRecipients.ok) {
+        sendJson(response, sendRecipients.status, {
+          error: sendRecipients.error,
+          message: sendRecipients.message,
         })
         return
       }
-      const sendTo = chosen.to
+      const sendTo = sendRecipients.to
+      // The one-time addresses, so the log can say which of `sendTo` were.
+      const sendOneTime = sendRecipients.oneTime
 
       // A fresh Checkout session on EVERY send — hosted Checkout URLs expire in
       // about a day, so reusing the one from an earlier send would email a dead
@@ -5294,6 +5303,7 @@ const server = createServer(async (request, response) => {
           ok: false,
           error: sendResult.error,
           providerId: sendResult.providerId ?? null,
+          oneTime: sendOneTime,
         })
         sendJson(response, 502, { error: 'invoice_send_failed', message: sendResult.error })
         return
@@ -5315,6 +5325,7 @@ const server = createServer(async (request, response) => {
             providerId: sendResult.providerId ?? null,
             // The moment the documents above were built from.
             stamp: sendStamp,
+            oneTime: sendOneTime,
           })) ?? invoice
         await appDataStore.recordActivity(
           session.user.id,

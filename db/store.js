@@ -15115,6 +15115,7 @@ export class AppDataStore {
       kind = null,
       providerId = null,
       stamp = null,
+      oneTime = [],
     } = {},
   ) {
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
@@ -15153,6 +15154,12 @@ export class AppDataStore {
       ...(kind ? { kind: String(kind) } : {}),
       ...(providerId ? { providerId: String(providerId) } : {}),
       ...(error ? { error: String(error).slice(0, 300) } : {}),
+      // Which of those addresses were typed for this one send. They are in `to`
+      // like the rest (the log records everyone it went to) and are NOT on the
+      // client or its contacts; this is the only place that says so.
+      ...(Array.isArray(oneTime) && oneTime.length > 0
+        ? { oneTime: oneTime.map((address) => String(address)) }
+        : {}),
     }
     // Only the invoice going out marks the invoice sent. A payment receipt is
     // logged on the same append-only trail but must not restart the payment

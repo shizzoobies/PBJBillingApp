@@ -4459,12 +4459,16 @@ export async function unmarkInvoicePaidRequest(invoiceId: string) {
   return ((await response.json()) as { invoice: PersistedInvoice }).invoice
 }
 
-export async function sendInvoiceRequest(invoiceId: string, to?: string[]) {
+export async function sendInvoiceRequest(invoiceId: string, to?: string[], extra?: string[]) {
   const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/send`, {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(to ? { to } : {}),
+    // `extra` is the addresses typed for this one send; omitted when there are none.
+    body: JSON.stringify({
+      ...(to ? { to } : {}),
+      ...(extra && extra.length > 0 ? { extra } : {}),
+    }),
   })
   if (!response.ok) {
     // The code rides along: `invoice_voided` (a void landed mid-send) makes the

@@ -46,3 +46,33 @@ export declare function chooseInvoiceRecipients(
   allowed: string[],
   requested: unknown,
 ): { to: string[]; reason: string | null }
+
+/** A plausible single address: trimmed, one `@`, a dot in the domain, no whitespace. */
+export declare function isPlausibleEmail(value: unknown): boolean
+
+/** The most addresses one send may carry beyond the ones on file. */
+export declare const MAX_EXTRA_INVOICE_RECIPIENTS: number
+
+/** What the 409 says when the browser chose from addresses the server no longer has. */
+export declare const RECIPIENTS_CHANGED_REASON: string
+
+export declare const EXTRA_RECIPIENT_REFUSALS: {
+  readonly shape: string
+  readonly invalid: string
+  readonly tooMany: string
+}
+
+/** The extra addresses a send carries, cleaned - or the sentence that refuses them. */
+export declare function cleanExtraRecipients(requested: unknown): {
+  extra: string[]
+  reason: string | null
+}
+
+/** Who a send goes to: the chosen on-file addresses plus the one-time extras. */
+export declare function resolveSendRecipients(args: {
+  allowed: string[]
+  to?: unknown
+  extra?: unknown
+}):
+  | { ok: true; to: string[]; oneTime: string[] }
+  | { ok: false; status: number; error: string; message: string }

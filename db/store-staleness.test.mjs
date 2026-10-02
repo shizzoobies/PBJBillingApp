@@ -65,6 +65,7 @@ import {
 import { invoiceAsSent, invoiceDisplayDate } from '../lib/invoice-draft.js'
 import { applyScopeRetag } from '../lib/invoice-scope-retag.js'
 import { buildInvoiceLines } from '../lib/invoice-lines.js'
+import { latestInvoiceSend } from '../lib/invoice-overdue.js'
 import { buildInvoiceEmail } from '../lib/invoice-email.js'
 import { buildInvoicePdf } from '../lib/invoice-pdf.js'
 import {
@@ -30998,5 +30999,186 @@ describe('wasSent - the status a save read (both backends)', () => {
       fakePostgres({ invoices: [{ ...row, status: 'reviewed' }] }),
     ).updateInvoice('inv-1', { blurb: 'x' })
     expect(reviewed.wasSent).toBe(false)
+  })
+})
+
+/**
+ * `recordInvoiceSent` with a one-time extra address (owner's answer 3,
+ * featreq-21d0bba8): the log records everyone the email went to, as it always
+ * has, and marks which of them were typed for that send only. Nothing is saved
+ * to the client or its contacts, and the delivery webhook (matched on the
+ * provider's id) is indifferent to whose address it was.
+ */
+describe('recordInvoiceSent with one-time addresses (file backend)', () => {
+  const seedInvoice = {
+    id: 'inv-1',
+    clientId: 'c1',
+    period: '2026-08',
+    number: '1042',
+    status: 'reviewed',
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    dueDate: '2026-09-15',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: null,
+    paidAt: null,
+    paymentMethod: null,
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+
+  async function seed() {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [seedInvoice]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('records every address and marks the one-time ones', async () => {
+    await seed()
+
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com', 'ap@other.com'],
+      subject: 'Invoice 1042',
+      ok: true,
+      providerId: 'prov-1',
+      oneTime: ['ap@other.com'],
+    })
+
+    expect(updated.emailLog[0]).toMatchObject({
+      to: ['ann@acme.com', 'ap@other.com'],
+      oneTime: ['ap@other.com'],
+      ok: true,
+    })
+    // What the editor reads back is the stored record.
+    const stored = JSON.parse(await readFile(localDataPath, 'utf8')).invoices[0]
+    expect(stored.emailLog[0].oneTime).toEqual(['ap@other.com'])
+    expect(stored.status).toBe('sent')
+  })
+
+  it('leaves an ordinary send exactly as it was: no oneTime key at all', async () => {
+    await seed()
+
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice 1042',
+      ok: true,
+      oneTime: [],
+    })
+
+    expect(updated.emailLog[0]).not.toHaveProperty('oneTime')
+  })
+
+  it('keeps the marks on a failed attempt too, without claiming the invoice was sent', async () => {
+    await seed()
+
+    const updated = await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com', 'ap@other.com'],
+      subject: 'Invoice 1042',
+      ok: false,
+      error: 'The domain is not verified.',
+      oneTime: ['ap@other.com'],
+    })
+
+    expect(updated.emailLog[0]).toMatchObject({ ok: false, oneTime: ['ap@other.com'] })
+    expect(updated.status).toBe('reviewed')
+  })
+
+  it('saves the extra address nowhere on the client or its contacts', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', email: 'ann@acme.com', contactIds: ['k1'] }],
+        contacts: [{ id: 'k1', name: 'Ann', email: 'ann@acme.com' }],
+      }),
+    )
+    await seed()
+    const before = JSON.parse(await readFile(localDataPath, 'utf8'))
+
+    await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com', 'ap@other.com'],
+      subject: 'Invoice 1042',
+      ok: true,
+      oneTime: ['ap@other.com'],
+    })
+
+    const after = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(after.clients).toEqual(before.clients)
+    expect(after.contacts).toEqual(before.contacts)
+    expect(JSON.stringify(after.clients)).not.toContain('ap@other.com')
+    expect(JSON.stringify(after.contacts)).not.toContain('ap@other.com')
+  })
+
+  it('still places a delivery event by the provider id, whoever the address belongs to', async () => {
+    await seed()
+    await store.recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com', 'ap@other.com'],
+      subject: 'Invoice 1042',
+      ok: true,
+      providerId: 'prov-1',
+      oneTime: ['ap@other.com'],
+    })
+
+    // The webhook's fallback lookup, and its write, for an event about the
+    // extra address - one the client has never heard of.
+    const found = await store.findInvoiceByEmailProviderId('prov-1')
+    expect(found?.id).toBe('inv-1')
+    const logged = await store.recordInvoiceDeliveryEvent('inv-1', {
+      event: 'bounced',
+      providerId: 'prov-1',
+      to: ['ap@other.com'],
+      detail: 'mailbox full',
+    })
+
+    expect(logged.emailLog.at(-1)).toMatchObject({
+      kind: 'delivery',
+      event: 'bounced',
+      providerId: 'prov-1',
+      to: ['ap@other.com'],
+    })
+    // The send is still the send: a tagged delivery entry is never mistaken for it.
+    expect(latestInvoiceSend(logged.emailLog)).toMatchObject({
+      oneTime: ['ap@other.com'],
+      providerId: 'prov-1',
+    })
+  })
+})
+
+describe('recordInvoiceSent with one-time addresses (postgres branch)', () => {
+  it('carries oneTime in the entry it appends, through the unchanged statement', async () => {
+    const fake = fakePostgres({ invoices: [{ ...existingInvoice, status: 'reviewed' }] })
+
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com', 'ap@other.com'],
+      subject: 'Invoice INV-2026-08-001',
+      ok: true,
+      providerId: 'prov-1',
+      oneTime: ['ap@other.com'],
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    // The same append, byte for byte: only the JSON it concatenates grew a key.
+    expect(update.text).toMatch(/email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb/)
+    expect(JSON.parse(update.params[1])[0]).toMatchObject({
+      to: ['ann@acme.com', 'ap@other.com'],
+      oneTime: ['ap@other.com'],
+      providerId: 'prov-1',
+      ok: true,
+    })
+    expect(update.params[2]).toBe(true)
+  })
+
+  it('writes no oneTime key for an ordinary send', async () => {
+    const fake = fakePostgres({ invoices: [{ ...existingInvoice, status: 'reviewed' }] })
+
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice INV-2026-08-001',
+      ok: true,
+    })
+
+    expect(JSON.parse(fake.matching(/^update invoices/i)[0].params[1])[0]).not.toHaveProperty(
+      'oneTime',
+    )
   })
 })

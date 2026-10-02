@@ -267,7 +267,17 @@ describe('InvoiceMonthRun — sending a master invoice with no recipient chosen'
       ),
     )
     mockList.mockResolvedValue([{ ...masterInvoice, status: 'reviewed' }])
-    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    // The page THINKS a company is chosen (KLC, with an address): the choice was
+    // cleared in another tab, so only the server knows to refuse. The page itself
+    // now disables Send for a master it can see names nobody (next test), so the
+    // round trip needs a master that looks sendable.
+    const staleClients = clients.map((entry) => {
+      if (entry.id === 'client-klc-master') {
+        return { ...entry, invoiceRecipientClientId: 'client-klc' }
+      }
+      return entry.id === 'client-klc' ? { ...entry, email: 'ap@klc.example' } : entry
+    }) as typeof clients
+    render(<InvoiceMonthRun clients={staleClients} onPrint={vi.fn()} />)
     // A reviewed invoice waits on its own tab, not the one the run opens on.
     fireEvent.click(await screen.findByRole('tab', { name: /Reviewed/ }))
     fireEvent.click(screen.getByText('INV-2026-09-004'))
@@ -281,6 +291,21 @@ describe('InvoiceMonthRun — sending a master invoice with no recipient chosen'
         'Pick which company receives this invoice first — Settings on the master client.',
       ),
     ).toBeInTheDocument()
+  })
+})
+
+describe('InvoiceMonthRun — a master that names no receiving company', () => {
+  it('says so before she presses Send, and Send is off', async () => {
+    mockList.mockResolvedValue([{ ...masterInvoice, status: 'reviewed' }])
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('tab', { name: /Reviewed/ }))
+    fireEvent.click(screen.getByText('INV-2026-09-004'))
+
+    const send = screen.getByRole('button', { name: 'Send' })
+    expect(send).toBeDisabled()
+    // The master's own address is not where its invoice goes, so it is not offered.
+    expect(send).toHaveAttribute('title', expect.stringMatching(/no receiving company set/i))
+    expect(screen.getAllByText('No email on file').length).toBeGreaterThan(0)
   })
 })
 
