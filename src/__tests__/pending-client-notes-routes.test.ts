@@ -188,41 +188,40 @@ describe('GET /api/pending-notes/attached (one request per page of cards)', () =
 })
 
 describe('the bulk PUT runs the attach pass after a successful save', () => {
-  it("hands the tab a version taken right after write(), BEFORE the attach pass, so the tab's next save 409s instead of erasing the attached item", () => {
+  it("hands the tab the version write() returned from INSIDE its transaction, BEFORE the attach pass, so the tab's next save 409s instead of erasing the attached item", () => {
     // The attach pass inserts an item row the saving tab's payload does not
     // have. A version taken AFTER it would let that tab's very next autosave
     // pass the staleness guard and delete the item (the note would stay
     // stamped attached). Taken BEFORE, the next save is refused and the tab
-    // refetches.
-    const writeAt = serverSource.indexOf('await appDataStore.write(data, { expectedVersion })')
-    const writeFailedAt = serverSource.indexOf("error: 'bulk_save_failed'")
+    // refetches. Since write() returns it from inside its own transaction
+    // (`returnVersion`), there is no query between the commit and the version
+    // for another request's write to land in.
     const declAt = serverSource.indexOf('let postWriteVersion = null')
-    const postWriteAt = serverSource.indexOf(
+    const writeAt = serverSource.indexOf(
+      'postWriteVersion = await appDataStore.write(data, { expectedVersion, returnVersion: true })',
+    )
+    const writeFailedAt = serverSource.indexOf("error: 'bulk_save_failed'")
+    const attachAt = serverSource.indexOf('appDataStore.attachPendingClientNotes({})')
+    expect(declAt).toBeGreaterThan(-1)
+    expect(writeAt).toBeGreaterThan(declAt)
+    expect(writeFailedAt).toBeGreaterThan(writeAt)
+    expect(attachAt).toBeGreaterThan(writeFailedAt)
+    // No separate post-commit version query is left between the write and the
+    // attach pass but the guarded re-take after a label restamp.
+    expect(
+      serverSource.slice(writeFailedAt, attachAt).match(/computeWorkspaceVersion()/g),
+    ).toHaveLength(1)
+    expect(serverSource).not.toContain(
       'postWriteVersion = await appDataStore.computeWorkspaceVersion()',
     )
-    const attachAt = serverSource.indexOf('appDataStore.attachPendingClientNotes({})')
-    expect(writeAt).toBeGreaterThan(-1)
-    expect(writeFailedAt).toBeGreaterThan(writeAt)
-    // The version is taken AFTER the write's try/catch closed (its failure
-    // branches all return), with nothing but its own try between: any other
-    // request's write landing there would be folded into the version.
-    expect(declAt).toBeGreaterThan(writeFailedAt)
-    expect(postWriteAt).toBeGreaterThan(declAt)
-    expect(serverSource.slice(declAt, postWriteAt).match(/await /g)).toBeNull()
-    expect(attachAt).toBeGreaterThan(postWriteAt)
   })
 
-  it('a failure computing the version never tells the tab its COMMITTED save failed - it fails closed instead', () => {
-    const declAt = serverSource.indexOf('let postWriteVersion = null')
-    const postWriteAt = serverSource.indexOf(
-      'postWriteVersion = await appDataStore.computeWorkspaceVersion()',
-    )
-    // Its own try/catch, outside the write's: the catch only logs and flags.
-    expect(serverSource.slice(declAt, postWriteAt)).toContain('try {')
-    const catchBlock = serverSource.slice(postWriteAt, postWriteAt + 300)
-    expect(catchBlock).toContain('} catch (error) {')
-    expect(catchBlock).toContain('versionFailed = true')
-    expect(catchBlock).not.toContain('sendJson')
+  it('a save that hands back no version never tells the tab its COMMITTED save failed - it fails closed instead', () => {
+    const failAt = serverSource.indexOf('if (!postWriteVersion) {')
+    expect(failAt).toBeGreaterThan(serverSource.indexOf("error: 'bulk_save_failed'"))
+    const failBlock = serverSource.slice(failAt, failAt + 300)
+    expect(failBlock).toContain('versionFailed = true')
+    expect(failBlock).not.toContain('sendJson')
     // No version header on failure (the tab keeps its old one, so its next
     // save 409s) plus a refetch hint, still a 200.
     const sendAt = serverSource.indexOf('nextVersion ? { [WORKSPACE_VERSION_HEADER]: nextVersion } : {}')
@@ -231,9 +230,8 @@ describe('the bulk PUT runs the attach pass after a successful save', () => {
     expect(reply).toContain('sendJson(')
     expect(reply).toContain('200')
     expect(reply).toContain('attachedNotes > 0 || versionFailed ? { ok: true, refetch: true } : { ok: true }')
-    // The known, documented gap.
+    // The one known, documented gap that is left: the label-restamp re-take.
     expect(serverSource).toContain('KNOWN, NOT CLOSED HERE')
-    expect(serverSource).toContain('REPEATABLE READ')
   })
 
   it('re-takes the version only when the label restamp actually changed rows', () => {

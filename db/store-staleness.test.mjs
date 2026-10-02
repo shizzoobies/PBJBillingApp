@@ -32408,7 +32408,7 @@ describe('the bulk save takes its tables first (postgres branch)', () => {
 
     // A delete behind a branch the fixture does not reach is still caught here.
     const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
-    const start = source.indexOf('  async write(data, { expectedVersion = null } = {}) {')
+    const start = source.indexOf('  async write(data, {')
     const end = source.indexOf('Fingerprint of everything the bulk save can destroy', start)
     expect(start).toBeGreaterThan(-1)
     expect(end).toBeGreaterThan(start)
@@ -32419,5 +32419,101 @@ describe('the bulk save takes its tables first (postgres branch)', () => {
     for (const table of named) {
       expect(BULK_SAVE_LOCK_TABLES, `write() deletes from ${table}, which is not locked`).toContain(table)
     }
+  })
+})
+
+/**
+ * `write(data, { returnVersion: true })` - the version a tab is handed back
+ * after a save is taken INSIDE that save (tracker featreq-6a5c6162). The route
+ * used to ask for it in a separate query after the commit, so a single-row write
+ * committing in between was folded into the tab's version without the tab
+ * holding its data.
+ */
+describe('write() can hand back the version it produced (postgres branch)', () => {
+  const FINGERPRINT = /md5\(coalesce\(string_agg/i
+  const rowsFor = (hash) => [{ t: 'clients', h: hash }]
+
+  it('computes it on the transaction connection just before the commit, and returns it', async () => {
+    const fake = fakePostgres({ versionResponses: () => rowsFor('produced-by-this-save') })
+    const version = await postgresStore(fake).write(workspace(), { returnVersion: true })
+
+    expect(version).toBe(foldVersionRows(rowsFor('produced-by-this-save')))
+    const fingerprintAt = fake.statements.map((s) => FINGERPRINT.test(s.text)).lastIndexOf(true)
+    const commitAt = fake.indexOf(/^commit$/i)
+    const lastInsertAt = fake.statements.map((s) => /^insert into /i.test(s.text)).lastIndexOf(true)
+    expect(fingerprintAt).toBeGreaterThan(lastInsertAt)
+    expect(commitAt).toBe(fingerprintAt + 1)
+    // Exactly one fingerprint: the caller passed no expected version.
+    expect(fake.matching(FINGERPRINT)).toHaveLength(1)
+  })
+
+  it('issues no version query at all for a caller that does not ask (and resolves undefined)', async () => {
+    const fake = fakePostgres()
+    const result = await postgresStore(fake).write(workspace())
+
+    expect(result).toBeUndefined()
+    expect(fake.matching(FINGERPRINT)).toHaveLength(0)
+
+    // With the staleness guard but without returnVersion: only the guard's one.
+    const guarded = fakePostgres()
+    const pgStore = postgresStore(guarded)
+    const current = await pgStore.computeWorkspaceVersion()
+    const before = guarded.matching(FINGERPRINT).length
+    expect(await pgStore.write(workspace(), { expectedVersion: current })).toBeUndefined()
+    expect(guarded.matching(FINGERPRINT).length - before).toBe(1)
+  })
+
+  it('a refused save returns no version and issues none', async () => {
+    const fake = fakePostgres()
+    await expect(
+      postgresStore(fake).write(workspace(), { expectedVersion: 'stale', returnVersion: true }),
+    ).rejects.toBeInstanceOf(StaleWorkspaceError)
+
+    // Only the guard's own fingerprint ran; the return-version one never did.
+    expect(fake.matching(FINGERPRINT)).toHaveLength(1)
+  })
+
+  it('after a lock retry, the version comes from the attempt that committed', async () => {
+    const lockError = Object.assign(new Error('lock timeout'), { code: '55P03' })
+    const fake = fakePostgres({
+      failOn: { pattern: /^lock table /i, error: lockError, times: 1 },
+      versionResponses: () => rowsFor('second-attempt'),
+    })
+    const version = await postgresStore(fake).write(workspace(), { returnVersion: true })
+
+    expect(version).toBe(foldVersionRows(rowsFor('second-attempt')))
+    expect(fake.matching(FINGERPRINT)).toHaveLength(1)
+  })
+})
+
+describe('write() can hand back the version it produced (file backend)', () => {
+  it('returns the fingerprint of the file as it now sits on disk', async () => {
+    const version = await store.write(workspace(), { returnVersion: true })
+
+    expect(typeof version).toBe('string')
+    expect(version).toBe(await store.computeWorkspaceVersion())
+  })
+
+  it('resolves undefined for a caller that does not ask', async () => {
+    expect(await store.write(workspace())).toBeUndefined()
+  })
+
+  it('is taken inside the save: a write queued right behind it cannot be folded in', async () => {
+    const first = store.write(workspace(), { returnVersion: true })
+    // Queued behind the save in the same file queue; it changes the workspace.
+    const second = store.write(
+      workspace({ timeEntries: [{ id: 't9', minutes: 99, clientId: 'c1' }] }),
+      { returnVersion: true },
+    )
+    const [firstVersion, secondVersion] = await Promise.all([first, second])
+
+    expect(firstVersion).not.toBe(secondVersion)
+    expect(secondVersion).toBe(await store.computeWorkspaceVersion())
+  })
+
+  it('a refused (stale) save returns no version', async () => {
+    await expect(
+      store.write(workspace(), { expectedVersion: 'stale', returnVersion: true }),
+    ).rejects.toBeInstanceOf(StaleWorkspaceError)
   })
 })

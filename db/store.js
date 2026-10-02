@@ -7512,7 +7512,13 @@ export class AppDataStore {
    * `BULK_SAVE_TABLES` from `data`.
    *
    * @param {object} data - the full workspace snapshot to persist.
-   * @param {{ expectedVersion?: string | null }} [options]
+   * @param {{ expectedVersion?: string | null, returnVersion?: boolean }} [options]
+   *   `returnVersion`: resolve with the workspace version of the state THIS save
+   *   produced, computed inside the same transaction (or file-queue slot) just
+   *   before it commits, so a write that lands after the commit can never be
+   *   folded into the version the caller hands its tab. Without it nothing is
+   *   computed and the promise resolves undefined, as always.
+   *
    *   `expectedVersion` is the staleness guard: when supplied, the persisted
    *   workspace's current fingerprint must still match it or the save is
    *   refused with `StaleWorkspaceError` and NOTHING is written. The comparison
@@ -7524,7 +7530,7 @@ export class AppDataStore {
    *   refuses itself instead of erasing the write. Omit it only for internal
    *   read-modify-write helpers where last-writer-wins is acceptable.
    */
-  async write(data, { expectedVersion = null } = {}) {
+  async write(data, { expectedVersion = null, returnVersion = false } = {}) {
     // SECURITY (L1/L2): normalize/clamp clearly-bad values IN PLACE before
     // either persistence branch. This NEVER rejects a save — a normal blob
     // passes through unchanged; only garbage (negative/huge numbers, invalid
@@ -8554,7 +8560,15 @@ export class AppDataStore {
           }
         }
 
+        // The version of what this save produced, taken on THIS transaction's
+        // connection just before the commit (see `returnVersion`). Under the
+        // table locks nothing else can write these tables in between, so the
+        // value is exactly the state the commit publishes. Asked for only by
+        // the caller that hands it to a tab; everyone else pays no query.
+        const producedVersion = returnVersion ? await postgresWorkspaceVersion(client) : undefined
+
         await client.query('commit')
+        return producedVersion
       }
 
       const startedAt = Date.now()
@@ -8563,11 +8577,12 @@ export class AppDataStore {
       // state and is released WITH the error, which makes `pg` destroy it instead
       // of handing it to the next request.
       let releaseError
+      let producedVersion
       try {
         for (;;) {
           attempts += 1
           try {
-            await runTransaction(BULK_SAVE_LOCK_TIMEOUTS[attempts - 1])
+            producedVersion = await runTransaction(BULK_SAVE_LOCK_TIMEOUTS[attempts - 1])
             break
           } catch (error) {
             try {
@@ -8600,7 +8615,7 @@ export class AppDataStore {
         `[bulk-save] write committed in ${Date.now() - startedAt}ms after ${attempts} lock attempt${attempts === 1 ? '' : 's'}`,
       )
 
-      return
+      return producedVersion
     }
 
     // ---- Store-7: FILE-BACKEND SANITIZE PARITY ----
@@ -8699,7 +8714,7 @@ export class AppDataStore {
     // between the check and the write and be erased by a snapshot whose check
     // predated it. Raw fs calls only in here: `readJson`/`writeFile` enqueue
     // behind this very slot and would deadlock.
-    await enqueueFileOperation(localDataPath, async () => {
+    return enqueueFileOperation(localDataPath, async () => {
       let previous = null
       // The rate-history snapshot, declared out here because the merge that
       // applies it is one pass at the very END of this slot. Empty means
@@ -9043,7 +9058,12 @@ export class AppDataStore {
         toPersist = rest
       }
 
-      await fsWriteFile(localDataPath, JSON.stringify(toPersist, null, 2))
+      const serialized = JSON.stringify(toPersist, null, 2)
+      await fsWriteFile(localDataPath, serialized)
+      // `returnVersion`, file half: the fingerprint of the file exactly as it
+      // now sits on disk (parsed back, like `computeWorkspaceVersion` does),
+      // taken inside this slot so no other write can land in between.
+      return returnVersion ? fileWorkspaceVersion(JSON.parse(serialized)) : undefined
     })
   }
 

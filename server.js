@@ -7172,8 +7172,14 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // The version of the state this save produces comes back FROM write():
+        // it is computed inside the save's own transaction, just before the
+        // commit, so a single-row write that commits after this save can never
+        // be folded into the version the tab is handed without the tab holding
+        // its data. (It used to be a separate query after the commit.)
+        let postWriteVersion = null
         try {
-          await appDataStore.write(data, { expectedVersion })
+          postWriteVersion = await appDataStore.write(data, { expectedVersion, returnVersion: true })
         } catch (error) {
           if (error instanceof StaleWorkspaceError) {
             // Nothing was written — the transaction rolled back.
@@ -7233,31 +7239,24 @@ const server = createServer(async (request, response) => {
           return
         }
 
-        // The version of the state this save just produced, taken the moment
-        // write() returns with NO other await in between: nothing below (the
-        // label restamp, the attach pass) may sit between the write and the
-        // version, or another request's write landing during it would be
-        // folded into the version this tab is handed without being in the data
-        // it holds.
+        // `postWriteVersion` is the version of the state this save produced,
+        // taken INSIDE write()'s transaction (see above). Nothing below (the
+        // label restamp, the attach pass) sits between the write and it.
         //
-        // KNOWN, NOT CLOSED HERE: a concurrent commit can still land between
-        // write() committing and this statement and be folded into the version
-        // returned (the tab then holds a version covering rows it never
-        // received; wider when the period-label restamp below re-takes it).
-        // That window exists on main today. Closing it needs the post-write
-        // version computed INSIDE write()'s transaction at REPEATABLE READ.
+        // KNOWN, NOT CLOSED HERE: when the period-label restamp below changes
+        // rows the version is re-taken after it, outside any transaction, and
+        // a concurrent commit landing during the restamp can be folded into
+        // it. Only saves that re-labeled something pay that.
         //
-        // OUTSIDE the write's try on purpose: the write has COMMITTED, so a
-        // failure computing the version must not tell the tab the save failed.
-        // It fails closed instead: no version header (the tab keeps its old
-        // one, so its next save 409s) plus `refetch: true`.
-        let postWriteVersion = null
+        // A save that handed back no version (it cannot today) fails closed:
+        // no version header (the tab keeps its old one, so its next save 409s)
+        // plus `refetch: true`. Never a failed-save answer: the write
+        // COMMITTED.
         let versionFailed = false
-        try {
-          postWriteVersion = await appDataStore.computeWorkspaceVersion()
-        } catch (error) {
+        if (!postWriteVersion) {
+          postWriteVersion = null
           versionFailed = true
-          console.error('[bulk-save] workspace version failed after a committed write:', error)
+          console.error('[bulk-save] write() returned no workspace version after a committed save')
         }
 
         // PERIOD LABELS. A recipe's covered-window fields ride this save like
