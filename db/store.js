@@ -7461,10 +7461,11 @@ export class AppDataStore {
       // landed mid-read refuses this snapshot instead of being erased by it.
       // Scope caveat: the fingerprint covers BULK_SAVE_SLICES + employees
       // (lib/workspace-version.js) — a mid-read write to a slice OUTSIDE that
-      // set (invoices, firmSettings, serviceCategories) does not move it and
-      // is still overwritten by this whole-file save. Postgres doesn't share
-      // that hole (its write() only touches the fingerprinted tables and
-      // restores invoices explicitly); file mode is dev/test only.
+      // set (serviceCategories, and any other key the save does not take from
+      // disk) does not move it and is still overwritten by this whole-file
+      // save. Invoices, the Stripe event ledger and firmSettings are no longer
+      // among them: write() takes those from the stored file. Postgres doesn't
+      // share the hole at all; file mode is dev/test only.
       // A refused (or failed) write-back serves the in-memory data and lets
       // the next read retry — never 500s the read.
       let writeBackSucceeded = false
@@ -9056,6 +9057,27 @@ export class AppDataStore {
       } else if (Object.prototype.hasOwnProperty.call(data, 'firmSettings')) {
         const { firmSettings: _dropped, ...rest } = data
         toPersist = rest
+      }
+
+      // Invoices and the Stripe event ledger are SERVER-OWNED and never ride the
+      // workspace payload: on Postgres the save restores every invoice from the
+      // stored copy ("stored wins", dropping one whose client is gone from the
+      // payload) and never touches `stripe_events`. Same here - what is on disk
+      // is what is persisted, whatever the payload carries (nothing, a stale
+      // copy, or an invoice it invented). The keys are only written when the
+      // file already had them, so no new shape appears on disk. `toPersist` is
+      // rebuilt rather than mutated, like the firm settings above.
+      const { invoices: _payloadInvoices, stripeEvents: _payloadEvents, ...withoutServerOwned } = toPersist
+      toPersist = {
+        ...withoutServerOwned,
+        ...(Array.isArray(previous?.invoices)
+          ? {
+              invoices: previous.invoices.filter((invoice) =>
+                fileValidClientIds.has(invoice?.clientId),
+              ),
+            }
+          : {}),
+        ...(Array.isArray(previous?.stripeEvents) ? { stripeEvents: previous.stripeEvents } : {}),
       }
 
       const serialized = JSON.stringify(toPersist, null, 2)
@@ -14822,14 +14844,18 @@ export class AppDataStore {
       )
       return rowCount > 0
     }
-    const data = await readJson(localDataPath)
-    if (!Array.isArray(data.stripeEvents)) data.stripeEvents = []
-    if (data.stripeEvents.some((entry) => entry.id === eventId)) return false
-    data.stripeEvents.push({ id: eventId, type: String(eventType ?? ''), at: nowIso() })
-    // Keep the log bounded — this is a dedup ledger, not history.
-    if (data.stripeEvents.length > 500) data.stripeEvents = data.stripeEvents.slice(-500)
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return true
+    // One queue slot, like the invoice writers: a read in one slot and a write in
+    // another lets a whole-workspace save land between them and be overwritten.
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      if (!Array.isArray(data.stripeEvents)) data.stripeEvents = []
+      if (data.stripeEvents.some((entry) => entry.id === eventId)) return false
+      data.stripeEvents.push({ id: eventId, type: String(eventType ?? ''), at: nowIso() })
+      // Keep the log bounded — this is a dedup ledger, not history.
+      if (data.stripeEvents.length > 500) data.stripeEvents = data.stripeEvents.slice(-500)
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return true
+    })
   }
 
   /**
@@ -14975,15 +15001,21 @@ export class AppDataStore {
       }
     }
 
-    const data = await readJson(localDataPath)
-    if (!Array.isArray(data.invoices)) data.invoices = []
-    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
-    if (index === -1) return null
-    const planned = planPayment(normalizeStoredInvoice(data.invoices[index]))
-    if (!planned) return null
-    data.invoices[index] = planned.next
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return withStatusChanged(planned.next, planned.statusChanged)
+    // The file backend: read, decide and write inside ONE queue slot, so a save
+    // landing between them cannot be overwritten by a stale whole-file copy.
+    // Raw fs calls only in here: `readJson` / `writeFile` enqueue behind this
+    // very slot and would deadlock.
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      if (!Array.isArray(data.invoices)) data.invoices = []
+      const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+      if (index === -1) return null
+      const planned = planPayment(normalizeStoredInvoice(data.invoices[index]))
+      if (!planned) return null
+      data.invoices[index] = planned.next
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return withStatusChanged(planned.next, planned.statusChanged)
+    })
   }
 
   /**
@@ -15031,28 +15063,31 @@ export class AppDataStore {
       return { invoice, previous: rows[0].previous ?? null }
     }
 
-    // Read-modify-write, returning the value it replaced. Node is single
-    // threaded through this function up to the first await, and the file
-    // backend is a single process — what matters here is parity of the ANSWER.
-    const data = await readJson(localDataPath)
-    if (!Array.isArray(data.invoices)) data.invoices = []
-    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
-    if (index === -1) return null
-    if (data.invoices[index].status === 'void') {
-      console.warn(`[invoices] swapInvoiceCheckoutSession skipped: ${invoiceId} is void`)
-      return null
-    }
-    const previous = data.invoices[index][field] ?? null
-    data.invoices[index] = {
-      ...data.invoices[index],
-      [field]: sessionId,
-      updatedAt: nowIso(),
-    }
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    // The invoice as `listInvoices` answers it, which is what the Postgres
-    // branch hands back — so a caller sees one shape on both backends. The
-    // stored row stays as written above; only the answer is normalized.
-    return { invoice: normalizeStoredInvoice(data.invoices[index]), previous }
+    // Read-modify-write, returning the value it replaced, inside ONE queue slot
+    // so a whole-workspace save landing between the read and the write cannot be
+    // overwritten by a stale whole-file copy. Raw fs calls only in here:
+    // `readJson` / `writeFile` enqueue behind this very slot and would deadlock.
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      if (!Array.isArray(data.invoices)) data.invoices = []
+      const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+      if (index === -1) return null
+      if (data.invoices[index].status === 'void') {
+        console.warn(`[invoices] swapInvoiceCheckoutSession skipped: ${invoiceId} is void`)
+        return null
+      }
+      const previous = data.invoices[index][field] ?? null
+      data.invoices[index] = {
+        ...data.invoices[index],
+        [field]: sessionId,
+        updatedAt: nowIso(),
+      }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      // The invoice as `listInvoices` answers it, which is what the Postgres
+      // branch hands back — so a caller sees one shape on both backends. The
+      // stored row stays as written above; only the answer is normalized.
+      return { invoice: normalizeStoredInvoice(data.invoices[index]), previous }
+    })
   }
 
   /**
@@ -15156,21 +15191,36 @@ export class AppDataStore {
       return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    if (!Array.isArray(data.invoices)) data.invoices = []
-    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
-    if (index === -1) return null
-    const next = {
-      ...data.invoices[index],
-      status: 'paid',
-      paymentMethod: 'manual',
-      paidAt,
-      updatedAt: paidAt,
-    }
-    data.invoices[index] = next
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    await this._insertInvoiceReviewEvent(reviewEvent)
-    return next
+    // The file backend: read, refuse and write inside ONE queue slot, so a
+    // whole-workspace save landing between them cannot be overwritten by a stale
+    // whole-file copy. Raw fs calls only in here: `readJson` / `writeFile`
+    // enqueue behind this very slot and would deadlock.
+    const written = await enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      if (!Array.isArray(data.invoices)) data.invoices = []
+      const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+      if (index === -1) return null
+      const before = normalizeStoredInvoice(data.invoices[index])
+      refuseUnlessPayable(before)
+      const next = {
+        ...data.invoices[index],
+        status: 'paid',
+        paymentMethod: 'manual',
+        paidAt,
+        updatedAt: paidAt,
+      }
+      data.invoices[index] = next
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return { next, before }
+    })
+    if (!written) return null
+    // The audit event is its own file (auth-state), so its own queue: written
+    // after the slot, and recording the status the slot actually replaced.
+    await this._insertInvoiceReviewEvent({
+      ...reviewEvent,
+      changes: { status: { before: written.before.status, after: 'paid' } },
+    })
+    return written.next
   }
 
   /**
@@ -15388,7 +15438,9 @@ export class AppDataStore {
       typeof stamp === 'string' && !Number.isNaN(Date.parse(stamp))
         ? new Date(stamp).toISOString()
         : nowIso()
-    const entry = {
+    // A function of the invoice because the file backend builds it from the row
+    // it reads INSIDE its queue slot (see the end of this method).
+    const entryFor = (invoice) => ({
       at,
       to: Array.isArray(to) ? to : [to].filter(Boolean),
       subject: String(subject ?? ''),
@@ -15396,7 +15448,7 @@ export class AppDataStore {
       // What was actually billed at the moment it went out. The lines can be
       // edited after a send, so without this the log records that an email left
       // but not what the client was asked to pay.
-      total: Number(current.total) || 0,
+      total: Number(invoice.total) || 0,
       ...(kind ? { kind: String(kind) } : {}),
       ...(providerId ? { providerId: String(providerId) } : {}),
       ...(error ? { error: String(error).slice(0, 300) } : {}),
@@ -15406,7 +15458,8 @@ export class AppDataStore {
       ...(Array.isArray(oneTime) && oneTime.length > 0
         ? { oneTime: oneTime.map((address) => String(address)) }
         : {}),
-    }
+    })
+    const entry = entryFor(current)
     // Only the invoice going out marks the invoice sent. A payment receipt is
     // logged on the same append-only trail but must not restart the payment
     // clock or rewrite a status the webhook just set.
@@ -15485,35 +15538,49 @@ export class AppDataStore {
       return mapInvoiceRow(rows[0])
     }
 
-    // Same semantics, spelled out in JS. The file backend's read IS the whole
-    // file, so appending here cannot drop entries the way the Postgres
-    // read-modify-write did — the branch above concatenates in SQL on purpose.
-    const emailLog = [...(current.emailLog ?? []), entry]
-    // A failed attempt — and a payment-side email of any kind — is logged but
-    // must NOT claim the invoice was sent.
-    const sentAt = marksSent ? (current.sentAt ?? entry.at) : current.sentAt
-    const status = marksSent && current.status !== 'paid' && current.status !== 'processing'
-      ? 'sent'
-      : current.status
+    // Same semantics, spelled out in JS, and read, decided and written inside ONE
+    // queue slot: a whole-workspace save landing between a read and a write
+    // would otherwise be overwritten by a stale whole-file copy (and the send,
+    // whose email is already out, lost with it). Everything below is decided on
+    // the row read in the slot, not on `current` above. Raw fs calls only in
+    // here: `readJson` / `writeFile` enqueue behind this very slot and deadlock.
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      if (!Array.isArray(data.invoices)) data.invoices = []
+      const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+      if (index === -1) return null
+      const stored = normalizeStoredInvoice(data.invoices[index])
+      if (stored.status === 'void') {
+        console.warn(`[invoices] recordInvoiceSent skipped: ${invoiceId} is void`)
+        return null
+      }
+      const storedEntry = entryFor(stored)
+      // The file backend's read IS the whole file, so appending here cannot drop
+      // entries the way the Postgres read-modify-write did — the branch above
+      // concatenates in SQL on purpose.
+      const emailLog = [...(stored.emailLog ?? []), storedEntry]
+      // A failed attempt — and a payment-side email of any kind — is logged but
+      // must NOT claim the invoice was sent.
+      const sentAt = marksSent ? (stored.sentAt ?? storedEntry.at) : stored.sentAt
+      const status = marksSent && stored.status !== 'paid' && stored.status !== 'processing'
+        ? 'sent'
+        : stored.status
 
-    const data = await readJson(localDataPath)
-    // The client's terms off the read this branch already had to do — no
-    // `this.read()`, which materializes recurring checklists and can write back.
-    const sendClient = marksSent
-      ? ((data.clients ?? []).find((client) => client.id === current.clientId) ?? null)
-      : null
-    const firstSendDueDate = firstSendDueDateFor(sendClient?.paymentTerms)
-    // The same first-send rule as the Postgres branch: only an invoice that had
-    // no `sentAt` before this call has its past-due line moved.
-    const dueDate =
-      marksSent && !current.sentAt && firstSendDueDate ? firstSendDueDate : current.dueDate
+      // The client's terms off the read this branch already had to do — no
+      // `this.read()`, which materializes recurring checklists and can write back.
+      const sendClient = marksSent
+        ? ((data.clients ?? []).find((client) => client.id === stored.clientId) ?? null)
+        : null
+      const firstSendDueDate = firstSendDueDateFor(sendClient?.paymentTerms)
+      // The same first-send rule as the Postgres branch: only an invoice that had
+      // no `sentAt` before this call has its past-due line moved.
+      const dueDate =
+        marksSent && !stored.sentAt && firstSendDueDate ? firstSendDueDate : stored.dueDate
 
-    if (!Array.isArray(data.invoices)) data.invoices = []
-    const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
-    if (index === -1) return null
-    data.invoices[index] = { ...current, emailLog, sentAt, status, dueDate, updatedAt: nowIso() }
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return data.invoices[index]
+      data.invoices[index] = { ...stored, emailLog, sentAt, status, dueDate, updatedAt: nowIso() }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return data.invoices[index]
+    })
   }
 
   /**

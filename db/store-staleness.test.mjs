@@ -27461,6 +27461,16 @@ describe('bulk save refuses to delete a client with history (file backend)', () 
     return JSON.parse(await readFile(localDataPath, 'utf8'))
   }
 
+  // Invoices are server-owned: a bulk save no longer persists the payload's, so
+  // a fixture that wants stored invoices puts them in the file directly.
+  async function seedInvoices(invoices, extra = {}) {
+    const stored = await persisted()
+    await writeFile(
+      localDataPath,
+      JSON.stringify({ ...stored, ...extra, invoices }, null, 2),
+    )
+  }
+
   it('refuses a payload missing a client that has stored time entries, and writes nothing', async () => {
     const before = await readFile(localDataPath, 'utf8')
     const error = await store.write(workspace({ clients: [], timeEntries: [] })).catch((e) => e)
@@ -27481,9 +27491,9 @@ describe('bulk save refuses to delete a client with history (file backend)', () 
           { id: 'c1', name: 'Acme' },
           { id: 'c2', name: 'Voided Co' },
         ],
-        invoices: [invoice('inv-1', 'c2', 'void')],
       }),
     )
+    await seedInvoices([invoice('inv-1', 'c2', 'void')])
     const before = await readFile(localDataPath, 'utf8')
 
     const error = await store
@@ -27555,6 +27565,7 @@ describe('bulk save refuses to delete a client with history (file backend)', () 
 
   it('refuses dropping a sub that is billed only on its master invoice (no time, no invoice of its own)', async () => {
     await store.write(withSub())
+    await seedInvoices([masterInvoice])
     const before = await readFile(localDataPath, 'utf8')
 
     const error = await store
@@ -27577,17 +27588,14 @@ describe('bulk save refuses to delete a client with history (file backend)', () 
 
   it('counts the sub as having an invoice, and a client named on no line as having none', async () => {
     await store.write(withSub())
+    await seedInvoices([masterInvoice])
     expect(await store.countClientInvoices('c-sub')).toBe(1)
     expect(await store.countClientInvoices('c-master')).toBe(1)
     expect(await store.countClientInvoices('c1')).toBe(0)
   })
 
   it("counts a client's invoices, void ones too", async () => {
-    await store.write(
-      workspace({
-        invoices: [invoice('inv-1', 'c1', 'void'), invoice('inv-2', 'c1'), invoice('inv-3', 'c9')],
-      }),
-    )
+    await seedInvoices([invoice('inv-1', 'c1', 'void'), invoice('inv-2', 'c1'), invoice('inv-3', 'c9')])
     expect(await store.countClientInvoices('c1')).toBe(2)
     expect(await store.countClientInvoices('nobody')).toBe(0)
   })
@@ -32516,4 +32524,270 @@ describe('write() can hand back the version it produced (file backend)', () => {
       store.write(workspace(), { expectedVersion: 'stale', returnVersion: true }),
     ).rejects.toBeInstanceOf(StaleWorkspaceError)
   })
+})
+
+/**
+ * On the file backend a whole-workspace save never rewrites invoices or the
+ * Stripe event ledger (tracker featreq-6a5c6162).
+ *
+ * Postgres restores every invoice from the SERVER's stored copy ("stored wins")
+ * and never touches `stripe_events`. The file branch used to persist the
+ * browser's payload with only `firmSettings` swapped, so a save from a tab that
+ * carried no invoices, or a stale copy of them, dropped or reverted money and
+ * the dedup ledger. The four file-backend money writers also used to read and
+ * write the whole file in two queue slots, so a save landing between them was
+ * overwritten by their stale copy.
+ */
+describe('file backend: a bulk save never rewrites invoices or the Stripe event ledger', () => {
+  const storedInvoice = (overrides = {}) => ({
+    id: 'inv-1',
+    clientId: 'c1',
+    period: '2026-08',
+    number: 'INV-2026-08-001',
+    kind: 'monthly',
+    status: 'sent',
+    lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 250 }],
+    subtotal: 250,
+    total: 250,
+    dueDate: '2026-09-30',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: '2026-09-01T12:00:00.000Z',
+    paidAt: null,
+    paymentMethod: null,
+    stripeCheckoutSessionId: 'cs_ach_1',
+    stripeCardSessionId: 'cs_card_1',
+    stripePaymentIntentId: null,
+    emailLog: [{ at: '2026-09-01T12:00:00.000Z', to: ['ann@acme.com'], subject: 's', ok: true, total: 250 }],
+    payToken: 'tok_durable_1',
+    createdAt: '2026-08-01T12:00:00.000Z',
+    updatedAt: '2026-09-01T12:00:00.000Z',
+    ...overrides,
+  })
+  const ledger = [
+    { id: 'evt_1', type: 'checkout.session.completed', at: '2026-09-02T00:00:00.000Z' },
+    { id: 'evt_2', type: 'payment_intent.succeeded', at: '2026-09-02T00:00:01.000Z' },
+  ]
+
+  async function seedStored(extra) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    Object.assign(data, extra)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  async function persisted() {
+    return JSON.parse(await readFile(localDataPath, 'utf8'))
+  }
+
+  it('keeps the stored invoices and ledger when the payload carries neither', async () => {
+    await seedStored({ invoices: [storedInvoice()], stripeEvents: ledger })
+
+    await store.write(workspace())
+
+    const after = await persisted()
+    expect(after.invoices).toEqual([storedInvoice()])
+    expect(after.stripeEvents).toEqual(ledger)
+  })
+
+  it('a stale copy of an invoice in the payload does not revert the stored one', async () => {
+    await seedStored({
+      invoices: [storedInvoice({ status: 'paid', paidAt: '2026-09-05T00:00:00.000Z', paymentMethod: 'card' })],
+      stripeEvents: ledger,
+    })
+
+    await store.write(
+      workspace({
+        // What a tab that loaded before the payment still holds.
+        invoices: [storedInvoice({ status: 'sent', emailLog: [], payToken: null })],
+        stripeEvents: [],
+      }),
+    )
+
+    const after = await persisted()
+    expect(after.invoices).toHaveLength(1)
+    expect(after.invoices[0].status).toBe('paid')
+    expect(after.invoices[0].paymentMethod).toBe('card')
+    expect(after.invoices[0].payToken).toBe('tok_durable_1')
+    expect(after.invoices[0].emailLog).toHaveLength(1)
+    expect(after.stripeEvents).toEqual(ledger)
+  })
+
+  it('an invoice the payload invents is not persisted (the app never sends invoices through this save)', async () => {
+    await seedStored({ invoices: [storedInvoice()] })
+
+    await store.write(workspace({ invoices: [storedInvoice(), storedInvoice({ id: 'inv-forged' })] }))
+
+    expect((await persisted()).invoices.map((invoice) => invoice.id)).toEqual(['inv-1'])
+  })
+
+  it('a stored invoice whose client is gone from the payload is dropped, as on Postgres', async () => {
+    // A client with invoices cannot be removed by a save (it is refused), so the
+    // only invoice this can catch is one whose client the file no longer holds.
+    await seedStored({ invoices: [storedInvoice(), storedInvoice({ id: 'inv-orphan', clientId: 'ghost' })] })
+
+    await store.write(workspace())
+
+    expect((await persisted()).invoices.map((invoice) => invoice.id)).toEqual(['inv-1'])
+  })
+
+  it('still refuses to delete a client who has an invoice, and writes nothing', async () => {
+    await seedStored({ invoices: [storedInvoice()], stripeEvents: ledger })
+    const before = await readFile(localDataPath, 'utf8')
+
+    await expect(
+      store.write(workspace({ clients: [{ id: 'c2', name: 'Other' }], timeEntries: [] })),
+    ).rejects.toBeInstanceOf(ClientHasHistoryError)
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('persists no `invoices` or `stripeEvents` key the file never had', async () => {
+    await store.write(workspace({ invoices: [storedInvoice()], stripeEvents: ledger }))
+
+    const after = await persisted()
+    expect(after).not.toHaveProperty('invoices')
+    expect(after).not.toHaveProperty('stripeEvents')
+  })
+})
+
+describe('file backend: a payment write and a bulk save cannot undo each other', () => {
+  const invoice = () => ({
+    id: 'inv-race',
+    clientId: 'c1',
+    period: '2026-08',
+    number: 'INV-2026-08-009',
+    kind: 'monthly',
+    status: 'sent',
+    lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+    subtotal: 100,
+    total: 100,
+    dueDate: '2026-09-30',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: '2026-09-01T12:00:00.000Z',
+    paidAt: null,
+    paymentMethod: null,
+    stripeCheckoutSessionId: null,
+    stripeCardSessionId: null,
+    emailLog: [],
+    createdAt: '2026-08-01T12:00:00.000Z',
+    updatedAt: '2026-09-01T12:00:00.000Z',
+  })
+  const edit = () =>
+    workspace({ clients: [{ id: 'c1', name: 'Acme Edited While Paying' }], timeEntries: [] })
+
+  async function seed(extra = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [invoice()]
+    Object.assign(data, extra)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  async function persisted() {
+    return JSON.parse(await readFile(localDataPath, 'utf8'))
+  }
+
+  it('applyInvoicePayment then write: the invoice ends paid AND the workspace edit is kept', async () => {
+    await seed()
+    const [paid] = await Promise.all([
+      store.applyInvoicePayment('inv-race', {
+        status: 'paid',
+        paidAt: '2026-09-10T00:00:00.000Z',
+        paymentMethod: 'card',
+      }),
+      store.write(edit()),
+    ])
+
+    expect(paid?.status).toBe('paid')
+    const after = await persisted()
+    expect(after.invoices.find((entry) => entry.id === 'inv-race').status).toBe('paid')
+    expect(after.clients[0].name).toBe('Acme Edited While Paying')
+  })
+
+  it('write then applyInvoicePayment: the invoice ends paid AND the workspace edit is kept', async () => {
+    await seed()
+    const [, paid] = await Promise.all([
+      store.write(edit()),
+      store.applyInvoicePayment('inv-race', {
+        status: 'paid',
+        paidAt: '2026-09-10T00:00:00.000Z',
+        paymentMethod: 'card',
+      }),
+    ])
+
+    expect(paid?.status).toBe('paid')
+    const after = await persisted()
+    expect(after.invoices.find((entry) => entry.id === 'inv-race').status).toBe('paid')
+    expect(after.clients[0].name).toBe('Acme Edited While Paying')
+  })
+
+  it('recordInvoiceSent racing a save, in both orders: the send is logged AND the edit is kept', async () => {
+    for (const order of ['send-first', 'save-first']) {
+      await seed()
+      const send = () =>
+        store.recordInvoiceSent('inv-race', { to: ['ann@acme.com'], subject: 'Invoice', ok: true })
+      const calls = order === 'send-first' ? [send(), store.write(edit())] : [store.write(edit()), send()]
+      await Promise.all(calls)
+
+      const after = await persisted()
+      const sent = after.invoices.find((entry) => entry.id === 'inv-race')
+      expect(sent.emailLog, order).toHaveLength(1)
+      expect(after.clients[0].name, order).toBe('Acme Edited While Paying')
+    }
+  })
+
+  it('swapInvoiceCheckoutSession racing a save, in both orders: the session is kept AND the edit is kept', async () => {
+    for (const order of ['swap-first', 'save-first']) {
+      await seed()
+      const swap = () => store.swapInvoiceCheckoutSession('inv-race', { channel: 'card', sessionId: 'cs_new' })
+      const calls = order === 'swap-first' ? [swap(), store.write(edit())] : [store.write(edit()), swap()]
+      await Promise.all(calls)
+
+      const after = await persisted()
+      expect(after.invoices.find((entry) => entry.id === 'inv-race').stripeCardSessionId, order).toBe('cs_new')
+      expect(after.clients[0].name, order).toBe('Acme Edited While Paying')
+    }
+  })
+
+  it('markInvoicePaidManually racing a save, in both orders: it ends paid AND the edit is kept', async () => {
+    for (const order of ['mark-first', 'save-first']) {
+      await seed()
+      const mark = () => store.markInvoicePaidManually('inv-race', { actorUserId: 'owner-1' })
+      const calls = order === 'mark-first' ? [mark(), store.write(edit())] : [store.write(edit()), mark()]
+      await Promise.all(calls)
+
+      const after = await persisted()
+      expect(after.invoices.find((entry) => entry.id === 'inv-race').status, order).toBe('paid')
+      expect(after.clients[0].name, order).toBe('Acme Edited While Paying')
+    }
+  })
+
+  it('recordStripeEventOnce racing a save: the event stays recorded', async () => {
+    await seed()
+    const [fresh] = await Promise.all([store.recordStripeEventOnce('evt_race', 'x'), store.write(edit())])
+    expect(fresh).toBe(true)
+    const after = await persisted()
+    expect(after.stripeEvents.map((entry) => entry.id)).toEqual(['evt_race'])
+    expect(after.clients[0].name).toBe('Acme Edited While Paying')
+    // A replay is still recognized afterwards.
+    expect(await store.recordStripeEventOnce('evt_race', 'x')).toBe(false)
+  })
+
+  // The writers read, decide and write in ONE queue slot (raw fs calls only, as
+  // confirmExpenseCoverage and toggleChecklistItem do). Source-read, because a
+  // queue-wrapped read followed by a queue-wrapped write is exactly the shape
+  // that lets a save land in between - and it behaves identically when nothing
+  // happens to race.
+  it.each(['applyInvoicePayment', 'recordInvoiceSent', 'swapInvoiceCheckoutSession', 'markInvoicePaidManually'])(
+    '%s runs its file branch in one queue slot',
+    async (method) => {
+      const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
+      const start = source.indexOf(`  async ${method}(`)
+      expect(start).toBeGreaterThan(-1)
+      const end = source.indexOf('\n  async ', start + 10)
+      const body = source.slice(start, end)
+      expect(body).toContain('enqueueFileOperation(localDataPath')
+      // No queue-wrapped read or write of the data file left in it: those
+      // would enqueue behind the slot (deadlock) or reopen the gap.
+      expect(body).not.toMatch(/\breadJson\(localDataPath\)/)
+      expect(body).not.toMatch(/(^|[^s])writeFile\(localDataPath/)
+    },
+  )
 })
