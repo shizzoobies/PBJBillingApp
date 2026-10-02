@@ -1,4 +1,5 @@
 import { useAppContext } from '../AppContext'
+import { mailingAddressLines } from '../../lib/mailing-address.js'
 import { isSafeImageSrc } from '../lib/utils'
 
 // Print-only header block. Hidden in normal page flow (display: none) and
@@ -14,13 +15,7 @@ export function PrintHeader({
   const { firmSettings, sessionUser } = useAppContext()
   const firmName = firmSettings?.name || 'PB&J Strategic Accounting'
   const firmTagline = firmSettings?.tagline || ''
-  const addressLines = [
-    firmSettings?.addressLine1,
-    firmSettings?.addressLine2,
-    [firmSettings?.city, firmSettings?.state, firmSettings?.postalCode]
-      .filter((part) => part && part.trim())
-      .join(', '),
-  ].filter((line) => line && line.trim().length > 0) as string[]
+  const addressLines = mailingAddressLines(firmSettings)
 
   const today = new Intl.DateTimeFormat('en-US', {
     month: 'long',

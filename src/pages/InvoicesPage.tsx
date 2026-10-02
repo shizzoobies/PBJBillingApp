@@ -48,6 +48,7 @@ import {
   renderedInvoiceLines,
 } from '../../lib/invoice-lines.js'
 import { invoiceDisplayDate, paymentTermsLabel } from '../../lib/invoice-draft.js'
+import { mailingAddressLines } from '../../lib/mailing-address.js'
 import type { InvoiceLineOut, InvoiceRoleTier } from '../../lib/invoice-lines.js'
 import { InvoiceDeliveryBadge } from '../components/InvoiceDeliveryBadge'
 import { InvoiceRecipientPicker } from '../components/InvoiceRecipientPicker'
@@ -1680,27 +1681,14 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
   const billingClient = invoice.client
   const showField = (key: keyof IncludeFlags) => (custom ? custom.include[key] : true)
 
-  const addressLines = showField('address')
-    ? [
-        billingClient.addressLine1,
-        billingClient.addressLine2,
-        [billingClient.city, billingClient.state, billingClient.postalCode]
-          .filter((part) => part && part.trim())
-          .join(', '),
-      ].filter((line) => line && line.trim().length > 0)
-    : []
+  // The same rule the emailed PDF uses, so the two documents agree.
+  const addressLines = showField('address') ? mailingAddressLines(billingClient) : []
 
   const firmName = firmSettings?.name || 'PB&J Strategic Accounting'
   // No tagline: she struck it off the letterhead on the marked-up sample. The
   // firm setting still exists and still prints elsewhere; this sheet just does
   // not use it.
-  const firmAddressLines = [
-    firmSettings?.addressLine1,
-    firmSettings?.addressLine2,
-    [firmSettings?.city, firmSettings?.state, firmSettings?.postalCode]
-      .filter((part) => part && part.trim())
-      .join(', '),
-  ].filter((line) => line && line.trim().length > 0) as string[]
+  const firmAddressLines = mailingAddressLines(firmSettings)
   const headerLogoUrl = showField('logo')
     ? billingClient.logoUrl || firmSettings?.logoUrl || ''
     : ''

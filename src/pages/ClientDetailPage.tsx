@@ -78,6 +78,7 @@ import {
 // The one place 'off' is decided, shared with the generator and the invoice
 // preview so all three agree about what an unset client means.
 import { normalizeTimeBreakdownMode } from '../../lib/invoice-lines.js'
+import { mailingAddressLines } from '../../lib/mailing-address.js'
 // The one rule for whether Delete is offered; the server enforces the same one.
 import { clientDeleteVerdict } from '../../lib/client-delete-rule.js'
 // The one resolver for "what did this person's hour bill at back then" —
@@ -933,11 +934,7 @@ function ReadOnlyContactSectionBody({
   const selectedContacts = selectedIds
     .map((id) => contacts.find((entry) => entry.id === id))
     .filter((entry): entry is Contact => Boolean(entry))
-  const addressLines = [
-    client.addressLine1,
-    client.addressLine2,
-    [client.city, client.state, client.postalCode].filter(Boolean).join(', '),
-  ].filter((line) => line && line.trim())
+  const addressLines = mailingAddressLines(client)
 
   return (
     <div className="form-grid two-col">
