@@ -4326,10 +4326,13 @@ export async function createInvoicePaymentLinkRequest(invoiceId: string) {
     },
   )
   if (!response.ok) {
-    const message = await safeErrorMessage(response)
+    // The code rides along: the month run reloads on the ones that mean the
+    // invoice moved (paid, or a bank payment going through) since it was drawn.
+    const { message, code } = await safeError(response)
     throw new ApiError(
       response.status,
       message || `Could not create a payment link (${response.status})`,
+      code,
     )
   }
   return (await response.json()) as { url: string; invoice: PersistedInvoice }

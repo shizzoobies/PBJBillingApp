@@ -1595,7 +1595,7 @@ function InvoiceRow({
   onToggle: () => void
   onPatch: (body: Parameters<typeof updateInvoiceRequest>[1]) => Promise<PatchResult>
   onPrint: () => void
-  /** Push a server-returned invoice back into the list (payment link marks it sent). */
+  /** Push a server-returned invoice back into the list (the payment link's new session id). */
   onInvoiceChanged: (invoice: PersistedInvoice) => void
   /** The invoice moved under a request (a void landed mid-send): re-read the month. */
   onInvoiceMoved: () => Promise<void>
@@ -2465,9 +2465,13 @@ function InvoiceEditor({
     try {
       const result = await createInvoicePaymentLinkRequest(invoice.id)
       setPaymentLink(result.url)
-      // The invoice is now 'sent' server-side; reflect that in the list.
+      // The invoice carries its new session id; reflect that in the list.
       onInvoiceChanged(result.invoice)
     } catch (err) {
+      // The invoice was paid, or a bank payment started, since this row was
+      // drawn: re-read the month first, so the row shows what it is now and the
+      // sentence goes where the reload leaves room for it (once).
+      if (err instanceof ApiError && INVOICE_MOVED_CODES.has(err.code)) await onInvoiceMoved()
       // Stripe not configured, or Stripe declined — either way say which.
       sayRefusal(
         err instanceof Error ? err.message : 'Could not create a payment link.',
@@ -3434,8 +3438,8 @@ function InvoiceEditor({
           notice above is the one to act on. */}
       {pastDue ? (
         <p className="invoice-run-error invoice-run-past-due" role="alert">
-          {/* `sentAt` can be null here: the Payment link button stamps a date,
-              but an invoice whose status was set another way may carry none,
+          {/* `sentAt` can be null here: an invoice whose status was set another
+              way (an older Payment link press, say) may carry none,
               and `formatSentOn('')` renders "sent , past the…". */}
           <strong>Past due</strong>
           {invoice.sentAt ? `: sent ${formatSentOn(invoice.sentAt)}, past the` : ': past the'} 30-day
@@ -3568,9 +3572,11 @@ function InvoiceEditor({
             </button>
           ) : null}
           {/* Payment link. Brittany is not the payer, so this does NOT open
-              Checkout — it hands back a URL for her to send. Creating one marks
-              the invoice sent, which is why it waits until after review. */}
-          {invoice.status !== 'void' && invoice.total > 0 ? (
+              Checkout — it hands back a URL for her to send. It only hands the
+              link back again, so it is offered on an invoice that has been
+              sent (a past-due one is still sent) and nowhere before that; the
+              server refuses it too, rather than marking a draft sent. */}
+          {(invoice.status === 'sent' || invoice.status === 'overdue') && invoice.total > 0 ? (
             <button
               type="button"
               className="secondary-action"

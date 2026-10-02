@@ -430,7 +430,8 @@ describe('the invoice responses carry which covered windows can still move', () 
     expect(confirm).toContain('invoice: await withCoverageChangeable(confirmed)')
     const send = routeBlock(/send bookkeeping failed after delivery/, 900)
     expect(send).toContain('sentInvoice = await withCoverageChangeable(sentInvoice)')
-    const link = routeBlock(/const invoicePaymentLinkMatch = normalizedPath\.match\(/, 6000)
+    // Widened from 6000 when the sent-only refusals went in ahead of the mint.
+    const link = routeBlock(/const invoicePaymentLinkMatch = normalizedPath\.match\(/, 8000)
     expect(link).toContain('invoice: await withCoverageChangeable(updated)')
   })
 

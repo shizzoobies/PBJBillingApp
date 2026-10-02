@@ -4378,7 +4378,8 @@ const server = createServer(async (request, response) => {
     }
 
     // POST /api/invoices/:id/payment-link — create the ACH Checkout Session.
-    // Owner-only. Does NOT email anything: that is I4.
+    // Owner-only, and only for an invoice that has been sent. Does NOT email
+    // anything: that is I4.
     //
     // Deliberately ACH-ONLY, even for a client with card payments switched on.
     // The card option is a promise made in words — "includes a $X card
@@ -4417,6 +4418,37 @@ const server = createServer(async (request, response) => {
       }
       if (invoice.status === 'void') {
         sendJson(response, 409, { error: 'This invoice is voided, so it cannot be paid.' })
+        return
+      }
+      // A payment link is only for an invoice that has already gone out: all it
+      // does is hand back the link again. Decided here, before any Stripe call
+      // or store write, so a draft or reviewed invoice can never be marked Sent
+      // through this button and skip review and the covered-dates check. Being
+      // past due is derived from a `sent` invoice (nothing writes `overdue`), so
+      // a late invoice is still allowed — as the pay page also allows. An
+      // invoice that WAS sent and has since moved on (a tab still showing it as
+      // Sent) gets the sentence that is true of it, under the codes the month
+      // run already reloads on.
+      if (invoice.status === 'processing') {
+        sendJson(response, 409, {
+          error: 'invoice_payment_processing',
+          message:
+            'A bank payment is already going through on this invoice, so it does not need a payment link.',
+        })
+        return
+      }
+      if (invoice.status === 'paid') {
+        sendJson(response, 409, {
+          error: 'invoice_locked',
+          message: 'This invoice has been paid, so it does not need a payment link.',
+        })
+        return
+      }
+      if (invoice.status !== 'sent' && invoice.status !== 'overdue') {
+        sendJson(response, 409, {
+          error: 'payment_link_needs_sent',
+          message: 'A payment link is only for an invoice that has been sent. Send the invoice first.',
+        })
         return
       }
       const appData = await appDataStore.read()
@@ -4493,13 +4525,9 @@ const server = createServer(async (request, response) => {
       if (linkSwap.previous && linkSwap.previous !== result.session.id) {
         await expireCheckoutSession(linkSwap.previous)
       }
-      // The status/sent stamp this button has always written, in its own narrow
-      // write. Copying a link is the firm deciding the invoice has gone out.
-      const updated =
-        (await appDataStore.applyInvoicePayment(invoice.id, {
-          status: invoice.status === 'paid' ? 'paid' : 'sent',
-          sentAt: invoice.sentAt ?? new Date().toISOString(),
-        })) ?? linkSwap.invoice
+      // The invoice is already sent, so the swap above is the only write: this
+      // route no longer stamps a status or a sent date.
+      const updated = linkSwap.invoice
       await appDataStore.recordActivity(
         session.user.id,
         'invoice_payment_link_created',

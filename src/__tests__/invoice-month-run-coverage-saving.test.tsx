@@ -187,7 +187,8 @@ function expectEditorFrozen() {
   expect(reviewButton()).toBeDisabled()
   expect(screen.getByRole('button', { name: 'Mark paid' })).toBeDisabled()
   expect(screen.getByRole('button', { name: 'Void' })).toBeDisabled()
-  expect(screen.getByRole('button', { name: /Payment link/ })).toBeDisabled()
+  // This invoice is a draft, and a payment link is only offered on a sent one.
+  expect(screen.queryByRole('button', { name: /Payment link/ })).not.toBeInTheDocument()
   // The hours panel stages tags that the remount would discard.
   expect(scopeSelect()).toBeDisabled()
   expect(screen.getByText(/covered dates are saving/i)).toBeInTheDocument()
@@ -238,6 +239,36 @@ describe('InvoiceMonthRun — nothing typed is lost while the dates save', () =>
       await screen.findByDisplayValue('QuickBooks Ledger — September 13 – October 13, 2026'),
     ).toBeInTheDocument()
     expectEditorLive()
+  })
+
+  // A sent invoice is where Payment link is offered, so this is where it has to
+  // freeze: a draft no longer shows it (the frozen check above says so).
+  it('freezes Payment link on a sent invoice while the dates save, and frees it after', async () => {
+    mockList.mockResolvedValue([
+      { ...baseInvoice, status: 'sent', sentAt: '2026-09-02T00:00:00.000Z' } as PersistedInvoice,
+    ])
+    render(
+      <InvoiceMonthRun
+        clients={clients}
+        timeEntries={timeEntries}
+        employees={employees}
+        checklists={checklists}
+        onPrint={vi.fn()}
+      />,
+    )
+    fireEvent.click(await screen.findByRole('tab', { name: /^Sent/ }))
+    fireEvent.click(await screen.findByText('INV-2026-08-001'))
+    expect(screen.getByRole('button', { name: /Payment link/ })).toBeEnabled()
+
+    const settle = startSavingDates()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Saving…' })).toBeDisabled())
+    expect(screen.getByRole('button', { name: /Payment link/ })).toBeDisabled()
+
+    settle('refused')
+    expect(
+      await screen.findByText('The end of the covered period must come after its start.'),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Payment link/ })).toBeEnabled()
   })
 
   it('frees it again when the server refuses, with her typed dates still there', async () => {

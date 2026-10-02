@@ -1975,6 +1975,25 @@ describe('swapInvoiceCheckoutSession (file backend)', () => {
     expect(result.invoice.stripeCheckoutSessionId).toBe('cs_S0')
   })
 
+  // The Postgres branch answers the invoice through `listInvoices`; the file
+  // branch has to hand back the same normalized shape (kind, applied-to, the
+  // original lines and the pay token all present), not the raw stored row — the
+  // payment-link route returns this invoice to the screen.
+  it('returns the invoice in the shape listInvoices answers, not the raw row', async () => {
+    await seed()
+    const result = await store.swapInvoiceCheckoutSession('inv-swap', {
+      channel: 'ach',
+      sessionId: 'cs_SA',
+    })
+    const listed = (await store.listInvoices()).find((invoice) => invoice.id === 'inv-swap')
+
+    expect(result.invoice).toEqual(listed)
+    expect(result.invoice.kind).toBe('monthly')
+    expect(result.invoice.appliedToInvoiceId).toBeNull()
+    expect(result.invoice.originalLineItems).toBeNull()
+    expect(result.invoice.payToken).toBeNull()
+  })
+
   // Null, not undefined — an invoice that has never had a session has nothing
   // to expire, and the caller branches on exactly this.
   it('returns null previous when the channel was empty', async () => {

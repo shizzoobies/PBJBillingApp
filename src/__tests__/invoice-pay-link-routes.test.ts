@@ -431,10 +431,102 @@ describe('the Payment link button hands back the durable link too', () => {
   // write, not from the snapshot it read before talking to Stripe.
   it('still mints, persists and expires, off the value the write replaced', () => {
     expect(block).toContain('createInvoiceCheckoutSession(')
-    expect(block).toContain('applyInvoicePayment(')
     expect(block).toContain('swapInvoiceCheckoutSession(invoice.id, {')
     expect(block).toContain('expireCheckoutSession(linkSwap.previous)')
     expect(block).not.toContain('expireCheckoutSession(invoice.stripeCheckoutSessionId)')
+  })
+})
+
+/**
+ * "PAYMENT LINK" IS ONLY FOR AN INVOICE THAT HAS BEEN SENT.
+ *
+ * All the button does is hand the link back again, so a draft or reviewed
+ * invoice has no business there — it used to be marked Sent by it, skipping
+ * review and the covered-dates check. The refusal has to land before ANY Stripe
+ * call or store write, and the route must no longer be able to move the status
+ * or the sent date of the invoice it serves.
+ */
+describe('the Payment link route is only for an invoice that has been sent', () => {
+  const block = (() => {
+    const start = serverSource.indexOf('const invoicePaymentLinkMatch = normalizedPath.match(')
+    expect(start).toBeGreaterThan(-1)
+    const end = serverSource.indexOf('// POST /api/invoices/:id/mark-paid', start)
+    expect(end, 'the route that used to follow the payment link is gone').toBeGreaterThan(start)
+    return serverSource.slice(start, end)
+  })()
+
+  const gateAt = block.indexOf("invoice.status !== 'sent' && invoice.status !== 'overdue'")
+  const processingAt = block.indexOf("invoice.status === 'processing'")
+  const paidAt = block.indexOf("invoice.status === 'paid'")
+  const lastGateAt = Math.max(gateAt, processingAt, paidAt)
+
+  it('answers 409 payment_link_needs_sent, with the owner’s sentence', () => {
+    expect(gateAt).toBeGreaterThan(-1)
+    const gate = block.slice(gateAt, gateAt + 400).replace(/\s+/g, ' ')
+    expect(gate).toContain('sendJson(response, 409, {')
+    expect(gate).toContain("error: 'payment_link_needs_sent'")
+    expect(gate).toContain(
+      "message: 'A payment link is only for an invoice that has been sent. Send the invoice first.'",
+    )
+  })
+
+  // An invoice that WAS sent and has since moved on (a tab still showing it as
+  // Sent) is not "not sent yet": it gets the sentence that is true of it, under
+  // the codes the month run reloads on.
+  it('tells a processing invoice a bank payment is already going through', () => {
+    expect(processingAt).toBeGreaterThan(-1)
+    const branch = block.slice(processingAt, processingAt + 420).replace(/\s+/g, ' ')
+    expect(branch).toContain('sendJson(response, 409, {')
+    expect(branch).toContain("error: 'invoice_payment_processing'")
+    expect(branch).toContain(
+      "message: 'A bank payment is already going through on this invoice, so it does not need a payment link.'",
+    )
+  })
+
+  it('tells a paid invoice it is paid', () => {
+    expect(paidAt).toBeGreaterThan(-1)
+    const branch = block.slice(paidAt, paidAt + 300).replace(/\s+/g, ' ')
+    expect(branch).toContain('sendJson(response, 409, {')
+    expect(branch).toContain("error: 'invoice_locked'")
+    expect(branch).toContain(
+      "message: 'This invoice has been paid, so it does not need a payment link.'",
+    )
+  })
+
+  it('keeps draft and reviewed on payment_link_needs_sent: the two moved branches come first', () => {
+    expect(processingAt).toBeLessThan(gateAt)
+    expect(paidAt).toBeLessThan(gateAt)
+  })
+
+  it('is decided before any Stripe call or store write', () => {
+    for (const later of [
+      'appDataStore.read()',
+      'customers.create(',
+      'setClientStripeCustomerId(',
+      'createInvoiceCheckoutSession(',
+      'swapInvoiceCheckoutSession(',
+      'expireCheckoutSession(',
+      'getOrCreateInvoicePayToken(',
+      'recordActivity(',
+    ]) {
+      const at = block.indexOf(later)
+      expect(at, `${later} is gone from the route`).toBeGreaterThan(-1)
+      // All three refusals, the last of them included, sit above it.
+      expect(lastGateAt, `the status checks must sit above ${later}`).toBeLessThan(at)
+    }
+  })
+
+  // A past-due invoice is still a sent one: nothing writes `overdue`, it is
+  // derived at read time, so the check never turns a late invoice away.
+  it('lets a sent invoice through, a past-due one included', () => {
+    expect(block).toContain("invoice.status !== 'sent' && invoice.status !== 'overdue'")
+  })
+
+  it('no longer writes a status or a sent date', () => {
+    expect(block).not.toContain('applyInvoicePayment(')
+    expect(block).not.toContain('sentAt')
+    expect(block).not.toContain('status:')
+    expect(block).toContain('const updated = linkSwap.invoice')
   })
 })
 

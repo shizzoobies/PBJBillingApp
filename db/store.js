@@ -14524,7 +14524,10 @@ export class AppDataStore {
       updatedAt: nowIso(),
     }
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return { invoice: data.invoices[index], previous }
+    // The invoice as `listInvoices` answers it, which is what the Postgres
+    // branch hands back — so a caller sees one shape on both backends. The
+    // stored row stays as written above; only the answer is normalized.
+    return { invoice: normalizeStoredInvoice(data.invoices[index]), previous }
   }
 
   /**
