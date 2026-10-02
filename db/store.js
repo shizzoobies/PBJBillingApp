@@ -37,6 +37,7 @@ import {
   sanitizeProposalPricing,
 } from '../lib/proposal-pricing.js'
 import {
+  deletionOpenWaitRefusal,
   isWaitingOnOpen,
   REMOVAL_WOULD_COMPLETE_WAITING_STEP,
   removalOpenWaitRefusal,
@@ -2627,8 +2628,9 @@ export class StepIsWaitingError extends Error {
 }
 
 /**
- * Thrown by `removeChecklistSubItem` and `removeChecklistSubSubItem` when the
- * node being removed, or any node beneath it, still carries an open saved wait
+ * Thrown by `removeChecklistSubItem`, `removeChecklistSubSubItem`,
+ * `deleteChecklistItem` and `deleteChecklistItemFromSeries` when the node being
+ * removed, or any node beneath it, still carries an open saved wait
  * (stage `waiting` or `resolved`): the wait record would be deleted with it. As
  * with `StepIsWaitingError`, the answer is decided on the row as it is now, the
  * route sends `refusal` (`{ status, error, message }`) as it is, and nothing was
@@ -2659,6 +2661,17 @@ function assertRemovalAllowed(item, subItemId, subSubItemId) {
       message: REMOVAL_WOULD_COMPLETE_WAITING_STEP,
     })
   }
+}
+
+/**
+ * The refusal a whole TOP-LEVEL step's deletion is answered with, decided on the
+ * step as it is now (the row locked `for update`, or the file queue slot): an
+ * open saved wait on the step itself or on any sub-step or sub-sub-step beneath
+ * it. Throws before anything is written; the routes map it like the sub-step one.
+ */
+function assertStepDeletable(item) {
+  const openWait = deletionOpenWaitRefusal(item)
+  if (openWait) throw new StepHasOpenWaitError(openWait)
 }
 
 /**
@@ -16844,13 +16857,25 @@ export class AppDataStore {
     })
   }
 
+  /**
+   * Delete a whole top-level step. Refused with `StepHasOpenWaitError` (nothing
+   * written) when the step, or any sub-step or sub-sub-step beneath it, carries
+   * an open saved wait: the wait record would go with it. The decision is made on
+   * the row as it is now: locked `for update` on Postgres, inside the one file
+   * queue slot on the file backend, so a wait added after the route read its copy
+   * still blocks the delete.
+   */
   async deleteChecklistItem(checklistId, itemId) {
     if (this.pool) {
-      const result = await this.pool.query(
-        `delete from checklist_items where checklist_id = $1 and id = $2 returning id`,
-        [checklistId, itemId],
-      )
-      if (!result.rowCount) {
+      const removed = await this._withLockedChecklistItem(checklistId, itemId, async (client, mapped) => {
+        assertStepDeletable(mapped)
+        await client.query(`delete from checklist_items where checklist_id = $1 and id = $2 returning id`, [
+          checklistId,
+          itemId,
+        ])
+        return true
+      })
+      if (!removed) {
         return null
       }
       await this._clearPendingNoteItemStampsSafely([itemId])
@@ -16858,27 +16883,35 @@ export class AppDataStore {
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedChecklist = null
-    let itemFound = false
-    data.checklists = data.checklists.map((checklist) => {
-      if (checklist.id !== checklistId) {
-        return checklist
-      }
-      const items = checklist.items.filter((item) => {
-        if (item.id === itemId) {
-          itemFound = true
-          return false
+    // Raw fs calls in one queue slot (see `_withFileChecklistItem`): the read, the
+    // refusal and the write cannot be split by another writer.
+    const updatedChecklist = await enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      let updated = null
+      let itemFound = false
+      data.checklists = data.checklists.map((checklist) => {
+        if (checklist.id !== checklistId) {
+          return checklist
         }
-        return true
+        const target = checklist.items.find((item) => item.id === itemId)
+        if (target) assertStepDeletable(target)
+        const items = checklist.items.filter((item) => {
+          if (item.id === itemId) {
+            itemFound = true
+            return false
+          }
+          return true
+        })
+        updated = { ...checklist, items }
+        return updated
       })
-      updatedChecklist = { ...checklist, items }
-      return updatedChecklist
+      if (!itemFound || !updated) {
+        return null
+      }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return updated
     })
-    if (!itemFound || !updatedChecklist) {
-      return null
-    }
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    if (!updatedChecklist) return null
     await this._clearPendingNoteItemStampsSafely([itemId])
     return updatedChecklist
   }
@@ -16960,6 +16993,12 @@ export class AppDataStore {
    *     step this removes is dropped with it, so the queue cannot hold a request
    *     for a step that no longer exists.
    *
+   * The clicked step is decided FIRST, on the row locked `for update`: when it, or
+   * any sub-step beneath it, carries an open saved wait the whole operation is
+   * refused with `StepHasOpenWaitError` and nothing is written anywhere (the
+   * template included). Later copies that carry a wait are not in play: they are
+   * kept (see above), never deleted, so no wait record can go with this call.
+   *
    * Postgres runs all of it in ONE transaction so a failure part-way leaves the
    * step, the template and the later checklists exactly as they were; the file
    * backend does it in one write per file. Both change the workspace
@@ -17005,6 +17044,20 @@ export class AppDataStore {
           await client.query('rollback')
           return null
         }
+        // The clicked step is read again locked `for update` and judged as it is
+        // now: an open saved wait on it or beneath it refuses the whole series
+        // delete before a single row is written (the catch below rolls back). A
+        // later copy that carries a wait of any kind is never deleted anyway
+        // (`untouchedStepSql` on the delete itself), so it needs no refusal.
+        const lockedTarget = await client.query(
+          `select ${CHECKLIST_ITEM_SELECT_COLUMNS} from checklist_items where checklist_id = $1 and id = $2 for update`,
+          [checklistId, itemId],
+        )
+        if (!lockedTarget.rowCount) {
+          await client.query('rollback')
+          return null
+        }
+        assertStepDeletable(mapChecklistItemRow(lockedTarget.rows[0]))
         const label = normalizeStepLabel(target.label)
         const ordinal = sameLabelOrdinal(ownItems.rows, itemId)
 
@@ -17124,6 +17177,7 @@ export class AppDataStore {
     const checklist = checklists.find((entry) => entry.id === checklistId)
     const target = checklist?.items.find((item) => item.id === itemId)
     if (!checklist || !target) return null
+    assertStepDeletable(target)
     const label = normalizeStepLabel(target.label)
     const ordinal = sameLabelOrdinal(checklist.items, itemId)
 

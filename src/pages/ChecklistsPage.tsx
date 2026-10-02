@@ -25,6 +25,7 @@ import {
   canAskWaitingOnQuestion,
   canMarkWaitingOnDone,
   canVerifyWaitingOn,
+  deletionOpenWaitRefusal,
   hasLiveSavedWait,
   hasLiveSavedWaitInTree,
   isClientWait,
@@ -34,6 +35,7 @@ import {
   removalWouldCompleteWaitingStep,
   removalWouldDropOpenWait,
   STEP_HAS_OPEN_WAIT_MESSAGE,
+  stepWouldDropOpenWait,
   WAITING_BLOCK_TITLES,
   waitingOnStage,
   waitingToggleRefusal,
@@ -1319,11 +1321,14 @@ function PendingDeletionsSection({
               const approveItem = checklists
                 .find((c) => c.id === req.checklistId)
                 ?.items.find((entry) => entry.id === req.itemId)
-              const approveHasOpenWait = removalWouldDropOpenWait(
-                approveItem,
-                req.subItemId ?? undefined,
-                req.subSubItemId ?? undefined,
-              )
+              // (An open wait on the step, or beneath it for a whole step: the same
+              // answer the server gives, so a disabled Approve is never a surprise.)
+              const approveHasOpenWait =
+                deletionOpenWaitRefusal(
+                  approveItem,
+                  req.subItemId ?? undefined,
+                  req.subSubItemId ?? undefined,
+                ) !== null
               const approveBlocked =
                 approveHasOpenWait ||
                 removalWouldCompleteWaitingStep(
@@ -2427,7 +2432,14 @@ export function ChecklistCard({
       setSeriesPromptLabels(null)
       setStepDeletePrompt({ itemId, label: checklist.items.find((item) => item.id === itemId)?.label ?? '' })
     } else if (window.confirm('Delete this step?')) {
-      void onDeleteItem(checklist.id, itemId)
+      void (async () => {
+        try {
+          await onDeleteItem(checklist.id, itemId)
+        } catch (error) {
+          // The server refused (a wait added from another tab): its own sentence.
+          setStepDeleteError(error instanceof Error ? error.message : 'Could not remove the step.')
+        }
+      })()
     }
   }
   // The result sentence is a passing notice: it clears after 8 seconds, or on
@@ -2827,9 +2839,15 @@ export function ChecklistCard({
               onThisOnly={() => {
                 void (async () => {
                   setStepDeleteBusy(true)
+                  setStepDeleteError(null)
                   let outcome: 'filed' | void
                   try {
                     outcome = await onDeleteItem(checklist.id, stepDeletePrompt.itemId)
+                  } catch (error) {
+                    // A refusal (an open wait added from another tab): keep the
+                    // prompt open and say why, in the server's own sentence.
+                    setStepDeleteError(error instanceof Error ? error.message : 'Could not remove the step.')
+                    return
                   } finally {
                     setStepDeleteBusy(false)
                   }
@@ -2889,6 +2907,11 @@ export function ChecklistCard({
       {stepDeleteNote ? (
         <p className="series-scope-text" role="status">
           {stepDeleteNote}
+        </p>
+      ) : null}
+      {stepDeleteError && !stepDeletePrompt ? (
+        <p className="waiting-editor-error" role="alert">
+          {stepDeleteError}
         </p>
       ) : null}
       {canEditStructure
@@ -4176,11 +4199,15 @@ function DraggableTaskList({
                       type="button"
                       aria-label="Delete item"
                       className="item-delete-btn"
-                      disabled={hasPendingDeletion(item.id)}
+                      // An open wait on this step (or beneath it) blocks deleting it,
+                      // for everyone and on every scope: the wait record would go too.
+                      disabled={hasPendingDeletion(item.id) || stepWouldDropOpenWait(item)}
                       title={
                         hasPendingDeletion(item.id)
                           ? 'Deletion already requested — waiting on owner approval'
-                          : 'Delete item'
+                          : stepWouldDropOpenWait(item)
+                            ? STEP_HAS_OPEN_WAIT_MESSAGE
+                            : 'Delete item'
                       }
                       onClick={() => void onDeleteItem(item.id)}
                     >

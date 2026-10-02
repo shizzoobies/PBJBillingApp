@@ -58,6 +58,7 @@ import {
   removalWouldDropOpenWait,
   SAVED_WAIT_FIELDS_ARE_LOCKED,
   STEP_HAS_OPEN_WAIT_MESSAGE,
+  stepWouldDropOpenWait,
   waitingLockRefusal,
   waitingOnStage,
   waitingToggleRefusal,
@@ -25017,6 +25018,72 @@ describe('deleteChecklistItemFromSeries', () => {
     )
     expect(await stageLabels(0)).toEqual(['Send report'])
   })
+
+  describe('a step with an open wait on it refuses the whole series delete (featreq-e8aa2abe)', () => {
+    // A client save keeps the waits the server already holds, so the waits are put on disk directly.
+    const withWaits = async (onClicked, later = {}) => {
+      await seed([
+        checklist('cl-sep', '2026-09-30', [step('s1', 'Reconcile'), step('s2', 'Send report')]),
+        checklist('cl-oct', '2026-10-31', [step('o1', 'Reconcile')]),
+        checklist('cl-nov', '2026-11-30', [step('n1', 'Reconcile')]),
+        checklist('cl-dec', '2026-12-31', [step('d1', 'Reconcile')]),
+      ])
+      const data = await persisted()
+      Object.assign(data.checklists.find((entry) => entry.id === 'cl-sep').items[0], onClicked)
+      for (const [id, over] of Object.entries(later)) {
+        Object.assign(data.checklists.find((entry) => entry.id === id).items[0], over)
+      }
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+    const open = (stage) => ({ waitingOns: [waitAtStage(stage, { id: 'wo-clicked' })] })
+    const refusedCases = {
+      'its own waiting wait': open('waiting'),
+      'its own resolved (not yet approved) wait': open('resolved'),
+      'a waiting wait on a sub-step beneath it': {
+        subItems: [{ id: 'u1', title: 'u', done: false, ...open('waiting') }],
+      },
+      'a resolved wait on a sub-sub-step beneath it': {
+        subItems: [{ id: 'u1', title: 'u', done: false, subItems: [{ id: 'v1', title: 'v', done: false, ...open('resolved') }] }],
+      },
+    }
+    for (const [name, onClicked] of Object.entries(refusedCases)) {
+      it(`refuses on ${name}: typed error, nothing deleted on any checklist, template untouched`, async () => {
+        await withWaits(onClicked)
+        const before = await readFile(localDataPath, 'utf8')
+        const authText = async () => (existsSync(localAuthPath) ? readFile(localAuthPath, 'utf8') : '')
+        const beforeAuth = await authText()
+        const error = await store.deleteChecklistItemFromSeries('cl-sep', 's1').catch((caught) => caught)
+        expect(error).toBeInstanceOf(StepHasOpenWaitError)
+        expect(error.refusal).toEqual(OPEN_WAIT_REFUSAL)
+        expect(await readFile(localDataPath, 'utf8')).toBe(before)
+        expect(await authText()).toBe(beforeAuth)
+        for (const id of ['cl-oct', 'cl-nov', 'cl-dec']) expect(await itemsOf(id), id).toHaveLength(1)
+        expect(await stageLabels(0)).toEqual(['Reconcile', 'Send report'])
+      })
+    }
+
+    it('a verified (closed) wait on the clicked step does not block the series delete', async () => {
+      await withWaits(open('verified'))
+      const result = await store.deleteChecklistItemFromSeries('cl-sep', 's1')
+      expect(result.removedFromTemplate).toBe(true)
+      expect(await itemsOf('cl-sep')).toEqual(['s2'])
+    })
+
+    it('a wait on a later copy is not deleted: that copy is kept and reported, the others go', async () => {
+      // The 3rd of 4 checklists carries an open wait. Nothing carrying a wait is
+      // ever removed by this operation (it never was), so no wait record is lost.
+      await withWaits({}, { 'cl-nov': open('waiting') })
+      const result = await store.deleteChecklistItemFromSeries('cl-sep', 's1')
+      expect(result).toEqual({
+        removedFromTemplate: true,
+        removedFromChecklists: ['cl-oct', 'cl-dec'],
+        keptOnChecklists: ['cl-nov'],
+      })
+      const kept = (await persisted()).checklists.find((entry) => entry.id === 'cl-nov').items
+      expect(kept.map((item) => item.id)).toEqual(['n1'])
+      expect(kept[0].waitingOns).toHaveLength(1)
+    })
+  })
 })
 
 describe('deleteChecklistItemFromSeries (postgres branch)', () => {
@@ -25036,12 +25103,17 @@ describe('deleteChecklistItemFromSeries (postgres branch)', () => {
     ],
     deletedLaterRows = null,
     failOn = null,
+    // The clicked step as its row is now, read again `for update` (null: gone).
+    lockedStep = { id: 's1', label: ' Reconcile ' },
   } = {}) {
     const statements = []
     const query = async (text, params) => {
       const trimmed = String(text).trim()
       statements.push({ text: trimmed, params })
       if (failOn && failOn.test(trimmed)) throw new Error('boom')
+      if (LOCKED_ITEM_SELECT.test(trimmed)) {
+        return lockedStep ? { rows: [lockedRowOf(lockedStep)], rowCount: 1 } : { rows: [], rowCount: 0 }
+      }
       if (/^select template_id, stage_id/i.test(trimmed)) return { rows: checklistRow ? [checklistRow] : [] }
       if (/^select id, label from checklist_items where checklist_id = \$1/i.test(trimmed)) return { rows: ownItemRows }
       if (/^select id from checklist_template_stages/i.test(trimmed)) return { rows: stageRows }
@@ -25272,6 +25344,78 @@ describe('deleteChecklistItemFromSeries (postgres branch)', () => {
       expect(fake.find(/^commit/i)).toHaveLength(0)
       expect(fake.released).toHaveLength(1)
     }
+  })
+
+  describe('an open wait on the clicked step (featreq-e8aa2abe)', () => {
+    const waited = (over) => ({ id: 's1', label: ' Reconcile ', ...over })
+    const refusedCases = {
+      'its own waiting wait': waited({ waitingOns: [waitAtStage('waiting')] }),
+      'its own resolved wait': waited({ waitingOns: [waitAtStage('resolved')] }),
+      'a waiting wait on a sub-step beneath it': waited({
+        subItems: [{ id: 'u1', title: 'u', done: false, waitingOns: [waitAtStage('waiting')] }],
+      }),
+      'a resolved wait on a sub-sub-step beneath it': waited({
+        subItems: [
+          { id: 'u1', title: 'u', done: false, subItems: [{ id: 'v1', title: 'v', done: false, waitingOns: [waitAtStage('resolved')] }] },
+        ],
+      }),
+    }
+    for (const [name, lockedStep] of Object.entries(refusedCases)) {
+      it(`refuses on ${name}: nothing is written, the template is untouched, rollback, connection released`, async () => {
+        const fake = seriesPostgres({ lockedStep })
+        const error = await storeOn(fake).deleteChecklistItemFromSeries('cl-sep', 's1').catch((caught) => caught)
+        expect(error).toBeInstanceOf(StepHasOpenWaitError)
+        expect(error.refusal).toEqual(OPEN_WAIT_REFUSAL)
+        expect(writes(fake)).toEqual([])
+        expect(fake.find(/^delete from checklist_template_items/i)).toHaveLength(0)
+        expect(fake.find(/^commit/i)).toHaveLength(0)
+        expect(fake.find(/^rollback/i)).toHaveLength(1)
+        expect(fake.released).toHaveLength(1)
+      })
+    }
+
+    it('reads the clicked step locked `for update` before the first delete, and again as it is now', async () => {
+      const fake = seriesPostgres()
+      await storeOn(fake).deleteChecklistItemFromSeries('cl-sep', 's1')
+      const texts = fake.statements.map((entry) => entry.text)
+      const lockAt = texts.findIndex((text) => LOCKED_ITEM_SELECT.test(text))
+      expect(lockAt).toBeGreaterThan(texts.findIndex((text) => /^select id, label from checklist_items where checklist_id = \$1/i.test(text)))
+      expect(lockAt).toBeLessThan(texts.findIndex((text) => /^delete from /i.test(text)))
+      expect(fake.statements[lockAt].params).toEqual(['cl-sep', 's1'])
+    })
+
+    it('the decision is the locked row\'s, not the first read: it refuses before the template steps are read', async () => {
+      const fake = seriesPostgres({ lockedStep: waited({ waitingOns: [waitAtStage('waiting')] }) })
+      await storeOn(fake).deleteChecklistItemFromSeries('cl-sep', 's1').catch(() => {})
+      expect(fake.find(/^select id, label from checklist_template_items/i)).toHaveLength(0)
+    })
+
+    it('a verified wait on the clicked step does not block; the delete runs as before', async () => {
+      const fake = seriesPostgres({ lockedStep: waited({ waitingOns: [waitAtStage('verified')] }) })
+      const result = await storeOn(fake).deleteChecklistItemFromSeries('cl-sep', 's1')
+      expect(result.removedFromTemplate).toBe(true)
+      expect(fake.find(/^commit/i)).toHaveLength(1)
+    })
+
+    it('answers null and rolls back when the step vanished between the two reads', async () => {
+      const fake = seriesPostgres({ lockedStep: null })
+      expect(await storeOn(fake).deleteChecklistItemFromSeries('cl-sep', 's1')).toBeNull()
+      expect(writes(fake)).toEqual([])
+      expect(fake.find(/^rollback/i)).toHaveLength(1)
+    })
+
+    it('a later copy that carries a wait is kept and reported, never deleted (the delete restates the untouched rule)', async () => {
+      const fake = seriesPostgres({
+        candidateRows: [
+          { id: 'o1', checklist_id: 'cl-oct', untouched: true },
+          { id: 'n1', checklist_id: 'cl-nov', untouched: false },
+          { id: 'd1', checklist_id: 'cl-dec', untouched: true },
+        ],
+      })
+      const result = await storeOn(fake).deleteChecklistItemFromSeries('cl-sep', 's1')
+      expect(result.keptOnChecklists).toEqual(['cl-nov'])
+      expect(fake.find(/^delete from checklist_items ci/i)[0].params).toEqual([['o1', 'd1']])
+    })
   })
 })
 
@@ -26006,6 +26150,10 @@ describe('pending notes: cap, one lookup, attach guards (postgres branch)', () =
       const query = async (text, params) => {
         const trimmed = String(text).trim()
         statements.push({ text: trimmed, params })
+        // The delete decides on the step's row locked `for update`: answer it with a plain step.
+        if (LOCKED_ITEM_SELECT.test(trimmed)) {
+          return rowCount ? { rows: [lockedRowOf({ id: params[1], label: 'Step' })], rowCount: 1 } : { rows: [], rowCount: 0 }
+        }
         return { rows: [], rowCount: /^delete from checklist_items where checklist_id = \$1 and id = \$2/i.test(trimmed) ? rowCount : 0 }
       }
       return { statements, pool: { query, async connect() { return { query, release() {} } } } }
@@ -26037,6 +26185,7 @@ describe('pending notes: cap, one lookup, attach guards (postgres branch)', () =
         const trimmed = String(text).trim()
         statements.push({ text: trimmed, params })
         if (/^update client_pending_notes/i.test(trimmed)) throw new Error('clear failed')
+        if (LOCKED_ITEM_SELECT.test(trimmed)) return { rows: [lockedRowOf({ id: params[1], label: 'Step' })], rowCount: 1 }
         return { rows: [], rowCount: /^delete from checklist_items/i.test(trimmed) ? 1 : 0 }
       }
       const pgStore = new AppDataStore()
@@ -26061,6 +26210,9 @@ describe('pending notes: cap, one lookup, attach guards (postgres branch)', () =
         }
         if (/^select id, label from checklist_items where checklist_id = \$1/i.test(trimmed)) {
           return { rows: [{ id: 'item-pn-abc', label: 'Reconcile' }] }
+        }
+        if (LOCKED_ITEM_SELECT.test(trimmed)) {
+          return { rows: [lockedRowOf({ id: 'item-pn-abc', label: 'Reconcile' })], rowCount: 1 }
         }
         return { rows: [], rowCount: 0 }
       }
@@ -29303,6 +29455,167 @@ describe('removing a step that has an open wait is refused (Postgres, on the loc
     })
     expectRolledBackWithNothingWritten(fake)
     expect(counter.released).toBe(1)
+  })
+})
+
+/**
+ * The same rule for a whole TOP-LEVEL step (featreq-e8aa2abe): `deleteChecklistItem`
+ * decides on the row as it is now (locked `for update`, or the file queue slot)
+ * and refuses with `StepHasOpenWaitError` when the step, or any sub-step or
+ * sub-sub-step beneath it, carries an open saved wait. Nothing is written.
+ */
+const wholeStepCases = () => ({
+  'its own waiting wait': { waitingOns: [waitAtStage('waiting', { id: 'wo-a' })] },
+  'its own resolved (not yet approved) wait': { waitingOns: [waitAtStage('resolved', { id: 'wo-b' })] },
+  'a waiting wait on a sub-step beneath it': {
+    subItems: [{ id: 'u1', title: 'u', done: false, waitingOns: [waitAtStage('waiting', { id: 'wo-c' })] }],
+  },
+  'a resolved wait on a sub-sub-step beneath it': {
+    subItems: [
+      { id: 'u1', title: 'u', done: false, subItems: [{ id: 'v1', title: 'v', done: false, waitingOns: [waitAtStage('resolved', { id: 'wo-d' })] }] },
+    ],
+  },
+})
+const wholeStepAllowed = () => ({
+  'a verified (closed) wait': { waitingOns: [waitAtStage('verified', { id: 'wo-e' })] },
+  'a verified wait on a sub-step beneath it': {
+    subItems: [{ id: 'u1', title: 'u', done: false, waitingOns: [waitAtStage('verified', { id: 'wo-f' })] }],
+  },
+  'the legacy waiting flag with no saved wait': { waiting: true, waitingOn: 'the bank' },
+  'no wait at all': {},
+})
+
+describe('deleting a whole step that has an open wait is refused (file backend)', () => {
+  const persistedText = () => readFile(localDataPath, 'utf8')
+  const seed = async (itemOver) => {
+    await store.write(
+      workspace({
+        employees: [
+          { id: OWNER_ID, name: 'Brittany', role: 'owner' },
+          { id: 'emp-lisa', name: 'Lisa', role: 'bookkeeper' },
+        ],
+        checklists: [
+          {
+            id: 'cl-1',
+            title: 'August close',
+            clientId: 'c1',
+            items: [
+              { id: 'it-1', label: 'Reconcile', done: false },
+              { id: 'it-2', label: 'Send report', done: false },
+            ],
+          },
+        ],
+      }),
+    )
+    // A client save keeps the waits the server already holds, so put them on disk directly.
+    const data = JSON.parse(await persistedText())
+    Object.assign(data.checklists[0].items[0], itemOver)
+    data.checklists[0].items[1].waitingOns = [waitAtStage('waiting', { id: 'wo-other' })]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  for (const [name, over] of Object.entries(wholeStepCases())) {
+    it(`refuses a step with ${name}: typed error with the approved sentence, nothing written`, async () => {
+      await seed(over)
+      const before = await persistedText()
+      const error = await store.deleteChecklistItem('cl-1', 'it-1').catch((caught) => caught)
+      expect(error).toBeInstanceOf(StepHasOpenWaitError)
+      expect(error.refusal).toEqual(OPEN_WAIT_REFUSAL)
+      expect(error.message).toBe(STEP_HAS_OPEN_WAIT_MESSAGE)
+      expect(await persistedText()).toBe(before)
+    })
+  }
+
+  for (const [name, over] of Object.entries(wholeStepAllowed())) {
+    it(`deletes a step with ${name}, and leaves the other step and its wait alone`, async () => {
+      await seed(over)
+      const updated = await store.deleteChecklistItem('cl-1', 'it-1')
+      expect(updated.items.map((item) => item.id)).toEqual(['it-2'])
+      const saved = JSON.parse(await persistedText())
+      expect(saved.checklists[0].items.map((item) => item.id)).toEqual(['it-2'])
+      expect(saved.checklists[0].items[0].waitingOns).toHaveLength(1)
+    })
+  }
+
+  it('a wait added after the caller read its copy still blocks the delete', async () => {
+    await seed({})
+    const staleCopy = await store.read()
+    expect(staleCopy.checklists[0].items[0].waitingOns).toBeUndefined()
+    await store.addWaitingOn('cl-1', { itemId: 'it-1' }, { blockerId: 'emp-lisa', requestedBy: OWNER_ID, note: 'late wait' })
+    const before = await persistedText()
+    await expect(store.deleteChecklistItem('cl-1', 'it-1')).rejects.toBeInstanceOf(StepHasOpenWaitError)
+    expect(await persistedText()).toBe(before)
+  })
+
+  it('a wait closed in the meantime no longer blocks', async () => {
+    await seed(wholeStepCases()['its own resolved (not yet approved) wait'])
+    await store.markWaitingOnVerified('cl-1', 'wo-b', { userId: OWNER_ID })
+    const updated = await store.deleteChecklistItem('cl-1', 'it-1')
+    expect(updated.items.map((item) => item.id)).toEqual(['it-2'])
+  })
+
+  it('answers null and writes nothing for a missing step or checklist', async () => {
+    await seed({})
+    const before = await persistedText()
+    expect(await store.deleteChecklistItem('cl-1', 'nope')).toBeNull()
+    expect(await store.deleteChecklistItem('nope', 'it-1')).toBeNull()
+    expect(await persistedText()).toBe(before)
+  })
+})
+
+describe('deleting a whole step that has an open wait is refused (Postgres, on the locked row)', () => {
+  const lockedStep = (over = {}) => ({ id: 'it-1', label: 'Reconcile', done: false, ...over })
+  const DELETE_STEP = /^delete from checklist_items where checklist_id = \$1 and id = \$2 returning id$/i
+
+  function pgStoreWhere({ locked = lockedStep() } = {}) {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    // The caller's own copy: no waits (they were committed after it read).
+    pgStore.read = async () => ({
+      checklists: [{ id: 'cl-1', clientId: 'c1', title: 'August close', items: [lockedStep()] }],
+    })
+    answerLockedChecklistItem(fake, (_checklistId, itemId) =>
+      itemId === 'it-1' && locked ? lockedRowOf(locked) : null,
+    )
+    tagConnection(fake)
+    return { fake, pgStore }
+  }
+
+  for (const [name, over] of Object.entries(wholeStepCases())) {
+    it(`refuses a step with ${name}: locked read, rollback, no delete, connection released`, async () => {
+      const { fake, pgStore } = pgStoreWhere({ locked: lockedStep(over) })
+      const counter = countReleases(fake)
+      const error = await pgStore.deleteChecklistItem('cl-1', 'it-1').catch((caught) => caught)
+      expect(error).toBeInstanceOf(StepHasOpenWaitError)
+      expect(error.refusal).toEqual(OPEN_WAIT_REFUSAL)
+      expectRolledBackWithNothingWritten(fake)
+      expect(fake.matching(/^delete/i)).toHaveLength(0)
+      expect(counter.released).toBe(1)
+    })
+  }
+
+  for (const [name, over] of Object.entries(wholeStepAllowed())) {
+    it(`deletes a step with ${name} in one locked transaction, the \`for update\` read before the delete`, async () => {
+      const { fake, pgStore } = pgStoreWhere({ locked: lockedStep(over) })
+      const result = await pgStore.deleteChecklistItem('cl-1', 'it-1')
+      expect(result.id).toBe('cl-1')
+      expectOneLockedTransaction(fake, DELETE_STEP)
+      expect(fake.matching(DELETE_STEP)[0].params).toEqual(['cl-1', 'it-1'])
+    })
+  }
+
+  it('the caller\'s copy had no waits: only the locked row decides', async () => {
+    const { fake, pgStore } = pgStoreWhere({ locked: lockedStep(wholeStepCases()['its own waiting wait']) })
+    expect(stepWouldDropOpenWait((await pgStore.read()).checklists[0].items[0])).toBe(false)
+    await expect(pgStore.deleteChecklistItem('cl-1', 'it-1')).rejects.toBeInstanceOf(StepHasOpenWaitError)
+    expect(fake.matching(/^delete/i)).toHaveLength(0)
+  })
+
+  it('answers null and rolls back when the row is gone', async () => {
+    const { fake, pgStore } = pgStoreWhere({ locked: null })
+    expect(await pgStore.deleteChecklistItem('cl-1', 'it-1')).toBeNull()
+    expect(fake.matching(/^delete/i)).toHaveLength(0)
+    expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(fake.indexOf(LOCKED_ITEM_SELECT))
   })
 })
 

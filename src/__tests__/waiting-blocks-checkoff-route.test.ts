@@ -276,8 +276,9 @@ describe('a step with an open wait cannot be deleted', () => {
 
   it('refuses an approval, before it removes anything, and keeps the request', () => {
     const block = routeBlock(/const itemDeletionDecisionMatch = normalizedPath\.match\(/, 7500)
+    // A whole top-level step is judged here too (`deletionOpenWaitRefusal`).
     const guardAt = block.indexOf(
-      'const approvalOpenWait = removalOpenWaitRefusal(approvalItem, req.subItemId, req.subSubItemId)',
+      'const approvalOpenWait = deletionOpenWaitRefusal(approvalItem, req.subItemId, req.subSubItemId)',
     )
     expect(guardAt).toBeGreaterThan(-1)
     expect(block.slice(guardAt, guardAt + 400)).toContain('sendJson(response, approvalOpenWait.status, {')
@@ -296,9 +297,10 @@ describe('a step with an open wait cannot be deleted', () => {
     expect(helper.slice(0, 400)).toContain(
       'if (error instanceof StepHasOpenWaitError || error instanceof StepIsWaitingError) {',
     )
-    // Three callers: the two DELETE routes and the approval.
-    expect(serverSource.split('const refusalBody = removalRefusalBody(error)').length - 1).toBe(3)
-    expect(serverSource.split('if (!refusalBody) throw error').length - 1).toBe(3)
+    // Four callers: the sub-step and sub-sub-step DELETE routes, the top-level
+    // step DELETE route (owner) and the approval.
+    expect(serverSource.split('const refusalBody = removalRefusalBody(error)').length - 1).toBe(4)
+    expect(serverSource.split('if (!refusalBody) throw error').length - 1).toBe(4)
     const approval = routeBlock(/const itemDeletionDecisionMatch = normalizedPath\.match\(/, 7500)
     const catchAt = approval.indexOf('const refusalBody = removalRefusalBody(error)')
     const dropAt = approval.indexOf('await appDataStore.deleteItemDeletionRequest(requestId)', catchAt)
@@ -325,11 +327,61 @@ describe('a step with an open wait cannot be deleted', () => {
     expect(storeSource).toContain('removalOpenWaitRefusal,')
   })
 
-  // Top-level steps are NOT covered by this rule: `deleteChecklistItem` and the
-  // series delete are different writers (they delete the whole row), and the
-  // owner's answer was about sub-steps.
-  it('leaves the top-level step DELETE and the series delete alone', () => {
-    const block = routeBlock(/--- DELETE \/api\/checklists\/:id\/items\/:itemId ---/, 4500)
-    expect(block).not.toContain('removalOpenWaitRefusal')
+  // Top-level steps follow the same rule (featreq-e8aa2abe): `deleteChecklistItem`
+  // and the series delete refuse in the store, and the route asks early too.
+  it('refuses the top-level step DELETE, on this checklist or across the series, before any request is filed or anything removed', () => {
+    const block = routeBlock(/--- DELETE \/api\/checklists\/:id\/items\/:itemId ---/, 6500)
+    const guardAt = block.indexOf('const stepOpenWaitRefusal = deletionOpenWaitRefusal(targetItem)')
+    expect(guardAt).toBeGreaterThan(-1)
+    expect(block.slice(guardAt, guardAt + 400)).toContain('sendJson(response, stepOpenWaitRefusal.status, {')
+    // Before the series branch, the staff request and both removals.
+    expect(guardAt).toBeLessThan(block.indexOf("requestUrl.searchParams.get('scope') === 'series'"))
+    expect(guardAt).toBeLessThan(block.indexOf('fileItemDeletionRequest('))
+    expect(guardAt).toBeLessThan(block.indexOf('runSeriesStepDelete('))
+    expect(guardAt).toBeLessThan(block.indexOf('appDataStore.deleteChecklistItem('))
+    // The owner's removal answers the store's refusal as the same 409.
+    const call = block.indexOf('appDataStore.deleteChecklistItem(')
+    expect(block.slice(call, call + 400)).toContain('const refusalBody = removalRefusalBody(error)')
+  })
+
+  it('refuses a series approval on an open wait too, before the series delete runs, and keeps the request', () => {
+    const block = routeBlock(/const itemDeletionDecisionMatch = normalizedPath\.match\(/, 7500)
+    const guardAt = block.indexOf('const seriesOpenWait = deletionOpenWaitRefusal(seriesStep)')
+    expect(guardAt).toBeGreaterThan(-1)
+    expect(guardAt).toBeLessThan(block.indexOf('runSeriesStepDelete('))
+    const refusalReturnAt = block.indexOf('return', guardAt)
+    expect(block.slice(guardAt, refusalReturnAt)).not.toContain('deleteItemDeletionRequest')
+  })
+
+  it('the series delete maps the store\'s refusal to a 409 body the callers send as it is', () => {
+    const seriesSource = readFileSync(
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../lib/series-step-delete.js'),
+      'utf8',
+    ).replaceAll('\r\n', '\n')
+    const at = seriesSource.indexOf("error?.name === 'StepHasOpenWaitError'")
+    expect(at).toBeGreaterThan(seriesSource.indexOf('store.deleteChecklistItemFromSeries('))
+    expect(seriesSource.slice(at, at + 300)).toContain('return { status: 409, body:')
+  })
+
+  it('a deletion request is refused on the step as it is now, not only on the route copy (every step depth)', () => {
+    const at = serverSource.indexOf('async function fileItemDeletionRequest(')
+    const helper = serverSource.slice(at, at + 4200)
+    const refusalAt = helper.indexOf('const openWait = deletionOpenWaitRefusal(currentItem, subItemId, subSubItemId)')
+    expect(refusalAt).toBeGreaterThan(helper.indexOf('deletionTargetStillExists('))
+    expect(refusalAt).toBeLessThan(helper.indexOf('createItemDeletionRequest('))
+    // All four filing callers answer it.
+    expect(serverSource.split('if (answerRefusedFiling(response, filed)) return').length - 1).toBe(4)
+  })
+
+  it('the store decides a whole step on the locked row / queue slot, before it deletes (both backends)', () => {
+    const start = storeSource.indexOf('async deleteChecklistItem(')
+    const body = storeSource.slice(start, storeSource.indexOf('async _clearPendingNoteItemStampsSafely(', start))
+    const pgGuard = body.indexOf('assertStepDeletable(mapped)')
+    expect(pgGuard).toBeGreaterThan(body.indexOf('_withLockedChecklistItem('))
+    expect(pgGuard).toBeLessThan(body.indexOf('delete from checklist_items'))
+    const fileGuard = body.indexOf('assertStepDeletable(target)')
+    expect(fileGuard).toBeGreaterThan(body.indexOf('enqueueFileOperation('))
+    expect(fileGuard).toBeLessThan(body.indexOf('await fsWriteFile('))
+    expect(storeSource).toContain('deletionOpenWaitRefusal,')
   })
 })

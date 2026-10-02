@@ -136,6 +136,14 @@ export function removalOpenWaitRefusal(
   subItemId?: string,
   subSubItemId?: string,
 ): { status: number; error: string; message: string } | null
+/** Would deleting this whole top-level step delete a saved wait that is still open (on it or beneath it)? */
+export function stepWouldDropOpenWait(item: StepSimulationItem | undefined): boolean
+/** The refusal for deleting a step (whole, or the sub-step / sub-sub-step named) that would drop an open wait, or null. */
+export function deletionOpenWaitRefusal(
+  item: StepSimulationItem | undefined,
+  subItemId?: string,
+  subSubItemId?: string,
+): { status: number; error: string; message: string } | null
 export function waitForTaskLinkDenial(args: {
   checklist: { id?: string; clientId?: string } | undefined
   pool?: Array<{ id?: string; clientId?: string }>

@@ -176,6 +176,7 @@ import {
   canVerifyWaitingOn,
   CLIENT_WAIT_CANNOT_BE_SENT_BACK,
   CLIENT_WAIT_NOBODY_TO_ASK,
+  deletionOpenWaitRefusal,
   isClientWait,
   isSelfWait,
   REFUSED_WAITING_ON_ACTIONS,
@@ -1157,7 +1158,8 @@ function removalRefusalBody(error) {
  * skipping duplicates, and notifies every owner. Mirrors the whole-checklist
  * deletion-request flow. Returns the created (or existing) request so the
  * handler can 200 it back, or null when the step is gone by now (the handler
- * answers with its own "not found" sentence). The caller must have already
+ * answers with its own "not found" sentence), or `{ refused }` (the 409 refusal,
+ * nothing filed) when the step now carries an open wait. The caller must have already
  * confirmed the client is in the user's visible set.
  */
 async function fileItemDeletionRequest(
@@ -1194,6 +1196,11 @@ async function fileItemDeletionRequest(
   if (!duplicate) {
     const current = (await appDataStore.read()).checklists.find((c) => c.id === checklist.id)
     if (!deletionTargetStillExists(current, { itemId, subItemId, subSubItemId })) return null
+    // The route's own check read ITS copy; a wait added since would still be
+    // caught here, on the step as it is now. The caller answers 409 with it.
+    const currentItem = current.items.find((entry) => entry.id === itemId)
+    const openWait = deletionOpenWaitRefusal(currentItem, subItemId, subSubItemId)
+    if (openWait) return { refused: openWait }
   }
 
   const requesterName =
@@ -1239,6 +1246,16 @@ async function fileItemDeletionRequest(
     )
   }
   return created
+}
+
+/** Answers 409 with the refusal `fileItemDeletionRequest` returned; false when it filed or found nothing. */
+function answerRefusedFiling(response, filed) {
+  if (!filed?.refused) return false
+  sendJson(response, filed.refused.status, {
+    error: filed.refused.error,
+    message: filed.refused.message,
+  })
+  return true
 }
 
 /**
@@ -10032,6 +10049,16 @@ const server = createServer(async (request, response) => {
           sendJson(response, 409, { error: seriesDenial.error })
           return
         }
+        // An open wait on the step refuses the approval and the request stays;
+        // the store re-decides inside the series delete (409, nothing written).
+        const seriesOpenWait = deletionOpenWaitRefusal(seriesStep)
+        if (seriesOpenWait) {
+          sendJson(response, seriesOpenWait.status, {
+            error: seriesOpenWait.error,
+            message: seriesOpenWait.message,
+          })
+          return
+        }
         const removal = await runSeriesStepDelete({
           store: appDataStore,
           actorId: session.user.id,
@@ -10057,13 +10084,14 @@ const server = createServer(async (request, response) => {
       // way the DELETE routes refuse it (the simulation runs the store's own
       // removal). The request stays in place so it can be approved once the wait
       // is cleared, and the approver is told why nothing happened.
-      if (req.subItemId) {
+      {
         const approvalData = await appDataStore.read()
         const approvalChecklist = approvalData.checklists.find(
           (entry) => entry.id === req.checklistId,
         )
         const approvalItem = approvalChecklist?.items.find((entry) => entry.id === req.itemId)
-        const approvalOpenWait = removalOpenWaitRefusal(approvalItem, req.subItemId, req.subSubItemId)
+        // A whole step is judged too (an open wait on it or beneath it).
+        const approvalOpenWait = deletionOpenWaitRefusal(approvalItem, req.subItemId, req.subSubItemId)
         if (approvalOpenWait) {
           sendJson(response, approvalOpenWait.status, {
             error: approvalOpenWait.error,
@@ -10071,6 +10099,7 @@ const server = createServer(async (request, response) => {
           })
           return
         }
+        // (False for a whole step: it only reads a sub-step or sub-sub-step removal.)
         if (removalWouldCompleteWaitingStep(approvalItem, req.subItemId, req.subSubItemId)) {
           sendJson(response, 409, {
             error: 'STEP_IS_WAITING',
@@ -11230,6 +11259,7 @@ const server = createServer(async (request, response) => {
             subSubItemId,
             label: targetSubSub.title ?? '',
           })
+          if (answerRefusedFiling(response, filed)) return
           if (!filed) {
             sendJson(response, 404, { error: 'Sub-sub-item not found' })
             return
@@ -11463,6 +11493,7 @@ const server = createServer(async (request, response) => {
             subSubItemId: null,
             label: targetSub.title ?? '',
           })
+          if (answerRefusedFiling(response, filed)) return
           if (!filed) {
             sendJson(response, 404, { error: 'Sub-item not found' })
             return
@@ -12336,6 +12367,19 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // A step with an open wait on it (or on a sub-step beneath it) cannot be
+        // deleted, by anyone, on this checklist or across the series, and no
+        // request is filed for it: the wait record would go with it. The store
+        // re-decides on the row as it is now (see the sub-step DELETE).
+        const stepOpenWaitRefusal = deletionOpenWaitRefusal(targetItem)
+        if (stepOpenWaitRefusal) {
+          sendJson(response, stepOpenWaitRefusal.status, {
+            error: stepOpenWaitRefusal.error,
+            message: stepOpenWaitRefusal.message,
+          })
+          return
+        }
+
         // ?scope=series: delete the step from this checklist AND the recurring
         // template and the later open copies (featreq-01464e64). It edits the
         // template, which only an owner may do, so a team member's choice files
@@ -12361,6 +12405,7 @@ const server = createServer(async (request, response) => {
               label: targetItem.label ?? '',
               scope: 'series',
             })
+            if (answerRefusedFiling(response, filed)) return
             if (!filed) {
               sendJson(response, 404, { error: 'Checklist item not found' })
               return
@@ -12387,6 +12432,7 @@ const server = createServer(async (request, response) => {
             subSubItemId: null,
             label: targetItem.label ?? '',
           })
+          if (answerRefusedFiling(response, filed)) return
           if (!filed) {
             sendJson(response, 404, { error: 'Checklist item not found' })
             return
@@ -12395,7 +12441,15 @@ const server = createServer(async (request, response) => {
           return
         }
 
-        const updated = await appDataStore.deleteChecklistItem(checklistId, itemId)
+        let updated
+        try {
+          updated = await appDataStore.deleteChecklistItem(checklistId, itemId)
+        } catch (error) {
+          const refusalBody = removalRefusalBody(error)
+          if (!refusalBody) throw error
+          sendJson(response, 409, refusalBody)
+          return
+        }
         if (!updated) {
           sendJson(response, 404, { error: 'Checklist item not found' })
           return

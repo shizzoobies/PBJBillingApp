@@ -3258,6 +3258,15 @@ function App() {
         setDataSyncState('offline')
         return
       }
+      if (error instanceof ApiError && error.status === 409) {
+        // A refusal, not a failure: the step now carries an open wait (added from
+        // another tab), and nothing was written. The Delete button is disabled
+        // ahead of this, so the render was stale: refetch, and let the card show
+        // the server's own sentence.
+        setDataSyncState('synced')
+        requestLiveRefetchRef.current?.()
+        throw error
+      }
       setDataSyncState('error')
     }
   }
