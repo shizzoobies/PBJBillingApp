@@ -25,7 +25,22 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-01, about 11:30 pm Eastern - end of the night run):** `main` =
+**State right now (2026-10-02, late afternoon):** `main` = `348fb28` (+ this
+handoff), deployed, `/health` 200 with that commit, voice agent re-provisioned after
+every ship. Suite **6264 tests / 289 files**, green. Four fixes shipped today, one per deploy, each
+reviewed and fixed before push (details: the "2026-10-02" entry at the top of section 5):
+checklist rough edges (`82ae03b`), payment leftovers + the two log warnings
+(`6bb8b5f`), the Proposals $0-rate incident from Brittany's email (`156f7b5`),
+and "the app's day is the firm's day everywhere" (`348fb28`). Brittany has THREE
+Needs-input items to answer (Stripe autopay `featreq-bef42b72`, proposal questionnaire
+`featreq-8f139178`, proposal Software section `featreq-a69a3cc0`). The two lane
+worktrees `D:\PBJ Accounting Work\AP-laneB` / `AP-laneC` are at merged branches
+and can be reused (`git checkout -B <branch> origin/main`) — ship from a worktree by
+COMMIT, then rebase (unpiped), then verify, then push; never rebase a dirty tree. Still
+no `[bulk-save] write committed` line in the Railway log: no real whole-workspace save
+has run since the lock shipped.
+
+**Earlier (2026-10-01, about 11:30 pm Eastern - end of the night run):** `main` =
 `90b9063` (+ this handoff), deployed, `/health` 200 with that commit, voice agent re-provisioned.
 Suite **6102 tests / 287 files**, green; manifest 198,614 bytes (tripwire 205,000). THE
 PLANNED QUEUE IS EMPTY: everything Alex put in Planned on 10-01 is Shipped. About thirty-five
@@ -514,6 +529,75 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-02 — four fixes, one deploy each, plus the Proposals incident and three
+questions for Brittany.** Alex picked all four from the 10-01 leftovers; Brittany's
+email landed mid-run and was fixed the same afternoon.
+
+- `82ae03b` **featreq-6b38110c** (Shipped, note posted): a refused deletion
+  approval shows inline + live refetch (no window.alert); the "Kept on" notice names
+  months and reasons via `keptReasons` {checklistId, reason, label, occurrence} from
+  both backends (the kept checklists are NOT merged into the owner's tab — doing so
+  overwrote unsaved local edits; review caught it); Dismiss renders only when
+  `canAddPendingClientNote` allows (same predicate the server uses); the dismiss
+  activity entry names the note + month; the file-backend series delete runs in one
+  queue slot. Left: review items 1-1, 1-5, 1-6, 2-3, 2-4; the start-up ALTER has no
+  lock_timeout like every other start-up DDL — a boot-policy decision, not a quick add.
+- `6bb8b5f` **featreq-c8e5f169** (Shipped, note posted): a payment for a VOIDED
+  invoice → `{kind:'payment', event:'on-voided'}` on the log + owner notice
+  `invoice_payment_on_voided`; a second payment on a PAID invoice is decided in
+  `planPayment` on the locked row, applies nothing, and files an unhandled payment with
+  `reason:'duplicate'` (same structure as amount-mismatch; `sameMarker` includes the
+  reason); a bank duplicate at authorization reads "started… once it settles" and
+  self-clears via a status-free failed entry if the debit fails; the unhandled notice
+  counts; money notices link to `/invoices?period=YYYY-MM` and the Invoices page reads
+  it (held until the month run mounts — cold load bug caught in review); a late
+  `payment_failed` never writes its intent onto a paid row. NEW email-pref group
+  `paymentProblems` ("Payment problems": failed, mismatch, duplicate, on-voided),
+  default on — decided by Fable so the busy Invoice alerts toggle cannot silence money.
+  Log warnings: `invoice_payment_failed` registered; all internal mail tagged
+  `kind:'internal'` so the Resend webhook answers quietly. Prod checked read-only: no
+  paid invoice carries a stale intent; nobody has Invoice alerts off. Left on the ticket:
+  B2/B0 (save lock batching — needs the log line), `updateInvoice` pre-read guard.
+- `156f7b5` **featreq-60d66c04** (filed Shipped, note posted) — **the incident:**
+  Brittany's first real proposal (Drilling, 15 employees, payroll) priced "$0/hr …
+  = $0.00". `firm_settings.proposal_pricing` is NULL in prod (confirmed before and
+  after deploy), so the seed applied, and the seed rates were $0; a $0 rate priced
+  silently with no flag. The 09-27 tracker question had told her the calculator "starts
+  with $75/$115/$125" (the plan, not the code) and she confirmed those. Fix: seed =
+  75/115/125 (no data write; the NULL column reads the seed); `flag:'no-rate'` for a
+  formula/payroll line whose rate is not > 0 (sales-tax rows never use the rate — review
+  caught a wrong flag there; flat rows never flagged); editor/PDF/letter all treat
+  amount ≤ 0 as "Not yet priced"; banners on the Estimate tab + Proposals list and a
+  Settings warning when a rate is 0; a DRAFT whose snapshot rates differ from the catalog
+  reprices once on open (through the Reprice path; sent/accepted/declined never; the
+  reprice UPDATE is now draft-guarded in SQL on both backends). Her Drilling draft
+  reprices itself when she opens it (~$1,147/mo payroll). Her two follow-ups from the
+  same thread are Needs input: `featreq-8f139178` a questionnaire generated from the
+  proposal's inputs (who fills it, does it start a draft, what else to ask) and
+  `featreq-a69a3cc0` a Software section (QBO/payroll/time; own section on proposal and
+  invoice? at cost or priced? which software and amounts). Her Stripe autopay question
+  `featreq-bef42b72` is also Needs input (opt-in or default; charge on send or due date;
+  bank, card, or both). Note: PROPOSAL_GROUPS is a fixed list — a Software group is a
+  code change.
+- `348fb28` **featreq-52362eac** (Shipped, note posted): Alex's decision — EVERY
+  listed site follows the firm's day. `server.js todayIso()` → `firmToday()` (assistant
+  and voice "today", default report/recap period, past-due list and notifier, the weekly
+  time-logging gate); month lock → firm month; store: rate month on new client + bulk
+  save, bill/cost-rate effective dates, generated and retainer issue dates, the pay-link
+  "opened today" dedupe, the send-time due-date restamp; `invoice-draft.js todayIso`;
+  rate-history's `madeIn` reads the firm month; the weekly digest and usage-patterns
+  defaults too. `invoiceDisplayDate` follows the firm day only for stamps at or after
+  the deploy-time cutover `FIRM_DAY_INVOICE_DATE_FROM` — earlier copies keep the UTC
+  date they were sent with. Behavior change staff may notice: Saturday entries made
+  8 pm–midnight Eastern are now gated like the rest of the week (the UTC server used to
+  let them through). Three tests that compared against the UTC day would have failed
+  verify every evening — fixed; new boundary tests freeze the clock at 03:30Z.
+
+Process notes: a worktree ship chain MUST commit before it rebases (a piped rebase on
+a dirty tree fails silently and the push is rejected as behind — cost one lane six
+minutes today). Reviews caught one real defect per lane; keep the separate reviewer.
+
 
 **2026-10-01 (late night) - the rest of the run: Brittany's answers, her "Invoice" item, and the four Planned tickets.**
 
