@@ -4192,6 +4192,14 @@ const server = createServer(async (request, response) => {
       // Retries and out-of-order delivery are normal. Returning 200 for an
       // event we have already handled stops Stripe retrying forever WITHOUT
       // applying it twice.
+      //
+      // The id is ledgered BEFORE the payment is applied, on purpose: it is what
+      // stops two concurrent deliveries of one event both applying it and both
+      // emailing the client. The price is that a delivery which then fails to
+      // apply would be answered "duplicate" on Stripe's retry and the payment
+      // lost for good - so a failure BEFORE the payment was applied takes the id
+      // back out of the ledger (`forgetStripeEvent`, in the catch below) and
+      // answers 500, and Stripe's retry applies it.
       const isNewEvent = await appDataStore.recordStripeEventOnce(event.id, event.type)
       if (!isNewEvent) {
         sendJson(response, 200, { received: true, duplicate: true })
@@ -4205,6 +4213,18 @@ const server = createServer(async (request, response) => {
       // that makes Stripe replay it.
       let settledInvoice = null
       let settledByCard = false
+      // Flips the moment an apply call RETURNS (a null answer - the invoice is
+      // gone or void - counts: there is nothing a retry could apply). It is what
+      // the catch below reads to tell "the payment was not applied, take the
+      // event back so Stripe's retry applies it" from "it was applied and
+      // something after it failed" - which must NOT be redelivered, or the
+      // owners are told twice.
+      let paymentApplied = false
+      const applyPayment = async (invoiceId, patch) => {
+        const settled = await appDataStore.applyInvoicePayment(invoiceId, patch)
+        paymentApplied = true
+        return settled
+      }
 
       try {
         const object = event.data?.object ?? {}
@@ -4240,7 +4260,7 @@ const server = createServer(async (request, response) => {
           // ACH does not settle here — it clears in about 4 business days, so
           // this is 'processing', not 'paid'. A card payment passes through the
           // same state, just far more briefly.
-          settledInvoice = await appDataStore.applyInvoicePayment(invoice.id, {
+          settledInvoice = await applyPayment(invoice.id, {
             status: 'processing',
             // The card session must NOT overwrite the ACH column: both ids are
             // needed, and losing one means the sibling below can never be
@@ -4258,7 +4278,7 @@ const server = createServer(async (request, response) => {
           // already-completed sibling is not a reason to fail the webhook.
           if (siblingSessionId) await expireCheckoutSession(siblingSessionId)
         } else if (event.type === 'payment_intent.succeeded') {
-          settledInvoice = await appDataStore.applyInvoicePayment(invoice.id, {
+          settledInvoice = await applyPayment(invoice.id, {
             status: 'paid',
             paidAt: new Date((event.created ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
             paymentIntentId: object.id,
@@ -4268,22 +4288,51 @@ const server = createServer(async (request, response) => {
         } else if (event.type === 'payment_intent.payment_failed') {
           // Back to 'sent': it was invoiced and is still owed. Owners are told,
           // because a failed ACH debit is something a person has to chase.
-          await appDataStore.applyInvoicePayment(invoice.id, {
+          //
+          // A failure that was FORGOTTEN and redelivered can arrive hours after
+          // the invoice moved on, and then it no longer applies: the invoice is
+          // already paid, or the client has since started a different payment
+          // (the invoice now carries another payment intent). Putting it back to
+          // 'sent', pointing it at the dead intent and telling the owners would
+          // all be wrong, so it is acknowledged and dropped. (A decline on an
+          // invoice that is still just 'sent' is NOT dropped: nothing moves, but
+          // the owners still need to hear about it.)
+          if (
+            invoice.status === 'paid' ||
+            (invoice.stripePaymentIntentId && invoice.stripePaymentIntentId !== object.id)
+          ) {
+            console.warn(
+              `[stripe] ignored a stale payment_failed (${object.id}) for invoice ${invoice.id}: ${invoice.status === 'paid' ? 'already paid' : `now on ${invoice.stripePaymentIntentId}`}`,
+            )
+            sendJson(response, 200, { received: true, ignored: 'stale_payment_failure' })
+            return
+          }
+          const failedInvoice = await applyPayment(invoice.id, {
             status: 'sent',
             paymentIntentId: object.id,
           })
+          // The store has the final say (paid is sticky, void is untouched): when
+          // it left the invoice paid - the payment landed while this ran - or
+          // there is nothing to write on, there is no failure to log or announce.
+          if (!failedInvoice || failedInvoice.status === 'paid') {
+            console.warn(
+              `[stripe] ignored a payment_failed (${object.id}) for invoice ${invoice.id}: it no longer applies`,
+            )
+            sendJson(response, 200, { received: true, ignored: 'stale_payment_failure' })
+            return
+          }
           const failureMessage = object.last_payment_error?.message ?? 'the payment was declined'
           // The status move above leaves no trace — once the bell is cleared
           // the row reads "Sent" as if nobody had tried. The log entry is what
           // puts the invoice in the month run's "Payment failed" tab until she
           // sends it again or the client pays another way.
           //
-          // Best effort, on purpose: the event id was ledgered before this
-          // handler ran, so a 500 here would NOT be retried into a second
-          // chance — Stripe's retry answers `duplicate` and never reaches this
-          // line again. A log write that fails must not also cost the owners
-          // the notification below, which is the one thing they cannot get
-          // back.
+          // Best effort, on purpose: the payment has been applied by now, so
+          // the event stays ledgered and a 500 here would NOT be retried into a
+          // second chance - Stripe's retry answers `duplicate` and never reaches
+          // this line again. A log write that fails must not also cost the
+          // owners the notification below, which is the one thing they cannot
+          // get back.
           await appDataStore
             .recordInvoicePaymentFailure(invoice.id, {
               at: new Date((event.created ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
@@ -4304,9 +4353,25 @@ const server = createServer(async (request, response) => {
           }
         }
       } catch (error) {
-        // A 500 makes Stripe retry, which is what we want for a transient
-        // failure — the dedup ledger means the retry cannot double-apply.
         console.error('[stripe] webhook handling failed:', error)
+        // The event was ledgered before anything was applied, so Stripe's retry
+        // of a 500 would be answered "duplicate" and never reach the apply - the
+        // payment would be lost. When the payment was NOT applied (the apply
+        // threw, or the lookup before it did), take the id back out of the
+        // ledger so the retry is processed as new; apply is idempotent on a
+        // replay (absolute sets, paid is sticky, the card fee line is added
+        // once). When it WAS applied, the event stays ledgered: whatever failed
+        // afterwards must not be redelivered into a second notification.
+        if (!paymentApplied) {
+          try {
+            await appDataStore.forgetStripeEvent(event.id)
+          } catch (forgetError) {
+            console.error(
+              `[stripe] could not forget event ${event.id}; its retry will be answered duplicate and the payment is NOT recorded:`,
+              forgetError,
+            )
+          }
+        }
         sendJson(response, 500, { error: 'webhook_failed' })
         return
       }

@@ -32791,3 +32791,133 @@ describe('file backend: a payment write and a bulk save cannot undo each other',
     },
   )
 })
+
+/**
+ * A payment that could not be applied is asked for again, not dropped
+ * (tracker featreq-6a5c6162). The webhook ledgers the event id BEFORE applying
+ * it, so a failed apply used to be answered "duplicate" on Stripe's retry and
+ * the payment lost for good. The webhook now takes the event back out of the
+ * ledger (`forgetStripeEvent`) when the apply failed and answers 500. The apply
+ * itself decides on a locked row (see "payment writes decide on the locked row"),
+ * so it has no zero-row retry of its own.
+ */
+describe('applyInvoicePayment is safe to replay (file backend)', () => {
+  const feeLine = { kind: 'card-fee', label: 'Card processing fee', detail: 'Paid by card', amount: 3.3 }
+  const patch = () => ({
+    status: 'paid',
+    paidAt: '2026-09-10T00:00:00.000Z',
+    paymentIntentId: 'pi_replay',
+    paymentMethod: 'card',
+    appendLines: [feeLine],
+  })
+
+  async function seed() {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-replay',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-004',
+        status: 'sent',
+        lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+        subtotal: 100,
+        total: 100,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-05T00:00:00.000Z',
+        paidAt: null,
+        paymentMethod: null,
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('applying the same event twice leaves the invoice exactly as once: absolute sets, paid sticky, the fee once', async () => {
+    await seed()
+    const first = await store.applyInvoicePayment('inv-replay', patch())
+    const second = await store.applyInvoicePayment('inv-replay', patch())
+
+    expect(first.statusChanged).toBe(true)
+    // The replay moves nothing, so the webhook sends no second receipt.
+    expect(second.statusChanged).toBe(false)
+    const { updatedAt: _a, ...firstRest } = first
+    const { updatedAt: _b, ...secondRest } = second
+    expect(secondRest).toEqual(firstRest)
+    expect(second.lineItems.filter((line) => line.kind === 'card-fee')).toHaveLength(1)
+    expect(second.total).toBe(103.3)
+    expect(second.paidAt).toBe('2026-09-10T00:00:00.000Z')
+  })
+
+  it('an earlier-state event replayed after the invoice is paid cannot move it back', async () => {
+    await seed()
+    await store.applyInvoicePayment('inv-replay', patch())
+    const late = await store.applyInvoicePayment('inv-replay', {
+      status: 'processing',
+      checkoutSessionId: 'cs_late',
+      appendLines: [feeLine],
+    })
+
+    expect(late.status).toBe('paid')
+    expect(late.statusChanged).toBe(false)
+    expect(late.lineItems.filter((line) => line.kind === 'card-fee')).toHaveLength(1)
+  })
+})
+
+describe('forgetStripeEvent takes an id back out of the dedup ledger', () => {
+  it('file backend: a forgotten event is processed as new on its redelivery', async () => {
+    expect(await store.recordStripeEventOnce('evt_a', 'payment_intent.succeeded')).toBe(true)
+    // A duplicate is answered as one while it is ledgered.
+    expect(await store.recordStripeEventOnce('evt_a', 'payment_intent.succeeded')).toBe(false)
+
+    expect(await store.forgetStripeEvent('evt_a')).toBe(true)
+    expect(await store.recordStripeEventOnce('evt_a', 'payment_intent.succeeded')).toBe(true)
+  })
+
+  it('file backend: forgets only that id, and an unknown id is a harmless false', async () => {
+    await store.recordStripeEventOnce('evt_a', 'x')
+    await store.recordStripeEventOnce('evt_b', 'x')
+
+    expect(await store.forgetStripeEvent('evt_missing')).toBe(false)
+    expect(await store.forgetStripeEvent('')).toBe(false)
+    expect(await store.forgetStripeEvent('evt_a')).toBe(true)
+
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(data.stripeEvents.map((entry) => entry.id)).toEqual(['evt_b'])
+  })
+
+  it('file backend: forgetting on a workspace with no ledger writes nothing', async () => {
+    const before = await readFile(localDataPath, 'utf8')
+    expect(await store.forgetStripeEvent('evt_a')).toBe(false)
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('postgres: one DELETE by id on the stripe_events table', async () => {
+    const fake = fakePostgres()
+    const inner = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      const result = await inner(text, params)
+      return /^delete from stripe_events/i.test(String(text).trim()) ? { rows: [], rowCount: 1 } : result
+    }
+
+    expect(await postgresStore(fake).forgetStripeEvent('evt_a')).toBe(true)
+
+    const deletes = fake.matching(/^delete from stripe_events/i)
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0].text).toBe('delete from stripe_events where id = $1')
+    expect(deletes[0].params).toEqual(['evt_a'])
+    expect(await postgresStore(fakePostgres()).forgetStripeEvent('')).toBe(false)
+  })
+
+  it('postgres: ledgering is still one INSERT .. ON CONFLICT DO NOTHING (the forget does not change it)', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).recordStripeEventOnce('evt_a', 'x')
+
+    const insert = fake.matching(/^insert into stripe_events/i)[0]
+    expect(insert.text).toMatch(/on conflict \(id\) do nothing/i)
+    expect(insert.params).toEqual(['evt_a', 'x'])
+  })
+})

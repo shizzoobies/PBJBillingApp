@@ -14859,6 +14859,34 @@ export class AppDataStore {
   }
 
   /**
+   * Take a Stripe event id back out of the dedup ledger.
+   *
+   * The webhook ledgers an id BEFORE it applies the payment (that is what keeps
+   * two concurrent deliveries from both applying and both emailing the client).
+   * When the apply then fails, the id has to come back out, or Stripe's retry is
+   * answered "duplicate" and the payment is never recorded. Called ONLY for a
+   * payment that was not applied - never after a successful apply.
+   *
+   * @returns {boolean} true if the id was in the ledger.
+   */
+  async forgetStripeEvent(eventId) {
+    if (!eventId) return false
+    if (this.pool) {
+      const { rowCount } = await this.pool.query('delete from stripe_events where id = $1', [eventId])
+      return rowCount > 0
+    }
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      if (!Array.isArray(data.stripeEvents)) return false
+      const kept = data.stripeEvents.filter((entry) => entry.id !== eventId)
+      if (kept.length === data.stripeEvents.length) return false
+      data.stripeEvents = kept
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return true
+    })
+  }
+
+  /**
    * Apply a payment-side change to one invoice: the Stripe ids, the status, and
    * the paid stamp. Deliberately narrow — this is the only path a WEBHOOK can
    * take into an invoice, so it cannot rewrite lines, amounts or the number.
