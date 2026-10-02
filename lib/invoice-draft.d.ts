@@ -38,6 +38,12 @@ export declare function paymentTermsLabel(
   windowDays?: number,
 ): string
 
+/**
+ * The instant the printed invoice date moved from the UTC day to the firm's
+ * day; a stamp before it keeps its UTC day.
+ */
+export declare const FIRM_DAY_INVOICE_DATE_FROM: string
+
 /** First billing month the period-end invoice date applies to. */
 export declare const PERIOD_END_INVOICE_DATE_FROM: string
 

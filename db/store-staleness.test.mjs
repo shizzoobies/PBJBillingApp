@@ -88,7 +88,7 @@ import {
   untouchedStepSql,
 } from '../lib/series-step-delete.js'
 import { templateStartFloor } from '../lib/checklist-start-floor.js'
-import { firmToday } from '../lib/firm-time.js'
+import { dateOnlyInZone, firmToday } from '../lib/firm-time.js'
 
 /**
  * End-to-end `appDataStore.write()` contracts on the FILE backend: the
@@ -2257,13 +2257,14 @@ describe('recordInvoicePayLinkOpened (postgres branch)', () => {
   })
 
   it('files nothing a second time on the same day', async () => {
-    const today = new Date().toISOString().slice(0, 10)
+    // 16:00Z is noon or 11 am Eastern: the firm's day whatever the zone offset.
+    const today = firmToday()
     const fake = fakePostgres({
       invoices: [
         {
           ...existingInvoice,
           email_log: [
-            { kind: 'link', ok: true, subject: 'Payment link opened', at: `${today}T01:00:00.000Z` },
+            { kind: 'link', ok: true, subject: 'Payment link opened', at: `${today}T16:00:00.000Z` },
           ],
         },
       ],
@@ -4020,7 +4021,7 @@ describe('recordInvoiceSent re-stamps the past-due line (file backend)', () => {
     // Seeded with the line a draft generated YESTERDAY would carry. Relative to
     // today rather than a fixed date, because a fixed one eventually IS today
     // plus thirty and the re-stamp becomes invisible.
-    const provisional = shiftDays(new Date().toISOString().slice(0, 10), 29)
+    const provisional = shiftDays(firmToday(), 29)
     await seed({ dueDate: provisional })
     const updated = await store.recordInvoiceSent('inv-1', {
       to: ['ann@acme.com'],
@@ -4028,7 +4029,7 @@ describe('recordInvoiceSent re-stamps the past-due line (file backend)', () => {
       ok: true,
     })
 
-    const sendDay = updated.emailLog[0].at.slice(0, 10)
+    const sendDay = dateOnlyInZone(new Date(updated.emailLog[0].at))
     expect(gapDays(sendDay, updated.dueDate)).toBe(30)
     expect(updated.dueDate).not.toBe(provisional)
   })
@@ -4100,7 +4101,7 @@ describe('recordInvoiceSent re-stamps the past-due line (file backend)', () => {
       ok: true,
     })
 
-    const sendDay = updated.emailLog[0].at.slice(0, 10)
+    const sendDay = dateOnlyInZone(new Date(updated.emailLog[0].at))
     expect(gapDays(sendDay, updated.dueDate)).toBe(45)
   })
 
@@ -4114,7 +4115,7 @@ describe('recordInvoiceSent re-stamps the past-due line (file backend)', () => {
       ok: true,
     })
 
-    const sendDay = updated.emailLog[0].at.slice(0, 10)
+    const sendDay = dateOnlyInZone(new Date(updated.emailLog[0].at))
     expect(gapDays(sendDay, updated.dueDate)).toBe(30)
   })
 
@@ -22936,7 +22937,7 @@ describe('a client that becomes Hourly is pinned at save time (file backend)', (
   // These fixtures replace the whole workspace, so they start from none: a bulk
   // save refuses to drop a stored client that has time entries or invoices.
   beforeEach(() => rm(localDataPath, { force: true }))
-  const thisMonth = () => new Date().toISOString().slice(0, 7)
+  const thisMonth = () => firmToday().slice(0, 7)
 
   it('pins a subscription client that is saved again as Hourly', async () => {
     await store.write(
@@ -23073,7 +23074,7 @@ describe('a client that becomes Hourly is pinned at save time (file backend)', (
 })
 
 describe('a client that becomes Hourly is pinned at save time (postgres branch)', () => {
-  const thisMonth = () => new Date().toISOString().slice(0, 7)
+  const thisMonth = () => firmToday().slice(0, 7)
 
   it('binds this month for an Hourly client with no stored pin', async () => {
     const fake = fakePostgres()
@@ -34934,5 +34935,243 @@ describe('a duplicate bank payment that was only started (settling)', () => {
     // Status-free: the invoice is still paid, and it is not a "Payment failed" row.
     expect(cleared.status).toBe('paid')
     expect(unresolvedPaymentFailure(cleared)).toBeNull()
+  })
+})
+
+/**
+ * featreq-52362eac: every place the store stamped "today" or "this month" from
+ * the UTC clock now reads the firm's (US Eastern). The clock below is 11:30 pm
+ * Eastern on September 30th, which is 03:30Z on October 1st: the UTC day AND
+ * the UTC month are both already the next ones.
+ */
+describe('the store dates its own "today" and "this month" on the firm’s clock', () => {
+  beforeEach(() => {
+    // Date only: the file backend's own I/O must keep its real timers.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-09-30T23:30:00-04:00'))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('pins a brand-new hourly client to the firm’s month (file backend)', async () => {
+    const created = await store.createClient({
+      name: 'Evening Co',
+      contact: 'Pat',
+      billingMode: 'hourly',
+      hourlyRate: 100,
+    })
+    expect(created.hourlyRatePeriod).toBe('2026-09')
+  })
+
+  it('pins a brand-new hourly client to the firm’s month (Postgres branch)', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).createClient({
+      name: 'Evening Co',
+      contact: 'Pat',
+      billingMode: 'hourly',
+      hourlyRate: 100,
+    })
+    const insert = fake.matching(/^insert into clients/i)[0]
+    const columns = /insert into clients\s*\(([\s\S]*?)\)\s*values/i
+      .exec(insert.text)[1]
+      .split(',')
+      .map((column) => column.trim())
+    expect(insert.params[columns.indexOf('hourly_rate_period')]).toBe('2026-09')
+  })
+
+  it('defaults an unpinned hourly client on a bulk save to the firm’s month', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }],
+        timeEntries: [],
+      }),
+    )
+    const stored = (await store.read()).clients.find((client) => client.id === 'c1')
+    expect(stored.hourlyRatePeriod).toBe('2026-09')
+  })
+
+  it('dates a rate set through the rate setters on the firm’s day and month', async () => {
+    const authState = existsSync(localAuthPath)
+      ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+      : {}
+    authState.billRateVersions = []
+    authState.costRateVersions = []
+    authState.users = [{ id: 'emp-lisa', name: 'Lisa', role: 'employee' }]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+
+    await store.setEmployeeBillRate('emp-lisa', 55)
+    await store.setEmployeeCostRate('emp-lisa', 30)
+    expect(await store.listBillRateVersions()).toEqual([
+      expect.objectContaining({ userId: 'emp-lisa', effectivePeriod: '2026-09', rate: 55 }),
+    ])
+    expect(await store.listCostRateVersions()).toEqual([
+      expect.objectContaining({ userId: 'emp-lisa', effectiveDate: '2026-09-30', rate: 30 }),
+    ])
+  })
+
+  it('issues generated invoices on the firm’s day, so Net 30 is October 30th', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c1',
+            name: 'Acme',
+            billingMode: 'hourly',
+            hourlyRate: 100,
+            paymentTerms: 'Net 30',
+          },
+        ],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [
+          {
+            id: 't1',
+            clientId: 'c1',
+            employeeId: 'emp-1',
+            date: '2026-09-04',
+            minutes: 120,
+            billable: true,
+          },
+        ],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const result = await store.generateInvoicesForPeriod('2026-09', { clientId: 'c1' })
+    expect(result.created).toHaveLength(1)
+    // From the firm's September 30th. The UTC day would have made it the 31st.
+    expect(result.created[0].dueDate).toBe('2026-10-30')
+  })
+
+  it('issues a retainer on the firm’s day', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c1',
+            name: 'Acme',
+            billingMode: 'hourly',
+            hourlyRate: 100,
+            paymentTerms: 'Net 30',
+          },
+        ],
+        timeEntries: [],
+      }),
+    )
+    const retainer = await store.createRetainerInvoice({ clientId: 'c1', amount: 500 })
+    expect(retainer.dueDate).toBe('2026-10-30')
+  })
+
+  describe('the first send re-stamps the due date from the firm day of the send', () => {
+    it('is thirty days from September 30th for an 11:30 pm Eastern send (file backend)', async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      data.clients = [
+        { id: 'c1', name: 'Acme', contact: 'Pat', billingMode: 'hourly', hourlyRate: 0, paymentTerms: '' },
+      ]
+      data.invoices = [
+        {
+          id: 'inv-send',
+          clientId: 'c1',
+          period: '2026-09',
+          number: '1043',
+          status: 'reviewed',
+          lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+          subtotal: 400,
+          total: 400,
+          dueDate: '2026-10-15',
+          blurb: '',
+          scopeFlags: [],
+          sentAt: null,
+          paidAt: null,
+          paymentMethod: null,
+          createdAt: '2026-09-15T00:00:00.000Z',
+          updatedAt: '2026-09-15T00:00:00.000Z',
+        },
+      ]
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+      const updated = await store.recordInvoiceSent('inv-send', {
+        to: ['ann@acme.com'],
+        subject: 'Invoice 1043',
+        ok: true,
+      })
+      expect(updated.emailLog[0].at).toBe('2026-10-01T03:30:00.000Z')
+      // Counted from the 30th, not the 31st that the UTC stamp reads.
+      expect(updated.dueDate).toBe('2026-10-30')
+    })
+
+    it('binds the same date on the Postgres branch', async () => {
+      const fake = fakePostgres({ invoices: [existingInvoice] })
+      await postgresStore(fake).recordInvoiceSent('inv-1', {
+        to: ['ann@acme.com'],
+        subject: 'Invoice INV-2026-08-001',
+        ok: true,
+      })
+      expect(fake.matching(/^update invoices/i)[0].params[4]).toBe('2026-10-30')
+    })
+  })
+
+  describe('the "link opened" entry is one per firm day', () => {
+    const seed = async (emailLog) => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      data.invoices = [
+        {
+          id: 'inv-open',
+          clientId: 'c1',
+          period: '2026-08',
+          number: 'INV-2026-08-001',
+          status: 'sent',
+          lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+          subtotal: 100,
+          total: 100,
+          dueDate: '2026-09-15',
+          blurb: '',
+          scopeFlags: [],
+          sentAt: '2026-08-05T00:00:00.000Z',
+          paidAt: null,
+          emailLog,
+          createdAt: '2026-08-01T00:00:00.000Z',
+          updatedAt: '2026-08-01T00:00:00.000Z',
+        },
+      ]
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+    const opens = async () =>
+      (await store.listInvoices())
+        .find((invoice) => invoice.id === 'inv-open')
+        .emailLog.filter((entry) => entry.kind === 'link')
+    const openedAt = (at) => ({
+      kind: 'link',
+      ok: true,
+      subject: 'Payment link opened',
+      to: [],
+      at,
+    })
+
+    it('does not file a second open for a link opened earlier that same firm evening', async () => {
+      // 4 pm Eastern the same day: 20:00Z on September 30th, a different UTC day
+      // from the 03:30Z on October 1st that the clock reads now.
+      await seed([openedAt('2026-09-30T20:00:00.000Z')])
+      await store.recordInvoicePayLinkOpened('inv-open')
+      expect(await opens()).toHaveLength(1)
+    })
+
+    it('files one for an open from the firm’s previous day, even if its UTC date matches', async () => {
+      // 8 pm Eastern on September 29th is 00:00Z on September 30th.
+      await seed([openedAt('2026-09-30T00:00:00.000Z')])
+      await store.recordInvoicePayLinkOpened('inv-open')
+      expect(await opens()).toHaveLength(2)
+    })
+
+    it('does the same on the Postgres branch', async () => {
+      const fake = fakePostgres({
+        invoices: [{ ...existingInvoice, email_log: [openedAt('2026-09-30T20:00:00.000Z')] }],
+      })
+      await postgresStore(fake).recordInvoicePayLinkOpened('inv-1')
+      expect(fake.matching(/^update invoices/i)).toEqual([])
+    })
   })
 })

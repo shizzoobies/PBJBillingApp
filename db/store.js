@@ -17,7 +17,7 @@ import {
   newTemplateCreatedAt,
   templateStartFloor,
 } from '../lib/checklist-start-floor.js'
-import { firmToday } from '../lib/firm-time.js'
+import { dateOnlyInZone, firmToday } from '../lib/firm-time.js'
 import {
   CHECKLIST_INSTANCE_UNIQUE_INDEX,
   CHECKLIST_INSTANCE_UNIQUE_INDEX_V2,
@@ -7946,7 +7946,7 @@ export class AppDataStore {
         // path other than `createClient`) would then bill at rates a year and a
         // half old. The month it turns hourly in is the honest answer, and it
         // is the same one `createClient` gives a brand-new hourly client.
-        const currentRatePeriod = nowIso().slice(0, 7)
+        const currentRatePeriod = firmToday().slice(0, 7)
 
         await client.query('delete from checklist_items')
         await client.query('delete from checklists')
@@ -9089,7 +9089,7 @@ export class AppDataStore {
       // is what keeps that safe: the merge runs only when the snapshot above
       // actually got to look at what is stored. It never runs off an empty map
       // it could not fill.
-      const currentRatePeriod = nowIso().slice(0, 7)
+      const currentRatePeriod = firmToday().slice(0, 7)
       if (ratePinSnapshotOk && Array.isArray(data.clients)) {
         data.clients = data.clients.map((clientRecord) => {
           if (!clientRecord || typeof clientRecord !== 'object') return clientRecord
@@ -13281,7 +13281,7 @@ export class AppDataStore {
     period,
     {
       windowDays = DEFAULT_PAYMENT_WINDOW_DAYS,
-      issueDate = nowIso().slice(0, 10),
+      issueDate = firmToday(),
       clientId = null,
     } = {},
   ) {
@@ -13594,7 +13594,7 @@ export class AppDataStore {
     // caller can route around it.
     if (client.platformInvoicingOptOut === true) return null
 
-    const today = nowIso().slice(0, 10)
+    const today = firmToday()
     const issuedPeriod = /^\d{4}-\d{2}$/.test(String(period ?? '')) ? period : today.slice(0, 7)
     const year = issuedPeriod.slice(0, 4)
 
@@ -15692,7 +15692,13 @@ export class AppDataStore {
      */
     const firstSendDueDateFor = (terms) =>
       marksSent
-        ? dueDateFromTerms(String(entry.at).slice(0, 10), terms ?? null, DEFAULT_PAYMENT_WINDOW_DAYS)
+        ? dueDateFromTerms(
+            // The firm's day of the send moment: `at` is a UTC stamp, so its own
+            // first ten characters are tomorrow's date after 8 pm Eastern.
+            dateOnlyInZone(new Date(entry.at)),
+            terms ?? null,
+            DEFAULT_PAYMENT_WINDOW_DAYS,
+          )
         : null
     if (this.pool) {
       // One row, and never a reason to fail a send that has already gone out:
@@ -16426,7 +16432,7 @@ export class AppDataStore {
    * sent for an untagged entry, and the UI's `latestInvoiceSend` skips tagged
    * ones for the same reason.
    *
-   * ONE ENTRY PER UTC DAY. The link is a durable URL a client may reload a
+   * ONE ENTRY PER FIRM DAY. The link is a durable URL a client may reload a
    * dozen times while deciding; a log with a dozen identical lines in it is a
    * log nobody reads.
    */
@@ -16450,9 +16456,12 @@ export class AppDataStore {
       current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
     }
     if (!current) return null
-    const today = nowIso().slice(0, 10)
+    // The firm's day on both sides: `at` is a UTC stamp, so its own first ten
+    // characters would be tomorrow's date for a link opened after 8 pm Eastern.
+    const today = firmToday()
     const alreadyToday = (current.emailLog ?? []).some(
-      (entry) => entry?.kind === 'link' && String(entry?.at ?? '').slice(0, 10) === today,
+      (entry) =>
+        entry?.kind === 'link' && dateOnlyInZone(new Date(String(entry?.at ?? ''))) === today,
     )
     if (alreadyToday) return current
     return await this.recordInvoiceSent(invoiceId, {
@@ -16580,7 +16589,7 @@ export class AppDataStore {
       // nothing prices off it. Server-side, deliberately: nothing visible
       // changes in the Add-client modal (spec §5).
       hourlyRatePeriod:
-        (client.billingMode ?? 'hourly') === 'hourly' ? nowIso().slice(0, 7) : null,
+        (client.billingMode ?? 'hourly') === 'hourly' ? firmToday().slice(0, 7) : null,
       hourlyRateHistory: [],
     })
 
@@ -19519,7 +19528,7 @@ export class AppDataStore {
     if (!Number.isFinite(n) || n < 0) return null
     const versions = await this.upsertCostRateVersion({
       userId,
-      effectiveDate: nowIso().slice(0, 10),
+      effectiveDate: firmToday(),
       rate: n,
       actingUserId: null,
     })
@@ -19562,7 +19571,7 @@ export class AppDataStore {
     if (!Number.isFinite(n) || n < 0) return null
     const versions = await this.upsertBillRateVersion({
       userId,
-      effectivePeriod: nowIso().slice(0, 7),
+      effectivePeriod: firmToday().slice(0, 7),
       rate: n,
       actingUserId: null,
     })

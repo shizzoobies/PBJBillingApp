@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { firmToday } from '../../lib/firm-time.js'
 import { ensureRecurringChecklists, dateOffset, isChecklistItemDone, localDateOnly } from '../lib/utils'
 import type { AppData, ChecklistTemplate } from '../lib/types'
 
@@ -128,7 +129,7 @@ describe('ensureRecurringChecklists', () => {
     const data = makeData([makeTemplate({ nextDueDate: dateOffset(-5) })])
     const result = ensureRecurringChecklists(data)
 
-    const today = new Date().toISOString().slice(0, 10)
+    const today = firmToday()
     const updated = result.data.checklistTemplates.find((t) => t.id === 'tmpl-1')
     expect(updated).toBeDefined()
     // After catch-up materialization the next due date is rolled into the future.

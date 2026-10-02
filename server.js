@@ -656,8 +656,11 @@ const CAPACITY_TARGET_HOURS =
     ? Number(process.env.ASSISTANT_CAPACITY_TARGET)
     : 40
 
+// The app's "today" is the FIRM's day (US Eastern, lib/firm-time.js), not the
+// server's UTC day, which is already tomorrow from 8 pm Eastern. Every caller
+// below wants a calendar day, never an instant.
 function todayIso() {
-  return new Date().toISOString().slice(0, 10)
+  return firmToday()
 }
 
 /**
@@ -887,10 +890,8 @@ function assistantReadTools() {
       const data = await appDataStore.read()
       return diagnoseRecurringChecklists(data, {
         subject: typeof input.subject === 'string' ? input.subject : '',
-        // The materializer's clock (the firm's day), not `todayIso()`: this
-        // tool explains what the materializer will do, so it has to be asked
-        // about the same year. The time-logging tool above stays on
-        // `todayIso()` because the weekly gate it explains still runs on it.
+        // The firm's day, the same one the materializer and the weekly gate
+        // both run on (`todayIso()` is `firmToday()`).
         today: firmToday(),
       })
     },
@@ -8729,7 +8730,10 @@ const server = createServer(async (request, response) => {
         // Month-end sign-off is only for a month that has ALREADY ENDED. Locking
         // the current (in-progress) or a future month would seal it and block
         // everyone from tracking time in it — the outage this guards against.
-        const currentMonth = new Date().toISOString().slice(0, 7)
+        // The firm's month: on the last evening of a month the UTC month is
+        // already the next one, which would let the month still in progress
+        // be locked.
+        const currentMonth = firmToday().slice(0, 7)
         if (period >= currentMonth) {
           sendJson(response, 400, {
             error:
@@ -14635,9 +14639,11 @@ async function maybeSendWeeklyDigest() {
   try {
     if (String(process.env.ASSISTANT_DIGEST || '').toLowerCase() === 'off') return
     if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) return
-    const now = new Date()
-    if (now.getDay() !== DIGEST_WEEKDAY) return
-    const weekKey = weekStartOf(now.toISOString().slice(0, 10))
+    // The firm's day: at 9 pm Eastern on a Sunday the server's clock already
+    // says Monday, which would send Monday's digest a night early.
+    const firmDay = todayIso()
+    if (new Date(`${firmDay}T12:00:00Z`).getUTCDay() !== DIGEST_WEEKDAY) return
+    const weekKey = weekStartOf(firmDay)
     const members = await appDataStore.getTeamMembers()
     const owner = members.find((member) => member.role === 'owner')
     if (!owner?.email) return
@@ -14684,11 +14690,10 @@ setTimeout(() => void maybeSendWeeklyDigest(), 30 * 1000).unref?.()
 // goes out, so switching this off buys time without spending the once-per-
 // invoice marker on invoices nobody was ever told about.
 //
-// Server-side "today" is `todayIso()` (UTC). The browser's is its own local day,
-// which means the two can disagree for a few hours either side of midnight —
-// accepted: a notice an hour early or late about a thirty-day line is not a
-// thing anybody can notice, and passing a clock into the rule is what keeps
-// both callers honest about which day they mean.
+// Server-side "today" is `todayIso()`, the firm's day (US Eastern). The browser's
+// is its own local day, which the firm's staff keep in the same zone, so the two
+// agree; passing a clock into the rule is what keeps both callers honest about
+// which day they mean.
 async function maybeNotifyPastDueInvoices() {
   try {
     if (String(process.env.INVOICE_PAST_DUE_NOTICES || '').toLowerCase() === 'off') return
