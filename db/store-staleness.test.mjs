@@ -14464,6 +14464,115 @@ describe('covered dates — changing an unflagged window (file backend)', () => 
     })
   })
 
+  // A SENT invoice's covered dates are in the label the client reads, so moving
+  // them is an edit like any other: it leaves the same record `updateInvoice`
+  // leaves, which is what marks the invoice "changed since sent".
+  describe('the edit record a covered-dates change leaves on a sent invoice', () => {
+    const SENT_LONG_AGO = '2026-01-01T00:00:00.000Z'
+    const reviewEvents = async () =>
+      JSON.parse(await readFile(localAuthPath, 'utf8')).invoiceReviewEvents ?? []
+
+    async function sentSeptember() {
+      const invoice = await seededSeptember()
+      await clearInvoiceIntelligence()
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const stored = data.invoices.find((entry) => entry.id === invoice.id)
+      stored.status = 'sent'
+      stored.emailLog = [
+        { at: SENT_LONG_AGO, to: ['ann@acme.com'], subject: 'Invoice', ok: true, total: 590 },
+      ]
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+      return invoice
+    }
+    const markOf = async (id) =>
+      (await store.withChangedSinceSent(await store.listInvoices())).find((row) => row.id === id)
+
+    it('records an edit, with who made it, and the invoice reads as changed since sent', async () => {
+      const invoice = await sentSeptember()
+
+      await store.confirmExpenseCoverage(
+        invoice.id,
+        'recur-qbo',
+        { start: '2026-10-13', end: '2026-11-13' },
+        { actorUserId: 'owner-1' },
+      )
+
+      const events = await reviewEvents()
+      expect(events).toHaveLength(1)
+      expect(events[0]).toMatchObject({
+        invoiceId: invoice.id,
+        event: 'edited',
+        actorUserId: 'owner-1',
+        period: '2026-09',
+      })
+      const { before, after } = events[0].changes.lineItems
+      expect(recurringLineOf({ lineItems: before }).coverageEnd).toBe('2026-10-13')
+      expect(recurringLineOf({ lineItems: after })).toMatchObject({
+        label: 'QuickBooks Online — October 13 – November 13, 2026',
+        coverageEnd: '2026-11-13',
+      })
+      expect((await markOf(invoice.id)).changedSinceSent).toBe(true)
+    })
+
+    it('counts a dates change even under a label she typed herself', async () => {
+      const invoice = await sentSeptember()
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      recurringLineOf(data.invoices.find((entry) => entry.id === invoice.id)).label =
+        'QBO subscription (per contract)'
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+      const changed = await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+        start: '2026-09-13',
+        end: '2026-10-20',
+      })
+
+      // Her wording stays; the dates still moved, and they are on the invoice.
+      expect(recurringLineOf(changed).label).toBe('QBO subscription (per contract)')
+      expect(await reviewEvents()).toHaveLength(1)
+      expect((await markOf(invoice.id)).changedSinceSent).toBe(true)
+    })
+
+    it('records nothing when the confirm changes nothing the client reads', async () => {
+      const invoice = await sentSeptember()
+
+      // No dates given: "the window on the line is right". Same dates, same label.
+      await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {})
+      await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+        start: '2026-09-13',
+        end: '2026-10-13',
+      })
+
+      expect(await reviewEvents()).toEqual([])
+      expect((await markOf(invoice.id)).changedSinceSent).toBeUndefined()
+    })
+
+    it('leaves a draft alone: its edits are not "since sent"', async () => {
+      const invoice = await seededSeptember()
+      await clearInvoiceIntelligence()
+
+      await store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+        start: '2026-10-13',
+        end: '2026-11-13',
+      })
+
+      expect(await reviewEvents()).toEqual([])
+      expect((await markOf(invoice.id)).changedSinceSent).toBeUndefined()
+    })
+
+    it('writes no record for a confirm the store refuses', async () => {
+      const invoice = await sentSeptember()
+
+      await expect(
+        store.confirmExpenseCoverage(invoice.id, 'recur-qbo', {
+          start: '2026-10-13',
+          end: '2026-10-01',
+        }),
+      ).rejects.toBeInstanceOf(CoverageConfirmationError)
+
+      expect(await reviewEvents()).toEqual([])
+    })
+  })
+
   // THE EDITOR IS TOLD, ON THE WAY OUT, WHICH WINDOWS CANNOT MOVE: a later month
   // is already billed for the expense. Derived per response, never stored.
   describe('marking which windows can still move', () => {
@@ -14654,6 +14763,46 @@ describe('covered dates — changing an unflagged window (postgres branch)', () 
       end: '2026-11-13',
       needsConfirmation: false,
     })
+  })
+
+  it('records the edit for a SENT invoice inside the same transaction, and none for a draft', async () => {
+    const sent = fakePostgres({ invoices: [unflaggedRow('sent')], recurringRows: [recurringRow] })
+
+    await postgresStore(sent).confirmExpenseCoverage(
+      'inv-1',
+      'recur-qbo',
+      { start: '2026-10-13', end: '2026-11-13' },
+      { actorUserId: 'owner-1' },
+    )
+
+    const line = sent.indexOf(/^update invoices set line_items/i)
+    const event = sent.indexOf(/^insert into invoice_review_events/i)
+    const commit = sent.indexOf(/^COMMIT$/i)
+    expect(event).toBeGreaterThan(line)
+    expect(commit).toBeGreaterThan(event)
+    const insert = sent.statements[event]
+    expect(insert.params.slice(0, 6)).toEqual([
+      expect.stringMatching(/^invev-/),
+      'inv-1',
+      'c1',
+      '2026-09',
+      'owner-1',
+      'edited',
+    ])
+    const changes = JSON.parse(insert.params[6])
+    expect(changes.lineItems.before[0].coverageEnd).toBe('2026-10-13')
+    expect(changes.lineItems.after[0].coverageEnd).toBe('2026-11-13')
+
+    // A draft has no "since sent"; a confirm that moves nothing records nothing.
+    const draft = fakePostgres({ invoices: [unflaggedRow('draft')], recurringRows: [recurringRow] })
+    await postgresStore(draft).confirmExpenseCoverage('inv-1', 'recur-qbo', {
+      start: '2026-10-13',
+      end: '2026-11-13',
+    })
+    expect(draft.matching(/^insert into invoice_review_events/i)).toHaveLength(0)
+    const same = fakePostgres({ invoices: [unflaggedRow('sent')], recurringRows: [recurringRow] })
+    await postgresStore(same).confirmExpenseCoverage('inv-1', 'recur-qbo', {})
+    expect(same.matching(/^insert into invoice_review_events/i)).toHaveLength(0)
   })
 
   const ledgerWrite = (fake) => JSON.parse(fake.matching(/jsonb_set\(/i)[0].params[2])
@@ -30399,5 +30548,455 @@ describe('a repeating note never copies onto one checklist twice (postgres branc
     }
     await postgresStore(partial).initialize().catch(() => {})
     expect(partial.matching(/^alter table client_pending_notes\s+add column if not exists repeats/i)).toHaveLength(1)
+  })
+})
+
+/**
+ * `withChangedSinceSent` and the `totalChanged` tag - an invoice changed after it
+ * was sent (owner's answer 6, featreq-21d0bba8).
+ *
+ * The mark is DERIVED on the way out from two facts already on file: the send
+ * times in the invoice's own `email_log`, and what each edit changed in
+ * `invoice_review_events`. Never stored, and `updated_at` is never consulted
+ * (the whole-workspace save re-stamps it on every invoice).
+ */
+describe('changed since sent (file backend)', () => {
+  const SENT_LONG_AGO = '2026-01-01T00:00:00.000Z'
+  const SENT_IN_THE_FUTURE = '2999-01-01T00:00:00.000Z'
+  const sendEntry = (at, extra = {}) => ({
+    at,
+    to: ['ann@acme.com'],
+    subject: 'Invoice 1042',
+    ok: true,
+    total: 400,
+    ...extra,
+  })
+  const invoiceRow = (id, overrides = {}) => ({
+    id,
+    clientId: 'c1',
+    period: '2026-08',
+    number: `INV-${id}`,
+    kind: 'monthly',
+    status: 'sent',
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    dueDate: '2026-09-15',
+    blurb: 'Thank you.',
+    scopeFlags: [],
+    sentAt: SENT_LONG_AGO,
+    paidAt: null,
+    paymentMethod: null,
+    emailLog: [sendEntry(SENT_LONG_AGO)],
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+    ...overrides,
+  })
+
+  async function seed(...rows) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = rows
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await clearInvoiceIntelligence()
+  }
+  const markOf = async (id) =>
+    (await store.withChangedSinceSent(await store.listInvoices())).find((row) => row.id === id)
+  const repriced = (amount) => [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount }]
+
+  it('marks a sent invoice whose lines were edited after its last send', async () => {
+    await seed(invoiceRow('inv-a'))
+    await store.updateInvoice('inv-a', { lineItems: repriced(450) })
+
+    expect((await markOf('inv-a')).changedSinceSent).toBe(true)
+  })
+
+  it('marks an edit to the note to the client too', async () => {
+    await seed(invoiceRow('inv-a'))
+    await store.updateInvoice('inv-a', { blurb: 'A new note.' })
+
+    expect((await markOf('inv-a')).changedSinceSent).toBe(true)
+  })
+
+  it('does NOT mark an edit made before the last send', async () => {
+    await seed(invoiceRow('inv-a', { emailLog: [sendEntry(SENT_IN_THE_FUTURE)] }))
+    await store.updateInvoice('inv-a', { lineItems: repriced(450) })
+
+    expect((await markOf('inv-a')).changedSinceSent).toBeUndefined()
+  })
+
+  it('is cleared by sending again: the new send is later than the edit', async () => {
+    await seed(invoiceRow('inv-a'))
+    await store.updateInvoice('inv-a', { lineItems: repriced(450) })
+    expect((await markOf('inv-a')).changedSinceSent).toBe(true)
+
+    await store.recordInvoiceSent('inv-a', {
+      to: ['ann@acme.com'],
+      subject: 'Invoice',
+      ok: true,
+      stamp: SENT_IN_THE_FUTURE,
+    })
+
+    expect((await markOf('inv-a')).changedSinceSent).toBeUndefined()
+  })
+
+  it('reads the LATEST successful send: a failed attempt or a tagged entry is not one', async () => {
+    await seed(
+      invoiceRow('inv-a', {
+        emailLog: [
+          sendEntry(SENT_LONG_AGO),
+          // A failed attempt after the edit, and the provider's delivery event:
+          // neither is the invoice going out, so neither can hide the edit.
+          sendEntry(SENT_IN_THE_FUTURE, { ok: false, error: 'bounced' }),
+          { kind: 'delivery', event: 'delivered', at: SENT_IN_THE_FUTURE, providerId: 'p1', to: [] },
+        ],
+      }),
+    )
+    await store.updateInvoice('inv-a', { lineItems: repriced(450) })
+
+    expect((await markOf('inv-a')).changedSinceSent).toBe(true)
+  })
+
+  it('does NOT mark a sent invoice with no successful send on file', async () => {
+    await seed(invoiceRow('inv-a', { emailLog: [] }))
+    await store.updateInvoice('inv-a', { lineItems: repriced(450) })
+
+    expect((await markOf('inv-a')).changedSinceSent).toBeUndefined()
+  })
+
+  it('does NOT mark an edit the client would not see', async () => {
+    await seed(invoiceRow('inv-a'))
+    // The due date is internal (the client reads "due on receipt").
+    await store.updateInvoice('inv-a', { dueDate: '2026-10-30' })
+    // A $0 plan line has no money on it and stays off the client's copy.
+    await store.updateInvoice('inv-a', {
+      lineItems: [...repriced(400), { kind: 'plan', label: 'Subscription Plan', detail: '', amount: 0 }],
+    })
+
+    expect((await markOf('inv-a')).changedSinceSent).toBeUndefined()
+  })
+
+  it('never marks an invoice that is not sent, whatever was edited after it', async () => {
+    const edited = {
+      id: 'x',
+      event: 'edited',
+      createdAt: '2026-06-01T00:00:00.000Z',
+      changes: { blurb: { before: 'a', after: 'b' } },
+    }
+    await seed(
+      invoiceRow('inv-draft', { status: 'draft', emailLog: [] }),
+      invoiceRow('inv-reviewed', { status: 'reviewed' }),
+      invoiceRow('inv-processing', { status: 'processing' }),
+      invoiceRow('inv-paid', { status: 'paid' }),
+      invoiceRow('inv-void', { status: 'void' }),
+    )
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    authState.invoiceReviewEvents = [
+      'inv-draft',
+      'inv-reviewed',
+      'inv-processing',
+      'inv-paid',
+      'inv-void',
+    ].map((invoiceId) => ({ ...edited, id: `ev-${invoiceId}`, invoiceId }))
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+
+    const marked = await store.withChangedSinceSent(await store.listInvoices())
+
+    expect(marked.filter((row) => row.changedSinceSent)).toEqual([])
+  })
+
+  it('counts only edits, not a review, a void or another invoice\'s edit', async () => {
+    await seed(invoiceRow('inv-a'), invoiceRow('inv-b'))
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    const change = { blurb: { before: 'a', after: 'b' } }
+    authState.invoiceReviewEvents = [
+      { id: 'e1', invoiceId: 'inv-a', event: 'reviewed', createdAt: '2026-06-01T00:00:00.000Z', changes: change },
+      { id: 'e2', invoiceId: 'inv-b', event: 'edited', createdAt: '2026-06-01T00:00:00.000Z', changes: change },
+    ]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+
+    const marked = await store.withChangedSinceSent(await store.listInvoices())
+
+    expect(marked.find((row) => row.id === 'inv-a').changedSinceSent).toBeUndefined()
+    expect(marked.find((row) => row.id === 'inv-b').changedSinceSent).toBe(true)
+  })
+
+  it('never stores the mark, and a round trip through a save drops it', async () => {
+    await seed(invoiceRow('inv-a'))
+    await store.updateInvoice('inv-a', { lineItems: repriced(450) })
+    const marked = await markOf('inv-a')
+    expect(marked.changedSinceSent).toBe(true)
+
+    // The editor sends back the lines it was handed.
+    await store.updateInvoice('inv-a', { lineItems: marked.lineItems })
+
+    const stored = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(JSON.stringify(stored.invoices)).not.toContain('changedSinceSent')
+    expect(JSON.stringify(await store.listInvoices())).not.toContain('changedSinceSent')
+    // And the inputs are not mutated: the mark is per response.
+    const plain = await store.listInvoices()
+    await store.withChangedSinceSent(plain)
+    expect('changedSinceSent' in plain[0]).toBe(false)
+  })
+
+  it('answers a list with nothing sent as it came, and tolerates a missing list', async () => {
+    const drafts = [{ id: 'x', status: 'draft', emailLog: [] }]
+
+    expect(await store.withChangedSinceSent(drafts)).toBe(drafts)
+    expect(await store.withChangedSinceSent(undefined)).toEqual([])
+  })
+
+  it('does NOT mark a save that only stamps rateManual / employeeId or adds an empty hours row', async () => {
+    const hourly = { kind: 'hourly', label: 'Bookkeeping', detail: '', hours: 4, rate: 75, amount: 300 }
+    await seed(invoiceRow('inv-h', { lineItems: [hourly], subtotal: 300, total: 300 }))
+
+    // Bookkeeping only: the app's own stamps on the row.
+    await store.updateInvoice('inv-h', {
+      lineItems: [{ ...hourly, rateManual: true, employeeId: 'emp-lisa' }],
+    })
+    // A role row she added and left at 0.00 is not on the client's copy.
+    await store.updateInvoice('inv-h', {
+      lineItems: [
+        { ...hourly, rateManual: true, employeeId: 'emp-lisa' },
+        { kind: 'hourly', label: 'Accounting', detail: '', hours: 0, rate: 90, amount: 0 },
+      ],
+    })
+
+    expect((await markOf('inv-h')).changedSinceSent).toBeUndefined()
+
+    // Filling that row is a change the client would see.
+    await store.updateInvoice('inv-h', {
+      lineItems: [
+        { ...hourly, rateManual: true, employeeId: 'emp-lisa' },
+        { kind: 'hourly', label: 'Accounting', detail: '', hours: 2, rate: 90, amount: 180 },
+      ],
+    })
+    expect((await markOf('inv-h')).changedSinceSent).toBe(true)
+  })
+
+  describe('the total tag the route reads (updateInvoice)', () => {
+    it('is true when the save moved the total, and never reaches the JSON', async () => {
+      await seed(invoiceRow('inv-a'))
+
+      const updated = await store.updateInvoice('inv-a', { lineItems: repriced(450) })
+
+      expect(updated.totalChanged).toBe(true)
+      expect(Object.keys(updated)).not.toContain('totalChanged')
+      expect(JSON.stringify(updated)).not.toContain('totalChanged')
+    })
+
+    it('is false when the save left the total alone', async () => {
+      await seed(invoiceRow('inv-a'))
+
+      const noteOnly = await store.updateInvoice('inv-a', { blurb: 'A new note.' })
+      const relabeled = await store.updateInvoice('inv-a', {
+        lineItems: [{ kind: 'custom', label: 'Bookkeeping, relabeled', detail: '', amount: 400 }],
+      })
+
+      expect(noteOnly.totalChanged).toBe(false)
+      expect(relabeled.totalChanged).toBe(false)
+    })
+  })
+})
+
+describe('changed since sent (postgres branch)', () => {
+  const SENT_AT = '2026-09-01T12:00:00.000Z'
+  const sentRow = (id, overrides = {}) => ({
+    ...existingInvoice,
+    id,
+    status: 'sent',
+    email_log: [{ at: SENT_AT, to: ['ann@acme.com'], subject: 'Invoice', ok: true }],
+    ...overrides,
+  })
+  const asInvoices = (rows) => rows.map(mapInvoiceRow)
+  const lineEdit = {
+    lineItems: {
+      before: [{ kind: 'plan', label: 'August work', detail: '', amount: 250 }],
+      after: [{ kind: 'plan', label: 'August work', detail: '', amount: 300 }],
+    },
+  }
+  // The fake answers every unknown statement with no rows. This one is scripted,
+  // and recorded the way the fake records the rest.
+  const withEventRows = (fake, rows) => {
+    fake.pool.query = async (text, params) => {
+      fake.statements.push({ text: String(text).trim(), params })
+      return /from invoice_review_events/i.test(String(text)) ? { rows } : { rows: [] }
+    }
+    return fake
+  }
+  const eventReads = (fake) => fake.matching(/from invoice_review_events/i)
+
+  it('reads the review events ONCE for the whole list and marks only the edited', async () => {
+    const fake = withEventRows(fakePostgres(), [
+      { invoice_id: 'inv-a', changes: lineEdit },
+      // A due-date-only edit: the client does not see it.
+      { invoice_id: 'inv-b', changes: { dueDate: { before: '2026-09-30', after: '2026-10-30' } } },
+    ])
+    const list = asInvoices([
+      sentRow('inv-a'),
+      sentRow('inv-b'),
+      sentRow('inv-c'),
+      // Not sent: never asked about.
+      sentRow('inv-d', { status: 'paid' }),
+      sentRow('inv-e', { status: 'draft' }),
+      // Sent with no successful send on its log: nothing to be "since".
+      sentRow('inv-f', { email_log: [] }),
+    ])
+
+    const marked = await postgresStore(fake).withChangedSinceSent(list)
+
+    expect(marked.map((row) => row.changedSinceSent === true)).toEqual([
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+    ])
+    // One statement whatever the size of the list. Pinned verbatim.
+    const reads = eventReads(fake)
+    expect(reads).toHaveLength(1)
+    expect(reads[0].text.replace(/\s+/g, ' ').trim()).toBe(
+      "select e.invoice_id, e.changes from invoice_review_events e join unnest($1::text[], $2::timestamptz[]) as s(invoice_id, sent_at) on s.invoice_id = e.invoice_id where e.event = 'edited' and e.created_at > s.sent_at",
+    )
+    expect(reads[0].params).toEqual([
+      ['inv-a', 'inv-b', 'inv-c'],
+      [SENT_AT, SENT_AT, SENT_AT],
+    ])
+    // Read-only, and the inputs are not mutated.
+    expect(fake.matching(/^(update|insert|delete)/i)).toHaveLength(0)
+    expect('changedSinceSent' in list[0]).toBe(false)
+  })
+
+  it('reads nothing at all when no invoice in the list is sent', async () => {
+    const fake = withEventRows(fakePostgres(), [])
+    const list = asInvoices([
+      sentRow('inv-a', { status: 'draft' }),
+      sentRow('inv-b', { status: 'reviewed' }),
+      sentRow('inv-c', { status: 'void' }),
+    ])
+
+    const marked = await postgresStore(fake).withChangedSinceSent(list)
+
+    expect(marked).toBe(list)
+    expect(eventReads(fake)).toHaveLength(0)
+  })
+
+  it('uses the invoice\'s LATEST successful send as the line an edit must be after', async () => {
+    const fake = withEventRows(fakePostgres(), [])
+    const list = asInvoices([
+      sentRow('inv-a', {
+        email_log: [
+          { at: '2026-09-01T12:00:00.000Z', to: ['a@x.com'], subject: 'Invoice', ok: true },
+          { at: '2026-09-05T12:00:00.000Z', to: ['a@x.com'], subject: 'Invoice', ok: true },
+          { at: '2026-09-09T12:00:00.000Z', to: ['a@x.com'], subject: 'Invoice', ok: false },
+          { kind: 'delivery', event: 'delivered', at: '2026-09-10T12:00:00.000Z', to: [] },
+        ],
+      }),
+    ])
+
+    await postgresStore(fake).withChangedSinceSent(list)
+
+    expect(eventReads(fake)[0].params).toEqual([['inv-a'], ['2026-09-05T12:00:00.000Z']])
+  })
+
+  it('tags a save with whether the total moved, in both of its write shapes', async () => {
+    // A line edit records an event, so it goes through the transaction path.
+    const edited = await postgresStore(fakePostgres({ invoices: [sentRow('inv-1')] })).updateInvoice(
+      'inv-1',
+      { lineItems: [{ kind: 'plan', label: 'August work', detail: '', amount: 300 }] },
+    )
+    expect(edited.totalChanged).toBe(true)
+    expect(JSON.stringify(edited)).not.toContain('totalChanged')
+
+    // The note changes no total.
+    const noted = await postgresStore(fakePostgres({ invoices: [sentRow('inv-1')] })).updateInvoice(
+      'inv-1',
+      { blurb: 'A new note.' },
+    )
+    expect(noted.totalChanged).toBe(false)
+
+    // A save that changes nothing is the single-statement path, and is tagged too.
+    const untouched = await postgresStore(fakePostgres({ invoices: [sentRow('inv-1')] })).updateInvoice(
+      'inv-1',
+      {},
+    )
+    expect(untouched.totalChanged).toBe(false)
+  })
+})
+
+/**
+ * The expiry gate keys on the status a save READ (`wasSent`), not the status it
+ * left: a save that moves the total and rewinds the invoice off `sent` in the
+ * same request still leaves the client holding a live page at the old amount.
+ */
+describe('wasSent - the status a save read (both backends)', () => {
+  const sentFile = {
+    id: 'inv-w',
+    clientId: 'c1',
+    period: '2026-08',
+    number: 'INV-w',
+    kind: 'monthly',
+    status: 'sent',
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    dueDate: '2026-09-15',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: '2026-01-01T00:00:00.000Z',
+    paidAt: null,
+    paymentMethod: null,
+    emailLog: [],
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  const repriced = [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 450 }]
+
+  async function seed(status) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [{ ...sentFile, status }]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('file: a save that changes the total AND rewinds the status off sent is still wasSent', async () => {
+    await seed('sent')
+
+    const updated = await store.updateInvoice('inv-w', { lineItems: repriced, status: 'draft' })
+
+    expect(updated.status).toBe('draft')
+    expect(updated.totalChanged).toBe(true)
+    expect(updated.wasSent).toBe(true)
+    expect(Object.keys(updated)).not.toContain('wasSent')
+    expect(JSON.stringify(updated)).not.toContain('wasSent')
+  })
+
+  it('file: an invoice that was not sent before the save is not wasSent', async () => {
+    await seed('reviewed')
+
+    const updated = await store.updateInvoice('inv-w', { lineItems: repriced })
+
+    expect(updated.totalChanged).toBe(true)
+    expect(updated.wasSent).toBe(false)
+  })
+
+  it('postgres: both write shapes carry it', async () => {
+    const row = { ...existingInvoice, id: 'inv-1', status: 'sent' }
+
+    const rewound = await postgresStore(fakePostgres({ invoices: [row] })).updateInvoice('inv-1', {
+      lineItems: [{ kind: 'plan', label: 'August work', detail: '', amount: 300 }],
+      status: 'draft',
+    })
+    expect(rewound.wasSent).toBe(true)
+    expect(rewound.totalChanged).toBe(true)
+
+    // The single-statement path: nothing changed, so no event and no transaction.
+    const untouched = await postgresStore(fakePostgres({ invoices: [row] })).updateInvoice('inv-1', {})
+    expect(untouched.wasSent).toBe(true)
+    expect(untouched.totalChanged).toBe(false)
+
+    const reviewed = await postgresStore(
+      fakePostgres({ invoices: [{ ...row, status: 'reviewed' }] }),
+    ).updateInvoice('inv-1', { blurb: 'x' })
+    expect(reviewed.wasSent).toBe(false)
   })
 })

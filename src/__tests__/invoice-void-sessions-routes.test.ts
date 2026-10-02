@@ -86,6 +86,29 @@ describe('the one helper that closes an invoice\'s payment pages', () => {
     )
   })
 
+  // `expireCheckoutSession` does not throw when Stripe refuses: it answers `false`.
+  // The labeled log line used to be reachable only through a throw, so a refused
+  // expiry was silent.
+  it('logs the label, the session and the invoice when Stripe answers false, and keeps going', async () => {
+    const expire = vi.fn(async (id: string) => id !== 'cs_ach')
+    const { helper, errors } = await runHelper(expire)
+
+    await expect(helper(['cs_ach', 'cs_card'], 'inv-1', 'edit (total changed)')).resolves.toBeUndefined()
+
+    expect(expire.mock.calls.map(([id]) => id)).toEqual(['cs_ach', 'cs_card'])
+    expect(errors).toHaveLength(1)
+    expect(errors[0][0]).toContain('[invoices] edit (total changed): could not expire checkout session cs_ach for inv-1')
+    expect(errors[0][0]).toContain('a live pay link may remain')
+  })
+
+  it('logs nothing when every expiry is confirmed', async () => {
+    const { helper, errors } = await runHelper(vi.fn(async () => true))
+
+    await helper(['cs_ach', 'cs_card'], 'inv-1', 'void')
+
+    expect(errors).toEqual([])
+  })
+
   it('skips ids that are not there', async () => {
     const expire = vi.fn(async () => true)
     const { helper } = await runHelper(expire)

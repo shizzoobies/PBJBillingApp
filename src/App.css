@@ -12552,6 +12552,36 @@ tr.is-inactive-client .client-name-link {
   color: #9b2226;
 }
 
+/* A reminder rather than a problem: the invoice was changed after it went out.
+   Grey like the sent receipt, not amber like a scope flag. */
+.invoice-run-flag.is-quiet {
+  background: rgba(120, 120, 128, 0.1);
+  color: var(--muted);
+}
+
+/* The same reminder inside the open editor, with the button that answers it.
+   Calm like `.invoice-run-locked`: nothing has gone wrong. The region is always
+   in the page (so a screen reader announces it filling), and takes no room
+   while it is empty. */
+.invoice-run-resend:empty {
+  margin: 0;
+  padding: 0;
+}
+
+.invoice-run-resend {
+  align-items: center;
+  background: rgba(120, 120, 128, 0.1);
+  border-radius: 8px;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  gap: 8px 12px;
+  justify-content: space-between;
+  margin: 10px 0 0;
+  padding: 9px 12px;
+}
+
 .invoice-run-amount {
   display: grid;
   gap: 5px;

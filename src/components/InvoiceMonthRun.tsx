@@ -43,6 +43,7 @@ import {
   updateInvoiceRequest,
 } from '../lib/api'
 import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
+import { editChangesWhatClientSees } from '../../lib/invoice-sent-change.js'
 import { ListSearch } from './ListSearch'
 import {
   INVOICE_HOURS_ROLE_ROWS,
@@ -244,6 +245,34 @@ const INVOICE_MOVED_CODES: ReadonlySet<string | undefined> = new Set([
 
 /** Appended when that reload threw away edits she had not saved. */
 const UNSAVED_NOT_KEPT = 'Your unsaved changes were not kept.'
+
+/**
+ * What she reads, in the editor, on a sent invoice she has changed since it went
+ * out — and the button beside it runs the same Send as the one in the footer.
+ */
+const CHANGED_SINCE_SENT_NOTICE =
+  'This invoice was already sent. The client has the earlier version - send it again so they have your changes.'
+
+/**
+ * The invoice a save answered with, marked `changedSinceSent` when that save
+ * changed what the client sees on a sent invoice.
+ *
+ * The server derives the mark on every response, best effort: a failed read
+ * answers unmarked. A save that said nothing about it would be the one moment
+ * she most needs telling, so the same question is asked here of the two versions
+ * the save moved between. Never UN-marks: an earlier edit still counts.
+ */
+function markedAfterEdit(before: PersistedInvoice, after: PersistedInvoice): PersistedInvoice {
+  if (after.changedSinceSent || before.status !== 'sent' || after.status !== 'sent') return after
+  // Never marks what the server never would: with no successful send on the log
+  // there is no earlier version the client is holding.
+  if (!latestInvoiceSend(before.emailLog)) return after
+  const seen = editChangesWhatClientSees({
+    lineItems: { before: before.lineItems, after: after.lineItems },
+    blurb: { before: before.blurb, after: after.blurb },
+  })
+  return seen ? { ...after, changedSinceSent: true } : after
+}
 
 /**
  * Everything ONE invoice's hours panel needs, resolved by the run rather than
@@ -1186,10 +1215,17 @@ export function InvoiceMonthRun({
     }
   }
 
-  /** Replace one invoice in the list with a server-returned version. */
+  /**
+   * Replace one invoice in the list with a server-returned version. Through
+   * `markedAfterEdit`, like a line save: a covered-dates change on a SENT
+   * invoice rewrites the label the client reads, and the notice has to follow it
+   * even when the server's best-effort mark could not be derived.
+   */
   const mergeInvoice = (updated: PersistedInvoice) =>
     setInvoices((current) =>
-      current.map((invoice) => (invoice.id === updated.id ? updated : invoice)),
+      current.map((invoice) =>
+        invoice.id === updated.id ? markedAfterEdit(invoice, updated) : invoice,
+      ),
     )
 
   /**
@@ -1216,7 +1252,9 @@ export function InvoiceMonthRun({
     try {
       const updated = await updateInvoiceRequest(invoiceId, body)
       setInvoices((current) =>
-        current.map((invoice) => (invoice.id === updated.id ? updated : invoice)),
+        current.map((invoice) =>
+          invoice.id === updated.id ? markedAfterEdit(invoice, updated) : invoice,
+        ),
       )
       // A save can have spent a retainer or handed one back. Re-ask rather than
       // guess: the server decides, and the offer on the next row has to agree
@@ -1703,6 +1741,20 @@ function InvoiceRow({
               >
                 <AlertTriangle size={13} />
                 Past due · {daysPastDueLabel(pastDue.daysPastDue)}
+              </span>
+            </span>
+          ) : null}
+          {/* Edited since it went out, so the client holds an earlier version.
+              Quiet: it is a reminder with a button inside the editor, not a
+              problem. Only ever on a sent invoice (the server never marks any
+              other), so a paid or voided row cannot carry it. */}
+          {invoice.changedSinceSent && invoice.status === 'sent' ? (
+            <span className="invoice-run-flags">
+              <span
+                className="invoice-run-flag is-quiet"
+                title="This invoice was changed after it was sent. The client has the earlier version."
+              >
+                Changed since sent
               </span>
             </span>
           ) : null}
@@ -3640,6 +3692,42 @@ function InvoiceEditor({
           {sendError}
         </p>
       ) : null}
+
+      {/* The client is holding the earlier version. A STATUS, not an alert: it
+          is news, not a failure, and a refusal above keeps the page's one alert.
+          Read off the invoice the server marked, so it survives the remount a
+          save causes, shows again when she comes back tomorrow, and is gone the
+          moment a send lands (the new send is later than the edit). Only while
+          the editor is clean: with edits pending, Save is the next move and
+          Send is disabled anyway. */}
+      {/* The region is ALWAYS mounted, empty when there is nothing to say: a
+          live region that appears together with its text is not reliably
+          announced, one that already exists and then fills is. The button is
+          named for what it does, because the footer has a "Send again" of its
+          own and two buttons with one name are not two choices to a screen
+          reader. */}
+      <div className="invoice-run-resend" role="status">
+        {invoice.changedSinceSent && invoice.status === 'sent' && !dirty ? (
+          <>
+            <span>{CHANGED_SINCE_SENT_NOTICE}</span>
+            <button
+              type="button"
+              className="secondary-action"
+              aria-label="Send again with your changes"
+              disabled={busy || savingDates || sendBusy || optedOut || recipients.to.length === 0}
+              title={
+                optedOut
+                  ? 'This client is invoiced outside the app'
+                  : (recipients.reason ?? 'Email this invoice to the client again')
+              }
+              onClick={startSend}
+            >
+              <Mail size={15} />
+              {sendBusy ? 'Sending…' : 'Send again'}
+            </button>
+          </>
+        ) : null}
+      </div>
 
       {paymentLink ? (
         <div className="invoice-run-paylink">

@@ -424,7 +424,8 @@ describe('the invoice responses carry which covered windows can still move', () 
   })
 
   it('marks the invoice a save, a confirm, a send and a pay link hand back', () => {
-    const patch = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 5200)
+    // Widened from 5200 when the sent-invoice session expiry went in ahead of the answer.
+    const patch = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 6200)
     expect(patch).toContain('invoice: await withCoverageChangeable(updated)')
     const confirm = routeBlock(/const coverageConfirmMatch = normalizedPath\.match\(/, 3400)
     expect(confirm).toContain('invoice: await withCoverageChangeable(confirmed)')

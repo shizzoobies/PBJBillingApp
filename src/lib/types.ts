@@ -682,6 +682,14 @@ export type PersistedInvoice = {
    * not a field any of them are about.
    */
   payToken?: string | null
+  /**
+   * `true` on a SENT invoice whose client-visible content (the lines, the note to
+   * the client, so the total) was edited after its most recent send. Derived by
+   * the server on every response from the send log and the edit record, never
+   * stored and never hers to edit; absent means no such edit. The editor's
+   * `dirty` does not look at it.
+   */
+  changedSinceSent?: boolean
   createdAt: string | null
   updatedAt: string | null
 }

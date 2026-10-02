@@ -80,6 +80,7 @@ import {
   sendInvoicePaymentEmail,
 } from './lib/invoice-email.js'
 import { chooseInvoiceRecipients } from './lib/invoice-recipients.js'
+import { invoiceContentChanged, totalsDiffer } from './lib/invoice-sent-change.js'
 import {
   isResendWebhookConfigured,
   resendDeliveryEventFor,
@@ -648,12 +649,31 @@ function todayIso() {
 }
 
 /**
+ * One invoice, marked `changedSinceSent` when it was edited after its most recent
+ * send (see `withChangedSinceSent` in db/store.js). Best effort, like the mark
+ * below: the write it follows has committed, so a failed read answers the
+ * invoice unmarked and logs, never a 500.
+ */
+async function withChangedSinceSent(invoice) {
+  try {
+    return (await appDataStore.withChangedSinceSent([invoice]))[0]
+  } catch (error) {
+    console.error('[invoices] changed-since-sent mark failed, answering unmarked:', error)
+    return invoice
+  }
+}
+
+/**
  * One invoice, marked for the month run's editor the way the list marks it: a
  * recurring line whose covered dates cannot move (a later month is already
  * billed for that expense) says so. Every response the editor merges back into
  * its list goes through here, or the control would reappear after a save.
  */
 async function withCoverageChangeable(invoice) {
+  // The other derived mark rides the same wrapper, for the same reason: it is
+  // the one every editor-bound response already goes through, so no response can
+  // say "changed since sent" on the list and forget it on a save.
+  invoice = await withChangedSinceSent(invoice)
   // BEST EFFORT. The mark is a courtesy to the editor, and every caller has
   // already committed its write (or delivered its email) by the time it asks:
   // a failure here must never turn that into a 500. Unmarked just means the
@@ -668,8 +688,9 @@ async function withCoverageChangeable(invoice) {
 
 /**
  * Close the checkout sessions an invoice can no longer be paid through — after
- * Mark paid, and after a void. Each id is expired in its own try/catch and a
- * failure is logged loudly, never thrown: the write that retired the invoice
+ * Mark paid, a void, and an edit that moved a sent invoice's total. Each id is
+ * expired in its own try/catch and a failure (a throw, or the `false` that
+ * `expireCheckoutSession` answers instead) is logged loudly, never thrown: the write that retired the invoice
  * has committed and is the truth either way, so a Stripe hiccup must not fail
  * the request. `label` names the caller in the log line.
  */
@@ -677,7 +698,15 @@ async function expireInvoiceSessions(sessionIds, invoiceId, label) {
   for (const sessionId of sessionIds) {
     if (!sessionId) continue
     try {
-      await expireCheckoutSession(sessionId)
+      // `expireCheckoutSession` absorbs Stripe's error and answers `false`, so
+      // the catch below never sees a refused expiry: the answer itself is what
+      // has to be read.
+      const expired = await expireCheckoutSession(sessionId)
+      if (expired === false) {
+        console.error(
+          `[invoices] ${label}: could not expire checkout session ${sessionId} for ${invoiceId} — a live pay link may remain (Stripe did not confirm it)`,
+        )
+      }
     } catch (error) {
       console.error(
         `[invoices] ${label}: could not expire checkout session ${sessionId} for ${invoiceId} — a live pay link may remain:`,
@@ -3651,6 +3680,39 @@ const server = createServer(async (request, response) => {
           await expireCheckoutSession(paySwap.previous)
         }
 
+        // THE EDIT THAT LANDED WHILE THIS PAGE WAS OPENING. `payInvoice` was read
+        // before the mint, so the session above carries that total; an edit
+        // committed in between has already run its own expiry, against the
+        // session ids it could see — not this one, which was stored only just
+        // now. Read the invoice again: if the total moved, this session is at the
+        // wrong amount, so it is closed and the client is sent round once more
+        // (the next pass mints at the new total). `retry=1` marks that second
+        // pass: if the total STILL differs there, the invoice is being edited
+        // right now and the client is told to try again in a moment rather than
+        // looped.
+        const freshPayInvoice = await appDataStore.findInvoiceByPayToken(payToken)
+        if (freshPayInvoice && totalsDiffer(payInvoice.total, freshPayInvoice.total)) {
+          await expireInvoiceSessions(
+            [payResult.session.id],
+            payInvoice.id,
+            'pay link (total changed while the page was opening)',
+          )
+          if (requestUrl.searchParams.get('retry') !== '1') {
+            response.writeHead(302, { Location: `${payPath}?retry=1`, ...PAY_RESPONSE_HEADERS })
+            response.end()
+            return
+          }
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'We could not open the payment page',
+              body: 'Please try again in a few minutes, or contact us at billing@pbjsa.com.',
+            }),
+            503,
+          )
+          return
+        }
+
         // Best effort: the evidence behind "they say they never got the invoice".
         // Tagged, so nothing reads it as a send, and once a day, because a
         // durable link gets reloaded.
@@ -4012,6 +4074,14 @@ const server = createServer(async (request, response) => {
         marked = await appDataStore.withCoverageChangeable(invoices)
       } catch (error) {
         console.error('[invoices] covered-dates mark failed on the list, answering unmarked:', error)
+      }
+      // And which sent invoices were edited after they went out: ONE read of the
+      // review events for the whole month, none when nothing in it is sent. The
+      // marks are separate steps so a failure of one leaves the other.
+      try {
+        marked = await appDataStore.withChangedSinceSent(marked)
+      } catch (error) {
+        console.error('[invoices] changed-since-sent mark failed on the list, answering unmarked:', error)
       }
       sendJson(response, 200, { invoices: marked })
       return
@@ -5185,6 +5255,21 @@ const server = createServer(async (request, response) => {
         await refuseSendVoidedMidSend(response, invoice.id, mintedSessionIds)
         return
       }
+      // The email, the PDF and the pay sessions above were all built from the
+      // invoice this route read at the top. An edit committed since then would
+      // be emailed in its OLD form, stamped as "before the send" (so never
+      // marked changed), with a session minted at the old amount that the edit's
+      // own expiry may already have run before. Nothing has left yet, so stop:
+      // retire what this request minted (the stored one too — it is at the old
+      // amount) and let her send again from what she now has.
+      if (invoiceContentChanged(invoice, lastLook)) {
+        await expireInvoiceSessions(mintedSessionIds, invoice.id, 'send (invoice edited mid-send)')
+        sendJson(response, 409, {
+          error: 'invoice_changed',
+          message: 'This invoice changed while it was being sent. Nothing was emailed. Try sending again.',
+        })
+        return
+      }
 
       const sendResult = await sendInvoiceEmail({
         to: sendTo,
@@ -5490,6 +5575,22 @@ const server = createServer(async (request, response) => {
           'void',
         )
       }
+      // A sent invoice's payment page the client already opened is a Checkout
+      // session minted at the OLD total, and it can still be completed at it —
+      // the webhook records whatever Stripe collected against the invoice
+      // without comparing amounts. So when this save moved the total, the stored
+      // sessions are closed after the write commits (best-effort, like the void
+      // above: `expireInvoiceSessions` logs and never throws, so a Stripe
+      // hiccup cannot fail a save that has already landed). The emailed Pay
+      // button is the durable /pay/<token> link, which mints a fresh session at
+      // the new total on its next open.
+      if (updated.wasSent && updated.totalChanged) {
+        await expireInvoiceSessions(
+          [updated.stripeCheckoutSessionId, updated.stripeCardSessionId],
+          invoiceId,
+          'edit (total changed on a sent invoice)',
+        )
+      }
       sendJson(response, 200, { invoice: await withCoverageChangeable(updated) })
       return
     }
@@ -5544,6 +5645,8 @@ const server = createServer(async (request, response) => {
           decodeURIComponent(coverageConfirmMatch[1]),
           recurringId,
           confirmRange,
+          // Who answered, for the edit record a confirm on a SENT invoice writes.
+          { actorUserId: session.user.id },
         )
       } catch (error) {
         if (error instanceof CoverageConfirmationError) {

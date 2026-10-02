@@ -94,6 +94,8 @@ import {
   isScopeTag,
   scopeRetagApplies,
 } from '../lib/invoice-scope-retag.js'
+import { latestInvoiceSend } from '../lib/invoice-overdue.js'
+import { editChangesWhatClientSees, totalsDiffer } from '../lib/invoice-sent-change.js'
 import {
   anchorDayFromRange,
   anchorDayOf,
@@ -1573,6 +1575,34 @@ function withStatusChanged(invoice, statusChanged) {
   if (!invoice) return invoice
   Object.defineProperty(invoice, 'statusChanged', {
     value: Boolean(statusChanged),
+    enumerable: false,
+    configurable: true,
+  })
+  return invoice
+}
+
+/**
+ * Tag an invoice returned by `updateInvoice` with whether that save MOVED its
+ * total, and whether the invoice was `sent` when the save READ it.
+ *
+ * The route closes a sent invoice's open payment pages when both are true: a
+ * Checkout session carries the amount it was minted at, and the client may still
+ * be holding one. `wasSent` is the status BEFORE the write, not the one after:
+ * a save that moves the total and rewinds the status in the same request (a sent
+ * invoice patched back to draft) leaves a status that is no longer `sent`, and
+ * the client's page is just as live. Same shape and same reason as
+ * `withStatusChanged` — facts about the WRITE, never columns, so they are
+ * non-enumerable and cannot ride into the API's JSON.
+ */
+function withTotalChanged(invoice, totalChanged, wasSent) {
+  if (!invoice) return invoice
+  Object.defineProperty(invoice, 'totalChanged', {
+    value: Boolean(totalChanged),
+    enumerable: false,
+    configurable: true,
+  })
+  Object.defineProperty(invoice, 'wasSent', {
+    value: Boolean(wasSent),
     enumerable: false,
     configurable: true,
   })
@@ -12185,6 +12215,68 @@ export class AppDataStore {
     })
   }
 
+  /**
+   * Tell the month run which SENT invoices were edited after they went out, on
+   * the way OUT: `changedSinceSent: true` on an invoice whose client-visible
+   * content (the lines, the note to the client, so the total) was changed by an
+   * edit saved after its most recent successful send.
+   *
+   * DERIVED per response and never stored — no column, and the PATCH sanitizer
+   * does not name the field, so a round trip drops it. Both facts are already
+   * on file: the send times are in the invoice's own `email_log` (the same
+   * `latestInvoiceSend` the row's "Sent …" line reads), and what each edit
+   * changed is in `invoice_review_events`. `updated_at` is deliberately NOT
+   * used: the whole-workspace save re-stamps it on every invoice, so it cannot
+   * say whether an invoice changed after it was sent.
+   *
+   * ONE read of the review events for the whole list, not one per invoice; no
+   * read at all when nothing in the list is `sent`. A paid, processing, void,
+   * draft or reviewed invoice is never marked, and a sent invoice with no
+   * successful send on its log has nothing to be "since".
+   */
+  async withChangedSinceSent(invoices) {
+    const list = Array.isArray(invoices) ? invoices : []
+    const sentAt = new Map()
+    for (const invoice of list) {
+      if (invoice?.status !== 'sent') continue
+      const send = latestInvoiceSend(invoice.emailLog)
+      if (send && Number.isFinite(Date.parse(send.at))) sentAt.set(invoice.id, send.at)
+    }
+    if (sentAt.size === 0) return list
+
+    // The edits after each invoice's own send, as `{ invoiceId, changes }`.
+    let edits
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select e.invoice_id, e.changes
+           from invoice_review_events e
+           join unnest($1::text[], $2::timestamptz[]) as s(invoice_id, sent_at)
+             on s.invoice_id = e.invoice_id
+          where e.event = 'edited' and e.created_at > s.sent_at`,
+        [[...sentAt.keys()], [...sentAt.values()]],
+      )
+      edits = rows.map((row) => ({ invoiceId: row.invoice_id, changes: row.changes }))
+    } else {
+      const authState = await readJson(localAuthPath)
+      edits = (Array.isArray(authState.invoiceReviewEvents) ? authState.invoiceReviewEvents : [])
+        .filter(
+          (event) =>
+            event?.event === 'edited' &&
+            sentAt.has(event.invoiceId) &&
+            Date.parse(event.createdAt) > Date.parse(sentAt.get(event.invoiceId)),
+        )
+        .map((event) => ({ invoiceId: event.invoiceId, changes: event.changes }))
+    }
+
+    const changedIds = new Set(
+      edits.filter((edit) => editChangesWhatClientSees(edit.changes)).map((edit) => edit.invoiceId),
+    )
+    if (changedIds.size === 0) return list
+    return list.map((invoice) =>
+      changedIds.has(invoice?.id) ? { ...invoice, changedSinceSent: true } : invoice,
+    )
+  }
+
   /** Every expense id a set of invoices' recurring lines names. */
   _coveredExpenseIds(invoices) {
     const ids = []
@@ -12237,10 +12329,16 @@ export class AppDataStore {
    * what the template is for; correcting them and leaving the sentence naming
    * the old ones would be worse than not asking at all.
    *
+   * THE DATES ARE IN THE LABEL THE CLIENT READS, so on a SENT invoice a change
+   * to what the line prints is an edit like any other: it is recorded in
+   * `invoice_review_events` (the same record `updateInvoice` writes, in the same
+   * transaction / file slot), which is what marks the invoice "changed since
+   * sent". A confirm that changes nothing the client sees records nothing.
+   *
    * Throws `CoverageConfirmationError` for anything it will not accept.
    * Returns the updated invoice, or null when there is no such invoice.
    */
-  async confirmExpenseCoverage(invoiceId, recurringId, { start, end } = {}) {
+  async confirmExpenseCoverage(invoiceId, recurringId, { start, end } = {}, opts = {}) {
     // READ, DECIDE AND WRITE UNDER ONE LOCK. The invoice is rewritten whole
     // (`line_items` is one array), so two answers for two lines of the same
     // invoice that each read it first and wrote it second were last-writer-wins:
@@ -12274,6 +12372,8 @@ export class AppDataStore {
           `update invoices set line_items = $2::jsonb, updated_at = now() where id = $1`,
           [invoiceId, JSON.stringify(plan.lineItems)],
         )
+        const sentEdit = this._coverageSentEditEvent(current, plan.lineItems, opts.actorUserId)
+        if (sentEdit) await this._insertInvoiceReviewEvent(sentEdit, { dbClient })
         // The ledger gets the CONFIRMED window, so the next cycle steps from what
         // she approved rather than from what was proposed.
         await this._writeCoverageLedgerEntry(
@@ -12324,8 +12424,34 @@ export class AppDataStore {
       stored.lineItems = plan.lineItems
       stored.updatedAt = next.updatedAt
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      // The edit record is its own file (auth-state), so its own queue: calling
+      // the insert helper from inside this slot cannot wait on it.
+      const sentEdit = this._coverageSentEditEvent(current, plan.lineItems, opts.actorUserId)
+      if (sentEdit) await this._insertInvoiceReviewEvent(sentEdit)
       return next
     })
+  }
+
+  /**
+   * The `edited` review event for a covered-dates confirm, or null when there is
+   * nothing to record: the invoice is not `sent` (a draft's edits are not "since
+   * sent"), or the confirm changed nothing the client would read (the same rule
+   * `editChangesWhatClientSees` applies to a line save).
+   */
+  _coverageSentEditEvent(current, lineItems, actorUserId = null) {
+    if (current.status !== 'sent') return null
+    const changes = { lineItems: { before: current.lineItems ?? [], after: lineItems } }
+    if (!editChangesWhatClientSees(changes)) return null
+    return {
+      id: `invev-${randomUUID().slice(0, 8)}`,
+      invoiceId: current.id,
+      clientId: current.clientId,
+      period: current.period,
+      actorUserId: actorUserId ?? null,
+      event: 'edited',
+      changes,
+      createdAt: nowIso(),
+    }
   }
 
   /**
@@ -13797,6 +13923,10 @@ export class AppDataStore {
 
     Object.assign(next, recomputeInvoiceMoney(next.lineItems))
     next.updatedAt = nowIso()
+    // Read by the route, which closes a sent invoice's open payment pages when
+    // this save changed what they would charge. See `withTotalChanged`.
+    const totalChanged = totalsDiffer(current.total, next.total)
+    const wasSent = current.status === 'sent'
 
     // Built BEFORE the write, from the two versions that only exist together
     // here. Null when the save changed nothing at all.
@@ -13853,7 +13983,11 @@ export class AppDataStore {
           if (await this._invoiceStillExists(this.pool, id)) throw new InvoiceChangedError()
           return null
         }
-        return (await this.listInvoices()).find((invoice) => invoice.id === id) ?? null
+        return withTotalChanged(
+          (await this.listInvoices()).find((invoice) => invoice.id === id) ?? null,
+          totalChanged,
+          wasSent,
+        )
       }
 
       const dbClient = await this.pool.connect()
@@ -13969,7 +14103,11 @@ export class AppDataStore {
       } finally {
         dbClient.release()
       }
-      return (await this.listInvoices()).find((invoice) => invoice.id === id) ?? null
+      return withTotalChanged(
+        (await this.listInvoices()).find((invoice) => invoice.id === id) ?? null,
+        totalChanged,
+        wasSent,
+      )
     }
 
     const data = await readJson(localDataPath)
@@ -14036,7 +14174,7 @@ export class AppDataStore {
     if (reviewEvent) {
       await this._insertInvoiceReviewEvent(reviewEvent)
     }
-    return next
+    return withTotalChanged(next, totalChanged, wasSent)
   }
 
   // ---- Invoice review events: what a human did to an invoice ----
