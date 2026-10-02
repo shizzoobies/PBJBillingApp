@@ -1110,6 +1110,76 @@ const LOCK_OMITTED_CLIENTS_SQL = `
 `
 
 /**
+ * The bulk save could not get its table locks in time, on every attempt (see
+ * `BULK_SAVE_LOCK_TIMEOUTS`). A fact about the moment, not about the data:
+ * another write was holding one of the tables and nothing was written. The
+ * endpoint answers 503 `workspace_busy` and the tab keeps its edits and saves
+ * again on its own.
+ */
+export class WorkspaceBusyError extends Error {
+  constructor(message = 'The workspace is busy saving another change. Try again in a moment.') {
+    super(message)
+    this.name = 'WorkspaceBusyError'
+  }
+}
+
+/**
+ * Every table `write()` deletes, parents first. The bulk save locks all of them
+ * in EXCLUSIVE mode before it looks at anything, so a single-row write that is
+ * in flight finishes first (the save then sees one consistent state) and one
+ * that arrives later waits at the table, before its statement takes a snapshot,
+ * and finds the re-inserted row instead of a deleted one. A test fails when a
+ * `delete from X` is issued for a table that is not in this list.
+ */
+export const BULK_SAVE_LOCK_TABLES = [
+  'subscription_plans',
+  'contacts',
+  'clients',
+  'invoices',
+  'recurring_reimbursements',
+  'reimbursements',
+  'weekly_submissions',
+  'timesheet_locks',
+  'time_entries',
+  'checklists',
+  'checklist_templates',
+  'checklist_template_stages',
+  'checklist_template_items',
+  'checklist_items',
+]
+
+/**
+ * EXCLUSIVE, not SHARE ROW EXCLUSIVE: the weaker mode does not block
+ * `select ... for update`, so a writer holding a row lock could then deadlock
+ * the save's delete. EXCLUSIVE blocks every writer and every `for update`
+ * reader and does not block plain selects or pg_dump.
+ */
+export const BULK_SAVE_LOCK_SQL = `lock table ${BULK_SAVE_LOCK_TABLES.join(', ')} in exclusive mode`
+
+/**
+ * One entry per attempt: two quick tries, then one patient one.
+ *
+ * The quick tiers are 1500 ms, not shorter, on purpose. Postgres cancels an
+ * autovacuum that is blocking a lock request only when the waiter's deadlock
+ * check runs, after `deadlock_timeout` (1 s in production). With a 500 ms tier
+ * the first two attempts could never get past a running autovacuum, and these
+ * tables are rewritten wholesale on every save, so autovacuum visits them often.
+ *
+ * `lock_timeout` is deliberately left in force for the whole transaction, not
+ * just the table lock: a save that then waits on a row outside the 14 tables
+ * (a `users` row, say) gives way and retries rather than sitting on its table
+ * locks while a writer queued behind them waits for it - a deadlock the
+ * database would otherwise only break after `deadlock_timeout`. Do not "fix"
+ * that by resetting it after the lock is granted.
+ */
+export const BULK_SAVE_LOCK_TIMEOUTS = ['1500ms', '1500ms', '3000ms']
+
+/** 55P03 lock_not_available (lock_timeout hit) and 40P01 deadlock_detected. */
+function isWorkspaceLockContention(error) {
+  return error?.code === '55P03' || error?.code === '40P01'
+}
+
+/**
  * The statement dates box's save was sent a `version` that no longer matches
  * the client's stored list (see `statementAccountsVersion` below) — another
  * tab or another save landed first. Same idea as `StaleWorkspaceError` in
@@ -7231,6 +7301,9 @@ export class AppDataStore {
           console.warn(
             `[read] materialize write-back skipped: workspace moved to ${error.currentVersion} mid-read; serving in-memory data`,
           )
+        } else if (error instanceof WorkspaceBusyError) {
+          // A read never fails because a save was running: the next read retries.
+          console.warn('[read] materialize write-back skipped: workspace busy; serving in-memory data')
         } else {
           console.error('[read] materialize write-back failed; serving in-memory data:', error)
         }
@@ -7566,13 +7639,25 @@ export class AppDataStore {
           .filter((id) => typeof id === 'string' && id),
       ])
 
-      try {
+      // One attempt at the whole transaction. Retried by the loop after it (same
+      // connection, never released mid-loop) only when the table locks could not
+      // be had; the rollback and the decision to retry live there.
+      const runTransaction = async (lockTimeout) => {
         await client.query('begin')
+
+        // THE TABLES FIRST, before the fingerprint and before any snapshot. A
+        // single-row write that is in flight finishes before this is granted,
+        // so the fingerprint, the snapshots and the deletes below all see one
+        // state; one that arrives after waits at the table lock (before its own
+        // statement takes a snapshot) and then finds the re-inserted row, not a
+        // deleted one. `set local` per attempt: it dies with the transaction.
+        await client.query(`set local lock_timeout = '${lockTimeout}'`)
+        await client.query(BULK_SAVE_LOCK_SQL)
 
         // Staleness guard, INSIDE the transaction. Running it here (rather than
         // in the endpoint before calling write) means a concurrent save cannot
         // land between the check and the deletes below.
-        // Throwing here lands in this try's catch, which issues the rollback —
+        // Throwing here lands in the attempt loop's catch, which issues the rollback —
         // no second rollback needed (a redundant one only logs a warning).
         if (expectedVersion) {
           const currentVersion = await postgresWorkspaceVersion(client)
@@ -7592,7 +7677,7 @@ export class AppDataStore {
         // (its snapshot is taken after the lock), and an insert that arrives
         // later waits for this transaction and then fails on the foreign key
         // if the client was deleted, so no committed entry is wiped unseen.
-        // Throwing lands in the catch's rollback.
+        // Throwing lands in the attempt loop's rollback.
         const keptClientIds = (Array.isArray(data.clients) ? data.clients : [])
           .map((c) => c?.id)
           .filter((id) => typeof id === 'string')
@@ -8470,12 +8555,50 @@ export class AppDataStore {
         }
 
         await client.query('commit')
-      } catch (error) {
-        await client.query('rollback')
-        throw error
-      } finally {
-        client.release()
       }
+
+      const startedAt = Date.now()
+      let attempts = 0
+      // Set only when a rollback itself fails: the connection is then in an unknown
+      // state and is released WITH the error, which makes `pg` destroy it instead
+      // of handing it to the next request.
+      let releaseError
+      try {
+        for (;;) {
+          attempts += 1
+          try {
+            await runTransaction(BULK_SAVE_LOCK_TIMEOUTS[attempts - 1])
+            break
+          } catch (error) {
+            try {
+              await client.query('rollback')
+            } catch (rollbackError) {
+              releaseError = rollbackError
+              console.error('[bulk-save] rollback failed; discarding the connection:', rollbackError)
+              // The ORIGINAL error is what the caller needs to see.
+              throw error
+            }
+            // ONLY lock contention is retried. A stale fingerprint, a client
+            // with history or any other failure is a fact about the data and
+            // propagates exactly as before; and each retry re-runs the
+            // fingerprint check under the lock, so a retry can never write a
+            // payload that has gone stale.
+            if (!isWorkspaceLockContention(error)) throw error
+            if (attempts >= BULK_SAVE_LOCK_TIMEOUTS.length) {
+              console.warn(
+                `[bulk-save] could not lock the workspace tables after ${attempts} attempts (${error.code}); refusing as busy`,
+              )
+              throw new WorkspaceBusyError()
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50 + Math.floor(Math.random() * 101)))
+          }
+        }
+      } finally {
+        client.release(releaseError)
+      }
+      console.log(
+        `[bulk-save] write committed in ${Date.now() - startedAt}ms after ${attempts} lock attempt${attempts === 1 ? '' : 's'}`,
+      )
 
       return
     }

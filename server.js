@@ -30,6 +30,7 @@ import {
   TimeEntrySplitError,
   TooManyPendingNotesError,
   WaitRefusedError,
+  WorkspaceBusyError,
 } from './db/store.js'
 import {
   allocateGroupMinutes,
@@ -7208,6 +7209,19 @@ const server = createServer(async (request, response) => {
             sendJson(response, 409, { error: 'client_has_history', message: error.message })
             return
           }
+          // The save could not get its table locks (another write held one
+          // for three attempts). Nothing was written. A 503, never the stale-tab
+          // notice: the tab's snapshot is fine, so it keeps its edits and its
+          // sticky-error retry saves them again a few seconds later.
+          if (error instanceof WorkspaceBusyError) {
+            console.warn(`[bulk-save] workspace busy for ${session.user.id}; asked the tab to retry`)
+            sendJson(response, 503, {
+              error: 'workspace_busy',
+              message:
+                'The workspace is busy saving another change. Your changes are kept and will be saved again in a moment.',
+            })
+            return
+          }
           // Log the full SQL/JS error server-side (visible in Railway logs);
           // return only a generic message so Postgres internals (schema,
           // constraint names, row data in `detail`) aren't leaked to clients.
@@ -14344,6 +14358,13 @@ const server = createServer(async (request, response) => {
 
     sendFile(response, indexFile)
   } catch (error) {
+    // A store write (template stage edits, standard templates, onboarding) that
+    // could not get the workspace tables in time. Nothing was written; say so
+    // plainly instead of a bare 500.
+    if (error instanceof WorkspaceBusyError) {
+      sendJson(response, 503, { error: 'workspace_busy', message: error.message })
+      return
+    }
     // A BILLING MASTER refusing a write is a fact about the data, not a server
     // fault. Four store guards throw it — time entries, checklists, template
     // applies and recurring reimbursements — and none of those handlers has a

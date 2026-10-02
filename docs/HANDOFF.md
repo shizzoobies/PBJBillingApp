@@ -434,6 +434,17 @@ first.** A past bulk write took production down (see `.omc/` notes / memory
 "Plan-refs Outage"). One approved backfill was done this session (177 rows) —
 snapshot first, single transaction, re-verify after.
 
+**Warning - the bulk save now locks 14 tables.** `write()` begins by taking
+`lock table ... in exclusive mode` on every table it deletes
+(`BULK_SAVE_LOCK_TABLES` in `db/store.js`), and keeps those locks until it
+commits or rolls back. So any trial that calls the real `write()` - or a
+`read()` that triggers the materializer write-back - through a
+savepoint-wrapping pool holds EXCLUSIVE locks on those 14 tables until your
+outer `ROLLBACK`: every write in the live app queues behind it (plain reads and
+`pg_dump` are not blocked). Keep such a trial to a second or two, and never run
+the full `write()` over the public proxy (thousands of statements, each a round
+trip, all of it under the locks).
+
 **Schema surprises** (the app-shaped names differ from the columns):
 - `time_entries`: `user_id` (not employee_id), `entry_date` (not date),
   `started_at` / `ended_at`, `sessions` jsonb NOT NULL, `client_id` **FK — must be

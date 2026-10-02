@@ -6,6 +6,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import {
   AppDataStore,
+  BULK_SAVE_LOCK_SQL,
+  BULK_SAVE_LOCK_TABLES,
+  BULK_SAVE_LOCK_TIMEOUTS,
   BillingMasterError,
   CHECKLIST_ITEM_SELECT_COLUMNS,
   ClientHasHistoryError,
@@ -31,6 +34,7 @@ import {
   StepIsWaitingError,
   TooManyPendingNotesError,
   WaitRefusedError,
+  WorkspaceBusyError,
   mapChecklistItemRow,
   mapClientRow,
   mapInvoiceRow,
@@ -1051,7 +1055,8 @@ function fakePostgres({
   simulateChecklistUniqueness = false,
   // Does the v3 instance index already exist? Answers initialize()'s to_regclass probe.
   checklistIndexV3Exists = false,
-  // { pattern, error }: throw `error` on the first statement matching `pattern`.
+  // { pattern, error, times? }: throw `error` on a statement matching `pattern`
+  // (every match, or only the first `times` of them when `times` is given).
   failOn = null,
   // Stored clients that have time entries or invoices, as the bulk save's
   // history check would select them: { id, name, has_time, has_invoices }.
@@ -1115,7 +1120,15 @@ function fakePostgres({
   const record = (text, params) => {
     const trimmed = String(text).trim()
     statements.push({ text: trimmed, params })
-    if (failOn && failOn.pattern.test(trimmed)) throw failOn.error
+    if (failOn && failOn.pattern.test(trimmed)) {
+      // `times` (optional) limits how many matching statements throw; without
+      // it every match throws, as before.
+      if (failOn.times === undefined) throw failOn.error
+      if (failOn.times > 0) {
+        failOn.times -= 1
+        throw failOn.error
+      }
+    }
     if (simulateChecklistUniqueness) simulateUniqueness(trimmed, params)
     // The bulk save's "never delete a client who has history" read. FIRST, and
     // actually filtering by the kept ids ($1), for two reasons: its text names
@@ -13492,6 +13505,30 @@ describe("read()'s materializer write-back is guarded (postgres branch)", () => 
     expect(fake.indexOf(/^rollback$/i)).toBeGreaterThan(-1)
     expect(warn).toHaveBeenCalled()
   })
+
+  // The write-back takes the same table locks as every other write(), so it can
+  // now find them held. A READ must never fail because the workspace was busy:
+  // it serves what it materialized and the next read tries again.
+  it('a write-back that cannot get the table locks serves the in-memory data and never fails the read', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fake = spawnableFake({
+      failOn: {
+        pattern: /^lock table /i,
+        error: Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }),
+      },
+    })
+
+    const data = await postgresStore(fake).read()
+
+    expect(data.checklists.some((c) => c.templateId === 'tpl-mat')).toBe(true)
+    expect(fake.matching(/^(delete from|insert into) /i)).toEqual([])
+    expect(fake.matching(/^commit$/i)).toEqual([])
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('workspace busy'))
+    // Busy is expected weather, not an error report.
+    expect(error).not.toHaveBeenCalled()
+  })
+
   // N1 (the app's "GET-side ordering gap"). The version a tab is handed has to
   // be taken BEFORE the snapshot it is served - a write that lands after the
   // final workspace read then moves the persisted state PAST the tab's version,
@@ -32130,5 +32167,257 @@ describe('a card payment\'s two events cannot undo each other (file backend)', (
     expect(stored.stripeCardSessionId).toBe('cs_card_9')
     if (events[0] === paidPatch) expect(second.statusChanged).toBe(false)
     expect(first.statusChanged).toBe(true)
+  })
+})
+
+/**
+ * The whole-workspace save takes its tables FIRST (tracker featreq-6a5c6162).
+ *
+ * `write()` wipes and re-inserts fourteen tables in one READ COMMITTED
+ * transaction that takes seconds. A single-row write racing it was lost two
+ * ways: committed after the save's snapshot (the save re-inserted the stale
+ * copy), or arrived after the delete (its UPDATE matched nothing once the save
+ * committed). The save now locks the tables in EXCLUSIVE mode right after
+ * `begin`, so the first waits for the writer and the second waits at the table.
+ * This block pins the statement order, the retry tiers and the lock list.
+ */
+describe('the bulk save takes its tables first (postgres branch)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const lockError = (code) => Object.assign(new Error(`simulated ${code}`), { code })
+  const LOCK_STATEMENT =
+    'lock table subscription_plans, contacts, clients, invoices, recurring_reimbursements, ' +
+    'reimbursements, weekly_submissions, timesheet_locks, time_entries, checklists, ' +
+    'checklist_templates, checklist_template_stages, checklist_template_items, ' +
+    'checklist_items in exclusive mode'
+  const FINGERPRINT = /md5\(coalesce\(string_agg/i
+  const texts = (fake) => fake.statements.map((s) => s.text)
+  const control = (fake) => texts(fake).filter((t) => /^(begin|commit|rollback)$/i.test(t))
+  const lockTimeouts = (fake) =>
+    fake.matching(/^set local lock_timeout/i).map((s) => /'([^']+)'/.exec(s.text)[1])
+
+  it('runs begin, set local lock_timeout, the table lock, then the fingerprint, the snapshots and the deletes', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    const current = await pgStore.computeWorkspaceVersion()
+    await pgStore.write(workspace(), { expectedVersion: current })
+
+    const all = texts(fake)
+    const beginAt = fake.indexOf(/^begin$/i)
+    expect(beginAt).toBeGreaterThan(-1)
+    expect(all[beginAt + 1]).toBe("set local lock_timeout = '1500ms'")
+    // The exact statement: parents first, EXCLUSIVE (not SHARE ROW EXCLUSIVE).
+    expect(all[beginAt + 2]).toBe(LOCK_STATEMENT)
+    expect(all[beginAt + 2]).toBe(BULK_SAVE_LOCK_SQL)
+    expect(FINGERPRINT.test(all[beginAt + 3])).toBe(true)
+
+    const fingerprintAt = beginAt + 3
+    const snapshotAt = fake.indexOf(/^select[\s\S]*from invoices$/i)
+    const firstDeleteAt = fake.indexOf(/^delete from /i)
+    expect(snapshotAt).toBeGreaterThan(fingerprintAt)
+    expect(firstDeleteAt).toBeGreaterThan(snapshotAt)
+    // Nothing between the begin and the lock: no read sees a pre-lock state.
+    expect(control(fake)).toEqual(['begin', 'commit'])
+  })
+
+  it('takes the lock even when the caller passes no expected version', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace())
+
+    const all = texts(fake)
+    const beginAt = fake.indexOf(/^begin$/i)
+    expect(all[beginAt + 1]).toBe("set local lock_timeout = '1500ms'")
+    expect(all[beginAt + 2]).toBe(LOCK_STATEMENT)
+  })
+
+  it('exports the tier list and the lock list from one place', () => {
+    expect(BULK_SAVE_LOCK_TIMEOUTS).toEqual(['1500ms', '1500ms', '3000ms'])
+    expect(BULK_SAVE_LOCK_TABLES).toEqual([
+      'subscription_plans',
+      'contacts',
+      'clients',
+      'invoices',
+      'recurring_reimbursements',
+      'reimbursements',
+      'weekly_submissions',
+      'timesheet_locks',
+      'time_entries',
+      'checklists',
+      'checklist_templates',
+      'checklist_template_stages',
+      'checklist_template_items',
+      'checklist_items',
+    ])
+  })
+
+  it('a lock timeout (55P03) once: rolls back, begins again, commits, and deletes nothing in the failed attempt', async () => {
+    const fake = fakePostgres({
+      failOn: { pattern: /^lock table /i, error: lockError('55P03'), times: 1 },
+    })
+    await expect(postgresStore(fake).write(workspace())).resolves.toBeUndefined()
+
+    expect(control(fake)).toEqual(['begin', 'rollback', 'begin', 'commit'])
+    expect(lockTimeouts(fake)).toEqual(['1500ms', '1500ms'])
+    // The first lock statement threw, so nothing destructive can precede the rollback.
+    const firstRollbackAt = fake.indexOf(/^rollback$/i)
+    expect(fake.statements.slice(0, firstRollbackAt).some((s) => /^(delete|insert) /i.test(s.text))).toBe(
+      false,
+    )
+    // The second attempt did the whole save.
+    expect(fake.matching(/^delete from /i)).toHaveLength(14)
+  })
+
+  it('uses the patient 3000ms tier on the third attempt and succeeds there', async () => {
+    const fake = fakePostgres({
+      failOn: { pattern: /^lock table /i, error: lockError('55P03'), times: 2 },
+    })
+    await postgresStore(fake).write(workspace())
+
+    expect(lockTimeouts(fake)).toEqual(['1500ms', '1500ms', '3000ms'])
+    expect(control(fake)).toEqual(['begin', 'rollback', 'begin', 'rollback', 'begin', 'commit'])
+  })
+
+  it('three failures throw WorkspaceBusyError after exactly three attempts, with nothing written or committed', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fake = fakePostgres({
+      failOn: { pattern: /^lock table /i, error: lockError('55P03'), times: 3 },
+    })
+    const error = await postgresStore(fake).write(workspace()).catch((e) => e)
+
+    expect(error).toBeInstanceOf(WorkspaceBusyError)
+    expect(error).not.toBeInstanceOf(StaleWorkspaceError)
+    expect(lockTimeouts(fake)).toEqual(['1500ms', '1500ms', '3000ms'])
+    expect(control(fake)).toEqual(['begin', 'rollback', 'begin', 'rollback', 'begin', 'rollback'])
+    expect(fake.matching(/^(delete from|insert into) /i)).toEqual([])
+  })
+
+  it('a rollback that itself fails releases the connection WITH the error (destroyed, not pooled) and rethrows the original', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const original = new Error('constraint')
+    const brokenRollback = new Error('connection terminated')
+    const fake = fakePostgres({ failOn: { pattern: /^delete from clients$/i, error: original } })
+    const client = await fake.pool.connect()
+    client.release = vi.fn()
+    const inner = client.query.bind(client)
+    client.query = async (text, params) => {
+      if (/^rollback$/i.test(String(text).trim())) throw brokenRollback
+      return inner(text, params)
+    }
+    const error = await postgresStore(fake).write(workspace()).catch((e) => e)
+
+    expect(error).toBe(original)
+    expect(client.release).toHaveBeenCalledTimes(1)
+    expect(client.release).toHaveBeenCalledWith(brokenRollback)
+  })
+
+  it('a clean connection is released once with no error argument, on success and on a refusal', async () => {
+    for (const options of [{}, { expectedVersion: 'stale' }]) {
+      const fake = fakePostgres()
+      const client = await fake.pool.connect()
+      client.release = vi.fn()
+      await postgresStore(fake).write(workspace(), options).catch(() => {})
+
+      expect(client.release).toHaveBeenCalledTimes(1)
+      expect(client.release.mock.calls[0][0]).toBeUndefined()
+    }
+  })
+
+  it('retries on the SAME connection - it never checks out another mid-loop', async () => {
+    const fake = fakePostgres({
+      failOn: { pattern: /^lock table /i, error: lockError('55P03'), times: 2 },
+    })
+    let connects = 0
+    const connect = fake.pool.connect.bind(fake.pool)
+    fake.pool.connect = async () => {
+      connects += 1
+      return connect()
+    }
+    await postgresStore(fake).write(workspace())
+
+    expect(connects).toBe(1)
+  })
+
+  it('a deadlock (40P01) inside the body is retried, and the retry re-checks the fingerprint under the lock', async () => {
+    const fake = fakePostgres({
+      failOn: { pattern: /^delete from time_entries$/i, error: lockError('40P01'), times: 1 },
+    })
+    const pgStore = postgresStore(fake)
+    const current = await pgStore.computeWorkspaceVersion()
+    const before = fake.matching(FINGERPRINT).length
+    await expect(pgStore.write(workspace(), { expectedVersion: current })).resolves.toBeUndefined()
+
+    expect(control(fake)).toEqual(['begin', 'rollback', 'begin', 'commit'])
+    // One fingerprint per attempt: a retry can never write a payload gone stale.
+    expect(fake.matching(FINGERPRINT).length - before).toBe(2)
+    expect(fake.matching(/^delete from checklist_items$/i)).toHaveLength(2)
+  })
+
+  it('a retry that finds the fingerprint moved is refused as stale, not retried again', async () => {
+    const fake = fakePostgres({
+      failOn: { pattern: /^lock table /i, error: lockError('55P03'), times: 1 },
+      // The attempt that wins the lock sees a state that is not the caller's.
+      versionResponses: [[{ t: 'clients', h: 'moved-while-we-waited' }]],
+    })
+    const pgStore = postgresStore(fake)
+    const error = await pgStore.write(workspace(), { expectedVersion: 'what-the-tab-holds' }).catch((e) => e)
+
+    expect(error).toBeInstanceOf(StaleWorkspaceError)
+    expect(control(fake)).toEqual(['begin', 'rollback', 'begin', 'rollback'])
+    expect(fake.matching(/^delete from /i)).toEqual([])
+  })
+
+  it('never retries a stale fingerprint: one begin, one rollback', async () => {
+    const fake = fakePostgres()
+    await expect(
+      postgresStore(fake).write(workspace(), { expectedVersion: 'stale' }),
+    ).rejects.toBeInstanceOf(StaleWorkspaceError)
+
+    expect(control(fake)).toEqual(['begin', 'rollback'])
+  })
+
+  it('never retries a client-with-history refusal: one begin, one rollback', async () => {
+    const fake = fakePostgres({
+      clientsWithHistory: [{ id: 'c-time', name: 'Timely LLC', has_time: true, has_invoices: false }],
+    })
+    await expect(postgresStore(fake).write(workspace())).rejects.toBeInstanceOf(ClientHasHistoryError)
+
+    expect(control(fake)).toEqual(['begin', 'rollback'])
+  })
+
+  it('never retries any other failure, and rethrows it unchanged', async () => {
+    for (const failure of [new Error('constraint'), lockError('23505'), lockError('57014')]) {
+      const fake = fakePostgres({ failOn: { pattern: /^delete from clients$/i, error: failure } })
+      const error = await postgresStore(fake).write(workspace()).catch((e) => e)
+
+      expect(error).toBe(failure)
+      expect(control(fake)).toEqual(['begin', 'rollback'])
+    }
+  })
+
+  it('every table the save deletes is in the lock list (recorded statements and the source)', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace())
+
+    const deleted = fake.matching(/^delete from /i).map((s) => /^delete from (\w+)/i.exec(s.text)[1])
+    expect(deleted.length).toBeGreaterThan(0)
+    for (const table of deleted) {
+      expect(BULK_SAVE_LOCK_TABLES, `delete from ${table} is not locked`).toContain(table)
+    }
+
+    // A delete behind a branch the fixture does not reach is still caught here.
+    const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
+    const start = source.indexOf('  async write(data, { expectedVersion = null } = {}) {')
+    const end = source.indexOf('Fingerprint of everything the bulk save can destroy', start)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    const named = new Set(
+      [...source.slice(start, end).matchAll(/delete from (\w+)/gi)].map((match) => match[1]),
+    )
+    expect(named.size).toBeGreaterThanOrEqual(14)
+    for (const table of named) {
+      expect(BULK_SAVE_LOCK_TABLES, `write() deletes from ${table}, which is not locked`).toContain(table)
+    }
   })
 })
