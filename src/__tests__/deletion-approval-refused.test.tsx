@@ -17,7 +17,9 @@ import type { Checklist } from '../lib/types'
  *     the page can already see the step is waiting; and
  *   - when the page cannot (a wait saved elsewhere since this tab last synced)
  *     the click reaches the server, the 409 comes back, and the owner is shown
- *     the server's sentence while the request stays in the queue.
+ *     the server's sentence INLINE (never a window.alert) while the request
+ *     stays in the queue, and the workspace is fetched again so the page stops
+ *     offering Approve on state the server has moved past.
  */
 
 const CHECKLIST_ID = 'cl-rec'
@@ -64,7 +66,11 @@ const json = (body: unknown, status = 200) =>
     headers: { 'Content-Type': 'application/json' },
   })
 
+// Set by a test to make the request-list reload fail (after the page first loaded).
+let failListReload = false
+
 afterEach(() => {
+  failListReload = false
   cleanup()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
@@ -80,7 +86,10 @@ async function openApproveButton(waitingOnPage: boolean) {
         // The three endpoints the app loads together on sign-in: one failing
         // would leave the whole batch (and the deletion queue) empty.
         if (method === 'GET' && path.endsWith('/api/checklists/item-deletions')) {
-          return json({ requests: [REQUEST] })
+          return failListReload ? json({ error: 'boom' }, 500) : json({ requests: [REQUEST] })
+        }
+        if (method === 'POST' && path.endsWith('/api/checklists/item-deletions/del-1/reject')) {
+          return json({ ok: true })
         }
         if (method === 'GET' && path.endsWith('/api/checklists/pending-edits')) {
           return json({ edits: [] })
@@ -116,19 +125,55 @@ it('disables Approve, with the sentence as its title, when the step is visibly w
   expect(approve.getAttribute('title')).toBe(REMOVAL_WOULD_COMPLETE_WAITING_STEP)
 })
 
-it('shows the owner the server sentence on a refused approval and keeps the request', async () => {
+it('shows the owner the server sentence inline on a refused approval, keeps the request, and refetches the workspace', async () => {
+  // The live refetch only exists where the browser has an EventSource.
+  class FakeEventSource {
+    addEventListener() {}
+    close() {}
+  }
+  vi.stubGlobal('EventSource', FakeEventSource)
   const alert = vi.fn()
   vi.stubGlobal('alert', alert)
   const { page, approve } = await openApproveButton(false)
   expect(approve).not.toBeDisabled()
+  // Count the workspace fetches from here on (the refusal must cause one more).
+  const appDataGets = () =>
+    (fetch as unknown as { mock: { calls: Array<[string, RequestInit?]> } }).mock.calls.filter(
+      ([url, init]) => String(url).endsWith('/api/app-data') && (init?.method ?? 'GET') === 'GET',
+    ).length
+  const before = appDataGets()
 
   fireEvent.click(approve)
 
-  await waitFor(() => expect(alert).toHaveBeenCalledWith(REMOVAL_WOULD_COMPLETE_WAITING_STEP))
+  const refusal = await page.findByRole('alert')
+  expect(refusal).toHaveTextContent(REMOVAL_WOULD_COMPLETE_WAITING_STEP)
+  expect(alert).not.toHaveBeenCalled()
+  // The app's normal deferred live refetch (a short debounce), asked for by the refusal.
+  await waitFor(() => expect(appDataGets()).toBeGreaterThan(before), { timeout: 4000 })
   // Nothing was removed: the request is still waiting in the queue, and the
   // sentence the owner saw is the readable one, not the machine code.
-  expect(alert).not.toHaveBeenCalledWith('STEP_IS_WAITING')
+  expect(page.queryByText('STEP_IS_WAITING')).toBeNull()
   expect(page.getByText('Item deletions')).toBeTruthy()
   expect(page.getAllByText('Match deposits').length).toBeGreaterThan(0)
   expect(page.queryByText(/something went wrong|not being saved/i)).toBeNull()
+})
+
+it('a failed reload of the request list cannot stand in for the server refusal', async () => {
+  const { page, approve } = await openApproveButton(false)
+  failListReload = true
+
+  fireEvent.click(approve)
+
+  expect(await page.findByRole('alert')).toHaveTextContent(REMOVAL_WOULD_COMPLETE_WAITING_STEP)
+})
+
+it('rejecting a request clears the refusal that was showing', async () => {
+  const { page, approve } = await openApproveButton(false)
+  fireEvent.click(approve)
+  expect(await page.findByRole('alert')).toHaveTextContent(REMOVAL_WOULD_COMPLETE_WAITING_STEP)
+
+  const row = approve.closest('.pending-deletion-item') as HTMLElement
+  fireEvent.click(within(row).getByRole('button', { name: 'Reject' }))
+
+  await waitFor(() => expect(page.queryByRole('alert')).toBeNull())
 })

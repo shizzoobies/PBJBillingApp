@@ -48,10 +48,13 @@ import {
 } from '../../lib/checklist-skip.js'
 import { useAppContext } from '../AppContext'
 import { dismissClientPendingNoteRequest } from '../lib/api'
+import { canAddPendingClientNote } from '../../lib/checklist-write-permission.js'
+import { KEPT_REASON_WORK_STARTED, keptNoticeSentence } from '../../lib/series-step-delete.js'
 import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { PeriodLabelChip } from '../components/PeriodLabelChip'
 import {
+  checklistMonthLabel,
   coverageAnchorForTemplate,
   periodLabelForInstance,
 } from '../../lib/checklist-period-label.js'
@@ -66,6 +69,7 @@ import { useFilters } from '../components/useFilters'
 import { SaveBadge } from '../components/SectionKit'
 import { SharingControl } from '../components/SharingControl'
 import { useSaveFlash } from '../lib/useSaveFlash'
+import { ApiError } from '../lib/types'
 import type {
   AppData,
   Checklist,
@@ -283,6 +287,14 @@ export function ChecklistsPage() {
   // What an approved "This + all future" request removed, as a passing notice
   // (it outlives the request row, which leaves the list when approved).
   const [deletionApprovalNote, setDeletionApprovalNote] = useState<string | null>(null)
+  // The server's sentence when it refuses an approval (a wait was added since the
+  // request was filed, and so on). Shown under the queue, never in an alert.
+  const [deletionApprovalRefusal, setDeletionApprovalRefusal] = useState<string | null>(null)
+  useEffect(() => {
+    if (!deletionApprovalRefusal) return undefined
+    const timer = window.setTimeout(() => setDeletionApprovalRefusal(null), 15000)
+    return () => window.clearTimeout(timer)
+  }, [deletionApprovalRefusal])
   useEffect(() => {
     if (!deletionApprovalNote) return undefined
     const timer = window.setTimeout(() => setDeletionApprovalNote(null), 8000)
@@ -534,17 +546,37 @@ export function ChecklistsPage() {
           onReject={rejectChecklistDeletion}
           itemRequests={itemDeletionRequests}
           onApproveItem={async (requestId, scope) => {
-            const result = await approveItemDeletion(requestId, scope)
+            setDeletionApprovalRefusal(null)
+            let result: Awaited<ReturnType<typeof approveItemDeletion>>
+            try {
+              result = await approveItemDeletion(requestId, scope)
+            } catch (error) {
+              // A refusal (the App has already reloaded the list and the workspace):
+              // say why, right under the queue.
+              if (error instanceof ApiError) {
+                setDeletionApprovalRefusal(error.message)
+                return
+              }
+              throw error
+            }
             // A "This + all future" approval says what it removed, in the same
             // sentence the owner's own series delete shows.
-            if (result) setDeletionApprovalNote(seriesDeleteNotice(result))
+            if (result) setDeletionApprovalNote(seriesDeleteNotice(result, data.checklists))
           }}
-          onRejectItem={rejectItemDeletion}
+          onRejectItem={async (requestId) => {
+            setDeletionApprovalRefusal(null)
+            await rejectItemDeletion(requestId)
+          }}
         />
       ) : null}
       {deletionApprovalNote ? (
         <p className="series-scope-text" role="status">
           {deletionApprovalNote}
+        </p>
+      ) : null}
+      {deletionApprovalRefusal ? (
+        <p className="waiting-editor-error" role="alert">
+          {deletionApprovalRefusal}
         </p>
       ) : null}
       <section className="panel">
@@ -2164,16 +2196,50 @@ const DELETE_REQUEST_SENT_NOTICE = 'Sent to the owner for approval.'
 const SERIES_DELETE_REQUEST_SENT_NOTICE =
   'Sent to the owner for approval - this checklist and all future ones.'
 
-/** What the "this + all future" step delete did, in a sentence for the owner. */
-function seriesDeleteNotice(result: {
-  removedFromTemplate: boolean
-  removedFromChecklists: string[]
-  keptOnChecklists: string[]
-}): string {
+/**
+ * What the "this + all future" step delete did, in a sentence for the owner. The
+ * kept copies are named by month and by why they stayed (an open wait, or work
+ * that had started). The server names each month from its fresh row (`label`); a
+ * kept checklist is never handed back to be merged, so when `label` is absent (an
+ * older server) the page falls back to its own copy in `known`. Kept copies read
+ * in date order, so both backends say the same thing.
+ */
+function seriesDeleteNotice(
+  result: {
+    removedFromTemplate: boolean
+    removedFromChecklists: string[]
+    keptOnChecklists: string[]
+    keptReasons?: {
+      checklistId: string
+      reason: string
+      label?: string | null
+      occurrence?: string | null
+    }[]
+  },
+  known: Checklist[] = [],
+): string {
   const count = result.removedFromChecklists.length
   const upcoming = `${count} upcoming ${count === 1 ? 'checklist' : 'checklists'}`
-  const kept =
-    result.keptOnChecklists.length > 0 ? ` Kept on ${result.keptOnChecklists.length} where work had started.` : ''
+  // An older server answers without reasons: every kept copy then reads as work started.
+  const keptEntries = (
+    result.keptReasons ??
+    result.keptOnChecklists.map((checklistId) => ({ checklistId, reason: KEPT_REASON_WORK_STARTED }))
+  )
+    .map((entry) => {
+      const local = known.find((candidate) => candidate.id === entry.checklistId)
+      return {
+        label: ('label' in entry ? entry.label : null) || checklistMonthLabel(local),
+        reason: entry.reason,
+        occurrence: ('occurrence' in entry ? entry.occurrence : null) || local?.cycleDueDate || local?.dueDate || '',
+      }
+    })
+    .sort(
+      (a, b) =>
+        (a.occurrence || '9999').localeCompare(b.occurrence || '9999') ||
+        String(a.label ?? '').localeCompare(String(b.label ?? '')),
+    )
+  const keptText = keptNoticeSentence(keptEntries)
+  const kept = keptText ? ` ${keptText}` : ''
   if (result.removedFromTemplate) {
     return count > 0 ? `Removed from the recurring checklist and ${upcoming}.${kept}` : `Removed from the recurring checklist.${kept}`
   }
@@ -2192,7 +2258,15 @@ function seriesDeleteNotice(result: {
  * the card itself. Renders read-only above the item list. Kind 'task' notes
  * are excluded here: they already landed as an ordinary item.
  */
-export function AttachedClientNotes({ notes: attached }: { notes: ClientPendingNote[] }) {
+export function AttachedClientNotes({
+  notes: attached,
+  canDismiss = () => true,
+}: {
+  notes: ClientPendingNote[]
+  /** Who may dismiss a copy: the card passes the server's own rule
+   *  (`canAddPendingClientNote`). Absent, every copy offers it and the server decides. */
+  canDismiss?: (note: ClientPendingNote) => boolean
+}) {
   // Notes dismissed from this card: gone at once, while the page's own list (one
   // fetch for every card) catches up on the server's data-changed signal.
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
@@ -2220,14 +2294,16 @@ export function AttachedClientNotes({ notes: attached }: { notes: ClientPendingN
             {note.repeatOf ? (
               <>
                 <span className="muted-text"> (repeat)</span>
-                <DismissRepeatNoteButton
-                  note={note}
-                  onDismissed={() => {
-                    setDismissError(null)
-                    setDismissed((current) => new Set(current).add(note.id))
-                  }}
-                  onRefused={(message) => setDismissError({ id: note.id, message })}
-                />
+                {canDismiss(note) ? (
+                  <DismissRepeatNoteButton
+                    note={note}
+                    onDismissed={() => {
+                      setDismissError(null)
+                      setDismissed((current) => new Set(current).add(note.id))
+                    }}
+                    onRefused={(message) => setDismissError({ id: note.id, message })}
+                  />
+                ) : null}
                 {dismissError?.id === note.id ? (
                   <p className="waiting-editor-error" role="alert">
                     {dismissError.message}
@@ -2428,6 +2504,21 @@ export function ChecklistCard({
     skipChecklistOccurrence,
     pushChecklistOccurrence,
   } = useAppContext()
+  // Dismiss on a repeating note's copy is for the people the server lets dismiss
+  // it: the SAME predicate as `pendingNoteWriteDenial` in the dismiss route
+  // (lib/checklist-write-permission.js), fed the same template and live checklists.
+  const canDismissNote = (note: ClientPendingNote) =>
+    canAddPendingClientNote({
+      user: { id: activeEmployeeId, role: ownerMode ? 'owner' : undefined },
+      clientVisible: true,
+      template: (contextData.checklistTemplates ?? []).find(
+        (entry) => entry.id === note.templateId && entry.clientId === note.clientId,
+      ),
+      checklists: (contextData.checklists ?? []).filter(
+        (entry) =>
+          entry.templateId === note.templateId && entry.clientId === note.clientId && !entry.deletedAt,
+      ),
+    })
   const [editingMeta, setEditingMeta] = useState(false)
   // Quiet skip. The affordance renders ONLY when the task's recurring template
   // has skipping turned on — a task with it off shows nothing at all, because
@@ -2877,7 +2968,7 @@ export function ChecklistCard({
           }}
         />
       </div>
-      <AttachedClientNotes notes={attachedNotes} />
+      <AttachedClientNotes notes={attachedNotes} canDismiss={canDismissNote} />
       {canEditStructure && checklist.items.length === 0 ? (
         <p className="checklist-empty-hint">No items yet — add one below.</p>
       ) : null}
@@ -2933,7 +3024,9 @@ export function ChecklistCard({
                     setStepDeletePrompt(null)
                     if (result) {
                       setStepDeleteNote(
-                        'request' in result ? SERIES_DELETE_REQUEST_SENT_NOTICE : seriesDeleteNotice(result),
+                        'request' in result
+                          ? SERIES_DELETE_REQUEST_SENT_NOTICE
+                          : seriesDeleteNotice(result, contextData.checklists),
                       )
                     }
                   } catch (error) {

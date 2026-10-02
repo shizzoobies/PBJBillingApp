@@ -9,7 +9,11 @@ import type { AppData, Checklist, Client, ClientPendingNote } from '../lib/types
  * (featreq-e8aa2abe). The card shows a note a repeating note put there with a
  * "(repeat)" marker and a small "Dismiss" text button; clicking it asks nothing,
  * dismisses, and the note leaves the card at once. A refusal shows the server's
- * own sentence under the note. An ordinary note has no Dismiss. The route and the
+ * own sentence under the note. An ordinary note has no Dismiss. Dismiss is shown
+ * only to the people the server's `pendingNoteWriteDenial` allows (the owner, or the
+ * assignee / an editor of the recurring checklist or of one of its live checklists
+ * for this client): both sides read the one predicate,
+ * `canAddPendingClientNote` in lib/checklist-write-permission.js. The route and the
  * store are pinned in `pending-client-notes-routes.test.ts` and
  * `db/store-staleness.test.mjs`.
  */
@@ -171,6 +175,65 @@ describe('Dismiss on the checklist card', () => {
     expect(screen.getByText('Remind them about the 1099s')).toBeInTheDocument()
     expect(within(copy).getByRole('button', { name: 'Dismiss' })).not.toBeDisabled()
     expect(alert).not.toHaveBeenCalled()
+  })
+
+  describe('is shown only to the people the server would let dismiss', () => {
+    const TEMPLATE = {
+      id: 'tmpl-1',
+      clientId: CLIENT.id,
+      title: 'Payroll',
+      assigneeId: 'emp-owner',
+      editorIds: [] as string[],
+      isStandard: false,
+      active: true,
+      stages: [],
+    }
+    const viewAs = (viewer: string, checklistOver: Partial<Checklist>, template = TEMPLATE) => {
+      const view = {
+        ...data,
+        checklists: [{ ...CHECKLISTS[0], templateId: 'tmpl-1', ...checklistOver } as Checklist],
+        checklistTemplates: [template],
+      } as unknown as AppData
+      signInAsOwner({
+        data: view,
+        activeEmployeeId: viewer,
+        ownerMode: false,
+        role: 'employee',
+        visibleChecklists: view.checklists,
+      })
+      return render(<ActiveChecklistsBody client={CLIENT} data={view} />)
+    }
+    const dismissButton = async () => {
+      await screen.findByText('Remind them about the 1099s')
+      return within(noteRow('Remind them about the 1099s')).queryByRole('button', { name: 'Dismiss' })
+    }
+
+    it('hides it from a staffer who is neither assignee nor editor of the template or its checklists', async () => {
+      viewAs('emp-lisa', { assigneeId: 'emp-owner', editorIds: [] })
+      expect(await dismissButton()).not.toBeInTheDocument()
+      // The note itself and its "(repeat)" marker are still shown to them.
+      expect(noteRow('Remind them about the 1099s').textContent).toContain('(repeat)')
+    })
+
+    it('shows it to the assignee of a live checklist of that recurring template', async () => {
+      viewAs('emp-lisa', { assigneeId: 'emp-lisa' })
+      expect(await dismissButton()).toBeInTheDocument()
+    })
+
+    it('shows it to an editor of one of those checklists', async () => {
+      viewAs('emp-lisa', { assigneeId: 'emp-owner', editorIds: ['emp-lisa'] })
+      expect(await dismissButton()).toBeInTheDocument()
+    })
+
+    it('shows it to an editor of the recurring template itself', async () => {
+      viewAs('emp-lisa', { assigneeId: 'emp-owner', editorIds: [] }, { ...TEMPLATE, editorIds: ['emp-lisa'] })
+      expect(await dismissButton()).toBeInTheDocument()
+    })
+
+    it('ignores a checklist of a different recurring template', async () => {
+      viewAs('emp-lisa', { assigneeId: 'emp-lisa', templateId: 'tmpl-other' })
+      expect(await dismissButton()).not.toBeInTheDocument()
+    })
   })
 
   it('is disabled while previewing someone, with the reason as its title', async () => {

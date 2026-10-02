@@ -283,21 +283,53 @@ describe('deleting a step on a recurring checklist', () => {
         keptOnChecklists: ['b'],
       })
       await chooseSeries()
+      // No reasons from the server (an older one) and the page does not know the
+      // checklist either: a count, and it still reads as work started.
       expect(await screen.findByRole('status')).toHaveTextContent(
-        'Removed from the recurring checklist. Kept on 1 where work had started.',
+        'Removed from the recurring checklist. Kept on 1 later checklist (work had started).',
       )
     })
 
-    it('adds where it kept a copy because work had started', async () => {
+    it('with an older server (no reasons), counts the kept checklists it cannot name', async () => {
+      deleteChecklistItemFromSeries.mockResolvedValue({
+        removedFromTemplate: true,
+        removedFromChecklists: [],
+        keptOnChecklists: ['b', 'c', 'd'],
+      })
+      await chooseSeries()
+      expect(await screen.findByRole('status')).toHaveTextContent(
+        'Removed from the recurring checklist. Kept on 3 later checklists (work had started).',
+      )
+    })
+
+    it('names the months where it kept a copy, and why each stayed', async () => {
       deleteChecklistItemFromSeries.mockResolvedValue({
         removedFromTemplate: true,
         removedFromChecklists: ['a'],
         keptOnChecklists: ['b', 'c'],
+        // The server names each month from its fresh row, and lists them in any order.
+        keptReasons: [
+          { checklistId: 'c', reason: 'work_started', label: 'December 1 - December 31, 2026', occurrence: '2026-12-31' },
+          { checklistId: 'b', reason: 'open_wait', label: 'November 2026', occurrence: '2026-11-30' },
+        ],
       })
       await chooseSeries()
+      // Read in date order, whatever order the server listed them in.
       expect(await screen.findByRole('status')).toHaveTextContent(
-        'Removed from the recurring checklist and 1 upcoming checklist. Kept on 2 where work had started.',
+        'Removed from the recurring checklist and 1 upcoming checklist. Kept on November 2026 (an open wait) and December 1 - December 31, 2026 (work had started).',
       )
+    })
+
+    it('falls back to the page\'s own copy of a kept checklist when the server sent no label', async () => {
+      deleteChecklistItemFromSeries.mockResolvedValue({
+        removedFromTemplate: true,
+        removedFromChecklists: [],
+        keptOnChecklists: ['cl-oneoff'],
+        keptReasons: [{ checklistId: 'cl-oneoff', reason: 'open_wait' }],
+      })
+      // 'cl-oneoff' is on the page (due 2026-08-31) but not in the answer.
+      await chooseSeries()
+      expect(await screen.findByRole('status')).toHaveTextContent('Kept on August 2026 (an open wait).')
     })
 
     it('says so when the step was not on the recurring checklist under that name', async () => {

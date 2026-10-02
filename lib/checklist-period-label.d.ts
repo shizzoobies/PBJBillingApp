@@ -47,6 +47,13 @@ export declare function coverageAnchorForTemplate(
   todayIso: string | null | undefined,
 ): string | null
 
+export declare function checklistMonthLabel(
+  checklist:
+    | { periodLabel?: string | null; cycleDueDate?: string | null; dueDate?: string | null }
+    | null
+    | undefined,
+): string | null
+
 export declare function sanitizePeriodLabel(value: unknown): string | null
 
 export declare function sanitizeCoverageDate(value: unknown): string | null

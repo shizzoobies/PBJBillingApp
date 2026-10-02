@@ -1841,6 +1841,15 @@ export type SeriesItemDeleteResult = {
   removedFromChecklists: string[]
   /** Later checklists where a same-label copy stayed because work had started on it. */
   keptOnChecklists: string[]
+  /** Why each kept copy stayed: `open_wait` (a saved wait is open) or `work_started`. */
+  keptReasons?: {
+    checklistId: string
+    reason: 'open_wait' | 'work_started'
+    /** The kept checklist's month (or period label), from the server's fresh row. */
+    label?: string | null
+    /** The date it belongs to (YYYY-MM-DD), for ordering. */
+    occurrence?: string | null
+  }[]
   checklists: Checklist[]
   template: ChecklistTemplate | null
 }

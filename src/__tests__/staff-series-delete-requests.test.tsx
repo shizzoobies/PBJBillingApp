@@ -271,6 +271,9 @@ describe('as the owner', () => {
             removedFromTemplate: true,
             removedFromChecklists: ['cl-oct', 'cl-nov'],
             keptOnChecklists: ['cl-dec'],
+            // The server names the kept month itself; the kept checklist is not in
+            // `checklists`, so the owner's local copy of it is never replaced.
+            keptReasons: [{ checklistId: 'cl-dec', reason: 'open_wait', label: 'December 2026', occurrence: '2026-12-31' }],
             checklists: [{ ...RECURRING, items: [step('cl-sep-rep', 'Send report')] }],
             template: {
               ...TEMPLATE,
@@ -287,7 +290,7 @@ describe('as the owner', () => {
     fireEvent.click(within(row).getByRole('button', { name: 'Approve' }))
 
     expect(
-      await page.findByText('Removed from the recurring checklist and 2 upcoming checklists. Kept on 1 where work had started.'),
+      await page.findByText('Removed from the recurring checklist and 2 upcoming checklists. Kept on December 2026 (an open wait).'),
     ).toBeInTheDocument()
     expect(seen).toEqual([{ method: 'POST', url: '/api/checklists/item-deletions/del-1/approve' }])
     await waitFor(() => expect(page.queryByText('Item deletions')).not.toBeInTheDocument())
@@ -311,7 +314,7 @@ describe('as the owner', () => {
     expect(page.queryByText(/Removed from the recurring checklist/)).not.toBeInTheDocument()
   })
 
-  it('shows the server sentence for a refused approval and keeps the request', async () => {
+  it('shows the server sentence inline for a refused approval and keeps the request', async () => {
     const alert = vi.fn()
     vi.stubGlobal('alert', alert)
     boot(OWNER_SESSION, {
@@ -324,7 +327,8 @@ describe('as the owner', () => {
     const page = await openChecklists()
     fireEvent.click(within(await rowFor(page, 'Reconcile')).getByRole('button', { name: 'Approve' }))
 
-    await waitFor(() => expect(alert).toHaveBeenCalledWith(LAST_RECURRING_STEP_MESSAGE))
+    expect(await page.findByRole('alert')).toHaveTextContent(LAST_RECURRING_STEP_MESSAGE)
+    expect(alert).not.toHaveBeenCalled()
     expect(page.getByText('Item deletions')).toBeInTheDocument()
     expect(within(await rowFor(page, 'Reconcile')).getByText('This + all future')).toBeInTheDocument()
     expect(page.queryByText(/Removed from the recurring checklist/)).not.toBeInTheDocument()
@@ -373,7 +377,8 @@ describe('as the owner', () => {
 
     fireEvent.click(within(row).getByRole('button', { name: 'Approve' }))
 
-    await waitFor(() => expect(alert).toHaveBeenCalledWith('This request changed - reload to see it.'))
+    expect(await page.findByRole('alert')).toHaveTextContent('This request changed - reload to see it.')
+    expect(alert).not.toHaveBeenCalled()
     expect(bodies).toEqual([{ scope: 'checklist' }])
     // The list was reloaded: the same row now says what the request really asks for.
     await waitFor(async () =>

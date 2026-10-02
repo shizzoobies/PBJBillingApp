@@ -442,7 +442,16 @@ describe('POST /api/clients/:id/pending-notes/:noteId/dismiss', () => {
     const recordAt = text.indexOf("'client_pending_note_dismissed',")
     const broadcastAt = text.indexOf('broadcastDataChanged()')
     expect(recordAt).toBeGreaterThan(dismissedAt)
-    expect(text.slice(recordAt, recordAt + 120)).toContain('client?.name ?? clientId')
+    // The entry names the client, the note (its text, trimmed and capped) and the month's checklist.
+    const entry = text.slice(text.lastIndexOf('const noteText', recordAt), recordAt + 260)
+    expect(entry).toContain("String(note.body ?? '').replace(/\\s+/g, ' ').trim()")
+    // Cut by code points, so an emoji or other surrogate pair is never split.
+    expect(entry).toContain('Array.from(noteText)')
+    expect(entry).toContain("noteChars.slice(0, 77).join('')")
+    expect(entry).toContain('checklistMonthLabel(')
+    expect(entry).toContain('entry.id === note.attachedChecklistId')
+    expect(entry).toContain('client?.name ?? clientId')
+    expect(entry).toContain('shortText')
     expect(broadcastAt).toBeGreaterThan(recordAt)
     const sendAt = text.indexOf('sendJson(response, 200, { ok: true, dismissed: true })')
     expect(sendAt).toBeGreaterThan(broadcastAt)

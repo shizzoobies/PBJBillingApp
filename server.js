@@ -138,6 +138,7 @@ import {
   checklistWriteDenial,
   pendingNoteWriteDenial,
 } from './lib/checklist-write-permission.js'
+import { checklistMonthLabel } from './lib/checklist-period-label.js'
 import {
   approvalDenial,
   deletionTargetStillExists,
@@ -7153,10 +7154,18 @@ const server = createServer(async (request, response) => {
       // Dismissed now, or already (the second click is the same answer, no second write).
       if (outcome.dismissed) {
         const client = (data.clients ?? []).find((entry) => entry.id === clientId)
+        // Name the note (its text, trimmed) and the month's checklist it came off,
+        // so "who dismissed November's note" can be answered from the log.
+        const noteText = String(note.body ?? '').replace(/\s+/g, ' ').trim()
+        const noteChars = Array.from(noteText)
+        const shortText = noteChars.length > 80 ? `${noteChars.slice(0, 77).join('')}...` : noteText
+        const month = checklistMonthLabel(
+          (data.checklists ?? []).find((entry) => entry.id === note.attachedChecklistId),
+        )
         await appDataStore.recordActivity(
           session.user.id,
           'client_pending_note_dismissed',
-          client?.name ?? clientId,
+          `${client?.name ?? clientId}: "${shortText}"${month ? ` (${month})` : ''}`,
         )
         broadcastDataChanged()
       }

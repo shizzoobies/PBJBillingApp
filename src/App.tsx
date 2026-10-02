@@ -1284,13 +1284,20 @@ function App() {
       } catch (error) {
         if (isCleanRejection(error) && error instanceof ApiError) {
           // The server refused this one approval (it would finish a waiting
-          // step, a stop of the series delete, or the request changed since this
-          // row was drawn). The request stays; nothing failed to save. Say why,
-          // the same way the checkbox handlers do, so the owner is never left
-          // guessing, and reload the list so the row shows the request as it is.
-          window.alert(error.message)
-          await refreshItemDeletionRequests()
-          return
+          // step, a step that gained an open wait since the request, a stop of the
+          // series delete, or the request changed since this row was drawn). The
+          // request stays; nothing failed to save. Reload the request list AND the
+          // workspace, so the row and the step it points at show what the server
+          // sees (Approve is no longer clickable on stale state), then rethrow:
+          // the caller (the Deletion requests panel) shows the server's sentence
+          // inline, the way every other clean refusal here is shown by its caller.
+          try {
+            await refreshItemDeletionRequests()
+          } catch {
+            // A failed reload must not stand in for the server's refusal below.
+          }
+          requestLiveRefetchRef.current?.()
+          throw error
         }
         if (error instanceof ApiError && error.status === 404) {
           // The step was already deleted somewhere else and the server dropped the

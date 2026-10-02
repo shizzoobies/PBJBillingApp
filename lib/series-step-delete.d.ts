@@ -54,7 +54,20 @@ export declare function normalizedLabelSql(column: string): string
 export declare function stepCarriesWork(item: unknown): boolean
 export declare function untouchedStepSql(alias?: string): string
 export declare function sameLabelOrdinal(items: { id: string; label?: string }[], itemId: string): number
+export declare const KEPT_REASON_OPEN_WAIT: 'open_wait'
+export declare const KEPT_REASON_WORK_STARTED: 'work_started'
+export declare function keptReasonEntry(
+  checklistId: string,
+  reason: string,
+  checklist: { periodLabel?: string | null; cycleDueDate?: string | null; dueDate?: string | null } | null | undefined,
+): { checklistId: string; reason: string; label: string | null; occurrence: string | null }
+export declare function keptReasonText(reason: string | null | undefined): string
+export declare function keptNoticeSentence(
+  kept: { label?: string | null; reason?: string | null }[] | null | undefined,
+): string
+export declare function stepHasOpenSavedWait(item: unknown): boolean
 export declare function pickCopyToRemove(
-  copies: { id: string; carriesWork: boolean }[],
+  copies: { id: string; carriesWork: boolean; hasOpenWait?: boolean }[],
   ordinal: number,
-): { removeId: string | null; kept: boolean }
+  templateCopies?: number,
+): { removeId: string | null; kept: boolean; keptReason?: 'open_wait' | 'work_started' }
