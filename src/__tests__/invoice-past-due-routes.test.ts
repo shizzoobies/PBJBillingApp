@@ -230,7 +230,7 @@ describe('the notification catalog knows the event', () => {
   it('sits under the invoice-alerts toggle', () => {
     expect(prefsSource).toContain("key: 'invoiceAlerts'")
     expect(prefsSource).toContain(
-      "events: ['invoice_ready', 'invoice_email_bounced', 'invoice_past_due']",
+      "events: ['invoice_ready', 'invoice_email_bounced', 'invoice_past_due', 'invoice_amount_mismatch']",
     )
   })
 })

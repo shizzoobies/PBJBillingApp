@@ -771,10 +771,35 @@ export interface InvoicePaymentFailureEntry {
   detail?: string
 }
 
+/**
+ * A payment that arrived for a DIFFERENT amount than the invoice total, written
+ * by the Stripe webhook after the payment was recorded as usual. Never a status
+ * change and never a failed attempt - the money did arrive.
+ */
+export interface InvoiceAmountMismatchEntry {
+  kind: 'payment'
+  event: 'amount-mismatch'
+  at: string
+  paymentIntentId: string | null
+  expectedCents: number
+  receivedCents: number
+}
+
+/** An owner's "Mark as handled" for the mismatch on the same payment. */
+export interface InvoiceAmountMismatchHandledEntry {
+  kind: 'payment'
+  event: 'amount-mismatch-handled'
+  at: string
+  by: string | null
+  paymentIntentId: string | null
+}
+
 export type InvoiceEmailLogEntry =
   | InvoiceEmailSendEntry
   | InvoiceEmailDeliveryEntry
   | InvoicePaymentFailureEntry
+  | InvoiceAmountMismatchEntry
+  | InvoiceAmountMismatchHandledEntry
 
 /**
  * One thing the rater wants a second look at. `warn` is "this could be wrong";

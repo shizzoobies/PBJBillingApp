@@ -12415,6 +12415,26 @@ tr.is-inactive-client .client-name-link {
   padding-left: 9px;
 }
 
+/* A payment that arrived for a different amount than the invoice total: amber,
+   like the scope flags (a decision, not a phone call), with the one button that
+   closes it beside the sentence. */
+.invoice-run-amount-mismatch {
+  align-items: center;
+  background: rgba(211, 155, 42, 0.12);
+  border-left: 3px solid rgba(211, 155, 42, 0.85);
+  border-radius: 0 8px 8px 0;
+  color: inherit;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  justify-content: space-between;
+  padding-left: 9px;
+}
+
+.invoice-run-amount-mismatch p {
+  margin: 0;
+}
+
 .invoice-run-note,
 .invoice-run-empty {
   color: var(--muted);

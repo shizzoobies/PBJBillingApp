@@ -96,6 +96,11 @@ import {
   scopeRetagApplies,
 } from '../lib/invoice-scope-retag.js'
 import { latestInvoiceSend } from '../lib/invoice-overdue.js'
+import {
+  AMOUNT_MISMATCH_EVENT,
+  AMOUNT_MISMATCH_HANDLED_EVENT,
+  unhandledAmountMismatches,
+} from '../lib/payment-amount-mismatch.js'
 import { editChangesWhatClientSees, totalsDiffer } from '../lib/invoice-sent-change.js'
 import {
   anchorDayFromRange,
@@ -15779,6 +15784,186 @@ export class AppDataStore {
     }
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return data.invoices[index]
+  }
+
+  /**
+   * Record that a client's payment arrived for a DIFFERENT amount than the
+   * invoice total - the Stripe webhook compares what Stripe collected with the
+   * invoice as it stands after the payment was applied.
+   *
+   * The payment itself is recorded exactly as it always was (the money did
+   * arrive); this is only the trace that says the two figures disagree, on the
+   * same append-only `email_log` the failure marker lives on, tagged
+   * `kind: 'payment'`. "Needs a look" is DERIVED from it on the way out
+   * (`unhandledAmountMismatch`) until `acknowledgeInvoiceAmountMismatch` files a
+   * later entry.
+   *
+   * THE STATUS IS NEVER TOUCHED. The status move belongs to
+   * `applyInvoicePayment`, called first by the webhook.
+   *
+   * Idempotent on `paymentIntentId` - a card payment fires two events for one
+   * intent - or, when no intent is known, on the expected/received pair. On
+   * Postgres the check and the append are ONE statement (a `@>` guard, the same
+   * shape `recordInvoicePastDueNoticed` uses): two events landing in the same
+   * second both read the same snapshot, and a read-then-append would let both
+   * write and both notify.
+   *
+   * @returns the invoice when THIS call wrote the marker, and null otherwise - no
+   * such invoice, an unusable amount, or the marker was already there. The
+   * webhook notifies only on a truthy answer, so "already there" must not be
+   * truthy.
+   */
+  async recordInvoiceAmountMismatch(
+    invoiceId,
+    { at = null, paymentIntentId = null, expectedCents, receivedCents } = {},
+  ) {
+    if (!invoiceId) return null
+    if (!Number.isFinite(expectedCents) || !Number.isFinite(receivedCents)) return null
+
+    const intentId = paymentIntentId ? String(paymentIntentId) : null
+    const expected = Math.round(expectedCents)
+    const received = Math.round(receivedCents)
+    const stamp = at && !Number.isNaN(new Date(at).getTime())
+      ? new Date(at).toISOString()
+      : nowIso()
+    const entry = {
+      kind: 'payment',
+      event: AMOUNT_MISMATCH_EVENT,
+      at: stamp,
+      paymentIntentId: intentId,
+      expectedCents: expected,
+      receivedCents: received,
+    }
+    // What "the same marker" means: the intent when there is one, else the pair.
+    const sameMarker = (logged) =>
+      logged?.kind === 'payment' &&
+      logged?.event === AMOUNT_MISMATCH_EVENT &&
+      (logged?.paymentIntentId ?? null) === intentId &&
+      (intentId !== null ||
+        (logged?.expectedCents === expected && logged?.receivedCents === received))
+
+    if (this.pool) {
+      const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+      if (!current) return null
+      if ((current.emailLog ?? []).some(sameMarker)) return null
+
+      // Appended in SQL, not read-modify-write, and guarded in the same
+      // statement. `status` is deliberately absent from it.
+      const guard =
+        intentId !== null
+          ? { kind: 'payment', event: AMOUNT_MISMATCH_EVENT, paymentIntentId: intentId }
+          : {
+              kind: 'payment',
+              event: AMOUNT_MISMATCH_EVENT,
+              paymentIntentId: null,
+              expectedCents: expected,
+              receivedCents: received,
+            }
+      const { rows } = await this.pool.query(
+        `update invoices
+            set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                updated_at = now()
+          where id = $1
+            and not (coalesce(email_log, '[]'::jsonb) @> $3::jsonb)
+          returning id`,
+        [invoiceId, JSON.stringify([entry]), JSON.stringify([guard])],
+      )
+      if (rows.length === 0) {
+        // Zero rows is "already flagged" ONLY if the marker is really there. The
+        // statement can also match nothing because the row it named is gone or
+        // was swapped under it, and reading that as a duplicate would silence
+        // the owners' notification (the caller notifies only on a truthy answer
+        // or on a throw). So ask again: marker present - a duplicate; invoice
+        // gone - nothing to flag; otherwise the write was lost, and throwing is
+        // what makes the webhook log it and still notify.
+        const after = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+        if (!after) return null
+        if ((after.emailLog ?? []).some(sameMarker)) return null
+        throw new Error(
+          `amount-mismatch marker for invoice ${invoiceId} matched no row and is not on its log`,
+        )
+      }
+      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
+
+    // One queue slot, like the other money writers: a read in one slot and a
+    // write in another lets a whole-workspace save land between them and be
+    // overwritten. Raw fs calls only in here: `readJson` / `writeFile` enqueue
+    // behind this very slot and would deadlock.
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      if (!Array.isArray(data.invoices)) data.invoices = []
+      const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+      if (index === -1) return null
+      const stored = normalizeStoredInvoice(data.invoices[index])
+      if ((stored.emailLog ?? []).some(sameMarker)) return null
+      data.invoices[index] = {
+        ...stored,
+        emailLog: [...(stored.emailLog ?? []), entry],
+        updatedAt: nowIso(),
+      }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return data.invoices[index]
+    })
+  }
+
+  /**
+   * An owner marks a payment-amount mismatch as handled (they billed or refunded
+   * the difference). Appends one `amount-mismatch-handled` entry per unhandled
+   * marker, naming the same payment; the log keeps both entries and the derived
+   * flag (`unhandledAmountMismatch`) is gone.
+   *
+   * Idempotent: with nothing to acknowledge the invoice is answered unchanged and
+   * nothing is written. Appended in SQL on Postgres, never read-modify-write, and
+   * the status is never touched.
+   *
+   * @returns the invoice, or null when there is no such invoice
+   */
+  async acknowledgeInvoiceAmountMismatch(invoiceId, { byUserId = null } = {}) {
+    if (!invoiceId) return null
+    const stampEntries = (current) => {
+      const at = nowIso()
+      return unhandledAmountMismatches(current.emailLog).map((marker) => ({
+        kind: 'payment',
+        event: AMOUNT_MISMATCH_HANDLED_EVENT,
+        at,
+        by: byUserId ? String(byUserId) : null,
+        paymentIntentId: marker.paymentIntentId ?? null,
+      }))
+    }
+
+    if (this.pool) {
+      const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+      if (!current) return null
+      const entries = stampEntries(current)
+      if (entries.length === 0) return current
+      const { rowCount } = await this.pool.query(
+        `update invoices
+            set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                updated_at = now()
+          where id = $1`,
+        [invoiceId, JSON.stringify(entries)],
+      )
+      if (rowCount === 0) return null
+      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
+
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      if (!Array.isArray(data.invoices)) data.invoices = []
+      const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+      if (index === -1) return null
+      const stored = normalizeStoredInvoice(data.invoices[index])
+      const entries = stampEntries(stored)
+      if (entries.length === 0) return stored
+      data.invoices[index] = {
+        ...stored,
+        emailLog: [...(stored.emailLog ?? []), ...entries],
+        updatedAt: nowIso(),
+      }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return data.invoices[index]
+    })
   }
 
   /**

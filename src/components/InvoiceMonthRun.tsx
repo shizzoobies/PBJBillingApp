@@ -26,6 +26,7 @@ import {
 } from 'react'
 import { flushSync } from 'react-dom'
 import {
+  acknowledgeInvoiceAmountMismatchRequest,
   answerInvoiceAiReviewQuestionRequest,
   confirmInvoiceCoverageRequest,
   createInvoicePaymentLinkRequest,
@@ -44,6 +45,7 @@ import {
 } from '../lib/api'
 import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
 import { editChangesWhatClientSees } from '../../lib/invoice-sent-change.js'
+import { paymentInProgress, unhandledAmountMismatch } from '../../lib/payment-amount-mismatch.js'
 import { invoiceAddressee } from '../lib/completeness'
 import { ListSearch } from './ListSearch'
 import {
@@ -257,6 +259,32 @@ const UNSAVED_NOT_KEPT = 'Your unsaved changes were not kept.'
  */
 const CHANGED_SINCE_SENT_NOTICE =
   'This invoice was already sent. The client has the earlier version - send it again so they have your changes.'
+
+/**
+ * Does this invoice belong in "Need a look"? Scope flags on the draft, or a
+ * payment that arrived for a different amount than the total and that nobody has
+ * marked handled. The second is DERIVED from the invoice's own log, so it counts
+ * on a PAID invoice too - which is the whole point of it.
+ */
+function needsALook(invoice: PersistedInvoice) {
+  return invoice.scopeFlags.length > 0 || unhandledAmountMismatch(invoice) !== null
+}
+
+/**
+ * What she reads, on the row and in the editor, about a payment for a different
+ * amount than the invoice total.
+ */
+function amountMismatchNotice(
+  mismatch: { expectedCents: number; receivedCents: number },
+  inProgress: boolean,
+) {
+  // A bank payment still settling has not put the money in, and can still fail:
+  // nothing may say it is recorded as paid.
+  if (inProgress) {
+    return `The client's payment in progress is for ${currency.format(mismatch.receivedCents / 100)}; this invoice's total is ${currency.format(mismatch.expectedCents / 100)}. Once it settles, bill or refund the difference, then mark this as handled.`
+  }
+  return `The client paid ${currency.format(mismatch.receivedCents / 100)}; this invoice's total is ${currency.format(mismatch.expectedCents / 100)}. It is recorded as paid. Bill or refund the difference, then mark this as handled.`
+}
 
 /**
  * The invoice a save answered with, marked `changedSinceSent` when that save
@@ -954,7 +982,7 @@ export function InvoiceMonthRun({
   // to decide about a voided invoice), same as the row rendering.
   const flaggedIn = (tabId: RunTabId) =>
     (byTab.get(tabId) ?? []).filter(
-      (invoice) => invoice.status !== 'void' && invoice.scopeFlags.length > 0,
+      (invoice) => invoice.status !== 'void' && needsALook(invoice),
     ).length
 
   /**
@@ -977,7 +1005,7 @@ export function InvoiceMonthRun({
   const live = ordered.filter((invoice) => invoice.status !== 'void')
   const toReview = live.filter((invoice) => invoice.status === 'draft').length
   const reviewed = live.filter((invoice) => invoice.status === 'reviewed').length
-  const needALook = live.filter((invoice) => invoice.scopeFlags.length > 0).length
+  const needALook = live.filter(needsALook).length
   // Whole-month, like every other figure in the strip — the search narrows the
   // tabs, never this.
   const pastDue = live.filter((invoice) => pastDueInvoice(invoice, today)).length
@@ -1665,13 +1693,16 @@ function InvoiceRow({
   const flagged = invoice.scopeFlags.length > 0
   const adjustment = invoice.lineItems.find((line) => line.kind === 'adjustment')
   const paymentFailure = unresolvedPaymentFailure(invoice)
+  // A payment that arrived for a different amount than the total, not yet marked
+  // handled. Counts as "needs a look" even on a paid row.
+  const amountMismatch = unhandledAmountMismatch(invoice)
   // Computed once here and handed to the editor, so the row's flag and the
   // notice inside it can never disagree about how late this invoice is.
   const pastDue = pastDueInvoice(invoice, today)
 
   const rowClass = [
     'invoice-run-row',
-    flagged && !isVoid ? 'is-flagged' : '',
+    (flagged || amountMismatch) && !isVoid ? 'is-flagged' : '',
     isVoid ? 'is-void' : '',
   ]
     .filter(Boolean)
@@ -1737,6 +1768,20 @@ function InvoiceRow({
               >
                 <AlertTriangle size={13} />
                 Payment failed {formatSentOn(paymentFailure.at)}
+              </span>
+            </span>
+          ) : null}
+          {/* The client paid, and not what the invoice says. Amber like the scope
+              flags - it is a decision (bill or refund the difference), not a
+              phone call - and on a Paid row too, where nothing else would say
+              the bank received a different amount. Gone once she marks it handled. */}
+          {amountMismatch && !isVoid ? (
+            <span className="invoice-run-flags">
+              <span className="invoice-run-flag" title={amountMismatchNotice(amountMismatch, paymentInProgress(invoice))}>
+                <AlertTriangle size={13} />
+                {paymentInProgress(invoice) ? 'Paying' : 'Paid'}{' '}
+                {currency.format(amountMismatch.receivedCents / 100)}, total{' '}
+                {currency.format(amountMismatch.expectedCents / 100)}
               </span>
             </span>
           ) : null}
@@ -2609,6 +2654,9 @@ function InvoiceEditor({
   const lastSent = latestInvoiceSend(invoice.emailLog)
   // A failed payment attempt nobody has answered yet — same source, same reason.
   const paymentFailure = unresolvedPaymentFailure(invoice)
+  // A payment for a different amount than the total, not yet marked handled.
+  const amountMismatch = unhandledAmountMismatch(invoice)
+  const [handledBusy, setHandledBusy] = useState(false)
 
   /**
    * Ask the server for a hosted Checkout URL. Deliberately does NOT open it —
@@ -3300,6 +3348,24 @@ function InvoiceEditor({
     if (!result.ok) sayPatchRefusal(result)
   }
 
+  /**
+   * She has billed or refunded the difference. No confirm: it writes one log
+   * entry, changes nothing about the money, and the flag is derived from the log
+   * so it simply goes. A refusal is a sentence in the editor's own error slot.
+   */
+  const markAmountMismatchHandled = async () => {
+    setRetainerError(null)
+    setHandledBusy(true)
+    try {
+      const updated = await acknowledgeInvoiceAmountMismatchRequest(invoice.id)
+      onInvoiceChanged(updated)
+    } catch (error) {
+      sayRefusal(error instanceof Error ? error.message : 'Could not mark that handled.')
+    } finally {
+      if (mountedRef.current) setHandledBusy(false)
+    }
+  }
+
   const unmarkPaid = async () => {
     const confirmed = window.confirm(
       `Undo the manual payment mark on ${invoice.number}?\n\nIt goes back to ${invoice.sentAt ? 'Sent' : 'Reviewed'} and can be edited and collected again.`,
@@ -3835,6 +3901,24 @@ function InvoiceEditor({
           The client's Pay link still works for a retry. Follow up with the client, then send
           the invoice again if they need it — or mark it paid if they pay another way.
         </p>
+      ) : null}
+
+      {/* The bank received a different amount than this invoice's total. The
+          payment is recorded exactly as it arrived; what is left is a decision -
+          bill or refund the difference - and this stays until she says it is
+          done. Shown on a paid invoice too: nothing else on it says so. */}
+      {amountMismatch && invoice.status !== 'void' ? (
+        <div className="invoice-run-error invoice-run-amount-mismatch" role="alert">
+          <p>{amountMismatchNotice(amountMismatch, paymentInProgress(invoice))}</p>
+          <button
+            type="button"
+            className="secondary-action"
+            disabled={handledBusy}
+            onClick={() => void markAmountMismatchHandled()}
+          >
+            Mark as handled
+          </button>
+        </div>
       ) : null}
 
       {/* Past the thirty-day line. Both moves named, because neither is obvious:

@@ -70,8 +70,10 @@ import {
 } from '../lib/waiting-on-state.js'
 import { invoiceAsSent, invoiceDisplayDate } from '../lib/invoice-draft.js'
 import { applyScopeRetag } from '../lib/invoice-scope-retag.js'
-import { buildInvoiceLines } from '../lib/invoice-lines.js'
-import { latestInvoiceSend } from '../lib/invoice-overdue.js'
+import { buildInvoiceLines, cardProcessingFeeLine } from '../lib/invoice-lines.js'
+import { buildCardCheckoutLineItems, buildCheckoutLineItems } from '../lib/stripe-rail.js'
+import { paymentAmountMismatch, unhandledAmountMismatch } from '../lib/payment-amount-mismatch.js'
+import { latestInvoiceSend, unresolvedPaymentFailure } from '../lib/invoice-overdue.js'
 import { buildInvoiceEmail } from '../lib/invoice-email.js'
 import { buildInvoicePdf } from '../lib/invoice-pdf.js'
 import {
@@ -5027,6 +5029,558 @@ describe('recordInvoicePaymentFailure statement shape (postgres branch)', () => 
     await postgresStore(fake).recordInvoicePaymentFailure('inv-1', { paymentIntentId: 'pi_1' })
 
     expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+  })
+})
+
+/**
+ * `recordInvoiceAmountMismatch` / `acknowledgeInvoiceAmountMismatch` - a client
+ * paid a different amount than the invoice total (featreq-9cc3c370).
+ *
+ * The webhook records the payment exactly as before; this is only the trace that
+ * the two figures disagree, on the same append-only log. Same two rules as the
+ * failure marker (never a status write; idempotent) plus the one the owners'
+ * notification hangs on: the call that wrote the marker is the only one that is
+ * answered with an invoice, so a card payment's two events notify once.
+ */
+describe('recordInvoiceAmountMismatch and acknowledgeInvoiceAmountMismatch (file backend)', () => {
+  const seedInvoice = {
+    id: 'inv-1',
+    clientId: 'c1',
+    period: '2026-08',
+    number: 'INV-2026-08-031',
+    status: 'paid',
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    dueDate: '2026-09-15',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: '2026-08-28T12:00:00.000Z',
+    paidAt: '2026-09-10T12:00:00.000Z',
+    paymentMethod: 'us_bank_account',
+    stripePaymentIntentId: 'pi_1',
+    emailLog: [
+      {
+        at: '2026-08-28T12:00:00.000Z',
+        to: ['ann@acme.com'],
+        subject: 'Invoice INV-2026-08-031',
+        ok: true,
+        total: 400,
+        providerId: 'ee-1',
+      },
+    ],
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+
+  async function seed(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [{ ...seedInvoice, ...overrides }]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  const mismatch = (over = {}) => ({
+    at: '2026-09-10T14:00:00.000Z',
+    paymentIntentId: 'pi_1',
+    expectedCents: 40000,
+    receivedCents: 35000,
+    ...over,
+  })
+
+  it('appends a payment entry beside the send, tagged so it is neither a send nor a failure', async () => {
+    await seed()
+    const updated = await store.recordInvoiceAmountMismatch('inv-1', mismatch())
+
+    expect(updated.emailLog).toHaveLength(2)
+    expect(updated.emailLog[1]).toEqual({
+      kind: 'payment',
+      event: 'amount-mismatch',
+      at: '2026-09-10T14:00:00.000Z',
+      paymentIntentId: 'pi_1',
+      expectedCents: 40000,
+      receivedCents: 35000,
+    })
+    // The send is still the send: the "Sent ..." line and the delivery badge read it.
+    expect(latestInvoiceSend(updated.emailLog).providerId).toBe('ee-1')
+    expect(unhandledAmountMismatch(updated)).toMatchObject({
+      expectedCents: 40000,
+      receivedCents: 35000,
+    })
+  })
+
+  // THE RULE. The status move is applyInvoicePayment's; this only remembers.
+  it.each(['sent', 'processing', 'paid'])('never changes a %s invoice status or dates', async (status) => {
+    await seed({ status })
+    const updated = await store.recordInvoiceAmountMismatch('inv-1', mismatch())
+
+    expect(updated.status).toBe(status)
+    expect(updated.sentAt).toBe('2026-08-28T12:00:00.000Z')
+    expect(updated.paidAt).toBe('2026-09-10T12:00:00.000Z')
+    expect(updated.total).toBe(400)
+  })
+
+  it('does not put the invoice in the Payment failed tab, even on a sent one', async () => {
+    await seed({ status: 'sent', paidAt: null })
+    const updated = await store.recordInvoiceAmountMismatch('inv-1', mismatch())
+
+    expect(unresolvedPaymentFailure(updated)).toBeNull()
+  })
+
+  it('is idempotent on the PaymentIntent - the second event of one payment writes nothing', async () => {
+    await seed()
+    const first = await store.recordInvoiceAmountMismatch('inv-1', mismatch())
+    const second = await store.recordInvoiceAmountMismatch('inv-1', mismatch())
+
+    expect(first).not.toBeNull()
+    // Null, not the invoice: the webhook notifies only on a truthy answer.
+    expect(second).toBeNull()
+    const [stored] = JSON.parse(await readFile(localDataPath, 'utf8')).invoices
+    expect(stored.emailLog.filter((logged) => logged.event === 'amount-mismatch')).toHaveLength(1)
+  })
+
+  it('is idempotent when two events race for one intent', async () => {
+    await seed()
+    const results = await Promise.all([
+      store.recordInvoiceAmountMismatch('inv-1', mismatch()),
+      store.recordInvoiceAmountMismatch('inv-1', mismatch()),
+    ])
+
+    expect(results.filter(Boolean)).toHaveLength(1)
+    const [stored] = JSON.parse(await readFile(localDataPath, 'utf8')).invoices
+    expect(stored.emailLog.filter((logged) => logged.event === 'amount-mismatch')).toHaveLength(1)
+  })
+
+  it('keeps mismatches from two different payments', async () => {
+    await seed()
+    await store.recordInvoiceAmountMismatch('inv-1', mismatch())
+    const updated = await store.recordInvoiceAmountMismatch('inv-1', mismatch({ paymentIntentId: 'pi_2' }))
+
+    expect(updated.emailLog.filter((logged) => logged.event === 'amount-mismatch')).toHaveLength(2)
+  })
+
+  it('with no intent id, is idempotent on the expected/received pair', async () => {
+    await seed()
+    const noIntent = mismatch({ paymentIntentId: null })
+    expect(await store.recordInvoiceAmountMismatch('inv-1', noIntent)).not.toBeNull()
+    expect(await store.recordInvoiceAmountMismatch('inv-1', noIntent)).toBeNull()
+    const other = await store.recordInvoiceAmountMismatch('inv-1', { ...noIntent, receivedCents: 30000 })
+
+    expect(other.emailLog.filter((logged) => logged.event === 'amount-mismatch')).toHaveLength(2)
+  })
+
+  it('refuses an invoice that is not there and amounts that are not numbers', async () => {
+    await seed()
+    expect(await store.recordInvoiceAmountMismatch('nope', mismatch())).toBeNull()
+    expect(await store.recordInvoiceAmountMismatch('inv-1', mismatch({ receivedCents: Number.NaN }))).toBeNull()
+    expect(await store.recordInvoiceAmountMismatch('inv-1', mismatch({ expectedCents: undefined }))).toBeNull()
+  })
+
+  it('falls back to now when the timestamp is unusable', async () => {
+    await seed()
+    const updated = await store.recordInvoiceAmountMismatch('inv-1', mismatch({ at: 'whenever' }))
+
+    expect(Number.isNaN(new Date(updated.emailLog[1].at).getTime())).toBe(false)
+  })
+
+  it('survives a whole-workspace save', async () => {
+    await seed()
+    await store.recordInvoiceAmountMismatch('inv-1', mismatch())
+    await store.write(workspace())
+
+    const [stored] = JSON.parse(await readFile(localDataPath, 'utf8')).invoices
+    expect(unhandledAmountMismatch(stored)).not.toBeNull()
+  })
+
+  describe('acknowledge', () => {
+    it('files a handled entry that clears the derived flag and keeps both entries', async () => {
+      await seed()
+      await store.recordInvoiceAmountMismatch('inv-1', mismatch())
+      const updated = await store.acknowledgeInvoiceAmountMismatch('inv-1', { byUserId: 'owner-1' })
+
+      expect(unhandledAmountMismatch(updated)).toBeNull()
+      expect(updated.status).toBe('paid')
+      expect(updated.emailLog.slice(1).map((logged) => logged.event)).toEqual([
+        'amount-mismatch',
+        'amount-mismatch-handled',
+      ])
+      expect(updated.emailLog[2]).toMatchObject({
+        kind: 'payment',
+        event: 'amount-mismatch-handled',
+        by: 'owner-1',
+        paymentIntentId: 'pi_1',
+      })
+      expect(Number.isNaN(new Date(updated.emailLog[2].at).getTime())).toBe(false)
+    })
+
+    it('is idempotent: nothing to acknowledge answers the invoice and writes nothing', async () => {
+      await seed()
+      const untouched = await store.acknowledgeInvoiceAmountMismatch('inv-1', { byUserId: 'owner-1' })
+      expect(untouched.emailLog).toHaveLength(1)
+
+      await store.recordInvoiceAmountMismatch('inv-1', mismatch())
+      await store.acknowledgeInvoiceAmountMismatch('inv-1', { byUserId: 'owner-1' })
+      const before = await readFile(localDataPath, 'utf8')
+      const again = await store.acknowledgeInvoiceAmountMismatch('inv-1', { byUserId: 'owner-2' })
+
+      expect(again.emailLog.filter((logged) => logged.event === 'amount-mismatch-handled')).toHaveLength(1)
+      expect(await readFile(localDataPath, 'utf8')).toBe(before)
+    })
+
+    it('leaves a LATER mismatch on another payment unhandled', async () => {
+      await seed()
+      await store.recordInvoiceAmountMismatch('inv-1', mismatch())
+      await store.acknowledgeInvoiceAmountMismatch('inv-1', { byUserId: 'owner-1' })
+      const updated = await store.recordInvoiceAmountMismatch(
+        'inv-1',
+        mismatch({ paymentIntentId: 'pi_2', receivedCents: 100 }),
+      )
+
+      expect(unhandledAmountMismatch(updated)).toMatchObject({
+        paymentIntentId: 'pi_2',
+        receivedCents: 100,
+      })
+    })
+
+    it('refuses an invoice that is not there', async () => {
+      await seed()
+      expect(await store.acknowledgeInvoiceAmountMismatch('nope', { byUserId: 'owner-1' })).toBeNull()
+    })
+  })
+})
+
+describe('recordInvoiceAmountMismatch statement shape (postgres branch)', () => {
+  it('appends to email_log behind a containment guard and touches nothing else', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    const written = await postgresStore(fake).recordInvoiceAmountMismatch('inv-1', {
+      at: '2026-09-10T14:00:00.000Z',
+      paymentIntentId: 'pi_1',
+      expectedCents: 25000,
+      receivedCents: 20000,
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.text).toMatch(/email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb/)
+    expect(update.text).toMatch(/and not \(coalesce\(email_log, '\[\]'::jsonb\) @> \$3::jsonb\)/)
+    expect(update.text).not.toMatch(/\bstatus\b/)
+    expect(update.text).not.toMatch(/\bsent_at\b/)
+    expect(update.text).not.toMatch(/\bstripe_payment_intent_id\b/)
+    expect(update.text).not.toMatch(/\bline_items\b|\btotal\b/)
+    expect(JSON.parse(update.params[1])[0]).toEqual({
+      kind: 'payment',
+      event: 'amount-mismatch',
+      at: '2026-09-10T14:00:00.000Z',
+      paymentIntentId: 'pi_1',
+      expectedCents: 25000,
+      receivedCents: 20000,
+    })
+    // The guard names the PAYMENT, not the amounts, when there is an intent.
+    expect(JSON.parse(update.params[2])).toEqual([
+      { kind: 'payment', event: 'amount-mismatch', paymentIntentId: 'pi_1' },
+    ])
+    expect(written).not.toBeNull()
+  })
+
+  it('guards on the expected/received pair when no intent is known', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoiceAmountMismatch('inv-1', {
+      expectedCents: 25000,
+      receivedCents: 20000,
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(JSON.parse(update.params[2])).toEqual([
+      {
+        kind: 'payment',
+        event: 'amount-mismatch',
+        paymentIntentId: null,
+        expectedCents: 25000,
+        receivedCents: 20000,
+      },
+    ])
+  })
+
+  // Zero rows from the guarded UPDATE is "already flagged" only when the marker
+  // is really on the log; the owners' notification hangs on the difference.
+  describe('a guarded UPDATE that matched no row', () => {
+    const args = { paymentIntentId: 'pi_1', expectedCents: 25000, receivedCents: 20000 }
+    const marker = {
+      kind: 'payment',
+      event: 'amount-mismatch',
+      at: '2026-09-10T14:00:00.000Z',
+      paymentIntentId: 'pi_1',
+      expectedCents: 25000,
+      receivedCents: 20000,
+    }
+    /** The UPDATE matches nothing; `during` runs as it is issued (a racing writer). */
+    function storeWhereUpdateMatchesNothing(invoices, during = () => {}) {
+      const fake = fakePostgres({ invoices })
+      const query = fake.pool.query
+      fake.pool.query = async (text, params) => {
+        if (/^update invoices/i.test(String(text).trim())) {
+          await query(text, params)
+          during()
+          return { rows: [], rowCount: 0 }
+        }
+        return query(text, params)
+      }
+      return postgresStore(fake)
+    }
+
+    it('is a duplicate (null) when a racing writer put the marker there', async () => {
+      const row = { ...existingInvoice, email_log: [] }
+      const pg = storeWhereUpdateMatchesNothing([row], () => {
+        row.email_log = [marker]
+      })
+      expect(await pg.recordInvoiceAmountMismatch('inv-1', args)).toBeNull()
+    })
+
+    it('is null when the invoice is gone', async () => {
+      const rows = [{ ...existingInvoice, email_log: [] }]
+      const pg = storeWhereUpdateMatchesNothing(rows, () => rows.splice(0, rows.length))
+      expect(await pg.recordInvoiceAmountMismatch('inv-1', args)).toBeNull()
+    })
+
+    it('THROWS when the marker is not there, so the webhook logs it and still notifies', async () => {
+      const pg = storeWhereUpdateMatchesNothing([{ ...existingInvoice, email_log: [] }])
+      await expect(pg.recordInvoiceAmountMismatch('inv-1', args)).rejects.toThrow(
+        /matched no row and is not on its log/,
+      )
+    })
+  })
+
+  it('writes nothing at all for a payment it has already flagged', async () => {
+    const fake = fakePostgres({
+      invoices: [
+        {
+          ...existingInvoice,
+          email_log: [
+            {
+              kind: 'payment',
+              event: 'amount-mismatch',
+              at: '2026-09-10T14:00:00.000Z',
+              paymentIntentId: 'pi_1',
+              expectedCents: 25000,
+              receivedCents: 20000,
+            },
+          ],
+        },
+      ],
+    })
+    const written = await postgresStore(fake).recordInvoiceAmountMismatch('inv-1', {
+      paymentIntentId: 'pi_1',
+      expectedCents: 25000,
+      receivedCents: 20000,
+    })
+
+    expect(written).toBeNull()
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+  })
+})
+
+describe('acknowledgeInvoiceAmountMismatch statement shape (postgres branch)', () => {
+  const flagged = {
+    ...existingInvoice,
+    email_log: [
+      {
+        kind: 'payment',
+        event: 'amount-mismatch',
+        at: '2026-09-10T14:00:00.000Z',
+        paymentIntentId: 'pi_1',
+        expectedCents: 25000,
+        receivedCents: 20000,
+      },
+    ],
+  }
+
+  it('appends the handled entry in SQL and touches nothing else', async () => {
+    const fake = fakePostgres({ invoices: [flagged] })
+    await postgresStore(fake).acknowledgeInvoiceAmountMismatch('inv-1', { byUserId: 'owner-1' })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(update.text).toMatch(/email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb/)
+    expect(update.text).not.toMatch(/\bstatus\b/)
+    expect(update.text).not.toMatch(/\bsent_at\b/)
+    const [entry] = JSON.parse(update.params[1])
+    expect(entry).toMatchObject({
+      kind: 'payment',
+      event: 'amount-mismatch-handled',
+      by: 'owner-1',
+      paymentIntentId: 'pi_1',
+    })
+  })
+
+  it('writes nothing when there is nothing to acknowledge, or it is already handled', async () => {
+    const none = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(none).acknowledgeInvoiceAmountMismatch('inv-1', { byUserId: 'owner-1' })
+    expect(none.matching(/^update invoices/i)).toHaveLength(0)
+
+    const handled = fakePostgres({
+      invoices: [
+        {
+          ...flagged,
+          email_log: [
+            ...flagged.email_log,
+            {
+              kind: 'payment',
+              event: 'amount-mismatch-handled',
+              at: '2026-09-11T00:00:00.000Z',
+              by: 'owner-1',
+              paymentIntentId: 'pi_1',
+            },
+          ],
+        },
+      ],
+    })
+    await postgresStore(handled).acknowledgeInvoiceAmountMismatch('inv-1', { byUserId: 'owner-1' })
+    expect(handled.matching(/^update invoices/i)).toHaveLength(0)
+  })
+})
+
+/**
+ * THE PROOF that a normal payment is never flagged. For ACH and for card, the
+ * amount Stripe collects is what the Checkout session was minted with
+ * (`buildCheckoutLineItems` / `buildCardCheckoutLineItems`), and the invoice
+ * total the webhook compares against is the REAL store's answer after the real
+ * apply - the card fee line appended and the totals recomputed by the store.
+ * Cents-awkward totals are the point: a rounding difference between the two
+ * would flag every payment of that size.
+ */
+describe('a normal payment compares EQUAL to the invoice it paid', () => {
+  const client = { id: 'c1', name: 'Acme' }
+  const sessionCents = (items) =>
+    items.reduce((sum, item) => sum + item.price_data.unit_amount * item.quantity, 0)
+
+  const scenarios = [
+    ['a round total', [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }]],
+    [
+      'cents-awkward lines',
+      [
+        { kind: 'custom', label: 'Bookkeeping', detail: '', amount: 1234.56 },
+        { kind: 'custom', label: 'Payroll', detail: '', amount: 99.99 },
+        { kind: 'custom', label: 'Cleanup', detail: '', amount: 0.07 },
+      ],
+    ],
+    [
+      'a $0 courtesy line beside real work',
+      [
+        { kind: 'custom', label: 'Bookkeeping', detail: '', amount: 333.33 },
+        { kind: 'custom', label: 'Courtesy', detail: '', amount: 0 },
+      ],
+    ],
+    [
+      'a credit carried from last month (collapses to one Stripe line)',
+      [
+        { kind: 'custom', label: 'Bookkeeping', detail: '', amount: 500.5 },
+        { kind: 'adjustment', label: 'Credit', detail: '', amount: -120.25 },
+      ],
+    ],
+    ['a large total', [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 18765.43 }]],
+  ]
+
+  async function seedWith(lineItems) {
+    const total = Math.round(lineItems.reduce((sum, line) => sum + line.amount * 100, 0)) / 100
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-eq',
+        clientId: 'c1',
+        period: '2026-08',
+        number: 'INV-2026-08-077',
+        status: 'sent',
+        kind: 'monthly',
+        lineItems,
+        subtotal: total,
+        total,
+        dueDate: '2026-09-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-08-28T12:00:00.000Z',
+        paidAt: null,
+        paymentMethod: null,
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return data.invoices[0]
+  }
+
+  it.each(scenarios)('ACH: %s', async (_name, lineItems) => {
+    const invoice = await seedWith(lineItems)
+    const collected = sessionCents(buildCheckoutLineItems(invoice, client))
+
+    const processing = await store.applyInvoicePayment('inv-eq', {
+      status: 'processing',
+      paymentIntentId: 'pi_a',
+    })
+    expect(
+      paymentAmountMismatch({
+        eventType: 'checkout.session.completed',
+        object: { amount_total: collected },
+        invoice: processing,
+      }),
+    ).toBeNull()
+    const paid = await store.applyInvoicePayment('inv-eq', { status: 'paid', paymentIntentId: 'pi_a' })
+    expect(
+      paymentAmountMismatch({
+        eventType: 'payment_intent.succeeded',
+        object: { amount_received: collected },
+        invoice: paid,
+      }),
+    ).toBeNull()
+  })
+
+  it.each(scenarios)('card, fee line appended by the store: %s', async (_name, lineItems) => {
+    const invoice = await seedWith(lineItems)
+    const collected = sessionCents(buildCardCheckoutLineItems(invoice, client))
+    const feeLines = [cardProcessingFeeLine(invoice)]
+
+    // Both events of one card payment, in webhook order: the second one finds
+    // the fee line already there and does not add it again.
+    const processing = await store.applyInvoicePayment('inv-eq', {
+      status: 'processing',
+      paymentIntentId: 'pi_c',
+      appendLines: feeLines,
+    })
+    expect(
+      paymentAmountMismatch({
+        eventType: 'checkout.session.completed',
+        object: { amount_total: collected },
+        invoice: processing,
+      }),
+    ).toBeNull()
+    const paid = await store.applyInvoicePayment('inv-eq', {
+      status: 'paid',
+      paymentIntentId: 'pi_c',
+      appendLines: feeLines,
+    })
+    expect(
+      paymentAmountMismatch({
+        eventType: 'payment_intent.succeeded',
+        object: { amount_received: collected },
+        invoice: paid,
+      }),
+    ).toBeNull()
+  })
+
+  it('a card paid on an OLD total is flagged against the total as it now stands', async () => {
+    const invoice = await seedWith([{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }])
+    const collected = sessionCents(buildCardCheckoutLineItems(invoice, client))
+    // The invoice was raised to 450 after the page was opened.
+    const raised = await seedWith([{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 450 }])
+
+    const paid = await store.applyInvoicePayment('inv-eq', {
+      status: 'paid',
+      paymentIntentId: 'pi_old',
+      appendLines: [cardProcessingFeeLine(raised)],
+    })
+    expect(
+      paymentAmountMismatch({
+        eventType: 'payment_intent.succeeded',
+        object: { amount_received: collected },
+        invoice: paid,
+      }),
+    ).toEqual({ expectedCents: Math.round(paid.total * 100), receivedCents: collected })
   })
 })
 

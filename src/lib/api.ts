@@ -4482,6 +4482,22 @@ export async function unmarkInvoicePaidRequest(invoiceId: string) {
   return ((await response.json()) as { invoice: PersistedInvoice }).invoice
 }
 
+/**
+ * An owner marks a payment that arrived for a different amount than the invoice
+ * total as handled. Answers the invoice, whose derived flag is then gone.
+ */
+export async function acknowledgeInvoiceAmountMismatchRequest(invoiceId: string) {
+  const response = await apiFetch(
+    `/api/invoices/${encodeURIComponent(invoiceId)}/amount-mismatch/handled`,
+    { credentials: 'same-origin', method: 'POST' },
+  )
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(response.status, message || `Failed to mark handled (${response.status})`, code)
+  }
+  return ((await response.json()) as { invoice: PersistedInvoice }).invoice
+}
+
 export async function sendInvoiceRequest(invoiceId: string, to?: string[], extra?: string[]) {
   const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/send`, {
     credentials: 'same-origin',

@@ -42,6 +42,17 @@ export interface InvoicePaymentFailureLogEntry {
   detail?: string
 }
 
+/**
+ * A payment arrived for a different amount than the invoice total, and the
+ * owner's "handled" entry for it. Neither is a failed payment.
+ */
+export interface InvoiceAmountMismatchLogEntry {
+  kind: 'payment'
+  event: 'amount-mismatch' | 'amount-mismatch-handled'
+  at: string
+  paymentIntentId: string | null
+}
+
 /** The owner was told once that this invoice passed its past-due line. */
 export interface InvoicePastDueLogEntry {
   kind: 'past-due'
@@ -54,6 +65,7 @@ export type InvoiceLogEntry =
   | InvoiceSendLogEntry
   | InvoiceDeliveryLogEntry
   | InvoicePaymentFailureLogEntry
+  | InvoiceAmountMismatchLogEntry
   | InvoicePastDueLogEntry
 
 /** Everything these rules read off an invoice, and nothing more. */

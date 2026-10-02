@@ -274,7 +274,10 @@ export function isInvoiceDeliveryEntry(
 export function isInvoicePaymentFailureEntry(
   entry: InvoiceEmailLogEntry,
 ): entry is InvoicePaymentFailureEntry {
-  return (entry as InvoicePaymentFailureEntry).kind === 'payment'
+  return (
+    (entry as InvoicePaymentFailureEntry).kind === 'payment' &&
+    (entry as InvoicePaymentFailureEntry).event === 'failed'
+  )
 }
 
 /**

@@ -83,6 +83,7 @@ import {
 } from './lib/invoice-email.js'
 import { resolveSendRecipients } from './lib/invoice-recipients.js'
 import { invoiceContentChanged, totalsDiffer } from './lib/invoice-sent-change.js'
+import { flagPaymentAmountMismatch } from './lib/payment-amount-mismatch.js'
 import {
   isResendWebhookConfigured,
   resendDeliveryEventFor,
@@ -4377,6 +4378,24 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // The money that arrived against the invoice as it now stands - flagged
+      // when they differ (lib/payment-amount-mismatch.js). Only after a
+      // SUCCESSFUL apply (`settledInvoice` is null otherwise), and it never
+      // throws: it must not turn a recorded payment into a 500, nor into a
+      // forget of the event, so a redelivery cannot flag or notify twice.
+      if (
+        settledInvoice &&
+        (event.type === 'checkout.session.completed' || event.type === 'payment_intent.succeeded')
+      ) {
+        await flagPaymentAmountMismatch({
+          store: appDataStore,
+          notify,
+          event,
+          invoice: settledInvoice,
+          appPublicUrl: getPublicAppUrl(request),
+        })
+      }
+
       // Tell the CLIENT their money arrived: an acknowledgment when a bank
       // payment is authorized, a receipt — with the PAID invoice attached —
       // when it settles. Card settles at once, so it gets the receipt only.
@@ -5002,6 +5021,46 @@ const server = createServer(async (request, response) => {
         sendJson(response, 500, {
           error: 'unmark_paid_failed',
           message: 'Could not undo that — please try again.',
+        })
+        return
+      }
+      if (!updated) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      sendJson(response, 200, { invoice: await withCoverageChangeable(updated) })
+      return
+    }
+
+    // POST /api/invoices/:id/amount-mismatch/handled — an owner says the
+    // difference between what a client paid and the invoice total has been
+    // billed or refunded. Appends a log entry (the flag is derived from the log,
+    // so it clears); idempotent, and it never touches the invoice's status.
+    const amountMismatchMatch = normalizedPath.match(
+      /^\/api\/invoices\/([^/]+)\/amount-mismatch\/handled$/,
+    )
+    if (amountMismatchMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can mark a payment mismatch handled' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const invoiceId = decodeURIComponent(amountMismatchMatch[1])
+      let updated
+      try {
+        updated = await appDataStore.acknowledgeInvoiceAmountMismatch(invoiceId, {
+          byUserId: session.user.id,
+        })
+      } catch (error) {
+        console.error('[invoices] amount-mismatch handled failed:', error)
+        sendJson(response, 500, {
+          error: 'amount_mismatch_handled_failed',
+          message: 'Could not mark that handled — please try again.',
         })
         return
       }
