@@ -68,7 +68,11 @@ export function useClientPendingNotes(clientId: string, enabled = true) {
 
 export type ClientPendingNotesState = ReturnType<typeof useClientPendingNotes>
 
-/** How many of a client's notes are still waiting for a checklist. */
+/**
+ * How many of a client's notes are still waiting for a checklist. A repeating
+ * note is a standing one (it is never "waiting" for its one checklist), so it is
+ * not counted here.
+ */
 export function pendingNoteCount(notes: ClientPendingNote[]) {
-  return notes.filter((note) => !note.attachedChecklistId).length
+  return notes.filter((note) => !note.attachedChecklistId && !note.repeats).length
 }

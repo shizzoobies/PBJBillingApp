@@ -3876,7 +3876,7 @@ export async function listClientPendingNotesRequest(clientId: string) {
 /** Flag a pending note against a recurring template. Returns the created note. */
 export async function addClientPendingNoteRequest(
   clientId: string,
-  note: { templateId: string; kind: 'task' | 'note'; body: string },
+  note: { templateId: string; kind: 'task' | 'note'; body: string; repeats?: boolean },
 ) {
   const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/pending-notes`, {
     method: 'POST',

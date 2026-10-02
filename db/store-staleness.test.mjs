@@ -8460,6 +8460,25 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
       inTransaction = false
       return { rows: [] }
     }
+    // The copy a repeating note leaves on one checklist (its own, already attached row).
+    if (/^insert into client_pending_notes\s+\(id, client_id, template_id, kind, body, author_id, author_name, created_at,\s+attached_checklist_id/i.test(trimmed)) {
+      const [id, clientId, templateId, kind, body, authorId, authorName, checklistId, itemId, repeatOf] = params
+      notes.push({
+        id,
+        client_id: clientId,
+        template_id: templateId,
+        kind,
+        body,
+        author_id: authorId,
+        author_name: authorName,
+        created_at: new Date(),
+        attached_checklist_id: checklistId,
+        attached_item_id: itemId,
+        attached_at: new Date(),
+        repeat_of: repeatOf,
+      })
+      return { rows: [], rowCount: 1 }
+    }
     if (/^insert into client_pending_notes/i.test(trimmed)) {
       // The cap rides in the same statement as the insert: it inserts nothing
       // (rowCount 0) when the client already holds 100 unattached notes.
@@ -8481,6 +8500,8 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
         attached_checklist_id: null,
         attached_item_id: null,
         attached_at: null,
+        // Honored only when the statement names the column, so a one-time insert stays one-time.
+        repeats: /created_at, repeats\)/i.test(trimmed) ? true : null,
       })
       return { rows: [] }
     }
@@ -8490,6 +8511,7 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
       const clientId = /and n\.client_id = \$1/i.test(trimmed) ? params[0] : null
       const rows = notes
         .filter((note) => !clientId || note.client_id === clientId)
+        .filter((note) => !/and n\.repeat_of is null/i.test(trimmed) || !note.repeat_of)
         .filter((note) => {
           if (note.attached_checklist_id === null) return true
           const checklist = checklists.find((entry) => entry.id === note.attached_checklist_id)
@@ -8532,7 +8554,15 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
     // notes cross-joined to a lateral pick of each one's next checklist.
     if (/^select n\.id as note_id, found\.id as checklist_id\s+from unnest\(/i.test(trimmed)) {
       lookups.push(params)
-      const [ids, templateIds, clientIds, createdAts, createdDates, stales] = params
+      const [ids, templateIds, clientIds, createdAts, createdDates, stales, lastDues, lastIds] = params
+      const afterLast = (c, index) =>
+        !/n\.last_checklist_id is null/i.test(trimmed) ||
+        !lastIds?.[index] ||
+        (String(c.due_date) >= String(lastDues[index]) && String(c.id) !== String(lastIds[index]))
+      // The statement's own "no second copy on one checklist" clause.
+      const holdsCopy = (c, noteId) =>
+        /p\.repeat_of = n\.id and p\.attached_checklist_id = c\.id/i.test(trimmed) &&
+        notes.some((p) => p.repeat_of === noteId && p.attached_checklist_id === c.id)
       const rows = []
       ids.forEach((noteId, index) => {
         const picks = checklists
@@ -8560,6 +8590,8 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
                         : !item.done,
                     )
                 )) &&
+              afterLast(c, index) &&
+              !holdsCopy(c, noteId) &&
               (c.created_at ? c.created_at > createdAts[index] : c.due_date > createdDates[index]),
           )
           .sort(
@@ -8592,6 +8624,28 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
         items.push({ id, checklist_id: checklistId, label, sort_order: sortOrder })
       }
       return { rows: [] }
+    }
+    // The claim transaction's re-check: does this checklist already hold a copy?
+    if (/^select 1 from client_pending_notes where repeat_of = \$1 and attached_checklist_id = \$2$/i.test(trimmed)) {
+      const there = notes.some((p) => p.repeat_of === params[0] && p.attached_checklist_id === params[1])
+      return { rows: there ? [{}] : [], rowCount: there ? 1 : 0 }
+    }
+    if (/^update client_pending_notes\s+set last_attached_checklist_id = \$2/i.test(trimmed)) {
+      const [id, checklistId, previous] = params
+      const note = notes.find(
+        (entry) =>
+          entry.id === id &&
+          entry.repeats === true &&
+          entry.attached_checklist_id === null &&
+          (entry.last_attached_checklist_id ?? null) === (previous ?? null),
+      )
+      if (!note) return { rows: [], rowCount: 0 }
+      note.last_attached_checklist_id = checklistId
+      note.last_attached_due_date = checklists.find((entry) => entry.id === checklistId)?.due_date ?? null
+      return {
+        rows: [{ author_id: note.author_id ?? null, author_name: note.author_name ?? null }],
+        rowCount: 1,
+      }
     }
     if (/^update client_pending_notes\s+set attached_checklist_id = \$2/i.test(trimmed)) {
       const [id, checklistId, itemId] = params
@@ -28522,5 +28576,1251 @@ describe('removing a step that has an open wait is refused (Postgres, on the loc
     })
     expectRolledBackWithNothingWritten(fake)
     expect(counter.released).toBe(1)
+  })
+})
+
+/**
+ * A client note that repeats on every month's checklist (featreq-1f352c4f). The
+ * repeating row is never attached or spent: it stays on the client page until it
+ * is stopped, and each NEW checklist of its template gets its own copy (a task
+ * becomes that checklist's own step, a note its own note). The row remembers the
+ * checklist it was last put on, so the lookup asks for the one AFTER it and no
+ * pass, however often it runs, puts it on the same checklist twice. One-time
+ * notes are exactly as before. Both backends.
+ */
+describe('a client note that repeats on every checklist (file backend)', () => {
+  beforeEach(async () => {
+    await rm(localDataPath, { force: true })
+    await store.write(workspace({ clients: [], timeEntries: [] }))
+  })
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const authNow = async () =>
+    existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+  let seq = 0
+  const newClient = () => `c-rep-${(seq += 1)}`
+  // Created a minute from now: after any note made in the test, which is what makes
+  // a checklist "the next one that populates" for it.
+  const checklistRow = (id, clientId, dueDate, over = {}) => ({
+    id,
+    title: 'Payroll',
+    clientId,
+    assigneeId: 'emp-1',
+    templateId: 'tpl-pn',
+    dueDate,
+    createdAt: new Date(Date.now() + 60_000).toISOString(),
+    viewerIds: [],
+    editorIds: [],
+    items: [{ id: `${id}-s1`, label: 'Existing step', done: false }],
+    ...over,
+  })
+  const addChecklists = async (...rows) => {
+    const data = await persisted()
+    data.checklists.push(...rows)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const changeChecklist = async (id, change) => {
+    const data = await persisted()
+    change(data.checklists.find((entry) => entry.id === id))
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const notesOf = async (clientId) =>
+    ((await authNow()).clientPendingNotes ?? []).filter((entry) => entry.clientId === clientId)
+  const copiesOf = async (clientId, noteId) =>
+    (await notesOf(clientId)).filter((entry) => entry.repeatOf === noteId)
+  const itemsOf = async (checklistId) =>
+    (await persisted()).checklists.find((entry) => entry.id === checklistId).items
+  const repeating = (clientId, over = {}) =>
+    store.createClientPendingNote(clientId, {
+      templateId: 'tpl-pn',
+      kind: 'task',
+      body: 'Send the 1099s',
+      authorId: 'emp-lisa',
+      authorName: 'Lisa',
+      repeats: true,
+      ...over,
+    })
+
+  it('creates the note as repeating only for a strict boolean true', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId)
+    expect(note).toMatchObject({ repeats: true, lastAttachedChecklistId: null, lastAttachedDueDate: null })
+    expect(note.attachedChecklistId).toBeNull()
+    for (const loose of ['true', 1, 'yes', {}, [], null, undefined, false]) {
+      const plain = await store.createClientPendingNote(clientId, {
+        templateId: 'tpl-pn',
+        kind: 'note',
+        body: 'one time',
+        repeats: loose,
+      })
+      expect(plain).not.toHaveProperty('repeats')
+      expect(Object.keys(plain).sort()).toEqual(
+        [
+          'attachedAt',
+          'attachedChecklistId',
+          'attachedItemId',
+          'authorId',
+          'authorName',
+          'body',
+          'clientId',
+          'createdAt',
+          'id',
+          'kind',
+          'templateId',
+        ].sort(),
+      )
+    }
+  })
+
+  it('goes on checklist A, is not spent, and a pass run again and again never adds it to A twice', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId)
+    await addChecklists(checklistRow('chk-a', clientId, '2026-10-10'))
+
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+    const parent = (await notesOf(clientId)).find((entry) => entry.id === note.id)
+    expect(parent).toMatchObject({
+      repeats: true,
+      attachedChecklistId: null,
+      attachedItemId: null,
+      lastAttachedChecklistId: 'chk-a',
+      lastAttachedDueDate: '2026-10-10',
+    })
+    const copies = await copiesOf(clientId, note.id)
+    expect(copies).toHaveLength(1)
+    expect(copies[0]).toMatchObject({
+      kind: 'task',
+      body: 'Send the 1099s',
+      authorId: 'emp-lisa',
+      authorName: 'Lisa',
+      attachedChecklistId: 'chk-a',
+    })
+    expect(copies[0]).not.toHaveProperty('repeats')
+    expect(copies[0].attachedItemId).toMatch(/^item-pn-/)
+    const steps = await itemsOf('chk-a')
+    expect(steps).toHaveLength(2)
+    expect(steps[1]).toMatchObject({ id: copies[0].attachedItemId, label: 'Send the 1099s', done: false })
+
+    for (let pass = 0; pass < 4; pass += 1) {
+      expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+    }
+    expect(await itemsOf('chk-a')).toHaveLength(2)
+    expect(await copiesOf(clientId, note.id)).toHaveLength(1)
+  })
+
+  it('then goes on checklist B when it is created later, each month its own step', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId)
+    await addChecklists(checklistRow('chk-a', clientId, '2026-10-10'))
+    await store.attachPendingClientNotes({ clientId })
+
+    await addChecklists(checklistRow('chk-b', clientId, '2026-11-10'))
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+
+    const copies = await copiesOf(clientId, note.id)
+    expect(copies.map((entry) => entry.attachedChecklistId).sort()).toEqual(['chk-a', 'chk-b'])
+    expect(new Set(copies.map((entry) => entry.attachedItemId)).size).toBe(2)
+    expect(await itemsOf('chk-a')).toHaveLength(2)
+    expect(await itemsOf('chk-b')).toHaveLength(2)
+    const parent = (await notesOf(clientId)).find((entry) => entry.id === note.id)
+    expect(parent).toMatchObject({ lastAttachedChecklistId: 'chk-b', lastAttachedDueDate: '2026-11-10' })
+  })
+
+  it('puts it on several checklists created since the last pass, in due-date order, once each, in one pass', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId, { kind: 'note' })
+    await addChecklists(
+      checklistRow('chk-c', clientId, '2026-12-10'),
+      checklistRow('chk-a', clientId, '2026-10-10'),
+      checklistRow('chk-b', clientId, '2026-11-10'),
+    )
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(3)
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+    const copies = await copiesOf(clientId, note.id)
+    expect(copies.map((entry) => entry.attachedChecklistId)).toEqual(['chk-a', 'chk-b', 'chk-c'])
+    // A note-kind copy is its own note on each checklist: no step is added.
+    expect(copies.every((entry) => entry.attachedItemId === null)).toBe(true)
+    expect((await itemsOf('chk-b')).map((item) => item.id)).toEqual(['chk-b-s1'])
+    const onChecklists = await store.listPendingNotesForChecklists(['chk-a', 'chk-b', 'chk-c'])
+    // (The checklist ids are reused across these tests, so look at this client's only.)
+    expect(
+      onChecklists
+        .filter((entry) => entry.clientId === clientId)
+        .map((entry) => entry.attachedChecklistId)
+        .sort(),
+    ).toEqual(['chk-a', 'chk-b', 'chk-c'])
+  })
+
+  it('ticking or deleting one month\'s step does not touch the next month\'s', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId)
+    await addChecklists(checklistRow('chk-a', clientId, '2026-10-10'), checklistRow('chk-b', clientId, '2026-11-10'))
+    await store.attachPendingClientNotes({ clientId })
+    const [copyA, copyB] = await copiesOf(clientId, note.id)
+    expect([copyA.attachedChecklistId, copyB.attachedChecklistId]).toEqual(['chk-a', 'chk-b'])
+
+    await store.toggleChecklistItem('chk-a', copyA.attachedItemId)
+    expect((await itemsOf('chk-a')).find((item) => item.id === copyA.attachedItemId).done).toBe(true)
+    expect((await itemsOf('chk-b')).find((item) => item.id === copyB.attachedItemId).done).toBe(false)
+
+    await store.deleteChecklistItem('chk-a', copyA.attachedItemId)
+    const after = await copiesOf(clientId, note.id)
+    expect(after.find((entry) => entry.id === copyA.id).attachedItemId).toBeNull()
+    expect(after.find((entry) => entry.id === copyB.id).attachedItemId).toBe(copyB.attachedItemId)
+    expect((await itemsOf('chk-b')).some((item) => item.id === copyB.attachedItemId)).toBe(true)
+    // And the repeating note itself carries on to the next checklist.
+    await addChecklists(checklistRow('chk-c', clientId, '2026-12-10'))
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+  })
+
+  it('stops after it is removed, and leaves the copies already on checklists alone', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId)
+    await addChecklists(checklistRow('chk-a', clientId, '2026-10-10'), checklistRow('chk-b', clientId, '2026-11-10'))
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(2)
+
+    expect(await store.deleteClientPendingNote(note.id)).toBe(true)
+    await addChecklists(checklistRow('chk-c', clientId, '2026-12-10'))
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+
+    expect(await itemsOf('chk-c')).toHaveLength(1)
+    expect(await itemsOf('chk-a')).toHaveLength(2)
+    expect(await itemsOf('chk-b')).toHaveLength(2)
+    const left = await notesOf(clientId)
+    expect(left.map((entry) => entry.attachedChecklistId).sort()).toEqual(['chk-a', 'chk-b'])
+    // The listing still shows what was added, but no repeating note.
+    const listed = await store.listClientPendingNotes(clientId)
+    expect(listed.some((entry) => entry.repeats)).toBe(false)
+    expect(listed).toHaveLength(2)
+  })
+
+  it('skips a skipped, deleted, split-record or carried-forward checklist and goes on the one after', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId)
+    await addChecklists(
+      checklistRow('chk-skipped', clientId, '2026-10-05', { skippedAt: '2026-09-30T00:00:00.000Z' }),
+      checklistRow('chk-deleted', clientId, '2026-10-06', { deletedAt: '2026-09-30T00:00:00.000Z' }),
+      checklistRow('chk-record', clientId, '2026-10-07', { pushedToChecklistId: 'chk-live-copy' }),
+      checklistRow('chk-carried', clientId, '2026-10-08', { pushedFromChecklistId: 'chk-older' }),
+      checklistRow('chk-stage-2', clientId, '2026-10-09', { stageIndex: 1 }),
+      checklistRow('chk-good', clientId, '2026-10-10'),
+    )
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+    expect((await copiesOf(clientId, note.id)).map((entry) => entry.attachedChecklistId)).toEqual(['chk-good'])
+    for (const id of ['chk-skipped', 'chk-deleted', 'chk-record', 'chk-carried', 'chk-stage-2']) {
+      expect(await itemsOf(id)).toHaveLength(1)
+    }
+
+    // A checklist it was put on that is later skipped keeps its copy (the copy is
+    // that checklist's own note and never moves), and the next checklist gets one.
+    await changeChecklist('chk-good', (checklist) => {
+      checklist.skippedAt = '2026-10-01T00:00:00.000Z'
+    })
+    await addChecklists(checklistRow('chk-next', clientId, '2026-11-10'))
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+    const copies = await copiesOf(clientId, note.id)
+    expect(copies.map((entry) => entry.attachedChecklistId).sort()).toEqual(['chk-good', 'chk-next'])
+    expect((await itemsOf('chk-next')).filter((item) => item.id.startsWith('item-pn-'))).toHaveLength(1)
+  })
+
+  it('does not go on a checklist that already existed when the note was written (the next one that populates)', async () => {
+    const clientId = newClient()
+    await addChecklists(checklistRow('chk-old', clientId, '2026-10-10', { createdAt: '2026-01-01T00:00:00.000Z' }))
+    await repeating(clientId)
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+    expect(await itemsOf('chk-old')).toHaveLength(1)
+  })
+
+  it('a one-time note alongside is still spent after its one attach; only the repeating one carries on', async () => {
+    const clientId = newClient()
+    const once = await store.createClientPendingNote(clientId, {
+      templateId: 'tpl-pn',
+      kind: 'task',
+      body: 'Just this once',
+    })
+    const note = await repeating(clientId)
+    await addChecklists(checklistRow('chk-a', clientId, '2026-10-10'))
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(2)
+    await addChecklists(checklistRow('chk-b', clientId, '2026-11-10'))
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+
+    const all = await notesOf(clientId)
+    expect(all.find((entry) => entry.id === once.id)).toMatchObject({ attachedChecklistId: 'chk-a' })
+    expect((await itemsOf('chk-a')).map((item) => item.label)).toEqual([
+      'Existing step',
+      'Just this once',
+      'Send the 1099s',
+    ])
+    expect((await itemsOf('chk-b')).map((item) => item.label)).toEqual(['Existing step', 'Send the 1099s'])
+    expect((await copiesOf(clientId, note.id)).map((entry) => entry.attachedChecklistId)).toEqual(['chk-a', 'chk-b'])
+  })
+
+  it('counts a repeating note once toward the 100-note cap, however many checklists it has been put on', async () => {
+    const clientId = newClient()
+    const authState = await authNow()
+    authState.clientPendingNotes = [
+      ...(authState.clientPendingNotes ?? []),
+      ...Array.from({ length: 98 }, (_, index) => ({
+        id: `pnote-fill-${clientId}-${index}`,
+        clientId,
+        templateId: 'tpl-other',
+        kind: 'note',
+        body: `fill ${index}`,
+        authorId: null,
+        authorName: null,
+        createdAt: new Date(Date.UTC(2026, 8, 1, 0, 0, index)).toISOString(),
+        attachedChecklistId: null,
+        attachedItemId: null,
+        attachedAt: null,
+      })),
+    ]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+
+    await repeating(clientId) // the 99th waiting note
+    await addChecklists(
+      checklistRow('chk-a', clientId, '2026-10-10'),
+      checklistRow('chk-b', clientId, '2026-11-10'),
+      checklistRow('chk-c', clientId, '2026-12-10'),
+    )
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(3)
+    // Three copies are attached notes, not waiting ones: exactly one slot is left.
+    await store.createClientPendingNote(clientId, { templateId: 'tpl-pn', kind: 'note', body: 'the 100th' })
+    await expect(
+      store.createClientPendingNote(clientId, { templateId: 'tpl-pn', kind: 'note', body: 'one too many' }),
+    ).rejects.toBeInstanceOf(TooManyPendingNotesError)
+    await expect(repeating(clientId)).rejects.toBeInstanceOf(TooManyPendingNotesError)
+  })
+
+  it('lists the repeating note (with what it was last put on) first, and its copies as attached notes', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId)
+    await store.createClientPendingNote(clientId, { templateId: 'tpl-pn', kind: 'note', body: 'plain' })
+    await addChecklists(checklistRow('chk-a', clientId, '2026-10-10'))
+    await store.attachPendingClientNotes({ clientId })
+    const listed = await store.listClientPendingNotes(clientId)
+    const parent = listed.find((entry) => entry.id === note.id)
+    expect(parent).toMatchObject({ repeats: true, lastAttachedChecklistId: 'chk-a', lastAttachedDueDate: '2026-10-10' })
+    expect(parent.attachedChecklistId).toBeNull()
+    expect(listed.filter((entry) => entry.repeatOf === note.id)).toHaveLength(1)
+    expect(listed.filter((entry) => entry.repeats)).toHaveLength(1)
+  })
+
+  it('two passes that read the note at the same spot cannot both put it on the same checklist', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId)
+    await addChecklists(checklistRow('chk-a', clientId, '2026-10-10'))
+    const seen = { id: note.id, clientId, templateId: 'tpl-pn', kind: 'task', body: note.body, lastChecklistId: null }
+    expect(await store._attachRepeatingPendingNote({ note: seen, checklistId: 'chk-a' })).toBe(true)
+    expect(await store._attachRepeatingPendingNote({ note: seen, checklistId: 'chk-a' })).toBe(false)
+    expect(await copiesOf(clientId, note.id)).toHaveLength(1)
+    expect(await itemsOf('chk-a')).toHaveLength(2)
+    // A stopped note, or a target that went away, is refused too and writes nothing.
+    await store.deleteClientPendingNote(note.id)
+    expect(
+      await store._attachRepeatingPendingNote({ note: { ...seen, lastChecklistId: 'chk-a' }, checklistId: 'chk-a' }),
+    ).toBe(false)
+    expect(await copiesOf(clientId, note.id)).toHaveLength(1)
+  })
+})
+
+describe('a client note that repeats on every checklist (postgres branch)', () => {
+  const noteRow = (over = {}) => ({
+    id: 'pnote-r',
+    client_id: 'c1',
+    template_id: 'tpl-pn',
+    kind: 'task',
+    body: 'Send the 1099s',
+    author_id: 'emp-lisa',
+    author_name: 'Lisa',
+    created_at: '2026-09-01T00:00:00.000Z',
+    attached_checklist_id: null,
+    repeats: true,
+    last_attached_checklist_id: null,
+    last_attached_due_date: null,
+    ...over,
+  })
+  const checklistRow = (id, dueDate, over = {}) => ({
+    id,
+    template_id: 'tpl-pn',
+    client_id: 'c1',
+    due_date: dueDate,
+    created_at: '2026-09-05T00:00:00.000Z',
+    ...over,
+  })
+
+  it('creates the column set with the table and as an idempotent alter, DDL pinned verbatim', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    const [created] = fake.matching(/create table if not exists client_pending_notes/i)
+    expect(created.text).toMatch(
+      /released_at timestamptz,\s+repeats boolean default false,\s+repeat_of text,\s+last_attached_checklist_id text,\s+last_attached_due_date text\s+\)/,
+    )
+    const [alter] = fake.matching(/^alter table client_pending_notes\s+add column if not exists repeats/i)
+    expect(alter.text.replace(/\s+/g, ' ')).toBe(
+      'alter table client_pending_notes add column if not exists repeats boolean default false, add column if not exists repeat_of text, add column if not exists last_attached_checklist_id text, add column if not exists last_attached_due_date text',
+    )
+    // The released_at statement it follows is untouched.
+    expect(fake.matching(/^alter table client_pending_notes add column if not exists released_at timestamptz$/i)).toHaveLength(1)
+  })
+
+  it('inserts a repeating note with its flag and a one-time note with exactly the statement it always had', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    const plain = await pgStore.createClientPendingNote('c1', { templateId: 'tpl-pn', kind: 'note', body: 'once' })
+    const again = await pgStore.createClientPendingNote('c1', { templateId: 'tpl-pn', kind: 'note', body: 'once', repeats: 'true' })
+    const rep = await pgStore.createClientPendingNote('c1', {
+      templateId: 'tpl-pn',
+      kind: 'task',
+      body: 'monthly',
+      authorId: 'emp-lisa',
+      authorName: 'Lisa',
+      repeats: true,
+    })
+    const [one, two, three] = fake.matching(/^insert into client_pending_notes/i)
+    const oneTime = one.text.replace(/\s+/g, ' ')
+    expect(oneTime).toBe(
+      'insert into client_pending_notes (id, client_id, template_id, kind, body, author_id, author_name, created_at) select $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text, now() where (select count(*) from client_pending_notes where client_id = $2::text and attached_checklist_id is null) < 100',
+    )
+    expect(two.text).toBe(one.text)
+    expect(plain).not.toHaveProperty('repeats')
+    expect(again).not.toHaveProperty('repeats')
+    expect(three.text.replace(/\s+/g, ' ')).toBe(
+      'insert into client_pending_notes (id, client_id, template_id, kind, body, author_id, author_name, created_at, repeats) select $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text, now(), true where (select count(*) from client_pending_notes where client_id = $2::text and attached_checklist_id is null) < 100',
+    )
+    expect(three.params).toEqual([rep.id, 'c1', 'tpl-pn', 'task', 'monthly', 'emp-lisa', 'Lisa'])
+    expect(rep).toMatchObject({ repeats: true, lastAttachedChecklistId: null })
+  })
+
+  it('lists with the new columns and maps them; a one-time row reads exactly as before', async () => {
+    const rows = [
+      {
+        id: 'pnote-r',
+        client_id: 'c1',
+        template_id: 'tpl-pn',
+        kind: 'task',
+        body: 'Send the 1099s',
+        author_id: 'emp-lisa',
+        author_name: 'Lisa',
+        created_at: '2026-09-01T00:00:00.000Z',
+        attached_checklist_id: null,
+        attached_item_id: null,
+        attached_at: null,
+        repeats: true,
+        repeat_of: null,
+        last_attached_checklist_id: 'chk-a',
+        last_attached_due_date: '2026-10-10',
+      },
+      {
+        id: 'pnote-copy',
+        client_id: 'c1',
+        template_id: 'tpl-pn',
+        kind: 'task',
+        body: 'Send the 1099s',
+        author_id: 'emp-lisa',
+        author_name: 'Lisa',
+        created_at: '2026-10-01T00:00:00.000Z',
+        attached_checklist_id: 'chk-a',
+        attached_item_id: 'item-pn-copy',
+        attached_at: '2026-10-01T00:00:00.000Z',
+        repeats: false,
+        repeat_of: 'pnote-r',
+        last_attached_checklist_id: null,
+        last_attached_due_date: null,
+      },
+      {
+        id: 'pnote-plain',
+        client_id: 'c1',
+        template_id: 'tpl-pn',
+        kind: 'note',
+        body: 'once',
+        author_id: null,
+        author_name: null,
+        created_at: '2026-09-02T00:00:00.000Z',
+        attached_checklist_id: null,
+        attached_item_id: null,
+        attached_at: null,
+      },
+    ]
+    const statements = []
+    const pgStore = postgresStore({
+      pool: {
+        query: async (text, params) => {
+          statements.push({ text: String(text), params })
+          return { rows }
+        },
+      },
+    })
+    const listed = await pgStore.listClientPendingNotes('c1')
+    expect(statements[0].text.replace(/\s+/g, ' ')).toContain(
+      'created_at, attached_checklist_id, attached_item_id, attached_at, repeats, repeat_of, last_attached_checklist_id, last_attached_due_date from client_pending_notes where client_id = $1',
+    )
+    expect(statements[0].params).toEqual(['c1'])
+    expect(listed[0]).toMatchObject({
+      id: 'pnote-r',
+      repeats: true,
+      lastAttachedChecklistId: 'chk-a',
+      lastAttachedDueDate: '2026-10-10',
+    })
+    expect(listed[1]).toMatchObject({ id: 'pnote-copy', repeatOf: 'pnote-r', attachedChecklistId: 'chk-a' })
+    expect(listed[1]).not.toHaveProperty('repeats')
+    expect(listed[2]).toEqual({
+      id: 'pnote-plain',
+      clientId: 'c1',
+      templateId: 'tpl-pn',
+      kind: 'note',
+      body: 'once',
+      authorId: null,
+      authorName: null,
+      createdAt: '2026-09-02T00:00:00.000Z',
+      attachedChecklistId: null,
+      attachedItemId: null,
+      attachedAt: null,
+    })
+  })
+
+  it('the unattached read never picks up the copies, and the lookup asks for the checklist AFTER the last one', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [noteRow({ last_attached_checklist_id: 'chk-a', last_attached_due_date: '2026-10-10' })],
+      checklists: [checklistRow('chk-a', '2026-10-10'), checklistRow('chk-b', '2026-11-10')],
+    })
+    const pgStore = postgresStore(fake)
+    const pending = await pgStore._listUnattachedPendingNotes('c1')
+    const [select] = fake.matching(/^select n\.id, n\.client_id/i)
+    expect(select.text.replace(/\s+/g, ' ')).toContain(
+      'n.repeats, n.last_attached_checklist_id, n.last_attached_due_date from client_pending_notes n left join checklists c on c.id = n.attached_checklist_id where (n.attached_checklist_id is null or c.id is null or c.deleted_at is not null or c.skipped_at is not null) and n.repeat_of is null and n.client_id = $1',
+    )
+    expect(pending[0]).toMatchObject({
+      id: 'pnote-r',
+      repeats: true,
+      lastChecklistId: 'chk-a',
+      lastDueDate: '2026-10-10',
+      stale: false,
+    })
+
+    const found = await pgStore._findNextChecklistsForPendingNotes(pending)
+    expect(found.get('pnote-r')).toEqual({ id: 'chk-b' })
+    const [lookup] = fake.matching(/^select n\.id as note_id, found\.id as checklist_id/i)
+    expect(lookup.text.replace(/\s+/g, ' ')).toContain(
+      'from unnest($1::text[], $2::text[], $3::text[], $4::timestamptz[], $5::text[], $6::boolean[], $7::text[], $8::text[]) as n(id, template_id, client_id, created_at, created_date, stale, last_due_date, last_checklist_id)',
+    )
+    expect(lookup.text.replace(/\s+/g, ' ')).toContain(
+      'and ( n.last_checklist_id is null or (c.due_date >= n.last_due_date::date and c.id <> n.last_checklist_id) ) and not exists ( select 1 from client_pending_notes p where p.repeat_of = n.id and p.attached_checklist_id = c.id )',
+    )
+    expect(lookup.params[6]).toEqual(['2026-10-10'])
+    expect(lookup.params[7]).toEqual(['chk-a'])
+    // A one-time note carries nulls there, which the clause reads as "no limit".
+    await pgStore._findNextChecklistsForPendingNotes([
+      { id: 'pnote-x', templateId: 'tpl-pn', clientId: 'c1', createdAt: '2026-09-01T00:00:00.000Z', stale: false },
+    ])
+    const last = fake.lookups.at(-1)
+    expect(last[6]).toEqual([null])
+    expect(last[7]).toEqual([null])
+  })
+
+  it('puts a repeating note on A then B, each in one transaction with the claim, never twice, and keeps the note pending', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [noteRow()],
+      checklists: [checklistRow('chk-a', '2026-10-10'), checklistRow('chk-b', '2026-11-10', { created_at: '2026-09-06T00:00:00.000Z' })],
+    })
+    const pgStore = postgresStore(fake)
+    const hook = vi.fn()
+    pgStore.onPendingNotesAttached = hook
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(2)
+    expect(hook).toHaveBeenCalledTimes(1)
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+    expect(hook).toHaveBeenCalledTimes(1)
+
+    const parent = fake.notes.find((entry) => entry.id === 'pnote-r')
+    expect(parent).toMatchObject({
+      attached_checklist_id: null,
+      last_attached_checklist_id: 'chk-b',
+      last_attached_due_date: '2026-11-10',
+    })
+    const copies = fake.notes.filter((entry) => entry.repeat_of === 'pnote-r')
+    expect(copies.map((entry) => entry.attached_checklist_id)).toEqual(['chk-a', 'chk-b'])
+    expect(copies.every((entry) => /^item-pn-/.test(entry.attached_item_id))).toBe(true)
+    expect(fake.items.map((item) => item.checklist_id)).toEqual(['chk-a', 'chk-b'])
+    expect(new Set(fake.items.map((item) => item.id)).size).toBe(2)
+
+    // The first attachment, statement by statement, all inside one transaction.
+    const claims = fake.matching(/^update client_pending_notes\s+set last_attached_checklist_id = \$2/i)
+    expect(claims).toHaveLength(2)
+    expect(claims[0].text.replace(/\s+/g, ' ')).toBe(
+      "update client_pending_notes set last_attached_checklist_id = $2, last_attached_due_date = (select to_char(due_date, 'YYYY-MM-DD') from checklists where id = $2) where id = $1 and repeats = true and attached_checklist_id is null and last_attached_checklist_id is not distinct from $3::text returning author_id, author_name",
+    )
+    expect(claims[0].params).toEqual(['pnote-r', 'chk-a', null])
+    expect(claims[1].params).toEqual(['pnote-r', 'chk-b', 'chk-a'])
+    const copyInserts = fake.matching(/^insert into client_pending_notes\s+\(id, client_id, template_id, kind, body, author_id, author_name, created_at,\s+attached_checklist_id/i)
+    expect(copyInserts[0].text.replace(/\s+/g, ' ')).toBe(
+      'insert into client_pending_notes (id, client_id, template_id, kind, body, author_id, author_name, created_at, attached_checklist_id, attached_item_id, attached_at, repeat_of) values ($1, $2, $3, $4, $5, $6, $7, now(), $8, $9, now(), $10)',
+    )
+    expect(copyInserts[0].params).toEqual([
+      copies[0].id,
+      'c1',
+      'tpl-pn',
+      'task',
+      'Send the 1099s',
+      'emp-lisa',
+      'Lisa',
+      'chk-a',
+      copies[0].attached_item_id,
+      'pnote-r',
+    ])
+    const order = [
+      /^begin$/i,
+      /^select 1 from checklists/i,
+      /^update client_pending_notes\s+set last_attached_checklist_id/i,
+      /^select coalesce\(max\(sort_order\)/i,
+      /^insert into checklist_items/i,
+      /^insert into client_pending_notes\s+\(id, client_id/i,
+      /^commit$/i,
+    ]
+    let at = -1
+    for (const pattern of order) {
+      const next = fake.statements.findIndex((statement, index) => index > at && pattern.test(statement.text))
+      expect(next, String(pattern)).toBeGreaterThan(at)
+      at = next
+    }
+    expect(fake.matching(/^insert into checklist_items/i)[0].inTransaction).toBe(true)
+    expect(copyInserts[0].inTransaction).toBe(true)
+  })
+
+  it('a note-kind repeating note writes no step', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [noteRow({ kind: 'note' })],
+      checklists: [checklistRow('chk-a', '2026-10-10')],
+    })
+    expect(await postgresStore(fake).attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+    expect(fake.items).toHaveLength(0)
+    expect(fake.matching(/^insert into checklist_items/i)).toHaveLength(0)
+    const [copy] = fake.notes.filter((entry) => entry.repeat_of === 'pnote-r')
+    expect(copy).toMatchObject({ kind: 'note', attached_checklist_id: 'chk-a', attached_item_id: null })
+  })
+
+  it('a pass that read the note at an older spot rolls back: nothing inserted, no commit', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [noteRow({ last_attached_checklist_id: 'chk-a', last_attached_due_date: '2026-10-10' })],
+      checklists: [checklistRow('chk-a', '2026-10-10'), checklistRow('chk-b', '2026-11-10')],
+    })
+    const pgStore = postgresStore(fake)
+    const stale = { id: 'pnote-r', clientId: 'c1', templateId: 'tpl-pn', kind: 'task', body: 'x', lastChecklistId: null }
+    expect(await pgStore._attachRepeatingPendingNote({ note: stale, checklistId: 'chk-a' })).toBe(false)
+    expect(fake.matching(/^insert into checklist_items/i)).toHaveLength(0)
+    expect(fake.matching(/^insert into client_pending_notes/i)).toHaveLength(0)
+    expect(fake.matching(/^commit$/i)).toHaveLength(0)
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+    expect(fake.notes[0].last_attached_checklist_id).toBe('chk-a')
+  })
+
+  it('a target that went away (deleted, skipped or a split record) is refused before the claim', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [noteRow()],
+      checklists: [checklistRow('chk-a', '2026-10-10', { deleted_at: '2026-09-30T00:00:00.000Z' })],
+    })
+    const pgStore = postgresStore(fake)
+    const seen = { id: 'pnote-r', clientId: 'c1', templateId: 'tpl-pn', kind: 'task', body: 'x', lastChecklistId: null }
+    expect(await pgStore._attachRepeatingPendingNote({ note: seen, checklistId: 'chk-a' })).toBe(false)
+    expect(fake.matching(/^update client_pending_notes/i)).toHaveLength(0)
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+  })
+
+  it('two passes at once never put it on the same checklist twice', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [noteRow()],
+      checklists: [checklistRow('chk-a', '2026-10-10')],
+    })
+    const pgStore = postgresStore(fake)
+    const results = await Promise.all([
+      pgStore.attachPendingClientNotes({ clientId: 'c1' }),
+      pgStore.attachPendingClientNotes({ clientId: 'c1' }),
+    ])
+    expect(results.reduce((sum, count) => sum + count, 0)).toBe(1)
+    expect(fake.notes.filter((entry) => entry.repeat_of === 'pnote-r')).toHaveLength(1)
+    expect(fake.items).toHaveLength(1)
+  })
+
+  it('a copy whose checklist is deleted is not released or moved; a one-time note still is', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        noteRow(),
+        {
+          id: 'pnote-copy',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'note',
+          body: 'copy',
+          created_at: '2026-09-02T00:00:00.000Z',
+          attached_checklist_id: 'chk-gone',
+          attached_item_id: null,
+          attached_at: new Date(),
+          repeat_of: 'pnote-r',
+        },
+        {
+          id: 'pnote-once',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'note',
+          body: 'once',
+          created_at: '2026-09-02T00:00:00.000Z',
+          attached_checklist_id: 'chk-gone',
+          attached_item_id: null,
+          attached_at: new Date(),
+        },
+      ],
+      checklists: [checklistRow('chk-gone', '2026-09-20', { deleted_at: '2026-09-25T00:00:00.000Z' }), checklistRow('chk-a', '2026-10-10')],
+    })
+    await postgresStore(fake).attachPendingClientNotes({ clientId: 'c1' })
+    const copy = fake.notes.find((entry) => entry.id === 'pnote-copy')
+    expect(copy.attached_checklist_id).toBe('chk-gone')
+    const once = fake.notes.find((entry) => entry.id === 'pnote-once')
+    expect(once.attached_checklist_id).toBe('chk-a')
+    expect(fake.notes.filter((entry) => entry.repeat_of === 'pnote-r' && entry.attached_checklist_id === 'chk-a')).toHaveLength(1)
+  })
+
+  it('a one-time note beside a repeating one is spent after one attach, by exactly the statements it always used', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [noteRow(), noteRow({ id: 'pnote-once', repeats: null, kind: 'note', body: 'once' })],
+      checklists: [checklistRow('chk-a', '2026-10-10'), checklistRow('chk-b', '2026-11-10')],
+    })
+    const pgStore = postgresStore(fake)
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(3)
+    const once = fake.notes.find((entry) => entry.id === 'pnote-once')
+    expect(once.attached_checklist_id).toBe('chk-a')
+    expect(fake.notes.filter((entry) => entry.repeat_of === 'pnote-r').map((entry) => entry.attached_checklist_id)).toEqual([
+      'chk-a',
+      'chk-b',
+    ])
+    const stamp = fake.matching(/^update client_pending_notes\s+set attached_checklist_id = \$2/i)
+    expect(stamp).toHaveLength(1)
+    expect(stamp[0].params).toEqual(['pnote-once', 'chk-a'])
+  })
+})
+
+/**
+ * A repeating note never puts a SECOND copy on one checklist. The pointer (the
+ * last checklist, its due date) orders the walk and is what the client page shows,
+ * but "never twice" is decided by the copies themselves: a checklist whose due date
+ * moved later (a push with no done steps, a due-date edit) is the same checklist,
+ * not a new one. Also: a repeating note skips a FINISHED checklist, the two backends
+ * read a note in the same shape, and the file backend's claim-and-copy is one slot.
+ */
+describe('a repeating note never copies onto one checklist twice (file backend)', () => {
+  beforeEach(async () => {
+    await rm(localDataPath, { force: true })
+    await store.write(workspace({ clients: [], timeEntries: [] }))
+  })
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const authNow = async () =>
+    existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+  let seq = 0
+  const newClient = () => `c-twice-${(seq += 1)}`
+  const checklistRow = (id, clientId, dueDate, over = {}) => ({
+    id,
+    title: 'Payroll',
+    clientId,
+    assigneeId: 'emp-1',
+    templateId: 'tpl-pn',
+    dueDate,
+    createdAt: new Date(Date.now() + 60_000).toISOString(),
+    viewerIds: [],
+    editorIds: [],
+    items: [{ id: `${id}-s1`, label: 'Existing step', done: false }],
+    ...over,
+  })
+  const addChecklists = async (...rows) => {
+    const data = await persisted()
+    data.checklists.push(...rows)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const changeChecklist = async (id, change) => {
+    const data = await persisted()
+    change(data.checklists.find((entry) => entry.id === id))
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const copiesOf = async (clientId, noteId) =>
+    ((await authNow()).clientPendingNotes ?? []).filter(
+      (entry) => entry.clientId === clientId && entry.repeatOf === noteId,
+    )
+  const copiesOn = async (clientId, noteId, checklistId) =>
+    (await copiesOf(clientId, noteId)).filter((entry) => entry.attachedChecklistId === checklistId)
+  const itemsOf = async (checklistId) =>
+    (await persisted()).checklists.find((entry) => entry.id === checklistId).items
+  const repeating = (clientId, over = {}) =>
+    store.createClientPendingNote(clientId, {
+      templateId: 'tpl-pn',
+      kind: 'task',
+      body: 'Send the 1099s',
+      authorId: 'emp-lisa',
+      authorName: 'Lisa',
+      repeats: true,
+      ...over,
+    })
+
+  it('a due-date edit that moves C1 later does not give C1 a second copy; the next month still gets its own', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId)
+    await addChecklists(checklistRow('chk-c1', clientId, '2026-10-10'))
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+
+    await store.updateChecklistMeta('chk-c1', { dueDate: '2026-11-10' })
+    expect((await persisted()).checklists.find((entry) => entry.id === 'chk-c1').dueDate).toBe('2026-11-10')
+    for (let pass = 0; pass < 3; pass += 1) {
+      expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+    }
+    expect(await copiesOn(clientId, note.id, 'chk-c1')).toHaveLength(1)
+    expect(await itemsOf('chk-c1')).toHaveLength(2)
+
+    await addChecklists(checklistRow('chk-c2', clientId, '2026-11-20'))
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+    expect(await copiesOn(clientId, note.id, 'chk-c2')).toHaveLength(1)
+    expect(await copiesOn(clientId, note.id, 'chk-c1')).toHaveLength(1)
+    // Moved past the pointer later still: same checklist, still one copy.
+    await changeChecklist('chk-c1', (checklist) => {
+      checklist.dueDate = '2026-12-31'
+    })
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+    expect(await copiesOf(clientId, note.id)).toHaveLength(2)
+  })
+
+  it('an earlier checklist moved later than the pointer does not stand in front of the next one (the lookup itself skips it)', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId, { kind: 'note' })
+    await addChecklists(checklistRow('chk-c1', clientId, '2026-10-10'), checklistRow('chk-c2', clientId, '2026-11-01'))
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(2)
+    // C1 is moved to between C2 and the next month's checklist.
+    await store.updateChecklistMeta('chk-c1', { dueDate: '2026-11-15' })
+    await addChecklists(checklistRow('chk-c3', clientId, '2026-12-01'))
+    const [parent] = await store._listUnattachedPendingNotes(clientId)
+    const found = await store._findNextChecklistsForPendingNotes([parent])
+    expect(found.get(note.id)).toEqual({ id: 'chk-c3' })
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+    expect(await copiesOn(clientId, note.id, 'chk-c3')).toHaveLength(1)
+    expect(await copiesOf(clientId, note.id)).toHaveLength(3)
+  })
+
+  it('a push with no done steps (the same row, a later date) does not give it a second copy either', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId, { kind: 'note' })
+    await addChecklists(checklistRow('chk-c1', clientId, '2026-10-10'))
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+
+    const pushed = await store.pushChecklistInstance('chk-c1', 'emp-1', '2026-11-12')
+    expect(pushed).toBeTruthy()
+    expect((await persisted()).checklists.find((entry) => entry.id === 'chk-c1').dueDate).toBe('2026-11-12')
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+    expect(await copiesOn(clientId, note.id, 'chk-c1')).toHaveLength(1)
+
+    await addChecklists(checklistRow('chk-c2', clientId, '2026-11-20'))
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+    expect(await copiesOf(clientId, note.id)).toHaveLength(2)
+  })
+
+  it('a checklist deleted and regenerated on the SAME due date gets a copy, whichever way the new id sorts', async () => {
+    for (const [oldId, regeneratedId] of [
+      ['chk-m-old-1', 'chk-a-new-1'],
+      ['chk-m-old-2', 'chk-z-new-2'],
+    ]) {
+      const clientId = newClient()
+      const note = await repeating(clientId)
+      await addChecklists(checklistRow(oldId, clientId, '2026-10-10'))
+      expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+      await changeChecklist(oldId, (checklist) => {
+        checklist.deletedAt = '2026-10-02T00:00:00.000Z'
+      })
+      await addChecklists(checklistRow(regeneratedId, clientId, '2026-10-10'))
+      expect(await store.attachPendingClientNotes({ clientId }), regeneratedId).toBe(1)
+      expect(await copiesOn(clientId, note.id, regeneratedId)).toHaveLength(1)
+      expect(await copiesOn(clientId, note.id, oldId)).toHaveLength(1)
+      expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+    }
+  })
+
+  it('deleting the last copy from the list does not make the same checklist look new', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId, { kind: 'note' })
+    await addChecklists(checklistRow('chk-c1', clientId, '2026-10-10'))
+    await store.attachPendingClientNotes({ clientId })
+    const [copy] = await copiesOf(clientId, note.id)
+    expect(await store.deleteClientPendingNote(copy.id)).toBe(true)
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+    expect(await copiesOf(clientId, note.id)).toHaveLength(0)
+  })
+
+  it('skips a FINISHED checklist (every step done by the roll-up) and goes on the next one with work left', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId)
+    await addChecklists(
+      checklistRow('chk-done', clientId, '2026-10-10', {
+        items: [{ id: 'd1', label: 'Done step', done: true }],
+      }),
+      checklistRow('chk-subs-done', clientId, '2026-10-11', {
+        items: [
+          {
+            id: 'd2',
+            label: 'Marked open, sub-steps done',
+            done: false,
+            subItems: [{ id: 'd2-1', title: 'Sub', done: true }],
+          },
+        ],
+      }),
+      checklistRow('chk-open', clientId, '2026-10-12', {
+        items: [
+          { id: 'o1', label: 'Done', done: true },
+          {
+            id: 'o2',
+            label: 'One sub-step open',
+            done: true,
+            subItems: [
+              { id: 'o2-1', title: 'a', done: true },
+              { id: 'o2-2', title: 'b', done: false },
+            ],
+          },
+        ],
+      }),
+    )
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(1)
+    expect((await copiesOf(clientId, note.id)).map((entry) => entry.attachedChecklistId)).toEqual(['chk-open'])
+    expect(await itemsOf('chk-done')).toHaveLength(1)
+    expect(await itemsOf('chk-subs-done')).toHaveLength(1)
+    const found = await store._findNextChecklistsForPendingNotes([
+      { id: 'n', templateId: 'tpl-pn', clientId, createdAt: '2026-09-01T00:00:00.000Z', stale: false, repeats: false },
+    ])
+    // A one-time, not-stale note still takes a finished checklist, exactly as before.
+    expect(found.get('n')).toEqual({ id: 'chk-done' })
+  })
+
+  it('two passes at once put one copy on the checklist, and a Stop that lands first wins', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId)
+    await addChecklists(checklistRow('chk-c1', clientId, '2026-10-10'))
+    const results = await Promise.all([
+      store.attachPendingClientNotes({ clientId }),
+      store.attachPendingClientNotes({ clientId }),
+      store.attachPendingClientNotes({ clientId }),
+    ])
+    expect(results.reduce((sum, count) => sum + count, 0)).toBe(1)
+    expect(await copiesOn(clientId, note.id, 'chk-c1')).toHaveLength(1)
+    expect(await itemsOf('chk-c1')).toHaveLength(2)
+
+    // The same note read at the same spot by two callers: one wins, the step is added once.
+    const clientTwo = newClient()
+    const second = await repeating(clientTwo)
+    await addChecklists(checklistRow('chk-d1', clientTwo, '2026-10-10'))
+    const seen = { id: second.id, clientId: clientTwo, templateId: 'tpl-pn', kind: 'task', body: second.body, lastChecklistId: null }
+    const raced = await Promise.all([
+      store._attachRepeatingPendingNote({ note: seen, checklistId: 'chk-d1' }),
+      store._attachRepeatingPendingNote({ note: seen, checklistId: 'chk-d1' }),
+    ])
+    expect(raced.filter(Boolean)).toHaveLength(1)
+    expect(await copiesOn(clientTwo, second.id, 'chk-d1')).toHaveLength(1)
+    expect(await itemsOf('chk-d1')).toHaveLength(2)
+
+    // Stopped (deleted) in the same instant as a pass: nothing is written after the Stop.
+    const clientThree = newClient()
+    const third = await repeating(clientThree)
+    await addChecklists(checklistRow('chk-e1', clientThree, '2026-10-10'))
+    const [attached] = await Promise.all([
+      store.attachPendingClientNotes({ clientId: clientThree }),
+      store.deleteClientPendingNote(third.id),
+    ])
+    expect([0, 1]).toContain(attached)
+    expect((await copiesOf(clientThree, third.id)).length).toBe(attached)
+    expect(await store.attachPendingClientNotes({ clientId: clientThree })).toBe(0)
+    expect((await copiesOf(clientThree, third.id)).length).toBe(attached)
+  })
+
+  it('a stray second copy already on the checklist is refused by the claim itself, whatever the pointer says', async () => {
+    const clientId = newClient()
+    const note = await repeating(clientId, { kind: 'note' })
+    await addChecklists(checklistRow('chk-c1', clientId, '2026-10-10'))
+    const authState = await authNow()
+    authState.clientPendingNotes.push({
+      id: 'pnote-stray',
+      clientId,
+      templateId: 'tpl-pn',
+      kind: 'note',
+      body: note.body,
+      authorId: null,
+      authorName: null,
+      createdAt: new Date().toISOString(),
+      attachedChecklistId: 'chk-c1',
+      attachedItemId: null,
+      attachedAt: new Date().toISOString(),
+      repeatOf: note.id,
+    })
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    const seen = { id: note.id, clientId, templateId: 'tpl-pn', kind: 'note', body: note.body, lastChecklistId: null }
+    expect(await store._attachRepeatingPendingNote({ note: seen, checklistId: 'chk-c1' })).toBe(false)
+    expect(await copiesOn(clientId, note.id, 'chk-c1')).toHaveLength(1)
+    // And the lookup does not offer it.
+    expect(await store.attachPendingClientNotes({ clientId })).toBe(0)
+  })
+
+  it('the reads return the same shape for a one-time note, a repeating note and a copy', async () => {
+    const clientId = newClient()
+    const once = await store.createClientPendingNote(clientId, { templateId: 'tpl-pn', kind: 'note', body: 'once' })
+    const note = await repeating(clientId)
+    await addChecklists(checklistRow('chk-c1', clientId, '2026-10-10'))
+    await store.attachPendingClientNotes({ clientId })
+    const [copy] = await copiesOf(clientId, note.id)
+    expect(await store.getClientPendingNote(once.id)).not.toHaveProperty('repeats')
+    expect(await store.getClientPendingNote(note.id)).toMatchObject({
+      repeats: true,
+      lastAttachedChecklistId: 'chk-c1',
+      lastAttachedDueDate: '2026-10-10',
+    })
+    expect(await store.getClientPendingNote(copy.id)).toMatchObject({ repeatOf: note.id })
+    const onChecklist = (await store.listPendingNotesForChecklists(['chk-c1'])).filter((entry) => entry.clientId === clientId)
+    expect(onChecklist.map((entry) => entry.id)).toContain(copy.id)
+    expect(onChecklist.find((entry) => entry.id === copy.id)).toMatchObject({ repeatOf: note.id })
+  })
+})
+
+describe('a repeating note never copies onto one checklist twice (postgres branch)', () => {
+  const noteRow = (over = {}) => ({
+    id: 'pnote-r',
+    client_id: 'c1',
+    template_id: 'tpl-pn',
+    kind: 'task',
+    body: 'Send the 1099s',
+    author_id: 'emp-lisa',
+    author_name: 'Lisa',
+    created_at: '2026-09-01T00:00:00.000Z',
+    attached_checklist_id: null,
+    repeats: true,
+    last_attached_checklist_id: null,
+    last_attached_due_date: null,
+    ...over,
+  })
+  const checklistRow = (id, dueDate, over = {}) => ({
+    id,
+    template_id: 'tpl-pn',
+    client_id: 'c1',
+    due_date: dueDate,
+    created_at: '2026-09-05T00:00:00.000Z',
+    ...over,
+  })
+  const copiesOn = (fake, checklistId) =>
+    fake.notes.filter((entry) => entry.repeat_of === 'pnote-r' && entry.attached_checklist_id === checklistId)
+
+  it('a checklist whose due date moved later (push or edit) is not a new one, and the next month still gets its own', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [noteRow()],
+      checklists: [checklistRow('chk-c1', '2026-10-10')],
+    })
+    const pgStore = postgresStore(fake)
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+    fake.checklists[0].due_date = '2026-11-10'
+    for (let pass = 0; pass < 3; pass += 1) {
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+    }
+    expect(copiesOn(fake, 'chk-c1')).toHaveLength(1)
+    expect(fake.items).toHaveLength(1)
+
+    fake.checklists.push(checklistRow('chk-c2', '2026-11-20'))
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+    expect(copiesOn(fake, 'chk-c2')).toHaveLength(1)
+    fake.checklists[0].due_date = '2026-12-31'
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+    expect(copiesOn(fake, 'chk-c1')).toHaveLength(1)
+  })
+
+  it('the lookup itself skips a checklist that holds a copy, even when it sorts before the next one', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [noteRow()],
+      checklists: [checklistRow('chk-c1', '2026-10-10'), checklistRow('chk-c2', '2026-11-01')],
+    })
+    const pgStore = postgresStore(fake)
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(2)
+    fake.checklists[0].due_date = '2026-11-15'
+    fake.checklists.push(checklistRow('chk-c3', '2026-12-01'))
+    const [parent] = await pgStore._listUnattachedPendingNotes('c1')
+    expect((await pgStore._findNextChecklistsForPendingNotes([parent])).get('pnote-r')).toEqual({ id: 'chk-c3' })
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+    expect(copiesOn(fake, 'chk-c3')).toHaveLength(1)
+    expect(fake.notes.filter((entry) => entry.repeat_of === 'pnote-r')).toHaveLength(3)
+  })
+
+  it('the claim re-checks, once the parent row is locked, that no copy is on the checklist, and rolls back', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        noteRow(),
+        {
+          id: 'pnote-stray',
+          client_id: 'c1',
+          template_id: 'tpl-pn',
+          kind: 'task',
+          body: 'x',
+          created_at: '2026-10-01T00:00:00.000Z',
+          attached_checklist_id: 'chk-c1',
+          repeat_of: 'pnote-r',
+        },
+      ],
+      checklists: [checklistRow('chk-c1', '2026-10-10')],
+    })
+    const pgStore = postgresStore(fake)
+    const seen = { id: 'pnote-r', clientId: 'c1', templateId: 'tpl-pn', kind: 'task', body: 'x', lastChecklistId: null }
+    expect(await pgStore._attachRepeatingPendingNote({ note: seen, checklistId: 'chk-c1' })).toBe(false)
+    const recheck = fake.matching(/^select 1 from client_pending_notes where repeat_of = \$1 and attached_checklist_id = \$2$/i)
+    expect(recheck).toHaveLength(1)
+    expect(recheck[0].params).toEqual(['pnote-r', 'chk-c1'])
+    // After the claim (the parent row is locked), before anything is written.
+    const claimAt = fake.statements.findIndex((statement) => /^update client_pending_notes\s+set last_attached_checklist_id/i.test(statement.text))
+    const recheckAt = fake.statements.findIndex((statement) => /^select 1 from client_pending_notes where repeat_of/i.test(statement.text))
+    expect(recheckAt).toBeGreaterThan(claimAt)
+    expect(fake.matching(/^insert into /i)).toHaveLength(0)
+    expect(fake.matching(/^commit$/i)).toHaveLength(0)
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+  })
+
+  it('a checklist regenerated on the SAME due date gets a copy, whichever way the new id sorts', async () => {
+    for (const regeneratedId of ['chk-a-new', 'chk-z-new']) {
+      const fake = fakePendingNotesPostgres({
+        notes: [noteRow()],
+        checklists: [checklistRow('chk-m-old', '2026-10-10')],
+      })
+      const pgStore = postgresStore(fake)
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+      fake.checklists[0].deleted_at = '2026-10-02T00:00:00.000Z'
+      fake.checklists.push(checklistRow(regeneratedId, '2026-10-10'))
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' }), regeneratedId).toBe(1)
+      expect(copiesOn(fake, regeneratedId)).toHaveLength(1)
+      expect(copiesOn(fake, 'chk-m-old')).toHaveLength(1)
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+    }
+  })
+
+  it('skips a finished checklist and goes on the next one with work left; the stale flag it rides is on for a repeating note only', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [noteRow(), noteRow({ id: 'pnote-once', repeats: null, kind: 'note', body: 'once' })],
+      checklists: [checklistRow('chk-done', '2026-10-10'), checklistRow('chk-open', '2026-10-12')],
+      items: [
+        { id: 'i1', checklist_id: 'chk-done', done: true, sort_order: 0 },
+        { id: 'i2', checklist_id: 'chk-open', done: false, sort_order: 0 },
+      ],
+    })
+    const pgStore = postgresStore(fake)
+    expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(2)
+    expect(copiesOn(fake, 'chk-open')).toHaveLength(1)
+    expect(copiesOn(fake, 'chk-done')).toHaveLength(0)
+    // The one-time, not-stale note still takes the earliest checklist, finished or not.
+    expect(fake.notes.find((entry) => entry.id === 'pnote-once').attached_checklist_id).toBe('chk-done')
+    // Lookup params, in order: repeating note true, one-time note false.
+    expect(fake.lookups[0][0]).toEqual(['pnote-r', 'pnote-once'])
+    expect(fake.lookups[0][5]).toEqual([true, false])
+  })
+
+  it('getClientPendingNote and listPendingNotesForChecklists select the new columns and map them like the list', async () => {
+    const rows = [
+      {
+        id: 'pnote-r',
+        client_id: 'c1',
+        template_id: 'tpl-pn',
+        kind: 'task',
+        body: 'x',
+        author_id: null,
+        author_name: null,
+        created_at: '2026-09-01T00:00:00.000Z',
+        attached_checklist_id: null,
+        attached_item_id: null,
+        attached_at: null,
+        repeats: true,
+        repeat_of: null,
+        last_attached_checklist_id: 'chk-a',
+        last_attached_due_date: '2026-10-10',
+      },
+      {
+        id: 'pnote-copy',
+        client_id: 'c1',
+        template_id: 'tpl-pn',
+        kind: 'note',
+        body: 'x',
+        author_id: null,
+        author_name: null,
+        created_at: '2026-10-01T00:00:00.000Z',
+        attached_checklist_id: 'chk-a',
+        attached_item_id: null,
+        attached_at: '2026-10-01T00:00:00.000Z',
+        repeats: false,
+        repeat_of: 'pnote-r',
+        last_attached_checklist_id: null,
+        last_attached_due_date: null,
+      },
+      {
+        id: 'pnote-plain',
+        client_id: 'c1',
+        template_id: 'tpl-pn',
+        kind: 'note',
+        body: 'once',
+        author_id: null,
+        author_name: null,
+        created_at: '2026-09-02T00:00:00.000Z',
+        attached_checklist_id: 'chk-a',
+        attached_item_id: null,
+        attached_at: '2026-10-01T00:00:00.000Z',
+      },
+    ]
+    const statements = []
+    const pgStore = postgresStore({
+      pool: {
+        query: async (text) => {
+          statements.push(String(text).replace(/\s+/g, ' '))
+          return { rows, rowCount: rows.length }
+        },
+      },
+    })
+    const columns =
+      'created_at, attached_checklist_id, attached_item_id, attached_at, repeats, repeat_of, last_attached_checklist_id, last_attached_due_date from client_pending_notes'
+    const one = await pgStore.getClientPendingNote('pnote-r')
+    expect(statements[0]).toContain(`${columns} where id = $1`)
+    expect(one).toMatchObject({ repeats: true, lastAttachedChecklistId: 'chk-a', lastAttachedDueDate: '2026-10-10' })
+    const onChecklists = await pgStore.listPendingNotesForChecklists(['chk-a'])
+    expect(statements[1]).toContain(`${columns} where attached_checklist_id = any($1::text[])`)
+    expect(onChecklists[1]).toMatchObject({ id: 'pnote-copy', repeatOf: 'pnote-r' })
+    expect(onChecklists[1]).not.toHaveProperty('repeats')
+    expect(onChecklists[2]).not.toHaveProperty('repeats')
+    expect(onChecklists[2]).not.toHaveProperty('repeatOf')
+  })
+
+  it('start-up runs the alter only when a column is missing, and skips it (no lock) once all four are there', async () => {
+    const check = /^select column_name from information_schema\.columns\s+where table_schema = current_schema\(\) and table_name = 'client_pending_notes'\s+and column_name = any\(\$1::text\[\]\)$/i
+    const missing = fakePostgres()
+    await postgresStore(missing).initialize().catch(() => {})
+    const [lookup] = missing.matching(check)
+    expect(lookup.text.replace(/\s+/g, ' ')).toBe(
+      "select column_name from information_schema.columns where table_schema = current_schema() and table_name = 'client_pending_notes' and column_name = any($1::text[])",
+    )
+    expect(lookup.params).toEqual([['repeats', 'repeat_of', 'last_attached_checklist_id', 'last_attached_due_date']])
+    expect(missing.matching(/^alter table client_pending_notes\s+add column if not exists repeats/i)).toHaveLength(1)
+
+    const present = fakePostgres()
+    const inner = present.pool.query.bind(present.pool)
+    present.pool.query = async (text, params) => {
+      const result = await inner(text, params)
+      if (check.test(String(text).trim())) {
+        return { rows: lookup.params[0].map((column_name) => ({ column_name })), rowCount: 4 }
+      }
+      return result
+    }
+    await postgresStore(present).initialize().catch(() => {})
+    expect(present.matching(check)).toHaveLength(1)
+    expect(present.matching(/^alter table client_pending_notes\s+add column if not exists repeats/i)).toHaveLength(0)
+    // The released_at alter is untouched: it still runs on every start.
+    expect(present.matching(/^alter table client_pending_notes add column if not exists released_at timestamptz$/i)).toHaveLength(1)
+    // And three of four is still a missing column.
+    const partial = fakePostgres()
+    const innerPartial = partial.pool.query.bind(partial.pool)
+    partial.pool.query = async (text, params) => {
+      const result = await innerPartial(text, params)
+      if (check.test(String(text).trim())) return { rows: [{ column_name: 'repeats' }], rowCount: 1 }
+      return result
+    }
+    await postgresStore(partial).initialize().catch(() => {})
+    expect(partial.matching(/^alter table client_pending_notes\s+add column if not exists repeats/i)).toHaveLength(1)
   })
 })

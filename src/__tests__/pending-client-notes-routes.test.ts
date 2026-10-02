@@ -315,3 +315,52 @@ describe('deleting a checklist puts its notes back on the client page right away
     }
   })
 })
+
+/**
+ * A note that repeats on every checklist (featreq-1f352c4f): the create route
+ * takes `repeats`, strictly boolean, and stopping one is the EXISTING delete
+ * route - the repeating row itself is never attached, so the rule "the author, or
+ * an owner, while it is unattached" already covers it. The attach pass, both
+ * backends and the cap are pinned in db/store-staleness.test.mjs.
+ */
+describe('a note that repeats on every checklist', () => {
+  it('POST passes repeats to the store only when the body says exactly true', () => {
+    const text = routeBlock(/const clientPendingNotesMatch = normalizedPath\.match/, 6200)
+    const at = text.indexOf('note = await appDataStore.createClientPendingNote(clientId, {')
+    expect(at).toBeGreaterThan(-1)
+    expect(text.slice(at, at + 500)).toContain('repeats: payload?.repeats === true,')
+  })
+
+  it('stopping one uses the existing delete route, which has no special case for the repeating note itself', () => {
+    const text = routeBlock(/const clientPendingNoteDeleteMatch = normalizedPath\.match/, 3200)
+    expect(text).not.toContain('repeats')
+    // The repeating row is never attached, so its author passes the unattached rule.
+    expect(text).toContain('const isOwnUnattached = note.authorId === session.user.id && !note.attachedChecklistId')
+    expect(text).toContain('await appDataStore.deleteClientPendingNote(noteId)')
+  })
+
+  it('refuses to delete a COPY a repeating note left on a checklist, for everyone, before anything is written', () => {
+    const text = routeBlock(/const clientPendingNoteDeleteMatch = normalizedPath.match/, 3200)
+    const refusalAt = text.indexOf('if (note.repeatOf) {')
+    expect(refusalAt).toBeGreaterThan(-1)
+    const refusal = text.slice(refusalAt, refusalAt + 520)
+    expect(refusal).toContain('sendJson(response, 409, {')
+    expect(refusal).toContain("error: 'REPEAT_COPY_NOT_DELETABLE',")
+    expect(refusal).toContain(
+      "'This note was added by a repeating note. Remove the step on the checklist instead, or stop the repeating note.',",
+    )
+    expect(refusal).toContain('return')
+    // Decided from the row the route already loads, after the 404s and the client
+    // check, and before the owner / author rule (so everyone gets it) and the store delete.
+    expect(refusalAt).toBeGreaterThan(text.indexOf('const note = await appDataStore.getClientPendingNote(noteId)'))
+    expect(refusalAt).toBeGreaterThan(text.indexOf('note.clientId !== clientId'))
+    expect(refusalAt).toBeLessThan(text.indexOf('const isOwnUnattached'))
+    expect(refusalAt).toBeLessThan(text.indexOf('await appDataStore.deleteClientPendingNote(noteId)'))
+  })
+
+  it('the list route hands back what the store lists (the repeats fields ride on the note)', () => {
+    const text = routeBlock(/const clientPendingNotesMatch = normalizedPath\.match/, 1400)
+    expect(text).toContain('const notes = await appDataStore.listClientPendingNotes(clientId)')
+    expect(text).toContain('sendJson(response, 200, { notes })')
+  })
+})

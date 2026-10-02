@@ -1125,6 +1125,12 @@ export class StaleStatementAccountsError extends Error {
 export const MAX_UNATTACHED_PENDING_NOTES = 100
 /** The most notes the client page's list ever returns (pending first, newest first). */
 export const MAX_LISTED_PENDING_NOTES = 200
+/**
+ * Most checklists one attach pass will put a repeating note on, one after the
+ * other (a client page note that repeats on every month's checklist). Two years
+ * of monthly checklists in a single pass is far more than a backlog ever holds.
+ */
+const MAX_REPEATING_ATTACH_ROUNDS = 24
 export class TooManyPendingNotesError extends Error {
   constructor(message) {
     super(message)
@@ -3450,7 +3456,7 @@ function mapChecklistSkipRow(row) {
  * this exact shape, so it needs no separate normalizer.
  */
 function mapClientPendingNoteRow(row) {
-  return {
+  const note = {
     id: row.id,
     clientId: row.client_id,
     templateId: row.template_id,
@@ -3463,6 +3469,14 @@ function mapClientPendingNoteRow(row) {
     attachedItemId: row.attached_item_id ?? null,
     attachedAt: row.attached_at ? new Date(row.attached_at).toISOString() : null,
   }
+  // Only a repeating note carries these, so a one-time note reads exactly as before.
+  if (row.repeats === true) {
+    note.repeats = true
+    note.lastAttachedChecklistId = row.last_attached_checklist_id ?? null
+    note.lastAttachedDueDate = row.last_attached_due_date ?? null
+  }
+  if (row.repeat_of) note.repeatOf = row.repeat_of
+  return note
 }
 
 /** A file-backend note without its internal `releasedAt` flag (Postgres rows never carry it). */
@@ -4061,7 +4075,11 @@ export class AppDataStore {
           attached_checklist_id text,
           attached_item_id text,
           attached_at timestamptz,
-          released_at timestamptz
+          released_at timestamptz,
+          repeats boolean default false,
+          repeat_of text,
+          last_attached_checklist_id text,
+          last_attached_due_date text
         )
       `)
       // A note released from a deleted or skipped checklist stays marked
@@ -4069,6 +4087,32 @@ export class AppDataStore {
       await this.pool.query(
         `alter table client_pending_notes add column if not exists released_at timestamptz`,
       )
+      // A note that repeats on every month's checklist (featreq-1f352c4f). The
+      // repeating row itself is never attached: it stays in the list until it is
+      // stopped, and `last_attached_checklist_id` / `last_attached_due_date` say
+      // which checklist it was last put on, so each pass asks for the one AFTER it.
+      // Every attachment is its own ordinary row (`repeat_of` names the note it
+      // came from), so a checklist's copy is edited, ticked or deleted by itself.
+      // Existing rows read as one-time notes (`repeats` is false or null).
+      // `alter table ... add column if not exists` takes an ACCESS EXCLUSIVE lock
+      // even when every column is already there, so look first and run the DDL only
+      // on the first boot after this shipped (a fresh database has the columns from
+      // the create above).
+      const repeatColumns = await this.pool.query(
+        `select column_name from information_schema.columns
+          where table_schema = current_schema() and table_name = 'client_pending_notes'
+            and column_name = any($1::text[])`,
+        [['repeats', 'repeat_of', 'last_attached_checklist_id', 'last_attached_due_date']],
+      )
+      if ((repeatColumns.rows?.length ?? 0) < 4) {
+        await this.pool.query(
+          `alter table client_pending_notes
+             add column if not exists repeats boolean default false,
+             add column if not exists repeat_of text,
+             add column if not exists last_attached_checklist_id text,
+             add column if not exists last_attached_due_date text`,
+        )
+      }
       await this.pool.query(
         `create index if not exists client_pending_notes_client_idx
            on client_pending_notes (client_id)`,
@@ -20581,7 +20625,8 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, client_id, template_id, kind, body, author_id, author_name,
-                created_at, attached_checklist_id, attached_item_id, attached_at
+                created_at, attached_checklist_id, attached_item_id, attached_at,
+                repeats, repeat_of, last_attached_checklist_id, last_attached_due_date
            from client_pending_notes
           where client_id = $1
             and (attached_checklist_id is null or attached_at > now() - interval '90 days')
@@ -20620,7 +20665,8 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, client_id, template_id, kind, body, author_id, author_name,
-                created_at, attached_checklist_id, attached_item_id, attached_at
+                created_at, attached_checklist_id, attached_item_id, attached_at,
+                repeats, repeat_of, last_attached_checklist_id, last_attached_due_date
            from client_pending_notes
           where attached_checklist_id = any($1::text[])
           order by attached_at asc nulls last, created_at asc`,
@@ -20646,7 +20692,10 @@ export class AppDataStore {
    * `MAX_UNATTACHED_PENDING_NOTES` notes that have not attached yet (the count
    * and the insert are one statement on Postgres).
    */
-  async createClientPendingNote(clientId, { templateId, kind, body, authorId, authorName } = {}) {
+  async createClientPendingNote(
+    clientId,
+    { templateId, kind, body, authorId, authorName, repeats } = {},
+  ) {
     if (!clientId || !templateId) return null
     const cleanKind = kind === 'task' ? 'task' : kind === 'note' ? 'note' : null
     if (!cleanKind) return null
@@ -20667,14 +20716,23 @@ export class AppDataStore {
       attachedItemId: null,
       attachedAt: null,
     }
+    // Opt-in (strictly `true`): the note stays on the list and goes on every new
+    // checklist of its template until it is stopped. It is never attached itself,
+    // so it counts once toward the cap below.
+    const repeating = repeats === true
+    if (repeating) {
+      note.repeats = true
+      note.lastAttachedChecklistId = null
+      note.lastAttachedDueDate = null
+    }
     const tooMany = new TooManyPendingNotesError(
       `This client already has ${MAX_UNATTACHED_PENDING_NOTES} notes waiting. Delete some first.`,
     )
     if (this.pool) {
       const inserted = await this.pool.query(
         `insert into client_pending_notes
-           (id, client_id, template_id, kind, body, author_id, author_name, created_at)
-         select $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text, now()
+           (id, client_id, template_id, kind, body, author_id, author_name, created_at${repeating ? ', repeats' : ''})
+         select $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text, now()${repeating ? ', true' : ''}
           where (select count(*) from client_pending_notes
                   where client_id = $2::text and attached_checklist_id is null) < ${MAX_UNATTACHED_PENDING_NOTES}`,
         [note.id, note.clientId, note.templateId, note.kind, note.body, note.authorId, note.authorName],
@@ -20699,7 +20757,8 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, client_id, template_id, kind, body, author_id, author_name,
-                created_at, attached_checklist_id, attached_item_id, attached_at
+                created_at, attached_checklist_id, attached_item_id, attached_at,
+                repeats, repeat_of, last_attached_checklist_id, last_attached_due_date
            from client_pending_notes where id = $1`,
         [noteId],
       )
@@ -20748,11 +20807,13 @@ export class AppDataStore {
       const result = await this.pool.query(
         `select n.id, n.client_id, n.template_id, n.kind, n.body, n.created_at,
                 (n.attached_checklist_id is not null) as was_attached,
-                (n.released_at is not null) as was_released
+                (n.released_at is not null) as was_released,
+                n.repeats, n.last_attached_checklist_id, n.last_attached_due_date
            from client_pending_notes n
            left join checklists c on c.id = n.attached_checklist_id
           where (n.attached_checklist_id is null or c.id is null or c.deleted_at is not null
                  or c.skipped_at is not null)
+            and n.repeat_of is null
             ${clientId ? 'and n.client_id = $1' : ''}`,
         clientId ? [clientId] : [],
       )
@@ -20789,11 +20850,20 @@ export class AppDataStore {
         body: row.body,
         createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
         stale: releasedIds.has(row.id),
+        ...(row.repeats === true
+          ? {
+              repeats: true,
+              lastChecklistId: row.last_attached_checklist_id ?? null,
+              lastDueDate: row.last_attached_due_date ?? null,
+            }
+          : {}),
       }))
     }
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
-    const scoped = list.filter((note) => !clientId || note.clientId === clientId)
+    // A copy a repeating note left on a checklist is that checklist's own note: it
+    // is never released or moved to another checklist when its checklist goes.
+    const scoped = list.filter((note) => (!clientId || note.clientId === clientId) && !note.repeatOf)
     let liveChecklistIds = null
     if (scoped.some((note) => note.attachedChecklistId)) {
       const data = await readJson(localDataPath)
@@ -20825,6 +20895,13 @@ export class AppDataStore {
       body: note.body,
       createdAt: note.createdAt,
       stale: Boolean(note.releasedAt),
+      ...(note.repeats === true
+        ? {
+            repeats: true,
+            lastChecklistId: note.lastAttachedChecklistId ?? null,
+            lastDueDate: note.lastAttachedDueDate ?? null,
+          }
+        : {}),
     }))
   }
 
@@ -20861,8 +20938,10 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select n.id as note_id, found.id as checklist_id
-           from unnest($1::text[], $2::text[], $3::text[], $4::timestamptz[], $5::text[], $6::boolean[])
-                as n(id, template_id, client_id, created_at, created_date, stale)
+           from unnest($1::text[], $2::text[], $3::text[], $4::timestamptz[], $5::text[], $6::boolean[],
+                       $7::text[], $8::text[])
+                as n(id, template_id, client_id, created_at, created_date, stale,
+                     last_due_date, last_checklist_id)
           cross join lateral (
             select c.id
               from checklists c
@@ -20876,6 +20955,14 @@ export class AppDataStore {
                and (
                  (c.created_at is not null and c.created_at > n.created_at)
                  or (c.created_at is null and c.due_date > n.created_date::date)
+               )
+               and (
+                 n.last_checklist_id is null
+                 or (c.due_date >= n.last_due_date::date and c.id <> n.last_checklist_id)
+               )
+               and not exists (
+                 select 1 from client_pending_notes p
+                  where p.repeat_of = n.id and p.attached_checklist_id = c.id
                )
                and (
                  not n.stale
@@ -20913,7 +21000,12 @@ export class AppDataStore {
           list.map((note) => note.clientId),
           list.map((note) => note.createdAt ?? null),
           list.map((note) => (note.createdAt ? String(note.createdAt).slice(0, 10) : null)),
-          list.map((note) => Boolean(note.stale)),
+          // "stale" is what makes the lookup skip a FINISHED checklist (attaching to
+          // finished work would only reopen it): a note that went back to pending, and
+          // a repeating note (it goes on the next checklist with work left to do).
+          list.map((note) => Boolean(note.stale || note.repeats)),
+          list.map((note) => note.lastDueDate ?? null),
+          list.map((note) => note.lastChecklistId ?? null),
         ],
       )
       for (const row of result.rows) found.set(row.note_id, { id: row.checklist_id })
@@ -20921,6 +21013,16 @@ export class AppDataStore {
     }
     const data = await readJson(localDataPath)
     const checklists = Array.isArray(data.checklists) ? data.checklists : []
+    // Which (repeating note, checklist) pairs already hold a copy.
+    const copiedOn = new Set()
+    if (list.some((note) => note.repeats)) {
+      const authState = await readJson(localAuthPath)
+      for (const entry of Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []) {
+        if (entry?.repeatOf && entry.attachedChecklistId) {
+          copiedOn.add(`${entry.repeatOf}\u0000${entry.attachedChecklistId}`)
+        }
+      }
+    }
     for (const note of list) {
       const noteDateOnly = String(note.createdAt ?? '').slice(0, 10)
       const candidates = checklists.filter((checklist) => {
@@ -20930,12 +21032,22 @@ export class AppDataStore {
         if (checklist.deletedAt || checklist.skippedAt) return false
         if (checklist.pushedFromChecklistId || checklist.pushedToChecklistId) return false
         if (typeof checklist.stageIndex === 'number' && checklist.stageIndex !== 0) return false
-        if (note.stale) {
+        if (note.stale || note.repeats) {
           const items = Array.isArray(checklist.items) ? checklist.items : []
           // Finished by the roll-up (`rollUpItemDone`), the rule the Postgres branch
           // spells out in SQL: a step with an open sub-step is open work.
           if (items.length > 0 && items.every((item) => item && rollUpItemDone(item))) return false
         }
+        // A repeating note asks for a checklist AFTER the last one it was put on (a
+        // due date no earlier than that one's, and not that checklist), and never one
+        // that already holds a copy of it: a checklist whose due date moved later
+        // (a push, an edit) is the same checklist, not a new one.
+        if (note.lastChecklistId) {
+          const lastDue = String(note.lastDueDate ?? '')
+          if (!lastDue || String(checklist.dueDate ?? '') < lastDue) return false
+          if (checklist.id === note.lastChecklistId) return false
+        }
+        if (note.repeats && copiedOn.has(`${note.id}\u0000${checklist.id}`)) return false
         if (typeof checklist.createdAt === 'string' && checklist.createdAt) {
           return checklist.createdAt > note.createdAt
         }
@@ -21136,24 +21248,49 @@ export class AppDataStore {
    * @returns {Promise<number>} how many notes were attached.
    */
   async attachPendingClientNotes({ clientId } = {}) {
+    // One round puts each note on at most one checklist. A REPEATING note that
+    // attached may have more checklists waiting after the one it just went on
+    // (several created since the last pass), so another round runs while one did;
+    // a pass with only one-time notes is exactly one round, as before.
+    let total = 0
+    for (let round = 0; round < MAX_REPEATING_ATTACH_ROUNDS; round += 1) {
+      const { attached, repeated } = await this._attachPendingClientNotesRound(clientId)
+      total += attached
+      if (!repeated) break
+    }
+    if (total > 0) {
+      this.onPendingNotesAttached?.()
+    }
+    return total
+  }
+
+  /**
+   * One round of `attachPendingClientNotes`: the next checklist for every
+   * pending note, one attachment each. `repeated` says a repeating note attached.
+   */
+  async _attachPendingClientNotesRound(clientId) {
     const pending = await this._listUnattachedPendingNotes(clientId)
-    if (pending.length === 0) return 0
+    if (pending.length === 0) return { attached: 0, repeated: false }
 
     let targets
     try {
       targets = await this._findNextChecklistsForPendingNotes(pending)
     } catch (error) {
       console.error('[pending-notes] could not look up the next checklists:', error)
-      return 0
+      return { attached: 0, repeated: false }
     }
 
     let attached = 0
+    let repeated = false
     for (const note of pending) {
       try {
         const target = targets.get(note.id)
         if (!target) continue
         let stamped = false
-        if (note.kind === 'task') {
+        if (note.repeats) {
+          stamped = await this._attachRepeatingPendingNote({ note, checklistId: target.id })
+          if (stamped) repeated = true
+        } else if (note.kind === 'task') {
           const itemId = `item-pn-${note.id.replace(/^pnote-/, '')}`
           stamped = await this._attachTaskKindPendingNote({
             checklistId: target.id,
@@ -21172,10 +21309,177 @@ export class AppDataStore {
         console.error(`[pending-notes] could not attach ${note.id}:`, error)
       }
     }
-    if (attached > 0) {
-      this.onPendingNotesAttached?.()
+    return { attached, repeated }
+  }
+
+  /**
+   * Put a repeating note on one checklist: the note itself stays pending (it is
+   * never attached) and the checklist gets its OWN copy of it, an ordinary note
+   * row (`repeat_of` names the repeating note) carrying the checklist id and, for
+   * kind 'task', its own step. Editing or ticking that step, or deleting the
+   * checklist, never touches the next month's copy.
+   *
+   * `note.lastChecklistId` is the checklist the note was last put on, as the
+   * caller read it. The repeating note's pointer moves from exactly that value to
+   * `checklistId` in the SAME transaction (Postgres) / file write as the copy, so
+   * two passes racing for the same checklist cannot both attach: the second finds
+   * the pointer already moved and does nothing. Returns true only when a copy was
+   * written.
+   */
+  async _attachRepeatingPendingNote({ note, checklistId }) {
+    const copyId = `pnote-${randomUUID().replace(/-/g, '').slice(0, 12)}`
+    const itemId = note.kind === 'task' ? `item-pn-${copyId.replace(/^pnote-/, '')}` : null
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        // The same re-check the one-time attach makes: a deleted, skipped or
+        // split-record target is never attached to.
+        const lockedTarget = await client.query(
+          `select 1 from checklists
+            where id = $1 and deleted_at is null and skipped_at is null
+              and pushed_to_checklist_id is null
+              for update`,
+          [checklistId],
+        )
+        if ((lockedTarget.rowCount ?? 0) === 0) {
+          await client.query('rollback')
+          return false
+        }
+        const claim = await client.query(
+          `update client_pending_notes
+              set last_attached_checklist_id = $2,
+                  last_attached_due_date = (select to_char(due_date, 'YYYY-MM-DD') from checklists where id = $2)
+            where id = $1 and repeats = true and attached_checklist_id is null
+              and last_attached_checklist_id is not distinct from $3::text
+            returning author_id, author_name`,
+          [note.id, checklistId, note.lastChecklistId ?? null],
+        )
+        if ((claim.rowCount ?? 0) === 0) {
+          await client.query('rollback')
+          return false
+        }
+        // The parent row is locked now. A checklist that already holds a copy of
+        // this note (its due date moved later and it looked new) gets no second one.
+        const alreadyThere = await client.query(
+          `select 1 from client_pending_notes where repeat_of = $1 and attached_checklist_id = $2`,
+          [note.id, checklistId],
+        )
+        if ((alreadyThere.rowCount ?? 0) > 0) {
+          await client.query('rollback')
+          return false
+        }
+        if (itemId) {
+          const sortResult = await client.query(
+            `select coalesce(max(sort_order), -1) as max_order
+               from checklist_items where checklist_id = $1`,
+            [checklistId],
+          )
+          const nextOrder = (sortResult.rows[0]?.max_order ?? -1) + 1
+          await client.query(
+            `insert into checklist_items (id, checklist_id, label, done, sort_order, created_at, updated_at)
+             values ($1, $2, $3, false, $4, now(), now())`,
+            [itemId, checklistId, note.body, nextOrder],
+          )
+        }
+        await client.query(
+          `insert into client_pending_notes
+             (id, client_id, template_id, kind, body, author_id, author_name, created_at,
+              attached_checklist_id, attached_item_id, attached_at, repeat_of)
+           values ($1, $2, $3, $4, $5, $6, $7, now(), $8, $9, now(), $10)`,
+          [
+            copyId,
+            note.clientId,
+            note.templateId,
+            note.kind,
+            note.body,
+            claim.rows[0]?.author_id ?? null,
+            claim.rows[0]?.author_name ?? null,
+            checklistId,
+            itemId,
+            note.id,
+          ],
+        )
+        await client.query('commit')
+        return true
+      } catch (error) {
+        await client.query('rollback').catch(() => {})
+        throw error
+      } finally {
+        client.release()
+      }
     }
-    return attached
+
+    // File backend. Two files cannot change in one step, so the order is what keeps
+    // "never two copies on one checklist": the claim and the copy are written
+    // together in ONE slot of the auth file's queue (the pointer move, the
+    // "already holds a copy" re-check and the copy all read the file as it is
+    // NOW), and only then, in ONE slot of the data file's queue, the task's step
+    // goes in (idempotent: it is keyed by the copy's own item id). Two passes and a
+    // Stop cannot interleave inside either slot. What is left is the window
+    // between the two slots: a crash there, or a checklist deleted in it, leaves a
+    // copy with no step (it is a note attached to that checklist, which nothing
+    // re-attaches), never a second copy.
+    const data = await readJson(localDataPath)
+    const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId)
+    // Same re-check as the Postgres lock: never a missing, deleted, skipped or split-record target.
+    if (!checklist || checklist.deletedAt || checklist.skippedAt || checklist.pushedToChecklistId) {
+      return false
+    }
+    const dueDate = typeof checklist.dueDate === 'string' ? checklist.dueDate : null
+    const claimed = await enqueueFileOperation(localAuthPath, async () => {
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+      const parent = list.find((entry) => entry.id === note.id)
+      // The claim: the repeating note must still be there (a Stop removes it), still
+      // repeating, and still where this pass saw it (a pass that got here first
+      // moved its pointer).
+      if (
+        !parent ||
+        parent.repeats !== true ||
+        parent.attachedChecklistId ||
+        (parent.lastAttachedChecklistId ?? null) !== (note.lastChecklistId ?? null)
+      ) {
+        return false
+      }
+      // And no checklist gets a second copy, whatever the pointer says.
+      if (list.some((entry) => entry.repeatOf === parent.id && entry.attachedChecklistId === checklistId)) {
+        return false
+      }
+      const stamp = nowIso()
+      list.push({
+        id: copyId,
+        clientId: parent.clientId,
+        templateId: parent.templateId,
+        kind: parent.kind === 'task' ? 'task' : 'note',
+        body: parent.body,
+        authorId: parent.authorId ?? null,
+        authorName: parent.authorName ?? null,
+        createdAt: stamp,
+        attachedChecklistId: checklistId,
+        attachedItemId: itemId,
+        attachedAt: stamp,
+        repeatOf: parent.id,
+      })
+      parent.lastAttachedChecklistId = checklistId
+      parent.lastAttachedDueDate = dueDate
+      authState.clientPendingNotes = list
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return true
+    })
+    if (!claimed) return false
+    if (itemId) {
+      await enqueueFileOperation(localDataPath, async () => {
+        const fresh = JSON.parse(await readFile(localDataPath, 'utf8'))
+        const target = (fresh.checklists ?? []).find((entry) => entry.id === checklistId)
+        if (!target || target.deletedAt || target.skippedAt || target.pushedToChecklistId) return
+        if (!Array.isArray(target.items)) target.items = []
+        if (target.items.some((item) => item.id === itemId)) return
+        target.items.push({ id: itemId, label: note.body, done: false })
+        await fsWriteFile(localDataPath, JSON.stringify(fresh, null, 2))
+      })
+    }
+    return true
   }
 
   // ---- Item-level deletion requests (staff request → owner approves) ----

@@ -22,6 +22,9 @@ const noteStamp = new Intl.DateTimeFormat('en-US', {
   minute: '2-digit',
 })
 
+// A checklist's due date (YYYY-MM-DD), read at noon so no timezone moves the day.
+const dueStamp = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+
 /**
  * Per-client notes: load / add / delete against the existing notes endpoints.
  * The add field is a lightweight rich-text editor; each saved note renders its
@@ -83,6 +86,8 @@ export function ClientNotesPanel({
   const [pendingBody, setPendingBody] = useState('')
   const [pendingTemplateId, setPendingTemplateId] = useState('')
   const [pendingKind, setPendingKind] = useState<'task' | 'note'>('task')
+  // Off by default: a note goes on the next checklist only, unless she opts in.
+  const [pendingRepeats, setPendingRepeats] = useState(false)
 
   const activeTemplates = useMemo(
     () =>
@@ -141,9 +146,12 @@ export function ClientNotesPanel({
         templateId: selectedTemplate.id,
         kind: pendingKind,
         body,
+        // Sent only when it is on, so a one-time note's request is what it always was.
+        ...(pendingRepeats ? { repeats: true } : {}),
       })
       setPendingNotes((current) => [note, ...current])
       setPendingBody('')
+      setPendingRepeats(false)
     } catch (err) {
       // The cap (100 notes waiting) carries its own sentence; anything else is generic.
       setPendingActionError(
@@ -240,6 +248,14 @@ export function ClientNotesPanel({
                     Note
                   </label>
                 </fieldset>
+                <label className="pending-note-kind">
+                  <input
+                    type="checkbox"
+                    checked={pendingRepeats}
+                    onChange={(event) => setPendingRepeats(event.target.checked)}
+                  />
+                  Repeat on every checklist from now on
+                </label>
                 <button
                   type="button"
                   className="secondary-action"
@@ -270,8 +286,11 @@ export function ClientNotesPanel({
                 const attachedChecklist = note.attachedChecklistId
                   ? data.checklists.find((entry) => entry.id === note.attachedChecklistId)
                   : null
+                // A copy a repeating note left on a checklist is removed by removing its
+                // step there, or by stopping the repeating note: the server refuses it here.
                 const canDelete =
-                  ownerMode || (note.authorId === currentUserId && !note.attachedChecklistId)
+                  !note.repeatOf &&
+                  (ownerMode || (note.authorId === currentUserId && !note.attachedChecklistId))
                 return (
                   <li
                     key={note.id}
@@ -281,11 +300,23 @@ export function ClientNotesPanel({
                         : 'pending-client-note'
                     }
                   >
-                    <span className="client-note-body">{note.body}</span>
+                    <span className="client-note-body">
+                      {note.body}
+                      {/* A copy a repeating note left on a checklist. */}
+                      {note.repeatOf ? <span className="pending-note-meta"> (repeat)</span> : null}
+                    </span>
                     <span className="pending-note-meta">
                       → {template?.title ?? 'a recurring checklist'} as{' '}
                       {note.kind === 'task' ? 'Task' : 'Note'}
                     </span>
+                    {note.repeats ? (
+                      <span className="pending-note-meta">
+                        Repeats on every checklist
+                        {note.lastAttachedDueDate
+                          ? ` · last added to the ${dueStamp.format(new Date(`${note.lastAttachedDueDate}T12:00:00`))} checklist`
+                          : ''}
+                      </span>
+                    ) : null}
                     <strong>
                       {note.authorName || 'Unknown'}
                       {note.createdAt ? ` · ${noteStamp.format(new Date(note.createdAt))}` : ''}
@@ -307,7 +338,7 @@ export function ClientNotesPanel({
                         className="link-button"
                         onClick={() => void removePendingNote(note.id)}
                       >
-                        Delete
+                        {note.repeats ? 'Stop repeating' : 'Delete'}
                       </button>
                     ) : null}
                   </li>

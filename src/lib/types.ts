@@ -1715,6 +1715,18 @@ export type ClientPendingNote = {
   attachedChecklistId: string | null
   attachedItemId: string | null
   attachedAt: string | null
+  /**
+   * True on a note that repeats on every checklist of its template until it is
+   * stopped (featreq-1f352c4f). Such a note is never attached itself; each
+   * checklist it goes on gets its own copy (`repeatOf` names the repeating note).
+   * Absent on a one-time note.
+   */
+  repeats?: boolean
+  /** The checklist a repeating note was last put on, and that checklist's due date. */
+  lastAttachedChecklistId?: string | null
+  lastAttachedDueDate?: string | null
+  /** On a copy a repeating note left on a checklist: the repeating note it came from. */
+  repeatOf?: string
 }
 
 /**

@@ -6697,6 +6697,8 @@ const server = createServer(async (request, response) => {
           body,
           authorId: session.user.id,
           authorName,
+          // Opt-in and strictly boolean: anything but `true` is a one-time note.
+          repeats: payload?.repeats === true,
         })
       } catch (error) {
         // The client already holds the most notes it may have waiting.
@@ -6740,6 +6742,18 @@ const server = createServer(async (request, response) => {
       // would delete any client's note through any other client's URL.
       if (!note || note.clientId !== clientId) {
         sendJson(response, 404, { error: 'Note not found' })
+        return
+      }
+      // A copy a repeating note left on a checklist is that checklist's own, and the
+      // repeating-note guard ("this checklist already holds a copy") reads it: deleting
+      // the row here would leave its step on the checklist and let a later pass add
+      // the step again. Refused for everyone; nothing is written.
+      if (note.repeatOf) {
+        sendJson(response, 409, {
+          error: 'REPEAT_COPY_NOT_DELETABLE',
+          message:
+            'This note was added by a repeating note. Remove the step on the checklist instead, or stop the repeating note.',
+        })
         return
       }
       // Owner can delete any note; everyone else only their own, and only
