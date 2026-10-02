@@ -47,6 +47,7 @@ import { ListSearch } from './ListSearch'
 import {
   INVOICE_HOURS_ROLE_ROWS,
   MAX_HOURLY_RATE,
+  MAX_LINE_HOURS,
   adhocLineForMode,
   defaultHoursRowRate,
   hourlyLineDetail,
@@ -2052,7 +2053,21 @@ function InvoiceLineRow({
                 onBlur={() => setHoursDraft(null)}
                 onChange={(event) => {
                   const raw = event.target.value
+                  // A HALF-TYPED number ("1." in a browser that reports it as an
+                  // empty value with `badInput` set) is neither empty nor 0: the
+                  // line keeps its last hours, and the box keeps what she typed.
+                  if (event.target.validity?.badInput) {
+                    setHoursDraft('')
+                    return
+                  }
                   const typed = Number(raw)
+                  // Over the cap (a typo like an extra zero; the sanitizer would
+                  // refuse it): nothing changes and the box snaps back, the way
+                  // the rate box does.
+                  if (Number.isFinite(typed) && typed > MAX_LINE_HOURS) {
+                    setHoursDraft(null)
+                    return
+                  }
                   const valid = raw !== '' && Number.isFinite(typed) && typed >= 0
                   // What is on screen while she types is what she typed: a box
                   // forced back to "0" the moment it is cleared turned the next
@@ -2084,8 +2099,9 @@ function InvoiceLineRow({
                   const raw = event.target.value
                   // An EMPTY box is not a rate: while she clears it to retype, the
                   // line keeps its last rate and amount, and it is not marked hers.
-                  // (Some browsers also report "" for a half-typed "90.".)
-                  if (raw === '') {
+                  // A half-typed "90." (`badInput`, which some browsers report as
+                  // an empty value) is the same: the last rate stays.
+                  if (raw === '' || event.target.validity?.badInput) {
                     setRateDraft('')
                     return
                   }

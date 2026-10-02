@@ -395,6 +395,49 @@ describe('the rate on an hours line', () => {
     expect(box.value).toBe('75')
   })
 
+  it('the hours box refuses more than 100,000 hours the way the rate box refuses an impossible rate', async () => {
+    await openEditor(makeInvoice({ lineItems: [lisaLine] }))
+    const box = screen.getByLabelText('Billed hours') as HTMLInputElement
+    fireEvent.change(box, { target: { value: '100001' } })
+    expect(box.value).toBe('2')
+    expect(saveButton()).toBeDisabled() // nothing changed
+    fireEvent.change(box, { target: { value: '100000' } })
+    expect(box.value).toBe('100000')
+    expect((screen.getAllByLabelText('Amount')[0] as HTMLInputElement).value).toBe('7500000')
+  })
+
+  // Some browsers report a half-typed "1." / "90." as an EMPTY value with
+  // `validity.badInput` set. That is neither an emptied box nor a 0.
+  describe('a half-typed number (badInput)', () => {
+    const halfTyped = (box: HTMLInputElement) => {
+      Object.defineProperty(box, 'validity', { value: { badInput: true }, configurable: true })
+      fireEvent.change(box, { target: { value: '' } })
+    }
+
+    it('keeps the last hours instead of zeroing the line', async () => {
+      await openEditor(makeInvoice({ lineItems: [lisaLine] }))
+      halfTyped(screen.getByLabelText('Billed hours') as HTMLInputElement)
+      expect((screen.getAllByLabelText('Amount')[0] as HTMLInputElement).value).toBe('150')
+      expect(screen.getByDisplayValue('2.00h at $75.00/hr')).toBeInTheDocument()
+      expect(saveButton()).toBeDisabled()
+    })
+
+    it('keeps the last rate, and does not mark it hers', async () => {
+      await openEditor(makeInvoice({ lineItems: [lisaLine] }))
+      halfTyped(screen.getByLabelText('Hourly rate') as HTMLInputElement)
+      expect((screen.getAllByLabelText('Amount')[0] as HTMLInputElement).value).toBe('150')
+      expect(saveButton()).toBeDisabled()
+    })
+
+    it('a GENUINELY emptied hours box still means 0 hours, and an emptied rate box still keeps the rate', async () => {
+      await openEditor(makeInvoice({ lineItems: [lisaLine] }))
+      fireEvent.change(screen.getByLabelText('Billed hours'), { target: { value: '' } })
+      expect((screen.getAllByLabelText('Amount')[0] as HTMLInputElement).value).toBe('0')
+      fireEvent.change(screen.getByLabelText('Hourly rate'), { target: { value: '' } })
+      expect(screen.getByDisplayValue('0.00h at $75.00/hr')).toBeInTheDocument()
+    })
+  })
+
   it('the hours box clears and retypes the same way (no "05" after clearing)', async () => {
     await openEditor(makeInvoice({ lineItems: [lisaLine] }))
     const box = screen.getByLabelText('Billed hours') as HTMLInputElement

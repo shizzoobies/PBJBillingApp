@@ -161,6 +161,8 @@ export function withoutEmptyLines<T extends { kind?: string; hours?: number; amo
 ): T[]
 /** The most an hours line's hourly rate may be ($10,000). */
 export const MAX_HOURLY_RATE: number
+/** The most hours one hours line may carry (100,000). */
+export const MAX_LINE_HOURS: number
 /** "1.50h at $75.00/hr" — the one wording of an hours line's detail. */
 export function hourlyLineDetail(hours: number, rate: number): string
 /** The three role rows the editor's hours block always offers, in print order. */

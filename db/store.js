@@ -77,6 +77,7 @@ import {
 } from '../lib/checklist-period-label.js'
 import {
   MAX_HOURLY_RATE,
+  MAX_LINE_HOURS,
   RETAINER_LABEL,
   invoiceLockMessage,
   invoiceLockRefusal,
@@ -1349,7 +1350,14 @@ function hasLaterCoveragePeriod(history, period) {
   return Object.keys(history ?? {}).some((key) => /^\d{4}-\d{2}$/.test(key) && key > period)
 }
 
-function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly' } = {}) {
+function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly', storedLines = [] } = {}) {
+  // The hourly rates the invoice ALREADY stores, for the over-cap rule below.
+  const storedRates = new Set(
+    (Array.isArray(storedLines) ? storedLines : [])
+      .filter((stored) => stored?.kind === 'hourly')
+      .map((stored) => Number(stored.rate))
+      .filter((rate) => Number.isFinite(rate)),
+  )
   return (Array.isArray(raw) ? raw : [])
     .map((line) => {
       const claimed = INVOICE_LINE_KINDS.has(line?.kind) ? line.kind : 'custom'
@@ -1445,13 +1453,22 @@ function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly' } = {}) {
         if (
           Number.isFinite(hours) &&
           hours >= 0 &&
-          hours <= 100000 &&
+          hours <= MAX_LINE_HOURS &&
           Number.isFinite(rate) &&
           rate >= 0 &&
           // A rate over the cap is refused the way an over-cap hours value is
           // (falls through to the legacy path below: amount as sent, no hours or
           // rate stored). It is a typo like an extra zero, not a real rate.
-          rate <= MAX_HOURLY_RATE
+          //
+          // EXCEPT a rate the invoice already stores. Generate can write one (a
+          // mistyped bill rate on the Team page, e.g. 12500), and the first Save
+          // of such a draft must not quietly turn that line into an amount-only
+          // line: she did not type the rate, so it is kept as it is stored, and
+          // the hours she edits still multiply into it. The sanitizer is handed
+          // the stored lines by `updateInvoice`, above the backend split, so this
+          // is the same on both. A NEW over-cap rate (API only: the editor will
+          // not take one) is still refused.
+          (rate <= MAX_HOURLY_RATE || storedRates.has(rate))
         ) {
           const cleanHours = Math.round(hours * 100) / 100
           const cleanRate = Math.round(rate * 100) / 100
@@ -13703,7 +13720,10 @@ export class AppDataStore {
 
     const next = { ...current }
     if (Array.isArray(patch.lineItems)) {
-      next.lineItems = sanitizeInvoiceLines(patch.lineItems, { invoiceKind: current.kind })
+      next.lineItems = sanitizeInvoiceLines(patch.lineItems, {
+        invoiceKind: current.kind,
+        storedLines: current.lineItems,
+      })
     }
     if (typeof patch.blurb === 'string') next.blurb = patch.blurb
     if (typeof patch.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(patch.dueDate)) {

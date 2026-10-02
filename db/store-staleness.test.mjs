@@ -19113,6 +19113,57 @@ describe('hourly lines re-derive amount from hours × rate (file backend)', () =
       expect(atCap.lineItems[0]).toMatchObject({ rate: 10000, hours: 1, amount: 10000 })
     })
 
+    // Generate can write an over-cap rate (a mistyped bill rate on the Team page,
+    // e.g. 12500). Saving that draft must not quietly turn the line into an
+    // amount-only line: a rate the invoice ALREADY stores is kept. The sanitizer
+    // is handed the stored lines by `updateInvoice` above the backend split, so
+    // the Postgres path runs the same rule.
+    describe('an over-cap rate Generate already stored', () => {
+      beforeEach(async () => {
+        const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+        data.invoices[0].lineItems = [
+          hourly({ rate: 12500, hours: 2, amount: 25000, detail: '2.00h at $12,500.00/hr' }),
+        ]
+        data.invoices[0].subtotal = 25000
+        data.invoices[0].total = 25000
+        await writeFile(localDataPath, JSON.stringify(data, null, 2))
+      })
+
+      it('keeps its hours, rate and amount through a save that did not touch the rate', async () => {
+        const same = await store.updateInvoice('inv-hours', {
+          lineItems: [hourly({ rate: 12500, hours: 2, amount: 25000 })],
+          blurb: 'note',
+        })
+        expect(same.lineItems[0]).toMatchObject({ hours: 2, rate: 12500, amount: 25000 })
+        expect(same.total).toBe(25000)
+      })
+
+      it('lets her edit the hours: they still multiply into the stored rate', async () => {
+        const more = await store.updateInvoice('inv-hours', {
+          lineItems: [hourly({ rate: 12500, hours: 3, amount: 1 })],
+        })
+        expect(more.lineItems[0]).toMatchObject({ hours: 3, rate: 12500, amount: 37500 })
+      })
+
+      it('still refuses a DIFFERENT over-cap rate', async () => {
+        const other = await store.updateInvoice('inv-hours', {
+          lineItems: [hourly({ rate: 13000, hours: 2, amount: 42 })],
+        })
+        expect(other.lineItems[0]).not.toHaveProperty('rate')
+        expect(other.lineItems[0].amount).toBe(42)
+      })
+
+      it('does not carry over to an invoice that stores no such rate', async () => {
+        const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+        data.invoices[0].lineItems = [hourly()]
+        await writeFile(localDataPath, JSON.stringify(data, null, 2))
+        const refused = await store.updateInvoice('inv-hours', {
+          lineItems: [hourly({ rate: 12500, hours: 2, amount: 42 })],
+        })
+        expect(refused.lineItems[0]).not.toHaveProperty('rate')
+      })
+    })
+
     it('keeps a zero-hours row on the invoice and leaves the total where it was', async () => {
       const updated = await store.updateInvoice('inv-hours', {
         lineItems: [
