@@ -25,7 +25,26 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-02, late afternoon):** `main` = `348fb28` (+ this
+**State right now (2026-10-04, late afternoon):** `main` = `6912db3` (+ this
+handoff), deployed, `/health` 200 with that commit, voice agent re-provisioned after every
+ship. Suite **6807 tests / 303 files**, green. Manifest 203,248 bytes (cap 205,000). Alex's
+instruction for the day: "go through the 4 in Planned and get them deployed once their fixes
+are green" - all four are Shipped (details: the "2026-10-04" entry at the top of section 5):
+Brittany's Statements button (`747aa42`, also closes the statement-box send-back), the proposal
+questionnaire (`649fc26`), the proposal Software section (`6f8ab89`) and Stripe autopay
+(`6912db3`). **AUTOPAY IS LIVE BUT INERT:** the charge step runs only when the Railway variable
+`AUTOPAY_CHARGING=on` is set, and it is UNSET - enrollment works, no money moves. Before Alex
+sets it: add `setup_intent.succeeded` and `setup_intent.setup_failed` to the Stripe webhook
+endpoint, run one end-to-end in test mode, and confirm Resend click tracking is OFF for the
+sending domain (bearer links in pay / proposal / questionnaire / autopay emails). Brittany has
+SIX open questions on her Shipped tickets (one on Software, three on the questionnaire, two on
+autopay) - answers go back through the tracker. Board hygiene rule from today: tickets Alex or a
+session filed go straight to Done when shipped; Shipped is Brittany's review queue. Lanes
+`AP-laneB` / `AP-laneC` / `AP-laneD` are at merged branches, reusable. Two concurrent vitest
+runs in one worktree corrupt each other (shared `tmp/app-data.json`) - never verify while a
+reviewer agent is testing in that lane.
+
+**Earlier (2026-10-02, late afternoon):** `main` = `348fb28` (+ this
 handoff), deployed, `/health` 200 with that commit, voice agent re-provisioned after
 every ship. Suite **6264 tests / 289 files**, green. Four fixes shipped today, one per deploy, each
 reviewed and fixed before push (details: the "2026-10-02" entry at the top of section 5):
@@ -550,6 +569,81 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-04 - Brittany's Statements button, then the four Planned items shipped one deploy each
+(questionnaire, Software section, autopay), 37 tracker follow-ups moved to Done.**
+
+- **Board tidy first (Alex asked):** Shipped held 41 items, 15 hers. The 23 developer-side
+  follow-ups went to Done (acting emp-alex-anderson) and a "related work, also live" paragraph
+  was prepended to the 8 tickets that stay for her review (undo list in memory
+  `prod-write-log`). Rule: Shipped is her review queue; our follow-up tickets go to Done.
+- `747aa42` **featreq-739f43d1** (+ send-back **featreq-11ffb3a6**, Shipped): the Clients row's
+  Mark inactive button is now **Statements**, opening the same `ClientStatementsPanel` in an
+  AddModal, editable, owners and staff, retired clients too. TRAP the reviewer caught: the row's
+  stage dropdown has never offered Inactive (`LIFECYCLE_STAGES` = proposal/onboarding/active),
+  so retiring now happens ONLY on the client page; a retired row keeps Reactivate. Her literal
+  ask; told her on the ticket.
+- `6b956cc` + `6520855` + `649fc26` **featreq-8f139178** (Shipped): proposal questionnaire.
+  `lib/proposal-questionnaire.js` builds the definition from the catalog's inputs (call-only
+  keys for counts a prospect cannot know); table `proposal_questionnaires` (token unique and
+  nullable, no FK on proposal_id; file backend keeps it in auth-state, out of the fingerprint);
+  public `/questionnaire/:token` above the SPA fallback, 32-byte token shape-checked before the
+  DB, 30 opens/IP/5 min + 5 POSTs/token, 64 KB form-urlencoded, CSP default-src none,
+  Referrer-Policy same-origin (NOT no-referrer: a no-referrer form POST sends Origin: null,
+  which isCrossSiteOrigin refuses), 303 to a fixed thank-you with no token; one conditional
+  UPDATE is the submit race; the draft claim is `proposal_id is null or = <dangling>` and a
+  losing/failed claim deletes its own draft; deleteProposal clears the link; owners notified
+  (group "Proposal questionnaires"); Resend webhook has a `questionnaire_id` branch BEFORE the
+  invoice lookup; prospect text reaches the letter prompt only via escapeForFence and a
+  `<prospect_notes>` fence. Accept now copies title + address to the client and contact. The
+  list says "Not yet priced" for an unselected draft (the 10-02 $0 lesson).
+- `6465c1a` + `515ccf0` + `6f8ab89` **featreq-a69a3cc0** (Shipped): Software section.
+  `PROPOSAL_GROUPS` gained 'Software' at the END and `MONTHLY_GROUPS` is now an explicit list
+  (the old `slice(0, 8)` would have moved every monthly total). New kind `software`:
+  basePrice (null until set -> "Not yet priced"; explicit 0 -> "No charge") + unitPrice x
+  max(0, count - unitsIncluded), unit none/employee/contractor; an employee plan with no count is
+  `needs-count` (unpriced), a contractor blank bills the base; `totals.software` is OUT of
+  monthly and of monthlyRate; 14 seed rows, a stored catalog is topped up once
+  (`softwareSeeded`), cap 300 + 14. Sent proposals lock base/unit/included/unit. Accept =
+  `_acceptWithSoftware`: ONE Postgres transaction (proposal row `for update` -> status
+  compare-and-set via `PROPOSAL_STATUS_UPDATE_SQL` -> inserts through the same dbClient; file
+  backend = one data-file slot with the CAS in the auth-file slot). Rows are recurring
+  reimbursements with new column `category` ('expense' default, 'software'), look-first ALTER,
+  bulk save keeps the stored value when the payload omits it; invoice lines carry
+  `section:'software'` and `invoiceSections` prints a Software section (PDF, email, print).
+  Prod check: the ALTER ran in 30 ms on 43 rows (rolled-back trial), then live.
+- `ecd9e68` + `b017b33` + `cdb690d` + `b394f71` + `6912db3` **featreq-bef42b72** (Shipped,
+  INERT): Stripe autopay, per-client opt-in, charge on send, bank + card. Tables
+  `client_autopay` and `autopay_attempts` (pk invoice_id+attempt_no IS the double-charge guard;
+  no FKs; file backend keeps both through a bulk save; staff never see them). One
+  `ensureStripeCustomer` (idempotency key `pbj-customer-<clientId>`) replaced three inline
+  copies. Enrollment: Invite -> durable `/autopay/<token>` -> setup-mode Checkout per open;
+  `setup_intent.succeeded` enrolls, `checkout.session.completed` (setup) = pending only,
+  `setup_failed` -> invited; withdraw = GET confirm + POST. Charge on send
+  (`lib/stripe-autopay.js`): `planAutopaySend` (enrolled + first ok send + total > 0 +
+  `AUTOPAY_CHARGING === 'on'` + Stripe configured + not opted out) decides BEFORE minting, so an
+  autopay send mints no pay sessions and the email has no Pay button; after the email leaves and
+  `recordInvoiceSent` succeeds: claim (invoice row `for update`, status/total re-check, insert
+  on conflict do nothing) -> retire open Checkout sessions (a completed one refuses) -> re-read
+  enrollment -> compare with the EMAILED cents -> PaymentIntent off_session with key
+  `autopay:<inv>:<n>`; ACH 'processing' applied by the route, paid only by the webhook. 409 /
+  idempotency_key_in_use / lock_timeout / Stripe-Should-Retry are AMBIGUOUS (attempt stays
+  claimed; never auto-failed); Charge again (owner, only after a failed attempt) lists the
+  customer's intents by metadata.invoiceId first and refuses on succeeded/processing; "Check with
+  Stripe" (`POST /api/invoices/:id/autopay/check`) adopts a found intent, cancels a declined
+  one, and marks a bare claim failed only after 10 minutes. Void takes the invoice lock before
+  reading attempts; the pay page, the payment-link route and the re-send route re-check for an
+  active attempt AFTER storing a new session and expire it if so. An announced send that is
+  refused before Stripe writes a failed attempt + Payment problems notice. ACH returns
+  debit_not_authorized / account_closed / no_account revoke the client's autopay. Prod checks
+  (rolled back): DDL, partial unique index, the claim against a real sent invoice (second claim
+  = 0 rows), and the void path waiting behind a claim on the row lock.
+
+Process notes: three builders ran in parallel lanes (B/C/D) with one independent reviewer each
+and up to three fix rounds; every lane rebased onto main before its verify (the questionnaire
+and Software touched the same files - the builder that owned the code resolved the conflicts).
+Shipped one item per deploy, questionnaire -> Software -> autopay. Alex: AUTOPAY_CHARGING stays
+unset until you say so.
 
 **2026-10-02 — four fixes, one deploy each, plus the Proposals incident and three
 questions for Brittany.** Alex picked all four from the 10-01 leftovers; Brittany's
