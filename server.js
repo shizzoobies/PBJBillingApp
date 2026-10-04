@@ -185,12 +185,20 @@ import { buildAutopayInviteEmail } from './lib/autopay-email.js'
 import { autopayMethodWords } from './lib/autopay-copy.js'
 import {
   applyAutopaySetupEvent,
+  autopayChargeCents,
+  autopayChargeDecision,
+  autopayChargingEnabled,
   autopayOffersCard,
+  autopayRefusalWords,
   autopaySummary,
   classifySetupEvent,
   createAutopaySetupSession,
   emptyAutopay,
+  hasActiveAutopayAttempt,
+  latestAttemptByInvoice,
   newSetupToken,
+  recordAutopayAttemptEvent,
+  runAutopayCharge,
   turnOffAutopay,
 } from './lib/stripe-autopay.js'
 import {
@@ -2109,6 +2117,64 @@ async function notifyOwnersAboutAutopay(request, event, { clientId, message }) {
     }
   } catch (error) {
     console.error(`[autopay] could not notify the owners (${event}):`, error?.message || error)
+  }
+}
+
+/** The owner-notification callback `runAutopayCharge` and the webhook hand to lib/stripe-autopay.js. */
+function autopayOwnerNotifier(request) {
+  return (event, { clientId, message }) =>
+    notifyOwnersAboutAutopay(request, event, { clientId, message })
+}
+
+/**
+ * The charge that follows an autopay send (see the comment at the call). Never
+ * throws and never fails the response: the client has already been emailed.
+ * Answers the invoice as it stands afterwards (a bank debit reads 'processing'),
+ * or `fallback` when anything goes wrong.
+ */
+async function chargeAfterSend(request, invoiceId, fallback) {
+  try {
+    await runAutopayCharge({
+      store: appDataStore,
+      stripe: stripeClient(),
+      invoiceId,
+      attemptNo: 1,
+      notifyOwners: autopayOwnerNotifier(request),
+    })
+    const refreshed = (await appDataStore.listInvoices()).find((entry) => entry.id === invoiceId)
+    return refreshed ? await withCoverageChangeable(refreshed) : fallback
+  } catch (error) {
+    console.error('[autopay] the charge step failed after the invoice was sent:', error)
+    return fallback
+  }
+}
+
+/**
+ * What the send route needs to know about autopay BEFORE it mints or emails
+ * anything.
+ *
+ * `plan` is the charge this send will be followed by (or null): it is set only
+ * when every gate in `autopayChargeDecision` holds - kill switch on, client
+ * enrolled with a saved method, FIRST ok send, nothing attempted yet. `active`
+ * is an attempt already claimed, in flight or collected, which makes this send
+ * a statement with no pay link.
+ *
+ * FAILS CLOSED: a read that throws answers "no plan", which sends the ordinary
+ * email with its pay link and charges nobody.
+ */
+async function planAutopaySend(invoice, client) {
+  try {
+    const enrollment = await appDataStore.getClientAutopay(client.id)
+    if (!enrollment) return { plan: null, active: false }
+    const attempts = await appDataStore.listAutopayAttempts({ invoiceId: invoice.id })
+    const decision = autopayChargeDecision({ client, invoice, enrollment, attempts })
+    return {
+      plan: decision.ok ? { enrollment, channel: decision.channel } : null,
+      active: hasActiveAutopayAttempt(attempts),
+    }
+  } catch (error) {
+    console.error('[autopay] could not plan the send; sending without autopay:', error?.message || error)
+    return { plan: null, active: false }
   }
 }
 
@@ -4213,6 +4279,22 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // An invoice autopay is charging, or has charged, takes no payment here: a
+        // pay link opened now could collect the same invoice a second time. A
+        // FAILED attempt does not count - the owner re-sends and this works again.
+        if (
+          hasActiveAutopayAttempt(await appDataStore.listAutopayAttempts({ invoiceId: payInvoice.id }))
+        ) {
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'A payment is already on its way',
+              body: `Invoice ${payNumber} is being paid automatically from your saved payment method. Nothing more is needed from you.`,
+            }),
+          )
+          return
+        }
+
         // THE RETURN TRIP. Stripe sends the payer back here with a marker on the
         // query, and without these two branches the return walks straight into a
         // NEW Checkout session: a client who has just paid is asked to pay again,
@@ -5045,6 +5127,120 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // GET /api/autopay/attempts — the latest autopay attempt per invoice, for the
+    // month run's badges (owner only), and whether charging is switched on.
+    // Never the intent id: the row says what happened, not how to find it.
+    if (normalizedPath === '/api/autopay/attempts' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see autopay' })
+        return
+      }
+      const latestAttempts = [...latestAttemptByInvoice(await appDataStore.listAutopayAttempts()).values()]
+      sendJson(response, 200, {
+        chargingEnabled: autopayChargingEnabled(),
+        attempts: latestAttempts.map((attempt) => ({
+          invoiceId: attempt.invoiceId,
+          attemptNo: attempt.attemptNo,
+          status: attempt.status,
+          errorCode: attempt.errorCode,
+          error: attempt.error,
+          updatedAt: attempt.updatedAt,
+        })),
+      })
+      return
+    }
+
+    // POST /api/invoices/:id/autopay/charge-again — the owner's explicit "Charge
+    // again" after an autopay attempt FAILED (owner only).
+    //
+    // Never automatic, and never a retry of the same attempt: it claims the NEXT
+    // attempt number, which `claimAutopayAttempt` allows only when the one before
+    // it failed and the invoice is still sent for the same amount - so pressing it
+    // twice, from two windows, charges once. Behind the same kill switch as the
+    // charge on send.
+    const autopayChargeAgainMatch = normalizedPath.match(
+      /^\/api\/invoices\/([^/]+)\/autopay\/charge-again$/,
+    )
+    if (autopayChargeAgainMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can charge an invoice' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const chargeAgainContentType = String(request.headers['content-type'] || '')
+      if (!chargeAgainContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (!autopayChargingEnabled()) {
+        sendJson(response, 409, {
+          error: 'autopay_charging_off',
+          message: autopayRefusalWords('charging_off'),
+        })
+        return
+      }
+      if (!isStripeConfigured()) {
+        sendJson(response, 503, {
+          error: 'stripe_unavailable',
+          message: 'Stripe is not connected yet, so nothing can be charged.',
+        })
+        return
+      }
+      const chargeAgainInvoiceId = decodeURIComponent(autopayChargeAgainMatch[1])
+      const chargeAgainAttempts = await appDataStore.listAutopayAttempts({
+        invoiceId: chargeAgainInvoiceId,
+      })
+      const lastAttempt = latestAttemptByInvoice(chargeAgainAttempts).get(chargeAgainInvoiceId)
+      if (!lastAttempt || lastAttempt.status !== 'failed') {
+        sendJson(response, 409, {
+          error: 'autopay_not_failed',
+          message: autopayRefusalWords('previous_attempt_not_failed'),
+        })
+        return
+      }
+      const chargeAgain = await runAutopayCharge({
+        store: appDataStore,
+        stripe: stripeClient(),
+        invoiceId: chargeAgainInvoiceId,
+        attemptNo: Number(lastAttempt.attemptNo) + 1,
+        notifyOwners: autopayOwnerNotifier(request),
+      })
+      if (chargeAgain.reason === 'no_invoice') {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      if (!chargeAgain.charged) {
+        // 'failed' means Stripe was asked and said no: the attempt is recorded
+        // and that sentence is on the invoice. Everything else is a refusal
+        // before Stripe was asked.
+        sendJson(response, 409, {
+          error: 'autopay_not_charged',
+          message:
+            chargeAgain.reason === 'failed'
+              ? 'Stripe refused the charge. The reason is on the invoice.'
+              : autopayRefusalWords(chargeAgain.reason),
+        })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'autopay_charged_again',
+        chargeAgainInvoiceId,
+      )
+      const chargedAgainInvoice = (await appDataStore.listInvoices()).find(
+        (entry) => entry.id === chargeAgainInvoiceId,
+      )
+      sendJson(response, 200, { invoice: await withCoverageChangeable(chargedAgainInvoice) })
+      return
+    }
+
     // POST /api/stripe/webhook — Stripe tells us money moved.
     //
     // UNAUTHENTICATED BY NECESSITY (Stripe cannot hold a session), so the
@@ -5096,6 +5292,9 @@ const server = createServer(async (request, response) => {
       // that makes Stripe replay it.
       let settledInvoice = null
       let settledByCard = false
+      // Set when the payment is one WE charged to a saved method (autopay), which
+      // is what puts the way to turn it off on the receipt.
+      let settledByAutopay = false
       // Flips the moment an apply call RETURNS (a null answer - the invoice is
       // gone or void - counts: there is nothing a retry could apply). It is what
       // the catch below reads to tell "the payment was not applied, take the
@@ -5169,6 +5368,7 @@ const server = createServer(async (request, response) => {
         // so the two events a single card payment fires cannot add it twice.
         const cardFeeLines = isCardChannel ? [cardProcessingFeeLine(invoice)] : []
         settledByCard = isCardChannel
+        settledByAutopay = object.metadata?.autopay === '1'
 
         if (event.type === 'checkout.session.completed') {
           // ACH does not settle here — it clears in about 4 business days, so
@@ -5199,7 +5399,32 @@ const server = createServer(async (request, response) => {
             paymentMethod: object.payment_method_types?.[0] ?? 'us_bank_account',
             appendLines: cardFeeLines,
           })
+          // An autopay attempt's own record: settled by Stripe's word, which
+          // overrides anything the charge step guessed. Best effort, never throws.
+          if (settledByAutopay) {
+            await recordAutopayAttemptEvent({
+              store: appDataStore,
+              stripe: stripeClient(),
+              invoice,
+              intent: object,
+              outcome: 'succeeded',
+            })
+          }
         } else if (event.type === 'payment_intent.payment_failed') {
+          // An autopay attempt that failed is recorded FIRST, whatever the invoice
+          // has since become: the attempt's own history is true regardless, and a
+          // bank return of debit_not_authorized / account_closed / no_account turns
+          // autopay off for the client (best effort, never throws).
+          if (settledByAutopay) {
+            await recordAutopayAttemptEvent({
+              store: appDataStore,
+              stripe: stripeClient(),
+              invoice,
+              intent: object,
+              outcome: 'failed',
+              notifyOwners: autopayOwnerNotifier(request),
+            })
+          }
           // Back to 'sent': it was invoiced and is still owed. Owners are told,
           // because a failed ACH debit is something a person has to chase.
           //
@@ -5395,6 +5620,11 @@ const server = createServer(async (request, response) => {
             console.warn('[stripe] payment email skipped:', paidAddressee.refusal.message)
           } else if (paidClient) {
             const paidFirmSettings = await appDataStore.getFirmSettings().catch(() => null)
+            // The receipt for a payment WE charged to a saved method carries the
+            // way to turn that off; every other receipt is what it always was.
+            const paidEnrollment = settledByAutopay
+              ? await appDataStore.getClientAutopay(settledInvoice.clientId).catch(() => null)
+              : null
             await sendInvoicePaymentEmail({
               invoice: settledInvoice,
               client: paidAddressee.addressee,
@@ -5416,6 +5646,10 @@ const server = createServer(async (request, response) => {
               ],
               sendEmail: sendInvoiceEmail,
               recordSent: (id, entry) => appDataStore.recordInvoiceSent(id, entry),
+              withdrawUrl:
+                paidEnrollment?.status === 'enrolled' && paidEnrollment.setupToken
+                  ? `${getPublicAppUrl(request)}/autopay/${paidEnrollment.setupToken}/withdraw`
+                  : '',
             })
           }
         } catch (error) {
@@ -5668,6 +5902,16 @@ const server = createServer(async (request, response) => {
         sendJson(response, 409, {
           error: 'payment_link_needs_sent',
           message: 'A payment link is only for an invoice that has been sent. Send the invoice first.',
+        })
+        return
+      }
+      // Autopay is charging this invoice (or has): a second link is a second way
+      // to be charged. A failed attempt does not block - that is when it is wanted.
+      if (hasActiveAutopayAttempt(await appDataStore.listAutopayAttempts({ invoiceId: invoice.id }))) {
+        sendJson(response, 409, {
+          error: 'autopay_in_flight',
+          message:
+            'An automatic payment is being collected for this invoice, so it does not need a payment link.',
         })
         return
       }
@@ -6199,12 +6443,28 @@ const server = createServer(async (request, response) => {
       // clear, would otherwise invite the client to pay a second time. Those
       // re-sends go out as a statement.
       const settled = invoice.status === 'paid' || invoice.status === 'processing'
+      // STRIPE AUTOPAY (featreq-bef42b72), decided BEFORE anything is minted or
+      // emailed. `autopaySend.plan` is set only for the FIRST ok send of an
+      // invoice whose client is enrolled, with the kill switch on: that email
+      // carries NO pay link (a second way to pay is a second way to be charged)
+      // and says it will be debited automatically. `autopaySend.active` is an
+      // attempt already claimed, in flight or collected: a re-send then goes out
+      // as a statement, exactly like one for a paid invoice. Anything else - a
+      // re-send, a changed invoice, the kill switch off - is the email it always
+      // was, with its pay link.
+      const autopaySend = await planAutopaySend(invoice, sendClient)
       let payUrl = ''
       let cardPayUrl = ''
       // The checkout sessions THIS request minted, so a void that lands before
       // the email leaves can retire them.
       const mintedSessionIds = []
-      if (isStripeConfigured() && invoice.total > 0 && !settled) {
+      if (
+        isStripeConfigured() &&
+        invoice.total > 0 &&
+        !settled &&
+        !autopaySend.plan &&
+        !autopaySend.active
+      ) {
         // Reuse the client's Stripe customer so a repeat payer is one customer
         // in Stripe rather than one per invoice.
         let customerId = null
@@ -6355,6 +6615,16 @@ const server = createServer(async (request, response) => {
         client: sendClient,
         payUrl,
         cardPayUrl,
+        // An invoice that is about to be charged automatically: what will be
+        // debited (a card's includes its fee), from what, and the way to turn it
+        // off. Null for every other send, which is then the email it always was.
+        autopay: autopaySend.plan
+          ? {
+              chargedAmount: autopayChargeCents(invoice, autopaySend.plan.channel) / 100,
+              methodWords: autopayMethodWords(autopaySend.plan.enrollment),
+              withdrawUrl: `${getPublicAppUrl(request)}/autopay/${autopaySend.plan.enrollment.setupToken}/withdraw`,
+            }
+          : null,
         // The same per-client note the printed sheet and the PDF carry. It is
         // the INVOICE's client, the one whose name and address the email uses:
         // a billing master's invoice carries the master's note, not a sub's.
@@ -6474,9 +6744,21 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         console.error('[invoice] send bookkeeping failed after delivery:', error)
       }
+      const sendWasRecorded = sentInvoice !== invoice
       // Best-effort by construction (it never throws), so a delivered email
       // cannot become a failed response here.
       sentInvoice = await withCoverageChangeable(sentInvoice)
+      // THE CHARGE (featreq-bef42b72). Only for a send that was planned as an
+      // autopay send BEFORE the email left (first ok send, enrolled, kill switch
+      // on) and only now that the email is out AND recorded: `recordInvoiceSent`
+      // answers null for a voided invoice and then `sentInvoice` is still the
+      // invoice read at the top. `runAutopayCharge` re-reads everything, claims
+      // the attempt (the primary key is the double-charge guard) and looks once
+      // more before Stripe is called. Whatever happens in it, the client has
+      // already been emailed: it must not fail the response.
+      if (autopaySend.plan && sendWasRecorded) {
+        sentInvoice = await chargeAfterSend(request, invoice.id, sentInvoice)
+      }
       sendJson(response, 200, { invoice: sentInvoice })
       return
     }

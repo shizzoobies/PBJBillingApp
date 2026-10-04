@@ -2356,3 +2356,17 @@ export type AutopaySummary = {
   consentedAt: string | null
   withdrawnAt: string | null
 }
+
+/**
+ * The latest automatic-payment attempt on one invoice (featreq-bef42b72), as the
+ * month run's badge reads it. `claimed` is the moment before Stripe is asked,
+ * `processing` a bank debit in flight.
+ */
+export type AutopayAttemptSummary = {
+  invoiceId: string
+  attemptNo: number
+  status: 'claimed' | 'processing' | 'succeeded' | 'failed'
+  errorCode: string | null
+  error: string | null
+  updatedAt: string | null
+}

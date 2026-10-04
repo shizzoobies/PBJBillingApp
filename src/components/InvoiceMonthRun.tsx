@@ -28,6 +28,7 @@ import { flushSync } from 'react-dom'
 import {
   acknowledgeInvoiceAmountMismatchRequest,
   answerInvoiceAiReviewQuestionRequest,
+  chargeAutopayAgainRequest,
   confirmInvoiceCoverageRequest,
   createInvoicePaymentLinkRequest,
   generateInvoicesRequest,
@@ -44,6 +45,9 @@ import {
   updateInvoiceRequest,
 } from '../lib/api'
 import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
+import { useAutopayAttempts } from '../hooks/useAutopayAttempts'
+import { autopayAttemptBadge, autopayAttemptCanBeRepeated } from '../lib/autopayText'
+import type { AutopayAttemptSummary } from '../lib/types'
 import { editChangesWhatClientSees } from '../../lib/invoice-sent-change.js'
 import {
   paymentInProgress,
@@ -614,6 +618,12 @@ export function InvoiceMonthRun({
   // `invoices` because they arrive on their own schedule: a rating is written
   // minutes after the invoice it describes, and the invoice never carries it.
   const [reviews, setReviews] = useState<Record<string, InvoiceAiReview>>({})
+  // The latest automatic-payment attempt per invoice (featreq-bef42b72), for the
+  // row's "Autopay" / "Autopay failed" badge. Looks again whenever an invoice's
+  // status moves, because a send or a payment is what creates or settles one.
+  const autopay = useAutopayAttempts(
+    `${period}|${refreshToken}|${invoices.map((invoice) => `${invoice.id}:${invoice.status}`).join(',')}`,
+  )
   // The one invoice being re-rated right now, if any. Held here rather than in
   // the editor so the ROW's badge can say "Rating…" too — the card that started
   // it is one click away from being closed.
@@ -1625,6 +1635,9 @@ export function InvoiceMonthRun({
                         : (retainers.find((held) => held.clientId === invoice.clientId) ?? null)
                     }
                     review={reviews[invoice.id] ?? null}
+                    autopayAttempt={autopay.byInvoice[invoice.id] ?? null}
+                    chargingEnabled={autopay.chargingEnabled}
+                    onAutopayChanged={() => void autopay.reload()}
                     // Either she asked for this one, or the run is still
                     // waiting on the rating the server owes it.
                     rating={
@@ -1670,6 +1683,9 @@ function InvoiceRow({
   scope,
   retainer,
   review,
+  autopayAttempt,
+  chargingEnabled,
+  onAutopayChanged,
   rating,
   onRate,
   onAnswer,
@@ -1685,6 +1701,12 @@ function InvoiceRow({
 }: {
   invoice: PersistedInvoice
   clientName: string
+  /** The latest automatic-payment attempt on this invoice, if there was one. */
+  autopayAttempt: AutopayAttemptSummary | null
+  /** Automatic charging is switched on, so "Charge again" is offered. */
+  chargingEnabled: boolean
+  /** An autopay action landed: look at the attempts again. */
+  onAutopayChanged: () => void
   /** The client's own invoice says "due on receipt", so the date here is ours. */
   dueOnReceipt: boolean
   /** The run's one "today" (YYYY-MM-DD), so every row measures late the same way. */
@@ -1731,6 +1753,23 @@ function InvoiceRow({
   const flagged = invoice.scopeFlags.length > 0
   const adjustment = invoice.lineItems.find((line) => line.kind === 'adjustment')
   const paymentFailure = unresolvedPaymentFailure(invoice)
+  const autopayBadge = autopayAttemptBadge(autopayAttempt)
+  const [chargeAgainBusy, setChargeAgainBusy] = useState(false)
+  const [chargeAgainError, setChargeAgainError] = useState<string | null>(null)
+  const chargeAgain = async () => {
+    setChargeAgainBusy(true)
+    setChargeAgainError(null)
+    try {
+      onInvoiceChanged(await chargeAutopayAgainRequest(invoice.id))
+      onAutopayChanged()
+    } catch (err) {
+      // The server's sentence (it refused, or Stripe did), never a stack trace.
+      setChargeAgainError(err instanceof Error ? err.message : 'Could not charge again.')
+      onAutopayChanged()
+    } finally {
+      setChargeAgainBusy(false)
+    }
+  }
   // A payment that arrived for a different amount than the total, not yet marked
   // handled. Counts as "needs a look" even on a paid row.
   const amountMismatch = unhandledAmountMismatch(invoice)
@@ -1806,6 +1845,21 @@ function InvoiceRow({
               >
                 <AlertTriangle size={13} />
                 Payment failed {formatSentOn(paymentFailure.at)}
+              </span>
+            </span>
+          ) : null}
+          {/* Automatic payment (featreq-bef42b72): charged to a saved method when
+              the invoice was sent. Red when the attempt failed, because that row
+              needs a person; quiet otherwise, because nothing is being asked of
+              her - the money is on its way. */}
+          {autopayBadge && !isVoid ? (
+            <span className="invoice-run-flags">
+              <span
+                className={`invoice-run-flag${autopayBadge === 'failed' ? ' is-bad' : ''}`}
+                title={autopayAttempt?.error ?? undefined}
+              >
+                {autopayBadge === 'failed' ? <AlertTriangle size={13} /> : null}
+                {autopayBadge === 'failed' ? 'Autopay failed' : 'Autopay'}
               </span>
             </span>
           ) : null}
@@ -1902,6 +1956,35 @@ function InvoiceRow({
           </span>
         </span>
       </button>
+      {/* An automatic payment failed. Nothing was collected. The three moves are
+          named: follow up, send the invoice again (it then carries a Pay link and
+          never charges), or - behind the charging switch, and only while the
+          client's autopay is still on - charge the saved method once more. */}
+      {autopayAttempt?.status === 'failed' && !isVoid ? (
+        <div className="invoice-run-error invoice-run-autopay-failed" role="alert">
+          <p>
+            <strong>Automatic payment failed</strong>
+            {autopayAttempt.error ? ` — ${autopayAttempt.error}` : ''}
+            <br />
+            The client was not charged. Follow up with them, send the invoice again (it will
+            carry a Pay link), or charge their saved payment method again.
+          </p>
+          {chargingEnabled &&
+          autopayAttemptCanBeRepeated(autopayAttempt) &&
+          (invoice.status === 'sent' || invoice.status === 'overdue') ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={chargeAgainBusy}
+              onClick={() => void chargeAgain()}
+            >
+              {chargeAgainBusy ? 'Charging…' : 'Charge again'}
+            </button>
+          ) : null}
+          {chargeAgainError ? <p role="alert">{chargeAgainError}</p> : null}
+        </div>
+      ) : null}
+
       {/* Keyed on updatedAt so a fresh server version REMOUNTS the editor
           rather than syncing props into state inside an effect. */}
       {open ? (

@@ -107,7 +107,7 @@ import {
   scopeRetagApplies,
 } from '../lib/invoice-scope-retag.js'
 import { latestInvoiceSend } from '../lib/invoice-overdue.js'
-import { emptyAutopay } from '../lib/stripe-autopay.js'
+import { AUTOPAY_ACTIVE_ATTEMPT_STATUSES, emptyAutopay } from '../lib/stripe-autopay.js'
 import {
   AMOUNT_MISMATCH_EVENT,
   AMOUNT_MISMATCH_HANDLED_EVENT,
@@ -14625,6 +14625,24 @@ export class AppDataStore {
     // a fact about the invoice, and every route that voids goes through here.
     const voidRefusal = invoiceVoidRefusal(current, patch)
     if (voidRefusal) throw new InvoicePaymentProcessingError(voidRefusal.message, voidRefusal.code)
+
+    // AN AUTOPAY CHARGE THAT IS CLAIMED, IN FLIGHT OR COLLECTED (featreq-bef42b72).
+    // The claim is written BEFORE Stripe is called and the invoice only reads
+    // 'processing' once the bank debit has been created, so for a moment (and
+    // for good, when the answer from Stripe never arrived) a void would
+    // withdraw an invoice the client is being charged for. A FAILED attempt
+    // does not block: nothing is owed to anyone, and voiding is the right
+    // answer. The backstop for the instant between this read and the write below
+    // is flagPaymentOnVoidedInvoice.
+    if (patch?.status === 'void' && current.status !== 'void') {
+      const attempts = await this.listAutopayAttempts({ invoiceId: id })
+      if (attempts.some((attempt) => AUTOPAY_ACTIVE_ATTEMPT_STATUSES.has(attempt.status))) {
+        throw new InvoicePaymentProcessingError(
+          'An automatic payment is being collected for this invoice, or could not be confirmed. Check Stripe, or wait for it to clear, before voiding.',
+          'invoice_autopay_in_flight',
+        )
+      }
+    }
 
     // The hours panel beside the invoice stages her scope decisions and sends
     // them with the lines they moved. Read HERE, above the backend split and

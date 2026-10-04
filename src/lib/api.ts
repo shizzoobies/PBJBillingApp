@@ -2,6 +2,7 @@
   ApiError,
   type ActivityEntry,
   type AppData,
+  type AutopayAttemptSummary,
   type AutopaySummary,
   type BillRateVersion,
   type CostRateVersion,
@@ -4774,4 +4775,38 @@ export function inviteToAutopayRequest(clientId: string) {
 /** The owner turns a client's autopay off; the saved method is removed. */
 export function turnOffAutopayRequest(clientId: string) {
   return autopayAction(clientId, 'turn-off', 'Could not turn autopay off')
+}
+
+/**
+ * The latest autopay attempt on each invoice, and whether charging is switched
+ * on at all (owner only). Never carries a Stripe id.
+ */
+export async function listAutopayAttemptsRequest() {
+  const response = await apiFetch('/api/autopay/attempts', { credentials: 'same-origin' })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load autopay attempts (${response.status})`)
+  }
+  return (await response.json()) as { chargingEnabled: boolean; attempts: AutopayAttemptSummary[] }
+}
+
+/**
+ * "Charge again" after an automatic payment failed (owner only). Claims the NEXT
+ * attempt, so pressing it twice charges once; the server answers a sentence when
+ * it refuses.
+ */
+export async function chargeAutopayAgainRequest(invoiceId: string) {
+  const response = await apiFetch(
+    `/api/invoices/${encodeURIComponent(invoiceId)}/autopay/charge-again`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Could not charge again (${response.status})`)
+  }
+  return ((await response.json()) as { invoice: PersistedInvoice }).invoice
 }

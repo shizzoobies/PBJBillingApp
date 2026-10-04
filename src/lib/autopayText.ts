@@ -38,3 +38,23 @@ export function autopayStatusText(summary: AutopaySummary | null): string {
       return 'Not enrolled.'
   }
 }
+
+/** The row badge: 'autopay' while a charge is claimed, in flight or collected, 'failed' once it failed. */
+export function autopayAttemptBadge(
+  attempt: { status: string } | null | undefined,
+): 'autopay' | 'failed' | null {
+  if (!attempt) return null
+  if (attempt.status === 'failed') return 'failed'
+  return attempt.status === 'claimed' || attempt.status === 'processing' || attempt.status === 'succeeded'
+    ? 'autopay'
+    : null
+}
+
+/**
+ * Can the saved method be tried again? Not when the bank itself said the account
+ * cannot be debited: those turn autopay off, and "Charge again" would only be
+ * refused.
+ */
+export function autopayAttemptCanBeRepeated(attempt: { errorCode: string | null }): boolean {
+  return !['debit_not_authorized', 'account_closed', 'no_account'].includes(attempt.errorCode ?? '')
+}
