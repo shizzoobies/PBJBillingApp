@@ -1,5 +1,5 @@
 import {
-  Archive,
+  CalendarDays,
   ChevronRight,
   Copy,
   ListChecks,
@@ -17,12 +17,12 @@ import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { ClientChecklistModal } from '../components/ClientChecklistModal'
 import { ClientTimeModal } from '../components/ClientTimeModal'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
+import { ClientStatementsPanel } from '../components/ClientStatementsPanel'
 import { FloatingAddButton } from '../components/FloatingAddButton'
 import { highlightMatch } from '../lib/highlight'
 import {
   isInactiveClient,
   lifecycleOf,
-  markInactiveConfirm,
   selectableClients,
 } from '../lib/clientLifecycle'
 import { buildClientTaskCounts, type ClientTaskCounts } from '../lib/clientTaskCounts'
@@ -959,10 +959,13 @@ function ClientTable({
   const [timeClient, setTimeClient] = useState<Client | null>(null)
   // Client whose "Apply template" modal is open (owner-only).
   const [templateClient, setTemplateClient] = useState<Client | null>(null)
+  // Client whose "Statements" modal is open: the same Statement dates box the
+  // client page shows, reachable from the list (tracker featreq-739f43d1).
+  const [statementsClient, setStatementsClient] = useState<Client | null>(null)
   // Client id currently mid-onboarding-request, so its button shows a pending
   // state and can't be double-clicked.
   const [onboardingId, setOnboardingId] = useState<string | null>(null)
-  // Client id currently mid retire/reactivate, for the same reason.
+  // Client id currently mid reactivate, for the same reason.
   const [lifecycleId, setLifecycleId] = useState<string | null>(null)
 
   const handleStartOnboarding = async (clientId: string) => {
@@ -975,11 +978,14 @@ function ClientTable({
     }
   }
 
-  const handleLifecycle = async (client: Client, stage: 'inactive' | 'active') => {
-    if (stage === 'inactive' && !window.confirm(markInactiveConfirm(client.name))) return
+  // Reactivate only. "Mark inactive" left the row for a Statements button
+  // (Brittany, 2026-10-03). A client is now retired from its own page, with
+  // the confirmation there; the row's stage dropdown never offers Inactive
+  // (LIFECYCLE_STAGES above), by design.
+  const handleReactivate = async (client: Client) => {
     setLifecycleId(client.id)
     try {
-      await setClientLifecycle(client.id, stage)
+      await setClientLifecycle(client.id, 'active')
     } finally {
       setLifecycleId(null)
     }
@@ -1168,24 +1174,28 @@ function ClientTable({
                     >
                       <StickyNote size={14} /> Note
                     </button>
-                    {ownerMode ? (
+                    {/* The client page's Statement dates box, from the list.
+                        Reference history, so a retired client keeps it too. */}
+                    <button
+                      type="button"
+                      className="secondary-action compact-action"
+                      title="Statement dates: which day of the month each account's statement usually appears"
+                      onClick={() => setStatementsClient(client)}
+                    >
+                      <CalendarDays size={14} /> Statements
+                    </button>
+                    {/* A retired client has no stage dropdown, so Reactivate
+                        stays here as its one way back. */}
+                    {ownerMode && retired ? (
                       <button
                         type="button"
                         className="secondary-action compact-action"
                         disabled={lifecycleId === client.id}
-                        title={
-                          retired
-                            ? 'Bring this client back — they reappear everywhere they were before'
-                            : 'Retire this client: hide them from lists and pickers, keeping all their history'
-                        }
-                        onClick={() => handleLifecycle(client, retired ? 'active' : 'inactive')}
+                        title="Bring this client back — they reappear everywhere they were before"
+                        onClick={() => handleReactivate(client)}
                       >
-                        {retired ? <RotateCcw size={14} /> : <Archive size={14} />}{' '}
-                        {lifecycleId === client.id
-                          ? 'Saving…'
-                          : retired
-                            ? 'Reactivate'
-                            : 'Mark inactive'}
+                        <RotateCcw size={14} />{' '}
+                        {lifecycleId === client.id ? 'Saving…' : 'Reactivate'}
                       </button>
                     ) : null}
                   </div>
@@ -1224,6 +1234,14 @@ function ClientTable({
             ownerMode={ownerMode}
             currentUserId={sessionUser.id}
           />
+        </AddModal>
+      ) : null}
+      {statementsClient ? (
+        <AddModal
+          title={`Statement dates · ${statementsClient.name}`}
+          onClose={() => setStatementsClient(null)}
+        >
+          <ClientStatementsPanel clientId={statementsClient.id} />
         </AddModal>
       ) : null}
     </div>
