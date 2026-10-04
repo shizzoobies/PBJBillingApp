@@ -30,7 +30,9 @@ function routeBlock(startPattern: RegExp, length = 4000): string {
 const block = () =>
   routeBlock(
     /if \(normalizedPath === '\/api\/resend\/webhook' && request\.method === 'POST'\)/,
-    6000,
+    // Wide enough for the proposal and questionnaire branches ahead of the
+    // invoice lookup; a longer route block is not a reason to re-anchor.
+    7000,
   )
 
 describe('the Resend webhook verifies before it trusts anything', () => {

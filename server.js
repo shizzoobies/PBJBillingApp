@@ -100,6 +100,18 @@ import {
 import { buildInvoicePdf, invoicePdfFilename } from './lib/invoice-pdf.js'
 import { buildProposalPdf, proposalPdfFilename } from './lib/proposal-pdf.js'
 import { buildProposalEmail } from './lib/proposal-email.js'
+import { buildQuestionnaireEmail } from './lib/proposal-questionnaire-email.js'
+import {
+  QUESTIONNAIRE_RESPONSE_HEADERS,
+  answersFromFormValues,
+  readQuestionnaireForm,
+  renderQuestionnaireAlreadyPage,
+  renderQuestionnaireClosedPage,
+  renderQuestionnaireNotFoundPage,
+  renderQuestionnairePage,
+  renderQuestionnaireStatusPage,
+  renderQuestionnaireThanksPage,
+} from './lib/proposal-questionnaire-page.js'
 import { applyProposalPatch } from './lib/proposal-pricing.js'
 import {
   cardProcessingFeeLine,
@@ -358,6 +370,14 @@ const requestLinkAttempts = new Map()
 const payLinkAttempts = new Map()
 
 /**
+ * The public questionnaire's own bucket (featreq-8f139178): 30 opens per source
+ * address and 5 submissions per link in five minutes. Separate for the same
+ * reason as the pay link's - a prospect reloading a form must never be able to
+ * lock an owner out of signing in.
+ */
+const questionnaireAttempts = new Map()
+
+/**
  * Sliding-window limiter. The defaults are the sign-in link's, so the two
  * callers that predate the options argument are unchanged.
  */
@@ -388,7 +408,7 @@ function isRateLimited(
  */
 function sweepRateLimitBuckets(windowMs = RATE_LIMIT_WINDOW_MS) {
   const cutoff = Date.now() - windowMs
-  for (const bucket of [requestLinkAttempts, payLinkAttempts]) {
+  for (const bucket of [requestLinkAttempts, payLinkAttempts, questionnaireAttempts]) {
     for (const [key, list] of bucket) {
       if (!Array.isArray(list) || list.every((ts) => ts <= cutoff)) bucket.delete(key)
     }
@@ -409,6 +429,10 @@ const WORKSPACE_VERSION_HEADER = 'x-workspace-version'
 // an oversized (multi-GB) body can't OOM the process. Throws past the limit;
 // the global request handler catch turns it into a 500.
 const MAX_JSON_BODY_BYTES = 10 * 1024 * 1024 // 10 MB
+
+// The public questionnaire form is a few short fields; nothing legitimate comes
+// near this, and a stranger gets no more of the server's memory than this.
+const MAX_FORM_BODY_BYTES = 64 * 1024 // 64 KB
 
 /**
  * How much of a send-back note or a question is kept. Both are APPENDED to the
@@ -504,12 +528,12 @@ async function readJsonBody(request) {
 
 // Raw-body variant for webhook endpoints that must verify an HMAC signature
 // computed over the exact bytes sent (parse AFTER verification).
-async function readRawBody(request) {
+async function readRawBody(request, maxBytes = MAX_JSON_BODY_BYTES) {
   const chunks = []
   let total = 0
   for await (const chunk of request) {
     total += chunk.length
-    if (total > MAX_JSON_BODY_BYTES) {
+    if (total > maxBytes) {
       request.destroy()
       throw Object.assign(new Error('Request body too large'), { statusCode: 413 })
     }
@@ -1705,6 +1729,20 @@ function sendPayPage(response, html, status = 200, extraHeaders = {}) {
   response.end(html)
 }
 
+/**
+ * Every public-questionnaire response. No cookie is ever set - nobody is being
+ * signed in. Node drops the body of a HEAD by itself, so the pages double as
+ * HEAD answers.
+ */
+function sendQuestionnairePage(response, html, status = 200, extraHeaders = {}) {
+  response.writeHead(status, {
+    'Content-Type': 'text/html; charset=utf-8',
+    ...QUESTIONNAIRE_RESPONSE_HEADERS,
+    ...extraHeaders,
+  })
+  response.end(html)
+}
+
 // ---- Real-time sync: SSE fan-out ------------------------------------------
 // Every authenticated client holds an open /api/events stream. After ANY
 // successful data mutation we ping all of them so each session refetches the
@@ -1781,14 +1819,106 @@ async function recordProposalDelivery(request, proposalId, deliveryEvent, resend
 
 /**
  * A questionnaire as an owner's screen gets it: everything on the record EXCEPT
- * the token. The token is the public link's whole authority, so it is rendered
- * into a `link` by the route that makes or renews one and is never echoed by a
- * list or a read.
+ * the bare token, plus `link` - the public address, for a link that can still be
+ * answered (so Copy link works from the inbox) and null for everything else.
  */
-function questionnaireView(record) {
+function questionnaireView(record, request) {
   if (!record) return null
-  const { token: _token, ...rest } = record
-  return rest
+  const { token, ...rest } = record
+  const open = record.mode === 'link' && record.status === 'open' && !record.expired
+  return {
+    ...rest,
+    link: open && token ? `${getPublicAppUrl(request)}/questionnaire/${token}` : null,
+  }
+}
+
+const QUESTIONNAIRE_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+/**
+ * Email a link to the prospect: through the invoice sender, tagged with the
+ * questionnaire so the delivery webhook files its events on it. Every attempt,
+ * failed ones included, goes on the questionnaire's log. Never throws.
+ *
+ * @returns {Promise<{ok: boolean, to: string, error: string|null}>}
+ */
+async function emailQuestionnaireLink(request, record, to) {
+  try {
+    const link = `${getPublicAppUrl(request)}/questionnaire/${record.token}`
+    const firmSettings = await appDataStore.getFirmSettings()
+    const email = buildQuestionnaireEmail({ link, firmSettings, expiresAt: record.expiresAt })
+    const sendResult = await sendInvoiceEmail({
+      to: [to],
+      subject: email.subject,
+      html: email.html,
+      text: email.text,
+      fromName: firmSettings?.name || undefined,
+      questionnaireId: record.id,
+      kind: 'questionnaire',
+    })
+    await appDataStore.appendProposalQuestionnaireEmailEvent(record.id, {
+      kind: 'send',
+      ok: sendResult.ok,
+      to: [to],
+      subject: email.subject,
+      providerId: sendResult.providerId ?? null,
+      error: sendResult.error ?? null,
+    })
+    return { ok: sendResult.ok, to, error: sendResult.error ?? null }
+  } catch (error) {
+    console.error('[questionnaire] could not email the link:', record.id, error)
+    return { ok: false, to, error: 'The email could not be sent.' }
+  }
+}
+
+/**
+ * A Resend delivery event about a QUESTIONNAIRE email: appended to its own log
+ * (idempotently, in the store) and, on a bounce or a spam complaint, told to the
+ * owners once. Never touches the questionnaire's status - a bounce does not
+ * withdraw a link. Reuses `invoice_email_bounced`, so the owners' "Invoice
+ * alerts" switch governs it; the subject says what it is.
+ *
+ * @returns {Promise<boolean>} whether the questionnaire was found
+ */
+async function recordQuestionnaireDelivery(request, questionnaireId, deliveryEvent, resendEvent) {
+  const eventData = resendEvent?.data ?? {}
+  const providerId = typeof eventData.email_id === 'string' ? eventData.email_id : null
+  const found = await appDataStore.getProposalQuestionnaire(questionnaireId)
+  if (!found) {
+    console.warn('[resend] event for an unknown questionnaire', resendEvent?.type, questionnaireId, providerId)
+    return false
+  }
+  const detail =
+    deliveryEvent === 'bounced' || deliveryEvent === 'complained'
+      ? String(eventData.bounce?.message ?? eventData.bounce?.type ?? '')
+      : ''
+  const alreadyLogged = found.emailLog.some(
+    (entry) =>
+      entry?.kind === 'delivery' &&
+      entry?.event === deliveryEvent &&
+      (entry?.providerId ?? null) === providerId,
+  )
+  await appDataStore.appendProposalQuestionnaireEmailEvent(found.id, {
+    kind: 'delivery',
+    event: deliveryEvent,
+    at: resendEvent?.created_at ?? null,
+    providerId,
+    to: Array.isArray(eventData.to) ? eventData.to : [eventData.to].filter(Boolean),
+    detail,
+  })
+  if (!alreadyLogged && (deliveryEvent === 'bounced' || deliveryEvent === 'complained')) {
+    const what = deliveryEvent === 'bounced' ? 'bounced' : 'was marked as spam'
+    const who = found.sentTo || 'a prospect'
+    const members = await appDataStore.getTeamMembers()
+    for (const owner of members.filter((member) => member.role === 'owner')) {
+      await notify(appDataStore, owner.id, 'invoice_email_bounced', {
+        message: `The questionnaire email to ${who} ${what}${detail ? `: ${detail}` : ''}`,
+        subject: `Questionnaire email problem: ${who}`,
+        link: '/proposals',
+        appPublicUrl: getPublicAppUrl(request),
+      })
+    }
+  }
+  return true
 }
 
 /**
@@ -3488,6 +3618,196 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // ---- /questionnaire/:token — the prospect's questionnaire (public) -------
+    //
+    // featreq-8f139178. A link a prospect fills in alone, from an email, with no
+    // account: the 32-byte token IS the authorization, so everything here says as
+    // little as it can. PUBLIC on purpose - no `requireSession` - and above the
+    // SPA fallback, which would otherwise answer a questionnaire link with 200 and
+    // the app shell.
+    //
+    //  - GET/HEAD show the form (only the questions: nothing stored about anyone).
+    //  - POST takes the answers ONCE, then 303s to a thank-you page so a refresh
+    //    cannot post twice. The one-submission rule itself is a conditional write in
+    //    the store; the limits here only keep it from being walked or hammered.
+    //  - An unknown token and a malformed one get the same page, shape-checked
+    //    before the database is ever asked.
+    //  - EVERYTHING is a page: the global handler's catch answers JSON, which a
+    //    prospect must never be shown.
+    const questionnaireMatch = normalizedPath.match(/^\/questionnaire\/([^/]+)$/)
+    if (questionnaireMatch) {
+      const linkToken = questionnaireMatch[1]
+      const isRead = request.method === 'GET' || request.method === 'HEAD'
+      const isPost = request.method === 'POST'
+
+      // The thank-you page is the one fixed address: nothing in the URL, nothing
+      // stored behind it, so a prospect's history or a proxy log learns nothing.
+      if (linkToken === 'thanks' && isRead) {
+        sendQuestionnairePage(response, renderQuestionnaireThanksPage())
+        return
+      }
+      if (!isRead && !isPost) {
+        sendQuestionnairePage(
+          response,
+          renderQuestionnaireStatusPage({
+            heading: 'This link only opens a questionnaire',
+            body: 'Open it in a browser to answer the questions.',
+          }),
+          405,
+          { Allow: 'GET, HEAD, POST' },
+        )
+        return
+      }
+
+      // Shape first, so a scanner walking the path space never reaches the
+      // database. 32 base64url bytes is 43 characters; the range is loose enough
+      // to survive a change of token length later.
+      if (!/^[A-Za-z0-9_-]{20,64}$/.test(linkToken)) {
+        sendQuestionnairePage(response, renderQuestionnaireNotFoundPage(), 404)
+        return
+      }
+
+      try {
+        const tooMany = () =>
+          sendQuestionnairePage(
+            response,
+            renderQuestionnaireStatusPage({
+              heading: 'Too many attempts',
+              body: 'Please wait a few minutes and try the link again.',
+            }),
+            429,
+            { 'Retry-After': '300' },
+          )
+        // Two limits: 30 opens per source address in five minutes, so nobody can
+        // walk the token space, and 5 submissions per token, so one link cannot
+        // be used to hammer the store.
+        if (isRateLimited(`ip:${getClientIp(request)}`, { max: 30, bucket: questionnaireAttempts })) {
+          tooMany()
+          return
+        }
+
+        const record = await appDataStore.findProposalQuestionnaireByToken(linkToken)
+        if (!record || record.mode !== 'link') {
+          sendQuestionnairePage(response, renderQuestionnaireNotFoundPage(), 404)
+          return
+        }
+        const closedPage = () =>
+          record.status === 'submitted'
+            ? sendQuestionnairePage(response, renderQuestionnaireAlreadyPage(), 200)
+            : sendQuestionnairePage(response, renderQuestionnaireClosedPage(), 410)
+
+        if (isRead) {
+          if (record.status !== 'open' || record.expired) {
+            closedPage()
+            return
+          }
+          sendQuestionnairePage(response, renderQuestionnairePage({ questionnaire: record.questions }))
+          return
+        }
+
+        // ---- POST ----
+        if (isRateLimited(`token:${linkToken}`, { max: 5, bucket: questionnaireAttempts })) {
+          tooMany()
+          return
+        }
+        if (isCrossSiteOrigin(request)) {
+          sendQuestionnairePage(
+            response,
+            renderQuestionnaireStatusPage({
+              heading: 'This form could not be sent from here',
+              body: 'Please open the link from your email and send the form from that page.',
+            }),
+            403,
+          )
+          return
+        }
+        if (
+          !String(request.headers['content-type'] || '')
+            .toLowerCase()
+            .includes('application/x-www-form-urlencoded')
+        ) {
+          sendQuestionnairePage(response, renderQuestionnaireNotFoundPage(), 415)
+          return
+        }
+        let formBody
+        try {
+          formBody = await readRawBody(request, MAX_FORM_BODY_BYTES)
+        } catch (error) {
+          if (error?.statusCode === 413) {
+            sendQuestionnairePage(
+              response,
+              renderQuestionnaireStatusPage({
+                heading: 'That is more than we can take',
+                body: 'Please shorten your answers and send the form again.',
+              }),
+              413,
+            )
+            return
+          }
+          throw error
+        }
+        if (record.status !== 'open' || record.expired) {
+          closedPage()
+          return
+        }
+
+        const values = readQuestionnaireForm(formBody, record.questions)
+        let submitted
+        try {
+          submitted = await appDataStore.submitProposalQuestionnaire(
+            { token: linkToken },
+            answersFromFormValues(values),
+          )
+        } catch (error) {
+          if (!(error instanceof ProposalQuestionnaireError)) throw error
+          if (error.reason === 'invalid') {
+            // Their own input, put back, with what is missing. Nothing stored.
+            sendQuestionnairePage(
+              response,
+              renderQuestionnairePage({
+                questionnaire: record.questions,
+                errors: error.problems.length > 0 ? error.problems : [error.message],
+                values,
+              }),
+              400,
+            )
+            return
+          }
+          if (error.reason === 'submitted') {
+            sendQuestionnairePage(response, renderQuestionnaireAlreadyPage(), 409)
+            return
+          }
+          if (error.reason === 'missing') {
+            sendQuestionnairePage(response, renderQuestionnaireNotFoundPage(), 404)
+            return
+          }
+          sendQuestionnairePage(response, renderQuestionnaireClosedPage(), 410)
+          return
+        }
+
+        // The answers are in. The draft and the notice are best-effort from here:
+        // nothing below may turn a stored submission into an error page.
+        await finishQuestionnaireSubmission(request, submitted)
+        response.writeHead(303, {
+          Location: '/questionnaire/thanks',
+          ...QUESTIONNAIRE_RESPONSE_HEADERS,
+        })
+        response.end()
+        return
+      } catch (error) {
+        console.error('[questionnaire] public route failed:', error)
+        sendQuestionnairePage(
+          response,
+          renderQuestionnaireStatusPage({
+            heading: 'Something went wrong',
+            body: 'Please try the link again in a few minutes.',
+          }),
+          500,
+        )
+        return
+      }
+    }
+
     // ---- GET /pay/:token — the durable payment link ------------------------
     //
     // WHY IT EXISTS. A Stripe Checkout URL expires in about a day, so the Pay
@@ -4679,6 +4999,20 @@ const server = createServer(async (request, response) => {
           const matched = await recordProposalDelivery(
             request,
             tagBag.proposal_id,
+            deliveryEvent,
+            resendEvent,
+          )
+          sendJson(response, 200, { received: true, matched })
+          return
+        }
+        // A questionnaire email carries a questionnaire_id tag: its events go on
+        // the questionnaire's own log (never its status), and nowhere near an
+        // invoice. Before the invoice lookup below, which would otherwise take
+        // the first unknown tag for a missing invoice.
+        if (typeof tagBag.questionnaire_id === 'string' && tagBag.questionnaire_id) {
+          const matched = await recordQuestionnaireDelivery(
+            request,
+            tagBag.questionnaire_id,
             deliveryEvent,
             resendEvent,
           )
@@ -9302,7 +9636,7 @@ const server = createServer(async (request, response) => {
       if (!(await requireQuestionnaireOwner(request, response))) return
       const proposalId = requestUrl.searchParams.get('proposalId') || null
       const list = await appDataStore.listProposalQuestionnaires({ proposalId })
-      sendJson(response, 200, { questionnaires: list.map(questionnaireView) })
+      sendJson(response, 200, { questionnaires: list.map((entry) => questionnaireView(entry, request)) })
       return
     }
 
@@ -9310,8 +9644,18 @@ const server = createServer(async (request, response) => {
       const session = await requireQuestionnaireOwner(request, response, { write: true })
       if (!session) return
       const payload = (await readJsonBody(request)) ?? {}
-      if (payload.mode !== 'call') {
-        sendJson(response, 400, { error: 'invalid_mode', message: 'Start a call sheet with mode "call".' })
+      if (payload.mode !== 'call' && payload.mode !== 'link') {
+        sendJson(response, 400, {
+          error: 'invalid_mode',
+          message: 'A questionnaire is a link ("link") or a call sheet ("call").',
+        })
+        return
+      }
+      // An address is only for a link, and the owner confirms it on every send -
+      // the same rule the proposal email follows.
+      const to = typeof payload.to === 'string' ? payload.to.trim() : ''
+      if (to && (payload.mode !== 'link' || to.length > 320 || !QUESTIONNAIRE_EMAIL_PATTERN.test(to))) {
+        sendJson(response, 400, { error: 'A valid email address is required.' })
         return
       }
       let created
@@ -9327,12 +9671,16 @@ const server = createServer(async (request, response) => {
         }
         throw error
       }
-      sendJson(response, 201, { questionnaire: questionnaireView(created) })
+      // A failed email still leaves the link made: the page says so and offers it
+      // to copy, rather than losing it.
+      const emailed = to ? await emailQuestionnaireLink(request, created, to) : null
+      const latest = (await appDataStore.getProposalQuestionnaire(created.id)) ?? created
+      sendJson(response, 201, { questionnaire: questionnaireView(latest, request), emailed })
       return
     }
 
     const questionnaireIdMatch = normalizedPath.match(
-      /^\/api\/proposal-questionnaires\/([^/]+)(?:\/(submit|withdraw|start-draft))?$/,
+      /^\/api\/proposal-questionnaires\/([^/]+)(?:\/(submit|withdraw|start-draft|new-link))?$/,
     )
     if (questionnaireIdMatch) {
       const questionnaireId = questionnaireIdMatch[1]
@@ -9350,7 +9698,7 @@ const server = createServer(async (request, response) => {
               sendJson(response, 404, { error: 'Questionnaire not found' })
               return
             }
-            sendJson(response, 200, { questionnaire: questionnaireView(found) })
+            sendJson(response, 200, { questionnaire: questionnaireView(found, request) })
             return
           }
 
@@ -9365,7 +9713,7 @@ const server = createServer(async (request, response) => {
               sendJson(response, 404, { error: 'Questionnaire not found' })
               return
             }
-            sendJson(response, 200, { questionnaire: questionnaireView(saved) })
+            sendJson(response, 200, { questionnaire: questionnaireView(saved, request) })
             return
           }
 
@@ -9388,7 +9736,27 @@ const server = createServer(async (request, response) => {
               )
             }
             const latest = (await appDataStore.getProposalQuestionnaire(submitted.id)) ?? submitted
-            sendJson(response, 200, { questionnaire: questionnaireView(latest), proposal })
+            sendJson(response, 200, { questionnaire: questionnaireView(latest, request), proposal })
+            return
+          }
+
+          // POST /:id/new-link { to? } - a fresh link and thirty days for one that
+          // was never answered; the old link names nothing from this moment.
+          if (action === 'new-link') {
+            const payload = (await readJsonBody(request)) ?? {}
+            const to = typeof payload.to === 'string' ? payload.to.trim() : ''
+            if (to && (to.length > 320 || !QUESTIONNAIRE_EMAIL_PATTERN.test(to))) {
+              sendJson(response, 400, { error: 'A valid email address is required.' })
+              return
+            }
+            const renewed = await appDataStore.renewProposalQuestionnaireLink(questionnaireId)
+            if (!renewed) {
+              sendJson(response, 404, { error: 'Questionnaire not found' })
+              return
+            }
+            const emailed = to ? await emailQuestionnaireLink(request, renewed, to) : null
+            const latest = (await appDataStore.getProposalQuestionnaire(renewed.id)) ?? renewed
+            sendJson(response, 200, { questionnaire: questionnaireView(latest, request), emailed })
             return
           }
 
@@ -9399,7 +9767,7 @@ const server = createServer(async (request, response) => {
               sendJson(response, 404, { error: 'Questionnaire not found' })
               return
             }
-            sendJson(response, 200, { questionnaire: questionnaireView(withdrawn) })
+            sendJson(response, 200, { questionnaire: questionnaireView(withdrawn, request) })
             return
           }
 
@@ -9416,7 +9784,7 @@ const server = createServer(async (request, response) => {
           }
           broadcastDataChanged()
           const latest = await appDataStore.getProposalQuestionnaire(questionnaireId)
-          sendJson(response, 200, { questionnaire: questionnaireView(latest), proposal: started.proposal })
+          sendJson(response, 200, { questionnaire: questionnaireView(latest, request), proposal: started.proposal })
           return
         } catch (error) {
           if (error instanceof ProposalQuestionnaireError) {

@@ -45,6 +45,8 @@ vi.mock('../lib/api', () => ({
   submitQuestionnaireRequest: (...args: unknown[]) => api.submitQuestionnaireRequest(...args),
   startQuestionnaireDraftRequest: (...args: unknown[]) => api.startQuestionnaireDraftRequest(...args),
   withdrawQuestionnaireRequest: (...args: unknown[]) => api.withdrawQuestionnaireRequest(...args),
+  sendQuestionnaireRequest: (...args: unknown[]) => api.sendQuestionnaireRequest(...args),
+  renewQuestionnaireLinkRequest: (...args: unknown[]) => api.renewQuestionnaireLinkRequest(...args),
 }))
 
 const api: Record<string, Mock> = {}

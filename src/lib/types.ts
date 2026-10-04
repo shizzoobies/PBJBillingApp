@@ -468,7 +468,12 @@ export type ProposalQuestionnaire = {
   createdBy: string | null
   createdAt: string
   updatedAt: string | null
+  /** The public address of a link that can still be answered; null for anything else. */
+  link?: string | null
 }
+
+/** What emailing a questionnaire link did: sent, or why not (the link is still made). */
+export type QuestionnaireEmailResult = { ok: boolean; to: string; error: string | null }
 
 /**
  * A reusable contact entered once and selected (via dropdown / multi-select)

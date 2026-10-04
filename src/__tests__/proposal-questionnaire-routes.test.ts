@@ -81,7 +81,6 @@ describe('the owner routes', () => {
 
   it('never puts a token in an answer', () => {
     expect(ownerBlock).not.toMatch(/\.token\b/)
-    expect(serverSource).toMatch(/const \{ token: _token, \.\.\.rest \} = record/)
     // Every response body in the block is a view or a plain object, not a raw record.
     for (const sent of ownerBlock.match(/sendJson\(response, 20[01], [^)]*\)/g) ?? []) {
       expect(sent, sent).toMatch(/questionnaireView|questionnaires:|proposal|\{ error/)
@@ -138,5 +137,189 @@ describe('the table', () => {
   it('claims the single submission and the single draft in the WHERE, not in JavaScript', () => {
     expect(storeSource).toContain("and status = 'open' and (expires_at is null or expires_at > now())")
     expect(storeSource).toContain('where id = $1 and proposal_id is null')
+  })
+})
+
+/* ------------------------------------------------------------------------ */
+/* The public link, the email and the webhook (part 2)                       */
+/* ------------------------------------------------------------------------ */
+
+const publicBlock = between(
+  serverSource,
+  'const questionnaireMatch = normalizedPath.match(',
+  '// ---- GET /pay/:token',
+)
+const notifySource = readFileSync(path.join(root, 'lib/notify.js'), 'utf8')
+
+describe('the public questionnaire route', () => {
+  it('is public, and answers only with pages - never JSON, never a cookie', () => {
+    expect(publicBlock).not.toContain('requireSession')
+    expect(publicBlock).not.toContain('sendJson(')
+    expect(publicBlock).not.toMatch(/Set-Cookie|appendSetCookie/)
+    expect(publicBlock).toContain("request.method === 'GET' || request.method === 'HEAD'")
+    expect(publicBlock).toContain("request.method === 'POST'")
+  })
+
+  it('sits above the /api/ 404 and the SPA fallback, or a link answers with the app shell', () => {
+    const at = serverSource.indexOf('const questionnaireMatch = normalizedPath.match(')
+    expect(at).toBeGreaterThan(-1)
+    expect(at).toBeLessThan(serverSource.indexOf("if (normalizedPath.startsWith('/api/')) {"))
+    expect(at).toBeLessThan(serverSource.indexOf('indexFile', serverSource.indexOf('const indexFile') + 20))
+  })
+
+  it('checks the token SHAPE before it ever asks the database, and rate-limits before the lookup', () => {
+    const shape = publicBlock.indexOf('/^[A-Za-z0-9_-]{20,64}$/.test(linkToken)')
+    const ipLimit = publicBlock.indexOf('isRateLimited(`ip:${getClientIp(request)}`')
+    const lookup = publicBlock.indexOf('findProposalQuestionnaireByToken(linkToken)')
+    expect(shape).toBeGreaterThan(-1)
+    expect(ipLimit).toBeGreaterThan(shape)
+    expect(lookup).toBeGreaterThan(ipLimit)
+    expect(publicBlock).toContain('{ max: 30, bucket: questionnaireAttempts }')
+    expect(publicBlock).toContain('{ max: 5, bucket: questionnaireAttempts }')
+  })
+
+  it('answers an unknown and a malformed token with the same page and status', () => {
+    const notFound = publicBlock.match(/renderQuestionnaireNotFoundPage\(\), 404/g) ?? []
+    expect(notFound.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('makes a GET or HEAD change nothing: no store write between the lookup and the page', () => {
+    const read = between(publicBlock, 'if (isRead) {', '// ---- POST ----')
+    expect(read).not.toMatch(/appDataStore\.(submit|save|renew|withdraw|append|create|start)/)
+  })
+
+  it('refuses a cross-site post, a wrong content type and a big body BEFORE it submits', () => {
+    const submit = publicBlock.indexOf('appDataStore.submitProposalQuestionnaire(')
+    for (const guard of [
+      'isCrossSiteOrigin(request)',
+      "includes('application/x-www-form-urlencoded')",
+      'readRawBody(request, MAX_FORM_BODY_BYTES)',
+    ]) {
+      const at = publicBlock.indexOf(guard)
+      expect(at, guard).toBeGreaterThan(-1)
+      expect(at, guard).toBeLessThan(submit)
+    }
+    expect(serverSource).toContain('const MAX_FORM_BODY_BYTES = 64 * 1024')
+  })
+
+  it('reads the form against the frozen questions and submits by token', () => {
+    expect(publicBlock).toContain('readQuestionnaireForm(formBody, record.questions)')
+    expect(publicBlock).toContain('{ token: linkToken }')
+    expect(publicBlock).toContain('answersFromFormValues(values)')
+  })
+
+  it('303s to a fixed thank-you page after the submission, so a refresh cannot post twice', () => {
+    const submit = publicBlock.indexOf('appDataStore.submitProposalQuestionnaire(')
+    const finish = publicBlock.indexOf('finishQuestionnaireSubmission(request, submitted)')
+    const redirect = publicBlock.indexOf('response.writeHead(303')
+    expect(finish).toBeGreaterThan(submit)
+    expect(redirect).toBeGreaterThan(finish)
+    expect(publicBlock).toContain("Location: '/questionnaire/thanks'")
+    // Nothing personal rides in the address.
+    expect(publicBlock).not.toMatch(/Location: `/)
+  })
+
+  it('has its own catch that answers a page, never the JSON the global handler would', () => {
+    expect(publicBlock).toContain("console.error('[questionnaire] public route failed:'")
+    expect(publicBlock).toContain("heading: 'Something went wrong'")
+  })
+
+  it('every answer carries the questionnaire headers', () => {
+    expect(serverSource).toMatch(
+      /function sendQuestionnairePage\([^)]*\) \{[\s\S]{0,300}\.\.\.QUESTIONNAIRE_RESPONSE_HEADERS/,
+    )
+    expect(publicBlock).toContain('...QUESTIONNAIRE_RESPONSE_HEADERS')
+  })
+
+  it('sweeps its rate-limit bucket with the others', () => {
+    expect(serverSource).toContain(
+      'for (const bucket of [requestLinkAttempts, payLinkAttempts, questionnaireAttempts])',
+    )
+  })
+})
+
+describe('the owner routes, now with links', () => {
+  it('never put the bare token in an answer; the view carries the link of an open link only', () => {
+    const view = between(serverSource, 'function questionnaireView(', 'const QUESTIONNAIRE_EMAIL_PATTERN')
+    expect(view).toContain('const { token, ...rest } = record')
+    expect(view).not.toMatch(/\btoken,\s*$/m)
+    expect(view).toContain("record.mode === 'link' && record.status === 'open' && !record.expired")
+    expect(ownerBlock).not.toMatch(/\.token\b/)
+  })
+
+  it('every view in the owner block is built with the request, so the link is public-origin', () => {
+    expect(ownerBlock).not.toMatch(/questionnaireView\([a-z]+\)/)
+    expect(ownerBlock).not.toContain('.map(questionnaireView)')
+  })
+
+  it('checks the address before it makes anything, and only a link takes one', () => {
+    const create = between(ownerBlock, "request.method === 'POST') {", 'const questionnaireIdMatch')
+    const check = create.indexOf('QUESTIONNAIRE_EMAIL_PATTERN.test(to)')
+    const make = create.indexOf('appDataStore.createProposalQuestionnaire(')
+    expect(check).toBeGreaterThan(-1)
+    expect(check).toBeLessThan(make)
+    expect(create).toContain("payload.mode !== 'link'")
+  })
+
+  it('a new link goes through the same email path as the first one', () => {
+    const renew = between(ownerBlock, "if (action === 'new-link') {", "if (action === 'withdraw')")
+    expect(renew).toContain('renewProposalQuestionnaireLink(questionnaireId)')
+    expect(renew).toContain('emailQuestionnaireLink(request, renewed, to)')
+  })
+})
+
+describe('the email', () => {
+  const emailer = between(
+    serverSource,
+    'async function emailQuestionnaireLink(',
+    'async function recordQuestionnaireDelivery(',
+  )
+
+  it('goes through the invoice sender, tagged with the questionnaire', () => {
+    expect(emailer).toContain('sendInvoiceEmail({')
+    expect(emailer).toContain('questionnaireId: record.id')
+    expect(emailer).toContain("kind: 'questionnaire'")
+  })
+
+  it('logs every attempt, failed ones too, and never throws', () => {
+    expect(emailer).toContain('appendProposalQuestionnaireEmailEvent(record.id')
+    expect(emailer).toContain('ok: sendResult.ok')
+    expect(emailer).toMatch(/\} catch \(error\) \{[\s\S]*return \{ ok: false/)
+  })
+
+  it('puts the questionnaire tag on the Resend payload', () => {
+    expect(notifySource).toContain("tags.push({ name: 'questionnaire_id', value: questionnaire })")
+  })
+})
+
+describe('the Resend webhook', () => {
+  const webhook = between(
+    serverSource,
+    "normalizedPath === '/api/resend/webhook'",
+    'const taggedInvoiceId',
+  )
+
+  it('routes a questionnaire-tagged event to the questionnaire BEFORE the invoice lookup', () => {
+    const branch = webhook.indexOf("typeof tagBag.questionnaire_id === 'string'")
+    expect(branch).toBeGreaterThan(-1)
+    expect(webhook.indexOf('recordQuestionnaireDelivery(')).toBeGreaterThan(branch)
+    // ...and the invoice fall-through is still the last thing in the handler.
+    expect(serverSource.indexOf('const taggedInvoiceId')).toBeGreaterThan(
+      serverSource.indexOf("typeof tagBag.questionnaire_id === 'string'"),
+    )
+    // The proposal branch is untouched and still ahead of it.
+    expect(webhook.indexOf("typeof tagBag.proposal_id === 'string'")).toBeLessThan(branch)
+  })
+
+  it('files the event on the questionnaire, never on its status, and tells owners once about a bounce', () => {
+    const handler = between(
+      serverSource,
+      'async function recordQuestionnaireDelivery(',
+      '// ---- Consolidated billing',
+    )
+    expect(handler).toContain('appendProposalQuestionnaireEmailEvent(found.id')
+    expect(handler).not.toMatch(/status/i)
+    expect(handler).toContain('!alreadyLogged')
+    expect(handler).toContain("'invoice_email_bounced'")
   })
 })

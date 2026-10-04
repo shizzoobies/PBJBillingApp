@@ -15,12 +15,18 @@ export function QuestionnaireInbox({
   onResume,
   onWithdraw,
   onStartDraft,
+  onCopyLink,
+  onSendAgain,
+  onNewLink,
 }: {
   questionnaires: ProposalQuestionnaire[]
   busyId: string | null
   onResume: (questionnaire: ProposalQuestionnaire) => void
   onWithdraw: (questionnaire: ProposalQuestionnaire) => void
   onStartDraft: (questionnaire: ProposalQuestionnaire) => void
+  onCopyLink: (questionnaire: ProposalQuestionnaire) => void
+  onSendAgain: (questionnaire: ProposalQuestionnaire) => void
+  onNewLink: (questionnaire: ProposalQuestionnaire) => void
 }) {
   if (questionnaires.length === 0) return null
   return (
@@ -41,11 +47,30 @@ export function QuestionnaireInbox({
                   <span className="muted-text">
                     {entry.mode === 'call' ? 'Call sheet' : 'Link'} -{' '}
                     {proposalDate(entry.submittedAt ?? entry.createdAt)}
+                    {entry.sentTo && group !== 'answered' ? ` - sent to ${entry.sentTo}` : ''}
+                    {entry.expiresAt && group === 'waiting'
+                      ? ` - open until ${proposalDate(entry.expiresAt)}`
+                      : ''}
                   </span>
                   <span className="questionnaire-actions">
                     {group === 'waiting' && entry.mode === 'call' ? (
                       <button type="button" className="secondary-action" onClick={() => onResume(entry)}>
                         Resume
+                      </button>
+                    ) : null}
+                    {group === 'waiting' && entry.mode === 'link' && entry.link ? (
+                      <button type="button" className="secondary-action" onClick={() => onCopyLink(entry)}>
+                        Copy link
+                      </button>
+                    ) : null}
+                    {group === 'waiting' && entry.mode === 'link' && entry.sentTo ? (
+                      <button
+                        type="button"
+                        className="secondary-action"
+                        disabled={busyId === entry.id}
+                        onClick={() => onSendAgain(entry)}
+                      >
+                        Send again
                       </button>
                     ) : null}
                     {group === 'waiting' ? (
@@ -75,9 +100,21 @@ export function QuestionnaireInbox({
                       </>
                     ) : null}
                     {group === 'expired' ? (
-                      <span className="status-pill">
-                        {entry.status === 'withdrawn' ? 'Withdrawn' : 'Expired'}
-                      </span>
+                      <>
+                        <span className="status-pill">
+                          {entry.status === 'withdrawn' ? 'Withdrawn' : 'Expired'}
+                        </span>
+                        {entry.mode === 'link' ? (
+                          <button
+                            type="button"
+                            className="secondary-action"
+                            disabled={busyId === entry.id}
+                            onClick={() => onNewLink(entry)}
+                          >
+                            New link
+                          </button>
+                        ) : null}
+                      </>
                     ) : null}
                   </span>
                 </li>

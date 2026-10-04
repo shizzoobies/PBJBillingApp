@@ -29,6 +29,8 @@ vi.mock('../lib/api', () => ({
   submitQuestionnaireRequest: (...args: unknown[]) => api.submitQuestionnaireRequest(...args),
   startQuestionnaireDraftRequest: (...args: unknown[]) => api.startQuestionnaireDraftRequest(...args),
   withdrawQuestionnaireRequest: (...args: unknown[]) => api.withdrawQuestionnaireRequest(...args),
+  sendQuestionnaireRequest: (...args: unknown[]) => api.sendQuestionnaireRequest(...args),
+  renewQuestionnaireLinkRequest: (...args: unknown[]) => api.renewQuestionnaireLinkRequest(...args),
 }))
 
 const api: Record<string, Mock> = {}
@@ -330,5 +332,97 @@ describe('the Estimate tab', () => {
     expect(await screen.findByLabelText('Title')).toHaveValue('Owner')
     expect(screen.getByLabelText('Address')).toHaveValue('1 Main St')
     expect(screen.getByLabelText('ZIP code')).toHaveValue('37201')
+  })
+})
+
+describe('Send questionnaire', () => {
+  const link = 'https://app.pbjsa.com/questionnaire/abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG'
+  const waitingLink = questionnaire({
+    id: 'pq-link',
+    mode: 'link',
+    answers: {},
+    sentTo: 'pat@acme.test',
+    expiresAt: '2026-11-03T15:00:00.000Z',
+    link,
+  })
+
+  it('asks for the address, and only Send with one filled in goes out', async () => {
+    api.sendQuestionnaireRequest = vi.fn(async () => ({
+      questionnaire: waitingLink,
+      emailed: { ok: true, to: 'pat@acme.test', error: null },
+    }))
+    renderList()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send questionnaire' }))
+    const send = screen.getByRole('button', { name: 'Send' })
+    expect(send).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Prospect email'), { target: { value: 'pat@acme.test' } })
+    expect(send).toBeEnabled()
+    fireEvent.click(send)
+    await waitFor(() => expect(api.sendQuestionnaireRequest).toHaveBeenCalledWith('pat@acme.test'))
+    expect(await screen.findByText('The questionnaire was emailed to pat@acme.test.')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Prospect email')).not.toBeInTheDocument()
+  })
+
+  it('says when the email did not go, and that the link is made anyway', async () => {
+    api.sendQuestionnaireRequest = vi.fn(async () => ({
+      questionnaire: waitingLink,
+      emailed: { ok: false, to: 'pat@acme.test', error: 'Email is not configured yet.' },
+    }))
+    api.listQuestionnairesRequest = vi.fn(async () => [waitingLink])
+    renderList()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send questionnaire' }))
+    fireEvent.change(screen.getByLabelText('Prospect email'), { target: { value: 'pat@acme.test' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('The link is made, but the email to pat@acme.test did not go')
+    expect(alert).toHaveTextContent('Email is not configured yet.')
+  })
+
+  it('shows the server’s sentence when it refuses the address', async () => {
+    api.sendQuestionnaireRequest = vi.fn(async () => {
+      throw new ApiError(400, 'A valid email address is required.')
+    })
+    renderList()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send questionnaire' }))
+    fireEvent.change(screen.getByLabelText('Prospect email'), { target: { value: 'pat@acme.test' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('A valid email address is required.')
+  })
+
+  it('a waiting link can be copied, sent again to the same address, or withdrawn', async () => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    api.listQuestionnairesRequest = vi.fn(async () => [waitingLink])
+    api.renewQuestionnaireLinkRequest = vi.fn(async () => ({
+      questionnaire: waitingLink,
+      emailed: { ok: true, to: 'pat@acme.test', error: null },
+    }))
+    renderList()
+    const inbox = await screen.findByRole('region', { name: 'Questionnaires' })
+    expect(within(inbox).getByText(/sent to pat@acme.test/)).toBeInTheDocument()
+    fireEvent.click(within(inbox).getByRole('button', { name: 'Copy link' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(link))
+    fireEvent.click(within(inbox).getByRole('button', { name: 'Send again' }))
+    await waitFor(() =>
+      expect(api.renewQuestionnaireLinkRequest).toHaveBeenCalledWith('pq-link', 'pat@acme.test'),
+    )
+    // A link is not a call sheet: there is nothing to resume.
+    expect(within(inbox).queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument()
+  })
+
+  it('an expired or withdrawn link gets a New link, without emailing anyone', async () => {
+    api.listQuestionnairesRequest = vi.fn(async () => [
+      questionnaire({ id: 'pq-old', mode: 'link', expired: true, sentTo: 'pat@acme.test' }),
+    ])
+    api.renewQuestionnaireLinkRequest = vi.fn(async () => ({
+      questionnaire: waitingLink,
+      emailed: null,
+    }))
+    renderList()
+    fireEvent.click(await screen.findByRole('button', { name: 'New link' }))
+    await waitFor(() =>
+      expect(api.renewQuestionnaireLinkRequest).toHaveBeenCalledWith('pq-old', undefined),
+    )
+    expect(await screen.findByText('The link is ready - use Copy link below.')).toBeInTheDocument()
   })
 })

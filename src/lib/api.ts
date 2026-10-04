@@ -31,6 +31,7 @@
   type ProposalQuestionnaire,
   type ProposalSnapshot,
   type QuestionnaireAnswers,
+  type QuestionnaireEmailResult,
   type PublicFirmSettings,
   type ServiceCategory,
   type SessionUser,
@@ -1088,6 +1089,33 @@ export async function createQuestionnaireRequest(
     'Could not start the questionnaire',
   )
   return body.questionnaire
+}
+
+/** What making or renewing a link did: the questionnaire (with its `link`), and the email's outcome when one was asked for. */
+export type QuestionnaireLinkResult = {
+  questionnaire: ProposalQuestionnaire
+  emailed: QuestionnaireEmailResult | null
+}
+
+/**
+ * Owner-only: make a link questionnaire and, when an address is given, email it.
+ * A failed email still leaves the link made - `emailed.ok` says so.
+ */
+export function sendQuestionnaireRequest(to?: string): Promise<QuestionnaireLinkResult> {
+  return proposalRequest<QuestionnaireLinkResult>(
+    '/api/proposal-questionnaires',
+    proposalJson('POST', { mode: 'link', ...(to ? { to } : {}) }),
+    'Could not make the questionnaire link',
+  )
+}
+
+/** Owner-only: a fresh link for one that was never answered; the old link stops working. Emails it when asked. */
+export function renewQuestionnaireLinkRequest(id: string, to?: string): Promise<QuestionnaireLinkResult> {
+  return proposalRequest<QuestionnaireLinkResult>(
+    questionnairePath(id, 'new-link'),
+    proposalJson('POST', to ? { to } : {}),
+    'Could not make a new link',
+  )
 }
 
 /** Owner-only: save a call sheet's answers so far. */

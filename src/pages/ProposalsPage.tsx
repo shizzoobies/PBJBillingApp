@@ -11,9 +11,12 @@ import {
   fetchFirmSettings,
   listProposalsRequest,
   listQuestionnairesRequest,
+  renewQuestionnaireLinkRequest,
+  sendQuestionnaireRequest,
   startQuestionnaireDraftRequest,
   withdrawQuestionnaireRequest,
   type QuestionnaireDraftResult,
+  type QuestionnaireLinkResult,
 } from '../lib/api'
 import { PROPOSAL_STATUS_LABELS, proposalDate, proposalTitle } from '../lib/proposals'
 import {
@@ -50,6 +53,9 @@ export function ProposalsPage() {
   const [busyQuestionnaireId, setBusyQuestionnaireId] = useState<string | null>(null)
   const [startingSheet, setStartingSheet] = useState(false)
   const [notice, setNotice] = useState('')
+  // "Send questionnaire": the address she confirms, then the link goes out.
+  const [sendingTo, setSendingTo] = useState<string | null>(null)
+  const [sendingLink, setSendingLink] = useState(false)
 
   // The catalog's rates, only to warn when one is still $0. A failed read
   // just means no banner - the editor shows the same warning.
@@ -147,6 +153,67 @@ export function ProposalsPage() {
     }
   }
 
+  // What a link request did: a sentence about the email (the link is made either
+  // way, and Copy link in the inbox is how she gets it when the email failed).
+  const reportLink = (result: QuestionnaireLinkResult) => {
+    if (!result.emailed) {
+      setNotice('The link is ready - use Copy link below.')
+    } else if (result.emailed.ok) {
+      setNotice(`The questionnaire was emailed to ${result.emailed.to}.`)
+    } else {
+      setError(
+        `The link is made, but the email to ${result.emailed.to} did not go: ${result.emailed.error ?? 'unknown error'}. Use Copy link below.`,
+      )
+    }
+  }
+
+  const sendLink = async () => {
+    const to = (sendingTo ?? '').trim()
+    if (!to) return
+    setSendingLink(true)
+    setError('')
+    setNotice('')
+    try {
+      reportLink(await sendQuestionnaireRequest(to))
+      setSendingTo(null)
+      await refreshQuestionnaires()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not send the questionnaire.')
+    } finally {
+      setSendingLink(false)
+    }
+  }
+
+  const renewLink = async (questionnaire: ProposalQuestionnaire, email: boolean) => {
+    setBusyQuestionnaireId(questionnaire.id)
+    setError('')
+    setNotice('')
+    try {
+      reportLink(
+        await renewQuestionnaireLinkRequest(
+          questionnaire.id,
+          email ? (questionnaire.sentTo ?? undefined) : undefined,
+        ),
+      )
+      await refreshQuestionnaires()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not make a new link.')
+    } finally {
+      setBusyQuestionnaireId(null)
+    }
+  }
+
+  const copyLink = async (questionnaire: ProposalQuestionnaire) => {
+    if (!questionnaire.link) return
+    try {
+      await navigator.clipboard.writeText(questionnaire.link)
+      setNotice('Link copied.')
+    } catch {
+      // No clipboard (an insecure context): show it so it can be copied by hand.
+      setNotice(`Copy this link: ${questionnaire.link}`)
+    }
+  }
+
   // A sheet that was submitted: straight to the draft it started - or, when the
   // draft could not be made, back here with the inbox's Start draft button.
   const sheetSubmitted = (result: QuestionnaireDraftResult) => {
@@ -207,6 +274,13 @@ export function ProposalsPage() {
             <button
               className="secondary-action"
               type="button"
+              onClick={() => setSendingTo((current) => (current === null ? '' : null))}
+            >
+              Send questionnaire
+            </button>
+            <button
+              className="secondary-action"
+              type="button"
               disabled={startingSheet}
               onClick={() => void startSheet()}
             >
@@ -224,6 +298,40 @@ export function ProposalsPage() {
         </div>
 
         <ProposalRatesBanner rates={rates} />
+
+        {sendingTo !== null ? (
+          <form
+            className="questionnaire-send"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void sendLink()
+            }}
+          >
+            <label className="field">
+              <span>Email the questionnaire link to</span>
+              <input
+                className="input"
+                type="email"
+                aria-label="Prospect email"
+                placeholder="prospect@example.com"
+                value={sendingTo}
+                onChange={(event) => setSendingTo(event.target.value)}
+              />
+            </label>
+            <div className="button-row">
+              <button
+                className="primary-action"
+                type="submit"
+                disabled={sendingLink || sendingTo.trim() === ''}
+              >
+                Send
+              </button>
+              <button className="ghost-action" type="button" onClick={() => setSendingTo(null)}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        ) : null}
 
         {openSheet ? (
           <QuestionnaireSheet
@@ -246,6 +354,9 @@ export function ProposalsPage() {
           onResume={(questionnaire) => setSheetId(questionnaire.id)}
           onWithdraw={(questionnaire) => void withdrawQuestionnaire(questionnaire)}
           onStartDraft={(questionnaire) => void startDraft(questionnaire)}
+          onCopyLink={(questionnaire) => void copyLink(questionnaire)}
+          onSendAgain={(questionnaire) => void renewLink(questionnaire, true)}
+          onNewLink={(questionnaire) => void renewLink(questionnaire, false)}
         />
 
         <div className="form-grid two-col">
