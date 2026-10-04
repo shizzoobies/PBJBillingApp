@@ -25,7 +25,7 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-04, late afternoon):** `main` = `6912db3` (+ this
+**State right now (2026-10-04, evening):** `main` = `d6a0a36` (+ this
 handoff), deployed, `/health` 200 with that commit, voice agent re-provisioned after every
 ship. Suite **6807 tests / 303 files**, green. Manifest 203,248 bytes (cap 205,000). Alex's
 instruction for the day: "go through the 4 in Planned and get them deployed once their fixes
@@ -638,6 +638,29 @@ with instructions rather than failing. Run it by hand after any print change.
   debit_not_authorized / account_closed / no_account revoke the client's autopay. Prod checks
   (rolled back): DDL, partial unique index, the claim against a real sent invoice (second claim
   = 0 rows), and the void path waiting behind a claim on the row lock.
+
+- **Evening, after Alex came back - his two invoice decisions, built and shipped one deploy each:**
+  `d9bef05` **featreq-21d0bba8 answer 4 / featreq-459bdfc2 item 7**: the note to the client can be
+  kept - `clients.invoice_note`, SERVER-PRESERVED through the bulk save exactly like
+  `stripe_customer_id` (snapshot before the wipe, restore the stored value, never read the payload)
+  and dropped from the staleness fingerprint on both backends (it is endpoint-owned); written only by
+  `setClientInvoiceNote` via owner-only `PUT /api/clients/:id/invoice-note`; the editor radio "This
+  invoice only" / "Keep for future invoices" (Keep saves the invoice, then the endpoint); generate
+  and retainer start the blurb from it; client Billing tab field "Note on every invoice".
+  `8a5d870` + `d6a0a36` **featreq-21d0bba8 answer 8 (Rivercity)**: a SEPARATE per-client switch
+  `clients.invoice_no_email` in its own "Invoice delivery" card (the platform-invoicing opt-out is
+  untouched): generation is NOT skipped; Mark reviewed also runs `recordInvoiceSent({ notEmailed })`
+  (same first-send bookkeeping, log entry `kind:'not-emailed'` that nothing reads as a delivery,
+  stamp only while status = reviewed); send / payment-link / autopay invite refuse 409
+  `client_not_emailed`; autopay never charges (and `hasPriorOkInvoiceSend` counts the stamp, so
+  switching the flag OFF later cannot turn an old marked-sent invoice into a "first send" charge);
+  pay page says it cannot be paid online; switching ON expires that client's open Checkout
+  sessions; the webhook receipt is skipped. Edits after the stamp are simply allowed (no
+  changed-since-sent). NOT built: a billing master whose RECEIVING sub has the flag still emails.
+  **Approved prod write (Alex, in chat):** `scripts/prod/rivercity-never-email-2026-10.mjs --apply`
+  set Rivercity (`client-c1qdfpd`) opt-out=false, invoice_no_email=true at 22:57Z; snapshot in
+  `docs/prod-snapshots/`; undo is in the script header. featreq-21d0bba8 is Shipped;
+  featreq-459bdfc2 stays in_progress for item 3 only (a preview of what the client receives).
 
 Process notes: three builders ran in parallel lanes (B/C/D) with one independent reviewer each
 and up to three fix rounds; every lane rebased onto main before its verify (the questionnaire
