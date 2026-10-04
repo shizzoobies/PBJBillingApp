@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-09-29. Everything below is committed on
+Written 2026-07-21, last updated 2026-10-04. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -25,24 +25,73 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-04, evening):** `main` = `d6a0a36` (+ this
-handoff), deployed, `/health` 200 with that commit, voice agent re-provisioned after every
-ship. Suite **6807 tests / 303 files**, green. Manifest 203,248 bytes (cap 205,000). Alex's
-instruction for the day: "go through the 4 in Planned and get them deployed once their fixes
-are green" - all four are Shipped (details: the "2026-10-04" entry at the top of section 5):
-Brittany's Statements button (`747aa42`, also closes the statement-box send-back), the proposal
-questionnaire (`649fc26`), the proposal Software section (`6f8ab89`) and Stripe autopay
-(`6912db3`). **AUTOPAY IS LIVE BUT INERT:** the charge step runs only when the Railway variable
-`AUTOPAY_CHARGING=on` is set, and it is UNSET - enrollment works, no money moves. Before Alex
-sets it: add `setup_intent.succeeded` and `setup_intent.setup_failed` to the Stripe webhook
-endpoint, run one end-to-end in test mode, and confirm Resend click tracking is OFF for the
-sending domain (bearer links in pay / proposal / questionnaire / autopay emails). Brittany has
-SIX open questions on her Shipped tickets (one on Software, three on the questionnaire, two on
-autopay) - answers go back through the tracker. Board hygiene rule from today: tickets Alex or a
-session filed go straight to Done when shipped; Shipped is Brittany's review queue. Lanes
-`AP-laneB` / `AP-laneC` / `AP-laneD` are at merged branches, reusable. Two concurrent vitest
-runs in one worktree corrupt each other (shared `tmp/app-data.json`) - never verify while a
-reviewer agent is testing in that lane.
+**State right now (2026-10-04, end of day - READ THIS FIRST):** `main` = `c2ebc46` (+ this
+handoff), deployed, `/health` 200 with that commit, voice agent re-provisioned after every ship.
+Suite **6934 tests / 311 files**, green. Manifest ~204,0xx bytes (cap 205,000 - about 900 bytes of
+room; TRIM BEFORE THE NEXT MANIFEST EDIT). Alex is moving the work to a NEW SESSION; this handoff
+plus the memory files are the whole hand-over.
+
+**What happened today (one deploy each, every item through an independent reviewer and fix
+rounds - the "2026-10-04" entry at the top of section 5 has the mechanics):**
+- Board tidy: 23 developer-side follow-ups moved to Done; Shipped is now Brittany's review queue
+  (rule: our follow-up tickets go to Done when shipped, hers stay Shipped).
+- `747aa42` Clients row: Statements button replaces Mark inactive (her email; retiring is now
+  client-page only because the row dropdown never offered Inactive).
+- `649fc26` Proposal questionnaire (public link + call sheet -> auto draft + inbox).
+- `6f8ab89` Proposal Software section (at-cost pass-through, own invoice section).
+- `6912db3` Stripe autopay - LIVE BUT INERT: `AUTOPAY_CHARGING` is UNSET in Railway, so
+  enrollment works and nothing charges. Alex confirmed the Stripe webhook now carries
+  `setup_intent.succeeded` / `setup_intent.setup_failed` (verified by API) and Resend click
+  tracking is OFF for pbjsa.com (verified by API). **Alex and Brittany run the end-to-end test
+  together on Tuesday 2026-10-07** (Test client: Invite -> enroll a bank account -> set
+  `AUTOPAY_CHARGING=on` -> send a small invoice -> Processing -> Paid -> withdraw the Test
+  client). Do not nudge before Tuesday; after it, ask how it went and whether the switch is on.
+- `d9bef05` the kept note to the client (answer 4 / item 7) and `8a5d870` + `d6a0a36` the
+  per-client "Generate the invoice but never email it" switch (answer 8). **Rivercity
+  (`client-c1qdfpd`) was switched over by an approved prod write** (opt-out off, never-email
+  on; script + snapshot committed in `3782970`). Its October invoice will generate with the rest
+  and Brittany finishes it with Mark reviewed.
+- `c2ebc46` generated hours lines labeled by ROLE ("Bookkeeping Services"; the name is added
+  only when two people share a role; others keep "Billable hours - <name>") - the branch held
+  since 10-01, wording approved by Alex tonight, rebased and re-reviewed. Sent September invoices
+  keep their old per-person labels (stored lines are never re-derived).
+- Bulk-save watch: still NO `[bulk-save] write committed` line in any of today's eight deployment logs - no real whole-workspace save has run since the table lock shipped on 10-01 (the last one was 10-01 21:41 Eastern, before the lock). Keep watching; over ~8 s or repeated `workspace_busy` = batch the inserts (B2 on `featreq-c8e5f169`).
+
+**Pick up here (in this order):**
+1. **Tuesday 2026-10-07: the autopay test** is Alex's and Brittany's. After it: confirm
+   `AUTOPAY_CHARGING` is on (Railway vars), read the Railway log for the first
+   `[autopay]` lines, and check `autopay_attempts` (read-only) for the Test invoice: one row,
+   status processing -> succeeded. Known limits to watch: a stuck `claimed` attempt is resolved by
+   "Check with Stripe" on the row; a declined card lands on Payment failed with the usual notice.
+2. **Brittany's SIX open questions**, all on her Shipped tickets (answers come back through the
+   tracker, never ask Alex in chat): Software `featreq-a69a3cc0` (start the QBO lines in the
+   acceptance month or the next, since QBO bills forward); questionnaire `featreq-8f139178` (a
+   standing website link too? review the question list; year-end / entity type / software as
+   client-page fields?); autopay `featreq-bef42b72` (card fee on autopay? email the client on a
+   failed charge?). Each answer may be a small build.
+3. **The one open invoice item:** `featreq-459bdfc2` item 3 - a preview of exactly what the
+   client receives (print sheet vs emailed PDF differ: note, Due field, subtotal). Not started.
+   Everything else on the nine is built or dropped on her word; `featreq-21d0bba8` is Shipped.
+4. **Alex's remaining decisions:** backups / resilience owner steps (he said the week of 10-05;
+   Cloudflare token by `setx` in his terminal, never in chat - `featreq-4caec5d3`);
+   `railway.json` -> `.railway/railway.ts` before 2026-12-01 (`featreq-d84ddb16`); the two
+   `planned_not_eom` items (TOTP encryption re-enrollment, "Brittany pushes her own update").
+5. **Watch for send-backs** on today's ships: the Saturday-evening gating and firm-day invoice
+   dates (10-02); "retire from the client page only"; the role labels on NEW invoices (a role
+   heading now sits directly above a row with the same words); the Software section's
+   "Not yet priced" for an unpriced plan or a per-employee plan with no employee count.
+6. Housekeeping: lanes `AP-laneB` / `AP-laneC` / `AP-laneD` sit on merged branches
+   (reusable; `node_modules` is a JUNCTION - remove the link, never its target, before
+   `git worktree remove`). Merged local branches can be pruned: feat/client-row-statements,
+   feat/proposal-questionnaire, feat/proposal-software-section, feat/stripe-autopay,
+   feat/invoice-note-and-no-email, feat/invoice-role-lines(-rebased).
+
+**Traps learned today:** never run two vitest processes in one worktree (they share
+`tmp/app-data.json`; 800 spurious failures); reviewer agents must be told "read-only, no tests"
+while a verify runs; `topbar-timer.test.tsx` can flake by one second under load - rerun before
+suspecting code; a textual rebase that applies cleanly can still be semantically wrong, so
+re-review after rebasing a held branch; the builder who owns the code should resolve its own rebase
+conflicts.
 
 **Earlier (2026-10-02, late afternoon):** `main` = `348fb28` (+ this
 handoff), deployed, `/health` 200 with that commit, voice agent re-provisioned after
@@ -59,7 +108,7 @@ COMMIT, then rebase (unpiped), then verify, then push; never rebase a dirty tree
 no `[bulk-save] write committed` line in the Railway log: no real whole-workspace save
 has run since the lock shipped.
 
-**Pick up here (in this order):**
+**Pick up here as of 2026-10-02 (superseded by the list above):**
 1. Railway log → `[bulk-save] write committed in <N>ms after <K> lock attempt(s)` after
    Brittany's first real save; over ~8 s or repeated `workspace_busy` = batch the inserts
    (B2 on `featreq-c8e5f169`). Nothing has run yet.
@@ -661,6 +710,17 @@ with instructions rather than failing. Run it by hand after any print change.
   set Rivercity (`client-c1qdfpd`) opt-out=false, invoice_no_email=true at 22:57Z; snapshot in
   `docs/prod-snapshots/`; undo is in the script header. featreq-21d0bba8 is Shipped;
   featreq-459bdfc2 stays in_progress for item 3 only (a preview of what the client receives).
+
+- **Night:** `c2ebc46` **the role-labeled hours lines** (held branch `feat/invoice-role-lines`
+  @ `0b12038`, rebased cleanly onto main and RE-REVIEWED - the three fillable role rows and the
+  Software section were already ancestors, so no semantic clash; re-tag matches on `employeeId`
+  first and refuses bare titles in its label fallback, so a hand row is never merged). Exact
+  labels: one person in a role -> "CFO / Advisory Services" / "Accounting Services" /
+  "Bookkeeping Services"; two or more -> "<Title> - <Full Name>"; any other role ->
+  "Billable hours - <Name>". LOW follow-ups noted by the reviewer: an empty hand row plus a re-tag
+  can print two identical bare titles; an old-format open draft can mix label formats under one
+  heading; `lib/invoice-confidence.js` prompt examples still say "Billable hours - Lisa".
+  Manifest line 583 was corrected in the same push. Filed as a Shipped tracker record for Brittany.
 
 Process notes: three builders ran in parallel lanes (B/C/D) with one independent reviewer each
 and up to three fix rounds; every lane rebased onto main before its verify (the questionnaire
