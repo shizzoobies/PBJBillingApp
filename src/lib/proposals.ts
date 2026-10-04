@@ -378,7 +378,8 @@ export function snapshotRatesDiffer(
     unitsIncluded?: number
     unit?: string
   }) => [
-    Number(source.basePrice) || 0,
+    // null (never priced) and 0 (a real no-charge plan) are different prices.
+    typeof source.basePrice === 'number' ? source.basePrice : null,
     Number(source.unitPrice) || 0,
     Number(source.unitsIncluded) || 0,
     source.unit ?? 'none',

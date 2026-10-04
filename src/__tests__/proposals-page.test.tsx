@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { AppContextValue } from '../AppContext'
@@ -1544,6 +1544,29 @@ describe('Software on the proposal editor', () => {
     expect(amounts).toEqual(['$630.00', 'Not yet priced', 'Not yet priced'])
     expect(screen.queryByText('No charge')).toBeNull()
     expect(screen.getByText('needs a count')).toBeTruthy()
+  })
+
+  it('a plan that went from unpriced (null) to an explicit $0 reprices a draft on open; a $0 that stayed $0 does not', async () => {
+    const draftWith = (basePrice: number | null, flag: 'no-rate' | null) => ({
+      ...WITH_SOFTWARE,
+      id: 'prop-sw',
+      pricingSnapshot: {
+        ...WITH_SOFTWARE.pricingSnapshot!,
+        lines: [...PROPOSAL.pricingSnapshot!.lines, { ...SOFTWARE_LINES[1], basePrice, flag }],
+      },
+    })
+    // The catalog's Bill Pay Basic is an explicit $0.
+    api.getProposalRequest = vi.fn(async () => draftWith(null, 'no-rate'))
+    api.repriceProposalRequest = vi.fn(async () => draftWith(0, null))
+    renderEditor('/proposals/prop-sw')
+    await waitFor(() => expect(api.repriceProposalRequest).toHaveBeenCalledWith('prop-sw'))
+    cleanup()
+
+    api.getProposalRequest = vi.fn(async () => draftWith(0, null))
+    api.repriceProposalRequest = vi.fn(async () => draftWith(0, null))
+    renderEditor('/proposals/prop-sw')
+    await screen.findByText('QB Bill Pay Basic', { selector: 'strong' })
+    expect(api.repriceProposalRequest).not.toHaveBeenCalled()
   })
 
   it('opening a draft whose software unit changed in the catalog reprices it once', async () => {

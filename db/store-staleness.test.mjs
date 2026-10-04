@@ -24693,7 +24693,8 @@ describe('accepting a proposal (file backend)', () => {
 
   it('carries createdClientId on ANY failure after the client is created, not just the lost-link race', async () => {
     const proposal = await prospectProposal()
-    vi.spyOn(store, 'setProposalStatus').mockRejectedValueOnce(
+    // The final step (the accepted flip and its software rows) refusing.
+    vi.spyOn(store, '_acceptWithSoftware').mockRejectedValueOnce(
       new ProposalStateError('This proposal is already declined.'),
     )
     const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
@@ -36064,10 +36065,11 @@ describe('Software on a proposal (file backend)', () => {
     expect(plus).toHaveLength(1)
     expect(plus[0]).toMatchObject({ amount: 90, category: 'expense' })
 
-    const lines = proposal.pricingSnapshot.lines
-    await store._addAcceptedSoftware(proposal.id, 'c1', lines)
-    await store._addAcceptedSoftware(proposal.id, 'c1', lines)
+    // A second proposal naming the same plans (a retry, a re-sent proposal).
+    const again = await softwareProposal({ clientId: 'c1' })
+    await store.acceptProposal(again.id, { addSoftware: true })
     expect((await expensesOf('c1')).filter((row) => row.description === 'QB Time Elite')).toHaveLength(1)
+    expect((await expensesOf('c1')).filter((row) => row.description === 'QBO Plus')).toHaveLength(1)
   })
 
   it('refuses a billing master, like every other recurring expense, and writes nothing', async () => {
@@ -36286,11 +36288,12 @@ describe('a recurring expense and its invoice section (postgres branch)', () => 
 })
 
 /**
- * Fix round for featreq-a69a3cc0: Accept's software step is one serialized
- * check-then-insert (two Accepts cannot both add the lines), and a refused
- * final flip takes the rows this call added back out.
+ * Accept's flip and its software rows are ONE atomic unit (featreq-a69a3cc0,
+ * second fix round): the compare-and-set on the proposal and the inserts happen
+ * together or not at all, so two Accepts can never leave an accepted proposal
+ * without its rows, nor rows without an accepted proposal.
  */
-describe('Accept and the software rows: concurrency and a refused flip (file backend)', () => {
+describe('Accept: the flip and the software rows are one unit (file backend)', () => {
   beforeEach(async () => {
     await clearProposals()
     const data = JSON.parse(await readFile(localDataPath, 'utf8'))
@@ -36317,63 +36320,48 @@ describe('Accept and the software rows: concurrency and a refused flip (file bac
   const softwareRows = async () =>
     (await store.read()).recurringReimbursements.filter((row) => row.clientId === 'c1')
 
-  it('two simultaneous adds for one proposal write the lines once', async () => {
-    const proposal = await upsell()
-    const lines = proposal.pricingSnapshot.lines
-    const [first, second] = await Promise.all([
-      store._addAcceptedSoftware(proposal.id, 'c1', lines),
-      store._addAcceptedSoftware(proposal.id, 'c1', lines),
-    ])
-    expect(first.length + second.length).toBe(2)
-    expect((await softwareRows()).map((row) => row.description).sort()).toEqual(['QB Time Elite', 'QBO Plus'])
-  })
-
-  it('two Accepts of one upsell at once bill the client once', async () => {
+  it('two simultaneous Accepts: exactly one is accepted, exactly one set of rows, the loser is refused', async () => {
     const proposal = await upsell()
     const results = await Promise.allSettled([
       store.acceptProposal(proposal.id, { addSoftware: true }),
       store.acceptProposal(proposal.id, { addSoftware: true }),
     ])
-    // (The file backend's own status flip is not compare-and-set, so whether the
-    // second one is refused is not what this pins: the rows are.)
-    expect(results.some((result) => result.status === 'fulfilled')).toBe(true)
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    const loser = results.find((result) => result.status === 'rejected')
+    expect(loser.reason).toBeInstanceOf(ProposalStateError)
     expect((await softwareRows()).map((row) => row.description).sort()).toEqual(['QB Time Elite', 'QBO Plus'])
     expect((await store.getProposal(proposal.id)).status).toBe('accepted')
   })
 
-  it('a refused final flip removes the rows this call added, and leaves the proposal open', async () => {
+  it('a decline that lands before the flip refuses the Accept and leaves no software rows behind', async () => {
     const proposal = await upsell()
-    vi.spyOn(store, 'setProposalStatus').mockRejectedValueOnce(
-      new ProposalStateError('This proposal was declined while you were accepting it.'),
-    )
+    vi.spyOn(store, '_refuseBillingMasterWrite').mockImplementationOnce(async () => {
+      await store.setProposalStatus(proposal.id, 'declined', { note: 'Went elsewhere' })
+    })
     await expect(store.acceptProposal(proposal.id, { addSoftware: true })).rejects.toBeInstanceOf(
       ProposalStateError,
     )
     expect(await softwareRows()).toEqual([])
-    expect((await store.getProposal(proposal.id)).status).toBe('draft')
-    // The retry then adds them, once.
-    await store.acceptProposal(proposal.id, { addSoftware: true })
+    expect((await store.getProposal(proposal.id)).status).toBe('declined')
+  })
+
+  it('a second proposal for the same client never doubles a line the client already carries', async () => {
+    const first = await upsell()
+    await store.acceptProposal(first.id, { addSoftware: true })
+    const second = await upsell()
+    await store.acceptProposal(second.id, { addSoftware: true })
     expect(await softwareRows()).toHaveLength(2)
   })
 
-  it('the cleanup only takes out what this call created, never an expense the client already had', async () => {
-    await store.addRecurringReimbursement({
-      clientId: 'c1',
-      description: 'QBO Plus',
-      amount: 90,
-      frequency: 'monthly',
-      startDate: '2026-01-01',
-    })
-    const proposal = await upsell()
-    vi.spyOn(store, 'setProposalStatus').mockRejectedValueOnce(new ProposalStateError('declined'))
-    await expect(store.acceptProposal(proposal.id, { addSoftware: true })).rejects.toBeInstanceOf(
-      ProposalStateError,
-    )
-    expect((await softwareRows()).map((row) => row.description)).toEqual(['QBO Plus'])
+  it('an Accept with no software still flips through the same compare-and-set', async () => {
+    const proposal = await store.createProposal({ clientId: 'c1', prospect: { company: 'Acme' } })
+    const accepted = await store.acceptProposal(proposal.id, {})
+    expect(accepted.proposal.status).toBe('accepted')
+    await expect(store.acceptProposal(proposal.id, {})).rejects.toBeInstanceOf(ProposalStateError)
   })
 })
 
-describe('Accept and the software rows (postgres branch)', () => {
+describe('Accept: the flip and the software rows are one unit (postgres branch)', () => {
   const softwareLines = [
     { serviceId: 'software-qbo-plus', group: 'Software', name: 'QBO Plus', amount: 98, flag: null },
     { serviceId: 'software-qb-time-elite', group: 'Software', name: 'QB Time Elite', amount: 70.6, flag: null },
@@ -36388,95 +36376,158 @@ describe('Accept and the software rows (postgres branch)', () => {
     is_billing_master: false,
   }
 
-  /** fakeProposalPostgres plus a stateful recurring_reimbursements table and pool.connect(). */
-  function softwarePg({ stored = [], failFlip = false } = {}) {
-    const base = fakeProposalPostgres(
-      proposalRow({
-        client_id: 'c1',
-        pricing_snapshot: { lines: softwareLines, totals: { monthly: 0, annual: 0, oneTime: 0, cleanup: 0, software: 168.6 } },
-      }),
-      { clientRows: [clientRow] },
-    )
+  /**
+   * fakeProposalPostgres plus what this needs to be honest about atomicity: a
+   * proposal row whose status the compare-and-set really changes, a
+   * recurring_reimbursements table, a `for update` row lock that a second
+   * connection waits on until the first COMMITs, and ROLLBACK that restores the
+   * status and the rows as they stood at BEGIN.
+   */
+  function softwarePg({ stored = [], failNthInsert = null } = {}) {
+    const row = proposalRow({
+      client_id: 'c1',
+      pricing_snapshot: { lines: softwareLines, totals: { monthly: 0, annual: 0, oneTime: 0, cleanup: 0, software: 168.6 } },
+    })
+    const base = fakeProposalPostgres(row, { clientRows: [clientRow] })
     const recurring = stored.map((description, index) => ({ id: `recur-old${index}`, client_id: 'c1', description }))
     const log = (text, params) => base.statements.push({ text, params })
-    const query = async (text, params) => {
+    let lockTail = Promise.resolve()
+    let inserts = 0
+
+    const makeQuery = (conn) => async (text, params) => {
       const trimmed = String(text).trim()
+      if (/^BEGIN$/i.test(trimmed)) {
+        log(trimmed, params)
+        conn.undo = []
+        return { rows: [] }
+      }
+      if (/^COMMIT$/i.test(trimmed) || /^ROLLBACK$/i.test(trimmed)) {
+        log(trimmed, params)
+        // Undo only what THIS connection did (a snapshot taken at BEGIN would
+        // wipe a commit that landed while it waited on the lock).
+        if (/^ROLLBACK$/i.test(trimmed)) for (const undo of (conn.undo ?? []).reverse()) undo()
+        conn.undo = null
+        conn.release_lock?.()
+        conn.release_lock = null
+        return { rows: [] }
+      }
+      if (/^select id from proposals where id = \$1 for update$/i.test(trimmed)) {
+        log(trimmed, params)
+        const previous = lockTail
+        let release
+        lockTail = new Promise((resolve) => {
+          release = resolve
+        })
+        await previous
+        conn.release_lock = release
+        return { rows: [{ id: params[0] }], rowCount: 1 }
+      }
+      if (/^update proposals\s+set status = \$2/i.test(trimmed)) {
+        log(trimmed, params)
+        const eligible = !['accepted', 'declined'].includes(row.status)
+        if (!eligible) return { rows: [], rowCount: 0 }
+        const before = { status: row.status, accepted_at: row.accepted_at, client_id: row.client_id }
+        conn.undo?.push(() => Object.assign(row, before))
+        row.status = params[1]
+        if (params[1] === 'accepted') row.accepted_at = new Date()
+        if (params[3]) row.client_id = params[3]
+        return { rows: [{ ...row }], rowCount: 1 }
+      }
       if (/^select description from recurring_reimbursements where client_id = \$1$/i.test(trimmed)) {
         log(trimmed, params)
-        return { rows: recurring.filter((row) => row.client_id === params[0]).map((row) => ({ description: row.description })) }
+        return { rows: recurring.filter((r) => r.client_id === params[0]).map((r) => ({ description: r.description })) }
       }
       if (/^insert into recurring_reimbursements/i.test(trimmed)) {
         log(trimmed, params)
-        recurring.push({ id: params[0], client_id: params[1], description: params[2], amount: params[3], category: params[14] })
+        inserts += 1
+        if (failNthInsert === inserts) throw new Error('insert failed')
+        const added = { id: params[0], client_id: params[1], description: params[2], amount: params[3], category: params[14] }
+        recurring.push(added)
+        conn.undo?.push(() => recurring.splice(recurring.indexOf(added), 1))
         return { rows: [], rowCount: 1 }
       }
-      if (/^delete from recurring_reimbursements where id = \$1/i.test(trimmed)) {
-        log(trimmed, params)
-        const at = recurring.findIndex((row) => row.id === params[0])
-        if (at >= 0) recurring.splice(at, 1)
-        return { rows: at >= 0 ? [{ id: params[0] }] : [], rowCount: at >= 0 ? 1 : 0 }
-      }
       if (/^select 1 from clients/i.test(trimmed)) return { rows: [{}], rowCount: 1 }
-      if (failFlip && /^update proposals\s+set status/i.test(trimmed)) {
-        log(trimmed, params)
-        return { rows: [], rowCount: 0 }
-      }
       return base.pool.query(text, params)
     }
-    const pool = { query, async connect() { return { query, release() {} } } }
-    return { pool, statements: base.statements, matching: base.matching, recurring }
+    const pool = {
+      query: makeQuery({}),
+      async connect() {
+        const conn = {}
+        conn.query = makeQuery(conn)
+        conn.release = () => {}
+        return conn
+      },
+    }
+    return { pool, statements: base.statements, matching: base.matching, recurring, row }
   }
 
-  it('locks the proposal row, lists the client\'s descriptions with a targeted select, then inserts - in one transaction, without read()', async () => {
+  it('flips first under the row lock, then lists and inserts on the same connection, then commits', async () => {
     const fake = softwarePg()
-    await postgresStore(fake).acceptProposal('prop-1', { addSoftware: true })
+    const result = await postgresStore(fake).acceptProposal('prop-1', { addSoftware: true })
+    expect(result.proposal.status).toBe('accepted')
     const texts = fake.statements.map((statement) => statement.text)
-    const begin = texts.findIndex((text) => /^BEGIN$/i.test(text))
-    const lock = texts.findIndex((text) => /^select id from proposals where id = \$1 for update$/i.test(text))
-    const listing = texts.findIndex((text) => /^select description from recurring_reimbursements where client_id = \$1$/i.test(text))
-    const firstInsert = texts.findIndex((text) => /^insert into recurring_reimbursements/i.test(text))
-    const commit = texts.findIndex((text) => /^COMMIT$/i.test(text))
-    expect(begin).toBeGreaterThan(-1)
+    const at = (pattern) => texts.findIndex((text) => pattern.test(text))
+    const begin = at(/^BEGIN$/i)
+    const lock = at(/^select id from proposals where id = \$1 for update$/i)
+    const flip = at(/^update proposals\s+set status = \$2/i)
+    const listing = at(/^select description from recurring_reimbursements where client_id = \$1$/i)
+    const insert = at(/^insert into recurring_reimbursements/i)
+    const commit = at(/^COMMIT$/i)
     expect(lock).toBeGreaterThan(begin)
-    expect(listing).toBeGreaterThan(lock)
-    expect(firstInsert).toBeGreaterThan(listing)
-    expect(commit).toBeGreaterThan(firstInsert)
-    // Only the two priced lines; the $0 plan adds nothing. Software category.
-    expect(fake.recurring.map((row) => [row.description, row.amount, row.category])).toEqual([
+    expect(flip).toBeGreaterThan(lock)
+    expect(listing).toBeGreaterThan(flip)
+    expect(insert).toBeGreaterThan(listing)
+    expect(commit).toBeGreaterThan(insert)
+    expect(fake.recurring.map((r) => [r.description, r.amount, r.category])).toEqual([
       ['QBO Plus', 98, 'software'],
       ['QB Time Elite', 70.6, 'software'],
     ])
-    // No whole-workspace read for one client's descriptions.
+    // Not the whole-workspace read, and no after-the-fact delete.
     expect(fake.matching(/^select[\s\S]*from recurring_reimbursements\s+order by start_date/i)).toHaveLength(0)
+    expect(fake.matching(/^delete from recurring_reimbursements/i)).toHaveLength(0)
   })
 
-  it('a retry skips what is already there, so nothing is billed twice', async () => {
+  it('two simultaneous Accepts: exactly one accepted, exactly one set of rows, the loser is refused', async () => {
+    const fake = softwarePg()
+    const store2 = postgresStore(fake)
+    const results = await Promise.allSettled([
+      store2.acceptProposal('prop-1', { addSoftware: true }),
+      store2.acceptProposal('prop-1', { addSoftware: true }),
+    ])
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    const loser = results.find((result) => result.status === 'rejected')
+    expect(loser.reason).toBeInstanceOf(ProposalStateError)
+    expect(fake.recurring.map((r) => r.description).sort()).toEqual(['QB Time Elite', 'QBO Plus'])
+    expect(fake.row.status).toBe('accepted')
+    // The winner's rows are never deleted by anyone.
+    expect(fake.matching(/^delete from recurring_reimbursements/i)).toHaveLength(0)
+    expect(fake.matching(/^insert into recurring_reimbursements/i)).toHaveLength(2)
+  })
+
+  it('a retry after a failed Accept adds each line once: what is already there is skipped', async () => {
     const fake = softwarePg({ stored: ['QBO Plus'] })
     await postgresStore(fake).acceptProposal('prop-1', { addSoftware: true })
-    expect(fake.recurring.map((row) => row.description)).toEqual(['QBO Plus', 'QB Time Elite'])
+    expect(fake.recurring.map((r) => r.description)).toEqual(['QBO Plus', 'QB Time Elite'])
     expect(fake.matching(/^insert into recurring_reimbursements/i)).toHaveLength(1)
   })
 
-  it('a refused flip deletes exactly the ids this call created and rethrows', async () => {
-    const fake = softwarePg({ stored: ['QBO Plus'], failFlip: true })
-    await expect(postgresStore(fake).acceptProposal('prop-1', { addSoftware: true })).rejects.toBeInstanceOf(
-      ProposalStateError,
-    )
-    const deletes = fake.matching(/^delete from recurring_reimbursements where id = \$1/i)
-    expect(deletes).toHaveLength(1)
-    expect(fake.recurring.map((row) => row.description)).toEqual(['QBO Plus'])
+  it('a failure on any insert rolls back the flip and the earlier rows together', async () => {
+    const fake = softwarePg({ failNthInsert: 2 })
+    await expect(postgresStore(fake).acceptProposal('prop-1', { addSoftware: true })).rejects.toThrow('insert failed')
+    expect(fake.recurring).toEqual([])
+    expect(fake.row.status).toBe('draft')
+    expect(fake.matching(/^ROLLBACK$/i)).toHaveLength(1)
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
   })
 
-  it('a line that fails partway takes the earlier ones back out', async () => {
+  it('a proposal decided in the meantime is refused by the compare-and-set, and nothing is inserted', async () => {
     const fake = softwarePg()
     const store2 = postgresStore(fake)
-    const original = store2.addRecurringReimbursement.bind(store2)
-    let calls = 0
-    store2.addRecurringReimbursement = async (input) => {
-      calls += 1
-      return calls === 2 ? null : original(input)
-    }
+    vi.spyOn(store2, '_refuseBillingMasterWrite').mockImplementationOnce(async () => {
+      fake.row.status = 'declined'
+    })
     await expect(store2.acceptProposal('prop-1', { addSoftware: true })).rejects.toBeInstanceOf(ProposalStateError)
+    expect(fake.matching(/^insert into recurring_reimbursements/i)).toHaveLength(0)
     expect(fake.recurring).toEqual([])
     expect(fake.matching(/^ROLLBACK$/i)).toHaveLength(1)
   })

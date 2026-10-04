@@ -1315,6 +1315,25 @@ const PROPOSAL_COLUMNS = `id, status, prospect, client_id, inputs, selections, p
  */
 const PROPOSAL_LIST_COLUMNS = PROPOSAL_COLUMNS.replace(/,\s*messages/, '')
 
+/**
+ * The one statement that moves a proposal's status (draft/sent -> sent,
+ * accepted or declined). Compare-and-set in its WHERE: zero rows back means the
+ * proposal was already decided. `setProposalStatus` runs it, and so does the
+ * accepted flip inside Accept's transaction, so the two can never disagree.
+ */
+const PROPOSAL_STATUS_UPDATE_SQL = `update proposals
+            set status = $2,
+                sent_at = case when $2 = 'sent' then coalesce(sent_at, now()) else sent_at end,
+                accepted_at = case when $2 = 'accepted' then now() else accepted_at end,
+                declined_at = case when $2 = 'declined' then now() else declined_at end,
+                decline_note = case when $2 = 'declined' then coalesce($3, decline_note) else decline_note end,
+                client_id = coalesce($4, client_id),
+                updated_at = now()
+          where id = $1
+            and status not in ('accepted', 'declined')
+            and ($2 not in ('accepted', 'declined') or status in ('draft', 'sent'))
+          returning ${PROPOSAL_COLUMNS}`
+
 /** Turns kept per proposal (spec §5.2) — oldest dropped past this. */
 const MAX_PROPOSAL_MESSAGES = 200
 
@@ -11430,21 +11449,12 @@ export class AppDataStore {
     const cleanNote = typeof note === 'string' ? note.trim().slice(0, 2000) : null
     const linkClient = cleanProposalId(clientId)
     if (this.pool) {
-      const { rows } = await this.pool.query(
-        `update proposals
-            set status = $2,
-                sent_at = case when $2 = 'sent' then coalesce(sent_at, now()) else sent_at end,
-                accepted_at = case when $2 = 'accepted' then now() else accepted_at end,
-                declined_at = case when $2 = 'declined' then now() else declined_at end,
-                decline_note = case when $2 = 'declined' then coalesce($3, decline_note) else decline_note end,
-                client_id = coalesce($4, client_id),
-                updated_at = now()
-          where id = $1
-            and status not in ('accepted', 'declined')
-            and ($2 not in ('accepted', 'declined') or status in ('draft', 'sent'))
-          returning ${PROPOSAL_COLUMNS}`,
-        [id, status, cleanNote, linkClient],
-      )
+      const { rows } = await this.pool.query(PROPOSAL_STATUS_UPDATE_SQL, [
+        id,
+        status,
+        cleanNote,
+        linkClient,
+      ])
       if (rows[0]) return AppDataStore.mapProposal(rows[0])
       // We just confirmed this id exists and was in a state that allows this
       // transition; zero rows here means a concurrent write raced us to it.
@@ -11865,23 +11875,14 @@ export class AppDataStore {
       }
       const packageResult = pkg ? await this.applyPackageToClient(clientId, packageId, { actorUserId }) : null
 
-      const softwareIds =
-        createdClient || addSoftware === true
-          ? await this._addAcceptedSoftware(id, clientId, proposal.pricingSnapshot?.lines)
-          : []
-
-      // The final flip can still refuse (a decline or another accept landed
-      // first). The software rows this call added would then bill from this
-      // month on a proposal that never got accepted, so they come back out
-      // before the refusal goes on to the caller.
-      let accepted
-      try {
-        accepted = await this.setProposalStatus(id, 'accepted', { clientId })
-      } catch (flipError) {
-        await this._removeRecurringExpenses(softwareIds)
-        throw flipError
-      }
-      if (!accepted) await this._removeRecurringExpenses(softwareIds)
+      // The accepted flip and the software rows are ONE unit (see
+      // `_acceptWithSoftware`): both happen or neither does, and a second
+      // Accept of the same proposal is refused rather than half-applied.
+      const accepted = await this._acceptWithSoftware(
+        id,
+        clientId,
+        createdClient || addSoftware === true ? proposal.pricingSnapshot?.lines : [],
+      )
       if (actorUserId) {
         if (createdClient) {
           // Same event name and shape as `POST /api/clients` (server.js) — a
@@ -11902,34 +11903,54 @@ export class AppDataStore {
   }
 
   /**
-   * The software lines of an accepted proposal as monthly recurring expenses
-   * (featreq-a69a3cc0): description = the plan's name, the line's amount,
-   * Software category, starting the first day of the firm's current month,
-   * covered dates off. Lines at $0 (Bill Pay Basic) bill nothing and add
-   * nothing; a line whose description the client already carries is skipped,
-   * which is what makes a retry after a half-finished accept safe.
+   * Accept's final step: the accepted flip AND the software lines of the
+   * proposal as monthly recurring expenses (featreq-a69a3cc0), as ONE atomic
+   * unit. Returns the accepted proposal; refuses with `ProposalStateError`
+   * (writing nothing) when the proposal is already decided.
    *
-   * The check and the inserts are one serialized step, so two Accepts of the
-   * same proposal (two tabs, a retry) cannot both see an empty list and both
-   * insert: Postgres holds the proposal's row `for update` across them, the
-   * file backend runs them in one queue slot. Returns the ids this call
-   * created; if a line fails partway, the ones already added come back out.
+   * Software: description = the plan's name, the line's amount, Software
+   * category, starting the first day of the firm's current month, covered dates
+   * off. Lines at $0 (Bill Pay Basic) or unpriced bill nothing and add nothing;
+   * a line whose description the client already carries is skipped, so a retry
+   * after a failed Accept adds each line once.
+   *
+   * Postgres: one transaction. The proposal row is locked `for update`, the
+   * compare-and-set flip runs first (zero rows = already decided, roll back),
+   * then the rows are inserted through the SAME connection, so a failure
+   * anywhere undoes all of it together. Two Accepts at once: the loser waits
+   * on the lock, finds the proposal decided, and is refused with nothing
+   * written. The file backend does the same inside one queue slot.
    */
-  async _addAcceptedSoftware(proposalId, clientId, lines) {
+  async _acceptWithSoftware(proposalId, clientId, lines) {
     const wanted = (Array.isArray(lines) ? lines : []).filter(
       (line) => line?.group === 'Software' && Number(line.amount) > 0 && !line.flag,
     )
-    if (wanted.length === 0) return []
     const startDate = `${firmToday().slice(0, 7)}-01`
-    const created = []
     const descriptionOf = (line) => String(line.name ?? '').trim()
     const refuse = (line) =>
       new ProposalStateError(`The software line "${descriptionOf(line)}" could not be added to the client.`)
+    const alreadyDecided = (status) =>
+      new ProposalStateError(
+        status
+          ? `This proposal is already ${status} — it can't be accepted again.`
+          : 'This proposal no longer exists.',
+      )
+    const linkClient = cleanProposalId(clientId)
 
     if (this.pool) {
-      try {
-        await this._withTransaction(async (dbClient) => {
-          await dbClient.query(`select id from proposals where id = $1 for update`, [proposalId])
+      return this._withTransaction(async (dbClient) => {
+        await dbClient.query(`select id from proposals where id = $1 for update`, [proposalId])
+        const flipped = await dbClient.query(PROPOSAL_STATUS_UPDATE_SQL, [
+          proposalId,
+          'accepted',
+          null,
+          linkClient,
+        ])
+        if (!flipped.rows[0]) {
+          const latest = await dbClient.query(`select status from proposals where id = $1`, [proposalId])
+          throw alreadyDecided(latest.rows?.[0]?.status ?? null)
+        }
+        if (wanted.length > 0) {
           const { rows } = await dbClient.query(
             `select description from recurring_reimbursements where client_id = $1`,
             [clientId],
@@ -11945,65 +11966,77 @@ export class AppDataStore {
               frequency: 'monthly',
               startDate,
               category: 'software',
+              dbClient,
             })
             if (!added) throw refuse(line)
-            created.push(added.id)
             have.add(description.toLowerCase())
           }
+        }
+        return AppDataStore.mapProposal(flipped.rows[0])
+      })
+    }
+
+    // The file backend: the read, the decision, the rows and the flip inside
+    // ONE queue slot of the workspace file (the flip's own file is entered
+    // through ITS queue, a different one, so this cannot deadlock). Raw fs
+    // calls only on the data file in here: `readJson` / `writeFile` would
+    // enqueue behind this very slot.
+    return enqueueFileOperation(localDataPath, async () => {
+      const original = await readFile(localDataPath, 'utf8')
+      const data = JSON.parse(original)
+      let wrote = false
+      if (wanted.length > 0) {
+        if (!Array.isArray(data.clients) || !data.clients.some((entry) => entry.id === clientId)) {
+          throw refuse(wanted[0])
+        }
+        if (!Array.isArray(data.recurringReimbursements)) data.recurringReimbursements = []
+        const have = new Set(
+          data.recurringReimbursements
+            .filter((entry) => entry.clientId === clientId)
+            .map((entry) => String(entry.description ?? '').trim().toLowerCase()),
+        )
+        for (const line of wanted) {
+          const description = descriptionOf(line)
+          if (!description || have.has(description.toLowerCase())) continue
+          data.recurringReimbursements.push(
+            normalizeRecurringReimbursement({
+              id: `recur-${randomUUID().slice(0, 8)}`,
+              clientId,
+              description,
+              amount: line.amount,
+              frequency: 'monthly',
+              startDate,
+              category: 'software',
+            }),
+          )
+          have.add(description.toLowerCase())
+          wrote = true
+        }
+        if (wrote) await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      }
+      try {
+        // The compare-and-set, in the proposals file's own slot.
+        return await enqueueFileOperation(localAuthPath, async () => {
+          const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+          const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
+            (row) => row && row.id === proposalId,
+          )
+          if (!target) throw alreadyDecided(null)
+          if (target.status !== 'draft' && target.status !== 'sent') throw alreadyDecided(target.status)
+          const now = nowIso()
+          target.status = 'accepted'
+          target.acceptedAt = now
+          if (linkClient) target.clientId = linkClient
+          target.updatedAt = now
+          await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+          return AppDataStore.mapProposal(target)
         })
       } catch (error) {
-        await this._removeRecurringExpenses(created)
+        // Refused: the rows written a moment ago never happened.
+        if (wrote) await fsWriteFile(localDataPath, original)
         throw error
       }
-      return created
-    }
-
-    // The file backend: read, decide and write inside ONE queue slot. Raw fs
-    // calls only in here: `readJson` / `writeFile` enqueue behind this very
-    // slot and would deadlock.
-    return enqueueFileOperation(localDataPath, async () => {
-      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
-      if (!Array.isArray(data.clients) || !data.clients.some((entry) => entry.id === clientId)) {
-        throw refuse(wanted[0])
-      }
-      if (!Array.isArray(data.recurringReimbursements)) data.recurringReimbursements = []
-      const have = new Set(
-        data.recurringReimbursements
-          .filter((entry) => entry.clientId === clientId)
-          .map((entry) => String(entry.description ?? '').trim().toLowerCase()),
-      )
-      for (const line of wanted) {
-        const description = descriptionOf(line)
-        if (!description || have.has(description.toLowerCase())) continue
-        const id = `recur-${randomUUID().slice(0, 8)}`
-        data.recurringReimbursements.push(
-          normalizeRecurringReimbursement({
-            id,
-            clientId,
-            description,
-            amount: line.amount,
-            frequency: 'monthly',
-            startDate,
-            category: 'software',
-          }),
-        )
-        created.push(id)
-        have.add(description.toLowerCase())
-      }
-      if (created.length > 0) await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
-      return created
     })
-  }
-
-  /** Take recurring expenses back out (an Accept that did not finish). Best effort per id. */
-  async _removeRecurringExpenses(ids) {
-    for (const recurringId of Array.isArray(ids) ? ids : []) {
-      try {
-        await this.deleteRecurringReimbursement(recurringId)
-      } catch (error) {
-        console.error('[accept] could not remove software expense', recurringId, error)
-      }
-    }
   }
 
   /**
@@ -12298,6 +12331,9 @@ export class AppDataStore {
     frequency,
     startDate,
     category = 'expense',
+    // A transaction's connection: the create then happens on it, so a caller
+    // that must roll back with it (Accept) can.
+    dbClient = null,
     ...coverage
   }) {
     if (!clientId || typeof clientId !== 'string') return null
@@ -12343,12 +12379,13 @@ export class AppDataStore {
     record.coverageAnchorDay = anchorDayFromRange(record.coverageEnd)
 
     if (this.pool) {
-      const exists = await this.pool.query(
+      const db = dbClient ?? this.pool
+      const exists = await db.query(
         `select 1 from clients where id = $1`,
         [clientId],
       )
       if (!exists.rowCount) return null
-      await this.pool.query(
+      await db.query(
         `insert into recurring_reimbursements
            (id, client_id, description, amount, frequency, start_date,
             coverage_enabled, coverage_template, coverage_start, coverage_end,
