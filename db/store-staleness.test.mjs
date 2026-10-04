@@ -37493,11 +37493,53 @@ describe('autopay review fixes (file backend, fake Stripe)', () => {
         const result = await run(stripe, { attemptNo: 2 })
         expect(result).toMatchObject({ charged: false, reason: 'payment_exists' })
         expect(stripe.paymentIntents.create).not.toHaveBeenCalled()
-        const attempts = await store.listAutopayAttempts()
-        expect(attempts[1]).toMatchObject({ attemptNo: 2, status: 'failed', errorCode: 'payment_exists' })
-        expect(attempts[1].error).toContain('pi_orig')
+        // The owner is being answered, so no new row is written for the press...
+        expect(await store.listAutopayAttempts()).toHaveLength(1)
+        // ...and the answer says what is true: the payment exists, the webhook will settle it.
+        expect(result.message).toContain('pi_orig')
+        expect(result.message).toContain('webhook will mark the invoice paid')
+        expect(result.message).not.toContain('Check with Stripe')
       },
     )
+
+    it('pressing Charge again over and over writes no rows and charges nothing', async () => {
+      await seed({ attempts: [failedAttempt()] })
+      const stripe = fakeStripe({ intents: [intentAt({ id: 'pi_orig', status: 'processing' })] })
+      for (let press = 0; press < 4; press += 1) {
+        expect((await run(stripe, { attemptNo: 2 })).reason).toBe('payment_exists')
+      }
+      expect(await store.listAutopayAttempts()).toHaveLength(1)
+      expect(stripe.paymentIntents.create).not.toHaveBeenCalled()
+    })
+
+    it('a refusal before Stripe, on Charge again, gives the claim back so the next press can try', async () => {
+      await seed({ attempts: [failedAttempt()], invoice: { stripeCheckoutSessionId: 'cs_done' } })
+      const blocked = fakeStripe({ sessions: { cs_done: 'complete' } })
+      expect((await run(blocked, { attemptNo: 2 })).reason).toBe('session_complete')
+      expect(await store.listAutopayAttempts()).toHaveLength(1)
+      const open = fakeStripe()
+      expect((await run(open, { attemptNo: 2 })).charged).toBe(true)
+    })
+
+    it('the first announced attempt KEEPS its failed row: that row is what says Autopay failed', async () => {
+      await seed({ invoice: { stripeCheckoutSessionId: 'cs_done' } })
+      await run(fakeStripe({ sessions: { cs_done: 'complete' } }), { announced: true })
+      expect((await store.listAutopayAttempts())[0]).toMatchObject({ attemptNo: 1, status: 'failed' })
+    })
+
+    it('releaseUnchargedAutopayAttempt only removes a bare claim, never one that has an intent or has moved on', async () => {
+      await seed({
+        attempts: [
+          failedAttempt({ attemptNo: 1 }),
+          failedAttempt({ attemptNo: 2, status: 'claimed', paymentIntentId: 'pi_live' }),
+          failedAttempt({ attemptNo: 3, status: 'claimed', paymentIntentId: null }),
+        ],
+      })
+      expect(await store.releaseUnchargedAutopayAttempt('inv-rv', 1)).toBe(false)
+      expect(await store.releaseUnchargedAutopayAttempt('inv-rv', 2)).toBe(false)
+      expect(await store.releaseUnchargedAutopayAttempt('inv-rv', 3)).toBe(true)
+      expect((await store.listAutopayAttempts()).map((row) => row.attemptNo)).toEqual([1, 2])
+    })
 
     it('Charge again goes ahead when Stripe holds only declined or cancelled intents for the invoice', async () => {
       await seed({ attempts: [failedAttempt()] })
@@ -37841,5 +37883,24 @@ describe('a void under the invoice lock (Postgres statements)', () => {
     instance.mode = 'postgres'
     expect(await instance.recordFailedAutopayAttempt('inv-1', { errorCode: 'x', error: 'why' })).toBeNull()
     expect(statements[0].text).toMatch(/^insert into autopay_attempts .* values \(\$1, \$2, \$3, \$4, 'failed', \$5, \$6\) on conflict \(invoice_id, attempt_no\) do nothing/i)
+  })
+})
+
+describe('releaseUnchargedAutopayAttempt (Postgres statement)', () => {
+  it('deletes only a claimed row with no intent', async () => {
+    const statements = []
+    const instance = new AppDataStore()
+    instance.pool = {
+      query: async (text, params) => {
+        statements.push({ text: text.replace(/\s+/g, ' ').trim(), params })
+        return { rows: [], rowCount: 1 }
+      },
+    }
+    instance.mode = 'postgres'
+    expect(await instance.releaseUnchargedAutopayAttempt('inv-1', 2)).toBe(true)
+    expect(statements[0].text).toBe(
+      "delete from autopay_attempts where invoice_id = $1 and attempt_no = $2 and status = 'claimed' and payment_intent_id is null",
+    )
+    expect(statements[0].params).toEqual(['inv-1', 2])
   })
 })

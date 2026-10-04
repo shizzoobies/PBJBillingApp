@@ -4521,6 +4521,27 @@ const server = createServer(async (request, response) => {
           await expireCheckoutSession(paySwap.previous)
         }
 
+        // AUTOPAY, AGAIN, now that the new session is STORED. The check before the
+        // mint can be stale: a charge claimed while Stripe was building this
+        // session retired only the ids it could see, and this one was not stored
+        // yet. Either the swap landed before that claim read the invoice (and its
+        // retire closed this session) or the claim committed first (and this read
+        // sees it). Whichever it was, a link that could collect a second time is
+        // closed here rather than handed over.
+        if (
+          hasActiveAutopayAttempt(await appDataStore.listAutopayAttempts({ invoiceId: payInvoice.id }))
+        ) {
+          await expireCheckoutSession(payResult.session.id)
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'A payment is already on its way',
+              body: `Invoice ${payNumber} is being paid automatically from your saved payment method. Nothing more is needed from you.`,
+            }),
+          )
+          return
+        }
+
         // THE EDIT THAT LANDED WHILE THIS PAGE WAS OPENING. `payInvoice` was read
         // before the mint, so the session above carries that total; an edit
         // committed in between has already run its own expiry, against the
@@ -5256,7 +5277,7 @@ const server = createServer(async (request, response) => {
           message:
             chargeAgain.reason === 'failed'
               ? 'Stripe refused the charge. The reason is on the invoice.'
-              : autopayRefusalWords(chargeAgain.reason),
+              : (chargeAgain.message ?? autopayRefusalWords(chargeAgain.reason)),
         })
         return
       }
@@ -6075,6 +6096,17 @@ const server = createServer(async (request, response) => {
       if (linkSwap.previous && linkSwap.previous !== result.session.id) {
         await expireCheckoutSession(linkSwap.previous)
       }
+      // Autopay again, now the new session is stored (see the pay page): a charge
+      // claimed while this link was being built could not retire it.
+      if (hasActiveAutopayAttempt(await appDataStore.listAutopayAttempts({ invoiceId: invoice.id }))) {
+        await expireCheckoutSession(result.session.id)
+        sendJson(response, 409, {
+          error: 'autopay_in_flight',
+          message:
+            'An automatic payment started while the link was being created, so it does not need a payment link.',
+        })
+        return
+      }
       // The invoice is already sent, so the swap above is the only write: this
       // route no longer stamps a status or a sent date.
       const updated = linkSwap.invoice
@@ -6688,6 +6720,23 @@ const server = createServer(async (request, response) => {
           if (cardSwap.previous && cardSwap.previous !== cardResult.session.id) {
             await expireCheckoutSession(cardSwap.previous)
           }
+        }
+
+        // AUTOPAY, AGAIN, now the sessions are STORED. `planAutopaySend` read
+        // "no active attempt" before any of this; a charge claimed since (the owner
+        // pressed Charge again in another window) retired only the session ids it
+        // could see, not the ones minted above. Either the swaps landed before that
+        // claim read the invoice (its retire closed them) or the claim committed
+        // first (this read sees it). In the second case nothing may be emailed with
+        // a Pay link: the sessions are closed and the send is refused.
+        if (hasActiveAutopayAttempt(await appDataStore.listAutopayAttempts({ invoiceId: invoice.id }))) {
+          await expireInvoiceSessions(mintedSessionIds, invoice.id, 'send (an automatic payment started)')
+          sendJson(response, 409, {
+            error: 'autopay_in_flight',
+            message:
+              'An automatic payment started while this invoice was being sent. Nothing was emailed.',
+          })
+          return
         }
       }
 

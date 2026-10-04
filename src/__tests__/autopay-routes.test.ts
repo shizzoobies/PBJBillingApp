@@ -596,3 +596,58 @@ describe('planAutopaySend requires Stripe to be connected (L6)', () => {
     expect(body).toContain('decision.ok && isStripeConfigured()')
   })
 })
+
+/* -------------------------------------------------------------------------- */
+/* A pay link minted DURING a charge                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The check for an active attempt that sits BEFORE a session is minted can be
+ * stale by the time the session is stored: a charge claimed in between retired
+ * only the session ids it could see. So each of the three places that mint a
+ * pay session asks again AFTER the swap that stores it, closes the session it
+ * just minted, and refuses. Either the swap landed before the claim read the
+ * invoice (the claim's retire closed the session) or the claim committed first
+ * (this read sees it).
+ */
+describe('a session minted while a charge starts is closed, not handed over', () => {
+  it('the pay page re-checks after storing the session, closes it, and never redirects to it', () => {
+    const pay = sliceBetween('const payLinkMatch = normalizedPath.match(', "if (normalizedPath === '/api/logout'")
+    const swapAt = pay.indexOf('const paySwap = await')
+    const recheck = pay.indexOf('hasActiveAutopayAttempt(', swapAt)
+    expect(recheck).toBeGreaterThan(swapAt)
+    const closeAt = pay.indexOf('expireCheckoutSession(payResult.session.id)', recheck)
+    expect(closeAt).toBeGreaterThan(recheck)
+    expect(pay.slice(recheck, closeAt + 400)).toContain('A payment is already on its way')
+    expect(closeAt).toBeLessThan(pay.indexOf('Location: payResult.session.url'))
+  })
+
+  it('the owner payment-link route re-checks after storing the session and refuses', () => {
+    const link = sliceBetween('const invoicePaymentLinkMatch = normalizedPath.match(', '// POST /api/invoices/:id/mark-paid')
+    const swapAt = link.indexOf('const linkSwap = await')
+    const recheck = link.indexOf('hasActiveAutopayAttempt(', swapAt)
+    expect(recheck).toBeGreaterThan(swapAt)
+    const closeAt = link.indexOf('expireCheckoutSession(result.session.id)', recheck)
+    expect(closeAt).toBeGreaterThan(recheck)
+    expect(link.slice(closeAt, closeAt + 300)).toContain("error: 'autopay_in_flight'")
+    expect(closeAt).toBeLessThan(link.indexOf('recordActivity(', swapAt))
+  })
+
+  it('the send route re-checks after BOTH sessions are stored, closes them, and emails nothing', () => {
+    const send = sliceBetween('const invoiceSendMatch = normalizedPath.match(', '// GET /api/invoices/export.csv')
+    const lastSwap = send.indexOf('const cardSwap = await')
+    const recheck = send.indexOf('hasActiveAutopayAttempt(', lastSwap)
+    expect(recheck).toBeGreaterThan(lastSwap)
+    const closeAt = send.indexOf('expireInvoiceSessions(mintedSessionIds', recheck)
+    expect(closeAt).toBeGreaterThan(recheck)
+    expect(send.slice(closeAt, closeAt + 400)).toContain("error: 'autopay_in_flight'")
+    // Before the email is built or sent.
+    expect(closeAt).toBeLessThan(send.indexOf('buildInvoiceEmail('))
+    expect(closeAt).toBeLessThan(send.indexOf('sendInvoiceEmail('))
+  })
+
+  it('the Charge again route answers the specific sentence, not a generic one', () => {
+    const block = sliceBetween('const autopayChargeAgainMatch = normalizedPath.match(', '// POST /api/stripe/webhook')
+    expect(squash(block)).toContain('chargeAgain.message ?? autopayRefusalWords(chargeAgain.reason)')
+  })
+})

@@ -16249,6 +16249,44 @@ export class AppDataStore {
   }
 
   /**
+   * Take back a claim that never reached Stripe: delete the row, but ONLY while
+   * it is still `claimed` with no payment intent. "Charge again" refused before
+   * Stripe is called (a payment already exists, a pay link was completed) must not
+   * leave a new failed row for every press; the attempt number is simply free
+   * again. A row that has an intent id, or any state past claimed, is never touched.
+   *
+   * @returns true when a row was removed.
+   */
+  async releaseUnchargedAutopayAttempt(invoiceId, attemptNo) {
+    const number = Number(attemptNo)
+    if (!invoiceId || !Number.isInteger(number)) return false
+    if (this.pool) {
+      const { rowCount } = await this.pool.query(
+        `delete from autopay_attempts
+          where invoice_id = $1 and attempt_no = $2
+            and status = 'claimed' and payment_intent_id is null`,
+        [invoiceId, number],
+      )
+      return rowCount > 0
+    }
+    return mutateLocalData((data) => {
+      const before = (data.autopayAttempts ?? []).length
+      if (!before) return { result: false, changed: false }
+      data.autopayAttempts = data.autopayAttempts.filter(
+        (row) =>
+          !(
+            row.invoiceId === invoiceId &&
+            Number(row.attemptNo) === number &&
+            row.status === 'claimed' &&
+            !row.paymentIntentId
+          ),
+      )
+      const removed = data.autopayAttempts.length < before
+      return { result: removed, changed: removed }
+    })
+  }
+
+  /**
    * Update one attempt (status, intent id, error). `onlyIfStatus` is the
    * guard that keeps a late event from walking an attempt backwards: a
    * 'succeeded' attempt is never failed by a stale webhook.
