@@ -5,7 +5,7 @@ import type { AppContextValue } from '../AppContext'
 import { defaultProposalPricing } from '../../lib/proposal-pricing.js'
 import { ProposalEditorPage } from '../pages/ProposalEditorPage'
 import { ProposalsPage } from '../pages/ProposalsPage'
-import { proposalDeliveryBadge } from '../lib/proposals'
+import { proposalDeliveryBadge, staleLetterFigureCount } from '../lib/proposals'
 import { ApiError, type Client, type Proposal } from '../lib/types'
 
 /** A promise plus its own `resolve`, for pinning a mock's response in flight. */
@@ -1429,5 +1429,197 @@ describe('the intake chat', () => {
         { serviceId: 'reconciliations' },
       ],
     })
+  })
+})
+
+/**
+ * featreq-a69a3cc0 - Software on the proposal: its own picker group, its own
+ * totals row ("at cost", never in the monthly fee), a "No charge" line, and
+ * Accept adding the lines to the client as monthly Software expenses.
+ */
+describe('Software on the proposal editor', () => {
+  const SOFTWARE_LINES = [
+    {
+      serviceId: 'software-qbo-plus',
+      group: 'Software',
+      name: 'QBO Plus',
+      tier: null,
+      cadence: null,
+      amount: 98,
+      computedAmount: 98,
+      formula: '$98.00 per month, at cost',
+      flag: null,
+      basePrice: 98,
+      unitPrice: 0,
+      unitsIncluded: 0,
+      unit: 'none',
+    },
+    {
+      serviceId: 'software-bill-pay-basic',
+      group: 'Software',
+      name: 'QB Bill Pay Basic',
+      tier: null,
+      cadence: null,
+      amount: 0,
+      computedAmount: 0,
+      formula: '$0.00 per month, at cost',
+      flag: null,
+      basePrice: 0,
+      unitPrice: 0,
+      unitsIncluded: 0,
+      unit: 'none',
+    },
+  ] as NonNullable<Proposal['pricingSnapshot']>['lines']
+  const WITH_SOFTWARE: Proposal = {
+    ...PROPOSAL,
+    selections: [...PROPOSAL.selections, { serviceId: 'software-qbo-plus' }, { serviceId: 'software-bill-pay-basic' }],
+    pricingSnapshot: {
+      ...PROPOSAL.pricingSnapshot!,
+      lines: [...PROPOSAL.pricingSnapshot!.lines, ...SOFTWARE_LINES],
+      totals: { monthly: 630, annual: 0, oneTime: 0, cleanup: 0, software: 98 },
+    },
+  }
+  const pricingWithRaisedQboPlus = {
+    name: 'PB&J',
+    proposalPricing: {
+      ...defaultProposalPricing(),
+      rates: { bookkeeper: 75, accountant: 115, controller: 125 },
+      services: defaultProposalPricing().services.map((service) =>
+        service.id === 'software-qbo-plus' ? { ...service, basePrice: 104 } : service,
+      ),
+    },
+  }
+
+  it('shows a Software group in the picker with a checkbox per plan', async () => {
+    renderEditor()
+    expect(await screen.findByLabelText('Software: QBO Plus')).toBeTruthy()
+    expect(screen.getByLabelText('Software: QB Bill Pay Basic')).toBeTruthy()
+  })
+
+  it('asks for a count only on a per-employee or per-contractor plan', async () => {
+    api.getProposalRequest = vi.fn(async () => ({
+      ...PROPOSAL,
+      selections: [
+        ...PROPOSAL.selections,
+        { serviceId: 'software-qb-time-elite' },
+        { serviceId: 'software-contractor-payments' },
+        { serviceId: 'software-qbo-plus' },
+      ],
+    }))
+    renderEditor()
+    expect(await screen.findByLabelText('Count for Software: QB Time Elite')).toBeTruthy()
+    expect(screen.getByLabelText('Count for Software: Contractor Payments & 1099 filing')).toBeTruthy()
+    expect(screen.queryByLabelText('Count for Software: QBO Plus')).toBeNull()
+  })
+
+  it('prints a software line at its price, a $0 plan as "No charge", and the at-cost total apart from the monthly fee', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_SOFTWARE)
+    renderEditor()
+    await screen.findByText('QBO Plus', { selector: 'strong' })
+    const amounts = [...document.querySelectorAll('.proposal-line-amount')].map((cell) => cell.textContent)
+    expect(amounts).toEqual(['$630.00', '$98.00', 'No charge'])
+    const totals = document.querySelector('.proposal-totals')!.textContent ?? ''
+    expect(totals).toContain('Monthly fee$630.00')
+    expect(totals).toContain('Software, at cost (monthly)$98.00')
+  })
+
+  it('has no Software total row on a proposal with no software', async () => {
+    renderEditor()
+    await screen.findByText(/120 transactions/)
+    expect(document.querySelector('.proposal-totals')!.textContent).not.toContain('Software')
+  })
+
+  it('opening a draft whose software price differs from the catalog reprices it once', async () => {
+    api.getProposalRequest = vi.fn(async () => ({ ...WITH_SOFTWARE, id: 'prop-sw' }))
+    api.repriceProposalRequest = vi.fn(async () => ({ ...WITH_SOFTWARE, id: 'prop-sw' }))
+    api.fetchFirmSettings = vi.fn(async () => pricingWithRaisedQboPlus)
+    renderEditor('/proposals/prop-sw')
+    await waitFor(() => expect(api.repriceProposalRequest).toHaveBeenCalledWith('prop-sw'))
+    expect(api.repriceProposalRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not reprice a SENT proposal on open, whatever QuickBooks charges now', async () => {
+    api.getProposalRequest = vi.fn(async () => ({ ...WITH_SOFTWARE, id: 'prop-sw', status: 'sent' as const }))
+    api.fetchFirmSettings = vi.fn(async () => pricingWithRaisedQboPlus)
+    renderEditor('/proposals/prop-sw')
+    await screen.findByText('QBO Plus', { selector: 'strong' })
+    expect(api.repriceProposalRequest).not.toHaveBeenCalled()
+  })
+
+  describe('Accept', () => {
+    it('on a prospect names the software it will add, and sends no extra flag', async () => {
+      api.getProposalRequest = vi.fn(async () => WITH_SOFTWARE)
+      const confirm = vi.fn(() => true)
+      vi.stubGlobal('confirm', confirm)
+      renderEditor()
+      fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+      expect(confirm).toHaveBeenCalledWith(
+        'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00, and adds QBO Plus as monthly Software expenses billed at cost. Nothing about any invoice changes.',
+      )
+      await waitFor(() =>
+        expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
+      )
+    })
+
+    it('an upsell asks separately before it adds the software, and sends the answer', async () => {
+      api.getProposalRequest = vi.fn(async () => ({ ...WITH_SOFTWARE, clientId: 'client-1' }))
+      const confirm = vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false).mockReturnValueOnce(true)
+      vi.stubGlobal('confirm', confirm)
+      renderEditor()
+      fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+      expect(confirm).toHaveBeenNthCalledWith(
+        3,
+        'Also add QBO Plus to Existing Co as monthly Software expenses, billed at cost? Cancel leaves their expenses as they are.',
+      )
+      await waitFor(() =>
+        expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
+          packageId: null,
+          updateMonthlyRate: false,
+          addSoftware: true,
+        }),
+      )
+    })
+
+    it('an upsell whose only software is $0 asks nothing about software', async () => {
+      api.getProposalRequest = vi.fn(async () => ({
+        ...WITH_SOFTWARE,
+        clientId: 'client-1',
+        pricingSnapshot: {
+          ...WITH_SOFTWARE.pricingSnapshot!,
+          lines: [...PROPOSAL.pricingSnapshot!.lines, SOFTWARE_LINES[1]],
+          totals: { ...WITH_SOFTWARE.pricingSnapshot!.totals, software: 0 },
+        },
+      }))
+      const confirm = vi.fn(() => true)
+      vi.stubGlobal('confirm', confirm)
+      renderEditor()
+      fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+      await waitFor(() =>
+        expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
+          packageId: null,
+          updateMonthlyRate: true,
+        }),
+      )
+      expect(confirm).toHaveBeenCalledTimes(2)
+    })
+  })
+})
+
+describe('the software total in a letter (featreq-a69a3cc0)', () => {
+  const snapshot = {
+    rates: { bookkeeper: 75, accountant: 115, controller: 125 },
+    lines: [],
+    totals: { monthly: 630, annual: 0, oneTime: 0, cleanup: 0, software: 98 },
+    catalogAt: '2026-10-01T12:00:00.000Z',
+  }
+  const letter = (text: string) => ({ subject: 's', sections: [], text })
+
+  it('a letter that quotes the software total is not stale; one that quotes another figure is', () => {
+    expect(
+      staleLetterFigureCount({ letter: letter('Software is $98.00 a month at cost.'), pricingSnapshot: snapshot }),
+    ).toBe(0)
+    expect(
+      staleLetterFigureCount({ letter: letter('Software is $104.00 a month at cost.'), pricingSnapshot: snapshot }),
+    ).toBe(1)
   })
 })

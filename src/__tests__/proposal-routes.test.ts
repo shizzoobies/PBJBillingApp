@@ -283,6 +283,7 @@ describe('accepting and declining', () => {
     expect(text).toContain('appDataStore.acceptProposal(proposalAcceptMatch[1], {')
     expect(text).not.toContain('appDataStore.createClient(')
     expect(text).toContain('updateMonthlyRate: payload.updateMonthlyRate === true')
+    expect(text).toContain('addSoftware: payload.addSoftware === true')
   })
 
   it('a refusal is a 409 with the sentence', () => {

@@ -1052,7 +1052,13 @@ export type AcceptProposalResult = {
  */
 export function acceptProposalRequest(
   id: string,
-  input: { packageId?: string | null; planIds?: string[]; updateMonthlyRate?: boolean } = {},
+  input: {
+    packageId?: string | null
+    planIds?: string[]
+    updateMonthlyRate?: boolean
+    /** An existing client only: also add the proposal's software lines as monthly expenses. */
+    addSoftware?: boolean
+  } = {},
 ): Promise<AcceptProposalResult> {
   return proposalRequest<AcceptProposalResult>(
     proposalPath(id, 'accept'),
@@ -1207,6 +1213,12 @@ export type RecurringReimbursementCoverageInput = {
   coverageStart?: string | null
   coverageEnd?: string | null
   coveragePaused?: boolean
+  /**
+   * Which invoice section the line prints under: 'software' (its own Software
+   * heading) or 'expense' (Client Reimbursed Expenses, the default). Absent on
+   * a PATCH leaves it as it is.
+   */
+  category?: 'expense' | 'software'
 }
 
 /** Owner-only: create a recurring reimbursement on a client. */

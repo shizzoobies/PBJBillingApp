@@ -689,3 +689,38 @@ describe('InvoicesPage — an hours row with no hours is left off the sheet', ()
     expect(text).not.toContain('emp-stamp-4d2f')
   })
 })
+
+describe('InvoicesPage - the Software section on the printed sheet (featreq-a69a3cc0)', () => {
+  const softwareInvoice: PersistedInvoice = {
+    ...fullInvoice,
+    id: 'inv-software',
+    number: 'INV-2026-08-009',
+    lineItems: lines([
+      { kind: 'plan', label: 'The Classic', detail: 'Monthly service', amount: 400 },
+      { kind: 'recurring', label: 'Recurring: Bank fee', detail: 'monthly', amount: 12 },
+      { kind: 'recurring', label: 'QBO Plus', detail: 'monthly', amount: 98, section: 'software' },
+    ]),
+    subtotal: 510,
+    total: 510,
+  }
+
+  it('prints its own heading and total, and keeps the other expense under its own', async () => {
+    await printStored(softwareInvoice)
+
+    const text = printed()
+    expect(text).toContain('Software')
+    expect(text).toContain('Total Software')
+    expect(text).toContain('QBO Plus')
+    expect(text).toContain('Total Client Reimbursed Expenses')
+    expect(text).toContain('$98.00')
+    expect(text).toContain('$12.00')
+    expect(text).toContain('$510.00')
+    expect(text.indexOf('Total Client Reimbursed Expenses')).toBeLessThan(text.indexOf('Total Software'))
+  })
+
+  it('prints no Software block on an invoice with none marked', async () => {
+    await printStored(fullInvoice)
+
+    expect(printed()).not.toContain('Total Software')
+  })
+})

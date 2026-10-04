@@ -13710,6 +13710,7 @@ describe('reimbursed-expense covered dates (postgres branch)', () => {
       coveragePaused: false,
       coverageResumePending: false,
       coverageHistory: { '2026-08': { start: '2026-07-13', end: '2026-08-13' } },
+      category: 'expense',
     })
   })
 
@@ -19794,6 +19795,21 @@ describe('hourly lines re-derive amount from hours × rate (file backend)', () =
     expect(updated.lineItems[0].amount).toBe(98.25)
   })
 
+  // featreq-a69a3cc0: a recurring line marked Software prints under its own
+  // heading. The mark rides the line through a save; a one-off or a typo does not.
+  it('the Software mark survives a round trip on a recurring line only', async () => {
+    const updated = await store.updateInvoice('inv-hours', {
+      lineItems: [
+        { kind: 'recurring', label: 'QBO Plus', detail: 'monthly', amount: 98, section: 'software' },
+        { kind: 'recurring', label: 'Bank fee', detail: 'monthly', amount: 12, section: 'nonsense' },
+        { kind: 'reimbursement', label: 'Reimbursement: Parking', detail: 'Aug 3, 2026', amount: 9, section: 'software' },
+        { kind: 'recurring', label: 'QB Time', detail: 'monthly', amount: 40, section: 'software', recurringId: 'recur-1' },
+      ],
+    })
+    expect(updated.lineItems.map((line) => line.section)).toEqual(['software', undefined, undefined, 'software'])
+    expect(updated.total).toBe(159)
+  })
+
   it('hours and rate survive the round trip', async () => {
     const updated = await store.updateInvoice('inv-hours', {
       lineItems: [
@@ -23344,7 +23360,7 @@ describe('proposal pricing in firm settings (file backend)', () => {
     const settings = await store.getFirmSettings()
     // A null catalog (production today) reads the seed - no data write needed.
     expect(settings.proposalPricing.rates).toEqual({ bookkeeper: 75, accountant: 115, controller: 125 })
-    expect(settings.proposalPricing.services).toHaveLength(41)
+    expect(settings.proposalPricing.services).toHaveLength(55)
   })
 
   it('saves the catalog through the sanitizer and reads it back', async () => {
@@ -23390,7 +23406,7 @@ describe('proposal pricing in firm settings (file backend)', () => {
     await store.updateFirmSettings({ proposalPricing: { rates: { bookkeeper: 80 } } })
     const pricing = (await store.getFirmSettings()).proposalPricing
     expect(pricing.rates).toEqual({ bookkeeper: 80, accountant: 90, controller: 100 })
-    expect(pricing.services).toHaveLength(41)
+    expect(pricing.services).toHaveLength(55)
   })
 })
 
@@ -23413,7 +23429,7 @@ describe('proposal pricing in firm settings (postgres branch)', () => {
     const fake = firmSettingsPool({ name: 'PB&J', proposal_pricing: null })
     const settings = await postgresStore(fake).getFirmSettings()
     expect(fake.statements[0].text).toMatch(/client_defaults, proposal_pricing/)
-    expect(settings.proposalPricing.services).toHaveLength(41)
+    expect(settings.proposalPricing.services).toHaveLength(55)
   })
 
   it('writes the sanitized catalog as $17 jsonb', async () => {
@@ -23487,7 +23503,7 @@ describe('proposal pricing in firm settings (postgres branch)', () => {
     await store2.updateFirmSettings({ proposalPricing: { rates: { bookkeeper: 80 } } })
     const pricing = (await store2.getFirmSettings()).proposalPricing
     expect(pricing.rates).toEqual({ bookkeeper: 80, accountant: 90, controller: 100 })
-    expect(pricing.services).toHaveLength(41)
+    expect(pricing.services).toHaveLength(55)
   })
 
   it('preserves a stored catalog across an unrelated save', async () => {
@@ -23543,7 +23559,7 @@ describe('firm settings catalog seeding via read() and a fresh-file bulk save (f
       accountant: 115,
       controller: 125,
     })
-    expect(data.firmSettings.proposalPricing.services).toHaveLength(41)
+    expect(data.firmSettings.proposalPricing.services).toHaveLength(55)
   })
 
   it('a fresh-file bulk save does not persist the payload copy of firm settings', async () => {
@@ -35808,5 +35824,463 @@ describe('proposal questionnaires: the review follow-ups (postgres branch)', () 
       /^select .* from proposal_questionnaires where id/is.test(sql) ? [submittedRow({ status: 'open' })] : [],
     )
     expect((await postgresStore(refused).appendProposalQuestionnaireEmailEvent('pq-1', event)).appended).toBe(false)
+  })
+})
+
+/**
+ * featreq-a69a3cc0 - the Software section. The catalog seeds her QuickBooks
+ * rows; a stored catalog that predates them is topped up once; a sent proposal
+ * keeps its software prices; Accept adds the lines as monthly recurring
+ * expenses marked Software; a bulk save never moves one back under Expenses.
+ */
+describe('Software in the proposal catalog (file backend)', () => {
+  beforeEach(async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    delete data.firmSettings
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  })
+
+  const oldCatalog = async () => {
+    // What production stored before Software existed: the 41 rows, no flag.
+    const seed = (await store.getFirmSettings()).proposalPricing
+    const { softwareSeeded: _flag, ...rest } = seed
+    return { ...rest, services: seed.services.filter((row) => row.group !== 'Software') }
+  }
+  const writeStoredCatalog = async (catalog) => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.firmSettings = { ...(data.firmSettings ?? {}), proposalPricing: catalog }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('reads the 14 software rows in the seed', async () => {
+    const services = (await store.getFirmSettings()).proposalPricing.services
+    expect(services.filter((row) => row.group === 'Software')).toHaveLength(14)
+  })
+
+  it('tops up a stored catalog that predates Software, on read and through read()', async () => {
+    await writeStoredCatalog(await oldCatalog())
+    const viaSettings = (await store.getFirmSettings()).proposalPricing
+    expect(viaSettings.services).toHaveLength(55)
+    expect(viaSettings.softwareSeeded).toBe(true)
+    const viaRead = (await store.read()).firmSettings.proposalPricing
+    expect(viaRead.services).toHaveLength(55)
+  })
+
+  it('a row she retires or deletes after her next save stays that way', async () => {
+    await writeStoredCatalog(await oldCatalog())
+    const topped = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({
+      proposalPricing: {
+        ...topped,
+        services: topped.services
+          .filter((row) => row.id !== 'software-qbo-ledger')
+          .map((row) => (row.id === 'software-qbo-plus' ? { ...row, active: false } : row)),
+      },
+    })
+    const after = (await store.getFirmSettings()).proposalPricing
+    expect(after.softwareSeeded).toBe(true)
+    expect(after.services.some((row) => row.id === 'software-qbo-ledger')).toBe(false)
+    expect(after.services.find((row) => row.id === 'software-qbo-plus').active).toBe(false)
+    // A partial patch (just a rate) does not bring them back either.
+    await store.updateFirmSettings({ proposalPricing: { rates: { bookkeeper: 80 } } })
+    const again = (await store.getFirmSettings()).proposalPricing
+    expect(again.services.some((row) => row.id === 'software-qbo-ledger')).toBe(false)
+  })
+
+  it('saves a changed software price and reads it back', async () => {
+    const seed = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({
+      proposalPricing: {
+        ...seed,
+        services: seed.services.map((row) =>
+          row.id === 'software-workforce-elite' ? { ...row, basePrice: 99.5, unitPrice: 15, unitsIncluded: 2 } : row,
+        ),
+      },
+    })
+    const row = (await store.getFirmSettings()).proposalPricing.services.find(
+      (service) => service.id === 'software-workforce-elite',
+    )
+    expect(row).toMatchObject({ basePrice: 99.5, unitPrice: 15, unitsIncluded: 2, unit: 'employee' })
+  })
+})
+
+describe('Software in the proposal catalog (postgres branch)', () => {
+  function statefulPool(initialRow) {
+    let row = initialRow
+    return {
+      statements: [],
+      pool: {
+        async query(text, params) {
+          if (/from firm_settings where id = 'singleton'/i.test(text)) return { rows: row ? [row] : [] }
+          if (/^insert into firm_settings/i.test(String(text).trim())) {
+            row = { ...row, name: params[0], client_defaults: params[15], proposal_pricing: params[16] ?? row?.proposal_pricing ?? null }
+          }
+          return { rows: [], rowCount: 1 }
+        },
+      },
+    }
+  }
+
+  it('tops up a stored catalog that predates Software, and keeps it topped up once saved', async () => {
+    const seed = defaultProposalPricing()
+    const { softwareSeeded: _flag, ...rest } = seed
+    const stored = { ...rest, services: seed.services.filter((row) => row.group !== 'Software') }
+    const store2 = postgresStore(statefulPool({ name: 'PB&J', proposal_pricing: stored }))
+    const read = (await store2.getFirmSettings()).proposalPricing
+    expect(read.services).toHaveLength(55)
+    await store2.updateFirmSettings({
+      proposalPricing: { ...read, services: read.services.filter((row) => row.id !== 'software-qbo-ledger') },
+    })
+    const after = (await store2.getFirmSettings()).proposalPricing
+    expect(after.services).toHaveLength(54)
+    expect(after.softwareSeeded).toBe(true)
+  })
+})
+
+describe('Software on a proposal (file backend)', () => {
+  beforeEach(async () => {
+    await clearProposals()
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    delete data.firmSettings
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await setProposalRates(store)
+    await store.write(workspace({ timeEntries: [] }))
+  })
+
+  const softwareSelections = [
+    { serviceId: 'software-qbo-plus' },
+    { serviceId: 'software-qb-time-elite', quantity: 3 },
+    { serviceId: 'software-bill-pay-basic' },
+  ]
+  const softwareProposal = (extra = {}) =>
+    store.createProposal({
+      prospect: { company: 'Acme Books', contactName: 'Pat Doe' },
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }, ...softwareSelections],
+      ...extra,
+    })
+  const raiseQuickBooksPrices = async () => {
+    const seed = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({
+      proposalPricing: {
+        ...seed,
+        services: seed.services.map((row) =>
+          row.id === 'software-qbo-plus' ? { ...row, basePrice: 120 } : row,
+        ),
+      },
+    })
+  }
+  const expensesOf = async (clientId) =>
+    (await store.read()).recurringReimbursements.filter((row) => row.clientId === clientId)
+
+  it('prices software at cost into totals.software, outside the monthly fee, and keeps the figures on the lines', async () => {
+    const proposal = await softwareProposal()
+    const { lines, totals } = proposal.pricingSnapshot
+    expect(totals).toMatchObject({ monthly: 630, software: 168.6 })
+    expect(lines.find((line) => line.serviceId === 'software-qbo-plus')).toMatchObject({
+      amount: 98,
+      basePrice: 98,
+      unitPrice: 0,
+      unit: 'none',
+    })
+    expect(lines.find((line) => line.serviceId === 'software-qb-time-elite')).toMatchObject({
+      amount: 70.6,
+      basePrice: 40,
+      unitPrice: 10.2,
+    })
+  })
+
+  it('a SENT proposal keeps its software prices when QuickBooks raises them, and a new line uses the catalog', async () => {
+    const proposal = await softwareProposal()
+    await store.setProposalStatus(proposal.id, 'sent')
+    await raiseQuickBooksPrices()
+    const edited = await store.updateProposal(proposal.id, {
+      selections: [...proposal.selections, { serviceId: 'software-qbo-advanced' }],
+    })
+    const amountOf = (id) => edited.pricingSnapshot.lines.find((line) => line.serviceId === id).amount
+    expect(amountOf('software-qbo-plus')).toBe(98)
+    expect(amountOf('software-qbo-advanced')).toBe(238)
+    expect(edited.pricingSnapshot.totals.software).toBe(98 + 70.6 + 238)
+  })
+
+  it('a DRAFT reprices at the new software price when its services change, and on an explicit reprice', async () => {
+    const proposal = await softwareProposal()
+    await raiseQuickBooksPrices()
+    const repriced = await store.updateProposal(proposal.id, {})
+    expect(repriced.pricingSnapshot.lines.find((line) => line.serviceId === 'software-qbo-plus').amount).toBe(120)
+  })
+
+  it('Accept on a prospect adds each priced software line as a monthly expense marked Software', async () => {
+    const proposal = await softwareProposal()
+    const result = await store.acceptProposal(proposal.id, {})
+    const expenses = (await expensesOf(result.clientId)).sort((a, b) => a.description.localeCompare(b.description))
+    expect(expenses.map((row) => [row.description, row.amount])).toEqual([
+      ['QB Time Elite', 70.6],
+      ['QBO Plus', 98],
+    ])
+    for (const row of expenses) {
+      expect(row).toMatchObject({
+        frequency: 'monthly',
+        category: 'software',
+        startDate: `${firmToday().slice(0, 7)}-01`,
+        coverageEnabled: false,
+      })
+    }
+    // Software is not part of the monthly rate.
+    const client = (await store.read()).clients.find((row) => row.id === result.clientId)
+    expect(client.monthlyRate).toBe(630)
+  })
+
+  it('Accept skips a $0 line (Bill Pay Basic): nothing to bill, nothing added', async () => {
+    const proposal = await store.createProposal({
+      prospect: { company: 'Free Co' },
+      selections: [{ serviceId: 'software-bill-pay-basic' }],
+    })
+    const result = await store.acceptProposal(proposal.id, {})
+    expect(await expensesOf(result.clientId)).toEqual([])
+  })
+
+  it('an upsell adds software only when the page confirmed it (addSoftware)', async () => {
+    const asked = await softwareProposal({ clientId: 'c1' })
+    await store.acceptProposal(asked.id, { addSoftware: false })
+    expect(await expensesOf('c1')).toEqual([])
+
+    const confirmed = await softwareProposal({ clientId: 'c1' })
+    await store.acceptProposal(confirmed.id, { addSoftware: true })
+    expect((await expensesOf('c1')).map((row) => row.description).sort()).toEqual(['QB Time Elite', 'QBO Plus'])
+  })
+
+  it('never doubles a line: a description the client already carries is skipped, so a retry is safe', async () => {
+    await store.addRecurringReimbursement({
+      clientId: 'c1',
+      description: 'QBO Plus',
+      amount: 90,
+      frequency: 'monthly',
+      startDate: '2026-01-01',
+    })
+    const proposal = await softwareProposal({ clientId: 'c1' })
+    await store.acceptProposal(proposal.id, { addSoftware: true })
+    const plus = (await expensesOf('c1')).filter((row) => row.description === 'QBO Plus')
+    expect(plus).toHaveLength(1)
+    expect(plus[0]).toMatchObject({ amount: 90, category: 'expense' })
+
+    const lines = proposal.pricingSnapshot.lines
+    await store._addAcceptedSoftware('c1', lines)
+    await store._addAcceptedSoftware('c1', lines)
+    expect((await expensesOf('c1')).filter((row) => row.description === 'QB Time Elite')).toHaveLength(1)
+  })
+
+  it('refuses a billing master, like every other recurring expense, and writes nothing', async () => {
+    await store.write(
+      workspace({
+        timeEntries: [],
+        clients: [
+          { id: 'c1', name: 'Acme', isBillingMaster: true },
+        ],
+      }),
+    )
+    const proposal = await softwareProposal({ clientId: 'c1' })
+    await expect(store.acceptProposal(proposal.id, { addSoftware: true })).rejects.toThrow()
+    expect(await expensesOf('c1')).toEqual([])
+    expect((await store.getProposal(proposal.id)).status).toBe('draft')
+  })
+})
+
+describe('a recurring expense and its invoice section (file backend)', () => {
+  beforeEach(async () => {
+    await store.write(workspace({ timeEntries: [] }))
+  })
+
+  it('defaults to expense, takes software on create, and moves with an update', async () => {
+    const plain = await store.addRecurringReimbursement({
+      clientId: 'c1',
+      description: 'Bank fee',
+      amount: 12,
+      frequency: 'monthly',
+      startDate: '2026-10-01',
+    })
+    expect(plain.category).toBe('expense')
+    const software = await store.addRecurringReimbursement({
+      clientId: 'c1',
+      description: 'QBO Plus',
+      amount: 98,
+      frequency: 'monthly',
+      startDate: '2026-10-01',
+      category: 'software',
+    })
+    expect(software.category).toBe('software')
+    expect(await store.addRecurringReimbursement({
+      clientId: 'c1', description: 'x', amount: 1, frequency: 'monthly', startDate: '2026-10-01', category: 'nonsense',
+    })).toBeNull()
+
+    const moved = await store.updateRecurringReimbursement(plain.id, { category: 'software' })
+    expect(moved.category).toBe('software')
+    expect(await store.updateRecurringReimbursement(plain.id, { category: 'nonsense' })).toBeNull()
+    const back = await store.updateRecurringReimbursement(plain.id, { category: 'expense' })
+    expect(back.category).toBe('expense')
+  })
+
+  it('a bulk save whose payload has no category keeps the stored one (a stale tab cannot move Software back)', async () => {
+    const created = await store.addRecurringReimbursement({
+      clientId: 'c1',
+      description: 'QBO Plus',
+      amount: 98,
+      frequency: 'monthly',
+      startDate: '2026-10-01',
+      category: 'software',
+    })
+    const row = (await store.read()).recurringReimbursements.find((entry) => entry.id === created.id)
+    const { category: _drop, ...withoutCategory } = row
+    await store.write(workspace({ timeEntries: [], recurringReimbursements: [withoutCategory] }))
+    const after = (await store.read()).recurringReimbursements.find((entry) => entry.id === created.id)
+    expect(after.category).toBe('software')
+  })
+
+  it('a bulk save payload that names a category is taken, and a new row with none is an expense', async () => {
+    const created = await store.addRecurringReimbursement({
+      clientId: 'c1',
+      description: 'QBO Plus',
+      amount: 98,
+      frequency: 'monthly',
+      startDate: '2026-10-01',
+    })
+    const row = (await store.read()).recurringReimbursements.find((entry) => entry.id === created.id)
+    await store.write(
+      workspace({
+        timeEntries: [],
+        recurringReimbursements: [
+          { ...row, category: 'software' },
+          { id: 'recur-new', clientId: 'c1', description: 'Fresh', amount: 5, frequency: 'monthly', startDate: '2026-10-01' },
+        ],
+      }),
+    )
+    const rows = (await store.read()).recurringReimbursements
+    expect(rows.find((entry) => entry.id === created.id).category).toBe('software')
+    expect(rows.find((entry) => entry.id === 'recur-new').category).toBe('expense')
+  })
+})
+
+describe('a recurring expense and its invoice section (postgres branch)', () => {
+  const baseRow = {
+    id: 'recur-qbo',
+    client_id: 'c1',
+    description: 'QBO Plus',
+    amount: '98.00',
+    frequency: 'monthly',
+    start_date: new Date(2026, 9, 1),
+    coverage_enabled: false,
+    coverage_template: null,
+    coverage_start: null,
+    coverage_end: null,
+    coverage_anchor_day: null,
+    coverage_paused: false,
+    coverage_resume_pending: false,
+    coverage_history: {},
+  }
+  const payloadRow = {
+    id: 'recur-qbo',
+    clientId: 'c1',
+    description: 'QBO Plus',
+    amount: 98,
+    frequency: 'monthly',
+    startDate: '2026-10-01',
+  }
+  const saveWith = (fake, recurringReimbursements) =>
+    postgresStore(fake)
+      .write({
+        clients: [{ id: 'c1', name: 'Acme' }],
+        employees: [],
+        timeEntries: [],
+        checklists: [],
+        checklistTemplates: [],
+        recycledChecklists: [],
+        plans: [],
+        contacts: [],
+        reimbursements: [],
+        recurringReimbursements,
+        timesheetLocks: [],
+        weeklySubmissions: [],
+      })
+      .catch(() => {})
+
+  it('adds the category column the look-first way: asks first, then one ALTER with the CHECK', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    const looks = fake.matching(/information_schema\.columns[\s\S]*recurring_reimbursements[\s\S]*category/i)
+    expect(looks.length).toBeGreaterThan(0)
+    const alters = fake.matching(/alter table recurring_reimbursements\s+add column if not exists category/i)
+    expect(alters).toHaveLength(1)
+    expect(alters[0].text).toMatch(/not null default 'expense'/i)
+    expect(alters[0].text).toMatch(/check \(category in \('expense', 'software'\)\)/i)
+  })
+
+  it('reads the column, maps it, and defaults a row without one to expense', () => {
+    expect(mapRecurringReimbursementRow({ ...baseRow, category: 'software' }).category).toBe('software')
+    expect(mapRecurringReimbursementRow(baseRow).category).toBe('expense')
+    expect(mapRecurringReimbursementRow({ ...baseRow, category: 'junk' }).category).toBe('expense')
+  })
+
+  it('the workspace read selects category', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .read()
+      .catch(() => {})
+    const select = fake.statements.find(
+      (statement) =>
+        /^select[\s\S]*from recurring_reimbursements/i.test(statement.text) && !/union all/i.test(statement.text),
+    )
+    expect(select.text).toMatch(/\bcategory\b/)
+  })
+
+  it('create writes the category as the last column of the insert', async () => {
+    const statements = []
+    const pool = {
+      async query(text, params) {
+        statements.push({ text: String(text).trim(), params })
+        if (/select 1 from clients/i.test(text)) return { rows: [{}], rowCount: 1 }
+        return { rows: [], rowCount: 0 }
+      },
+    }
+    const created = await postgresStore({ pool }).addRecurringReimbursement({
+      clientId: 'c1',
+      description: 'QBO Plus',
+      amount: 98,
+      frequency: 'monthly',
+      startDate: '2026-10-01',
+      category: 'software',
+    })
+    expect(created.category).toBe('software')
+    const insert = statements.find((statement) => /^insert into recurring_reimbursements/i.test(statement.text))
+    expect(insert.text).toMatch(/coverage_history,\s+category\)/)
+    expect(insert.params[14]).toBe('software')
+  })
+
+  it('update sets the category column', async () => {
+    const fake = fakePostgres({ recurringRows: [{ ...baseRow, category: 'expense' }] })
+    await postgresStore(fake).updateRecurringReimbursement('recur-qbo', { category: 'software' })
+    const updates = fake.matching(/^update recurring_reimbursements set/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].text).toMatch(/category = \$\d+/)
+    expect(updates[0].params).toContain('software')
+  })
+
+  it('a bulk save whose payload has no category keeps the STORED one', async () => {
+    const fake = fakePostgres({ recurringRows: [{ ...baseRow, category: 'software' }] })
+    await saveWith(fake, [payloadRow])
+    const insert = fake.matching(/^insert into recurring_reimbursements/i)[0]
+    expect(insert.text).toMatch(/\bcategory\b/)
+    expect(insert.params[14]).toBe('software')
+  })
+
+  it('a payload that names a category is taken; a new row with none is an expense', async () => {
+    const named = fakePostgres({ recurringRows: [{ ...baseRow, category: 'expense' }] })
+    await saveWith(named, [{ ...payloadRow, category: 'software' }])
+    expect(named.matching(/^insert into recurring_reimbursements/i)[0].params[14]).toBe('software')
+
+    const fresh = fakePostgres()
+    await saveWith(fresh, [payloadRow])
+    expect(fresh.matching(/^insert into recurring_reimbursements/i)[0].params[14]).toBe('expense')
   })
 })

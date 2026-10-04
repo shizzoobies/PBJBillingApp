@@ -72,7 +72,7 @@ describe('Proposal pricing in Settings', () => {
     fireEvent.blur(input)
     const saved = lastSaved(onCommit)
     expect(saved.services.find((row) => row.id === 'monthly-weekly-transactions-basic')?.factor).toBe(0.08)
-    expect(saved.services).toHaveLength(41)
+    expect(saved.services).toHaveLength(55)
   })
 
   it('retires a row without deleting it', () => {
@@ -95,7 +95,7 @@ describe('Proposal pricing in Settings', () => {
     const onCommit = renderSection()
     fireEvent.click(screen.getByRole('button', { name: 'Add row to Payroll' }))
     const saved = lastSaved(onCommit)
-    expect(saved.services).toHaveLength(42)
+    expect(saved.services).toHaveLength(56)
     const added = saved.services.at(-1)!
     expect(added).toMatchObject({ group: 'Payroll', name: 'New service', active: true })
     expect(added.id).toMatch(/^custom-/)
@@ -134,7 +134,7 @@ describe('Proposal pricing in Settings', () => {
     fireEvent.click(addButton)
     fireEvent.click(addButton)
     const saved = lastSaved(onCommit)
-    expect(saved.services).toHaveLength(43)
+    expect(saved.services).toHaveLength(57)
     const added = saved.services.slice(-2)
     expect(added[0]!.id).not.toBe(added[1]!.id)
     expect(added[0]!.id).toMatch(/^custom-/)
@@ -281,5 +281,67 @@ describe('Proposal pricing in Settings', () => {
         "Input standards fill in a new proposal; a row's standard fills in when you first pick it.",
       ),
     ).toBeTruthy()
+  })
+})
+
+describe('Software in Settings (featreq-a69a3cc0)', () => {
+  it('shows base, per-unit, included and unit columns for the Software group, not factor or role', () => {
+    renderSection()
+    expect(screen.getByLabelText('Base price for Software QBO Plus')).toBeTruthy()
+    expect(screen.getByLabelText('Per-unit price for Software QBO Workforce Elite')).toBeTruthy()
+    expect(screen.getByLabelText('Units included for Software Contractor Payments & 1099 filing')).toBeTruthy()
+    expect(screen.getByLabelText('Unit for Software QB Time Elite')).toBeTruthy()
+    expect(screen.queryByLabelText('Factor for Software QBO Plus')).toBeNull()
+    expect(screen.queryByLabelText('Role for Software QBO Plus')).toBeNull()
+  })
+
+  it('saves a changed price, and it survives the sanitizer', () => {
+    const onCommit = renderSection()
+    const input = screen.getByLabelText('Base price for Software QBO Plus')
+    fireEvent.change(input, { target: { value: '104.5' } })
+    fireEvent.blur(input)
+    const row = lastSaved(onCommit).services.find((service) => service.id === 'software-qbo-plus')
+    expect(row).toMatchObject({ basePrice: 104.5, group: 'Software', pricing: 'software', active: true })
+  })
+
+  it('saves a per-unit price and the included count', () => {
+    const onCommit = renderStatefulSection()
+    const perUnit = screen.getByLabelText('Per-unit price for Software Contractor Payments & 1099 filing')
+    fireEvent.change(perUnit, { target: { value: '1.9' } })
+    fireEvent.blur(perUnit)
+    const included = screen.getByLabelText('Units included for Software Contractor Payments & 1099 filing')
+    fireEvent.change(included, { target: { value: '25' } })
+    fireEvent.blur(included)
+    const row = lastSaved(onCommit).services.find((service) => service.id === 'software-contractor-payments')
+    expect(row).toMatchObject({ unitPrice: 1.9, unitsIncluded: 25, unit: 'contractor' })
+  })
+
+  it('adds a software row as the software kind, with no input or role', () => {
+    const onCommit = renderStatefulSection()
+    fireEvent.click(screen.getByRole('button', { name: 'Add row to Software' }))
+    const added = lastSaved(onCommit).services.at(-1)!
+    expect(added).toMatchObject({
+      group: 'Software',
+      pricing: 'software',
+      basePrice: 0,
+      unitPrice: 0,
+      unit: 'none',
+      inputKey: null,
+      role: null,
+    })
+  })
+
+  it('retires a software row without deleting it', () => {
+    const onCommit = renderSection()
+    fireEvent.click(screen.getByRole('button', { name: 'Retire Software QB Bill Pay Basic' }))
+    const saved = lastSaved(onCommit)
+    expect(saved.services.find((row) => row.id === 'software-bill-pay-basic')?.active).toBe(false)
+    expect(saved.services).toHaveLength(55)
+  })
+
+  it('does not offer the software kind in the other groups pricing menus', () => {
+    renderSection()
+    const select = screen.getByLabelText('Pricing for Monthly Weekly transactions Basic') as HTMLSelectElement
+    expect([...select.options].map((option) => option.value)).not.toContain('software')
   })
 })

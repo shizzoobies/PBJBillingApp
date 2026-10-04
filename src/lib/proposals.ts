@@ -16,6 +16,7 @@ import type {
   ProposalStatus,
   ProposalTotals,
 } from './types'
+import type { PricedLine, SoftwareUnit } from '../../lib/proposal-pricing.js'
 
 /**
  * Words for the proposal catalog's enums (featreq-311473e2). One place, so the
@@ -44,6 +45,13 @@ export const PROPOSAL_PRICING_LABELS: Record<ProposalPricingKind, string> = {
   flat: 'Flat amount',
   payroll: 'Payroll block',
   'sales-tax': 'Sales tax block',
+  software: 'Software (at cost)',
+}
+
+export const SOFTWARE_UNIT_LABELS: Record<SoftwareUnit, string> = {
+  none: 'None (base price only)',
+  employee: 'Per employee',
+  contractor: 'Per contractor',
 }
 
 export const PROPOSAL_STATUS_LABELS: Record<ProposalStatus, string> = {
@@ -107,12 +115,15 @@ export function resolveProposalTab(param: string | null): ProposalTab {
  */
 export type ProposalPatchBuilder = (latest: Proposal) => ProposalPatch
 
-/** The four totals, in the order the estimate and the PDF show them. */
+/** The totals, in the order the estimate and the PDF show them. Software is at
+ *  cost and never part of the monthly fee; the estimate shows its row only when
+ *  the proposal has software on it. */
 export const PROPOSAL_TOTAL_LABELS: Array<[keyof ProposalTotals, string]> = [
   ['monthly', 'Monthly fee'],
   ['annual', 'Annual fees'],
   ['oneTime', 'One-time fees'],
   ['cleanup', 'Clean-up'],
+  ['software', 'Software, at cost (monthly)'],
 ]
 
 /* ---- The service picker ------------------------------------------------ */
@@ -342,12 +353,36 @@ export function unsetRateRoles(rates: Partial<Record<ProposalRole, number>> | nu
   return PROPOSAL_ROLES.filter((role) => !(Number(rates?.[role]) > 0))
 }
 
-/** True when a snapshot's role rates are not the catalog's current ones. */
+/**
+ * True when a snapshot was priced at other figures than the catalog's today: a
+ * role rate, or - when the snapshot's lines and the catalog's services are
+ * passed - a software line's base price, per-unit price or included count
+ * (QuickBooks raised a price, so a draft reprices once on open).
+ */
 export function snapshotRatesDiffer(
   snapshotRates: Partial<Record<ProposalRole, number>> | null | undefined,
   catalogRates: Partial<Record<ProposalRole, number>> | null | undefined,
+  snapshotLines?: ReadonlyArray<PricedLine> | null,
+  catalogServices?: ReadonlyArray<ProposalService> | null,
 ): boolean {
-  return PROPOSAL_ROLES.some(
-    (role) => (Number(snapshotRates?.[role]) || 0) !== (Number(catalogRates?.[role]) || 0),
-  )
+  if (
+    PROPOSAL_ROLES.some(
+      (role) => (Number(snapshotRates?.[role]) || 0) !== (Number(catalogRates?.[role]) || 0),
+    )
+  ) {
+    return true
+  }
+  const figures = (source: { basePrice?: number; unitPrice?: number; unitsIncluded?: number }) => [
+    Number(source.basePrice) || 0,
+    Number(source.unitPrice) || 0,
+    Number(source.unitsIncluded) || 0,
+  ]
+  return (snapshotLines ?? []).some((line) => {
+    if (line.group !== 'Software') return false
+    const service = (catalogServices ?? []).find((entry) => entry.id === line.serviceId)
+    // A line whose row is gone or retired is not repriced by a price change.
+    if (!service || !service.active) return false
+    const catalog = figures(service)
+    return figures(line).some((value, index) => value !== catalog[index])
+  })
 }

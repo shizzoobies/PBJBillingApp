@@ -68,7 +68,12 @@ import { generateSkipMessage } from '../lib/invoiceSkipMessage'
  * through EVERY builder below is load-bearing — a display row that loses either
  * lands ungrouped, or vanishes from the sheet entirely.
  */
-type DisplayLine = InvoiceLine & { groupKey?: string; roleTier?: InvoiceRoleTier }
+type DisplayLine = InvoiceLine & {
+  groupKey?: string
+  roleTier?: InvoiceRoleTier
+  /** A recurring line's Software mark: it prints under its own heading. */
+  section?: 'software'
+}
 
 type DisplayInvoice = {
   invoice: Invoice
@@ -200,6 +205,7 @@ function seedDraft(display: DisplayInvoice, client: Client, hasFirmLogo: boolean
       id: makeLineId(),
       kind: line.kind,
       roleTier: line.roleTier,
+      section: line.section,
       hours: line.hours,
       label: line.label,
       detail: line.detail,
@@ -214,6 +220,7 @@ function draftToDisplay(draft: InvoiceDraft, baseInvoice: Invoice): DisplayInvoi
   const lines: DisplayLine[] = draft.lines.map((line) => ({
     kind: line.kind,
     roleTier: line.roleTier,
+    section: line.section,
     hours: line.hours,
     label: line.label,
     detail: line.detail,
@@ -459,6 +466,7 @@ function persistedToDisplay(
   >(stored.lineItems).map((line) => ({
     kind: line.kind,
     roleTier: line.roleTier,
+    section: line.section,
     // `hours` too: the sheet leaves an hours row with no hours off, as the PDF
     // does, and `isEmptyHoursLine` can only recognize one that still has it.
     hours: line.hours,

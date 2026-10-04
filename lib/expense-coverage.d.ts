@@ -52,6 +52,8 @@ export type CoverageConfig = {
   /** Set when a paused expense is switched back on; forces one confirmation. */
   coverageResumePending?: boolean
   coverageHistory?: CoverageLedger
+  /** Which invoice section the line prints under; absent reads as 'expense'. */
+  category?: 'expense' | 'software'
   description?: string
   frequency?: string
 }

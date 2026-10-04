@@ -206,6 +206,26 @@ function CoverageFields({
   )
 }
 
+/**
+ * "Software" - the line prints under its own Software heading on the invoice,
+ * not under Client Reimbursed Expenses (featreq-a69a3cc0). Existing lines stay
+ * expenses until she ticks this.
+ */
+function SoftwareField({
+  checked,
+  onChange,
+}: {
+  checked: boolean
+  onChange: (next: boolean) => void
+}) {
+  return (
+    <label style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: 8 }}>
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <span>Software (prints under its own Software heading on the invoice)</span>
+    </label>
+  )
+}
+
 export function RecurringReimbursementsCard({
   clientId,
   bare = false,
@@ -228,6 +248,7 @@ export function RecurringReimbursementsCard({
   const [amount, setAmount] = useState('')
   const [frequency, setFrequency] = useState<RecurringReimbursementFrequency>('monthly')
   const [coverage, setCoverage] = useState<CoverageDraft>(EMPTY_COVERAGE)
+  const [isSoftware, setIsSoftware] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [removingId, setRemovingId] = useState<string | null>(null)
@@ -240,6 +261,7 @@ export function RecurringReimbursementsCard({
   const [editFrequency, setEditFrequency] = useState<RecurringReimbursementFrequency>('monthly')
   const [editStartDate, setEditStartDate] = useState('')
   const [editCoverage, setEditCoverage] = useState<CoverageDraft>(EMPTY_COVERAGE)
+  const [editIsSoftware, setEditIsSoftware] = useState(false)
   const [savingEdit, setSavingEdit] = useState(false)
   const [editError, setEditError] = useState('')
 
@@ -250,6 +272,7 @@ export function RecurringReimbursementsCard({
     setEditFrequency(entry.frequency)
     setEditStartDate(entry.startDate)
     setEditCoverage(coverageDraftFrom(entry))
+    setEditIsSoftware(entry.category === 'software')
     setEditError('')
   }
 
@@ -282,6 +305,7 @@ export function RecurringReimbursementsCard({
         amount: numericAmount,
         frequency: editFrequency,
         startDate: editStartDate,
+        category: editIsSoftware ? 'software' : 'expense',
         ...coveragePayload(editCoverage),
       })
       setEditingId(null)
@@ -328,6 +352,7 @@ export function RecurringReimbursementsCard({
         amount: numericAmount,
         frequency,
         startDate,
+        category: isSoftware ? 'software' : 'expense',
         ...coveragePayload(coverage),
       })
       setDescription('')
@@ -335,6 +360,7 @@ export function RecurringReimbursementsCard({
       setFrequency('monthly')
       setStartDate(today)
       setCoverage(EMPTY_COVERAGE)
+      setIsSoftware(false)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not add recurring reimbursement.')
     } finally {
@@ -493,6 +519,7 @@ export function RecurringReimbursementsCard({
                     <X size={14} />
                   </button>
                 </div>
+                <SoftwareField checked={editIsSoftware} onChange={setEditIsSoftware} />
                 <CoverageFields
                   value={editCoverage}
                   description={editDescription}
@@ -522,6 +549,7 @@ export function RecurringReimbursementsCard({
                     {formatFrequency(entry.frequency)} · starting{' '}
                     {formatStartLabel(entry.startDate)}
                     {entry.coveragePaused ? ' · paused' : ''}
+                    {entry.category === 'software' ? ' · Software' : ''}
                   </div>
                   {/* Where the cycle stands. Without this the only way to see
                       which window the next invoice will name is to generate it. */}
@@ -662,6 +690,7 @@ export function RecurringReimbursementsCard({
             <Plus size={14} />
             Add
           </button>
+          <SoftwareField checked={isSoftware} onChange={setIsSoftware} />
           <CoverageFields value={coverage} description={description} onChange={setCoverage} />
         </form>
       ) : null}

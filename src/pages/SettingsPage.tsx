@@ -40,12 +40,15 @@ import {
   PROPOSAL_PRICING_KINDS,
   PROPOSAL_ROLES,
   PROPOSAL_TIERS,
+  SOFTWARE_GROUP,
+  SOFTWARE_UNITS,
   defaultProposalPricing,
 } from '../../lib/proposal-pricing.js'
 import {
   PROPOSAL_MULTIPLIER_LABELS,
   PROPOSAL_PRICING_LABELS,
   PROPOSAL_ROLE_LABELS,
+  SOFTWARE_UNIT_LABELS,
 } from '../lib/proposals'
 
 export function SettingsPage() {
@@ -807,6 +810,12 @@ export function ProposalPricingSection({
   const addRow = (group: ProposalGroup) => {
     const current = pricingRef.current
     const sortOrder = Math.max(0, ...current.services.map((service) => service.sortOrder)) + 1
+    // A Software row is priced at cost: a base price and an optional per-unit
+    // amount, no input, role or multiplier.
+    const software =
+      group === SOFTWARE_GROUP
+        ? { pricing: 'software' as const, basePrice: 0, unitPrice: 0, unitsIncluded: 0, unit: 'none' as const }
+        : null
     save({
       ...current,
       services: [
@@ -827,6 +836,8 @@ export function ProposalPricingSection({
           sortOrder,
           defaultAmount: null,
           defaultQuantity: null,
+          ...(software ?? {}),
+          ...(software ? { inputKey: null, role: null } : {}),
         },
       ],
     })
@@ -897,6 +908,107 @@ export function ProposalPricingSection({
         const rows = pricing.services
           .filter((service) => service.group === group)
           .sort((a, b) => a.sortOrder - b.sortOrder)
+        if (group === SOFTWARE_GROUP) {
+          return (
+            <div className="proposal-catalog-group" key={group}>
+              <h3>{group}</h3>
+              <p className="muted-text" style={{ marginTop: 0 }}>
+                Billed at your cost, no markup, and never part of the monthly fee. Change a price
+                here when QuickBooks changes theirs: a draft takes the new price when it is opened or
+                repriced, and a sent proposal keeps the price it was sent with. A per-unit amount is
+                charged for each employee (or contractor) past the number included.
+              </p>
+              <div className="table-wrap">
+                <table className="report-table proposal-catalog-table">
+                  <thead>
+                    <tr>
+                      <th>Service</th>
+                      <th>Base ($/month)</th>
+                      <th>Per-unit ($)</th>
+                      <th>Included</th>
+                      <th>Unit</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((service) => {
+                      const label = rowLabel(group, service)
+                      return (
+                        <tr key={service.id} className={service.active ? '' : 'is-retired'}>
+                          <td>
+                            <SavingTextInput
+                              ariaLabel={`Name for ${label}`}
+                              canonical={service.name}
+                              onCommit={(value) => setService(service.id, { name: value })}
+                            />
+                          </td>
+                          <td>
+                            <SavingNumberInput
+                              ariaLabel={`Base price for ${label}`}
+                              canonical={service.basePrice ?? 0}
+                              min="0"
+                              step="0.01"
+                              onCommit={(value) => setService(service.id, { basePrice: value ?? 0 })}
+                            />
+                          </td>
+                          <td>
+                            <SavingNumberInput
+                              ariaLabel={`Per-unit price for ${label}`}
+                              canonical={service.unitPrice ?? 0}
+                              min="0"
+                              step="0.01"
+                              onCommit={(value) => setService(service.id, { unitPrice: value ?? 0 })}
+                            />
+                          </td>
+                          <td>
+                            <SavingNumberInput
+                              ariaLabel={`Units included for ${label}`}
+                              canonical={service.unitsIncluded ?? 0}
+                              min="0"
+                              step="1"
+                              onCommit={(value) => setService(service.id, { unitsIncluded: value ?? 0 })}
+                            />
+                          </td>
+                          <td>
+                            <select
+                              className="input"
+                              aria-label={`Unit for ${label}`}
+                              value={service.unit ?? 'none'}
+                              onChange={(event) =>
+                                setService(service.id, {
+                                  unit: event.target.value as ProposalService['unit'],
+                                })
+                              }
+                            >
+                              {SOFTWARE_UNITS.map((unit) => (
+                                <option key={unit} value={unit}>
+                                  {SOFTWARE_UNIT_LABELS[unit]}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="ghost-action"
+                              aria-label={`${service.active ? 'Retire' : 'Restore'} ${label}`}
+                              onClick={() => setService(service.id, { active: !service.active })}
+                            >
+                              {service.active ? 'Retire' : 'Restore'}
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <button type="button" className="secondary-action" onClick={() => addRow(group)}>
+                Add row to {group}
+              </button>
+            </div>
+          )
+        }
         return (
           <div className="proposal-catalog-group" key={group}>
             <h3>{group}</h3>
@@ -1025,7 +1137,7 @@ export function ProposalPricingSection({
                               })
                             }}
                           >
-                            {PROPOSAL_PRICING_KINDS.map((kind) => (
+                            {PROPOSAL_PRICING_KINDS.filter((kind) => kind !== 'software').map((kind) => (
                               <option key={kind} value={kind}>
                                 {PROPOSAL_PRICING_LABELS[kind]}
                               </option>

@@ -52,6 +52,9 @@ export type InvoiceLineOut = {
   /** Which role heading this row prints under. Presentational ONLY: no money
    *  is derived from it, and a line without one renders ungrouped. */
   roleTier?: InvoiceRoleTier
+  /** `recurring` lines only: 'software' prints the line under the Software
+   *  section instead of Client Reimbursed Expenses. Presentational ONLY. */
+  section?: 'software'
   /** On a billing master's invoice, the SUB this line was built from. */
   sourceClientId?: string
   /* -- `recurring` lines with a covered-date window configured -------------- */

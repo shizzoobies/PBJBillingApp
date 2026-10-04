@@ -10209,7 +10209,7 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // POST /api/proposals/:id/accept — { packageId?, planIds?, updateMonthlyRate? }
+    // POST /api/proposals/:id/accept — { packageId?, planIds?, updateMonthlyRate?, addSoftware? }
     // (spec §5.5). The store decides: a prospect becomes a client in Onboarding;
     // an existing client's monthly rate moves only when the page confirmed it.
     const proposalAcceptMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/accept$/)
@@ -10236,6 +10236,7 @@ const server = createServer(async (request, response) => {
           packageId: typeof payload.packageId === 'string' ? payload.packageId : null,
           planIds: Array.isArray(payload.planIds) ? payload.planIds : [],
           updateMonthlyRate: payload.updateMonthlyRate === true,
+          addSoftware: payload.addSoftware === true,
         })
       } catch (error) {
         // A refusal that landed AFTER `acceptProposal` created a client — the
@@ -10477,6 +10478,7 @@ const server = createServer(async (request, response) => {
         amount: payload?.amount,
         frequency: payload?.frequency,
         startDate: typeof payload?.startDate === 'string' ? payload.startDate.trim() : '',
+        ...(payload?.category !== undefined ? { category: payload.category } : {}),
         ...readCoverageFields(payload),
       })
       if (!created) {
@@ -10514,6 +10516,7 @@ const server = createServer(async (request, response) => {
         if (payload?.amount !== undefined) patch.amount = payload.amount
         if (typeof payload?.frequency === 'string') patch.frequency = payload.frequency
         if (typeof payload?.startDate === 'string') patch.startDate = payload.startDate.trim()
+        if (payload?.category !== undefined) patch.category = payload.category
         Object.assign(patch, readCoverageFields(payload))
         const updated = await appDataStore.updateRecurringReimbursement(id, patch)
         if (!updated) {

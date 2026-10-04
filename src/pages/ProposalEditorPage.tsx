@@ -249,7 +249,12 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     if (
       proposal.status === 'draft' &&
       proposal.pricingSnapshot?.rates &&
-      snapshotRatesDiffer(proposal.pricingSnapshot.rates, pricing.rates)
+      snapshotRatesDiffer(
+        proposal.pricingSnapshot.rates,
+        pricing.rates,
+        proposal.pricingSnapshot.lines,
+        pricing.services,
+      )
     ) {
       // Deferred a tick: `enqueue` sets state, which an effect body must not do
       // synchronously.
@@ -379,10 +384,19 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     if (!proposal) return
     const monthly = formatProposalMoney(proposal.pricingSnapshot?.totals.monthly ?? 0)
     const chosenPackage = packageId || null
+    // Software is billed at cost and is not part of the monthly fee; Accept adds
+    // each priced line to the client as a monthly expense marked Software.
+    const softwareNames = (proposal.pricingSnapshot?.lines ?? [])
+      .filter((line) => line.group === 'Software' && !line.flag && line.amount > 0)
+      .map((line) => line.name)
     if (!proposal.clientId) {
       const ok = window.confirm(
         `Accept this proposal? This adds ${proposalTitle(proposal)} as a client in Onboarding, ` +
-          `billed monthly at ${monthly}. Nothing about any invoice changes.`,
+          `billed monthly at ${monthly}` +
+          (softwareNames.length > 0
+            ? `, and adds ${softwareNames.join(', ')} as monthly Software expenses billed at cost`
+            : '') +
+          `. Nothing about any invoice changes.`,
       )
       if (!ok) return
       enqueue(async () => {
@@ -400,8 +414,18 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     const updateMonthlyRate = skipRateQuestion
       ? false
       : window.confirm(`Also change ${clientName}’s monthly fee to ${monthly}? Cancel keeps their current fee.`)
+    const addSoftware =
+      softwareNames.length > 0
+        ? window.confirm(
+            `Also add ${softwareNames.join(', ')} to ${clientName} as monthly Software expenses, billed at cost? Cancel leaves their expenses as they are.`,
+          )
+        : null
     enqueue(async () => {
-      const result = await acceptProposalRequest(proposalId, { packageId: chosenPackage, updateMonthlyRate })
+      const result = await acceptProposalRequest(proposalId, {
+        packageId: chosenPackage,
+        updateMonthlyRate,
+        ...(addSoftware === null ? {} : { addSoftware }),
+      })
       setNotice(noticeFromAccept(chosenPackage, result.packageApplied))
       return result.proposal
     })

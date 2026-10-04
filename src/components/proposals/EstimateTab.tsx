@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { formatProposalMoney } from '../../../lib/proposal-pricing.js'
+import { formatProposalMoney, isNoChargeLine } from '../../../lib/proposal-pricing.js'
 import { SavingNumberInput, SavingTextarea, SavingTextInput } from '../SectionKit'
 import { QuestionnaireAnswersPanel } from './QuestionnaireInbox'
 import { ProposalRatesBanner } from './RatesBanner'
@@ -252,7 +252,9 @@ export function EstimateTab({
                     // A line at or below $0 is "Not yet priced", never $0.00 -
                     // the same rule the PDF and the letter apply. A hand-set
                     // override above zero is a real price and shows as one.
-                    const notYetPriced = !(line.amount > 0)
+                    // A software plan with no charge (Bill Pay Basic) says so.
+                    const noCharge = isNoChargeLine(line)
+                    const notYetPriced = !(line.amount > 0) && !noCharge
                     return (
                       <tr key={line.serviceId ?? index}>
                         <td>
@@ -263,7 +265,11 @@ export function EstimateTab({
                           ) : null}
                         </td>
                         <td className="proposal-line-amount">
-                          {notYetPriced ? 'Not yet priced' : formatProposalMoney(line.amount)}
+                          {noCharge
+                            ? 'No charge'
+                            : notYetPriced
+                              ? 'Not yet priced'
+                              : formatProposalMoney(line.amount)}
                         </td>
                         <td>
                           {retired ? (
@@ -308,7 +314,9 @@ export function EstimateTab({
           <p className="muted-text">Pick services above and fill in the counts to price them.</p>
         )}
         <dl className="proposal-totals">
-          {PROPOSAL_TOTAL_LABELS.map(([key, label]) => (
+          {PROPOSAL_TOTAL_LABELS.filter(
+            ([key]) => key !== 'software' || snapshot?.lines.some((line) => line.group === 'Software'),
+          ).map(([key, label]) => (
             <div key={key}>
               <dt>{label}</dt>
               <dd>{formatProposalMoney(snapshot?.totals[key] ?? 0)}</dd>
@@ -408,6 +416,22 @@ function SelectionFields({
       {PER_COUNT_MULTIPLIERS.has(service.multiplier) ? (
         <label className="field">
           <span>{countLabel}</span>
+          <NonNegativeNumberInput
+            ariaLabel={`Count for ${label}`}
+            canonical={selection.quantity ?? null}
+            min="0"
+            step="1"
+            onCommit={(value) => onChange({ quantity: value })}
+          />
+        </label>
+      ) : null}
+      {service.pricing === 'software' && (service.unit === 'employee' || service.unit === 'contractor') ? (
+        <label className="field">
+          <span>
+            {service.unit === 'employee'
+              ? 'Employees (blank uses the employee count)'
+              : 'Contractors (blank is the base price)'}
+          </span>
           <NonNegativeNumberInput
             ariaLabel={`Count for ${label}`}
             canonical={selection.quantity ?? null}

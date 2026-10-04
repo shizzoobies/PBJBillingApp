@@ -35,6 +35,7 @@ import {
   cleanProposalSelections,
   priceProposal,
   sanitizeProposalPricing,
+  softwareLocksOf,
 } from '../lib/proposal-pricing.js'
 import {
   QUESTIONNAIRE_EXPIRY_DAYS,
@@ -1297,6 +1298,10 @@ export const PROPOSAL_QUESTIONNAIRE_STATUSES = ['open', 'submitted', 'withdrawn'
 const PROPOSAL_QUESTIONNAIRE_COLUMNS = `id, token, mode, status, questions, answers, email_log,
   proposal_id, sent_to, expires_at, submitted_at, created_by, created_at, updated_at`
 
+/** The invoice sections a recurring reimbursement can print under: the
+ *  ordinary "Client Reimbursed Expenses", or the Software section. */
+const RECURRING_CATEGORIES = ['expense', 'software']
+
 /** Every `proposals` column, in the order `mapProposal` reads them. */
 const PROPOSAL_COLUMNS = `id, status, prospect, client_id, inputs, selections, pricing_snapshot,
   letter, letter_at, messages, email_log, sent_at, accepted_at, declined_at, decline_note,
@@ -1322,14 +1327,18 @@ const MAX_PROPOSAL_MESSAGES = 200
  * repricing. `updateProposal` passes the SNAPSHOT'S existing rates here for a
  * SENT proposal (Important 2(b), final fix wave): the prospect saw a price
  * built on a rate, and an edit to the counts or services after it went out
- * must not quietly move that rate too.
+ * must not quietly move that rate too. The same goes for software prices
+ * (featreq-a69a3cc0): `softwareLocks` pins each software line to the figures
+ * the sent snapshot carries, so a QuickBooks price change in Settings never
+ * moves a price the prospect already saw.
  */
-function proposalSnapshot(pricing, inputs, selections, at, rates = pricing.rates) {
+function proposalSnapshot(pricing, inputs, selections, at, rates = pricing.rates, softwareLocks = null) {
   const { lines, totals } = priceProposal({
     catalog: pricing,
     rates,
     inputs,
     selections,
+    softwareLocks,
   })
   return { rates: { ...rates }, lines, totals, catalogAt: at }
 }
@@ -1543,6 +1552,12 @@ function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly', storedLines = [] }
       // rather than stored, and a line with none renders ungrouped by design.
       if (INVOICE_LINE_ROLE_TIERS.has(line?.roleTier)) {
         base.roleTier = line.roleTier
+      }
+      // The Software section's mark (featreq-a69a3cc0), kept for the same
+      // reason: only a recurring line can carry it, and an unknown value is
+      // dropped rather than stored.
+      if (kind === 'recurring' && line?.section === 'software') {
+        base.section = 'software'
       }
       // A retainer credit carries the id of the retainer it came out of. That
       // is what lets a save know WHICH retainer to mark applied, and what lets
@@ -2100,6 +2115,7 @@ export function mapRecurringReimbursementRow(row) {
     coveragePaused: row.coverage_paused,
     coverageResumePending: row.coverage_resume_pending,
     coverageHistory: row.coverage_history,
+    category: row.category,
   })
 }
 
@@ -5403,6 +5419,25 @@ export class AppDataStore {
         `alter table recurring_reimbursements add column if not exists coverage_history jsonb not null default '{}'::jsonb`,
       )
 
+      // Which section of the invoice a recurring line prints under
+      // (featreq-a69a3cc0): 'expense' is "Client Reimbursed Expenses", 'software'
+      // is the Software section. Every existing row reads 'expense' - nothing is
+      // moved until she ticks Software on a line. `add column if not exists`
+      // takes an ACCESS EXCLUSIVE lock even when the column is there, so look
+      // first and run the DDL only on the first boot after this shipped.
+      const categoryColumn = await this.pool.query(
+        `select column_name from information_schema.columns
+          where table_schema = current_schema() and table_name = 'recurring_reimbursements'
+            and column_name = 'category'`,
+      )
+      if ((categoryColumn.rows?.length ?? 0) < 1) {
+        await this.pool.query(
+          `alter table recurring_reimbursements
+             add column if not exists category text not null default 'expense'
+               check (category in ('expense', 'software'))`,
+        )
+      }
+
       // Weekly lock-for-review submissions: a bookkeeper / accountant
       // submits their Sun-Sat week and an owner approves or rejects it.
       // Exactly one row per (user, week) — a resubmit after rejection
@@ -7021,7 +7056,8 @@ export class AppDataStore {
           this.pool.query(`
             select id, client_id, description, amount, frequency, start_date,
                    coverage_enabled, coverage_template, coverage_start, coverage_end,
-                   coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history
+                   coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history,
+                   category
             from recurring_reimbursements
             order by start_date desc, id asc
           `),
@@ -7881,7 +7917,7 @@ export class AppDataStore {
         const preservedCoverageById = new Map(
           (
             await client.query(
-              `select id, coverage_anchor_day, coverage_resume_pending, coverage_history
+              `select id, coverage_anchor_day, coverage_resume_pending, coverage_history, category
                  from recurring_reimbursements`,
             )
           ).rows.map((row) => [
@@ -7890,6 +7926,7 @@ export class AppDataStore {
               coverageAnchorDay: row.coverage_anchor_day,
               coverageResumePending: row.coverage_resume_pending,
               coverageHistory: row.coverage_history,
+              category: row.category,
             },
           ]),
         )
@@ -7904,6 +7941,14 @@ export class AppDataStore {
           }
           return Boolean(recurring.coverageResumePending)
         }
+        // Which invoice section a line prints under. The payload's own value
+        // when it names one; otherwise the stored row's (a payload with no
+        // category must not move a Software line back under Expenses); a brand
+        // new row with none is an ordinary expense.
+        const categoryOf = (recurring) =>
+          RECURRING_CATEGORIES.includes(recurring.category)
+            ? recurring.category
+            : (preservedCoverageById.get(recurring.id)?.category ?? 'expense')
 
         // Completion stamps, for the same reason and with the same rule (see
         // `preservedItemCompletion`): the payload's copy is ignored, the stored
@@ -8421,8 +8466,8 @@ export class AppDataStore {
                 (id, client_id, description, amount, frequency, start_date,
                  coverage_enabled, coverage_template, coverage_start, coverage_end,
                  coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history,
-                 created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, now())
+                 category, created_at, updated_at)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16, now())
             `,
             [
               recurring.id,
@@ -8443,6 +8488,7 @@ export class AppDataStore {
               Boolean(recurring.coveragePaused),
               preservedCoverage(recurring, 'coverageResumePending'),
               JSON.stringify(preservedCoverage(recurring, 'coverageHistory') ?? {}),
+              categoryOf(recurring),
               createdAtFor('recurring_reimbursements', recurring.id),
             ],
           )
@@ -9078,6 +9124,11 @@ export class AppDataStore {
                 coverageAnchorDay: prior.coverageAnchorDay ?? anchorDayFromRange(prior.coverageEnd),
                 coverageResumePending: prior.coverageResumePending,
                 coverageHistory: prior.coverageHistory,
+                // Same rule as `categoryOf` in the Postgres branch: the
+                // payload's section when it names one, else the stored one.
+                category: RECURRING_CATEGORIES.includes(recurring.category)
+                  ? recurring.category
+                  : prior.category,
               })
             })
           }
@@ -11174,6 +11225,7 @@ export class AppDataStore {
             next.selections,
             current.pricingSnapshot?.catalogAt ?? updatedAt,
             sentRates,
+            softwareLocksOf(current.pricingSnapshot?.lines),
           )
         : proposalSnapshot(pricing, next.inputs, next.selections, updatedAt)
 
@@ -11656,6 +11708,13 @@ export class AppDataStore {
    * An UPSELL (`client_id` set) changes that client's monthly rate only when
    * `updateMonthlyRate` is true — the page asks first.
    *
+   * SOFTWARE (featreq-a69a3cc0) is not part of the monthly rate: each software
+   * line with a price becomes a monthly recurring expense on the client, marked
+   * Software, starting in the acceptance month with covered dates off. A new
+   * client gets them always; an upsell only when `addSoftware` is true (the page
+   * asks, as it does for the rate). A line whose description is already on the
+   * client is skipped, so a retry never doubles one.
+   *
    * Chosen plans are unioned in through the targeted plan write and a chosen
    * package through `applyPackageToClient`, the same paths the client page
    * uses. Nothing about any existing invoice changes.
@@ -11681,7 +11740,13 @@ export class AppDataStore {
    */
   async acceptProposal(
     id,
-    { actorUserId = null, packageId = null, planIds = [], updateMonthlyRate = false } = {},
+    {
+      actorUserId = null,
+      packageId = null,
+      planIds = [],
+      updateMonthlyRate = false,
+      addSoftware = false,
+    } = {},
   ) {
     const proposal = await this.getProposal(id)
     if (!proposal) return null
@@ -11800,6 +11865,10 @@ export class AppDataStore {
       }
       const packageResult = pkg ? await this.applyPackageToClient(clientId, packageId, { actorUserId }) : null
 
+      if (createdClient || addSoftware === true) {
+        await this._addAcceptedSoftware(clientId, proposal.pricingSnapshot?.lines)
+      }
+
       const accepted = await this.setProposalStatus(id, 'accepted', { clientId })
       if (actorUserId) {
         if (createdClient) {
@@ -11817,6 +11886,43 @@ export class AppDataStore {
     } catch (e) {
       if (createdClient) e.createdClientId ??= clientId
       throw e
+    }
+  }
+
+  /**
+   * The software lines of an accepted proposal as monthly recurring expenses
+   * (featreq-a69a3cc0): description = the plan's name, the line's amount,
+   * Software category, starting the first day of the firm's current month,
+   * covered dates off. Lines at $0 (Bill Pay Basic) bill nothing and add
+   * nothing; a line whose description the client already carries is skipped,
+   * which is what makes a retry after a half-finished accept safe.
+   */
+  async _addAcceptedSoftware(clientId, lines) {
+    const wanted = (Array.isArray(lines) ? lines : []).filter(
+      (line) => line?.group === 'Software' && Number(line.amount) > 0 && !line.flag,
+    )
+    if (wanted.length === 0) return
+    const have = new Set(
+      ((await this.read()).recurringReimbursements ?? [])
+        .filter((entry) => entry.clientId === clientId)
+        .map((entry) => String(entry.description ?? '').trim().toLowerCase()),
+    )
+    const startDate = `${firmToday().slice(0, 7)}-01`
+    for (const line of wanted) {
+      const description = String(line.name ?? '').trim()
+      if (!description || have.has(description.toLowerCase())) continue
+      const created = await this.addRecurringReimbursement({
+        clientId,
+        description,
+        amount: line.amount,
+        frequency: 'monthly',
+        startDate,
+        category: 'software',
+      })
+      if (!created) {
+        throw new ProposalStateError(`The software line "${description}" could not be added to the client.`)
+      }
+      have.add(description.toLowerCase())
     }
   }
 
@@ -12111,9 +12217,11 @@ export class AppDataStore {
     amount,
     frequency,
     startDate,
+    category = 'expense',
     ...coverage
   }) {
     if (!clientId || typeof clientId !== 'string') return null
+    if (!RECURRING_CATEGORIES.includes(category)) return null
     await this._refuseBillingMasterWrite(clientId, 'reimbursed expenses')
     const trimmedDescription = typeof description === 'string' ? description.trim() : ''
     if (!trimmedDescription) return null
@@ -12146,6 +12254,7 @@ export class AppDataStore {
       coveragePaused: false,
       coverageResumePending: false,
       coverageHistory: {},
+      category,
       ...checked.values,
     }
     // The day the first window ENDS on is the day the cycle turns. Stored from
@@ -12163,8 +12272,9 @@ export class AppDataStore {
         `insert into recurring_reimbursements
            (id, client_id, description, amount, frequency, start_date,
             coverage_enabled, coverage_template, coverage_start, coverage_end,
-            coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)`,
+            coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history,
+            category)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15)`,
         [
           id,
           clientId,
@@ -12180,6 +12290,7 @@ export class AppDataStore {
           record.coveragePaused,
           record.coverageResumePending,
           JSON.stringify(record.coverageHistory),
+          record.category,
         ],
       )
       return record
@@ -12236,6 +12347,10 @@ export class AppDataStore {
       }
       updates.startDate = patch.startDate
     }
+    if (patch.category !== undefined) {
+      if (!RECURRING_CATEGORIES.includes(patch.category)) return null
+      updates.category = patch.category
+    }
 
     const checked = sanitizeCoverageInput(patch, { partial: true })
     if (!checked.ok) return null
@@ -12279,6 +12394,7 @@ export class AppDataStore {
         coverageAnchorDay: 'coverage_anchor_day',
         coveragePaused: 'coverage_paused',
         coverageResumePending: 'coverage_resume_pending',
+        category: 'category',
       }
       const setClauses = []
       const values = [id]
@@ -12292,7 +12408,8 @@ export class AppDataStore {
         `update recurring_reimbursements set ${setClauses.join(', ')} where id = $1
          returning id, client_id, description, amount, frequency, start_date,
                    coverage_enabled, coverage_template, coverage_start, coverage_end,
-                   coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history`,
+                   coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history,
+                   category`,
         values,
       )
       if (!result.rowCount) return null
@@ -12343,7 +12460,8 @@ export class AppDataStore {
       const result = await (dbClient ?? this.pool).query(
         `select id, client_id, description, amount, frequency, start_date,
                 coverage_enabled, coverage_template, coverage_start, coverage_end,
-                coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history
+                coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history,
+                category
            from recurring_reimbursements where id = $1`,
         [id],
       )

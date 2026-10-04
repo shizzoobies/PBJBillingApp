@@ -583,6 +583,11 @@ export type PersistedInvoiceLine = {
    * a row without one prints ungrouped rather than under a guessed heading.
    */
   roleTier?: 'CFO' | 'Accountant' | 'Bookkeeper' | 'Other'
+  /**
+   * `recurring` lines only: 'software' prints the line under the Software
+   * section instead of Client Reimbursed Expenses. PRESENTATIONAL ONLY.
+   */
+  section?: 'software'
   rate?: number
   /**
    * `hourly` lines only: true when she typed the rate herself in the month run.
@@ -2055,6 +2060,9 @@ export type Reimbursement = {
 
 export type RecurringReimbursementFrequency = 'monthly' | 'quarterly' | 'annually'
 
+/** The invoice section a recurring line prints under. */
+export type RecurringReimbursementCategory = 'expense' | 'software'
+
 /**
  * Per-client recurring expense (e.g. a monthly software subscription the
  * firm fronts, an annual filing fee). Doesn't store generated rows —
@@ -2075,6 +2083,11 @@ export type RecurringReimbursement = {
    * annually recurs in the same month each year.
    */
   startDate: string
+  /**
+   * Which invoice section the line prints under: 'expense' (Client Reimbursed
+   * Expenses, the default) or 'software' (the Software section).
+   */
+  category?: RecurringReimbursementCategory
   /* -- Covered-date window (opt-in) ---------------------------------------- */
   /**
    * This expense's invoice wording names the period it covers, so the wording

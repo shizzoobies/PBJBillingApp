@@ -16,9 +16,12 @@ export type ProposalGroup =
   | 'Additional reports'
   | 'Annual and one-time'
   | 'Clean-up'
+  | 'Software'
 export type ProposalTier = 'Basic' | 'Classes' | 'Advance'
 export type ProposalRole = 'bookkeeper' | 'accountant' | 'controller'
-export type ProposalPricingKind = 'formula' | 'flat' | 'payroll' | 'sales-tax'
+export type ProposalPricingKind = 'formula' | 'flat' | 'payroll' | 'sales-tax' | 'software'
+/** What a software row's per-unit amount is charged per. */
+export type SoftwareUnit = 'none' | 'employee' | 'contractor'
 export type ProposalMultiplier =
   | 'none'
   | 'weekly-x4'
@@ -60,12 +63,21 @@ export type ProposalService = {
   defaultAmount: number | null
   /** A 'per-count' row's standard count (its selection's `quantity`), or null. */
   defaultQuantity: number | null
+  /** Software rows only (pricing 'software'): the plan's price at cost, per month. */
+  basePrice?: number
+  /** Software rows only: charged per `unit` past `unitsIncluded`. */
+  unitPrice?: number
+  unitsIncluded?: number
+  unit?: SoftwareUnit
 }
 
 export type ProposalPricing = {
   rates: ProposalRates
   inputs: ProposalInput[]
   services: ProposalService[]
+  /** True once the seed Software rows were added to a stored catalog; a row she
+   *  retires after that stays retired. Saved back with the catalog. */
+  softwareSeeded?: boolean
 }
 
 export type ProposalSelection = {
@@ -90,14 +102,31 @@ export type PricedLine = {
   computedAmount: number
   formula: string
   flag: 'unknown-input' | 'needs-count' | 'invalid-input' | 'no-rate' | 'retired' | null
+  /** Software lines only: the figures the line was priced with (kept on a sent proposal). */
+  basePrice?: number
+  unitPrice?: number
+  unitsIncluded?: number
+  unit?: SoftwareUnit
 }
 
-export type ProposalTotals = { monthly: number; annual: number; oneTime: number; cleanup: number }
+export type ProposalTotals = {
+  monthly: number
+  annual: number
+  oneTime: number
+  cleanup: number
+  /** Software at cost - never part of `monthly`. Absent on a snapshot older than the section. */
+  software?: number
+}
+
+/** The figures a sent proposal's software line is held to, by service id. */
+export type SoftwareLocks = Record<string, { basePrice: number; unitPrice: number; unitsIncluded: number }>
 
 export declare const PROPOSAL_GROUPS: readonly ProposalGroup[]
 export declare const MONTHLY_GROUPS: readonly ProposalGroup[]
 export declare const ANNUAL_GROUP: 'Annual and one-time'
 export declare const CLEANUP_GROUP: 'Clean-up'
+export declare const SOFTWARE_GROUP: 'Software'
+export declare const SOFTWARE_UNITS: readonly SoftwareUnit[]
 export declare const PROPOSAL_TIERS: readonly ProposalTier[]
 export declare const PROPOSAL_ROLES: readonly ProposalRole[]
 export declare const PROPOSAL_PRICING_KINDS: readonly ProposalPricingKind[]
@@ -117,7 +146,15 @@ export declare function priceProposal(args: {
   rates: Partial<ProposalRates> | null | undefined
   inputs: Record<string, number> | null | undefined
   selections: readonly ProposalSelection[] | null | undefined
+  softwareLocks?: SoftwareLocks | null
 }): { lines: PricedLine[]; totals: ProposalTotals }
+
+/** The software figures a priced snapshot's lines carry, by service id (`softwareLocks`). */
+export declare function softwareLocksOf(lines: readonly Partial<PricedLine>[] | null | undefined): SoftwareLocks
+/** An unflagged $0 Software line: "No charge", where any other $0 line is "Not yet priced". */
+export declare function isNoChargeLine(
+  line: Pick<PricedLine, 'amount' | 'flag'> & { group?: string | null } | null | undefined,
+): boolean
 
 /** Owner-edited catalog in, a safe catalog out; anything not an object is the seed. */
 export declare function sanitizeProposalPricing(raw: unknown): ProposalPricing
