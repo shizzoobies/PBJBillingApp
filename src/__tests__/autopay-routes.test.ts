@@ -270,7 +270,7 @@ describe('the send route and autopay', () => {
     const sendOk = send.indexOf('if (!sendResult.ok) {')
     const failedBranchEnd = send.indexOf('return', send.indexOf('invoice_send_failed', sendOk))
     const recordedAt = send.indexOf('ok: true,')
-    const chargeAt = send.indexOf('chargeAfterSend(request, invoice.id, sentInvoice)')
+    const chargeAt = send.indexOf('chargeAfterSend(')
     expect(chargeAt).toBeGreaterThan(failedBranchEnd)
     expect(chargeAt).toBeGreaterThan(send.indexOf('recordInvoiceSent(', recordedAt - 200))
     expect(squash(send)).toContain('if (autopaySend.plan && sendWasRecorded) {')
@@ -312,16 +312,23 @@ describe('planAutopaySend (the pre-send decision), run for real with a stubbed s
   // @ts-expect-error TS7016
   const dependencies = import('../../lib/stripe-autopay.js')
 
-  async function planner(store: object) {
+  async function planner(store: object, stripeConfigured = true) {
     const lib = await dependencies
     const make = new Function(
       'appDataStore',
       'autopayChargeDecision',
       'hasActiveAutopayAttempt',
+      'isStripeConfigured',
       'console',
       `${body}\nreturn planAutopaySend`,
     )
-    return make(store, lib.autopayChargeDecision, lib.hasActiveAutopayAttempt, { error() {} }) as (
+    return make(
+      store,
+      lib.autopayChargeDecision,
+      lib.hasActiveAutopayAttempt,
+      () => stripeConfigured,
+      { error() {} },
+    ) as (
       invoice: unknown,
       client: unknown,
     ) => Promise<{ plan: { channel: string } | null; active: boolean }>
@@ -352,6 +359,12 @@ describe('planAutopaySend (the pre-send decision), run for real with a stubbed s
     process.env.AUTOPAY_CHARGING = 'on'
     const plan = await (await planner(storeOf()))(invoice, client)
     expect(plan.plan).toMatchObject({ channel: 'ach' })
+  })
+
+  // The email would promise a charge that could not be made.
+  it('plans nothing when Stripe is not connected, even with the switch on and a client enrolled', async () => {
+    process.env.AUTOPAY_CHARGING = 'on'
+    expect((await (await planner(storeOf(), false))(invoice, client)).plan).toBeNull()
   })
 
   it('plans NOTHING while the kill switch is unset: the send is an ordinary one with its pay link', async () => {
@@ -500,5 +513,86 @@ describe('no second way to pay an invoice autopay is charging', () => {
     expect(at).toBeGreaterThan(-1)
     expect(at).toBeLessThan(link.indexOf('ensureStripeCustomer('))
     expect(link).toContain("error: 'autopay_in_flight'")
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/* Review fixes                                                                */
+/* -------------------------------------------------------------------------- */
+
+describe('the send route tells the charge what the email said (M2, M3)', () => {
+  const send = sliceBetween(
+    'const invoiceSendMatch = normalizedPath.match(',
+    '// GET /api/invoices/export.csv',
+  )
+  const helper = sliceBetween('async function chargeAfterSend(', 'async function planAutopaySend(')
+
+  it('passes the amount the email quoted, and says the client was already told', () => {
+    expect(squash(send)).toContain(
+      'sentInvoice = await chargeAfterSend( request, invoice.id, sentInvoice, autopayChargeCents(invoice, autopaySend.plan.channel), )',
+    )
+    expect(helper).toContain('emailedCents,')
+    expect(helper).toContain('announced: true,')
+  })
+
+  it('a planned send that could not be recorded is REPORTED, not dropped', () => {
+    expect(squash(send)).toContain(
+      '} else if (autopaySend.plan) { await reportUnrecordedAutopaySend(request, invoice, autopaySend.plan.channel) }',
+    )
+    expect(helper).toContain("reason: 'send_not_recorded'")
+    expect(helper).toContain('reportAutopayNotCharged({')
+  })
+
+  it('an unexpected failure in the charge step tells the owners and does not claim nothing was charged', () => {
+    const catchAt = helper.indexOf('} catch (error) {')
+    const caught = helper.slice(catchAt, helper.indexOf('async function reportUnrecordedAutopaySend'))
+    expect(caught).toContain("notifyOwners('invoice_payment_failed'")
+    expect(caught).toContain('Check Stripe to see whether the client was charged')
+    expect(caught).not.toContain('nothing was charged')
+  })
+
+  it('a card email names its processing fee', () => {
+    expect(send).toContain("autopaySend.plan.channel === 'card'")
+    expect(send).toContain("autopayChargeCents(invoice, 'card') - autopayChargeCents(invoice, 'ach')")
+    expect(send).toContain('cardFee:')
+  })
+})
+
+describe('POST /api/invoices/:id/autopay/check (Check with Stripe)', () => {
+  const block = sliceBetween(
+    'const autopayCheckMatch = normalizedPath.match(',
+    '// POST /api/stripe/webhook',
+  )
+
+  it('is owner-only, same-origin, JSON and needs Stripe, before anything is read', () => {
+    const owner = block.indexOf("session.user.role !== 'owner'")
+    const origin = block.indexOf('isCrossSiteOrigin(request)')
+    const json = block.indexOf("'application/json required'")
+    const stripe = block.indexOf('!isStripeConfigured()')
+    expect(owner).toBeLessThan(origin)
+    expect(origin).toBeLessThan(json)
+    expect(json).toBeLessThan(stripe)
+    expect(stripe).toBeLessThan(block.indexOf('reconcileAutopayAttempt('))
+  })
+
+  it('only reconciles: it creates no charge and claims no attempt', () => {
+    for (const forbidden of ['runAutopayCharge', 'claimAutopayAttempt', 'paymentIntents', 'chargeAutopayInvoice']) {
+      expect(block).not.toContain(forbidden)
+    }
+  })
+
+  it('answers a sentence for a refusal and the invoice for an outcome', () => {
+    expect(block).toContain("error: 'autopay_not_stuck'")
+    expect(block).toContain("error: 'stripe_unreachable'")
+    expect(block).toContain('outcome: checked.outcome')
+  })
+})
+
+describe('planAutopaySend requires Stripe to be connected (L6)', () => {
+  it('the plan is gated on isStripeConfigured()', () => {
+    const lf = serverSource.replace(/\r\n/g, '\n')
+    const start = lf.indexOf('async function planAutopaySend(')
+    const body = lf.slice(start, lf.indexOf('\n}\n', start) + 3)
+    expect(body).toContain('decision.ok && isStripeConfigured()')
   })
 })

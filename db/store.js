@@ -462,6 +462,10 @@ const AUTOPAY_ATTEMPT_PATCH_COLUMNS = {
   errorCode: 'error_code',
 }
 
+/** What she reads when a void is refused because an automatic payment is on the invoice. */
+export const AUTOPAY_VOID_REFUSAL =
+  'An automatic payment is being collected for this invoice, or could not be confirmed. Check Stripe, or wait for it to clear, before voiding.'
+
 const isoOrNull = (value) => (value ? new Date(value).toISOString() : null)
 
 export function mapAutopayRow(row) {
@@ -14632,15 +14636,17 @@ export class AppDataStore {
     // for good, when the answer from Stripe never arrived) a void would
     // withdraw an invoice the client is being charged for. A FAILED attempt
     // does not block: nothing is owed to anyone, and voiding is the right
-    // answer. The backstop for the instant between this read and the write below
-    // is flagPaymentOnVoidedInvoice.
-    if (patch?.status === 'void' && current.status !== 'void') {
+    // answer. This early read is only the cheap refusal: the decision that
+    // counts is made AGAIN inside the write, under the invoice row's lock on
+    // Postgres (the claim locks the same row) and on the data being written on
+    // the file backend, because a claim can land between this read and the write.
+    const voiding = patch?.status === 'void' && current.status !== 'void'
+    const autopayInFlight = () =>
+      new InvoicePaymentProcessingError(AUTOPAY_VOID_REFUSAL, 'invoice_autopay_in_flight')
+    if (voiding) {
       const attempts = await this.listAutopayAttempts({ invoiceId: id })
       if (attempts.some((attempt) => AUTOPAY_ACTIVE_ATTEMPT_STATUSES.has(attempt.status))) {
-        throw new InvoicePaymentProcessingError(
-          'An automatic payment is being collected for this invoice, or could not be confirmed. Check Stripe, or wait for it to clear, before voiding.',
-          'invoice_autopay_in_flight',
-        )
+        throw autopayInFlight()
       }
     }
 
@@ -14732,7 +14738,8 @@ export class AppDataStore {
         !retainerWork.clear &&
         coverageToRelease.length === 0 &&
         !reviewEvent &&
-        !entryTags
+        !entryTags &&
+        !voiding
       ) {
         // `and status = $8` is the status this save READ. A Stripe webhook can
         // move the invoice to processing/paid between that read and this write;
@@ -14774,6 +14781,23 @@ export class AppDataStore {
         const taggedClientIds = entryTags
           ? await this._assertEntryTagsWritable(entryTags, current, { dbClient })
           : []
+        // A VOID, under the invoice row's lock. The autopay claim takes the same
+        // lock (`select ... for update`), so one of the two goes first and the
+        // other sees it: a claim that committed first is found here (each
+        // statement reads fresh in READ COMMITTED), and a void that committed
+        // first is found by the claim's own status check.
+        if (voiding) {
+          await dbClient.query('select id from invoices where id = $1 for update', [id])
+          const active = await dbClient.query(
+            `select 1 from autopay_attempts
+              where invoice_id = $1 and status = any($2::text[]) limit 1`,
+            [id, [...AUTOPAY_ACTIVE_ATTEMPT_STATUSES]],
+          )
+          if (active.rows.length > 0) {
+            await dbClient.query('ROLLBACK')
+            throw autopayInFlight()
+          }
+        }
         const { rowCount } = await dbClient.query(
           `update invoices
               set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5,
@@ -14893,6 +14917,16 @@ export class AppDataStore {
     // still carry the status this save read, or a payment moved it in between.
     // Before a single field moves, so nothing is written.
     if (data.invoices[index].status !== current.status) throw new InvoiceChangedError()
+    // The autopay check again, on the SAME data this save is about to write.
+    if (
+      voiding &&
+      (data.autopayAttempts ?? []).some(
+        (attempt) =>
+          attempt.invoiceId === id && AUTOPAY_ACTIVE_ATTEMPT_STATUSES.has(attempt.status),
+      )
+    ) {
+      throw autopayInFlight()
+    }
     // Against the SAME data this save is about to write, and before a single
     // field of it moves — the file backend's version of the in-transaction
     // check above.
@@ -16152,6 +16186,60 @@ export class AppDataStore {
         status: 'claimed',
         error: null,
         errorCode: null,
+        createdAt: at,
+        updatedAt: at,
+      }
+      data.autopayAttempts.push(row)
+      return { result: { ...row }, changed: true }
+    })
+  }
+
+  /**
+   * Write a FAILED attempt row for a charge that was announced and then not
+   * made (the client withdrew in the gap, the amount moved, the send could not be
+   * recorded): there is no claim to fail, but the invoice row must still say
+   * "Autopay failed" so somebody re-sends it with a Pay link. Insert-only: an
+   * attempt that already exists at this number is left exactly as it is.
+   *
+   * @returns the row, or null when that attempt number already exists.
+   */
+  async recordFailedAutopayAttempt(
+    invoiceId,
+    { attemptNo = 1, amountCents = 0, channel = null, errorCode = null, error = null } = {},
+  ) {
+    const number = Number(attemptNo)
+    if (!invoiceId || !Number.isInteger(number) || number < 1) return null
+    const cents = Number.isInteger(Number(amountCents)) ? Number(amountCents) : 0
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `insert into autopay_attempts
+           (invoice_id, attempt_no, amount_cents, channel, status, error, error_code)
+         values ($1, $2, $3, $4, 'failed', $5, $6)
+         on conflict (invoice_id, attempt_no) do nothing
+         returning ${AUTOPAY_ATTEMPT_SELECT_COLUMNS}`,
+        [invoiceId, number, cents, channel, error, errorCode],
+      )
+      return rows.length > 0 ? mapAutopayAttemptRow(rows[0]) : null
+    }
+    return mutateLocalData((data) => {
+      if (!Array.isArray(data.autopayAttempts)) data.autopayAttempts = []
+      if (
+        data.autopayAttempts.some(
+          (row) => row.invoiceId === invoiceId && Number(row.attemptNo) === number,
+        )
+      ) {
+        return { result: null, changed: false }
+      }
+      const at = nowIso()
+      const row = {
+        invoiceId,
+        attemptNo: number,
+        paymentIntentId: null,
+        amountCents: cents,
+        channel,
+        status: 'failed',
+        error,
+        errorCode,
         createdAt: at,
         updatedAt: at,
       }

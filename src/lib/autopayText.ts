@@ -58,3 +58,19 @@ export function autopayAttemptBadge(
 export function autopayAttemptCanBeRepeated(attempt: { errorCode: string | null }): boolean {
   return !['debit_not_authorized', 'account_closed', 'no_account'].includes(attempt.errorCode ?? '')
 }
+
+/**
+ * An attempt stuck at `claimed`: either the charge ended in an error that does
+ * not say whether it reached Stripe (the server stored the error), or it has sat
+ * unanswered for more than two minutes (the server died between the claim and
+ * the call). Both are resolved the same way: Check with Stripe.
+ */
+export function autopayAttemptIsUnconfirmed(
+  attempt: { status: string; error: string | null; updatedAt: string | null } | null | undefined,
+  nowMs: number,
+): boolean {
+  if (!attempt || attempt.status !== 'claimed') return false
+  if (attempt.error) return true
+  const since = Date.parse(attempt.updatedAt ?? '')
+  return Number.isFinite(since) && nowMs - since > 2 * 60 * 1000
+}

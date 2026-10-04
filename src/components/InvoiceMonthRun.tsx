@@ -29,6 +29,7 @@ import {
   acknowledgeInvoiceAmountMismatchRequest,
   answerInvoiceAiReviewQuestionRequest,
   chargeAutopayAgainRequest,
+  checkAutopayAttemptRequest,
   confirmInvoiceCoverageRequest,
   createInvoicePaymentLinkRequest,
   generateInvoicesRequest,
@@ -46,7 +47,11 @@ import {
 } from '../lib/api'
 import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
 import { useAutopayAttempts } from '../hooks/useAutopayAttempts'
-import { autopayAttemptBadge, autopayAttemptCanBeRepeated } from '../lib/autopayText'
+import {
+  autopayAttemptBadge,
+  autopayAttemptCanBeRepeated,
+  autopayAttemptIsUnconfirmed,
+} from '../lib/autopayText'
 import type { AutopayAttemptSummary } from '../lib/types'
 import { editChangesWhatClientSees } from '../../lib/invoice-sent-change.js'
 import {
@@ -1754,6 +1759,24 @@ function InvoiceRow({
   const adjustment = invoice.lineItems.find((line) => line.kind === 'adjustment')
   const paymentFailure = unresolvedPaymentFailure(invoice)
   const autopayBadge = autopayAttemptBadge(autopayAttempt)
+  // The moment the row first rendered, for "has this attempt sat unanswered?".
+  const [renderedAt] = useState(() => Date.now())
+  const [checkBusy, setCheckBusy] = useState(false)
+  const [checkMessage, setCheckMessage] = useState<string | null>(null)
+  const checkWithStripe = async () => {
+    setCheckBusy(true)
+    setCheckMessage(null)
+    try {
+      const result = await checkAutopayAttemptRequest(invoice.id)
+      if (result.invoice) onInvoiceChanged(result.invoice)
+      setCheckMessage(result.message)
+    } catch (err) {
+      setCheckMessage(err instanceof Error ? err.message : 'Could not check with Stripe.')
+    } finally {
+      setCheckBusy(false)
+      onAutopayChanged()
+    }
+  }
   const [chargeAgainBusy, setChargeAgainBusy] = useState(false)
   const [chargeAgainError, setChargeAgainError] = useState<string | null>(null)
   const chargeAgain = async () => {
@@ -1982,6 +2005,30 @@ function InvoiceRow({
             </button>
           ) : null}
           {chargeAgainError ? <p role="alert">{chargeAgainError}</p> : null}
+        </div>
+      ) : null}
+
+      {/* An automatic payment that never got an answer: the charge may or may not
+          have reached Stripe. Until somebody asks Stripe, nothing can be voided,
+          paid by link or charged again - this is how it gets resolved. */}
+      {autopayAttemptIsUnconfirmed(autopayAttempt, renderedAt) && !isVoid ? (
+        <div className="invoice-run-error invoice-run-autopay-unconfirmed" role="alert">
+          <p>
+            <strong>Automatic payment not confirmed</strong>
+            {autopayAttempt?.error ? ` — ${autopayAttempt.error}` : ''}
+            <br />
+            We could not confirm whether the client was charged. Check with Stripe before doing
+            anything else with this invoice.
+          </p>
+          <button
+            type="button"
+            className="secondary-action"
+            disabled={checkBusy}
+            onClick={() => void checkWithStripe()}
+          >
+            {checkBusy ? 'Checking…' : 'Check with Stripe'}
+          </button>
+          {checkMessage ? <p role="status">{checkMessage}</p> : null}
         </div>
       ) : null}
 

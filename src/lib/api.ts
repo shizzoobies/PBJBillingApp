@@ -4810,3 +4810,30 @@ export async function chargeAutopayAgainRequest(invoiceId: string) {
   }
   return ((await response.json()) as { invoice: PersistedInvoice }).invoice
 }
+
+/**
+ * "Check with Stripe" on an automatic payment that is stuck unconfirmed (owner
+ * only). Stripe is asked what it holds for the invoice: an existing payment is
+ * adopted, none means nothing was charged. The server answers a sentence either
+ * way (and a 409/502 sentence when there is nothing to check or Stripe is down).
+ */
+export async function checkAutopayAttemptRequest(invoiceId: string) {
+  const response = await apiFetch(
+    `/api/invoices/${encodeURIComponent(invoiceId)}/autopay/check`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Could not check with Stripe (${response.status})`)
+  }
+  return (await response.json()) as {
+    outcome: 'adopted' | 'failed' | 'no_payment_found' | 'too_soon'
+    message: string | null
+    invoice: PersistedInvoice | null
+  }
+}

@@ -198,6 +198,8 @@ import {
   latestAttemptByInvoice,
   newSetupToken,
   recordAutopayAttemptEvent,
+  reconcileAutopayAttempt,
+  reportAutopayNotCharged,
   runAutopayCharge,
   turnOffAutopay,
 } from './lib/stripe-autopay.js'
@@ -2132,21 +2134,48 @@ function autopayOwnerNotifier(request) {
  * Answers the invoice as it stands afterwards (a bank debit reads 'processing'),
  * or `fallback` when anything goes wrong.
  */
-async function chargeAfterSend(request, invoiceId, fallback) {
+async function chargeAfterSend(request, invoiceId, fallback, emailedCents) {
+  const notifyOwners = autopayOwnerNotifier(request)
   try {
+    // `announced`: the email already told the client they would be charged, so
+    // any refusal is written on the invoice and told to the owners, and
+    // `emailedCents` is the amount that email quoted.
     await runAutopayCharge({
       store: appDataStore,
       stripe: stripeClient(),
       invoiceId,
       attemptNo: 1,
-      notifyOwners: autopayOwnerNotifier(request),
+      emailedCents,
+      announced: true,
+      notifyOwners,
     })
     const refreshed = (await appDataStore.listInvoices()).find((entry) => entry.id === invoiceId)
     return refreshed ? await withCoverageChangeable(refreshed) : fallback
   } catch (error) {
     console.error('[autopay] the charge step failed after the invoice was sent:', error)
+    // Not known whether Stripe was reached, so the sentence does not claim it was not.
+    const failedInvoice = fallback ?? { id: invoiceId, clientId: null }
+    await notifyOwners('invoice_payment_failed', {
+      clientId: failedInvoice.clientId,
+      message: `The automatic payment step on invoice ${failedInvoice.number ?? invoiceId} failed after the invoice was emailed (${error?.message || 'unexpected error'}). Check Stripe to see whether the client was charged before doing anything else.`,
+    })
     return fallback
   }
+}
+
+/**
+ * The invoice email said it would be charged automatically, but the send could
+ * not be recorded, so no charge was attempted: written on the invoice and told
+ * to the owners (see `reportAutopayNotCharged`) so it is re-sent with a Pay link.
+ */
+async function reportUnrecordedAutopaySend(request, invoice, channel) {
+  await reportAutopayNotCharged({
+    store: appDataStore,
+    invoice,
+    reason: 'send_not_recorded',
+    channel,
+    notifyOwners: autopayOwnerNotifier(request),
+  })
 }
 
 /**
@@ -2169,7 +2198,9 @@ async function planAutopaySend(invoice, client) {
     const attempts = await appDataStore.listAutopayAttempts({ invoiceId: invoice.id })
     const decision = autopayChargeDecision({ client, invoice, enrollment, attempts })
     return {
-      plan: decision.ok ? { enrollment, channel: decision.channel } : null,
+      // Stripe must be connected: an autopay email promises a charge that could
+      // not be made without it.
+      plan: decision.ok && isStripeConfigured() ? { enrollment, channel: decision.channel } : null,
       active: hasActiveAutopayAttempt(attempts),
     }
   } catch (error) {
@@ -5241,6 +5272,69 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/invoices/:id/autopay/check — "Check with Stripe" on an automatic
+    // payment attempt that is stuck at claimed (owner only): the server died
+    // between the claim and the charge, or the charge ended in an error that does
+    // not say whether it reached Stripe. Asks Stripe what it holds for the invoice
+    // (`reconcileAutopayAttempt`): an existing payment is adopted and carried on by
+    // the webhook; none means nothing was charged and the attempt is failed, which
+    // frees void, the payment link and Charge again. It never creates a charge.
+    const autopayCheckMatch = normalizedPath.match(/^\/api\/invoices\/([^/]+)\/autopay\/check$/)
+    if (autopayCheckMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can check an automatic payment' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const checkContentType = String(request.headers['content-type'] || '')
+      if (!checkContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (!isStripeConfigured()) {
+        sendJson(response, 503, {
+          error: 'stripe_unavailable',
+          message: 'Stripe is not connected yet, so there is nothing to check.',
+        })
+        return
+      }
+      const checkInvoiceId = decodeURIComponent(autopayCheckMatch[1])
+      const checked = await reconcileAutopayAttempt({
+        store: appDataStore,
+        stripe: stripeClient(),
+        invoiceId: checkInvoiceId,
+      })
+      if (checked.outcome === 'not_stuck') {
+        sendJson(response, 409, {
+          error: 'autopay_not_stuck',
+          message: 'There is no unconfirmed automatic payment on this invoice.',
+        })
+        return
+      }
+      if (checked.outcome === 'stripe_unreachable') {
+        sendJson(response, 502, {
+          error: 'stripe_unreachable',
+          message: `Stripe could not be reached, so nothing was changed. ${checked.message ?? ''}`.trim(),
+        })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'autopay_checked', checkInvoiceId)
+      const checkedInvoice = (await appDataStore.listInvoices()).find(
+        (entry) => entry.id === checkInvoiceId,
+      )
+      sendJson(response, 200, {
+        outcome: checked.outcome,
+        message: checked.message,
+        invoice: checkedInvoice ? await withCoverageChangeable(checkedInvoice) : null,
+      })
+      return
+    }
+
     // POST /api/stripe/webhook — Stripe tells us money moved.
     //
     // UNAUTHENTICATED BY NECESSITY (Stripe cannot hold a session), so the
@@ -6621,6 +6715,11 @@ const server = createServer(async (request, response) => {
         autopay: autopaySend.plan
           ? {
               chargedAmount: autopayChargeCents(invoice, autopaySend.plan.channel) / 100,
+              // A card's charge includes the processing fee: the email names it.
+              cardFee:
+                autopaySend.plan.channel === 'card'
+                  ? (autopayChargeCents(invoice, 'card') - autopayChargeCents(invoice, 'ach')) / 100
+                  : 0,
               methodWords: autopayMethodWords(autopaySend.plan.enrollment),
               withdrawUrl: `${getPublicAppUrl(request)}/autopay/${autopaySend.plan.enrollment.setupToken}/withdraw`,
             }
@@ -6757,7 +6856,14 @@ const server = createServer(async (request, response) => {
       // more before Stripe is called. Whatever happens in it, the client has
       // already been emailed: it must not fail the response.
       if (autopaySend.plan && sendWasRecorded) {
-        sentInvoice = await chargeAfterSend(request, invoice.id, sentInvoice)
+        sentInvoice = await chargeAfterSend(
+          request,
+          invoice.id,
+          sentInvoice,
+          autopayChargeCents(invoice, autopaySend.plan.channel),
+        )
+      } else if (autopaySend.plan) {
+        await reportUnrecordedAutopaySend(request, invoice, autopaySend.plan.channel)
       }
       sendJson(response, 200, { invoice: sentInvoice })
       return

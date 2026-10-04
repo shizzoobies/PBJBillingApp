@@ -13,6 +13,7 @@ import type { AutopayAttemptSummary, Client, PersistedInvoice } from '../lib/typ
 
 vi.mock('../lib/api', () => ({
   chargeAutopayAgainRequest: vi.fn(),
+  checkAutopayAttemptRequest: vi.fn(),
   createInvoicePaymentLinkRequest: vi.fn(),
   generateInvoicesRequest: vi.fn(),
   listAutopayAttemptsRequest: vi.fn(),
@@ -22,11 +23,17 @@ vi.mock('../lib/api', () => ({
   updateInvoiceRequest: vi.fn(),
 }))
 
-import { chargeAutopayAgainRequest, listAutopayAttemptsRequest, listInvoicesRequest } from '../lib/api'
+import {
+  chargeAutopayAgainRequest,
+  checkAutopayAttemptRequest,
+  listAutopayAttemptsRequest,
+  listInvoicesRequest,
+} from '../lib/api'
 
 const mockList = vi.mocked(listInvoicesRequest)
 const mockAttempts = vi.mocked(listAutopayAttemptsRequest)
 const mockChargeAgain = vi.mocked(chargeAutopayAgainRequest)
+const mockCheck = vi.mocked(checkAutopayAttemptRequest)
 
 const clients = [
   { id: 'client-acme', name: 'Acme LLC', contactIds: [], planIds: [] },
@@ -78,6 +85,7 @@ beforeEach(() => {
   mockList.mockReset()
   mockAttempts.mockReset()
   mockChargeAgain.mockReset()
+  mockCheck.mockReset()
 })
 
 describe('the Autopay badge', () => {
@@ -175,5 +183,64 @@ describe('Charge again', () => {
     await renderRun([invoice()])
     fireEvent.click(await screen.findByRole('button', { name: 'Charge again' }))
     expect(await screen.findByText('This client is not set up for automatic payments.')).toBeInTheDocument()
+  })
+})
+
+describe('Check with Stripe (a stuck attempt)', () => {
+  const stuck = attempt({
+    status: 'claimed',
+    error: 'socket hang up',
+    updatedAt: '2026-08-28T10:00:00.000Z',
+  })
+
+  it('an attempt that ended in an unconfirmed error offers Check with Stripe', async () => {
+    mockAttempts.mockResolvedValue({ chargingEnabled: true, attempts: [stuck] })
+    await renderRun([invoice()])
+    expect(await screen.findByText('Automatic payment not confirmed')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Check with Stripe' })).toBeInTheDocument()
+    // It is not offered Charge again: nothing has failed yet.
+    expect(screen.queryByRole('button', { name: 'Charge again' })).toBeNull()
+  })
+
+  it('an attempt that has simply sat claimed for a long time is stuck too', async () => {
+    mockAttempts.mockResolvedValue({
+      chargingEnabled: true,
+      attempts: [attempt({ status: 'claimed', error: null, updatedAt: '2020-01-01T00:00:00.000Z' })],
+    })
+    await renderRun([invoice()])
+    expect(await screen.findByRole('button', { name: 'Check with Stripe' })).toBeInTheDocument()
+  })
+
+  it('a charge that is only seconds old, with no error, is left alone', async () => {
+    mockAttempts.mockResolvedValue({
+      chargingEnabled: true,
+      attempts: [attempt({ status: 'claimed', error: null, updatedAt: new Date().toISOString() })],
+    })
+    await renderRun([invoice()])
+    await screen.findByText('Autopay')
+    expect(screen.queryByRole('button', { name: 'Check with Stripe' })).toBeNull()
+  })
+
+  it('asks the server once, shows its sentence, and looks at the attempts again', async () => {
+    mockAttempts.mockResolvedValue({ chargingEnabled: true, attempts: [stuck] })
+    mockCheck.mockResolvedValue({
+      outcome: 'no_payment_found',
+      message: 'Stripe has no payment for this attempt, so nothing was charged.',
+      invoice: invoice(),
+    })
+    await renderRun([invoice()])
+    fireEvent.click(await screen.findByRole('button', { name: 'Check with Stripe' }))
+    expect(await screen.findByText(/nothing was charged/)).toBeInTheDocument()
+    expect(mockCheck).toHaveBeenCalledWith('inv-1')
+    expect(mockCheck).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(mockAttempts.mock.calls.length).toBeGreaterThan(1))
+  })
+
+  it('shows the refusal when Stripe cannot be reached', async () => {
+    mockAttempts.mockResolvedValue({ chargingEnabled: true, attempts: [stuck] })
+    mockCheck.mockRejectedValue(new Error('Stripe could not be reached, so nothing was changed.'))
+    await renderRun([invoice()])
+    fireEvent.click(await screen.findByRole('button', { name: 'Check with Stripe' }))
+    expect(await screen.findByText(/nothing was changed/)).toBeInTheDocument()
   })
 })

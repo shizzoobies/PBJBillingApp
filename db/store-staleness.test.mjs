@@ -92,7 +92,12 @@ import {
 } from '../lib/series-step-delete.js'
 import { templateStartFloor } from '../lib/checklist-start-floor.js'
 import { dateOnlyInZone, firmToday } from '../lib/firm-time.js'
-import { recordAutopayAttemptEvent, runAutopayCharge } from '../lib/stripe-autopay.js'
+import {
+  reconcileAutopayAttempt,
+  recordAutopayAttemptEvent,
+  reportAutopayNotCharged,
+  runAutopayCharge,
+} from '../lib/stripe-autopay.js'
 
 /**
  * End-to-end `appDataStore.write()` contracts on the FILE backend: the
@@ -36944,10 +36949,25 @@ describe('runAutopayCharge (file backend, fake Stripe)', () => {
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
   }
 
-  const fakeStripe = (create) => ({
-    paymentIntents: { create: vi.fn(create ?? (async () => ({ id: 'pi_1', status: 'processing' }))) },
+  // `intents` is what Stripe "holds" for the customer; `sessions` maps a Checkout
+  // session id to its status. Both default to empty, which is the ordinary case.
+  const fakeStripe = (create, { intents = [], sessions = {} } = {}) => ({
+    paymentIntents: {
+      create: vi.fn(create ?? (async () => ({ id: 'pi_1', status: 'processing' }))),
+      list: vi.fn(async () => ({ data: intents, has_more: false })),
+      cancel: vi.fn(async () => ({})),
+    },
     paymentMethods: { detach: vi.fn(async () => ({})) },
     customers: { create: vi.fn(async () => ({ id: 'cus_new' })) },
+    checkout: {
+      sessions: {
+        retrieve: vi.fn(async (id) => ({ id, status: sessions[id] ?? 'expired' })),
+        expire: vi.fn(async (id) => {
+          sessions[id] = 'expired'
+          return { id, status: 'expired' }
+        }),
+      },
+    },
   })
   const notified = () => {
     const calls = []
@@ -37087,7 +37107,7 @@ describe('runAutopayCharge (file backend, fake Stripe)', () => {
       expect(result).toMatchObject({ charged: false, reason: 'changed' })
       expect(stripe.paymentIntents.create).not.toHaveBeenCalled()
       const [attempt] = await store.listAutopayAttempts()
-      expect(attempt).toMatchObject({ status: 'failed', errorCode: 'invoice_changed_before_charge' })
+      expect(attempt).toMatchObject({ status: 'failed', errorCode: 'changed' })
     })
 
     it('an invoice marked paid by hand right after the claim is not charged either', async () => {
@@ -37304,5 +37324,522 @@ describe('recordAutopayAttemptEvent (the webhook half)', () => {
       outcome: 'failed',
     })
     expect((await store.listAutopayAttempts())[0].status).toBe('processing')
+  })
+})
+
+/**
+ * THE REVIEW FIXES, on the real file-backend store with a fake Stripe: open
+ * Checkout sessions, payments Stripe already holds, ambiguous 409s, a stuck
+ * claim, announced-but-uncharged sends, the quoted amount, and the last look at
+ * the enrollment.
+ */
+describe('autopay review fixes (file backend, fake Stripe)', () => {
+  const ON = { AUTOPAY_CHARGING: 'on' }
+
+  async function seed({ invoice = {}, enrollment = {}, client = {}, attempts = [] } = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients = [{ id: 'c1', name: 'Acme', stripeCustomerId: 'cus_1', ...client }]
+    data.invoices = [
+      {
+        id: 'inv-rv',
+        clientId: 'c1',
+        period: '2026-09',
+        number: 'INV-2026-09-200',
+        kind: 'monthly',
+        status: 'sent',
+        lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+        subtotal: 100,
+        total: 100,
+        dueDate: '2026-10-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-10-01T00:00:00.000Z',
+        paidAt: null,
+        emailLog: [{ at: '2026-10-01T00:00:00.000Z', ok: true, to: ['ap@acme.test'], total: 100 }],
+        createdAt: '2026-10-01T00:00:00.000Z',
+        updatedAt: '2026-10-01T00:00:00.000Z',
+        ...invoice,
+      },
+    ]
+    data.clientAutopay = [
+      {
+        clientId: 'c1',
+        status: 'enrolled',
+        paymentMethodId: 'pm_bank',
+        methodType: 'us_bank_account',
+        last4: '6789',
+        mandateId: 'mandate_1',
+        setupToken: 'tok_withdraw',
+        ...enrollment,
+      },
+    ]
+    data.autopayAttempts = attempts
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  const fakeStripe = ({ create, intents = [], sessions = {}, listFails = false } = {}) => {
+    const state = { ...sessions }
+    return {
+      paymentIntents: {
+        create: vi.fn(create ?? (async () => ({ id: 'pi_1', status: 'processing' }))),
+        list: vi.fn(async () => {
+          if (listFails) throw new Error('stripe down')
+          return { data: intents, has_more: false }
+        }),
+        cancel: vi.fn(async () => ({})),
+      },
+      paymentMethods: { detach: vi.fn(async () => ({})) },
+      customers: { create: vi.fn(async () => ({ id: 'cus_new' })) },
+      checkout: {
+        sessions: {
+          retrieve: vi.fn(async (id) => ({ id, status: state[id] ?? 'expired' })),
+          expire: vi.fn(async (id) => {
+            state[id] = 'expired'
+            return { id }
+          }),
+        },
+      },
+    }
+  }
+  const notifier = () => {
+    const calls = []
+    return { calls, notifyOwners: async (event, details) => void calls.push({ event, ...details }) }
+  }
+  const run = (stripe, extra = {}) =>
+    runAutopayCharge({ store, stripe, invoiceId: 'inv-rv', env: ON, ...extra })
+  const invoiceNow = async () => (await store.listInvoices())[0]
+  const failedAttempt = (over = {}) => ({
+    invoiceId: 'inv-rv',
+    attemptNo: 1,
+    status: 'failed',
+    amountCents: 10000,
+    channel: 'ach',
+    paymentIntentId: 'pi_old',
+    error: 'Your card was declined.',
+    errorCode: 'card_declined',
+    createdAt: '2026-10-01T00:00:00.000Z',
+    updatedAt: '2026-10-01T00:00:00.000Z',
+    ...over,
+  })
+  const intentAt = (over = {}) => ({
+    id: 'pi_x',
+    status: 'succeeded',
+    metadata: { invoiceId: 'inv-rv', attempt: '1' },
+    ...over,
+  })
+
+  describe('open Checkout sessions (H1)', () => {
+    it('are expired BEFORE the charge, on the first send and on Charge again alike', async () => {
+      await seed({ invoice: { stripeCheckoutSessionId: 'cs_ach', stripeCardSessionId: 'cs_card' } })
+      const stripe = fakeStripe({ sessions: { cs_ach: 'open', cs_card: 'open' } })
+      const result = await run(stripe)
+      expect(result.charged).toBe(true)
+      expect(stripe.checkout.sessions.expire.mock.calls.map((call) => call[0]).sort()).toEqual(['cs_ach', 'cs_card'])
+      const expiredBeforeCharge =
+        stripe.checkout.sessions.expire.mock.invocationCallOrder.at(-1) <
+        stripe.paymentIntents.create.mock.invocationCallOrder[0]
+      expect(expiredBeforeCharge).toBe(true)
+    })
+
+    it('a session the client already COMPLETED stops the charge: nothing is created', async () => {
+      await seed({ invoice: { stripeCheckoutSessionId: 'cs_ach' } })
+      const stripe = fakeStripe({ sessions: { cs_ach: 'complete' } })
+      const { calls, notifyOwners } = notifier()
+      const result = await run(stripe, { announced: true, notifyOwners })
+      expect(result).toMatchObject({ charged: false, reason: 'session_complete' })
+      expect(stripe.paymentIntents.create).not.toHaveBeenCalled()
+      expect((await store.listAutopayAttempts())[0]).toMatchObject({ status: 'failed', errorCode: 'session_complete' })
+      // announced: the email said "we will charge you", so the owners are told.
+      expect(calls.map((entry) => entry.event)).toEqual(['invoice_payment_failed'])
+    })
+
+    it('the scenario from review: re-send minted Pay sessions, then Charge again - those sessions are closed first', async () => {
+      await seed({
+        invoice: { stripeCheckoutSessionId: 'cs_resend', stripeCardSessionId: null },
+        attempts: [failedAttempt()],
+      })
+      const stripe = fakeStripe({ sessions: { cs_resend: 'open' } })
+      const result = await run(stripe, { attemptNo: 2 })
+      expect(result.charged).toBe(true)
+      expect(stripe.checkout.sessions.expire).toHaveBeenCalledWith('cs_resend')
+      expect(stripe.paymentIntents.create).toHaveBeenCalledTimes(1)
+    })
+
+    it('Charge again is refused when the re-sent link was already completed', async () => {
+      await seed({
+        invoice: { stripeCheckoutSessionId: 'cs_resend' },
+        attempts: [failedAttempt()],
+      })
+      const stripe = fakeStripe({ sessions: { cs_resend: 'complete' } })
+      expect((await run(stripe, { attemptNo: 2 })).reason).toBe('session_complete')
+      expect(stripe.paymentIntents.create).not.toHaveBeenCalled()
+    })
+
+    it('a Stripe that cannot be read while closing sessions means no charge', async () => {
+      await seed({ invoice: { stripeCheckoutSessionId: 'cs_ach' } })
+      const stripe = fakeStripe()
+      stripe.checkout.sessions.retrieve.mockRejectedValue(new Error('down'))
+      expect((await run(stripe)).reason).toBe('stripe_unreachable')
+      expect(stripe.paymentIntents.create).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('what Stripe already holds (H2)', () => {
+    it.each(['succeeded', 'processing'])(
+      'Charge again is refused when an intent for this invoice is %s, whatever our row says',
+      async (status) => {
+        await seed({ attempts: [failedAttempt()] })
+        const stripe = fakeStripe({ intents: [intentAt({ id: 'pi_orig', status })] })
+        const result = await run(stripe, { attemptNo: 2 })
+        expect(result).toMatchObject({ charged: false, reason: 'payment_exists' })
+        expect(stripe.paymentIntents.create).not.toHaveBeenCalled()
+        const attempts = await store.listAutopayAttempts()
+        expect(attempts[1]).toMatchObject({ attemptNo: 2, status: 'failed', errorCode: 'payment_exists' })
+        expect(attempts[1].error).toContain('pi_orig')
+      },
+    )
+
+    it('Charge again goes ahead when Stripe holds only declined or cancelled intents for the invoice', async () => {
+      await seed({ attempts: [failedAttempt()] })
+      const stripe = fakeStripe({
+        intents: [intentAt({ id: 'pi_dec', status: 'canceled' }), intentAt({ id: 'pi_other', status: 'succeeded', metadata: { invoiceId: 'inv-other' } })],
+      })
+      expect((await run(stripe, { attemptNo: 2 })).charged).toBe(true)
+    })
+
+    it('Charge again will not charge when Stripe cannot be asked', async () => {
+      await seed({ attempts: [failedAttempt()] })
+      const stripe = fakeStripe({ listFails: true })
+      expect((await run(stripe, { attemptNo: 2 })).reason).toBe('stripe_unreachable')
+      expect(stripe.paymentIntents.create).not.toHaveBeenCalled()
+    })
+
+    it('the 409 from review leaves the attempt CLAIMED, so Charge again cannot follow it', async () => {
+      await seed()
+      const { calls, notifyOwners } = notifier()
+      const stripe = fakeStripe({
+        create: async () => {
+          throw Object.assign(new Error('Keys for idempotent requests can only be used for one request at a time.'), {
+            type: 'StripeInvalidRequestError',
+            statusCode: 409,
+            code: 'idempotency_key_in_use',
+          })
+        },
+      })
+      const result = await run(stripe, { notifyOwners })
+      expect(result.reason).toBe('unconfirmed')
+      expect((await store.listAutopayAttempts())[0].status).toBe('claimed')
+      expect(calls[0].message).toContain('Check with Stripe')
+      const again = fakeStripe()
+      expect((await run(again, { attemptNo: 2 })).reason).toBe('previous_attempt_not_failed')
+      expect(again.paymentIntents.create).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('Check with Stripe on a stuck claim (H3)', () => {
+    const claimed = (over = {}) => failedAttempt({ status: 'claimed', paymentIntentId: null, error: null, errorCode: null, ...over })
+    const now = new Date('2026-10-02T00:00:00.000Z')
+    const check = (stripe, extra = {}) => reconcileAutopayAttempt({ store, stripe, invoiceId: 'inv-rv', now, ...extra })
+
+    it('adopts a payment Stripe holds for that attempt: the attempt and the invoice move to processing', async () => {
+      await seed({ attempts: [claimed()] })
+      const stripe = fakeStripe({ intents: [intentAt({ id: 'pi_found', status: 'processing' })] })
+      const result = await check(stripe)
+      expect(result.outcome).toBe('adopted')
+      expect((await store.listAutopayAttempts())[0]).toMatchObject({ status: 'processing', paymentIntentId: 'pi_found' })
+      expect(await invoiceNow()).toMatchObject({ status: 'processing', stripePaymentIntentId: 'pi_found' })
+      expect(stripe.paymentIntents.create).not.toHaveBeenCalled()
+    })
+
+    it('adopts a succeeded one too, leaving the invoice to the webhook or Verify payment', async () => {
+      await seed({ attempts: [claimed()] })
+      const result = await check(fakeStripe({ intents: [intentAt({ status: 'succeeded' })] }))
+      expect(result.outcome).toBe('adopted')
+      expect(result.message).toContain('marked paid')
+    })
+
+    it('with NO payment at Stripe and the attempt old enough, fails it: void, Charge again and a pay link work again', async () => {
+      await seed({ attempts: [claimed()] })
+      await expect(store.updateInvoice('inv-rv', { status: 'void' })).rejects.toBeInstanceOf(InvoicePaymentProcessingError)
+      const result = await check(fakeStripe())
+      expect(result.outcome).toBe('no_payment_found')
+      expect((await store.listAutopayAttempts())[0]).toMatchObject({ status: 'failed', errorCode: 'not_found_at_stripe' })
+      const retry = fakeStripe()
+      expect((await run(retry, { attemptNo: 2 })).charged).toBe(true)
+    })
+
+    it('a failed attempt can be voided after Check with Stripe', async () => {
+      await seed({ attempts: [claimed()] })
+      await check(fakeStripe())
+      expect((await store.updateInvoice('inv-rv', { status: 'void' })).status).toBe('void')
+    })
+
+    it('does NOT fail a young attempt - the original request may still be in flight', async () => {
+      await seed({ attempts: [claimed({ createdAt: '2026-10-01T23:58:00.000Z' })] })
+      const result = await check(fakeStripe())
+      expect(result.outcome).toBe('too_soon')
+      expect((await store.listAutopayAttempts())[0].status).toBe('claimed')
+    })
+
+    it('an intent for the attempt that did not collect is cancelled and the attempt failed with its reason', async () => {
+      await seed({ attempts: [claimed()] })
+      const stripe = fakeStripe({
+        intents: [intentAt({ id: 'pi_dec', status: 'requires_payment_method', last_payment_error: { code: 'card_declined', message: 'Declined.' } })],
+      })
+      const result = await check(stripe)
+      expect(result.outcome).toBe('failed')
+      expect(stripe.paymentIntents.cancel).toHaveBeenCalledWith('pi_dec')
+      expect((await store.listAutopayAttempts())[0]).toMatchObject({ status: 'failed', paymentIntentId: 'pi_dec', error: 'Declined.' })
+    })
+
+    it('an intent for ANOTHER attempt number is not this attempt’s', async () => {
+      await seed({ attempts: [claimed()] })
+      const result = await check(fakeStripe({ intents: [intentAt({ metadata: { invoiceId: 'inv-rv', attempt: '2' }, status: 'succeeded' })] }))
+      expect(result.outcome).toBe('no_payment_found')
+    })
+
+    it('does nothing for an attempt that is not stuck, and changes nothing when Stripe cannot be read', async () => {
+      await seed({ attempts: [failedAttempt()] })
+      expect((await check(fakeStripe())).outcome).toBe('not_stuck')
+      await seed({ attempts: [claimed()] })
+      expect((await check(fakeStripe({ listFails: true }))).outcome).toBe('stripe_unreachable')
+      expect((await store.listAutopayAttempts())[0].status).toBe('claimed')
+      expect((await check(null)).outcome).toBe('stripe_unreachable')
+    })
+  })
+
+  describe('a void is decided under the lock (M1)', () => {
+    it('the file backend re-checks the attempts on the data it writes, even if the early read missed a claim', async () => {
+      await seed({ attempts: [claimed()] })
+      const racing = Object.create(store)
+      // The early read answers "no attempts" (the claim had not landed yet)...
+      racing.listAutopayAttempts = async () => []
+      // ...but the data the write sees has it.
+      await expect(racing.updateInvoice('inv-rv', { status: 'void' })).rejects.toBeInstanceOf(InvoicePaymentProcessingError)
+      expect((await store.listInvoices())[0].status).toBe('sent')
+
+      function claimed() {
+        return failedAttempt({ status: 'claimed', paymentIntentId: null, error: null, errorCode: null })
+      }
+    })
+  })
+
+  describe('an announced charge that was not made (M2)', () => {
+    it('the client withdrew in the gap: the attempt is failed, the invoice says so, the owners are told, nothing is charged', async () => {
+      await seed()
+      const { calls, notifyOwners } = notifier()
+      const racing = Object.create(store)
+      racing.claimAutopayAttempt = async (...args) => {
+        const claimed = await store.claimAutopayAttempt(...args)
+        await store.updateClientAutopay('c1', { status: 'withdrawn', paymentMethodId: null })
+        return claimed
+      }
+      const stripe = fakeStripe()
+      const result = await runAutopayCharge({ store: racing, stripe, invoiceId: 'inv-rv', env: ON, announced: true, notifyOwners })
+      expect(result).toMatchObject({ charged: false, reason: 'enrollment_changed' })
+      expect(stripe.paymentIntents.create).not.toHaveBeenCalled()
+      expect((await store.listAutopayAttempts())[0]).toMatchObject({ status: 'failed', errorCode: 'enrollment_changed' })
+      const invoice = await invoiceNow()
+      expect(invoice.emailLog.some((entry) => entry.kind === 'payment' && entry.event === 'failed')).toBe(true)
+      expect(calls).toHaveLength(1)
+      expect(calls[0]).toMatchObject({ event: 'invoice_payment_failed', clientId: 'c1' })
+      expect(calls[0].message).toContain('Send the invoice again')
+    })
+
+    it('card payments switched off in the gap is refused the same way (L3)', async () => {
+      await seed({
+        client: { cardPaymentsEnabled: true },
+        enrollment: { methodType: 'card', paymentMethodId: 'pm_card', mandateId: null },
+      })
+      const racing = Object.create(store)
+      racing.claimAutopayAttempt = async (...args) => {
+        const claimed = await store.claimAutopayAttempt(...args)
+        const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+        data.clients[0].cardPaymentsEnabled = false
+        await writeFile(localDataPath, JSON.stringify(data, null, 2))
+        return claimed
+      }
+      const stripe = fakeStripe()
+      const result = await runAutopayCharge({ store: racing, stripe, invoiceId: 'inv-rv', env: ON, announced: true })
+      expect(result.reason).toBe('enrollment_changed')
+      expect(stripe.paymentIntents.create).not.toHaveBeenCalled()
+    })
+
+    it('a refusal BEFORE the claim (the switch flipped off) still writes a failed attempt and tells the owners', async () => {
+      await seed()
+      const { calls, notifyOwners } = notifier()
+      const result = await run(fakeStripe(), { env: {}, announced: true, notifyOwners })
+      expect(result.reason).toBe('charging_off')
+      expect((await store.listAutopayAttempts())[0]).toMatchObject({ status: 'failed', errorCode: 'charging_off', attemptNo: 1 })
+      expect(calls).toHaveLength(1)
+    })
+
+    it('after that, the row reads Autopay failed and Charge again is the owner’s explicit choice', async () => {
+      await seed()
+      await run(fakeStripe(), { env: {}, announced: true })
+      const stripe = fakeStripe()
+      expect((await run(stripe, { attemptNo: 2 })).charged).toBe(true)
+    })
+
+    it.each([['void'], ['paid']])('a %s invoice is a quiet refusal: nothing to chase', async (status) => {
+      await seed({ invoice: { status } })
+      const { calls, notifyOwners } = notifier()
+      await run(fakeStripe(), { announced: true, notifyOwners })
+      expect(calls).toEqual([])
+      expect(await store.listAutopayAttempts()).toEqual([])
+    })
+
+    it('Charge again (not announced) does not write rows or notifications for a refusal: the owner is looking', async () => {
+      await seed({ attempts: [failedAttempt()] })
+      const { calls, notifyOwners } = notifier()
+      await run(fakeStripe(), { attemptNo: 2, env: {}, notifyOwners })
+      expect(calls).toEqual([])
+      expect(await store.listAutopayAttempts()).toHaveLength(1)
+    })
+
+    it('reportAutopayNotCharged never throws and leaves an existing attempt alone', async () => {
+      await seed({ attempts: [failedAttempt()] })
+      const { calls, notifyOwners } = notifier()
+      await reportAutopayNotCharged({
+        store,
+        invoice: await invoiceNow(),
+        reason: 'send_not_recorded',
+        notifyOwners,
+      })
+      expect((await store.listAutopayAttempts())[0].errorCode).toBe('card_declined')
+      expect(calls).toHaveLength(1)
+      await expect(
+        reportAutopayNotCharged({ store: {}, invoice: { id: 'x', total: 1 }, reason: 'send_not_recorded' }),
+      ).resolves.toBeUndefined()
+    })
+  })
+
+  describe('the amount the email quoted (M3)', () => {
+    it('a total that changed after the email went out is refused before the claim, and reported', async () => {
+      await seed({ invoice: { total: 150, subtotal: 150 } })
+      const { calls, notifyOwners } = notifier()
+      const stripe = fakeStripe()
+      const result = await run(stripe, { emailedCents: 10000, announced: true, notifyOwners })
+      expect(result).toMatchObject({ charged: false, reason: 'amount_changed' })
+      expect(stripe.paymentIntents.create).not.toHaveBeenCalled()
+      expect((await store.listAutopayAttempts())[0]).toMatchObject({ status: 'failed', errorCode: 'amount_changed' })
+      expect(calls).toHaveLength(1)
+    })
+
+    it('the amount that was quoted is charged', async () => {
+      await seed()
+      const stripe = fakeStripe()
+      expect((await run(stripe, { emailedCents: 10000, announced: true })).charged).toBe(true)
+      expect(stripe.paymentIntents.create.mock.calls[0][0].amount).toBe(10000)
+    })
+
+    it('a card quote includes the fee, and is compared with the fee-inclusive charge', async () => {
+      await seed({
+        client: { cardPaymentsEnabled: true },
+        enrollment: { methodType: 'card', paymentMethodId: 'pm_card', mandateId: null },
+      })
+      const wrong = await run(fakeStripe(), { emailedCents: 10000, announced: true })
+      expect(wrong.reason).toBe('amount_changed')
+    })
+  })
+
+  describe('a declined intent is not left open (L2)', () => {
+    it('is cancelled', async () => {
+      await seed()
+      const stripe = fakeStripe({
+        create: async () => {
+          throw Object.assign(new Error('Your card was declined.'), {
+            type: 'StripeCardError',
+            code: 'card_declined',
+            payment_intent: { id: 'pi_dec' },
+          })
+        },
+      })
+      await run(stripe)
+      expect(stripe.paymentIntents.cancel).toHaveBeenCalledWith('pi_dec')
+    })
+
+    it('is not cancelled when there is no intent, or when the charge succeeded', async () => {
+      await seed()
+      const ok = fakeStripe()
+      await run(ok)
+      expect(ok.paymentIntents.cancel).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('recordFailedAutopayAttempt', () => {
+    it('inserts a failed row once and never overwrites an attempt', async () => {
+      await seed()
+      const first = await store.recordFailedAutopayAttempt('inv-rv', { amountCents: 10000, channel: 'ach', errorCode: 'x', error: 'why' })
+      expect(first).toMatchObject({ attemptNo: 1, status: 'failed', errorCode: 'x', error: 'why' })
+      expect(await store.recordFailedAutopayAttempt('inv-rv', { errorCode: 'y' })).toBeNull()
+      expect((await store.listAutopayAttempts())[0].errorCode).toBe('x')
+    })
+  })
+})
+
+describe('a void under the invoice lock (Postgres statements)', () => {
+  it('locks the invoice row, THEN reads the attempts, and rolls back without updating when one is active', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    const statements = []
+    let attemptReads = 0
+    const inner = fake.pool.query.bind(fake.pool)
+    const wrapped = async (text, params) => {
+      const trimmed = text.replace(/\s+/g, ' ').trim()
+      if (/from autopay_attempts/i.test(trimmed)) {
+        attemptReads += 1
+        statements.push('attempts')
+        // The early read (outside the transaction) misses the claim; the one
+        // under the lock sees it.
+        return attemptReads === 1 ? { rows: [], rowCount: 0 } : { rows: [{ '?column?': 1 }], rowCount: 1 }
+      }
+      if (/^select id from invoices where id = \$1 for update$/i.test(trimmed)) {
+        statements.push('lock')
+        return { rows: [{ id: 'inv-1' }], rowCount: 1 }
+      }
+      if (/^update invoices/i.test(trimmed)) statements.push('update')
+      if (/^ROLLBACK$/i.test(trimmed)) statements.push('rollback')
+      return inner(text, params)
+    }
+    fake.pool.query = wrapped
+    fake.pool.connect = async () => ({ query: wrapped, release() {} })
+
+    await expect(postgresStore(fake).updateInvoice('inv-1', { status: 'void' })).rejects.toBeInstanceOf(
+      InvoicePaymentProcessingError,
+    )
+    expect(attemptReads).toBe(2)
+    expect(statements.indexOf('lock')).toBeGreaterThan(-1)
+    expect(statements.indexOf('lock')).toBeLessThan(statements.lastIndexOf('attempts'))
+    expect(statements).toContain('rollback')
+    expect(statements).not.toContain('update')
+  })
+
+  it('a void never takes the single-statement path, which holds no lock', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    const seen = []
+    const inner = fake.pool.query.bind(fake.pool)
+    const wrapped = async (text, params) => {
+      seen.push(text.replace(/\s+/g, ' ').trim())
+      return inner(text, params)
+    }
+    fake.pool.query = wrapped
+    fake.pool.connect = async () => ({ query: wrapped, release() {} })
+    await postgresStore(fake).updateInvoice('inv-1', { status: 'void' }).catch(() => {})
+    expect(seen.some((text) => /^BEGIN$/i.test(text))).toBe(true)
+    expect(seen.some((text) => /^select id from invoices where id = \$1 for update$/i.test(text))).toBe(true)
+  })
+
+  it('recordFailedAutopayAttempt is one insert on conflict do nothing', async () => {
+    const statements = []
+    const instance = new AppDataStore()
+    instance.pool = {
+      query: async (text, params) => {
+        statements.push({ text: text.replace(/\s+/g, ' ').trim(), params })
+        return { rows: [], rowCount: 0 }
+      },
+    }
+    instance.mode = 'postgres'
+    expect(await instance.recordFailedAutopayAttempt('inv-1', { errorCode: 'x', error: 'why' })).toBeNull()
+    expect(statements[0].text).toMatch(/^insert into autopay_attempts .* values \(\$1, \$2, \$3, \$4, 'failed', \$5, \$6\) on conflict \(invoice_id, attempt_no\) do nothing/i)
   })
 })
