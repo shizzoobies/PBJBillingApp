@@ -520,6 +520,7 @@ export function InvoicesPage({
     ownerMode,
     previewMode,
     applyScopeTagsLocally,
+    updateClient,
     firmSettings,
   } = useAppContext()
 
@@ -1073,6 +1074,9 @@ export function InvoicesPage({
           timesheetLocks={data.timesheetLocks}
           previewMode={previewMode}
           onEntriesTagged={applyScopeTagsLocally}
+          // The note was already written by its own endpoint; this only keeps
+          // the page's copy of the client current.
+          onClientNoteKept={(clientId, note) => updateClient(clientId, { invoiceNote: note })}
           refreshToken={monthRunRefresh}
           ref={monthRunRef}
           onPrint={printStored}

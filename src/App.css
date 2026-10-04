@@ -12991,6 +12991,28 @@ tr.is-inactive-client .client-name-link {
   margin: 0;
 }
 
+/* The "This invoice only / Keep for future invoices" choice under the note. */
+.invoice-run-blurb-scope {
+  border: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 6px 0 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.invoice-run-blurb-scope label {
+  align-items: center;
+  display: inline-flex;
+  font-size: 13px;
+  gap: 6px;
+}
+
+.invoice-run-blurb-helper {
+  flex-basis: 100%;
+}
+
 /* The AI's read on a draft. Advisory throughout: it earns a pill in the row and
    a bordered note in the editor, and nothing else on the screen answers to it.
    Sized and shaped like the scope-flag chip beside it so it reads as one more

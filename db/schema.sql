@@ -86,6 +86,10 @@ alter table clients add column if not exists platform_invoicing_opt_out boolean 
 -- authoritative path is `initialize()` in db/store.js, which is what production
 -- actually runs. A column added there and not here drifts silently.
 alter table clients add column if not exists stripe_customer_id text;
+-- The "note to the client" kept for every FUTURE invoice. Null is none kept.
+-- Written only by `setClientInvoiceNote`; the bulk save snapshots and restores
+-- it, so a stale tab can never erase it.
+alter table clients add column if not exists invoice_note text;
 
 create table if not exists client_assignments (
   client_id text not null references clients(id) on delete cascade,

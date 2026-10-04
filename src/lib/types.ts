@@ -258,6 +258,13 @@ export type Client = {
    */
   platformInvoicingOptOut?: boolean
   /**
+   * The "note to the client" kept for every FUTURE invoice (null or absent: none
+   * kept). Starts the note on each new invoice; invoices already created keep
+   * their own. Owner-only, and written only through its own endpoint — the bulk
+   * save never changes it.
+   */
+  invoiceNote?: string | null
+  /**
    * Onboarding lifecycle stage (Proposal → Onboarding → Active). Optional —
    * absent is treated as 'active' (existing clients default to active and must
    * never silently become a prospect). See {@link LifecycleStage}.

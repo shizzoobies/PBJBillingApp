@@ -43,6 +43,7 @@ import {
   rateInvoiceRequest,
   regenerateInvoicesRequest,
   sendInvoiceRequest,
+  setClientInvoiceNote,
   updateInvoiceRequest,
 } from '../lib/api'
 import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
@@ -234,6 +235,29 @@ const ADHOC_CHOICES: ReadonlyArray<{ value: AdhocMode; label: string }> = [
   { value: 'courtesy', label: 'Show detail only ($0.00)' },
   { value: 'omitted', label: 'Leave off the invoice' },
 ]
+
+/** How much of a kept note the helper quotes before it trims. */
+const KEPT_NOTE_PREVIEW_LENGTH = 140
+
+/**
+ * The sentence under the note box. It says what is TRUE of the selected choice:
+ * a note stays on this invoice unless Keep is chosen and saved, and a kept note
+ * reaches only invoices made after it - never the ones already created.
+ */
+function noteScopeHelper(scope: 'invoice' | 'keep', blurb: string, kept: string | null): string {
+  if (scope === 'keep') {
+    if (blurb.trim()) {
+      return 'Saving also keeps this note for every future invoice for this client. Invoices already created are not changed.'
+    }
+    return kept
+      ? 'Saving with this box empty clears the note kept for this client, so new invoices start blank. Invoices already created are not changed.'
+      : 'Write a note, then save to keep it for every future invoice for this client.'
+  }
+  if (!kept) return 'This note appears on this invoice only. Nothing is kept for future invoices.'
+  const shown =
+    kept.length > KEPT_NOTE_PREVIEW_LENGTH ? `${kept.slice(0, KEPT_NOTE_PREVIEW_LENGTH)}…` : kept
+  return `This note appears on this invoice only. New invoices for this client start with the note kept for them: "${shown}" You can change it on the client's Billing tab.`
+}
 
 /**
  * What a save answers with.
@@ -557,6 +581,7 @@ export function InvoiceMonthRun({
   timesheetLocks = [],
   previewMode = false,
   onEntriesTagged,
+  onClientNoteKept,
   onPrint,
   refreshToken = 0,
   ref,
@@ -598,6 +623,12 @@ export function InvoiceMonthRun({
    * looking at.
    */
   onEntriesTagged?: (tags: Array<{ entryId: string; tag: ScopeTag }>) => void
+  /**
+   * A note was kept for a client's future invoices (the editor's "Keep for
+   * future invoices"). The write already happened through its own endpoint; this
+   * hands the new text up so the page's copy of the client stays current.
+   */
+  onClientNoteKept?: (clientId: string, note: string | null) => void
   /** Hand a stored invoice up to the page, which owns the print document. */
   onPrint: (invoice: PersistedInvoice) => void
   /**
@@ -682,6 +713,22 @@ export function InvoiceMonthRun({
       clients.find((c) => c.id === clientId)?.platformInvoicingOptOut ?? false,
     [clients],
   )
+
+  /** The note this client keeps for every future invoice, if it keeps one. */
+  const keptNote = useCallback(
+    (clientId: string) => clients.find((c) => c.id === clientId)?.invoiceNote ?? null,
+    [clients],
+  )
+
+  /**
+   * "Keep for future invoices": write the client's own note through its own
+   * endpoint (the bulk save never carries it), then tell the page. A refusal
+   * propagates to the editor, which says it beside the invoice that WAS saved.
+   */
+  const keepClientNote = async (clientId: string, text: string) => {
+    const updated = await setClientInvoiceNote(clientId, text)
+    onClientNoteKept?.(clientId, updated.invoiceNote ?? null)
+  }
 
   /**
    * Whether this client's invoice ASKS to be paid on receipt — which is nearly
@@ -1628,6 +1675,8 @@ export function InvoiceMonthRun({
                     sourceClientName={clientName}
                     cardEnabled={cardEnabled(invoice.clientId)}
                     optedOut={optedOut(invoice.clientId)}
+                    keptNote={keptNote(invoice.clientId)}
+                    onKeepNote={(text) => keepClientNote(invoice.clientId, text)}
                     dueOnReceipt={dueOnReceipt(invoice.clientId)}
                     today={today}
                     recipients={recipientsFor(invoice.clientId)}
@@ -1684,6 +1733,8 @@ function InvoiceRow({
   sourceClientName,
   cardEnabled,
   optedOut,
+  keptNote,
+  onKeepNote,
   recipients,
   scope,
   retainer,
@@ -1724,6 +1775,10 @@ function InvoiceRow({
   cardEnabled: boolean
   /** This client is billed outside the app — nothing here may be sent or paid. */
   optedOut: boolean
+  /** The note this client keeps for every future invoice, or null. */
+  keptNote: string | null
+  /** Keep the editor's note for this client's future invoices. Rejects on refusal. */
+  onKeepNote: (note: string) => Promise<void>
   /** Every address this invoice would be emailed to, resolved before any click. */
   recipients: ResolvedInvoiceRecipients
   /** The hours behind this invoice, for the panel beside it. */
@@ -2043,6 +2098,8 @@ function InvoiceRow({
           isBillingMaster={isBillingMaster}
           sourceClientName={sourceClientName}
           optedOut={optedOut}
+          keptNote={keptNote}
+          onKeepNote={onKeepNote}
           recipients={recipients}
           scope={scope}
           retainer={retainer}
@@ -2496,6 +2553,8 @@ function InvoiceEditor({
   isBillingMaster,
   sourceClientName,
   optedOut,
+  keptNote,
+  onKeepNote,
   recipients,
   scope,
   retainer,
@@ -2521,6 +2580,10 @@ function InvoiceEditor({
   sourceClientName: (clientId: string) => string
   /** This client is billed outside the app — Send and the pay link are refused. */
   optedOut: boolean
+  /** The note this client keeps for every future invoice, or null. */
+  keptNote: string | null
+  /** Keep the note for this client's future invoices. Rejects with the refusal. */
+  onKeepNote: (note: string) => Promise<void>
   /** Who this would go to, resolved by the same code the send endpoint uses. */
   recipients: ResolvedInvoiceRecipients
   /** The hours behind this invoice, for the panel beside the lines. */
@@ -2554,6 +2617,11 @@ function InvoiceEditor({
 }) {
   const [lines, setLines] = useState<PersistedInvoiceLine[]>(invoice.lineItems)
   const [blurb, setBlurb] = useState(invoice.blurb)
+  // Whether the note stays on this invoice alone (the default) or is ALSO kept
+  // as the client's note for every future invoice. Per editor, never remembered:
+  // a note that quietly became permanent because of last month's click would be
+  // the exact surprise this choice exists to prevent.
+  const [noteScope, setNoteScope] = useState<'invoice' | 'keep'>('invoice')
   const [saved, setSaved] = useState(false)
   const [paymentLink, setPaymentLink] = useState<string | null>(null)
   const [payBusy, setPayBusy] = useState(false)
@@ -3003,10 +3071,14 @@ function InvoiceEditor({
       delete copy.coverageChangeable
       return copy
     })
+  // Choosing Keep is itself an unsaved change whenever it would change what the
+  // client keeps - she may be keeping a note that is already on the invoice.
+  const keepPending = noteScope === 'keep' && blurb.trim() !== (keptNote ?? '')
   const dirty =
     JSON.stringify(withoutDerivedMarks(lines)) !==
       JSON.stringify(withoutDerivedMarks(invoice.lineItems)) ||
     blurb !== invoice.blurb ||
+    keepPending ||
     Object.keys(tagEdits).length > 0
   const localTotal = previewLines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0)
   // Read off the lines ON SCREEN rather than the saved ones, so deleting the
@@ -3565,6 +3637,22 @@ function InvoiceEditor({
       // The page moves them in local app data; the remount this save causes
       // then re-reads the tags off entries that already carry them.
       if (entryTags.length > 0) scope.onEntriesTagged?.(entryTags)
+      // Keep for future invoices: the invoice is saved FIRST (it is the primary
+      // act, and a refused save must keep nothing), then the client's own note.
+      // A successful save always moves `updatedAt`, which REMOUNTS this editor,
+      // so a sentence said in its own slot would be wiped with it: this one goes
+      // to the run's banner, which survives the remount.
+      if (keepPending) {
+        try {
+          await onKeepNote(blurb)
+        } catch (error) {
+          onRefusal(
+            `The invoice was saved, but the note could not be kept for future invoices: ${
+              error instanceof Error ? error.message : 'please try again.'
+            }`,
+          )
+        }
+      }
       return
     }
     // The row was collapsed (or the tab switched) while the request was in the
@@ -3930,7 +4018,7 @@ function InvoiceEditor({
           rows={2}
           value={blurb}
           readOnly={Boolean(lockMessage) || savingDates}
-          placeholder="Carried over from last month once you've written one."
+          placeholder="Optional note shown on the invoice."
           onChange={(event) => {
             setRetainerError(null)
             setBlurb(event.target.value)
@@ -3938,6 +4026,35 @@ function InvoiceEditor({
           }}
         />
       </label>
+      {/* Where the note applies. Offered only while the box is editable, and its
+          helper says what is TRUE of the selected choice: nothing carries to
+          the next invoice unless "Keep" is chosen and saved. */}
+      {lockMessage ? null : (
+        <fieldset className="invoice-run-blurb-scope" disabled={savingDates}>
+          <legend className="visually-hidden">Where this note applies</legend>
+          <label>
+            <input
+              type="radio"
+              name={`invoice-note-scope-${invoice.id}`}
+              checked={noteScope === 'invoice'}
+              onChange={() => setNoteScope('invoice')}
+            />{' '}
+            This invoice only
+          </label>
+          <label>
+            <input
+              type="radio"
+              name={`invoice-note-scope-${invoice.id}`}
+              checked={noteScope === 'keep'}
+              onChange={() => setNoteScope('keep')}
+            />{' '}
+            Keep for future invoices
+          </label>
+          <small className="field-helper invoice-run-blurb-helper">
+            {noteScopeHelper(noteScope, blurb, keptNote)}
+          </small>
+        </fieldset>
+      )}
 
       {payError ? (
         <p className="invoice-run-error" role="alert">

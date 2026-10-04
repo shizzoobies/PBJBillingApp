@@ -1687,6 +1687,28 @@ export async function setClientHourlyRatePeriod(clientId: string, period: string
   return (await response.json()) as Client
 }
 
+/**
+ * Keep (or clear, with null or blank) the note that starts every FUTURE invoice
+ * for this client. Owner-only and TARGETED: the bulk workspace save never
+ * writes it. Answers the client in the shape the page speaks.
+ */
+export async function setClientInvoiceNote(clientId: string, note: string | null) {
+  const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/invoice-note`, {
+    credentials: 'same-origin',
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to keep the note for future invoices (${response.status})`,
+    )
+  }
+  return (await response.json()) as Client
+}
+
 export async function inviteTeamMember(payload: { name: string; email: string; role: string }) {
   const response = await apiFetch('/api/team/invite', {
     credentials: 'same-origin',

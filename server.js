@@ -1467,6 +1467,9 @@ function scopeAppDataForSession(session, data) {
       // reason — what PB&J charges is between the owner and the client.
       hourlyRatePeriod: null,
       hourlyRateHistory: [],
+      // The note kept for future invoices is billing copy a staff member has no
+      // use for; owner-only like the rates beside it.
+      invoiceNote: undefined,
       monthlyRate: undefined,
       customMonthlyFee: null,
       planId: null,
@@ -14491,6 +14494,54 @@ const server = createServer(async (request, response) => {
       await appDataStore.recordActivity(
         session.user.id,
         'client_rate_period_moved',
+        updated.name ?? clientId,
+      )
+      sendJson(response, 200, updated)
+      return
+    }
+
+    // PUT /api/clients/:id/invoice-note — owner-only. Keep (or clear) the "note
+    // to the client" that starts every FUTURE invoice for this client. A
+    // TARGETED endpoint rather than part of the bulk save, so a stale owner tab
+    // can never clobber it (cardinal rule 4); the store snapshots and restores
+    // the column across the bulk save exactly like the Stripe customer id.
+    const clientInvoiceNoteMatch = normalizedPath.match(
+      /^\/api\/clients\/([^/]+)\/invoice-note$/,
+    )
+    if (clientInvoiceNoteMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'PUT') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can keep a note for future invoices' })
+        return
+      }
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const clientId = decodeURIComponent(clientInvoiceNoteMatch[1])
+      const payload = await readJsonBody(request)
+      if (typeof payload?.note !== 'string' && payload?.note !== null) {
+        sendJson(response, 400, { error: 'note must be text, or null to clear it' })
+        return
+      }
+      const updated = await appDataStore.setClientInvoiceNote(clientId, payload.note)
+      if (!updated) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'client_invoice_note_updated',
         updated.name ?? clientId,
       )
       sendJson(response, 200, updated)

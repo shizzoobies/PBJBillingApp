@@ -51,6 +51,7 @@ import {
   listPackagesRequest,
   recordClientProfileActivity,
   setClientAssignedTeamRequest,
+  setClientInvoiceNote,
   setClientHourlyRatePeriod,
 } from '../lib/api'
 import { applyPackageConfirmText } from '../lib/packages'
@@ -1829,6 +1830,46 @@ function BrandingSectionBody({
   )
 }
 
+/**
+ * "Note on every invoice": the text that starts the note to the client on every
+ * NEW invoice for this client (featreq-459bdfc2 item 7). Saved through its own
+ * endpoint - the bulk workspace save never carries it - and only after the
+ * server accepts it does the page's copy of the client change.
+ */
+function InvoiceNoteField({
+  client,
+  onCommit,
+}: {
+  client: Client
+  onCommit: (patch: Partial<Client>) => void
+}) {
+  const [error, setError] = useState('')
+  const keep = async (value: string) => {
+    setError('')
+    try {
+      const updated = await setClientInvoiceNote(client.id, value)
+      onCommit({ invoiceNote: updated.invoiceNote ?? null })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save that note.')
+    }
+  }
+  return (
+    <>
+      <SaveTextareaField
+        label="Note on every invoice"
+        helper="Starts the note to the client on every new invoice for this client. Invoices already created keep their own note. Leave it empty for none."
+        onCommit={(value) => void keep(value)}
+        value={client.invoiceNote ?? ''}
+      />
+      {error ? (
+        <p className="auth-error full-row" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </>
+  )
+}
+
 // Exported for its own test, exactly as `MasterInvoiceRecipientBody` is: the
 // toggles here decide whether a client is billed at all, and rendering the whole
 // page to reach them would test the page instead.
@@ -1859,6 +1900,7 @@ export function InvoiceSettingsSectionBody({
         onCommit={(value) => onCommit({ footerNote: value })}
         value={client.footerNote ?? ''}
       />
+      <InvoiceNoteField client={client} onCommit={onCommit} />
       {/* Her control, and the whole of featreq-…: off unless she turns it on,
           and then at the level of detail she picks. The lines this adds are
           informational — they never change what the client owes — so there is

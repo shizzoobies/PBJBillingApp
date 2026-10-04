@@ -1492,6 +1492,24 @@ function fakePostgres({
       found.hourly_rate_period = params?.[1]
       return { rows: [{ id: found.id }], rowCount: 1 }
     }
+    // The kept invoice note, snapshotted before the wipe. Answered out of
+    // `clientRows` for the same reason the Stripe customer is: a fake that
+    // answered nothing would make every stored note look absent and the
+    // stored-wins assertion pass against a store that dropped the column.
+    if (/^select id, invoice_note from clients$/i.test(trimmed)) {
+      return {
+        rows: clientRows.map((row) => ({ id: row.id, invoice_note: row.invoice_note ?? null })),
+      }
+    }
+    // `setClientInvoiceNote`'s ONE targeted update, emulated against the fixture
+    // rows and answered with a rowCount (or the store reads its own write as a
+    // miss and hands the caller null).
+    if (/^update clients set invoice_note = \$2, updated_at = now\(\) where id = \$1 returning id$/i.test(trimmed)) {
+      const found = clientRows.find((row) => row.id === params?.[0])
+      if (!found) return { rows: [], rowCount: 0 }
+      found.invoice_note = params?.[1]
+      return { rows: [{ id: found.id }], rowCount: 1 }
+    }
     // The rate-history pin snapshot the bulk save takes before the wipe — the
     // same idiom as `priorStripeCustomerIds`. Anchored on its exact shape so a
     // rewrite that stopped reading it falls through to the empty default and
@@ -16138,9 +16156,21 @@ describe('the fingerprint ignores the columns a bulk save cannot write', () => {
   })
 
   it('still drops only the timestamps from a table with nothing server-owned', () => {
-    expect(tableVersionSql('clients')).toBe(
+    expect(tableVersionSql('contacts')).toBe(
       `select md5(coalesce(string_agg(x, ',' order by x), '')) as h
             from (select (to_jsonb(t) - 'updated_at' - 'created_at')::text as x
+                    from contacts t) s`,
+    )
+  })
+
+  // The ONE server-owned clients column: the note kept for future invoices. It
+  // is written only by `setClientInvoiceNote` and snapshotted/restored by the
+  // bulk save, so no tab can change it and counting it would only produce false
+  // 409s (see the kept-invoice-note suite).
+  it('drops only the timestamps and invoice_note from clients', () => {
+    expect(tableVersionSql('clients')).toBe(
+      `select md5(coalesce(string_agg(x, ',' order by x), '')) as h
+            from (select (to_jsonb(t) - 'updated_at' - 'created_at' - 'invoice_note')::text as x
                     from clients t) s`,
     )
   })
@@ -37902,5 +37932,205 @@ describe('releaseUnchargedAutopayAttempt (Postgres statement)', () => {
       "delete from autopay_attempts where invoice_id = $1 and attempt_no = $2 and status = 'claimed' and payment_intent_id is null",
     )
     expect(statements[0].params).toEqual(['inv-1', 2])
+  })
+})
+
+/**
+ * The kept "note to the client" (featreq-459bdfc2 item 7, featreq-21d0bba8
+ * answer 4): `clients.invoice_note`.
+ *
+ * ENDPOINT-OWNED, exactly like `stripe_customer_id`: `setClientInvoiceNote` is
+ * the only writer, and the bulk-save payload is never consulted for it. A stale
+ * owner tab autosaving a client record it loaded before the note was kept must
+ * not erase it.
+ */
+describe('the kept invoice note (clients.invoice_note)', () => {
+  const boundClientColumns = (statement) => {
+    const match = /insert into clients\s*\(([\s\S]*?)\)\s*values/i.exec(statement.text)
+    const columns = match[1].split(',').map((column) => column.trim())
+    const bound = {}
+    statement.params.forEach((value, index) => {
+      bound[columns[index]] = value
+    })
+    return bound
+  }
+
+  it('reads invoice_note into invoiceNote, null when there is none', () => {
+    expect(mapClientRow({ id: 'c1', name: 'Acme' }).invoiceNote).toBeNull()
+    expect(mapClientRow({ id: 'c1', name: 'Acme', invoice_note: 'Thanks!' }).invoiceNote).toBe(
+      'Thanks!',
+    )
+    expect(CLIENT_SELECT_COLUMNS).toMatch(/\binvoice_note\b/)
+  })
+
+  describe('Postgres bulk save', () => {
+    it('snapshots the stored note before the wipe and writes it back', async () => {
+      const fake = fakePostgres({
+        clientRows: [{ id: 'c1', name: 'Acme', invoice_note: 'Kept note' }],
+      })
+      await postgresStore(fake).write(workspace())
+
+      expect(fake.matching(/^select id, invoice_note from clients$/i)).toHaveLength(1)
+      const insert = fake.matching(/^insert into clients \(/i)[0]
+      expect(boundClientColumns(insert).invoice_note).toBe('Kept note')
+    })
+
+    it('lets the stored note win over a stale value in the payload', async () => {
+      const fake = fakePostgres({
+        clientRows: [{ id: 'c1', name: 'Acme', invoice_note: 'Kept note' }],
+      })
+      await postgresStore(fake).write(
+        workspace({ clients: [{ id: 'c1', name: 'Acme', invoiceNote: 'stale from a tab' }] }),
+      )
+      const bound = boundClientColumns(fake.matching(/^insert into clients \(/i)[0])
+      expect(bound.invoice_note).toBe('Kept note')
+    })
+
+    it('keeps the note through a payload that omits it entirely', async () => {
+      const fake = fakePostgres({
+        clientRows: [{ id: 'c1', name: 'Acme', invoice_note: 'Kept note' }],
+      })
+      await postgresStore(fake).write(workspace({ clients: [{ id: 'c1', name: 'Acme' }] }))
+      const bound = boundClientColumns(fake.matching(/^insert into clients \(/i)[0])
+      expect(bound.invoice_note).toBe('Kept note')
+    })
+
+    it('does not let a payload invent a note for a brand-new client', async () => {
+      const fake = fakePostgres({ clientRows: [] })
+      await postgresStore(fake).write(
+        workspace({ clients: [{ id: 'c1', name: 'Acme', invoiceNote: 'smuggled' }] }),
+      )
+      const bound = boundClientColumns(fake.matching(/^insert into clients \(/i)[0])
+      expect(bound.invoice_note).toBeNull()
+    })
+  })
+
+  describe('setClientInvoiceNote', () => {
+    it('Postgres: one targeted update, trimmed, and answers the client in read shape', async () => {
+      const fake = fakePostgres({ clientRows: [{ id: 'c1', name: 'Acme' }] })
+      const updated = await postgresStore(fake).setClientInvoiceNote('c1', '  Thanks for your business.  ')
+      const statement = fake.matching(/^update clients set invoice_note = \$2/i)[0]
+      expect(statement.params).toEqual(['c1', 'Thanks for your business.'])
+      expect(updated.invoiceNote).toBe('Thanks for your business.')
+    })
+
+    it('Postgres: a blank note clears the column to null', async () => {
+      const fake = fakePostgres({ clientRows: [{ id: 'c1', name: 'Acme', invoice_note: 'Old' }] })
+      const updated = await postgresStore(fake).setClientInvoiceNote('c1', '   ')
+      expect(fake.matching(/^update clients set invoice_note = \$2/i)[0].params).toEqual(['c1', null])
+      expect(updated.invoiceNote).toBeNull()
+    })
+
+    it('Postgres: an unknown client answers null', async () => {
+      const fake = fakePostgres({ clientRows: [] })
+      expect(await postgresStore(fake).setClientInvoiceNote('ghost', 'x')).toBeNull()
+    })
+
+    it('file: writes the note, trims it, and clears it on a blank', async () => {
+      const updated = await store.setClientInvoiceNote('c1', '  Hello  ')
+      expect(updated.invoiceNote).toBe('Hello')
+      expect((await store.read()).clients.find((c) => c.id === 'c1').invoiceNote).toBe('Hello')
+      const cleared = await store.setClientInvoiceNote('c1', '')
+      expect(cleared.invoiceNote).toBeNull()
+      expect((await store.read()).clients.find((c) => c.id === 'c1').invoiceNote).toBeNull()
+    })
+
+    it('file: an unknown client answers null and writes nothing', async () => {
+      expect(await store.setClientInvoiceNote('ghost', 'x')).toBeNull()
+    })
+
+    it('caps the note so one paste cannot fill every invoice with a wall of text', async () => {
+      const updated = await store.setClientInvoiceNote('c1', 'x'.repeat(5000))
+      expect(updated.invoiceNote).toHaveLength(2000)
+    })
+  })
+
+  describe('file backend bulk save', () => {
+    it('keeps the note through a save that omits it', async () => {
+      await store.setClientInvoiceNote('c1', 'Kept note')
+      await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme' }] }))
+      expect((await store.read()).clients.find((c) => c.id === 'c1').invoiceNote).toBe('Kept note')
+    })
+
+    it('lets the stored note win over a stale value in the payload', async () => {
+      await store.setClientInvoiceNote('c1', 'Kept note')
+      await store.write(
+        workspace({ clients: [{ id: 'c1', name: 'Acme', invoiceNote: 'stale from a tab' }] }),
+      )
+      expect((await store.read()).clients.find((c) => c.id === 'c1').invoiceNote).toBe('Kept note')
+    })
+
+    it('does not let a payload invent a note for a client with none stored', async () => {
+      await store.write(
+        workspace({ clients: [{ id: 'c1', name: 'Acme', invoiceNote: 'smuggled' }] }),
+      )
+      expect((await store.read()).clients.find((c) => c.id === 'c1').invoiceNote).toBeNull()
+    })
+  })
+
+  describe('generation starts from the kept note', () => {
+    const period = '2026-08'
+    async function seed(clients) {
+      await store.write(
+        workspace({
+          clients,
+          employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+          timeEntries: ['c1', 'c2'].map((clientId, index) => ({
+            id: `t${index}`,
+            clientId,
+            employeeId: 'emp-1',
+            date: `${period}-04`,
+            minutes: 120,
+            billable: true,
+          })),
+        }),
+      )
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      data.invoices = []
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+    const hourly = (id, name) => ({ id, name, billingMode: 'hourly', hourlyRate: 100 })
+
+    it('a monthly invoice starts with the client’s note, and a client with none starts blank', async () => {
+      await seed([hourly('c1', 'Acme'), hourly('c2', 'Globex')])
+      await store.setClientInvoiceNote('c1', 'Payment is due on receipt.')
+
+      const result = await store.generateInvoicesForPeriod(period)
+
+      const byClient = Object.fromEntries(result.created.map((inv) => [inv.clientId, inv]))
+      expect(byClient.c1.blurb).toBe('Payment is due on receipt.')
+      expect(byClient.c2.blurb).toBe('')
+    })
+
+    it('Void & regenerate rebuilds from the kept note, not from the voided invoice’s text', async () => {
+      await seed([hourly('c1', 'Acme'), hourly('c2', 'Globex')])
+      await store.setClientInvoiceNote('c1', 'Kept A')
+      const first = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+      await store.updateInvoice(first.created[0].id, { blurb: 'Only this month' })
+      await store.updateInvoice(first.created[0].id, { status: 'void' })
+      await store.setClientInvoiceNote('c1', 'Kept B')
+
+      const again = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+      expect(again.created[0].blurb).toBe('Kept B')
+    })
+
+    it('a retainer starts with the kept note too', async () => {
+      await seed([hourly('c1', 'Acme'), hourly('c2', 'Globex')])
+      await store.setClientInvoiceNote('c1', 'Retainer thanks')
+      const retainer = await store.createRetainerInvoice({ clientId: 'c1', amount: 500 })
+      expect(retainer.blurb).toBe('Retainer thanks')
+      const plain = await store.createRetainerInvoice({ clientId: 'c2', amount: 500 })
+      expect(plain.blurb).toBe('')
+    })
+
+    it('editing one invoice’s note leaves the client’s kept note alone', async () => {
+      await seed([hourly('c1', 'Acme'), hourly('c2', 'Globex')])
+      await store.setClientInvoiceNote('c1', 'Kept')
+      const made = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+      await store.updateInvoice(made.created[0].id, { blurb: 'Just this invoice' })
+      const client = (await store.read()).clients.find((c) => c.id === 'c1')
+      expect(client.invoiceNote).toBe('Kept')
+    })
   })
 })

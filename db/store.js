@@ -779,6 +779,10 @@ export function normalizeClientProfile(client) {
         ? client.invoiceRecipientClientId
         : null,
     // Rate history, mirroring the Postgres read map exactly (cardinal rule 1).
+    // The note kept for future invoices (see `setClientInvoiceNote`), mirroring
+    // the Postgres read map — cardinal rule 1.
+    invoiceNote:
+      typeof client.invoiceNote === 'string' && client.invoiceNote ? client.invoiceNote : null,
     hourlyRatePeriod:
       typeof client.hourlyRatePeriod === 'string' && client.hourlyRatePeriod
         ? client.hourlyRatePeriod
@@ -2016,6 +2020,9 @@ function applyCoverageLedgerEntry(data, id, period, value, anchorDay = null) {
   return true
 }
 
+/** The longest "note to the client" a client may keep for every future invoice. */
+export const INVOICE_NOTE_MAX_LENGTH = 2000
+
 /**
  * The clients columns every Postgres read selects, and the row map that turns
  * one of them into the shape the app speaks.
@@ -2040,7 +2047,7 @@ export const CLIENT_SELECT_COLUMNS = `id, name, contact, billing_mode, hourly_ra
           assigned_bookkeeper_ids, monthly_service_tier,
           annual_rate, annual_billing_month, lifecycle_stage,
           bill_to_client_id, is_billing_master, invoice_recipient_client_id,
-          hourly_rate_period, hourly_rate_history`
+          hourly_rate_period, hourly_rate_history, invoice_note`
 
 /** One `clients` row -> the camelCase shape the app and the API speak. */
 export function mapClientRow(row) {
@@ -2137,6 +2144,9 @@ export function mapClientRow(row) {
     // ledger is an empty array rather than undefined so every reader can
     // iterate without a null check. Same shape `normalizeClientProfile`
     // produces for the file backend — cardinal rule 1.
+    // The note kept for future invoices, written only by `setClientInvoiceNote`.
+    // Null is "none kept" — and every row written before the column existed.
+    invoiceNote: row.invoice_note ?? null,
     hourlyRatePeriod: row.hourly_rate_period ?? null,
     hourlyRateHistory: Array.isArray(row.hourly_rate_history) ? row.hourly_rate_history : [],
   }
@@ -5951,6 +5961,12 @@ export class AppDataStore {
       await this.pool.query(
         `alter table clients add column if not exists stripe_customer_id text`,
       )
+      // The "note to the client" a person chose to KEEP for future invoices
+      // (featreq-459bdfc2). Nullable: null is no kept note. Endpoint-owned like
+      // the Stripe customer above — the bulk save snapshots and restores it.
+      await this.pool.query(
+        `alter table clients add column if not exists invoice_note text`,
+      )
       // Stripe autopay (featreq-bef42b72). NO foreign keys, deliberately: the
       // bulk save deletes and re-inserts clients and invoices, so a cascade
       // would erase every enrollment on an autosave and a restrict would block
@@ -8180,6 +8196,18 @@ export class AppDataStore {
           ]),
         )
 
+        // The kept invoice note, by the same rule: ENDPOINT-OWNED
+        // (`setClientInvoiceNote` is the only writer) and never read from the
+        // payload. Without this snapshot the re-insert below writes NULL and
+        // the next owner autosave — including a stale tab's — erases a note
+        // Brittany chose to keep for every future invoice.
+        const priorInvoiceNotes = new Map(
+          (await client.query(`select id, invoice_note from clients`)).rows.map((row) => [
+            row.id,
+            row.invoice_note ?? null,
+          ]),
+        )
+
         // The rate-history pin and its ledger, by the same rule as the Stripe
         // customer id above: they are ENDPOINT-OWNED
         // (`setClientHourlyRatePeriod` is the only writer) and the bulk-save
@@ -8359,10 +8387,10 @@ export class AppDataStore {
                 stripe_customer_id,
                 invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
                 bill_to_client_id, is_billing_master, invoice_recipient_client_id,
-                hourly_rate_period, hourly_rate_history,
+                hourly_rate_period, hourly_rate_history, invoice_note,
                 created_at, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44::jsonb, $45, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44::jsonb, $45, $46, now())
             `,
             [
               clientRecord.id,
@@ -8454,6 +8482,9 @@ export class AppDataStore {
               priorRatePins.get(clientRecord.id)?.period ??
                 (clientRecord.billingMode === 'hourly' ? currentRatePeriod : null),
               JSON.stringify(priorRatePins.get(clientRecord.id)?.history ?? []),
+              // Stored wins outright (see the snapshot above); a client with
+              // none stored — including a brand-new one — gets null.
+              priorInvoiceNotes.get(clientRecord.id) ?? null,
               createdAtFor('clients', clientRecord.id),
             ],
           )
@@ -9129,6 +9160,7 @@ export class AppDataStore {
         for (const entry of Array.isArray(previous?.clients) ? previous.clients : []) {
           if (!entry || typeof entry.id !== 'string') continue
           priorPinById.set(entry.id, {
+            invoiceNote: typeof entry.invoiceNote === 'string' && entry.invoiceNote ? entry.invoiceNote : null,
             hourlyRatePeriod: entry.hourlyRatePeriod ?? null,
             hourlyRateHistory: Array.isArray(entry.hourlyRateHistory)
               ? entry.hourlyRateHistory
@@ -9364,6 +9396,9 @@ export class AppDataStore {
             typeof clientRecord.id === 'string' ? priorPinById.get(clientRecord.id) : undefined
           return {
             ...clientRecord,
+            // The kept invoice note is endpoint-owned like the pin: stored wins,
+            // the payload's copy is discarded (null when nothing is stored).
+            invoiceNote: prior?.invoiceNote ?? null,
             hourlyRatePeriod:
               prior?.hourlyRatePeriod ??
               (clientRecord.billingMode === 'hourly' ? currentRatePeriod : null),
@@ -13486,6 +13521,47 @@ export class AppDataStore {
   }
 
   /**
+   * Keep (or clear) the "note to the client" for FUTURE invoices.
+   *
+   * A TARGETED writer, deliberately: `clients.invoice_note` is snapshotted and
+   * restored by the bulk save exactly like `stripe_customer_id`, so a stale
+   * owner tab can never erase it — and, equally, can never write it. This is the
+   * only way the column changes.
+   *
+   * Trimmed, capped at 2,000 characters, and a blank note CLEARS it to null. It
+   * touches no invoice: the invoice that was open when someone chose "Keep for
+   * future invoices" carries its own copy of the text (`blurb`), written by the
+   * ordinary invoice save.
+   *
+   * Returns the client in read shape, or null when there is no such client.
+   */
+  async setClientInvoiceNote(clientId, note) {
+    if (typeof clientId !== 'string' || !clientId) return null
+    const text = String(note ?? '').trim().slice(0, INVOICE_NOTE_MAX_LENGTH)
+    const stored = text || null
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update clients set invoice_note = $2, updated_at = now() where id = $1 returning id`,
+        [clientId, stored],
+      )
+      if (!result.rowCount) return null
+      return this.getClientById(clientId)
+    }
+
+    const data = await readJson(localDataPath)
+    let updated = null
+    data.clients = (data.clients ?? []).map((entry) => {
+      if (entry.id !== clientId) return entry
+      updated = { ...entry, invoiceNote: stored }
+      return updated
+    })
+    if (!updated) return null
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return normalizeClientProfile(updated)
+  }
+
+  /**
    * Re-stamp the stored period labels of ONE recipe's open instances.
    *
    * Called after a save that could have moved the window (see the bulk-save
@@ -14001,7 +14077,11 @@ export class AppDataStore {
         subtotal: draft.subtotal,
         total: draft.total,
         dueDate: draft.dueDate,
-        blurb: '',
+        // Starts as the note the client's owner chose to KEEP for future
+        // invoices, else blank. A draft has no note of its own to protect: a
+        // regenerate (Void & regenerate) discards the voided invoice's text by
+        // design, so the kept note is the only thing that can carry over.
+        blurb: client.invoiceNote ?? '',
         scopeFlags: draft.scopeFlags,
         sentAt: null,
         paidAt: null,
@@ -14103,7 +14183,8 @@ export class AppDataStore {
       // invoice's clock started at the end of the period it billed for, and
       // this line was the exception that already got it right.
       dueDate: dueDateFromTerms(today, client.paymentTerms, windowDays),
-      blurb: '',
+      // The kept note, same rule as a monthly draft.
+      blurb: client.invoiceNote ?? '',
       scopeFlags: [],
       sentAt: null,
       paidAt: null,
@@ -18007,6 +18088,8 @@ export class AppDataStore {
       // Never let a bad value land in the stage column — absent/garbage is
       // 'active', matching write() and the read mappers.
       lifecycleStage: coerceLifecycleStage(client.lifecycleStage),
+      // Endpoint-owned: a create payload cannot carry a kept invoice note.
+      invoiceNote: null,
       // A NEW client starts on the current rates: pinned to the month it is
       // created in, with an empty ledger. Only Hourly clients use a pin, so
       // Monthly and Annual get null — `ratePeriodAsOf` then answers null and
