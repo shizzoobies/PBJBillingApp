@@ -181,7 +181,18 @@ import {
   validateSkipRequest,
 } from './lib/checklist-skip.js'
 import { buildQboCsv } from './lib/qbo-export.js'
-import { autopaySummary } from './lib/stripe-autopay.js'
+import { buildAutopayInviteEmail } from './lib/autopay-email.js'
+import { autopayMethodWords } from './lib/autopay-copy.js'
+import {
+  applyAutopaySetupEvent,
+  autopayOffersCard,
+  autopaySummary,
+  classifySetupEvent,
+  createAutopaySetupSession,
+  emptyAutopay,
+  newSetupToken,
+  turnOffAutopay,
+} from './lib/stripe-autopay.js'
 import {
   createInvoiceCardCheckoutSession,
   createInvoiceCheckoutSession,
@@ -2076,6 +2087,68 @@ function invoiceEmailAddressee(client, clients) {
   return { addressee: { ...sub, name: client.name }, refusal: null }
 }
 
+// ---- Stripe autopay (featreq-bef42b72) -------------------------------------
+// The routes live further down; these are the small pieces they share.
+
+/**
+ * Tell every owner something about a client's autopay. One in-app notification
+ * each (and the email side, for owners who have not switched the "Automatic
+ * payments" group off). Never throws: a notification problem must not undo the
+ * enrollment change it is announcing.
+ */
+async function notifyOwnersAboutAutopay(request, event, { clientId, message }) {
+  try {
+    const members = await appDataStore.getTeamMembers()
+    for (const owner of members.filter((member) => member.role === 'owner')) {
+      await notify(appDataStore, owner.id, event, {
+        message,
+        link: `/clients/${clientId}`,
+        clientId,
+        appPublicUrl: getPublicAppUrl(request),
+      })
+    }
+  } catch (error) {
+    console.error(`[autopay] could not notify the owners (${event}):`, error?.message || error)
+  }
+}
+
+/**
+ * The page a client reaches from "Turn off automatic payments". A GET only
+ * SHOWS this: mail scanners and link previewers open every URL in an email, and
+ * a link that withdrew on GET would turn autopay off for whoever's inbox
+ * software read the message first. Only the POST from this button acts.
+ */
+function renderAutopayWithdrawPage({ token }) {
+  const safeToken = escapeHtml(token)
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Turn off automatic payments - PB&amp;J Strategic Accounting</title>
+<style>
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f6f5f1; color: #1f1d1a; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 24px; box-sizing: border-box; }
+  .card { background: #fff; padding: 32px 36px; border-radius: 14px; box-shadow: 0 12px 40px rgba(31, 29, 26, 0.08); max-width: 460px; text-align: center; }
+  h1 { margin: 0 0 12px 0; font-size: 22px; color: #7d2a4d; }
+  p { line-height: 1.5; margin: 0 0 20px 0; color: #555049; }
+  button { font: inherit; font-weight: 600; color: #fff; background: #7d2a4d; border: none; border-radius: 10px; padding: 12px 24px; cursor: pointer; }
+  p.footer { margin: 20px 0 0; font-size: 13px; color: #8a837a; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Turn off automatic payments?</h1>
+    <p>We will stop charging your saved payment method and remove it. Each invoice will come with a link to pay it yourself instead.</p>
+    <form method="POST" action="/autopay/${safeToken}/withdraw">
+      <button type="submit">Turn off automatic payments</button>
+    </form>
+    <p class="footer">Questions? billing@pbjsa.com</p>
+  </div>
+</body>
+</html>`
+}
+
 // ---- Invoice confidence ratings -------------------------------------------
 // docs/plans/invoice-confidence-2026-08.md. The rating is an ADVISORY
 // annotation and nothing else: it never feeds lib/invoice-lines.js, never
@@ -3818,6 +3891,206 @@ const server = createServer(async (request, response) => {
       }
     }
 
+    // ---- /autopay/:token - the client's autopay page ------------------------
+    //
+    // PUBLIC on purpose, on exactly the terms /pay/:token is: the client has no
+    // account here and the 32-byte token IS the authorization, so every page says
+    // as little as it can. A GET opens the setup page (a fresh Stripe setup
+    // Checkout each time, hosted URLs die in about a day); a HEAD is NOT an open
+    // and mints nothing. /autopay/:token/withdraw is a confirm page on GET and
+    // only the POST acts, so a mail scanner opening the link cannot turn anyone's
+    // autopay off.
+    const autopayLinkMatch = normalizedPath.match(/^\/autopay\/([^/]+)(\/withdraw)?$/)
+    if (autopayLinkMatch) {
+      const autopayToken = autopayLinkMatch[1]
+      const isWithdrawPath = Boolean(autopayLinkMatch[2])
+      const allowedMethods = isWithdrawPath ? ['GET', 'HEAD', 'POST'] : ['GET', 'HEAD']
+      if (!allowedMethods.includes(request.method)) {
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'This link only opens a page',
+            body: 'Open it in a browser to manage automatic payments.',
+          }),
+          405,
+          { Allow: allowedMethods.join(', ') },
+        )
+        return
+      }
+      try {
+        // Shape first, so a scanner walking the path space never reaches the database.
+        if (!/^[A-Za-z0-9_-]{20,64}$/.test(autopayToken)) {
+          sendPayPage(response, renderPayNotFoundPage(), 404)
+          return
+        }
+        const autopayBusy = () =>
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'Too many attempts',
+              body: 'Please wait a few minutes and try the link again.',
+            }),
+            429,
+          )
+        if (isRateLimited(`apip:${getClientIp(request)}`, { max: 30, bucket: payLinkAttempts })) {
+          autopayBusy()
+          return
+        }
+        const autopayRow = await appDataStore.findClientAutopayByToken(autopayToken)
+        if (!autopayRow) {
+          sendPayPage(response, renderPayNotFoundPage(), 404)
+          return
+        }
+        // A HEAD IS NOT AN OPEN: everything below mints a Stripe customer or
+        // session, or changes the enrollment.
+        if (request.method === 'HEAD') {
+          sendPayPage(response, '', 200)
+          return
+        }
+        if (isRateLimited(`aptoken:${autopayToken}`, { max: 10, bucket: payLinkAttempts })) {
+          autopayBusy()
+          return
+        }
+        const autopayPageClient = await appDataStore.getClientById(autopayRow.clientId)
+        if (!autopayPageClient) {
+          sendPayPage(response, renderPayNotFoundPage(), 404)
+          return
+        }
+        const autopayPagePath = `/autopay/${autopayToken}`
+
+        if (isWithdrawPath) {
+          if (request.method === 'GET') {
+            sendPayPage(response, renderAutopayWithdrawPage({ token: autopayToken }))
+            return
+          }
+          const withdrawn = await turnOffAutopay({
+            store: appDataStore,
+            stripe: stripeClient(),
+            clientId: autopayRow.clientId,
+            by: 'client',
+          })
+          if (withdrawn.changed) {
+            await notifyOwnersAboutAutopay(request, 'autopay_withdrawn', {
+              clientId: autopayRow.clientId,
+              message: `${autopayPageClient.name} turned off automatic payments. Their invoices will go out with a payment link again.`,
+            })
+          }
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'Automatic payments are turned off',
+              body: 'We will no longer charge a saved payment method. Each invoice will come with a link to pay it yourself.',
+            }),
+          )
+          return
+        }
+
+        if (autopayRow.status === 'enrolled') {
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'Automatic payments are on',
+              body: `Your invoices are paid automatically from your ${autopayMethodWords(autopayRow)}. There is nothing more for you to do.`,
+              action: { href: `${autopayPagePath}/withdraw`, label: 'Turn off automatic payments' },
+            }),
+          )
+          return
+        }
+        if (autopayRow.status !== 'invited' && autopayRow.status !== 'pending_verification') {
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'Automatic payments are off',
+              body: 'To set them up again, contact us at billing@pbjsa.com.',
+            }),
+          )
+          return
+        }
+
+        // Invited, or verifying a bank: the client may (re)open the setup page.
+        if (requestUrl.searchParams.get('done') === '1') {
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'Thank you',
+              body: 'Your payment method is being confirmed. There is nothing more for you to do. A bank that verifies with two small deposits can take a day or two.',
+            }),
+          )
+          return
+        }
+        if (requestUrl.searchParams.get('cancelled') === '1') {
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'Nothing was saved',
+              body: 'You can start again whenever you are ready.',
+              action: { href: autopayPagePath, label: 'Set up automatic payments' },
+            }),
+          )
+          return
+        }
+        if (!isStripeConfigured()) {
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'Setup is unavailable right now',
+              body: 'Please contact us at billing@pbjsa.com.',
+            }),
+            503,
+          )
+          return
+        }
+        const autopaySetupFailed = () =>
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'We could not open the setup page',
+              body: 'Please try again in a few minutes, or contact us at billing@pbjsa.com.',
+            }),
+            502,
+          )
+        let autopayCustomerId
+        try {
+          autopayCustomerId = await ensureStripeCustomer({
+            client: autopayPageClient,
+            store: appDataStore,
+          })
+        } catch (error) {
+          console.error('[autopay] setup page customer failed:', error?.message || error)
+          autopaySetupFailed()
+          return
+        }
+        const autopayFirm = await appDataStore.getFirmSettings().catch(() => null)
+        const setupResult = await createAutopaySetupSession({
+          stripe: stripeClient(),
+          client: autopayPageClient,
+          customerId: autopayCustomerId,
+          appUrl: getPublicAppUrl(request),
+          token: autopayToken,
+          firmName: autopayFirm?.name || undefined,
+        })
+        if (!setupResult.ok) {
+          console.error('[autopay] setup session failed:', setupResult.reason)
+          autopaySetupFailed()
+          return
+        }
+        response.writeHead(302, { Location: setupResult.session.url, ...PAY_RESPONSE_HEADERS })
+        response.end()
+        return
+      } catch (error) {
+        console.error('[autopay] page failed:', error?.message || error)
+        sendPayPage(
+          response,
+          renderPayStatusPage({
+            heading: 'We could not open that page',
+            body: 'Please try again in a few minutes, or contact us at billing@pbjsa.com.',
+          }),
+          502,
+        )
+        return
+      }
+    }
+
     // ---- GET /pay/:token — the durable payment link ------------------------
     //
     // WHY IT EXISTS. A Stripe Checkout URL expires in about a day, so the Pay
@@ -4608,6 +4881,170 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/clients/:id/autopay/invite  — email the client a link to set up
+    // automatic payments (owner only).
+    // POST /api/clients/:id/autopay/turn-off — the owner turns it off.
+    //
+    // NOTHING HERE CHARGES ANYTHING. Invite mints a link and sends it; the
+    // client's own Stripe Checkout is what saves a method, and a webhook is what
+    // enrolls them.
+    const autopayActionMatch = normalizedPath.match(
+      /^\/api\/clients\/([^/]+)\/autopay\/(invite|turn-off)$/,
+    )
+    if (autopayActionMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can change autopay' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const autopayContentType = String(request.headers['content-type'] || '')
+      if (!autopayContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const autopayClientId = decodeURIComponent(autopayActionMatch[1])
+      const autopayClient = await appDataStore.getClientById(autopayClientId)
+      if (!autopayClient) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+
+      if (autopayActionMatch[2] === 'turn-off') {
+        const turnedOff = await turnOffAutopay({
+          store: appDataStore,
+          stripe: stripeClient(),
+          clientId: autopayClientId,
+          by: 'owner',
+        })
+        if (turnedOff.changed) {
+          await appDataStore.recordActivity(session.user.id, 'autopay_turned_off', autopayClient.name)
+        }
+        sendJson(response, 200, {
+          enrollment: autopaySummary(turnedOff.row ?? emptyAutopay(autopayClientId)),
+        })
+        return
+      }
+
+      if (!isStripeConfigured()) {
+        sendJson(response, 503, {
+          error: 'stripe_unavailable',
+          message: 'Stripe is not connected yet, so automatic payments cannot be set up.',
+        })
+        return
+      }
+      if (autopayClient.platformInvoicingOptOut) {
+        sendJson(response, 409, {
+          error: 'client_opted_out',
+          message: `${autopayClient.name} is invoiced outside the app.`,
+        })
+        return
+      }
+      // A company on a billing master's combined invoice has no invoice of its
+      // own to charge: the master enrolls, and the invite goes to the master's
+      // addressee below.
+      if (autopayClient.billToClientId) {
+        sendJson(response, 409, {
+          error: 'autopay_on_master',
+          message: 'This company is billed on a combined invoice. Set up automatic payments on the billing master instead.',
+        })
+        return
+      }
+      const priorAutopay = await appDataStore.getClientAutopay(autopayClientId)
+      if (priorAutopay?.status === 'enrolled') {
+        sendJson(response, 409, {
+          error: 'already_enrolled',
+          message: `${autopayClient.name} already has automatic payments set up. Turn it off first to start over.`,
+        })
+        return
+      }
+
+      const inviteData = await appDataStore.read()
+      const inviteAddressee = invoiceEmailAddressee(autopayClient, inviteData.clients ?? [])
+      if (inviteAddressee.refusal) {
+        sendJson(response, 409, inviteAddressee.refusal)
+        return
+      }
+      const inviteRecipients = resolveInvoiceRecipients({
+        client: inviteAddressee.addressee,
+        contacts: inviteData.contacts ?? [],
+      })
+      if (inviteRecipients.to.length === 0) {
+        sendJson(response, 409, {
+          error: 'invoice_no_recipient',
+          message: `There is no email address on file for ${autopayClient.name}.`,
+        })
+        return
+      }
+
+      // The customer is made BEFORE the link goes out, so the client's first
+      // click is one hop; Stripe refusing stops the invite with nothing sent.
+      try {
+        await ensureStripeCustomer({ client: autopayClient, store: appDataStore })
+      } catch (error) {
+        console.error('[stripe] autopay customer create failed:', error?.message || error)
+        sendJson(response, 502, {
+          error: 'stripe_customer_failed',
+          message: 'Stripe would not create a customer for this client, so nothing was sent.',
+        })
+        return
+      }
+
+      const inviteToken = newSetupToken()
+      const invited = await appDataStore.updateClientAutopay(autopayClientId, {
+        status: 'invited',
+        setupToken: inviteToken,
+        invitedAt: new Date().toISOString(),
+        withdrawnAt: null,
+        paymentMethodId: null,
+        methodType: null,
+        last4: null,
+        bankOrBrand: null,
+        mandateId: null,
+        consentedAt: null,
+      })
+      const inviteFirm = await appDataStore.getFirmSettings().catch(() => null)
+      const inviteEmail = buildAutopayInviteEmail({
+        client: inviteAddressee.addressee,
+        setupUrl: `${getPublicAppUrl(request)}/autopay/${inviteToken}`,
+        cardsOffered: autopayOffersCard(autopayClient),
+        firmName: inviteFirm?.name || undefined,
+        firmSettings: inviteFirm,
+      })
+      const inviteResult = await sendInvoiceEmail({
+        to: inviteRecipients.to,
+        subject: inviteEmail.subject,
+        html: inviteEmail.html,
+        text: inviteEmail.text,
+        fromName: inviteFirm?.name || undefined,
+        kind: 'autopay_invite',
+      })
+      if (!inviteResult.ok) {
+        // Nothing reached the client, so the panel must not say "Invited".
+        await appDataStore.updateClientAutopay(autopayClientId, {
+          status: priorAutopay?.status ?? 'off',
+          setupToken: priorAutopay?.setupToken ?? null,
+          invitedAt: priorAutopay?.invitedAt ?? null,
+          withdrawnAt: priorAutopay?.withdrawnAt ?? null,
+          paymentMethodId: priorAutopay?.paymentMethodId ?? null,
+          methodType: priorAutopay?.methodType ?? null,
+          last4: priorAutopay?.last4 ?? null,
+          bankOrBrand: priorAutopay?.bankOrBrand ?? null,
+          mandateId: priorAutopay?.mandateId ?? null,
+          consentedAt: priorAutopay?.consentedAt ?? null,
+        })
+        sendJson(response, 502, { error: 'autopay_invite_failed', message: inviteResult.error })
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'autopay_invited', autopayClient.name)
+      sendJson(response, 200, { enrollment: autopaySummary(invited) })
+      return
+    }
+
     // POST /api/stripe/webhook — Stripe tells us money moved.
     //
     // UNAUTHENTICATED BY NECESSITY (Stripe cannot hold a session), so the
@@ -4676,6 +5113,32 @@ const server = createServer(async (request, response) => {
       }
 
       try {
+        // A SETUP event - a client saving a bank account or card for autopay -
+        // names a client and never an invoice. It is recognized and handled
+        // BEFORE the invoice lookup, and by code that is not handed the means to
+        // touch an invoice: a setup that fell into the payment path below could
+        // be matched by an id and applied as money. A failure here (Stripe
+        // unreachable, the enrollment write failing) falls to the catch, which
+        // takes the event back out of the ledger so Stripe's retry applies it.
+        if (classifySetupEvent(event)) {
+          const setupApplied = await applyAutopaySetupEvent({
+            store: appDataStore,
+            stripe: stripeClient(),
+            event,
+          })
+          if (setupApplied.notify) {
+            const enrolledName =
+              (await appDataStore.getClientNameById(setupApplied.notify.clientId).catch(() => '')) ||
+              'A client'
+            await notifyOwnersAboutAutopay(request, 'autopay_enrolled', {
+              clientId: setupApplied.notify.clientId,
+              message: `${enrolledName} set up automatic payments (${autopayMethodWords(setupApplied.notify.summary)}).`,
+            })
+          }
+          sendJson(response, 200, { received: true, setup: true })
+          return
+        }
+
         const object = event.data?.object ?? {}
         const metaInvoiceId = object.metadata?.invoiceId ?? null
         const invoice = await appDataStore.findInvoiceByStripeRef({

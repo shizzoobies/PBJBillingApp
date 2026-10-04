@@ -1,11 +1,17 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AutopayPanel } from '../components/AutopayPanel'
 import { autopayStatusText } from '../lib/autopayText'
 import type { AutopaySummary } from '../lib/types'
 
 const listAutopayRequest = vi.fn()
-vi.mock('../lib/api', () => ({ listAutopayRequest: () => listAutopayRequest() }))
+const inviteToAutopayRequest = vi.fn()
+const turnOffAutopayRequest = vi.fn()
+vi.mock('../lib/api', () => ({
+  listAutopayRequest: () => listAutopayRequest(),
+  inviteToAutopayRequest: (id: string) => inviteToAutopayRequest(id),
+  turnOffAutopayRequest: (id: string) => turnOffAutopayRequest(id),
+}))
 
 const summary = (over: Partial<AutopaySummary> = {}): AutopaySummary => ({
   clientId: 'c1',
@@ -57,6 +63,9 @@ describe('the autopay panel’s words', () => {
 describe('<AutopayPanel>', () => {
   beforeEach(() => {
     listAutopayRequest.mockReset()
+    inviteToAutopayRequest.mockReset()
+    turnOffAutopayRequest.mockReset()
+    vi.restoreAllMocks()
   })
 
   it('shows this client’s status, not another client’s', async () => {
@@ -84,5 +93,62 @@ describe('<AutopayPanel>', () => {
     await waitFor(() => expect(listAutopayRequest).toHaveBeenCalled())
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(container.querySelector('.autopay-panel')).toBeNull()
+  })
+})
+
+describe('<AutopayPanel> actions', () => {
+  beforeEach(() => {
+    listAutopayRequest.mockReset()
+    inviteToAutopayRequest.mockReset()
+    turnOffAutopayRequest.mockReset()
+  })
+
+  const load = async (rows: AutopaySummary[]) => {
+    listAutopayRequest.mockResolvedValue(rows)
+    render(<AutopayPanel clientId="c1" />)
+    await waitFor(() => expect(screen.getByTestId('autopay-status')).toBeInTheDocument())
+  }
+
+  it('offers Invite to a client who is not enrolled, and shows the new status after it', async () => {
+    await load([])
+    inviteToAutopayRequest.mockResolvedValue(summary({ status: 'invited' }))
+    expect(screen.queryByRole('button', { name: 'Turn off' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Invite to autopay' }))
+
+    await waitFor(() => expect(screen.getByTestId('autopay-status')).toHaveTextContent('Invited on'))
+    expect(inviteToAutopayRequest).toHaveBeenCalledWith('c1')
+    expect(screen.getByRole('button', { name: 'Send the invitation again' })).toBeInTheDocument()
+  })
+
+  it('an enrolled client can only be turned off, not invited again', async () => {
+    await load([summary()])
+    expect(screen.queryByRole('button', { name: /invit/i })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Turn off' })).toBeInTheDocument()
+  })
+
+  it('turning off asks first, and does nothing if she says no', async () => {
+    await load([summary()])
+    window.confirm = vi.fn(() => false)
+    fireEvent.click(screen.getByRole('button', { name: 'Turn off' }))
+    expect(turnOffAutopayRequest).not.toHaveBeenCalled()
+    expect(screen.getByTestId('autopay-status')).toHaveTextContent('Enrolled')
+  })
+
+  it('turning off, once confirmed, shows the new status', async () => {
+    await load([summary()])
+    window.confirm = vi.fn(() => true)
+    turnOffAutopayRequest.mockResolvedValue(summary({ status: 'off', last4: null }))
+    fireEvent.click(screen.getByRole('button', { name: 'Turn off' }))
+    await waitFor(() => expect(screen.getByTestId('autopay-status')).toHaveTextContent('Not enrolled.'))
+    expect(turnOffAutopayRequest).toHaveBeenCalledWith('c1')
+  })
+
+  it('shows the server’s sentence when the invitation is refused', async () => {
+    await load([])
+    inviteToAutopayRequest.mockRejectedValue(new Error('Acme is invoiced outside the app.'))
+    fireEvent.click(screen.getByRole('button', { name: 'Invite to autopay' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('invoiced outside the app'))
+    expect(screen.getByTestId('autopay-status')).toHaveTextContent('Not enrolled.')
   })
 })

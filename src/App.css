@@ -13739,3 +13739,11 @@ details.invoice-run-sent ul,
   margin: 0;
   white-space: pre-wrap;
 }
+
+/* Autopay panel (featreq-bef42b72): the owner's invite / turn-off buttons. */
+.autopay-panel .autopay-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}

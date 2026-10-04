@@ -4751,3 +4751,27 @@ export async function listAutopayRequest() {
   }
   return ((await response.json()) as { enrollments: AutopaySummary[] }).enrollments
 }
+
+async function autopayAction(clientId: string, action: 'invite' | 'turn-off', failure: string) {
+  const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/autopay/${action}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `${failure} (${response.status})`)
+  }
+  return ((await response.json()) as { enrollment: AutopaySummary }).enrollment
+}
+
+/** Email the client a link to set up automatic payments. Nothing is charged. */
+export function inviteToAutopayRequest(clientId: string) {
+  return autopayAction(clientId, 'invite', 'Could not send the invitation')
+}
+
+/** The owner turns a client's autopay off; the saved method is removed. */
+export function turnOffAutopayRequest(clientId: string) {
+  return autopayAction(clientId, 'turn-off', 'Could not turn autopay off')
+}
