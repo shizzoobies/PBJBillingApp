@@ -810,11 +810,18 @@ export function ProposalPricingSection({
   const addRow = (group: ProposalGroup) => {
     const current = pricingRef.current
     const sortOrder = Math.max(0, ...current.services.map((service) => service.sortOrder)) + 1
-    // A Software row is priced at cost: a base price and an optional per-unit
-    // amount, no input, role or multiplier.
+    // A Software row is priced at cost: a base price (blank until she sets it)
+    // and an optional per-unit amount, no input, role or multiplier.
     const software =
       group === SOFTWARE_GROUP
-        ? { pricing: 'software' as const, basePrice: 0, unitPrice: 0, unitsIncluded: 0, unit: 'none' as const }
+        ? {
+            pricing: 'software' as const,
+            // No price yet: "Not yet priced" on a proposal until she sets one.
+            basePrice: null,
+            unitPrice: 0,
+            unitsIncluded: 0,
+            unit: 'none' as const,
+          }
         : null
     save({
       ...current,
@@ -945,10 +952,11 @@ export function ProposalPricingSection({
                           <td>
                             <SavingNumberInput
                               ariaLabel={`Base price for ${label}`}
-                              canonical={service.basePrice ?? 0}
+                              canonical={service.basePrice ?? null}
+                              placeholder="Not set"
                               min="0"
                               step="0.01"
-                              onCommit={(value) => setService(service.id, { basePrice: value ?? 0 })}
+                              onCommit={(value) => setService(service.id, { basePrice: value })}
                             />
                           </td>
                           <td>

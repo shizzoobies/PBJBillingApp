@@ -1523,6 +1523,46 @@ describe('Software on the proposal editor', () => {
     expect(totals).toContain('Software, at cost (monthly)$98.00')
   })
 
+  it('an unpriced plan and a per-employee plan with no count read "Not yet priced", never "No charge"', async () => {
+    // Sent, so the page shows the snapshot as it is rather than repricing it on open.
+    api.getProposalRequest = vi.fn(async () => ({
+      ...WITH_SOFTWARE,
+      status: 'sent' as const,
+      pricingSnapshot: {
+        ...WITH_SOFTWARE.pricingSnapshot!,
+        lines: [
+          ...PROPOSAL.pricingSnapshot!.lines,
+          { ...SOFTWARE_LINES[1], serviceId: 'software-new', name: 'New plan', basePrice: null, flag: 'no-rate', formula: 'No price set for this plan - not yet priced' },
+          { ...SOFTWARE_LINES[0], serviceId: 'software-qb-time-elite', name: 'QB Time Elite', amount: 0, flag: 'needs-count', formula: 'Needs an employee count - not yet priced', unit: 'employee' },
+        ],
+        totals: { monthly: 630, annual: 0, oneTime: 0, cleanup: 0, software: 0 },
+      },
+    }))
+    renderEditor()
+    await screen.findByText('New plan', { selector: 'strong' })
+    const amounts = [...document.querySelectorAll('.proposal-line-amount')].map((cell) => cell.textContent)
+    expect(amounts).toEqual(['$630.00', 'Not yet priced', 'Not yet priced'])
+    expect(screen.queryByText('No charge')).toBeNull()
+    expect(screen.getByText('needs a count')).toBeTruthy()
+  })
+
+  it('opening a draft whose software unit changed in the catalog reprices it once', async () => {
+    api.getProposalRequest = vi.fn(async () => ({ ...WITH_SOFTWARE, id: 'prop-sw' }))
+    api.repriceProposalRequest = vi.fn(async () => ({ ...WITH_SOFTWARE, id: 'prop-sw' }))
+    api.fetchFirmSettings = vi.fn(async () => ({
+      name: 'PB&J',
+      proposalPricing: {
+        ...defaultProposalPricing(),
+        rates: { bookkeeper: 75, accountant: 115, controller: 125 },
+        services: defaultProposalPricing().services.map((service) =>
+          service.id === 'software-qbo-plus' ? { ...service, unit: 'employee' as const } : service,
+        ),
+      },
+    }))
+    renderEditor('/proposals/prop-sw')
+    await waitFor(() => expect(api.repriceProposalRequest).toHaveBeenCalledWith('prop-sw'))
+  })
+
   it('has no Software total row on a proposal with no software', async () => {
     renderEditor()
     await screen.findByText(/120 transactions/)

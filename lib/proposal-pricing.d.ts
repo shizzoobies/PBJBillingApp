@@ -64,7 +64,7 @@ export type ProposalService = {
   /** A 'per-count' row's standard count (its selection's `quantity`), or null. */
   defaultQuantity: number | null
   /** Software rows only (pricing 'software'): the plan's price at cost, per month. */
-  basePrice?: number
+  basePrice?: number | null
   /** Software rows only: charged per `unit` past `unitsIncluded`. */
   unitPrice?: number
   unitsIncluded?: number
@@ -103,7 +103,7 @@ export type PricedLine = {
   formula: string
   flag: 'unknown-input' | 'needs-count' | 'invalid-input' | 'no-rate' | 'retired' | null
   /** Software lines only: the figures the line was priced with (kept on a sent proposal). */
-  basePrice?: number
+  basePrice?: number | null
   unitPrice?: number
   unitsIncluded?: number
   unit?: SoftwareUnit
@@ -119,7 +119,10 @@ export type ProposalTotals = {
 }
 
 /** The figures a sent proposal's software line is held to, by service id. */
-export type SoftwareLocks = Record<string, { basePrice: number; unitPrice: number; unitsIncluded: number }>
+export type SoftwareLocks = Record<
+  string,
+  { basePrice: number; unitPrice: number; unitsIncluded: number; unit: SoftwareUnit }
+>
 
 export declare const PROPOSAL_GROUPS: readonly ProposalGroup[]
 export declare const MONTHLY_GROUPS: readonly ProposalGroup[]

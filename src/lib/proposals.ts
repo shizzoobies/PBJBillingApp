@@ -356,7 +356,7 @@ export function unsetRateRoles(rates: Partial<Record<ProposalRole, number>> | nu
 /**
  * True when a snapshot was priced at other figures than the catalog's today: a
  * role rate, or - when the snapshot's lines and the catalog's services are
- * passed - a software line's base price, per-unit price or included count
+ * passed - a software line's base price, per-unit price, included count or unit
  * (QuickBooks raised a price, so a draft reprices once on open).
  */
 export function snapshotRatesDiffer(
@@ -372,10 +372,16 @@ export function snapshotRatesDiffer(
   ) {
     return true
   }
-  const figures = (source: { basePrice?: number; unitPrice?: number; unitsIncluded?: number }) => [
+  const figures = (source: {
+    basePrice?: number | null
+    unitPrice?: number
+    unitsIncluded?: number
+    unit?: string
+  }) => [
     Number(source.basePrice) || 0,
     Number(source.unitPrice) || 0,
     Number(source.unitsIncluded) || 0,
+    source.unit ?? 'none',
   ]
   return (snapshotLines ?? []).some((line) => {
     if (line.group !== 'Software') return false

@@ -323,12 +323,24 @@ describe('Software in Settings (featreq-a69a3cc0)', () => {
     expect(added).toMatchObject({
       group: 'Software',
       pricing: 'software',
-      basePrice: 0,
+      // Not priced yet: null, never a silent $0 that would read "No charge".
+      basePrice: null,
       unitPrice: 0,
       unit: 'none',
       inputKey: null,
       role: null,
     })
+  })
+
+  it('a cleared base price saves as null (unset), and an explicit 0 stays 0', () => {
+    const onCommit = renderStatefulSection()
+    const input = screen.getByLabelText('Base price for Software QBO Plus')
+    fireEvent.change(input, { target: { value: '' } })
+    fireEvent.blur(input)
+    expect(lastSaved(onCommit).services.find((row) => row.id === 'software-qbo-plus')?.basePrice).toBeNull()
+    fireEvent.change(input, { target: { value: '0' } })
+    fireEvent.blur(input)
+    expect(lastSaved(onCommit).services.find((row) => row.id === 'software-qbo-plus')?.basePrice).toBe(0)
   })
 
   it('retires a software row without deleting it', () => {

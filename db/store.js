@@ -11865,11 +11865,23 @@ export class AppDataStore {
       }
       const packageResult = pkg ? await this.applyPackageToClient(clientId, packageId, { actorUserId }) : null
 
-      if (createdClient || addSoftware === true) {
-        await this._addAcceptedSoftware(clientId, proposal.pricingSnapshot?.lines)
-      }
+      const softwareIds =
+        createdClient || addSoftware === true
+          ? await this._addAcceptedSoftware(id, clientId, proposal.pricingSnapshot?.lines)
+          : []
 
-      const accepted = await this.setProposalStatus(id, 'accepted', { clientId })
+      // The final flip can still refuse (a decline or another accept landed
+      // first). The software rows this call added would then bill from this
+      // month on a proposal that never got accepted, so they come back out
+      // before the refusal goes on to the caller.
+      let accepted
+      try {
+        accepted = await this.setProposalStatus(id, 'accepted', { clientId })
+      } catch (flipError) {
+        await this._removeRecurringExpenses(softwareIds)
+        throw flipError
+      }
+      if (!accepted) await this._removeRecurringExpenses(softwareIds)
       if (actorUserId) {
         if (createdClient) {
           // Same event name and shape as `POST /api/clients` (server.js) — a
@@ -11896,33 +11908,101 @@ export class AppDataStore {
    * covered dates off. Lines at $0 (Bill Pay Basic) bill nothing and add
    * nothing; a line whose description the client already carries is skipped,
    * which is what makes a retry after a half-finished accept safe.
+   *
+   * The check and the inserts are one serialized step, so two Accepts of the
+   * same proposal (two tabs, a retry) cannot both see an empty list and both
+   * insert: Postgres holds the proposal's row `for update` across them, the
+   * file backend runs them in one queue slot. Returns the ids this call
+   * created; if a line fails partway, the ones already added come back out.
    */
-  async _addAcceptedSoftware(clientId, lines) {
+  async _addAcceptedSoftware(proposalId, clientId, lines) {
     const wanted = (Array.isArray(lines) ? lines : []).filter(
       (line) => line?.group === 'Software' && Number(line.amount) > 0 && !line.flag,
     )
-    if (wanted.length === 0) return
-    const have = new Set(
-      ((await this.read()).recurringReimbursements ?? [])
-        .filter((entry) => entry.clientId === clientId)
-        .map((entry) => String(entry.description ?? '').trim().toLowerCase()),
-    )
+    if (wanted.length === 0) return []
     const startDate = `${firmToday().slice(0, 7)}-01`
-    for (const line of wanted) {
-      const description = String(line.name ?? '').trim()
-      if (!description || have.has(description.toLowerCase())) continue
-      const created = await this.addRecurringReimbursement({
-        clientId,
-        description,
-        amount: line.amount,
-        frequency: 'monthly',
-        startDate,
-        category: 'software',
-      })
-      if (!created) {
-        throw new ProposalStateError(`The software line "${description}" could not be added to the client.`)
+    const created = []
+    const descriptionOf = (line) => String(line.name ?? '').trim()
+    const refuse = (line) =>
+      new ProposalStateError(`The software line "${descriptionOf(line)}" could not be added to the client.`)
+
+    if (this.pool) {
+      try {
+        await this._withTransaction(async (dbClient) => {
+          await dbClient.query(`select id from proposals where id = $1 for update`, [proposalId])
+          const { rows } = await dbClient.query(
+            `select description from recurring_reimbursements where client_id = $1`,
+            [clientId],
+          )
+          const have = new Set(rows.map((row) => String(row.description ?? '').trim().toLowerCase()))
+          for (const line of wanted) {
+            const description = descriptionOf(line)
+            if (!description || have.has(description.toLowerCase())) continue
+            const added = await this.addRecurringReimbursement({
+              clientId,
+              description,
+              amount: line.amount,
+              frequency: 'monthly',
+              startDate,
+              category: 'software',
+            })
+            if (!added) throw refuse(line)
+            created.push(added.id)
+            have.add(description.toLowerCase())
+          }
+        })
+      } catch (error) {
+        await this._removeRecurringExpenses(created)
+        throw error
       }
-      have.add(description.toLowerCase())
+      return created
+    }
+
+    // The file backend: read, decide and write inside ONE queue slot. Raw fs
+    // calls only in here: `readJson` / `writeFile` enqueue behind this very
+    // slot and would deadlock.
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      if (!Array.isArray(data.clients) || !data.clients.some((entry) => entry.id === clientId)) {
+        throw refuse(wanted[0])
+      }
+      if (!Array.isArray(data.recurringReimbursements)) data.recurringReimbursements = []
+      const have = new Set(
+        data.recurringReimbursements
+          .filter((entry) => entry.clientId === clientId)
+          .map((entry) => String(entry.description ?? '').trim().toLowerCase()),
+      )
+      for (const line of wanted) {
+        const description = descriptionOf(line)
+        if (!description || have.has(description.toLowerCase())) continue
+        const id = `recur-${randomUUID().slice(0, 8)}`
+        data.recurringReimbursements.push(
+          normalizeRecurringReimbursement({
+            id,
+            clientId,
+            description,
+            amount: line.amount,
+            frequency: 'monthly',
+            startDate,
+            category: 'software',
+          }),
+        )
+        created.push(id)
+        have.add(description.toLowerCase())
+      }
+      if (created.length > 0) await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return created
+    })
+  }
+
+  /** Take recurring expenses back out (an Accept that did not finish). Best effort per id. */
+  async _removeRecurringExpenses(ids) {
+    for (const recurringId of Array.isArray(ids) ? ids : []) {
+      try {
+        await this.deleteRecurringReimbursement(recurringId)
+      } catch (error) {
+        console.error('[accept] could not remove software expense', recurringId, error)
+      }
     }
   }
 
