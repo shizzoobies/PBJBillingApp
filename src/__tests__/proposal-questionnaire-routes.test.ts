@@ -136,7 +136,9 @@ describe('the table', () => {
 
   it('claims the single submission and the single draft in the WHERE, not in JavaScript', () => {
     expect(storeSource).toContain("and status = 'open' and (expires_at is null or expires_at > now())")
-    expect(storeSource).toContain('where id = $1 and proposal_id is null')
+    expect(storeSource).toContain('where id = $1 and (proposal_id is null or proposal_id = $3)')
+    // ...and deleting a draft clears the link that names it (no FK to do it).
+    expect(storeSource).toContain('set proposal_id = null, updated_at = now()')
   })
 })
 
@@ -208,15 +210,29 @@ describe('the public questionnaire route', () => {
     expect(publicBlock).toContain('answersFromFormValues(values)')
   })
 
-  it('303s to a fixed thank-you page after the submission, so a refresh cannot post twice', () => {
+  it('303s to a fixed thank-you page right after the submission, so a refresh cannot post twice', () => {
     const submit = publicBlock.indexOf('appDataStore.submitProposalQuestionnaire(')
-    const finish = publicBlock.indexOf('finishQuestionnaireSubmission(request, submitted)')
     const redirect = publicBlock.indexOf('response.writeHead(303')
-    expect(finish).toBeGreaterThan(submit)
-    expect(redirect).toBeGreaterThan(finish)
+    expect(redirect).toBeGreaterThan(submit)
     expect(publicBlock).toContain("Location: '/questionnaire/thanks'")
     // Nothing personal rides in the address.
     expect(publicBlock).not.toMatch(/Location: `/)
+  })
+
+  // The owner emails are slow (one per owner) and the prospect's answer is already
+  // stored: they are thanked first, and the draft and the notices run after.
+  it('thanks the prospect BEFORE the draft and the owner notices, whose failure is only logged', () => {
+    const redirect = publicBlock.indexOf('response.writeHead(303')
+    const end = publicBlock.indexOf('response.end()', redirect)
+    const finish = publicBlock.indexOf('await finishQuestionnaireSubmission(request, submitted)')
+    expect(end).toBeGreaterThan(redirect)
+    expect(finish).toBeGreaterThan(end)
+    expect(publicBlock.slice(end, finish)).toContain('try {')
+    expect(publicBlock).toContain("console.error('[questionnaire] after-submit work failed:'")
+    // Nothing may answer a second time once the redirect is out.
+    expect(publicBlock.slice(finish, publicBlock.indexOf('} catch (error) {', finish))).not.toMatch(
+      /sendQuestionnairePage|writeHead/,
+    )
   })
 
   it('has its own catch that answers a page, never the JSON the global handler would', () => {
@@ -319,7 +335,9 @@ describe('the Resend webhook', () => {
     )
     expect(handler).toContain('appendProposalQuestionnaireEmailEvent(found.id')
     expect(handler).not.toMatch(/status/i)
-    expect(handler).toContain('!alreadyLogged')
+    // Once, decided by the store's conditional append - not by a read beforehand.
+    expect(handler).toContain('logged?.appended')
+    expect(handler).not.toContain('alreadyLogged')
     expect(handler).toContain("'invoice_email_bounced'")
   })
 })

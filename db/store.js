@@ -11295,15 +11295,36 @@ export class AppDataStore {
         `delete from proposals where id = $1 and status = 'draft' returning id`,
         [id],
       )
-      return (result.rowCount ?? 0) > 0
+      if ((result.rowCount ?? 0) === 0) return false
+      // A questionnaire's draft that is gone is a draft it no longer has: clear
+      // the link (there is no FK to do it) so the inbox offers Start draft again
+      // instead of an "Open the draft" that goes nowhere.
+      await this.pool.query(
+        `update proposal_questionnaires set proposal_id = null, updated_at = now()
+          where proposal_id = $1`,
+        [id],
+      )
+      return true
     }
-    const authState = await readJson(localAuthPath)
-    const list = Array.isArray(authState.proposals) ? authState.proposals : []
-    const next = list.filter((row) => !row || row.id !== id || row.status !== 'draft')
-    if (next.length === list.length) return false
-    authState.proposals = next
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-    return true
+    // One queue slot for the proposal AND the questionnaire links that name it.
+    // Raw fs calls only in here.
+    return enqueueFileOperation(localAuthPath, async () => {
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const list = Array.isArray(authState.proposals) ? authState.proposals : []
+      const next = list.filter((row) => !row || row.id !== id || row.status !== 'draft')
+      if (next.length === list.length) return false
+      authState.proposals = next
+      for (const questionnaire of Array.isArray(authState.proposalQuestionnaires)
+        ? authState.proposalQuestionnaires
+        : []) {
+        if (questionnaire && questionnaire.proposalId === id) {
+          questionnaire.proposalId = null
+          questionnaire.updatedAt = nowIso()
+        }
+      }
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return true
+    })
   }
 
   /**
@@ -14861,8 +14882,14 @@ export class AppDataStore {
     if (current.status !== 'submitted') {
       throw new ProposalQuestionnaireError('Only an answered questionnaire starts a draft.', 'not_submitted')
     }
+    // A link to a proposal that no longer exists (it was deleted before deleting
+    // cleared the link, or behind the store's back) is no link: the draft is
+    // started again and the claim below replaces exactly THAT dangling id.
+    let dangling = null
     if (current.proposalId) {
-      return { proposal: await this.getProposal(current.proposalId), created: false }
+      const existing = await this.getProposal(current.proposalId)
+      if (existing) return { proposal: existing, created: false }
+      dangling = current.proposalId
     }
     const seed = answersToProposalSeed(flattenQuestions(current.questions), current.answers)
     const proposal = await this.createProposal({
@@ -14872,24 +14899,33 @@ export class AppDataStore {
       createdBy,
     })
 
+    // createProposal has already committed, so a claim that THROWS (not one that
+    // loses) must take the draft back, or the retry would make a second one.
     let claimed = false
-    if (this.pool) {
-      const { rows } = await this.pool.query(
-        `update proposal_questionnaires
-            set proposal_id = $2, updated_at = now()
-          where id = $1 and proposal_id is null
-          returning id`,
-        [id, proposal.id],
-      )
-      claimed = rows.length > 0
-    } else {
-      claimed = await this._mutateQuestionnaireFile((list) => {
-        const target = list.find((row) => row && row.id === id)
-        if (!target || target.proposalId) return { result: false, changed: false }
-        target.proposalId = proposal.id
-        target.updatedAt = nowIso()
-        return { result: true, changed: true }
-      })
+    try {
+      if (this.pool) {
+        const { rows } = await this.pool.query(
+          `update proposal_questionnaires
+              set proposal_id = $2, updated_at = now()
+            where id = $1 and (proposal_id is null or proposal_id = $3)
+            returning id`,
+          [id, proposal.id, dangling],
+        )
+        claimed = rows.length > 0
+      } else {
+        claimed = await this._mutateQuestionnaireFile((list) => {
+          const target = list.find((row) => row && row.id === id)
+          if (!target || (target.proposalId && target.proposalId !== dangling)) {
+            return { result: false, changed: false }
+          }
+          target.proposalId = proposal.id
+          target.updatedAt = nowIso()
+          return { result: true, changed: true }
+        })
+      }
+    } catch (error) {
+      await this.deleteProposal(proposal.id).catch(() => {})
+      throw error
     }
     if (claimed) return { proposal, created: true }
 
@@ -14973,25 +15009,27 @@ export class AppDataStore {
    * One send or provider delivery event on a questionnaire's email log - the
    * proposal log's shape and its idempotence (Resend retries a webhook until it
    * gets a 200, so the same event arrives more than once). A successful send also
-   * remembers who it went to. Never touches status. Returns the questionnaire, or
-   * null when there is none.
+   * remembers who it went to. Never touches status. Returns the questionnaire with
+   * `appended` - true only when THIS call inserted the entry - or null when there
+   * is none; a caller that should act once per event (a bounce notice) acts on
+   * `appended`, which the conditional write decides, not on a read beforehand.
    */
   async appendProposalQuestionnaireEmailEvent(id, entry = {}) {
     const current = await this.getProposalQuestionnaire(id)
     if (!current) return null
     const kind = entry.kind === 'delivery' ? 'delivery' : 'send'
     const event = kind === 'delivery' ? String(entry.event ?? '').trim().slice(0, 40) : null
-    if (kind === 'delivery' && !event) return current
+    if (kind === 'delivery' && !event) return { ...current, appended: false }
     const providerId = entry.providerId ? String(entry.providerId) : null
-    const duplicate =
+    const alreadyLogged = (log) =>
       providerId !== null &&
-      current.emailLog.some(
+      log.some(
         (logged) =>
           logged?.kind === kind &&
           (logged?.event ?? null) === event &&
           logged?.providerId === providerId,
       )
-    if (duplicate) return current
+    if (alreadyLogged(current.emailLog)) return { ...current, appended: false }
 
     const at =
       entry.at && !Number.isNaN(new Date(entry.at).getTime())
@@ -15035,16 +15073,29 @@ export class AppDataStore {
           ? [id, JSON.stringify([clean]), JSON.stringify([probe]), sentTo]
           : [id, JSON.stringify([clean]), sentTo],
       )
-      if (rows[0]) return AppDataStore.mapProposalQuestionnaire(rows[0])
-      return (await this.getProposalQuestionnaire(id)) ?? current
+      if (rows[0]) return { ...AppDataStore.mapProposalQuestionnaire(rows[0]), appended: true }
+      // Zero rows: the @> guard refused (a concurrent retry already logged it).
+      return { ...((await this.getProposalQuestionnaire(id)) ?? current), appended: false }
     }
     return this._mutateQuestionnaireFile((list) => {
       const target = list.find((row) => row && row.id === id)
       if (!target) return { result: null, changed: false }
-      target.emailLog = [...(Array.isArray(target.emailLog) ? target.emailLog : []), clean]
+      const log = Array.isArray(target.emailLog) ? target.emailLog : []
+      // Decided again INSIDE the slot: two retries of one webhook can both pass
+      // the read above, and only one may insert.
+      if (alreadyLogged(log)) {
+        return {
+          result: { ...AppDataStore.mapProposalQuestionnaire(target), appended: false },
+          changed: false,
+        }
+      }
+      target.emailLog = [...log, clean]
       if (sentTo) target.sentTo = sentTo
       target.updatedAt = nowIso()
-      return { result: AppDataStore.mapProposalQuestionnaire(target), changed: true }
+      return {
+        result: { ...AppDataStore.mapProposalQuestionnaire(target), appended: true },
+        changed: true,
+      }
     })
   }
 

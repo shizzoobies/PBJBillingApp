@@ -141,10 +141,10 @@ function renderList() {
 }
 
 describe('the Proposals list', () => {
-  it('says "Not priced yet" for a draft with nothing selected, never $0.00', async () => {
+  it('says "Not yet priced" for a draft with nothing selected, never $0.00', async () => {
     renderList()
     const row = (await screen.findByRole('link', { name: 'Acme Books' })).closest('tr')!
-    expect(within(row).getByText('Not priced yet')).toBeInTheDocument()
+    expect(within(row).getByText('Not yet priced')).toBeInTheDocument()
     expect(within(row).queryByText('$0.00')).not.toBeInTheDocument()
     const priced = screen.getByRole('link', { name: 'Priced Co' }).closest('tr')!
     expect(within(priced).getByText('$630.00')).toBeInTheDocument()

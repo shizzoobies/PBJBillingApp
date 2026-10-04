@@ -430,7 +430,7 @@ export function ProposalsPage() {
                         // A draft with nothing selected is not a $0.00 price, it is
                         // no price yet (the 2026-10-02 incident read it as a quote).
                         proposal.selections.length === 0
-                          ? 'Not priced yet'
+                          ? 'Not yet priced'
                           : formatProposalMoney(proposal.pricingSnapshot?.totals.monthly ?? 0)
                       }
                     </td>

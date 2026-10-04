@@ -35606,7 +35606,7 @@ describe('proposal questionnaires (postgres branch)', () => {
     })
     await postgresStore(fake).startProposalQuestionnaireDraft('pq-1')
     const claim = fake.statements.find((s) => /proposal_id is null/i.test(s.text))
-    expect(claim.text).toMatch(/where id = \$1 and proposal_id is null/)
+    expect(claim.text).toMatch(/where id = \$1 and \(proposal_id is null or proposal_id = \$3\)/)
     expect(fake.statements.some((s) => /^delete from proposals where id/i.test(s.text))).toBe(true)
   })
 
@@ -35620,5 +35620,193 @@ describe('proposal questionnaires (postgres branch)', () => {
     const update = fake.statements.find((s) => /^update proposal_questionnaires/i.test(s.text))
     expect(update.text).toMatch(/status <> 'submitted'/)
     expect(update.params[1]).toMatch(/^[A-Za-z0-9_-]{43}$/)
+  })
+})
+
+/**
+ * Review follow-ups for the questionnaire: a deleted auto-draft must not strand
+ * its questionnaire, a failed claim must not leave an orphan draft, and the email
+ * log must say whether an append actually inserted (so a retried webhook notifies
+ * nobody twice).
+ */
+describe('a questionnaire whose draft was deleted (file backend)', () => {
+  beforeEach(async () => {
+    await clearQuestionnaires()
+    await setProposalRates(store)
+  })
+
+  async function answeredWithDraft() {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    await store.submitProposalQuestionnaire({ token: created.token }, LINK_ANSWERS)
+    const { proposal } = await store.startProposalQuestionnaireDraft(created.id)
+    return { id: created.id, proposal }
+  }
+
+  it('deleting the draft clears the questionnaire’s link to it, so Start draft is offered again', async () => {
+    const { id, proposal } = await answeredWithDraft()
+    expect((await store.getProposalQuestionnaire(id)).proposalId).toBe(proposal.id)
+    expect(await store.deleteProposal(proposal.id)).toBe(true)
+    expect((await store.getProposalQuestionnaire(id)).proposalId).toBeNull()
+    const again = await store.startProposalQuestionnaireDraft(id)
+    expect(again.created).toBe(true)
+    expect(again.proposal.id).not.toBe(proposal.id)
+    expect((await store.getProposalQuestionnaire(id)).proposalId).toBe(again.proposal.id)
+  })
+
+  it('deleting some other proposal leaves the link alone', async () => {
+    const { id, proposal } = await answeredWithDraft()
+    const other = await store.createProposal({})
+    await store.deleteProposal(other.id)
+    expect((await store.getProposalQuestionnaire(id)).proposalId).toBe(proposal.id)
+  })
+
+  it('treats a link to a proposal that no longer exists as unclaimed', async () => {
+    const { id, proposal } = await answeredWithDraft()
+    // Gone behind the store's back (an old delete from before the link was cleared).
+    await editStoredQuestionnaire(id, (row) => {
+      row.proposalId = 'prop-gone'
+    })
+    const again = await store.startProposalQuestionnaireDraft(id)
+    expect(again.created).toBe(true)
+    expect(again.proposal.id).not.toBe('prop-gone')
+    expect(again.proposal.id).not.toBe(proposal.id)
+    expect((await store.getProposalQuestionnaire(id)).proposalId).toBe(again.proposal.id)
+    // ...and still only one per questionnaire once it is real again.
+    const third = await store.startProposalQuestionnaireDraft(id)
+    expect(third.created).toBe(false)
+    expect(third.proposal.id).toBe(again.proposal.id)
+  })
+})
+
+describe('the questionnaire email log says whether an append inserted (file backend)', () => {
+  beforeEach(async () => {
+    await clearQuestionnaires()
+  })
+
+  it('is appended once; a retried delivery event is not appended again', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    const event = { kind: 'delivery', event: 'bounced', providerId: 'em_7', to: ['pat@acme.test'] }
+    const first = await store.appendProposalQuestionnaireEmailEvent(created.id, event)
+    const retry = await store.appendProposalQuestionnaireEmailEvent(created.id, event)
+    expect(first.appended).toBe(true)
+    expect(retry.appended).toBe(false)
+    expect(retry.emailLog).toHaveLength(1)
+  })
+
+  it('two at the same instant: exactly one inserts', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    const event = { kind: 'delivery', event: 'bounced', providerId: 'em_8', to: ['pat@acme.test'] }
+    const both = await Promise.all([
+      store.appendProposalQuestionnaireEmailEvent(created.id, event),
+      store.appendProposalQuestionnaireEmailEvent(created.id, event),
+    ])
+    expect(both.filter((entry) => entry.appended)).toHaveLength(1)
+    expect((await store.getProposalQuestionnaire(created.id)).emailLog).toHaveLength(1)
+  })
+
+  it('an append with no provider id always inserts', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    const send = { kind: 'send', ok: false, to: ['pat@acme.test'], error: 'refused' }
+    expect((await store.appendProposalQuestionnaireEmailEvent(created.id, send)).appended).toBe(true)
+    expect((await store.appendProposalQuestionnaireEmailEvent(created.id, send)).appended).toBe(true)
+  })
+})
+
+describe('proposal questionnaires: the review follow-ups (postgres branch)', () => {
+  function pool(rowsFor = () => [], failOn = null) {
+    const statements = []
+    return {
+      statements,
+      pool: {
+        async query(text, params) {
+          const sql = String(text).trim()
+          statements.push({ text: sql, params })
+          if (failOn && failOn.test(sql)) throw new Error('boom')
+          if (/from firm_settings where id = 'singleton'/i.test(sql)) {
+            return { rows: [{ name: 'PB&J', proposal_pricing: null }] }
+          }
+          const rows = rowsFor(sql, params)
+          return { rows, rowCount: rows.length }
+        },
+      },
+    }
+  }
+  const submittedRow = (extra = {}) => ({
+    id: 'pq-1',
+    token: 'T'.repeat(43),
+    mode: 'link',
+    status: 'submitted',
+    questions: JSON.stringify(buildQuestionnaire(defaultProposalPricing())),
+    answers: { company: 'Acme' },
+    email_log: [],
+    proposal_id: null,
+    ...extra,
+  })
+  const draftRow = (id = 'prop-x') => ({ id, status: 'draft', prospect: {}, inputs: {}, selections: [] })
+
+  it('deleting a draft clears every questionnaire that pointed at it', async () => {
+    const fake = pool((sql) => {
+      if (/^select .* from proposals where id/is.test(sql)) return [draftRow('prop-1')]
+      if (/^delete from proposals/i.test(sql)) return [{ id: 'prop-1' }]
+      return []
+    })
+    expect(await postgresStore(fake).deleteProposal('prop-1')).toBe(true)
+    const clear = fake.statements.find((s) => /^update proposal_questionnaires/i.test(s.text))
+    expect(clear.text).toMatch(/set proposal_id = null/)
+    expect(clear.text).toMatch(/where proposal_id = \$1/)
+    expect(clear.params).toEqual(['prop-1'])
+  })
+
+  it('does not touch the questionnaires when nothing was deleted', async () => {
+    const fake = pool((sql) => (/^select .* from proposals where id/is.test(sql) ? [draftRow('prop-1')] : []))
+    expect(await postgresStore(fake).deleteProposal('prop-1')).toBe(false)
+    expect(fake.statements.some((s) => /^update proposal_questionnaires/i.test(s.text))).toBe(false)
+  })
+
+  it('claims over a dangling proposal id, and only over THAT one', async () => {
+    const fake = pool((sql) => {
+      if (/^select .* from proposal_questionnaires where id/is.test(sql)) {
+        return [submittedRow({ proposal_id: 'prop-gone' })]
+      }
+      if (/^select .* from proposals where id/is.test(sql)) return []
+      if (/^insert into proposals/i.test(sql)) return [draftRow('prop-new')]
+      if (/^update proposal_questionnaires/i.test(sql)) return [{ id: 'pq-1' }]
+      return []
+    })
+    const result = await postgresStore(fake).startProposalQuestionnaireDraft('pq-1')
+    expect(result.created).toBe(true)
+    const claim = fake.statements.find((s) => /^update proposal_questionnaires/i.test(s.text))
+    expect(claim.text).toMatch(/where id = \$1 and \(proposal_id is null or proposal_id = \$3\)/)
+    expect(claim.params).toEqual(['pq-1', 'prop-new', 'prop-gone'])
+  })
+
+  it('a claim that throws deletes the draft it just made, and rethrows', async () => {
+    const fake = pool(
+      (sql) => {
+        if (/^select .* from proposal_questionnaires where id/is.test(sql)) return [submittedRow()]
+        if (/^select .* from proposals where id/is.test(sql)) return [draftRow('prop-new')]
+        if (/^insert into proposals/i.test(sql)) return [draftRow('prop-new')]
+        if (/^delete from proposals/i.test(sql)) return [{ id: 'prop-new' }]
+        return []
+      },
+      /^update proposal_questionnaires\s+set proposal_id = \$2/i,
+    )
+    await expect(postgresStore(fake).startProposalQuestionnaireDraft('pq-1')).rejects.toThrow('boom')
+    const del = fake.statements.find((s) => /^delete from proposals where id/i.test(s.text))
+    expect(del.params).toEqual(['prop-new'])
+  })
+
+  it('reports an append that inserted, and one the @> guard refused', async () => {
+    const event = { kind: 'delivery', event: 'bounced', providerId: 'em_1', to: ['a@b.test'] }
+    const inserted = pool((sql) => {
+      if (/^select .* from proposal_questionnaires where id/is.test(sql)) return [submittedRow({ status: 'open' })]
+      if (/^update proposal_questionnaires/i.test(sql)) return [submittedRow({ status: 'open' })]
+      return []
+    })
+    expect((await postgresStore(inserted).appendProposalQuestionnaireEmailEvent('pq-1', event)).appended).toBe(true)
+    const refused = pool((sql) =>
+      /^select .* from proposal_questionnaires where id/is.test(sql) ? [submittedRow({ status: 'open' })] : [],
+    )
+    expect((await postgresStore(refused).appendProposalQuestionnaireEmailEvent('pq-1', event)).appended).toBe(false)
   })
 })

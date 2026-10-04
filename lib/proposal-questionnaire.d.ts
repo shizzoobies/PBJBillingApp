@@ -39,6 +39,7 @@ export type QuestionnaireSection = {
 export type Questionnaire = { welcome: string; sections: QuestionnaireSection[] }
 
 export declare const QUESTIONNAIRE_WELCOME: string
+export declare const QUESTIONNAIRE_NOTES_MARKER: string
 export declare const QUESTIONNAIRE_EXPIRY_DAYS: number
 
 export declare function buildQuestionnaire(

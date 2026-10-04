@@ -1891,13 +1891,11 @@ async function recordQuestionnaireDelivery(request, questionnaireId, deliveryEve
     deliveryEvent === 'bounced' || deliveryEvent === 'complained'
       ? String(eventData.bounce?.message ?? eventData.bounce?.type ?? '')
       : ''
-  const alreadyLogged = found.emailLog.some(
-    (entry) =>
-      entry?.kind === 'delivery' &&
-      entry?.event === deliveryEvent &&
-      (entry?.providerId ?? null) === providerId,
-  )
-  await appDataStore.appendProposalQuestionnaireEmailEvent(found.id, {
+  // Resend retries until it gets a 200, so the same event arrives more than once.
+  // Whether THIS delivery was the one that logged it is the store's conditional
+  // append to say (`appended`), not a read beforehand: two retries that land at
+  // once both pass a read, and only one of them inserts.
+  const logged = await appDataStore.appendProposalQuestionnaireEmailEvent(found.id, {
     kind: 'delivery',
     event: deliveryEvent,
     at: resendEvent?.created_at ?? null,
@@ -1905,7 +1903,7 @@ async function recordQuestionnaireDelivery(request, questionnaireId, deliveryEve
     to: Array.isArray(eventData.to) ? eventData.to : [eventData.to].filter(Boolean),
     detail,
   })
-  if (!alreadyLogged && (deliveryEvent === 'bounced' || deliveryEvent === 'complained')) {
+  if (logged?.appended && (deliveryEvent === 'bounced' || deliveryEvent === 'complained')) {
     const what = deliveryEvent === 'bounced' ? 'bounced' : 'was marked as spam'
     const who = found.sentTo || 'a prospect'
     const members = await appDataStore.getTeamMembers()
@@ -3785,14 +3783,20 @@ const server = createServer(async (request, response) => {
           return
         }
 
-        // The answers are in. The draft and the notice are best-effort from here:
-        // nothing below may turn a stored submission into an error page.
-        await finishQuestionnaireSubmission(request, submitted)
+        // The answers are in, so the prospect is thanked NOW: the draft and the
+        // owner emails are best-effort and slow (an email per owner), and nothing
+        // after this may turn a stored submission into an error page or make them
+        // wait on it.
         response.writeHead(303, {
           Location: '/questionnaire/thanks',
           ...QUESTIONNAIRE_RESPONSE_HEADERS,
         })
         response.end()
+        try {
+          await finishQuestionnaireSubmission(request, submitted)
+        } catch (error) {
+          console.error('[questionnaire] after-submit work failed:', submitted.id, error)
+        }
         return
       } catch (error) {
         console.error('[questionnaire] public route failed:', error)
