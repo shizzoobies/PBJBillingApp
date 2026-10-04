@@ -8,6 +8,7 @@ import type {
   ProposalMultiplier,
   ProposalPatch,
   ProposalPricingKind,
+  ProposalQuestionnaire,
   ProposalRole,
   ProposalSelection,
   ProposalService,
@@ -60,6 +61,23 @@ export function proposalTitle(proposal: Pick<Proposal, 'prospect'>): string {
 }
 
 /** "Sep 23, 2026" from an ISO timestamp; '' for anything else. */
+/** Who a questionnaire is about: the business or the person, whichever the answers named. */
+export function questionnaireName(questionnaire: ProposalQuestionnaire): string {
+  const answers = questionnaire.answers
+  const company = typeof answers.company === 'string' ? answers.company.trim() : ''
+  const contact = typeof answers.contactName === 'string' ? answers.contactName.trim() : ''
+  return company || contact || 'Not named yet'
+}
+
+/** Waiting, Answered, or Expired (a withdrawn one rests with the expired). */
+export function questionnaireGroup(
+  questionnaire: ProposalQuestionnaire,
+): 'waiting' | 'answered' | 'expired' {
+  if (questionnaire.status === 'submitted') return 'answered'
+  if (questionnaire.status === 'withdrawn' || questionnaire.expired) return 'expired'
+  return 'waiting'
+}
+
 export function proposalDate(iso: string | null | undefined): string {
   if (!iso) return ''
   const date = new Date(iso)

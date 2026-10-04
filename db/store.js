@@ -37,6 +37,14 @@ import {
   sanitizeProposalPricing,
 } from '../lib/proposal-pricing.js'
 import {
+  QUESTIONNAIRE_EXPIRY_DAYS,
+  answersToProposalSeed,
+  buildQuestionnaire,
+  cleanQuestionnaireAnswers,
+  flattenQuestions,
+  questionnaireProblems,
+} from '../lib/proposal-questionnaire.js'
+import {
   deletionOpenWaitRefusal,
   isWaitingOnOpen,
   REMOVAL_WOULD_COMPLETE_WAITING_STEP,
@@ -1087,6 +1095,23 @@ export class ProposalStateError extends Error {
 }
 
 /**
+ * A proposal-questionnaire write the questionnaire's own state refuses: answering
+ * one twice, after it expired, or after it was withdrawn - or answers that are
+ * missing what a link needs. `reason` is machine-readable ('missing',
+ * 'submitted', 'withdrawn', 'expired', 'not_open', 'invalid', 'not_submitted') so
+ * the public page can choose its words; `message` is a sentence for the owner's
+ * screen; `problems` lists every missing answer for 'invalid'.
+ */
+export class ProposalQuestionnaireError extends Error {
+  constructor(message, reason = 'not_open', problems = []) {
+    super(message)
+    this.name = 'ProposalQuestionnaireError'
+    this.reason = reason
+    this.problems = problems
+  }
+}
+
+/**
  * A bulk save that would delete a client who still has time entries or
  * invoices in the database. A fact about the data, not a bug: the endpoint
  * answers 409 `client_has_history` with `message` (which names the client) and
@@ -1265,6 +1290,12 @@ export class TooManyPendingNotesError extends Error {
 }
 
 export const PROPOSAL_STATUSES = ['draft', 'sent', 'accepted', 'declined']
+
+export const PROPOSAL_QUESTIONNAIRE_STATUSES = ['open', 'submitted', 'withdrawn']
+
+/** Every `proposal_questionnaires` column, in the order `mapProposalQuestionnaire` reads them. */
+const PROPOSAL_QUESTIONNAIRE_COLUMNS = `id, token, mode, status, questions, answers, email_log,
+  proposal_id, sent_to, expires_at, submitted_at, created_by, created_at, updated_at`
 
 /** Every `proposals` column, in the order `mapProposal` reads them. */
 const PROPOSAL_COLUMNS = `id, status, prospect, client_id, inputs, selections, pricing_snapshot,
@@ -4776,6 +4807,35 @@ export class AppDataStore {
       await this.pool.query(`alter table proposals drop constraint if exists proposals_status_check`)
       await this.pool.query(
         `alter table proposals add constraint proposals_status_check check (status in ('draft', 'sent', 'accepted', 'declined'))`,
+      )
+
+      // PROPOSAL QUESTIONNAIRES (featreq-8f139178): the intake that comes before
+      // a proposal - a link a prospect fills in, or a sheet worked on a call.
+      // Outside the bulk save and the workspace fingerprint, like `proposals`.
+      // `token` is the link's whole authority (32 random bytes, unique, null for a
+      // call sheet); `proposal_id` has NO foreign key (the `plan_ids` idiom), so a
+      // deleted draft never blocks or cascades.
+      await this.pool.query(`
+        create table if not exists proposal_questionnaires (
+          id text primary key,
+          token text,
+          mode text not null default 'link' check (mode in ('link', 'call')),
+          status text not null default 'open'
+            check (status in ('open', 'submitted', 'withdrawn')),
+          questions jsonb not null default '{}'::jsonb,
+          answers jsonb not null default '{}'::jsonb,
+          email_log jsonb not null default '[]'::jsonb,
+          proposal_id text,
+          sent_to text,
+          expires_at timestamptz,
+          submitted_at timestamptz,
+          created_by text,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(
+        `create unique index if not exists proposal_questionnaires_token_key on proposal_questionnaires (token)`,
       )
 
       // Reusable contacts (shared across clients). Mirrors the plans/clients
@@ -11029,10 +11089,15 @@ export class AppDataStore {
       return AppDataStore.mapProposal(rows[0] ?? record)
     }
 
-    const authState = await readJson(localAuthPath)
-    if (!Array.isArray(authState.proposals)) authState.proposals = []
-    authState.proposals.push(record)
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    // One queue slot for the read AND the write, so two drafts made at the same
+    // instant (the questionnaire's submit and its retry button) cannot each read
+    // the list before the other has pushed. Raw fs calls only in here.
+    await enqueueFileOperation(localAuthPath, async () => {
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      if (!Array.isArray(authState.proposals)) authState.proposals = []
+      authState.proposals.push(record)
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+    })
     return AppDataStore.mapProposal(record)
   }
 
@@ -11641,7 +11706,8 @@ export class AppDataStore {
     let createdClientName = null
 
     if (!clientId) {
-      const { company, contactName, email, phone } = proposal.prospect
+      const { company, contactName, title, email, phone, addressLine1, addressLine2, city, state, postalCode } =
+        proposal.prospect
       const name = company || contactName
       if (!name) {
         throw new ProposalStateError('Give the prospect a company or contact name before accepting.')
@@ -11653,11 +11719,16 @@ export class AppDataStore {
         contactName,
         email,
         phone,
+        addressLine1,
+        addressLine2,
+        city,
+        state,
+        postalCode,
         lifecycleStage: 'onboarding',
         billingMode: 'subscription',
         monthlyRate,
         paymentTerms: firm.clientDefaults?.paymentTerms ?? '',
-        ...(contactName ? { newPrimaryContact: { name: contactName, email, phone } } : {}),
+        ...(contactName ? { newPrimaryContact: { name: contactName, title, email, phone } } : {}),
       })
       if (!client) throw new ProposalStateError('The client could not be created.')
       clientId = client.id
@@ -14462,6 +14533,521 @@ export class AppDataStore {
     return withTotalChanged(next, totalChanged, wasSent)
   }
 
+  // ---- Proposal questionnaires (featreq-8f139178) ----
+  //
+  // lib/proposal-questionnaire.js. A questionnaire is the intake that comes BEFORE
+  // a proposal: a link the prospect fills in alone, or a sheet Brittany works
+  // through on a call. Its questions are frozen onto the row when it is made, and
+  // when it is answered the app starts a DRAFT proposal from the answers (nothing
+  // selected, nothing priced). Storage mirrors `proposals`: a table on Postgres,
+  // the auth-state file on the file backend - outside the bulk save and the
+  // workspace fingerprint, so a stale tab can never rewrite one.
+  //
+  // The two things that must hold under a race are the single submission and the
+  // single draft. Both are ONE conditional write (`where status = 'open'`,
+  // `where proposal_id is null`), on Postgres as a single UPDATE and on the file
+  // backend inside one queue slot.
+
+  /** Normalize a stored questionnaire (either backend's row shape) for the API. */
+  static mapProposalQuestionnaire(row) {
+    if (!row) return null
+    if (!PROPOSAL_QUESTIONNAIRE_STATUSES.includes(row.status)) {
+      console.error('proposal questionnaire row skipped', row.id, 'status', row.status)
+      return null
+    }
+    const json = (value) => (typeof value === 'string' ? safeJsonParse(value) : value)
+    const iso = (value) => {
+      if (!value) return null
+      const date = new Date(value)
+      return Number.isNaN(date.getTime()) ? null : date.toISOString()
+    }
+    const questions = json(row.questions)
+    const answers = json(row.answers)
+    const log = json(row.email_log ?? row.emailLog)
+    const expiresAt = iso(row.expires_at ?? row.expiresAt)
+    return {
+      id: row.id,
+      token: typeof row.token === 'string' && row.token ? row.token : null,
+      mode: row.mode === 'call' ? 'call' : 'link',
+      status: row.status,
+      // Open and past its date: still `open` on the row (nothing flips it), so
+      // every reader asks the same question the same way.
+      expired: row.status === 'open' && expiresAt !== null && new Date(expiresAt).getTime() <= Date.now(),
+      questions:
+        questions && typeof questions === 'object' && Array.isArray(questions.sections)
+          ? questions
+          : { welcome: '', sections: [] },
+      answers: answers && typeof answers === 'object' && !Array.isArray(answers) ? answers : {},
+      emailLog: Array.isArray(log) ? log : [],
+      proposalId: row.proposal_id ?? row.proposalId ?? null,
+      sentTo: row.sent_to ?? row.sentTo ?? null,
+      expiresAt,
+      submittedAt: iso(row.submitted_at ?? row.submittedAt),
+      createdBy: row.created_by ?? row.createdBy ?? null,
+      createdAt: iso(row.created_at ?? row.createdAt),
+      updatedAt: iso(row.updated_at ?? row.updatedAt),
+    }
+  }
+
+  /**
+   * The ONE read-modify-write on the file backend's questionnaires. Raw fs calls
+   * only, in a single queue slot: `readJson` / `writeFile` enqueue behind this
+   * very slot and would deadlock, and as two separate slots another writer's
+   * submit could land between the check and the write. `mutate` receives the
+   * live list and returns `{ result, changed }`; it may throw to refuse.
+   */
+  async _mutateQuestionnaireFile(mutate) {
+    return enqueueFileOperation(localAuthPath, async () => {
+      const authState = existsSync(localAuthPath)
+        ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+        : {}
+      const list = Array.isArray(authState.proposalQuestionnaires)
+        ? authState.proposalQuestionnaires
+        : []
+      const { result, changed } = mutate(list)
+      if (changed) {
+        authState.proposalQuestionnaires = list
+        await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      }
+      return result
+    })
+  }
+
+  /** Why a questionnaire cannot take a write right now, as the error to throw. */
+  static questionnaireClosedError(record) {
+    if (!record) return new ProposalQuestionnaireError('That questionnaire no longer exists.', 'missing')
+    if (record.status === 'submitted') {
+      return new ProposalQuestionnaireError('This questionnaire was already submitted.', 'submitted')
+    }
+    if (record.status === 'withdrawn') {
+      return new ProposalQuestionnaireError('This questionnaire was withdrawn.', 'withdrawn')
+    }
+    if (record.expired) {
+      return new ProposalQuestionnaireError('This questionnaire link has expired.', 'expired')
+    }
+    return new ProposalQuestionnaireError('This questionnaire is not open.', 'not_open')
+  }
+
+  /**
+   * Start a questionnaire, its questions frozen from the CURRENT catalog. A link
+   * gets a 32-byte token and a thirty-day life; a call sheet has neither (nobody
+   * opens it but an owner).
+   */
+  async createProposalQuestionnaire({ mode = 'link', createdBy = null } = {}) {
+    if (mode !== 'link' && mode !== 'call') {
+      throw new ProposalQuestionnaireError('A questionnaire is a link or a call.', 'invalid')
+    }
+    const pricing = (await this.getFirmSettings()).proposalPricing
+    const now = nowIso()
+    const record = {
+      id: `pq-${randomUUID().slice(0, 8)}`,
+      token: mode === 'link' ? randomBytes(32).toString('base64url') : null,
+      mode,
+      status: 'open',
+      questions: buildQuestionnaire(pricing),
+      answers: {},
+      emailLog: [],
+      proposalId: null,
+      sentTo: null,
+      expiresAt:
+        mode === 'link'
+          ? new Date(Date.now() + QUESTIONNAIRE_EXPIRY_DAYS * 24 * 60 * 60 * 1000).toISOString()
+          : null,
+      submittedAt: null,
+      createdBy: cleanProposalId(createdBy),
+      createdAt: now,
+      updatedAt: now,
+    }
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `insert into proposal_questionnaires (id, token, mode, status, questions, answers,
+            email_log, expires_at, created_by, created_at, updated_at)
+         values ($1, $2, $3, 'open', $4::jsonb, '{}'::jsonb, '[]'::jsonb, $5, $6, $7, $7)
+         returning ${PROPOSAL_QUESTIONNAIRE_COLUMNS}`,
+        [
+          record.id,
+          record.token,
+          record.mode,
+          JSON.stringify(record.questions),
+          record.expiresAt,
+          record.createdBy,
+          now,
+        ],
+      )
+      return AppDataStore.mapProposalQuestionnaire(rows[0] ?? record)
+    }
+    await this._mutateQuestionnaireFile((list) => {
+      list.push(record)
+      return { result: null, changed: true }
+    })
+    return AppDataStore.mapProposalQuestionnaire(record)
+  }
+
+  /** Every questionnaire (or one proposal's), newest first. Owner-only at the endpoint. */
+  async listProposalQuestionnaires({ proposalId = null } = {}) {
+    if (this.pool) {
+      const { rows } = proposalId
+        ? await this.pool.query(
+            `select ${PROPOSAL_QUESTIONNAIRE_COLUMNS} from proposal_questionnaires
+              where proposal_id = $1 order by created_at desc`,
+            [proposalId],
+          )
+        : await this.pool.query(
+            `select ${PROPOSAL_QUESTIONNAIRE_COLUMNS} from proposal_questionnaires
+              order by created_at desc limit 200`,
+          )
+      return rows.map((row) => AppDataStore.mapProposalQuestionnaire(row)).filter(Boolean)
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    return (Array.isArray(authState.proposalQuestionnaires) ? authState.proposalQuestionnaires : [])
+      .filter((row) => row && (!proposalId || row.proposalId === proposalId))
+      .map((row) => AppDataStore.mapProposalQuestionnaire(row))
+      .filter(Boolean)
+      .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
+  }
+
+  /** One questionnaire, or null. */
+  async getProposalQuestionnaire(id) {
+    if (!id) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${PROPOSAL_QUESTIONNAIRE_COLUMNS} from proposal_questionnaires where id = $1`,
+        [id],
+      )
+      return rows[0] ? AppDataStore.mapProposalQuestionnaire(rows[0]) : null
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const found = (
+      Array.isArray(authState.proposalQuestionnaires) ? authState.proposalQuestionnaires : []
+    ).find((row) => row && row.id === id)
+    return found ? AppDataStore.mapProposalQuestionnaire(found) : null
+  }
+
+  /**
+   * The questionnaire one link names, whatever state it is in. Says nothing about
+   * whether it can be answered - the public route decides which page to show.
+   */
+  async findProposalQuestionnaireByToken(token) {
+    const value = String(token ?? '').trim()
+    if (!value) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${PROPOSAL_QUESTIONNAIRE_COLUMNS} from proposal_questionnaires where token = $1`,
+        [value],
+      )
+      return rows[0] ? AppDataStore.mapProposalQuestionnaire(rows[0]) : null
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const found = (
+      Array.isArray(authState.proposalQuestionnaires) ? authState.proposalQuestionnaires : []
+    ).find((row) => row && typeof row.token === 'string' && row.token === value)
+    return found ? AppDataStore.mapProposalQuestionnaire(found) : null
+  }
+
+  /** The answers as the frozen questions would accept them. */
+  static cleanQuestionnaireAnswersFor(record, raw) {
+    const call = record.mode === 'call'
+    return cleanQuestionnaireAnswers(flattenQuestions(record.questions), raw, {
+      includeCallOnly: call,
+      lenient: call,
+    })
+  }
+
+  /**
+   * Save a call sheet's progress. A call can run long and be picked up again, so
+   * the sheet saves as it goes; the public link deliberately cannot (decided).
+   * Only an open call sheet takes it.
+   */
+  async saveProposalQuestionnaireAnswers(id, rawAnswers) {
+    const current = await this.getProposalQuestionnaire(id)
+    if (!current) return null
+    if (current.mode !== 'call') {
+      throw new ProposalQuestionnaireError('Only a call sheet saves progress.', 'invalid')
+    }
+    if (current.status !== 'open') throw AppDataStore.questionnaireClosedError(current)
+    const answers = AppDataStore.cleanQuestionnaireAnswersFor(current, rawAnswers)
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update proposal_questionnaires
+            set answers = $2::jsonb, updated_at = now()
+          where id = $1 and status = 'open'
+          returning ${PROPOSAL_QUESTIONNAIRE_COLUMNS}`,
+        [id, JSON.stringify(answers)],
+      )
+      if (rows[0]) return AppDataStore.mapProposalQuestionnaire(rows[0])
+      throw AppDataStore.questionnaireClosedError(await this.getProposalQuestionnaire(id))
+    }
+    return this._mutateQuestionnaireFile((list) => {
+      const target = list.find((row) => row && row.id === id)
+      if (!target || target.status !== 'open') {
+        throw AppDataStore.questionnaireClosedError(AppDataStore.mapProposalQuestionnaire(target))
+      }
+      target.answers = answers
+      target.updatedAt = nowIso()
+      return { result: AppDataStore.mapProposalQuestionnaire(target), changed: true }
+    })
+  }
+
+  /**
+   * Take the answers - ONCE. `selector` is `{ token }` (the public link) or
+   * `{ id }` (an owner submitting a call sheet). The claim is one conditional
+   * write: `status = 'open'` and not past its date, so two submissions at the
+   * same instant cannot both win; the loser is told why in a sentence and a
+   * `reason`. A link submission is also pinned to the token it arrived with, so
+   * a link that was replaced a moment ago cannot still land.
+   *
+   * What is wrong with the answers (a link with no email) is refused BEFORE the
+   * claim, so a mistake does not use up the one submission.
+   *
+   * Returns the submitted questionnaire. Starting the draft is its own call
+   * (`startProposalQuestionnaireDraft`): a draft that fails to build must not
+   * undo an answer the prospect already gave.
+   */
+  async submitProposalQuestionnaire(selector, rawAnswers) {
+    const current = selector?.token
+      ? await this.findProposalQuestionnaireByToken(selector.token)
+      : await this.getProposalQuestionnaire(selector?.id)
+    if (!current) throw AppDataStore.questionnaireClosedError(null)
+    if (current.status !== 'open' || current.expired) throw AppDataStore.questionnaireClosedError(current)
+
+    const answers = AppDataStore.cleanQuestionnaireAnswersFor(current, rawAnswers)
+    const problems = questionnaireProblems(flattenQuestions(current.questions), answers, {
+      mode: current.mode,
+    })
+    if (problems.length > 0) {
+      throw new ProposalQuestionnaireError(problems[0], 'invalid', problems)
+    }
+
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update proposal_questionnaires
+            set status = 'submitted', answers = $2::jsonb, submitted_at = now(), updated_at = now()
+          where id = $1 and token is not distinct from $3
+            and status = 'open' and (expires_at is null or expires_at > now())
+          returning ${PROPOSAL_QUESTIONNAIRE_COLUMNS}`,
+        [current.id, JSON.stringify(answers), current.token],
+      )
+      if (rows[0]) return AppDataStore.mapProposalQuestionnaire(rows[0])
+      throw AppDataStore.questionnaireClosedError(await this.getProposalQuestionnaire(current.id))
+    }
+    return this._mutateQuestionnaireFile((list) => {
+      const target = list.find((row) => row && row.id === current.id)
+      const live = AppDataStore.mapProposalQuestionnaire(target)
+      if (!live || live.status !== 'open' || live.expired || live.token !== current.token) {
+        throw AppDataStore.questionnaireClosedError(live)
+      }
+      const now = nowIso()
+      target.status = 'submitted'
+      target.answers = answers
+      target.submittedAt = now
+      target.updatedAt = now
+      return { result: AppDataStore.mapProposalQuestionnaire(target), changed: true }
+    })
+  }
+
+  /**
+   * Start the DRAFT proposal from a submitted questionnaire's answers: the
+   * contact block, the counts, the rest in the notes - no service selected, so
+   * nothing is priced until she picks. ONE draft per questionnaire: the link is
+   * claimed with `proposal_id is null`, and a draft built by a call that lost
+   * that race is deleted again (it has no history yet), so the retry button and
+   * the submit route can both call this without ever making two.
+   *
+   * Returns `{ proposal, created }`.
+   */
+  async startProposalQuestionnaireDraft(id, { createdBy = null } = {}) {
+    const current = await this.getProposalQuestionnaire(id)
+    if (!current) throw AppDataStore.questionnaireClosedError(null)
+    if (current.status !== 'submitted') {
+      throw new ProposalQuestionnaireError('Only an answered questionnaire starts a draft.', 'not_submitted')
+    }
+    if (current.proposalId) {
+      return { proposal: await this.getProposal(current.proposalId), created: false }
+    }
+    const seed = answersToProposalSeed(flattenQuestions(current.questions), current.answers)
+    const proposal = await this.createProposal({
+      prospect: seed.prospect,
+      inputs: seed.inputs,
+      selections: [],
+      createdBy,
+    })
+
+    let claimed = false
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update proposal_questionnaires
+            set proposal_id = $2, updated_at = now()
+          where id = $1 and proposal_id is null
+          returning id`,
+        [id, proposal.id],
+      )
+      claimed = rows.length > 0
+    } else {
+      claimed = await this._mutateQuestionnaireFile((list) => {
+        const target = list.find((row) => row && row.id === id)
+        if (!target || target.proposalId) return { result: false, changed: false }
+        target.proposalId = proposal.id
+        target.updatedAt = nowIso()
+        return { result: true, changed: true }
+      })
+    }
+    if (claimed) return { proposal, created: true }
+
+    // Someone else's draft got there first: take ours back and answer with theirs.
+    await this.deleteProposal(proposal.id).catch(() => {})
+    const latest = await this.getProposalQuestionnaire(id)
+    return {
+      proposal: latest?.proposalId ? await this.getProposal(latest.proposalId) : null,
+      created: false,
+    }
+  }
+
+  /** Take a questionnaire back. Only an open one: an answered one is a record. */
+  async withdrawProposalQuestionnaire(id) {
+    const current = await this.getProposalQuestionnaire(id)
+    if (!current) return null
+    if (current.status !== 'open') throw AppDataStore.questionnaireClosedError(current)
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update proposal_questionnaires
+            set status = 'withdrawn', updated_at = now()
+          where id = $1 and status = 'open'
+          returning ${PROPOSAL_QUESTIONNAIRE_COLUMNS}`,
+        [id],
+      )
+      if (rows[0]) return AppDataStore.mapProposalQuestionnaire(rows[0])
+      throw AppDataStore.questionnaireClosedError(await this.getProposalQuestionnaire(id))
+    }
+    return this._mutateQuestionnaireFile((list) => {
+      const target = list.find((row) => row && row.id === id)
+      if (!target || target.status !== 'open') {
+        throw AppDataStore.questionnaireClosedError(AppDataStore.mapProposalQuestionnaire(target))
+      }
+      target.status = 'withdrawn'
+      target.updatedAt = nowIso()
+      return { result: AppDataStore.mapProposalQuestionnaire(target), changed: true }
+    })
+  }
+
+  /**
+   * A fresh link for a questionnaire that was never answered (expired, withdrawn,
+   * or open and lost): a new token and a new thirty days, and the old token
+   * names nothing from this moment. An answered one is a record and is refused.
+   */
+  async renewProposalQuestionnaireLink(id) {
+    const current = await this.getProposalQuestionnaire(id)
+    if (!current) return null
+    if (current.mode !== 'link') {
+      throw new ProposalQuestionnaireError('Only a link has a link to renew.', 'invalid')
+    }
+    if (current.status === 'submitted') throw AppDataStore.questionnaireClosedError(current)
+    const token = randomBytes(32).toString('base64url')
+    const expiresAt = new Date(
+      Date.now() + QUESTIONNAIRE_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
+    ).toISOString()
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update proposal_questionnaires
+            set token = $2, expires_at = $3, status = 'open', updated_at = now()
+          where id = $1 and mode = 'link' and status <> 'submitted'
+          returning ${PROPOSAL_QUESTIONNAIRE_COLUMNS}`,
+        [id, token, expiresAt],
+      )
+      if (rows[0]) return AppDataStore.mapProposalQuestionnaire(rows[0])
+      throw AppDataStore.questionnaireClosedError(await this.getProposalQuestionnaire(id))
+    }
+    return this._mutateQuestionnaireFile((list) => {
+      const target = list.find((row) => row && row.id === id)
+      if (!target || target.status === 'submitted') {
+        throw AppDataStore.questionnaireClosedError(AppDataStore.mapProposalQuestionnaire(target))
+      }
+      target.token = token
+      target.expiresAt = expiresAt
+      target.status = 'open'
+      target.updatedAt = nowIso()
+      return { result: AppDataStore.mapProposalQuestionnaire(target), changed: true }
+    })
+  }
+
+  /**
+   * One send or provider delivery event on a questionnaire's email log - the
+   * proposal log's shape and its idempotence (Resend retries a webhook until it
+   * gets a 200, so the same event arrives more than once). A successful send also
+   * remembers who it went to. Never touches status. Returns the questionnaire, or
+   * null when there is none.
+   */
+  async appendProposalQuestionnaireEmailEvent(id, entry = {}) {
+    const current = await this.getProposalQuestionnaire(id)
+    if (!current) return null
+    const kind = entry.kind === 'delivery' ? 'delivery' : 'send'
+    const event = kind === 'delivery' ? String(entry.event ?? '').trim().slice(0, 40) : null
+    if (kind === 'delivery' && !event) return current
+    const providerId = entry.providerId ? String(entry.providerId) : null
+    const duplicate =
+      providerId !== null &&
+      current.emailLog.some(
+        (logged) =>
+          logged?.kind === kind &&
+          (logged?.event ?? null) === event &&
+          logged?.providerId === providerId,
+      )
+    if (duplicate) return current
+
+    const at =
+      entry.at && !Number.isNaN(new Date(entry.at).getTime())
+        ? new Date(entry.at).toISOString()
+        : nowIso()
+    const to = (Array.isArray(entry.to) ? entry.to : [entry.to])
+      .filter(Boolean)
+      .map((address) => String(address).slice(0, 320))
+      .slice(0, 10)
+    const clean = {
+      kind,
+      at,
+      providerId,
+      to,
+      ...(kind === 'send'
+        ? {
+            ok: entry.ok === true,
+            subject: String(entry.subject ?? '').slice(0, 200),
+            error: entry.error ? String(entry.error).slice(0, 300) : null,
+          }
+        : { event, detail: String(entry.detail ?? '').slice(0, 300) }),
+    }
+    const sentTo = kind === 'send' && clean.ok && to[0] ? to[0] : null
+
+    if (this.pool) {
+      const probe =
+        providerId !== null ? { kind, providerId, ...(kind === 'delivery' ? { event } : {}) } : null
+      const { rows } = await this.pool.query(
+        probe
+          ? `update proposal_questionnaires
+                set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                    sent_to = coalesce($4, sent_to), updated_at = now()
+              where id = $1 and not (coalesce(email_log, '[]'::jsonb) @> $3::jsonb)
+              returning ${PROPOSAL_QUESTIONNAIRE_COLUMNS}`
+          : `update proposal_questionnaires
+                set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                    sent_to = coalesce($3, sent_to), updated_at = now()
+              where id = $1
+              returning ${PROPOSAL_QUESTIONNAIRE_COLUMNS}`,
+        probe
+          ? [id, JSON.stringify([clean]), JSON.stringify([probe]), sentTo]
+          : [id, JSON.stringify([clean]), sentTo],
+      )
+      if (rows[0]) return AppDataStore.mapProposalQuestionnaire(rows[0])
+      return (await this.getProposalQuestionnaire(id)) ?? current
+    }
+    return this._mutateQuestionnaireFile((list) => {
+      const target = list.find((row) => row && row.id === id)
+      if (!target) return { result: null, changed: false }
+      target.emailLog = [...(Array.isArray(target.emailLog) ? target.emailLog : []), clean]
+      if (sentTo) target.sentTo = sentTo
+      target.updatedAt = nowIso()
+      return { result: AppDataStore.mapProposalQuestionnaire(target), changed: true }
+    })
+  }
+
   // ---- Invoice review events: what a human did to an invoice ----
   //
   // Endpoint-managed (NOT part of the bulk /api/app-data write and NOT in the
@@ -16642,9 +17228,15 @@ export class AppDataStore {
         if (plan.create) {
           primaryContactId = `contact-${randomUUID().slice(0, 8)}`
           await dbClient.query(
-            `insert into contacts (id, name, email, phone, updated_at)
-             values ($1, $2, $3, $4, now())`,
-            [primaryContactId, plan.create.name, plan.create.email, plan.create.phone],
+            `insert into contacts (id, name, email, phone, title, updated_at)
+             values ($1, $2, $3, $4, $5, now())`,
+            [
+              primaryContactId,
+              plan.create.name,
+              plan.create.email,
+              plan.create.phone,
+              plan.create.title || null,
+            ],
           )
         }
         record.contactIds = mergeContactIds(primaryContactId, plan.otherContactIds)

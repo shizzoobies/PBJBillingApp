@@ -125,8 +125,14 @@ export declare function sanitizeProposalPricing(raw: unknown): ProposalPricing
 export type ProposalProspect = {
   company: string
   contactName: string
+  title: string
   email: string
   phone: string
+  addressLine1: string
+  addressLine2: string
+  city: string
+  state: string
+  postalCode: string
   notes: string
 }
 

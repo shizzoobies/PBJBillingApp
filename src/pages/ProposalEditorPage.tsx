@@ -16,6 +16,7 @@ import {
   fetchFirmSettings,
   getProposalRequest,
   listPackagesRequest,
+  listQuestionnairesRequest,
   proposalChatRequest,
   repriceProposalRequest,
   sendProposalRequest,
@@ -32,7 +33,13 @@ import {
   type ProposalPatchBuilder,
   type ProposalTab,
 } from '../lib/proposals'
-import { ApiError, type Package, type Proposal, type ProposalPricing } from '../lib/types'
+import {
+  ApiError,
+  type Package,
+  type Proposal,
+  type ProposalPricing,
+  type ProposalQuestionnaire,
+} from '../lib/types'
 
 /**
  * Keyed on the proposal id (review M1): a Copy navigation swaps the URL to a
@@ -69,6 +76,9 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   const [packages, setPackages] = useState<Package[]>([])
   const [packageId, setPackageId] = useState('')
   const [highlight, setHighlight] = useState<ReadonlySet<string>>(new Set())
+  // The questionnaire this draft was started from, shown read-only on the
+  // Estimate tab (featreq-8f139178). A failed read just means no panel.
+  const [questionnaire, setQuestionnaire] = useState<ProposalQuestionnaire | null>(null)
 
   // Packages are endpoint-managed; Accept can apply one. A failed list just
   // means Accept offers none.
@@ -85,6 +95,20 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void listQuestionnairesRequest(proposalId)
+      .then((rows) => {
+        if (!cancelled) setQuestionnaire(rows.find((row) => row.status === 'submitted') ?? null)
+      })
+      .catch(() => {
+        if (!cancelled) setQuestionnaire(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [proposalId])
 
   // The last server-CONFIRMED proposal. A queued save's patch is built from
   // this, not from `proposal` as it stood when the save was requested.
@@ -494,6 +518,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
             clients={workableClients(data.clients, [proposal.clientId])}
             busy={busy}
             highlight={highlight}
+            questionnaire={questionnaire}
             onSave={save}
             onReprice={reprice}
           />

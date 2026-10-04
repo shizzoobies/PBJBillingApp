@@ -26,6 +26,7 @@ import {
   ManualPaymentError,
   NothingToPushError,
   PackageApplyError,
+  ProposalQuestionnaireError,
   ProposalStateError,
   PushConflictError,
   PushedRecordError,
@@ -69,6 +70,8 @@ import {
   waitingOnStage,
   waitingToggleRefusal,
 } from '../lib/waiting-on-state.js'
+import { buildQuestionnaire } from '../lib/proposal-questionnaire.js'
+import { defaultProposalPricing } from '../lib/proposal-pricing.js'
 import { invoiceAsSent, invoiceDisplayDate } from '../lib/invoice-draft.js'
 import { applyScopeRetag } from '../lib/invoice-scope-retag.js'
 import { buildInvoiceLines, cardProcessingFeeLine } from '../lib/invoice-lines.js'
@@ -35173,5 +35176,449 @@ describe('the store dates its own "today" and "this month" on the firm’s clock
       await postgresStore(fake).recordInvoicePayLinkOpened('inv-1')
       expect(fake.matching(/^update invoices/i)).toEqual([])
     })
+  })
+})
+
+/**
+ * Proposal questionnaires (featreq-8f139178) - the intake that comes before a
+ * proposal. Their own table on Postgres, the auth-state file on the file backend,
+ * outside the bulk save and the workspace fingerprint like `proposals`.
+ */
+async function clearQuestionnaires() {
+  const authState = existsSync(localAuthPath)
+    ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+    : {}
+  authState.proposalQuestionnaires = []
+  authState.proposals = []
+  await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+}
+
+/** Rewrite one stored questionnaire (to age it, say) behind the store's back. */
+async function editStoredQuestionnaire(id, change) {
+  const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+  const row = authState.proposalQuestionnaires.find((entry) => entry.id === id)
+  change(row)
+  await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+}
+
+const LINK_ANSWERS = {
+  company: 'Acme Books',
+  contactName: 'Pat Doe',
+  title: 'Owner',
+  email: 'pat@acme.test',
+  phone: '615-555-0101',
+  addressLine1: '1 Main St',
+  city: 'Nashville',
+  state: 'TN',
+  postalCode: '37201',
+  whatTheyDo: 'Bakery',
+  'count:transactions': '120',
+  'count:balanceSheetAccounts': '14',
+  services: ['Monthly'],
+}
+
+describe('proposal questionnaires (file backend)', () => {
+  beforeEach(async () => {
+    await clearQuestionnaires()
+    await setProposalRates(store)
+  })
+
+  it('makes a link with a 32-byte token and a thirty-day life, its questions frozen', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link', createdBy: 'emp-patrice' })
+    expect(created.id).toMatch(/^pq-/)
+    expect(created.token).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(created.status).toBe('open')
+    expect(created.expired).toBe(false)
+    const days = (Date.parse(created.expiresAt) - Date.now()) / 86_400_000
+    expect(days).toBeGreaterThan(29.9)
+    expect(days).toBeLessThanOrEqual(30)
+    expect(created.questions.welcome).toMatch(/^Thank you for your interest in PB&J/)
+
+    // A catalog change later does not touch a questionnaire already made.
+    const seed = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({
+      proposalPricing: {
+        ...seed,
+        inputs: [{ key: 'locations', label: 'Locations', help: '', defaultValue: null }],
+      },
+    })
+    const reread = await store.getProposalQuestionnaire(created.id)
+    const ids = reread.questions.sections.flatMap((section) => section.questions.map((q) => q.id))
+    expect(ids).toContain('count:transactions')
+    expect(ids).not.toContain('count:locations')
+    // ...but the next one is built from the new catalog.
+    const next = await store.createProposalQuestionnaire({ mode: 'link' })
+    const nextIds = next.questions.sections.flatMap((s) => s.questions.map((q) => q.id))
+    expect(nextIds).toContain('count:locations')
+    expect(next.token).not.toBe(created.token)
+  })
+
+  it('makes a call sheet with no token and no expiry', async () => {
+    const sheet = await store.createProposalQuestionnaire({ mode: 'call' })
+    expect(sheet.token).toBeNull()
+    expect(sheet.expiresAt).toBeNull()
+    expect(sheet.expired).toBe(false)
+    await expect(store.createProposalQuestionnaire({ mode: 'carrier-pigeon' })).rejects.toMatchObject({
+      reason: 'invalid',
+    })
+  })
+
+  it('finds a questionnaire by its token, and only by the whole token', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    expect((await store.findProposalQuestionnaireByToken(created.token)).id).toBe(created.id)
+    expect(await store.findProposalQuestionnaireByToken(created.token.slice(0, 20))).toBeNull()
+    expect(await store.findProposalQuestionnaireByToken('')).toBeNull()
+    expect(await store.findProposalQuestionnaireByToken(null)).toBeNull()
+  })
+
+  it('takes the answers once: of two submissions at the same instant exactly one wins', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    const results = await Promise.allSettled([
+      store.submitProposalQuestionnaire({ token: created.token }, LINK_ANSWERS),
+      store.submitProposalQuestionnaire({ token: created.token }, { ...LINK_ANSWERS, company: 'Second' }),
+    ])
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    const loser = results.find((result) => result.status === 'rejected')
+    expect(loser.reason).toBeInstanceOf(ProposalQuestionnaireError)
+    expect(loser.reason.reason).toBe('submitted')
+    const stored = await store.getProposalQuestionnaire(created.id)
+    expect(stored.status).toBe('submitted')
+    expect(stored.submittedAt).toBeTruthy()
+    // The winner's answers are what is kept, not a blend.
+    expect(['Acme Books', 'Second']).toContain(stored.answers.company)
+  })
+
+  it('keeps only answers to the frozen questions, and drops call-only answers from a link', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    const submitted = await store.submitProposalQuestionnaire(
+      { token: created.token },
+      { ...LINK_ANSWERS, notAQuestion: 'x' },
+    )
+    expect(submitted.answers['count:transactions']).toBe(120)
+    expect(submitted.answers).not.toHaveProperty('notAQuestion')
+    expect(submitted.answers).not.toHaveProperty('count:balanceSheetAccounts')
+  })
+
+  it('refuses a link with no email, and the mistake does not use up the submission', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    await expect(
+      store.submitProposalQuestionnaire({ token: created.token }, { contactName: 'Pat' }),
+    ).rejects.toMatchObject({ reason: 'invalid' })
+    expect((await store.getProposalQuestionnaire(created.id)).status).toBe('open')
+    const ok = await store.submitProposalQuestionnaire(
+      { token: created.token },
+      { contactName: 'Pat', email: 'pat@acme.test' },
+    )
+    expect(ok.status).toBe('submitted')
+  })
+
+  it('refuses an expired link, with the reason', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    await editStoredQuestionnaire(created.id, (row) => {
+      row.expiresAt = new Date(Date.now() - 1000).toISOString()
+    })
+    expect((await store.getProposalQuestionnaire(created.id)).expired).toBe(true)
+    await expect(
+      store.submitProposalQuestionnaire({ token: created.token }, LINK_ANSWERS),
+    ).rejects.toMatchObject({ reason: 'expired' })
+    expect((await store.getProposalQuestionnaire(created.id)).status).toBe('open')
+  })
+
+  it('refuses a withdrawn link, and a withdrawn one cannot be withdrawn twice', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    const withdrawn = await store.withdrawProposalQuestionnaire(created.id)
+    expect(withdrawn.status).toBe('withdrawn')
+    await expect(
+      store.submitProposalQuestionnaire({ token: created.token }, LINK_ANSWERS),
+    ).rejects.toMatchObject({ reason: 'withdrawn' })
+    await expect(store.withdrawProposalQuestionnaire(created.id)).rejects.toMatchObject({
+      reason: 'withdrawn',
+    })
+    expect(await store.withdrawProposalQuestionnaire('pq-nope')).toBeNull()
+  })
+
+  it('refuses an answered one being withdrawn', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    await store.submitProposalQuestionnaire({ token: created.token }, LINK_ANSWERS)
+    await expect(store.withdrawProposalQuestionnaire(created.id)).rejects.toMatchObject({
+      reason: 'submitted',
+    })
+  })
+
+  it('a new link replaces the old one: the old token names nothing, an expired one reopens', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    await editStoredQuestionnaire(created.id, (row) => {
+      row.expiresAt = new Date(Date.now() - 1000).toISOString()
+    })
+    const renewed = await store.renewProposalQuestionnaireLink(created.id)
+    expect(renewed.token).not.toBe(created.token)
+    expect(renewed.status).toBe('open')
+    expect(renewed.expired).toBe(false)
+    expect(await store.findProposalQuestionnaireByToken(created.token)).toBeNull()
+    expect((await store.findProposalQuestionnaireByToken(renewed.token)).id).toBe(created.id)
+    await store.submitProposalQuestionnaire({ token: renewed.token }, LINK_ANSWERS)
+    await expect(store.renewProposalQuestionnaireLink(created.id)).rejects.toMatchObject({
+      reason: 'submitted',
+    })
+    const sheet = await store.createProposalQuestionnaire({ mode: 'call' })
+    await expect(store.renewProposalQuestionnaireLink(sheet.id)).rejects.toMatchObject({
+      reason: 'invalid',
+    })
+  })
+
+  it('a call sheet saves progress, keeps call-only answers, and submits with just a name', async () => {
+    const sheet = await store.createProposalQuestionnaire({ mode: 'call', createdBy: 'emp-patrice' })
+    const saved = await store.saveProposalQuestionnaireAnswers(sheet.id, {
+      company: 'Acme Books',
+      email: 'pat@',
+      'count:balanceSheetAccounts': '14',
+    })
+    expect(saved.answers).toEqual({
+      company: 'Acme Books',
+      email: 'pat@',
+      'count:balanceSheetAccounts': 14,
+    })
+    const submitted = await store.submitProposalQuestionnaire({ id: sheet.id }, saved.answers)
+    expect(submitted.status).toBe('submitted')
+    await expect(store.saveProposalQuestionnaireAnswers(sheet.id, {})).rejects.toMatchObject({
+      reason: 'submitted',
+    })
+    const link = await store.createProposalQuestionnaire({ mode: 'link' })
+    await expect(store.saveProposalQuestionnaireAnswers(link.id, {})).rejects.toMatchObject({
+      reason: 'invalid',
+    })
+  })
+
+  it('starts one DRAFT proposal from the answers: contact block, counts, notes - nothing selected, nothing priced', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    await store.submitProposalQuestionnaire({ token: created.token }, LINK_ANSWERS)
+    const { proposal, created: made } = await store.startProposalQuestionnaireDraft(created.id)
+    expect(made).toBe(true)
+    expect(proposal.status).toBe('draft')
+    expect(proposal.prospect).toMatchObject({
+      company: 'Acme Books',
+      contactName: 'Pat Doe',
+      title: 'Owner',
+      email: 'pat@acme.test',
+      addressLine1: '1 Main St',
+      city: 'Nashville',
+      state: 'TN',
+      postalCode: '37201',
+    })
+    expect(proposal.prospect.notes).toContain('Bakery')
+    expect(proposal.inputs).toEqual({ transactions: 120 })
+    expect(proposal.selections).toEqual([])
+    expect(proposal.pricingSnapshot.totals.monthly).toBe(0)
+    expect((await store.getProposalQuestionnaire(created.id)).proposalId).toBe(proposal.id)
+  })
+
+  it('makes only one draft however many times, or at once, it is asked', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    await store.submitProposalQuestionnaire({ token: created.token }, LINK_ANSWERS)
+    const both = await Promise.all([
+      store.startProposalQuestionnaireDraft(created.id),
+      store.startProposalQuestionnaireDraft(created.id),
+    ])
+    const again = await store.startProposalQuestionnaireDraft(created.id)
+    expect(again.created).toBe(false)
+    expect(both.filter((entry) => entry.created)).toHaveLength(1)
+    expect(new Set([...both, again].map((entry) => entry.proposal.id)).size).toBe(1)
+    expect(await store.listProposals()).toHaveLength(1)
+  })
+
+  it('will not start a draft from a questionnaire nobody answered', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    await expect(store.startProposalQuestionnaireDraft(created.id)).rejects.toMatchObject({
+      reason: 'not_submitted',
+    })
+    expect(await store.listProposals()).toHaveLength(0)
+  })
+
+  it('lists newest first, and one proposal’s own', async () => {
+    const first = await store.createProposalQuestionnaire({ mode: 'call' })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const second = await store.createProposalQuestionnaire({ mode: 'link' })
+    expect((await store.listProposalQuestionnaires()).map((row) => row.id)).toEqual([
+      second.id,
+      first.id,
+    ])
+    await store.submitProposalQuestionnaire({ id: first.id }, { company: 'Acme' })
+    const { proposal } = await store.startProposalQuestionnaireDraft(first.id)
+    expect(
+      (await store.listProposalQuestionnaires({ proposalId: proposal.id })).map((row) => row.id),
+    ).toEqual([first.id])
+  })
+
+  it('logs a send once and remembers who it went to; a repeated delivery event is not logged twice', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    const sent = await store.appendProposalQuestionnaireEmailEvent(created.id, {
+      kind: 'send',
+      ok: true,
+      to: ['pat@acme.test'],
+      subject: 'Tell us about your business',
+      providerId: 'em_1',
+    })
+    expect(sent.sentTo).toBe('pat@acme.test')
+    await store.appendProposalQuestionnaireEmailEvent(created.id, {
+      kind: 'delivery',
+      event: 'delivered',
+      providerId: 'em_1',
+      to: ['pat@acme.test'],
+    })
+    const twice = await store.appendProposalQuestionnaireEmailEvent(created.id, {
+      kind: 'delivery',
+      event: 'delivered',
+      providerId: 'em_1',
+      to: ['pat@acme.test'],
+    })
+    expect(twice.emailLog.map((entry) => entry.kind)).toEqual(['send', 'delivery'])
+    await store.appendProposalQuestionnaireEmailEvent(created.id, {
+      kind: 'send',
+      ok: false,
+      to: ['other@acme.test'],
+      error: 'refused',
+    })
+    expect((await store.getProposalQuestionnaire(created.id)).sentTo).toBe('pat@acme.test')
+    expect(await store.appendProposalQuestionnaireEmailEvent('pq-nope', { kind: 'send' })).toBeNull()
+  })
+
+  it('survives a bulk save and is not part of the staleness fingerprint', async () => {
+    const before = await store.computeWorkspaceVersion()
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    expect(await store.computeWorkspaceVersion()).toBe(before)
+    await store.write(workspace())
+    expect((await store.getProposalQuestionnaire(created.id)).id).toBe(created.id)
+    expect(BULK_SAVE_TABLES).not.toContain('proposal_questionnaires')
+    expect(BULK_SAVE_SLICES).not.toContain('proposal_questionnaires')
+    expect(workspaceVersionSql()).not.toMatch(/proposal_questionnaires/i)
+  })
+})
+
+describe('Accept hands the questionnaire’s title and address to the new client', () => {
+  beforeEach(async () => {
+    await clearQuestionnaires()
+    await setProposalRates(store)
+  })
+
+  it('copies the address onto the client and the title onto its primary contact', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    await store.submitProposalQuestionnaire({ token: created.token }, LINK_ANSWERS)
+    const { proposal } = await store.startProposalQuestionnaireDraft(created.id)
+    const result = await store.acceptProposal(proposal.id, {})
+    const data = await store.read()
+    const client = data.clients.find((row) => row.id === result.clientId)
+    expect(client).toMatchObject({
+      name: 'Acme Books',
+      addressLine1: '1 Main St',
+      city: 'Nashville',
+      state: 'TN',
+      postalCode: '37201',
+    })
+    const contact = data.contacts.find((row) => row.id === client.contactIds[0])
+    expect(contact).toMatchObject({ name: 'Pat Doe', title: 'Owner', email: 'pat@acme.test' })
+  })
+})
+
+describe('proposal questionnaires (postgres branch)', () => {
+  function questionnairePool(rowsFor = () => []) {
+    const statements = []
+    return {
+      statements,
+      pool: {
+        async query(text, params) {
+          const sql = String(text).trim()
+          statements.push({ text: sql, params })
+          if (/from firm_settings where id = 'singleton'/i.test(sql)) {
+            return { rows: [{ name: 'PB&J', proposal_pricing: null }] }
+          }
+          return { rows: rowsFor(sql, params), rowCount: 1 }
+        },
+      },
+    }
+  }
+  const openRow = (extra = {}) => ({
+    id: 'pq-1',
+    token: 'T'.repeat(43),
+    mode: 'link',
+    status: 'open',
+    questions: JSON.stringify(buildQuestionnaire(defaultProposalPricing())),
+    answers: {},
+    email_log: [],
+    proposal_id: null,
+    expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+    ...extra,
+  })
+
+  it('inserts the token, the mode and the frozen questions as one row', async () => {
+    const fake = questionnairePool((sql) =>
+      /^insert into proposal_questionnaires/i.test(sql) ? [openRow()] : [],
+    )
+    await postgresStore(fake).createProposalQuestionnaire({ mode: 'link', createdBy: 'emp-patrice' })
+    const insert = fake.statements.find((s) => /^insert into proposal_questionnaires/i.test(s.text))
+    expect(insert.params[1]).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(insert.params[2]).toBe('link')
+    expect(JSON.parse(insert.params[3]).sections.length).toBeGreaterThan(0)
+  })
+
+  it('submits with ONE conditional update that checks open, unexpired and the same token', async () => {
+    const fake = questionnairePool((sql) => {
+      if (/^select .* from proposal_questionnaires where token/is.test(sql)) return [openRow()]
+      if (/^update proposal_questionnaires/i.test(sql)) return [openRow({ status: 'submitted' })]
+      return []
+    })
+    await postgresStore(fake).submitProposalQuestionnaire(
+      { token: 'T'.repeat(43) },
+      { contactName: 'Pat', email: 'pat@acme.test' },
+    )
+    const updates = fake.statements.filter((s) => /^update proposal_questionnaires/i.test(s.text))
+    expect(updates).toHaveLength(1)
+    expect(updates[0].text).toMatch(/status = 'open'/)
+    expect(updates[0].text).toMatch(/expires_at is null or expires_at > now\(\)/)
+    expect(updates[0].text).toMatch(/token is not distinct from \$3/)
+    expect(updates[0].params[2]).toBe('T'.repeat(43))
+  })
+
+  it('answers the loser of a submit race from the row that beat it', async () => {
+    const fake = questionnairePool((sql) => {
+      if (/^select .* from proposal_questionnaires where token/is.test(sql)) return [openRow()]
+      if (/^select .* from proposal_questionnaires where id/is.test(sql)) {
+        return [openRow({ status: 'submitted' })]
+      }
+      return []
+    })
+    await expect(
+      postgresStore(fake).submitProposalQuestionnaire(
+        { token: 'T'.repeat(43) },
+        { contactName: 'Pat', email: 'pat@acme.test' },
+      ),
+    ).rejects.toMatchObject({ reason: 'submitted' })
+  })
+
+  it('claims the draft with proposal_id is null, and deletes its own when it lost', async () => {
+    const fake = questionnairePool((sql) => {
+      if (/^select .* from proposal_questionnaires where id/is.test(sql)) {
+        return [openRow({ status: 'submitted', answers: { company: 'Acme' } })]
+      }
+      if (/^insert into proposals/i.test(sql) || /^select .* from proposals where id/is.test(sql)) {
+        return [{ id: 'prop-x', status: 'draft', prospect: {}, inputs: {}, selections: [] }]
+      }
+      return []
+    })
+    await postgresStore(fake).startProposalQuestionnaireDraft('pq-1')
+    const claim = fake.statements.find((s) => /proposal_id is null/i.test(s.text))
+    expect(claim.text).toMatch(/where id = \$1 and proposal_id is null/)
+    expect(fake.statements.some((s) => /^delete from proposals where id/i.test(s.text))).toBe(true)
+  })
+
+  it('renewing replaces the token and refuses an answered questionnaire in the WHERE', async () => {
+    const fake = questionnairePool((sql) => {
+      if (/^select .* from proposal_questionnaires where id/is.test(sql)) return [openRow()]
+      if (/^update proposal_questionnaires/i.test(sql)) return [openRow()]
+      return []
+    })
+    await postgresStore(fake).renewProposalQuestionnaireLink('pq-1')
+    const update = fake.statements.find((s) => /^update proposal_questionnaires/i.test(s.text))
+    expect(update.text).toMatch(/status <> 'submitted'/)
+    expect(update.params[1]).toMatch(/^[A-Za-z0-9_-]{43}$/)
   })
 })

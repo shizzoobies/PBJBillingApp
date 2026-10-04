@@ -427,6 +427,50 @@ export type ProposalPatch = Partial<{
 }>
 
 /**
+ * A PROPOSAL QUESTIONNAIRE (featreq-8f139178): the intake that comes before a
+ * proposal - a link a prospect fills in alone, or a sheet worked through on a
+ * call. Its questions are frozen onto it when it is made. Endpoint-managed like
+ * proposals. The server never sends the token; `link` is the public address, on
+ * the one response that makes or renews it.
+ */
+export type QuestionnaireQuestion = {
+  id: string
+  label: string
+  type: 'text' | 'longtext' | 'email' | 'phone' | 'number' | 'choice' | 'multi'
+  help?: string
+  options?: Array<{ value: string; label: string }>
+  /** Only asked on a call - a prospect cannot know it. */
+  callOnly?: boolean
+}
+
+export type QuestionnaireSection = {
+  id: string
+  title: string
+  questions: QuestionnaireQuestion[]
+}
+
+export type QuestionnaireAnswers = Record<string, string | number | string[]>
+
+export type ProposalQuestionnaire = {
+  id: string
+  mode: 'link' | 'call'
+  status: 'open' | 'submitted' | 'withdrawn'
+  /** Open and past its date. */
+  expired: boolean
+  questions: { welcome: string; sections: QuestionnaireSection[] }
+  answers: QuestionnaireAnswers
+  emailLog: ProposalEmailEvent[]
+  /** The draft proposal started from the answers, once there is one. */
+  proposalId: string | null
+  sentTo: string | null
+  expiresAt: string | null
+  submittedAt: string | null
+  createdBy: string | null
+  createdAt: string
+  updatedAt: string | null
+}
+
+/**
  * A reusable contact entered once and selected (via dropdown / multi-select)
  * on one or more clients. Contacts are shared across clients and managed on
  * their own owner-only Contacts page.

@@ -13661,3 +13661,81 @@ details.invoice-run-sent ul,
   outline: 2px solid var(--gold);
   outline-offset: 2px;
 }
+
+/* The proposal questionnaire: the call sheet, the inbox, the answers (featreq-8f139178). */
+.questionnaire-sheet,
+.questionnaire-inbox,
+.questionnaire-answers {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.questionnaire-section h4,
+.questionnaire-group h4,
+.questionnaire-answers h4 {
+  margin: 8px 0 6px;
+}
+
+.questionnaire-call-only {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.questionnaire-multi {
+  border: 0;
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.checkbox-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.questionnaire-list {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.questionnaire-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.questionnaire-name {
+  font-weight: 600;
+}
+
+.questionnaire-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.questionnaire-answer-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.questionnaire-answer-list dt {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.questionnaire-answer-list dd {
+  margin: 0;
+  white-space: pre-wrap;
+}

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { formatProposalMoney } from '../../../lib/proposal-pricing.js'
 import { SavingNumberInput, SavingTextarea, SavingTextInput } from '../SectionKit'
+import { QuestionnaireAnswersPanel } from './QuestionnaireInbox'
 import { ProposalRatesBanner } from './RatesBanner'
 import {
   PROPOSAL_TOTAL_LABELS,
@@ -16,6 +17,7 @@ import type {
   Proposal,
   ProposalPricing,
   ProposalProspect,
+  ProposalQuestionnaire,
   ProposalSelection,
   ProposalService,
 } from '../../lib/types'
@@ -23,8 +25,14 @@ import type {
 const PROSPECT_FIELDS: Array<[Exclude<keyof ProposalProspect, 'notes'>, string]> = [
   ['company', 'Company'],
   ['contactName', 'Contact'],
+  ['title', 'Title'],
   ['email', 'Email'],
   ['phone', 'Phone'],
+  ['addressLine1', 'Address'],
+  ['addressLine2', 'Address line 2'],
+  ['city', 'City'],
+  ['state', 'State'],
+  ['postalCode', 'ZIP code'],
 ]
 
 // The multipliers whose factor comes from a typed count rather than the
@@ -111,6 +119,7 @@ export function EstimateTab({
   onSave,
   onReprice,
   highlight = NOTHING_CHANGED,
+  questionnaire = null,
 }: {
   proposal: Proposal
   pricing: ProposalPricing
@@ -120,6 +129,8 @@ export function EstimateTab({
   onReprice: () => void
   /** What the last chat turn changed (`changedKeys`), marked for her to see. */
   highlight?: ReadonlySet<string>
+  /** The answered questionnaire this draft came from, shown read-only. */
+  questionnaire?: ProposalQuestionnaire | null
 }) {
   const locked = proposal.status === 'accepted' || proposal.status === 'declined'
   const snapshot = proposal.pricingSnapshot
@@ -176,6 +187,8 @@ export function EstimateTab({
             </label>
           </div>
         </section>
+
+        {questionnaire ? <QuestionnaireAnswersPanel questionnaire={questionnaire} /> : null}
 
         <section className="panel">
           <h3>What they told you</h3>

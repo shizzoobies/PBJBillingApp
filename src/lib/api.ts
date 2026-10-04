@@ -28,7 +28,9 @@
   type ProposalChatPatch,
   type ProposalPatch,
   type ProposalProspect,
+  type ProposalQuestionnaire,
   type ProposalSnapshot,
+  type QuestionnaireAnswers,
   type PublicFirmSettings,
   type ServiceCategory,
   type SessionUser,
@@ -1056,6 +1058,86 @@ export function acceptProposalRequest(
     proposalJson('POST', input),
     'The proposal could not be accepted',
   )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Proposal questionnaires (featreq-8f139178)                                 */
+/* -------------------------------------------------------------------------- */
+
+const questionnairePath = (id: string, action = '') =>
+  `/api/proposal-questionnaires/${encodeURIComponent(id)}${action ? `/${action}` : ''}`
+
+/** Owner-only: every questionnaire, newest first - or just the ones behind one proposal. */
+export async function listQuestionnairesRequest(proposalId?: string): Promise<ProposalQuestionnaire[]> {
+  const query = proposalId ? `?proposalId=${encodeURIComponent(proposalId)}` : ''
+  const body = await proposalRequest<{ questionnaires?: ProposalQuestionnaire[] }>(
+    `/api/proposal-questionnaires${query}`,
+    {},
+    'Failed to load questionnaires',
+  )
+  return Array.isArray(body.questionnaires) ? body.questionnaires : []
+}
+
+/** Owner-only: start a call sheet - a questionnaire Brittany works through with the prospect on the phone. */
+export async function createQuestionnaireRequest(
+  input: { mode: 'call' },
+): Promise<ProposalQuestionnaire> {
+  const body = await proposalRequest<{ questionnaire: ProposalQuestionnaire }>(
+    '/api/proposal-questionnaires',
+    proposalJson('POST', input),
+    'Could not start the questionnaire',
+  )
+  return body.questionnaire
+}
+
+/** Owner-only: save a call sheet's answers so far. */
+export async function saveQuestionnaireAnswersRequest(
+  id: string,
+  answers: QuestionnaireAnswers,
+): Promise<ProposalQuestionnaire> {
+  const body = await proposalRequest<{ questionnaire: ProposalQuestionnaire }>(
+    questionnairePath(id),
+    proposalJson('PUT', { answers }),
+    'Could not save the answers',
+  )
+  return body.questionnaire
+}
+
+/** What submitting (or retrying) a questionnaire did: the record, and the draft proposal if one got made. */
+export type QuestionnaireDraftResult = {
+  questionnaire: ProposalQuestionnaire
+  proposal: Proposal | null
+}
+
+/** Owner-only: take the answers, once, and start the draft proposal from them. */
+export function submitQuestionnaireRequest(
+  id: string,
+  answers: QuestionnaireAnswers,
+): Promise<QuestionnaireDraftResult> {
+  return proposalRequest<QuestionnaireDraftResult>(
+    questionnairePath(id, 'submit'),
+    proposalJson('POST', { answers }),
+    'Could not submit the questionnaire',
+  )
+}
+
+/** Owner-only: start the draft proposal for an answered questionnaire that has none yet. */
+export function startQuestionnaireDraftRequest(id: string): Promise<QuestionnaireDraftResult> {
+  return proposalRequest<QuestionnaireDraftResult>(
+    questionnairePath(id, 'start-draft'),
+    proposalJson('POST', {}),
+    'Could not start the draft proposal',
+  )
+}
+
+/** Owner-only: take a waiting questionnaire back. */
+export async function withdrawQuestionnaireRequest(id: string): Promise<ProposalQuestionnaire> {
+  const body = await proposalRequest<{ questionnaire: ProposalQuestionnaire }>(
+    questionnairePath(id, 'withdraw'),
+    proposalJson('POST', {}),
+    'Could not withdraw the questionnaire',
+  )
+  return body.questionnaire
 }
 
 /** One intake-chat turn: the reply, the validated patch the server applied, and the result. */

@@ -38,6 +38,13 @@ vi.mock('../lib/api', () => ({
   acceptProposalRequest: (...args: unknown[]) => api.acceptProposalRequest(...args),
   declineProposalRequest: (...args: unknown[]) => api.declineProposalRequest(...args),
   proposalChatRequest: (...args: unknown[]) => api.proposalChatRequest(...args),
+  listQuestionnairesRequest: (...args: unknown[]) => api.listQuestionnairesRequest(...args),
+  createQuestionnaireRequest: (...args: unknown[]) => api.createQuestionnaireRequest(...args),
+  saveQuestionnaireAnswersRequest: (...args: unknown[]) =>
+    api.saveQuestionnaireAnswersRequest(...args),
+  submitQuestionnaireRequest: (...args: unknown[]) => api.submitQuestionnaireRequest(...args),
+  startQuestionnaireDraftRequest: (...args: unknown[]) => api.startQuestionnaireDraftRequest(...args),
+  withdrawQuestionnaireRequest: (...args: unknown[]) => api.withdrawQuestionnaireRequest(...args),
 }))
 
 const api: Record<string, Mock> = {}
@@ -49,8 +56,14 @@ const PROPOSAL: Proposal = {
   prospect: {
     company: 'Acme Books',
     contactName: 'Pat Doe',
+    title: '',
     email: 'pat@acme.test',
     phone: '',
+    addressLine1: '',
+    addressLine2: '',
+    city: '',
+    state: '',
+    postalCode: '',
     notes: '',
   },
   clientId: null,
@@ -279,6 +292,7 @@ beforeEach(() => {
     packageApplied: false,
   }))
   api.declineProposalRequest = vi.fn(async () => ({ ...PROPOSAL, status: 'declined' }))
+  api.listQuestionnairesRequest = vi.fn(async () => [])
 })
 
 afterEach(() => {

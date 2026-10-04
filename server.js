@@ -18,6 +18,7 @@ import {
   ManualPaymentError,
   NothingToPushError,
   PackageApplyError,
+  ProposalQuestionnaireError,
   ProposalStateError,
   PushConflictError,
   PushedRecordError,
@@ -1772,6 +1773,99 @@ async function recordProposalDelivery(request, proposalId, deliveryEvent, resend
     }
   }
   return true
+}
+
+// ---- Proposal questionnaires (featreq-8f139178) ----------------------------
+// lib/proposal-questionnaire.js. The intake that comes before a proposal; see
+// the owner routes below ("Proposal questionnaires (owner)").
+
+/**
+ * A questionnaire as an owner's screen gets it: everything on the record EXCEPT
+ * the token. The token is the public link's whole authority, so it is rendered
+ * into a `link` by the route that makes or renews one and is never echoed by a
+ * list or a read.
+ */
+function questionnaireView(record) {
+  if (!record) return null
+  const { token: _token, ...rest } = record
+  return rest
+}
+
+/**
+ * The owner-route answer for a store refusal: the questionnaire's own state
+ * (already answered, expired, withdrawn) is a 409 with a sentence the page shows
+ * as-is; answers that are missing something are a 400.
+ */
+function sendQuestionnaireRefusal(response, error) {
+  sendJson(response, error.reason === 'invalid' ? 400 : error.reason === 'missing' ? 404 : 409, {
+    error: 'questionnaire_refused',
+    reason: error.reason,
+    message: error.message,
+    problems: error.problems ?? [],
+  })
+}
+
+/**
+ * Everything every owner questionnaire route checks first: a session, an owner,
+ * and for a write a same-origin JSON request. Answers the request itself and
+ * returns null when any of it fails.
+ */
+async function requireQuestionnaireOwner(request, response, { write = false } = {}) {
+  const session = await requireSession(request, response)
+  if (!session) return null
+  if (session.user.role !== 'owner') {
+    sendJson(response, 403, { error: 'Only owners can use proposal questionnaires' })
+    return null
+  }
+  if (write && isCrossSiteOrigin(request)) {
+    sendJson(response, 403, { error: 'Origin not allowed' })
+    return null
+  }
+  if (write && request.method !== 'DELETE' && !isJsonContentType(request)) {
+    sendJson(response, 415, { error: 'application/json required' })
+    return null
+  }
+  return session
+}
+
+/**
+ * What follows an accepted submission, public link or call sheet: start the
+ * DRAFT proposal from the answers and, for a link, tell every owner. Neither may
+ * undo the answer the prospect already gave, so each failure is logged and the
+ * inbox's "Start draft" button is the retry.
+ *
+ * @returns {Promise<object|null>} the draft proposal, or null when it could not be made
+ */
+async function finishQuestionnaireSubmission(request, submitted, { createdBy = null } = {}) {
+  let proposal = null
+  try {
+    const started = await appDataStore.startProposalQuestionnaireDraft(submitted.id, { createdBy })
+    proposal = started.proposal
+  } catch (error) {
+    console.error('[questionnaire] could not start the draft proposal:', submitted.id, error)
+  }
+  if (submitted.mode === 'link') {
+    try {
+      const who =
+        String(submitted.answers?.company ?? '').trim() ||
+        String(submitted.answers?.contactName ?? '').trim() ||
+        'A prospect'
+      const members = await appDataStore.getTeamMembers()
+      for (const owner of members.filter((member) => member.role === 'owner')) {
+        await notify(appDataStore, owner.id, 'proposal_questionnaire_answered', {
+          message: proposal
+            ? `${who} sent back their questionnaire. A draft proposal is waiting for your review.`
+            : `${who} sent back their questionnaire. Open Proposals to start the draft.`,
+          link: proposal ? `/proposals/${proposal.id}` : '/proposals',
+          appPublicUrl: getPublicAppUrl(request),
+        })
+      }
+    } catch (error) {
+      console.error('[questionnaire] could not notify the owners:', submitted.id, error)
+    }
+  }
+  broadcastDataChanged()
+  return proposal
 }
 
 // ---- Consolidated billing (featreq-65f5eac1) ------------------------------
@@ -9197,6 +9291,141 @@ const server = createServer(async (request, response) => {
       broadcastDataChanged()
       sendJson(response, 200, applied)
       return
+    }
+
+    // ---- Proposal questionnaires (owner) -----------------------------------
+    //
+    // featreq-8f139178. Endpoint-managed like proposals: never in the bulk
+    // save. Owner-only, same-origin JSON on every write. A questionnaire never
+    // leaves here with its token (`questionnaireView`).
+    if (normalizedPath === '/api/proposal-questionnaires' && request.method === 'GET') {
+      if (!(await requireQuestionnaireOwner(request, response))) return
+      const proposalId = requestUrl.searchParams.get('proposalId') || null
+      const list = await appDataStore.listProposalQuestionnaires({ proposalId })
+      sendJson(response, 200, { questionnaires: list.map(questionnaireView) })
+      return
+    }
+
+    if (normalizedPath === '/api/proposal-questionnaires' && request.method === 'POST') {
+      const session = await requireQuestionnaireOwner(request, response, { write: true })
+      if (!session) return
+      const payload = (await readJsonBody(request)) ?? {}
+      if (payload.mode !== 'call') {
+        sendJson(response, 400, { error: 'invalid_mode', message: 'Start a call sheet with mode "call".' })
+        return
+      }
+      let created
+      try {
+        created = await appDataStore.createProposalQuestionnaire({
+          mode: payload.mode,
+          createdBy: session.user.id,
+        })
+      } catch (error) {
+        if (error instanceof ProposalQuestionnaireError) {
+          sendQuestionnaireRefusal(response, error)
+          return
+        }
+        throw error
+      }
+      sendJson(response, 201, { questionnaire: questionnaireView(created) })
+      return
+    }
+
+    const questionnaireIdMatch = normalizedPath.match(
+      /^\/api\/proposal-questionnaires\/([^/]+)(?:\/(submit|withdraw|start-draft))?$/,
+    )
+    if (questionnaireIdMatch) {
+      const questionnaireId = questionnaireIdMatch[1]
+      const action = questionnaireIdMatch[2] ?? ''
+      const isRead = request.method === 'GET' && action === ''
+      const isSave = request.method === 'PUT' && action === ''
+      const isAction = request.method === 'POST' && action !== ''
+      if (isRead || isSave || isAction) {
+        const session = await requireQuestionnaireOwner(request, response, { write: !isRead })
+        if (!session) return
+        try {
+          if (isRead) {
+            const found = await appDataStore.getProposalQuestionnaire(questionnaireId)
+            if (!found) {
+              sendJson(response, 404, { error: 'Questionnaire not found' })
+              return
+            }
+            sendJson(response, 200, { questionnaire: questionnaireView(found) })
+            return
+          }
+
+          // PUT /:id { answers } - a call sheet saves as it goes.
+          if (isSave) {
+            const payload = (await readJsonBody(request)) ?? {}
+            const saved = await appDataStore.saveProposalQuestionnaireAnswers(
+              questionnaireId,
+              payload.answers,
+            )
+            if (!saved) {
+              sendJson(response, 404, { error: 'Questionnaire not found' })
+              return
+            }
+            sendJson(response, 200, { questionnaire: questionnaireView(saved) })
+            return
+          }
+
+          // POST /:id/submit { answers } - an owner submitting a call sheet. The
+          // store takes the answers once; then the draft proposal starts.
+          if (action === 'submit') {
+            const payload = (await readJsonBody(request)) ?? {}
+            const submitted = await appDataStore.submitProposalQuestionnaire(
+              { id: questionnaireId },
+              payload.answers,
+            )
+            const proposal = await finishQuestionnaireSubmission(request, submitted, {
+              createdBy: session.user.id,
+            })
+            if (proposal) {
+              await appDataStore.recordActivity(
+                session.user.id,
+                'proposal_created',
+                proposal.prospect.company || proposal.id,
+              )
+            }
+            const latest = (await appDataStore.getProposalQuestionnaire(submitted.id)) ?? submitted
+            sendJson(response, 200, { questionnaire: questionnaireView(latest), proposal })
+            return
+          }
+
+          // POST /:id/withdraw - take back a link (or abandon a call sheet).
+          if (action === 'withdraw') {
+            const withdrawn = await appDataStore.withdrawProposalQuestionnaire(questionnaireId)
+            if (!withdrawn) {
+              sendJson(response, 404, { error: 'Questionnaire not found' })
+              return
+            }
+            sendJson(response, 200, { questionnaire: questionnaireView(withdrawn) })
+            return
+          }
+
+          // POST /:id/start-draft - the inbox's retry when the draft did not get made.
+          const started = await appDataStore.startProposalQuestionnaireDraft(questionnaireId, {
+            createdBy: session.user.id,
+          })
+          if (started.created && started.proposal) {
+            await appDataStore.recordActivity(
+              session.user.id,
+              'proposal_created',
+              started.proposal.prospect.company || started.proposal.id,
+            )
+          }
+          broadcastDataChanged()
+          const latest = await appDataStore.getProposalQuestionnaire(questionnaireId)
+          sendJson(response, 200, { questionnaire: questionnaireView(latest), proposal: started.proposal })
+          return
+        } catch (error) {
+          if (error instanceof ProposalQuestionnaireError) {
+            sendQuestionnaireRefusal(response, error)
+            return
+          }
+          throw error
+        }
+      }
     }
 
     // ---- Proposals (featreq-311473e2 / featreq-ef18a38e) -------------------
