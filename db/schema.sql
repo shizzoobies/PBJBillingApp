@@ -78,6 +78,9 @@ alter table clients add column if not exists card_payments_enabled boolean not n
 -- Per-client opt-out from platform invoicing. Off by default: every client is
 -- invoiced from here until someone says this one is billed outside the app.
 alter table clients add column if not exists platform_invoicing_opt_out boolean not null default false;
+-- "Generate the invoice but never email it": the invoice is built and reviewed
+-- here and marked sent without an email. Off by default.
+alter table clients add column if not exists invoice_no_email boolean not null default false;
 -- The Stripe customer a client's payments are filed under, remembered so the
 -- next invoice reuses it instead of creating a second customer for the same
 -- company. Null until they have paid once.

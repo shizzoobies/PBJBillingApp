@@ -236,6 +236,13 @@ const ADHOC_CHOICES: ReadonlyArray<{ value: AdhocMode; label: string }> = [
   { value: 'omitted', label: 'Leave off the invoice' },
 ]
 
+/**
+ * What the row and the editor say about a client whose invoices are generated
+ * here but never emailed (the client's "Generate the invoice but never email it"
+ * switch).
+ */
+const NOT_EMAILED_NOTE = 'Not emailed - delivered outside the app'
+
 /** How much of a kept note the helper quotes before it trims. */
 const KEPT_NOTE_PREVIEW_LENGTH = 140
 
@@ -711,6 +718,16 @@ export function InvoiceMonthRun({
   const optedOut = useCallback(
     (clientId: string) =>
       clients.find((c) => c.id === clientId)?.platformInvoicingOptOut ?? false,
+    [clients],
+  )
+
+  /**
+   * This client's invoices are generated here and never emailed. Unlike the
+   * opt-out the invoice exists and is worked like any other; what goes is the
+   * email, so no Send, no payment link, and no missing-address warning.
+   */
+  const noEmail = useCallback(
+    (clientId: string) => clients.find((c) => c.id === clientId)?.invoiceNoEmail ?? false,
     [clients],
   )
 
@@ -1675,6 +1692,7 @@ export function InvoiceMonthRun({
                     sourceClientName={clientName}
                     cardEnabled={cardEnabled(invoice.clientId)}
                     optedOut={optedOut(invoice.clientId)}
+                    noEmail={noEmail(invoice.clientId)}
                     keptNote={keptNote(invoice.clientId)}
                     onKeepNote={(text) => keepClientNote(invoice.clientId, text)}
                     dueOnReceipt={dueOnReceipt(invoice.clientId)}
@@ -1733,6 +1751,7 @@ function InvoiceRow({
   sourceClientName,
   cardEnabled,
   optedOut,
+  noEmail,
   keptNote,
   onKeepNote,
   recipients,
@@ -1775,6 +1794,8 @@ function InvoiceRow({
   cardEnabled: boolean
   /** This client is billed outside the app — nothing here may be sent or paid. */
   optedOut: boolean
+  /** This client's invoices are generated here but never emailed. */
+  noEmail: boolean
   /** The note this client keeps for every future invoice, or null. */
   keptNote: string | null
   /** Keep the editor's note for this client's future invoices. Rejects on refusal. */
@@ -1907,9 +1928,12 @@ function InvoiceRow({
             {/* How many people this would email, before she opens anything. A
                 client with two contact addresses and one with a single address
                 used to look identical from here. */}
-            {!isVoid && recipients.to.length > 0
+            {!isVoid && !noEmail && recipients.to.length > 0
               ? ` · ${recipientCountLabel(recipients.to.length)}`
               : ''}
+            {/* A never-email client has no recipients to count. The row says why,
+                in the place the count would have been. */}
+            {!isVoid && noEmail ? ` · ${NOT_EMAILED_NOTE}` : ''}
           </span>
           {/* The client tried to pay and it failed. Louder than the amber
               scope flags because it is the one row here that needs a phone
@@ -1999,7 +2023,7 @@ function InvoiceRow({
           ) : null}
           {/* Nobody on file is a flag in its own right — it used to surface as a
               409 only after she pressed Send. */}
-          {!isVoid && recipients.to.length === 0 ? (
+          {!isVoid && !noEmail && recipients.to.length === 0 ? (
             <span className="invoice-run-flags">
               <span className="invoice-run-flag">
                 <AlertTriangle size={13} />
@@ -2098,6 +2122,7 @@ function InvoiceRow({
           isBillingMaster={isBillingMaster}
           sourceClientName={sourceClientName}
           optedOut={optedOut}
+          noEmail={noEmail}
           keptNote={keptNote}
           onKeepNote={onKeepNote}
           recipients={recipients}
@@ -2553,6 +2578,7 @@ function InvoiceEditor({
   isBillingMaster,
   sourceClientName,
   optedOut,
+  noEmail,
   keptNote,
   onKeepNote,
   recipients,
@@ -2580,6 +2606,12 @@ function InvoiceEditor({
   sourceClientName: (clientId: string) => string
   /** This client is billed outside the app — Send and the pay link are refused. */
   optedOut: boolean
+  /**
+   * This client's invoices are generated here but never emailed: the editor
+   * offers no Send, Send again or payment link, and Mark reviewed (which the
+   * server turns into "reviewed AND sent") is the last step.
+   */
+  noEmail: boolean
   /** The note this client keeps for every future invoice, or null. */
   keptNote: string | null
   /** Keep the note for this client's future invoices. Rejects with the refusal. */
@@ -4082,7 +4114,7 @@ function InvoiceEditor({
           own and two buttons with one name are not two choices to a screen
           reader. */}
       <div className="invoice-run-resend" role="status">
-        {invoice.changedSinceSent && invoice.status === 'sent' && !dirty ? (
+        {invoice.changedSinceSent && invoice.status === 'sent' && !dirty && !noEmail ? (
           <>
             <span>{CHANGED_SINCE_SENT_NOTICE}</span>
             <button
@@ -4129,24 +4161,40 @@ function InvoiceEditor({
 
       {/* Who this would go to, BEFORE anything is sent. Named, not counted:
           "the contacts on file" was never something she could check. */}
-      <div className="invoice-run-recipients">
-        {recipients.to.length > 0 ? (
-          <>
-            <span className="invoice-run-recipients-label">
-              Goes to {recipientCountLabel(recipients.to.length)}
-            </span>
-            <ul>
-              {recipients.details.map((detail) => (
-                <li key={detail.email}>{formatInvoiceRecipient(detail)}</li>
-              ))}
-            </ul>
-          </>
-        ) : (
-          <p className="invoice-run-error" role="alert">
-            {recipients.reason}
+      {/* A never-email client has nobody this goes to, so the recipients block
+          (and its missing-address alert) gives way to one plain statement of
+          what happens instead. */}
+      {noEmail ? (
+        invoice.status === 'void' ? null : (
+          <p className="invoice-run-recipients invoice-run-not-emailed" role="note">
+            {NOT_EMAILED_NOTE}.{' '}
+            {invoice.status === 'draft' || invoice.status === 'reviewed'
+              ? 'Mark reviewed also marks this invoice sent, without sending anything.'
+              : invoice.sentAt
+                ? `Marked sent ${formatSentOn(invoice.sentAt)}.`
+                : ''}
           </p>
-        )}
-      </div>
+        )
+      ) : (
+        <div className="invoice-run-recipients">
+          {recipients.to.length > 0 ? (
+            <>
+              <span className="invoice-run-recipients-label">
+                Goes to {recipientCountLabel(recipients.to.length)}
+              </span>
+              <ul>
+                {recipients.details.map((detail) => (
+                  <li key={detail.email}>{formatInvoiceRecipient(detail)}</li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <p className="invoice-run-error" role="alert">
+              {recipients.reason}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* The durable receipt for a send — there is no toast, because the editor
           remounts on the server's new invoice and a toast would not survive it.
@@ -4219,7 +4267,9 @@ function InvoiceEditor({
           {invoice.sentAt ? `: sent ${formatSentOn(invoice.sentAt)}, past the` : ': past the'} 30-day
           line since {formatPastDueLine(pastDue.dueDate)}.
           <br />
-          Send again to nudge, or Mark paid if it was settled another way.
+          {noEmail
+            ? 'Follow up with the client, or Mark paid if it was settled another way.'
+            : 'Send again to nudge, or Mark paid if it was settled another way.'}
         </p>
       ) : null}
 
@@ -4316,7 +4366,12 @@ function InvoiceEditor({
           {/* While the panel above is up, this button IS that panel — leaving
               it here too would offer two ways to approve, one of which throws
               away the answers she is in the middle of typing. */}
-          {invoice.status === 'draft' && !approving ? (
+          {/* A never-email client's REVIEWED invoice keeps this button: review is
+              the last step for them, and the server marks the invoice sent when
+              it lands - so an invoice reviewed before the switch went on (or one
+              whose stamp failed) finishes the same way. */}
+          {(invoice.status === 'draft' || (noEmail && invoice.status === 'reviewed')) &&
+          !approving ? (
             <button
               type="button"
               className="primary-action"
@@ -4328,7 +4383,9 @@ function InvoiceEditor({
                     ? // The server refuses this too — saying so here is what stops
                       // the refusal arriving as a surprise after the click.
                       'Confirm the covered dates above first'
-                    : 'Mark this invoice reviewed'
+                    : noEmail
+                      ? 'Mark this invoice reviewed and sent. Nothing is emailed.'
+                      : 'Mark this invoice reviewed'
               }
               onClick={markReviewed}
             >
@@ -4350,7 +4407,9 @@ function InvoiceEditor({
               link back again, so it is offered on an invoice that has been
               sent (a past-due one is still sent) and nowhere before that; the
               server refuses it too, rather than marking a draft sent. */}
-          {(invoice.status === 'sent' || invoice.status === 'overdue') && invoice.total > 0 ? (
+          {(invoice.status === 'sent' || invoice.status === 'overdue') &&
+          invoice.total > 0 &&
+          !noEmail ? (
             <button
               type="button"
               className="secondary-action"
@@ -4376,7 +4435,7 @@ function InvoiceEditor({
               gets an expired Checkout URL. A draft is shown but not sendable:
               review comes before send, and the button that does it is right
               here. */}
-          {invoice.status !== 'void' ? (
+          {invoice.status !== 'void' && !noEmail ? (
             <button
               type="button"
               className="secondary-action"
@@ -4409,7 +4468,7 @@ function InvoiceEditor({
           {/* The quiet way to add an address for this one send. Beside Send, not
               instead of it: the one-click Send is unchanged. Open to a client
               with one address, or none, which Send cannot reach. */}
-          {invoice.status !== 'void' ? (
+          {invoice.status !== 'void' && !noEmail ? (
             <button
               type="button"
               className="invoice-send-others"

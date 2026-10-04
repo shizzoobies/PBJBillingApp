@@ -37091,6 +37091,7 @@ describe('runAutopayCharge (file backend, fake Stripe)', () => {
       ['the invoice is paid', { invoice: { status: 'paid' } }, {}, 'invoice_paid'],
       ['the total is $0', { invoice: { total: 0, subtotal: 0 } }, {}, 'nothing_owed'],
       ['the client opted out of invoicing', { client: { platformInvoicingOptOut: true } }, {}, 'client_opted_out'],
+      ['the client’s invoices are never emailed', { client: { invoiceNoEmail: true } }, {}, 'client_not_emailed'],
       ['the client withdrew', { enrollment: { status: 'withdrawn' } }, {}, 'not_enrolled'],
       ['the client is revoked', { enrollment: { status: 'revoked' } }, {}, 'not_enrolled'],
       ['the invoice is still a draft', { invoice: { status: 'draft' } }, {}, 'not_claimed'],
@@ -38131,6 +38132,221 @@ describe('the kept invoice note (clients.invoice_note)', () => {
       await store.updateInvoice(made.created[0].id, { blurb: 'Just this invoice' })
       const client = (await store.read()).clients.find((c) => c.id === 'c1')
       expect(client.invoiceNote).toBe('Kept')
+    })
+  })
+})
+
+/**
+ * "Generate the invoice but never email it" (featreq-21d0bba8 answer 8,
+ * Rivercity): `clients.invoice_no_email`.
+ *
+ * An ORDINARY client field, saved by the client page like
+ * `platform_invoicing_opt_out` - unlike the kept invoice note it travels with
+ * the bulk-save payload. Unlike the opt-out it does NOT stop generation: the
+ * invoice is built exactly as for anyone else, it just is never emailed, and
+ * "Mark reviewed" marks it sent without sending anything.
+ */
+describe('the never-email switch (clients.invoice_no_email)', () => {
+  const boundClientColumns = (statement) => {
+    const match = /insert into clients\s*\(([\s\S]*?)\)\s*values/i.exec(statement.text)
+    const columns = match[1].split(',').map((column) => column.trim())
+    const bound = {}
+    statement.params.forEach((value, index) => {
+      bound[columns[index]] = value
+    })
+    return bound
+  }
+
+  it('reads invoice_no_email into invoiceNoEmail, false for a row from before the column', () => {
+    expect(mapClientRow({ id: 'c1', name: 'Acme' }).invoiceNoEmail).toBe(false)
+    expect(mapClientRow({ id: 'c1', name: 'Acme', invoice_no_email: true }).invoiceNoEmail).toBe(true)
+    expect(CLIENT_SELECT_COLUMNS).toMatch(/\binvoice_no_email\b/)
+  })
+
+  it('Postgres: carries the switch through the bulk-save wipe', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({ clients: [{ id: 'c1', name: 'Acme', invoiceNoEmail: true }] }),
+    )
+    const insert = fake.matching(/^insert into clients \(/i)[0]
+    expect(boundClientColumns(insert).invoice_no_email).toBe(true)
+  })
+
+  it('Postgres: a client that never had it is saved as false, and a non-boolean is false too', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex', invoiceNoEmail: 'yes' },
+        ],
+      }),
+    )
+    const inserts = fake.matching(/^insert into clients \(/i)
+    expect(boundClientColumns(inserts[0]).invoice_no_email).toBe(false)
+    expect(boundClientColumns(inserts[1]).invoice_no_email).toBe(false)
+  })
+
+  it('Postgres: a newly created client persists the switch', async () => {
+    const fake = fakePostgres()
+    const created = await postgresStore(fake).createClient({
+      id: 'c9',
+      name: 'Rivercity',
+      invoiceNoEmail: true,
+    })
+    expect(created.invoiceNoEmail).toBe(true)
+    expect(boundClientColumns(fake.matching(/^insert into clients \(/i)[0]).invoice_no_email).toBe(true)
+  })
+
+  it('file: keeps the switch across a save and a read', async () => {
+    await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme', invoiceNoEmail: true }] }))
+    expect((await store.read()).clients.find((c) => c.id === 'c1').invoiceNoEmail).toBe(true)
+    await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme', invoiceNoEmail: false }] }))
+    expect((await store.read()).clients.find((c) => c.id === 'c1').invoiceNoEmail).toBe(false)
+  })
+
+  describe('generation is NOT skipped (unlike the platform-invoicing opt-out)', () => {
+    const period = '2026-08'
+    async function seed(c1, extraClients = []) {
+      await store.write(
+        workspace({
+          clients: [
+            { id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100, ...c1 },
+            { id: 'c2', name: 'Globex', billingMode: 'hourly', hourlyRate: 100 },
+            ...extraClients,
+          ],
+          employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+          timeEntries: ['c1', 'c2'].map((clientId, index) => ({
+            id: `t${index}`,
+            clientId,
+            employeeId: 'emp-1',
+            date: `${period}-04`,
+            minutes: 120,
+            billable: true,
+          })),
+        }),
+      )
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      data.invoices = []
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+
+    it('the month run builds the invoice for a never-email client like any other', async () => {
+      await seed({ invoiceNoEmail: true })
+      const result = await store.generateInvoicesForPeriod(period)
+      expect(result.created.map((entry) => entry.clientId).sort()).toEqual(['c1', 'c2'])
+      expect(result.skipped.filter((row) => row.clientId === 'c1')).toEqual([])
+    })
+
+    it('generating that one client works too, and the draft is an ordinary draft', async () => {
+      await seed({ invoiceNoEmail: true })
+      const result = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+      expect(result.created).toHaveLength(1)
+      expect(result.created[0]).toMatchObject({ status: 'draft', clientId: 'c1', sentAt: null })
+    })
+
+    it('a billing master with a never-email sub still merges that sub', async () => {
+      await seed({ invoiceNoEmail: true, billToClientId: 'master' }, [
+        { id: 'master', name: 'Master', isBillingMaster: true, billingMode: 'hourly', hourlyRate: 100 },
+      ])
+      const result = await store.generateInvoicesForPeriod(period, { clientId: 'master' })
+      expect(result.skipped.find((row) => row.clientId === 'c1')).toBeUndefined()
+      expect(result.created).toHaveLength(1)
+    })
+  })
+
+  describe('recordInvoiceSent({ notEmailed: true }) - the stamp Mark reviewed writes', () => {
+    const seedInvoice = {
+      id: 'inv-ne',
+      clientId: 'c1',
+      period: '2026-08',
+      number: 'INV-2026-08-001',
+      status: 'reviewed',
+      lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+      subtotal: 400,
+      total: 400,
+      dueDate: '2026-09-15',
+      blurb: '',
+      scopeFlags: [],
+      sentAt: null,
+      paidAt: null,
+      paymentMethod: null,
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    }
+    async function seed(overrides = {}) {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      data.invoices = [{ ...seedInvoice, ...overrides }]
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+    const stampOpts = { notEmailed: true, subject: 'Marked sent - delivered outside the app' }
+
+    it('file: marks it sent, re-stamps the due date, and logs ONE entry that is not a delivery', async () => {
+      await seed()
+      const updated = await store.recordInvoiceSent('inv-ne', stampOpts)
+
+      expect(updated.status).toBe('sent')
+      expect(updated.sentAt).toBeTruthy()
+      // The first-send due-date rule: thirty days from the stamp, not the stored date.
+      expect(updated.dueDate).not.toBe('2026-09-15')
+      expect(updated.emailLog).toHaveLength(1)
+      expect(updated.emailLog[0]).toMatchObject({ kind: 'not-emailed', ok: true, to: [], total: 400 })
+      // Nothing that reads the log as "who it went to" may take this for a send.
+      expect(latestInvoiceSend(updated.emailLog)).toBeNull()
+      // No pay token and no Checkout sessions were minted on the way.
+      expect(updated.payToken ?? null).toBeNull()
+      expect(updated.stripeCheckoutSessionId ?? null).toBeNull()
+      expect(updated.stripeCardSessionId ?? null).toBeNull()
+    })
+
+    it('file: stamping twice keeps the first sent date and due date (a re-stamp moves nothing)', async () => {
+      await seed()
+      const first = await store.recordInvoiceSent('inv-ne', stampOpts)
+      const second = await store.recordInvoiceSent('inv-ne', stampOpts)
+      expect(second.sentAt).toBe(first.sentAt)
+      expect(second.dueDate).toBe(first.dueDate)
+      expect(second.emailLog).toHaveLength(2)
+    })
+
+    it('file: a paid invoice stays paid', async () => {
+      await seed({ status: 'paid', paidAt: '2026-09-01T00:00:00.000Z', sentAt: '2026-08-31T00:00:00.000Z' })
+      const updated = await store.recordInvoiceSent('inv-ne', stampOpts)
+      expect(updated.status).toBe('paid')
+    })
+
+    it('file: a voided invoice is refused', async () => {
+      await seed({ status: 'void' })
+      expect(await store.recordInvoiceSent('inv-ne', stampOpts)).toBeNull()
+    })
+
+    it('Postgres: the same statement as a send, with kind not-emailed on the entry and marks-sent true', async () => {
+      const fake = fakePostgres({ invoices: [existingInvoice] })
+      await postgresStore(fake).recordInvoiceSent('inv-1', stampOpts)
+      const update = fake.matching(/^update invoices/i)[0]
+      expect(update.params[2]).toBe(true)
+      expect(JSON.parse(update.params[1])[0]).toMatchObject({
+        kind: 'not-emailed',
+        ok: true,
+        to: [],
+      })
+    })
+
+    it('Mark reviewed then stamp: review through updateInvoice, then the stamp moves it to Sent', async () => {
+      await seed({ status: 'draft' })
+      const reviewed = await store.updateInvoice('inv-ne', { status: 'reviewed' })
+      expect(reviewed.status).toBe('reviewed')
+      const stamped = await store.recordInvoiceSent('inv-ne', stampOpts)
+      expect(stamped.status).toBe('sent')
+    })
+
+    it('an edit after the stamp is simply allowed (no Send again, no changed-since-sent mark)', async () => {
+      await seed()
+      await store.recordInvoiceSent('inv-ne', stampOpts)
+      const edited = await store.updateInvoice('inv-ne', { blurb: 'Corrected note' })
+      expect(edited.blurb).toBe('Corrected note')
+      expect(edited.status).toBe('sent')
+      const [marked] = await store.withChangedSinceSent([edited])
+      expect(marked.changedSinceSent).toBeUndefined()
     })
   })
 })

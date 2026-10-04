@@ -120,6 +120,11 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     // the same call the retired-client rule makes. Team, contacts and checklist
     // issues are untouched: the work still happens, only the billing moved.
     const billedOffPlatform = client.platformInvoicingOptOut === true
+    // Generated here but never emailed (Rivercity): there is nobody to email, so
+    // a missing billing address - or a master with no receiving company - is not
+    // an unfinished setup step. The rate checks below still apply: the invoice
+    // is built, and a $0 one is wrong.
+    const neverEmailed = client.invoiceNoEmail === true
 
     // Billing rate not set for subscription / annual clients. (Hourly clients
     // bill off per-employee bill rates — covered by the Team check below.)
@@ -168,7 +173,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     // A master with no receiving company CANNOT send its combined invoice at
     // all — the send route refuses rather than addressing four companies each
     // other's invoice. High, and it links straight to the picker that sets it.
-    if (!billedOffPlatform && client.isBillingMaster && !addressee) {
+    if (!billedOffPlatform && !neverEmailed && client.isBillingMaster && !addressee) {
       issues.push({
         id: `client:invoiceRecipient:${client.id}`,
         category: 'Invoices',
@@ -189,6 +194,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     // an opted-out client from here, so there is nothing to be missing.
     if (
       !billedOffPlatform &&
+      !neverEmailed &&
       addressee &&
       resolveInvoiceRecipients({ client: addressee, contacts }).to.length === 0
     ) {

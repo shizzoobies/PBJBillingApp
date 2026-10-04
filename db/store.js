@@ -762,6 +762,11 @@ export function normalizeClientProfile(client) {
       typeof client.platformInvoicingOptOut === 'boolean'
         ? client.platformInvoicingOptOut
         : false,
+    // Generated here, never emailed from here: unlike the opt-out the invoice
+    // IS built, and Mark reviewed marks it sent without sending anything. Off
+    // unless someone switched it on; any other value is off, so a bad payload
+    // can never stop a client's invoice reaching them.
+    invoiceNoEmail: client.invoiceNoEmail === true,
     // Consolidated billing (featreq-65f5eac1). `billToClientId` names the
     // BILLING MASTER this client's work is invoiced on; `isBillingMaster` marks
     // that payer row itself; `invoiceRecipientClientId` is the sub whose
@@ -2047,7 +2052,8 @@ export const CLIENT_SELECT_COLUMNS = `id, name, contact, billing_mode, hourly_ra
           assigned_bookkeeper_ids, monthly_service_tier,
           annual_rate, annual_billing_month, lifecycle_stage,
           bill_to_client_id, is_billing_master, invoice_recipient_client_id,
-          hourly_rate_period, hourly_rate_history, invoice_note`
+          hourly_rate_period, hourly_rate_history, invoice_note,
+          invoice_no_email`
 
 /** One `clients` row -> the camelCase shape the app and the API speak. */
 export function mapClientRow(row) {
@@ -2124,6 +2130,10 @@ export function mapClientRow(row) {
     // Billed outside the app. Same shape the file backend produces — cardinal
     // rule 1 — and false for every row written before the column existed.
     platformInvoicingOptOut: row.platform_invoicing_opt_out ?? false,
+    // The invoice is generated and reviewed here but NEVER emailed from here
+    // (Rivercity). Same shape the file backend produces — cardinal rule 1 — and
+    // false for every row written before the column existed.
+    invoiceNoEmail: row.invoice_no_email === true,
     // The client's Stripe customer, written by `setClientStripeCustomerId` at
     // first send. It was written and never read back on Postgres, so every
     // send, payment link and pay click minted a BRAND NEW Stripe customer for
@@ -3185,6 +3195,12 @@ export function sanitizeAppData(data) {
     // stage above: a client that never had the field keeps not having it.
     if ('platformInvoicingOptOut' in client) {
       client.platformInvoicingOptOut = client.platformInvoicingOptOut === true
+    }
+    // Same rule for the never-email switch: it decides whether this client's
+    // invoice is emailed, so a truthy-but-not-boolean value must resolve to a
+    // real boolean before it reaches either backend.
+    if ('invoiceNoEmail' in client) {
+      client.invoiceNoEmail = client.invoiceNoEmail === true
     }
   }
 
@@ -5076,6 +5092,13 @@ export class AppDataStore {
       // from here, and opting one out is a deliberate act on their Billing tab.
       await this.pool.query(
         `alter table clients add column if not exists platform_invoicing_opt_out boolean not null default false`,
+      )
+      // Per-client "generate the invoice but never email it" (Rivercity). Default
+      // FALSE: every client keeps being emailed until someone says this one is
+      // delivered outside the app. An ordinary client field, saved by the client
+      // page and carried through the bulk save like the opt-out above.
+      await this.pool.query(
+        `alter table clients add column if not exists invoice_no_email boolean not null default false`,
       )
       await this.pool.query(
         `alter table clients add column if not exists assigned_bookkeeper_ids text[] not null default '{}'`,
@@ -8388,9 +8411,10 @@ export class AppDataStore {
                 invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
                 bill_to_client_id, is_billing_master, invoice_recipient_client_id,
                 hourly_rate_period, hourly_rate_history, invoice_note,
+                invoice_no_email,
                 created_at, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44::jsonb, $45, $46, now())
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44::jsonb, $45, $46, $47, now())
             `,
             [
               clientRecord.id,
@@ -8485,6 +8509,10 @@ export class AppDataStore {
               // Stored wins outright (see the snapshot above); a client with
               // none stored — including a brand-new one — gets null.
               priorInvoiceNotes.get(clientRecord.id) ?? null,
+              // Travels with the payload like the opt-out: leave it out of the
+              // insert and the next autosave switches it back off, and the
+              // client is emailed an invoice that is delivered another way.
+              clientRecord.invoiceNoEmail === true,
               createdAtFor('clients', clientRecord.id),
             ],
           )
@@ -17131,6 +17159,7 @@ export class AppDataStore {
       providerId = null,
       stamp = null,
       oneTime = [],
+      notEmailed = false,
     } = {},
   ) {
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
@@ -17168,7 +17197,14 @@ export class AppDataStore {
       // edited after a send, so without this the log records that an email left
       // but not what the client was asked to pay.
       total: Number(invoice.total) || 0,
-      ...(kind ? { kind: String(kind) } : {}),
+      // `notEmailed` is the stamp "Mark reviewed" writes for a client whose
+      // invoices are never emailed from here: it MARKS THE INVOICE SENT exactly
+      // as a real send does (status, first sent date, the due-date re-stamp -
+      // `marksSent` below is unchanged), but its entry carries its own kind so
+      // nothing that reads this log as "who it went to" (the Sent line, the
+      // delivery badge, autopay's first-send rule, changed-since-sent) can take
+      // it for an email.
+      ...(kind ? { kind: String(kind) } : notEmailed ? { kind: 'not-emailed' } : {}),
       ...(providerId ? { providerId: String(providerId) } : {}),
       ...(error ? { error: String(error).slice(0, 300) } : {}),
       // Which of those addresses were typed for this one send. They are in `to`
@@ -18185,9 +18221,9 @@ export class AppDataStore {
              card_payments_enabled, platform_invoicing_opt_out,
              invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
              bill_to_client_id, is_billing_master, invoice_recipient_client_id,
-             hourly_rate_period, hourly_rate_history, updated_at
+             hourly_rate_period, hourly_rate_history, invoice_no_email, updated_at
            )
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42::jsonb, now())`,
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42::jsonb,$43, now())`,
           [
             record.id,
             record.name,
@@ -18238,6 +18274,7 @@ export class AppDataStore {
             record.invoiceRecipientClientId ?? null,
             record.hourlyRatePeriod,
             JSON.stringify(record.hourlyRateHistory ?? []),
+            record.invoiceNoEmail === true,
           ],
         )
         await dbClient.query('commit')

@@ -42,7 +42,8 @@ describe('the send route refuses an unanswered covered-date window', () => {
   // guard is added ahead of the Checkout mint — the opt-out refusal
   // (featreq-006f12f6) pushed that mint past 6000. Still well short of
   // `sendInvoiceEmail`, so it stays inside the pre-send half of the route.
-  const block = () => routeBlock(/This invoice is voided, so it cannot be sent\./, 8000)
+  // Widened again from 8000 for the never-email refusal (Rivercity).
+  const block = () => routeBlock(/This invoice is voided, so it cannot be sent\./, 9000)
 
   // The UI disables Send behind review, and review is gated — but this route is
   // reachable directly, and an invoice reviewed BEFORE the question existed
@@ -424,15 +425,17 @@ describe('the invoice responses carry which covered windows can still move', () 
   })
 
   it('marks the invoice a save, a confirm, a send and a pay link hand back', () => {
-    // Widened from 5200 when the sent-invoice session expiry went in ahead of the answer.
-    const patch = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 6200)
+    // Widened from 5200 when the sent-invoice session expiry went in ahead of the answer,
+    // and again from 6200 for the never-email "reviewed means sent" stamp.
+    const patch = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 8400)
     expect(patch).toContain('invoice: await withCoverageChangeable(updated)')
     const confirm = routeBlock(/const coverageConfirmMatch = normalizedPath\.match\(/, 3400)
     expect(confirm).toContain('invoice: await withCoverageChangeable(confirmed)')
     const send = routeBlock(/send bookkeeping failed after delivery/, 900)
     expect(send).toContain('sentInvoice = await withCoverageChangeable(sentInvoice)')
-    // Widened from 6000 when the sent-only refusals went in ahead of the mint.
-    const link = routeBlock(/const invoicePaymentLinkMatch = normalizedPath\.match\(/, 8000)
+    // Widened from 6000 when the sent-only refusals went in ahead of the mint,
+    // and again from 8000 for the never-email refusal.
+    const link = routeBlock(/const invoicePaymentLinkMatch = normalizedPath\.match\(/, 8800)
     expect(link).toContain('invoice: await withCoverageChangeable(updated)')
   })
 

@@ -258,6 +258,14 @@ export type Client = {
    */
   platformInvoicingOptOut?: boolean
   /**
+   * The invoice is generated and reviewed here like any other, but NEVER emailed
+   * from here (Rivercity: delivered outside the app). Unlike the opt-out above
+   * it does not stop generation. With it on there is no Send, Send again or
+   * payment link, "Mark reviewed" marks the invoice sent without an email, and
+   * autopay never charges it. Off unless someone switched it on.
+   */
+  invoiceNoEmail?: boolean
+  /**
    * The "note to the client" kept for every FUTURE invoice (null or absent: none
    * kept). Starts the note on each new invoice; invoices already created keep
    * their own. Owner-only, and written only through its own endpoint — the bulk
@@ -789,8 +797,13 @@ export interface InvoiceEmailSendEntry {
    * Absent on a send of the invoice; set on the two payment notices, and on
    * `'link'` — which is not an email at all but a note that somebody OPENED the
    * durable pay link. A tagged entry never marks the invoice sent.
+   *
+   * `'not-emailed'` is the one tagged entry that sits beside a sent invoice: the
+   * stamp "Mark reviewed" writes for a client whose invoices are never emailed
+   * (no recipients, nothing delivered). It is NOT a send - `latestInvoiceSend`
+   * skips it - it only records that the invoice was marked sent, and when.
    */
-  kind?: 'ack' | 'receipt' | 'link'
+  kind?: 'ack' | 'receipt' | 'link' | 'not-emailed'
   /** Resend's own id for the message — the join key to its delivery events. */
   providerId?: string | null
   /**

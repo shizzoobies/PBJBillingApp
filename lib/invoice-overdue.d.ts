@@ -17,7 +17,7 @@ export interface InvoiceSendLogEntry {
   ok: boolean
   total?: number
   error?: string
-  kind?: 'ack' | 'receipt' | 'link'
+  kind?: 'ack' | 'receipt' | 'link' | 'not-emailed'
   providerId?: string | null
   /** The addresses in `to` typed for this send only; absent when there were none. */
   oneTime?: string[]

@@ -1103,12 +1103,14 @@ export function InvoicesPage({
                     be worse than one she has to close a panel to reach. */}
                 <button
                   className="ghost-action"
-                  disabled={sendBusy || customizing}
+                  disabled={sendBusy || customizing || selectedClient.invoiceNoEmail === true}
                   onClick={() => void emailInvoice()}
                   title={
-                    customizing
-                      ? 'Email sends the stored invoice — close Customize first; edit lines in the month run'
-                      : 'Email this invoice to the client'
+                    selectedClient.invoiceNoEmail === true
+                      ? 'This client’s invoices are delivered outside the app and never emailed'
+                      : customizing
+                        ? 'Email sends the stored invoice — close Customize first; edit lines in the month run'
+                        : 'Email this invoice to the client'
                   }
                   type="button"
                 >
@@ -1120,12 +1122,14 @@ export function InvoicesPage({
                     with one address (or none), to add one for this send only. */}
                 <button
                   className="invoice-send-others"
-                  disabled={sendBusy || customizing}
+                  disabled={sendBusy || customizing || selectedClient.invoiceNoEmail === true}
                   onClick={() => void emailInvoice(true)}
                   title={
-                    customizing
-                      ? 'Email sends the stored invoice — close Customize first; edit lines in the month run'
-                      : 'Email this invoice to an address that is not on file, just this once'
+                    selectedClient.invoiceNoEmail === true
+                      ? 'This client’s invoices are delivered outside the app and never emailed'
+                      : customizing
+                        ? 'Email sends the stored invoice — close Customize first; edit lines in the month run'
+                        : 'Email this invoice to an address that is not on file, just this once'
                   }
                   type="button"
                 >

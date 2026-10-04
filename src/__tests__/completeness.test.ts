@@ -132,6 +132,38 @@ describe('computeSetupIssues', () => {
     })
   })
 
+  /**
+   * "Generate the invoice but never email it" (Rivercity): the invoice IS made,
+   * so a missing RATE is still an unfinished step, but there is nobody to email,
+   * so a missing billing address - or a master with no receiving company - is
+   * not one.
+   */
+  describe('a client whose invoices are never emailed', () => {
+    const neverEmailed = (overrides: Partial<Client> = {}) =>
+      computeSetupIssues({
+        ...emptyInput,
+        clients: [makeClient({ invoiceNoEmail: true, ...overrides })],
+      })
+
+    it('does not ask for a billing email', () => {
+      expect(neverEmailed({ email: '' }).some((i) => i.id === 'client:email:client-1')).toBe(false)
+    })
+
+    it('still asks for a monthly rate, because the invoice is still built', () => {
+      expect(neverEmailed({ monthlyRate: 0 }).some((i) => i.id === 'billing:monthly:client-1')).toBe(
+        true,
+      )
+    })
+
+    it('asks for the billing email again the moment the switch goes off', () => {
+      const ids = computeSetupIssues({
+        ...emptyInput,
+        clients: [makeClient({ invoiceNoEmail: false, email: '' })],
+      }).map((i) => i.id)
+      expect(ids).toContain('client:email:client-1')
+    })
+  })
+
   it('flags an annual client with no annual rate', () => {
     const input: CompletenessInput = {
       ...emptyInput,

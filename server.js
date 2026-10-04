@@ -4435,6 +4435,20 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // Delivered outside the app and never emailed from it. A link minted
+        // before that switch went on may still be in somebody's inbox; it opens
+        // a page that says so and starts nothing.
+        if (payClient.invoiceNoEmail) {
+          sendPayPage(
+            response,
+            renderPayStatusPage({
+              heading: 'This invoice is handled outside the app',
+              body: `Invoice ${payNumber} is delivered to you directly, so there is nothing to pay here. Please contact us at billing@pbjsa.com with any questions.`,
+            }),
+          )
+          return
+        }
+
         // A card link held by a client who is no longer on card payments is a
         // stale link, not an error. Send them to the bank-transfer page.
         if (wantsCard && !payClient.cardPaymentsEnabled) {
@@ -6049,6 +6063,14 @@ const server = createServer(async (request, response) => {
         })
         return
       }
+      // Never emailed, so there is no pay link to hand back either.
+      if (invoiceClient.invoiceNoEmail) {
+        sendJson(response, 409, {
+          error: 'client_not_emailed',
+          message: `${invoiceClient.name}'s invoices are delivered outside the app, so there is no payment link.`,
+        })
+        return
+      }
 
       // Reuse the client's Stripe customer so a repeat payer is one customer in
       // Stripe rather than one per invoice.
@@ -6514,6 +6536,16 @@ const server = createServer(async (request, response) => {
         sendJson(response, 409, {
           error: 'client_opted_out',
           message: `${sendClient.name} is invoiced outside the app.`,
+        })
+        return
+      }
+      // Generated here but never emailed from here (Rivercity): refused before a
+      // recipient is resolved or anything is minted. Their invoice is marked
+      // sent by Mark reviewed instead.
+      if (sendClient.invoiceNoEmail) {
+        sendJson(response, 409, {
+          error: 'client_not_emailed',
+          message: `${sendClient.name}'s invoices are delivered outside the app and never emailed. Mark the invoice reviewed to mark it sent.`,
         })
         return
       }
@@ -7154,6 +7186,41 @@ const server = createServer(async (request, response) => {
       if (!updated) {
         sendJson(response, 404, { error: 'Invoice not found' })
         return
+      }
+      // "GENERATE THE INVOICE BUT NEVER EMAIL IT" (Rivercity). For such a client
+      // review is the last step: Mark reviewed ALSO marks the invoice sent, with
+      // no email, no pay token and no payment sessions - the same first-send
+      // bookkeeping a real send writes (status, sent date, the due-date
+      // re-stamp), with a log entry of its own kind so nothing reads it as a
+      // delivery. Done here, after the review landed, through the one store
+      // writer that already owns that bookkeeping on both backends. A client
+      // billed outside the app entirely is left alone: nothing is stamped sent
+      // for an invoice the app does not own.
+      if (updated.status === 'reviewed' && payload?.status === 'reviewed') {
+        const stampClient = await appDataStore.getClientById(updated.clientId).catch(() => null)
+        if (stampClient?.invoiceNoEmail === true && stampClient.platformInvoicingOptOut !== true) {
+          try {
+            const stamped = await appDataStore.recordInvoiceSent(updated.id, {
+              notEmailed: true,
+              subject: 'Marked sent - delivered outside the app',
+            })
+            // Null is a void that landed in between: the review stands.
+            if (stamped) updated = { ...updated, ...stamped }
+            await appDataStore.recordActivity(
+              session.user.id,
+              'invoice_marked_sent_not_emailed',
+              `${updated.number ?? updated.id}`,
+            )
+          } catch (error) {
+            console.error('[invoices] marked reviewed but could not be marked sent:', error)
+            sendJson(response, 500, {
+              error: 'not_emailed_stamp_failed',
+              message:
+                'The invoice was marked reviewed, but could not be marked sent. Press Mark reviewed again to finish.',
+            })
+            return
+          }
+        }
       }
       // A void leaves the client's open payment pages live for up to a day, and
       // money paid on one would arrive against an invoice that no longer

@@ -562,6 +562,13 @@ export function ClientDetailPage() {
             {client.billToClientId ? null : <AutopayPanel key={client.id} clientId={client.id} />}
           </CollapsibleSection>
 
+          {/* Its OWN card, deliberately apart from the opt-out switch in Invoice
+              customization: that one stops the invoice being made at all, this
+              one only stops it being emailed. */}
+          <CollapsibleSection id="client-section-invoice-delivery" kicker="Invoice settings" title="Invoice delivery" lockable>
+            <InvoiceDeliverySectionBody client={client} onCommit={commit} />
+          </CollapsibleSection>
+
           <CollapsibleSection
             id="client-section-retainer"
             kicker="Engagement"
@@ -1867,6 +1874,31 @@ function InvoiceNoteField({
         </p>
       ) : null}
     </>
+  )
+}
+
+/**
+ * "Generate the invoice but never email it" (Rivercity). Exported for its own
+ * test for the same reason `InvoiceSettingsSectionBody` is. The invoice is still
+ * generated, reviewed and tracked here; only the email (and so the Send button
+ * and the payment link) goes away, and Mark reviewed marks it sent instead.
+ */
+export function InvoiceDeliverySectionBody({
+  client,
+  onCommit,
+}: {
+  client: Client
+  onCommit: (patch: Partial<Client>) => void
+}) {
+  return (
+    <div className="form-grid two-col">
+      <SaveToggleField
+        checked={client.invoiceNoEmail ?? false}
+        description="The invoice is still generated here and reviewed like any other, but it is never emailed. There is no Send button or payment link, and Mark reviewed marks it sent without an email. Use it for a client you deliver invoices to outside the app."
+        label="Generate the invoice but never email it"
+        onChange={(value) => onCommit({ invoiceNoEmail: value })}
+      />
+    </div>
   )
 }
 
