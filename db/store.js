@@ -107,6 +107,7 @@ import {
   scopeRetagApplies,
 } from '../lib/invoice-scope-retag.js'
 import { latestInvoiceSend } from '../lib/invoice-overdue.js'
+import { emptyAutopay } from '../lib/stripe-autopay.js'
 import {
   AMOUNT_MISMATCH_EVENT,
   AMOUNT_MISMATCH_HANDLED_EVENT,
@@ -427,6 +428,96 @@ function generateMagicToken() {
 
 function nowIso() {
   return new Date().toISOString()
+}
+
+/**
+ * Stripe autopay (featreq-bef42b72). Two small tables with NO foreign keys, on
+ * purpose: a cascade from clients would wipe every enrollment on each autosave
+ * (the bulk save deletes and re-inserts the clients), and a restrict would
+ * block the save outright. They are SERVER-OWNED, never part of the workspace
+ * payload, and the file backend keeps them in two top-level arrays that the
+ * bulk save carries over untouched.
+ */
+const AUTOPAY_FIELD_COLUMNS = {
+  status: 'status',
+  paymentMethodId: 'payment_method_id',
+  methodType: 'method_type',
+  last4: 'last4',
+  bankOrBrand: 'bank_or_brand',
+  mandateId: 'mandate_id',
+  consentedAt: 'consented_at',
+  invitedAt: 'invited_at',
+  setupToken: 'setup_token',
+  withdrawnAt: 'withdrawn_at',
+}
+const AUTOPAY_SELECT_COLUMNS = `client_id, status, payment_method_id, method_type, last4,
+          bank_or_brand, mandate_id, consented_at, invited_at, setup_token,
+          withdrawn_at, updated_at`
+const AUTOPAY_ATTEMPT_SELECT_COLUMNS = `invoice_id, attempt_no, payment_intent_id, amount_cents,
+          channel, status, error, error_code, created_at, updated_at`
+const AUTOPAY_ATTEMPT_PATCH_COLUMNS = {
+  paymentIntentId: 'payment_intent_id',
+  status: 'status',
+  error: 'error',
+  errorCode: 'error_code',
+}
+
+const isoOrNull = (value) => (value ? new Date(value).toISOString() : null)
+
+export function mapAutopayRow(row) {
+  return {
+    clientId: row.client_id,
+    status: row.status ?? 'off',
+    paymentMethodId: row.payment_method_id ?? null,
+    methodType: row.method_type ?? null,
+    last4: row.last4 ?? null,
+    bankOrBrand: row.bank_or_brand ?? null,
+    mandateId: row.mandate_id ?? null,
+    consentedAt: isoOrNull(row.consented_at),
+    invitedAt: isoOrNull(row.invited_at),
+    setupToken: row.setup_token ?? null,
+    withdrawnAt: isoOrNull(row.withdrawn_at),
+    updatedAt: isoOrNull(row.updated_at),
+  }
+}
+
+export function mapAutopayAttemptRow(row) {
+  return {
+    invoiceId: row.invoice_id,
+    attemptNo: Number(row.attempt_no),
+    paymentIntentId: row.payment_intent_id ?? null,
+    amountCents: Number(row.amount_cents) || 0,
+    channel: row.channel ?? null,
+    status: row.status,
+    error: row.error ?? null,
+    errorCode: row.error_code ?? null,
+    createdAt: isoOrNull(row.created_at),
+    updatedAt: isoOrNull(row.updated_at),
+  }
+}
+
+/** Only the whitelisted enrollment fields, so a caller cannot write a stray key. */
+function pickAutopayPatch(patch) {
+  const picked = {}
+  for (const key of Object.keys(AUTOPAY_FIELD_COLUMNS)) {
+    if (Object.prototype.hasOwnProperty.call(patch ?? {}, key)) picked[key] = patch[key] ?? null
+  }
+  return picked
+}
+
+/**
+ * Read-modify-write on the app-data file inside ONE queue slot, for the
+ * server-owned autopay arrays. `mutate(data)` returns `{ result, changed }`.
+ * Raw fs calls only in here: `readJson` / `writeFile` enqueue behind this very
+ * slot and would deadlock.
+ */
+function mutateLocalData(mutate) {
+  return enqueueFileOperation(localDataPath, async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    const outcome = await mutate(data)
+    if (outcome?.changed) await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+    return outcome?.result
+  })
 }
 
 function createSeededAuthUsers() {
@@ -5856,6 +5947,48 @@ export class AppDataStore {
       await this.pool.query(
         `alter table clients add column if not exists stripe_customer_id text`,
       )
+      // Stripe autopay (featreq-bef42b72). NO foreign keys, deliberately: the
+      // bulk save deletes and re-inserts clients and invoices, so a cascade
+      // would erase every enrollment on an autosave and a restrict would block
+      // the save. Server-owned; nothing in the workspace payload touches them.
+      await this.pool.query(`
+        create table if not exists client_autopay (
+          client_id text primary key,
+          status text not null default 'off',
+          payment_method_id text,
+          method_type text,
+          last4 text,
+          bank_or_brand text,
+          mandate_id text,
+          consented_at timestamptz,
+          invited_at timestamptz,
+          setup_token text,
+          withdrawn_at timestamptz,
+          updated_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`
+        create unique index if not exists client_autopay_setup_token_key
+          on client_autopay (setup_token)
+          where setup_token is not null
+      `)
+      // One row per attempt to charge one invoice. The primary key IS the
+      // double-charge guard: attempt 1 can be inserted once, ever.
+      await this.pool.query(`
+        create table if not exists autopay_attempts (
+          invoice_id text not null,
+          attempt_no integer not null,
+          payment_intent_id text,
+          amount_cents integer not null default 0,
+          channel text,
+          status text not null default 'claimed',
+          error text,
+          error_code text,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now(),
+          primary key (invoice_id, attempt_no)
+        )
+      `)
       // ---- RATE HISTORY (docs/plans/rate-history-2026-09.md) ----
       //
       // Brittany raises rates one client at a time, at that client's yearly
@@ -9261,7 +9394,15 @@ export class AppDataStore {
       // copy, or an invoice it invented). The keys are only written when the
       // file already had them, so no new shape appears on disk. `toPersist` is
       // rebuilt rather than mutated, like the firm settings above.
-      const { invoices: _payloadInvoices, stripeEvents: _payloadEvents, ...withoutServerOwned } = toPersist
+      const {
+        invoices: _payloadInvoices,
+        stripeEvents: _payloadEvents,
+        // Autopay enrollments and charge attempts are server-owned too: a stale
+        // tab's copy (or none) must never roll back, or erase, either.
+        clientAutopay: _payloadAutopay,
+        autopayAttempts: _payloadAutopayAttempts,
+        ...withoutServerOwned
+      } = toPersist
       toPersist = {
         ...withoutServerOwned,
         ...(Array.isArray(previous?.invoices)
@@ -9272,6 +9413,10 @@ export class AppDataStore {
             }
           : {}),
         ...(Array.isArray(previous?.stripeEvents) ? { stripeEvents: previous.stripeEvents } : {}),
+        ...(Array.isArray(previous?.clientAutopay) ? { clientAutopay: previous.clientAutopay } : {}),
+        ...(Array.isArray(previous?.autopayAttempts)
+          ? { autopayAttempts: previous.autopayAttempts }
+          : {}),
       }
 
       const serialized = JSON.stringify(toPersist, null, 2)
@@ -15774,6 +15919,269 @@ export class AppDataStore {
     if (!client) return
     client.stripeCustomerId = customerId
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  /**
+   * A client's autopay enrollment, or null when none was ever written. Both
+   * backends answer the same camelCase shape (`mapAutopayRow`).
+   */
+  async getClientAutopay(clientId) {
+    if (!clientId) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${AUTOPAY_SELECT_COLUMNS} from client_autopay where client_id = $1`,
+        [clientId],
+      )
+      return rows.length > 0 ? mapAutopayRow(rows[0]) : null
+    }
+    const data = await readJson(localDataPath)
+    const found = (data.clientAutopay ?? []).find((row) => row.clientId === clientId)
+    return found ? { ...emptyAutopay(clientId), ...found } : null
+  }
+
+  /** Every enrollment row, for the owner's panel. Small: one row per opted-in client. */
+  async listClientAutopay() {
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${AUTOPAY_SELECT_COLUMNS} from client_autopay order by client_id`,
+      )
+      return rows.map(mapAutopayRow)
+    }
+    const data = await readJson(localDataPath)
+    return (data.clientAutopay ?? []).map((row) => ({ ...emptyAutopay(row.clientId), ...row }))
+  }
+
+  /** The enrollment a durable /autopay/<token> link names, or null. */
+  async findClientAutopayByToken(token) {
+    const value = String(token ?? '').trim()
+    if (!value) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${AUTOPAY_SELECT_COLUMNS} from client_autopay where setup_token = $1`,
+        [value],
+      )
+      return rows.length > 0 ? mapAutopayRow(rows[0]) : null
+    }
+    const data = await readJson(localDataPath)
+    const found = (data.clientAutopay ?? []).find((row) => row.setupToken === value)
+    return found ? { ...emptyAutopay(found.clientId), ...found } : null
+  }
+
+  /**
+   * Write some of a client's enrollment fields (only the whitelisted ones).
+   *
+   * With `onlyIfStatus` (an array of statuses) the write happens ONLY when the
+   * row exists and is currently in one of them, and the answer is null
+   * otherwise - decided on the row as it stands, so two webhooks racing cannot
+   * walk a withdrawn client back to enrolled. Without it the row is created if
+   * need be.
+   *
+   * @returns the row as written, or null when the guard refused.
+   */
+  async updateClientAutopay(clientId, patch = {}, { onlyIfStatus = null } = {}) {
+    if (!clientId) return null
+    const picked = pickAutopayPatch(patch)
+    const keys = Object.keys(picked)
+    const guarded = Array.isArray(onlyIfStatus)
+
+    if (this.pool) {
+      if (guarded) {
+        const sets = keys.map((key, index) => `${AUTOPAY_FIELD_COLUMNS[key]} = $${index + 3}`)
+        const { rows } = await this.pool.query(
+          `update client_autopay
+              set ${[...sets, 'updated_at = now()'].join(', ')}
+            where client_id = $1 and status = any($2::text[])
+          returning ${AUTOPAY_SELECT_COLUMNS}`,
+          [clientId, onlyIfStatus, ...keys.map((key) => picked[key])],
+        )
+        return rows.length > 0 ? mapAutopayRow(rows[0]) : null
+      }
+      const columns = ['client_id', ...keys.map((key) => AUTOPAY_FIELD_COLUMNS[key])]
+      const updates = keys.map(
+        (key) => `${AUTOPAY_FIELD_COLUMNS[key]} = excluded.${AUTOPAY_FIELD_COLUMNS[key]}`,
+      )
+      const { rows } = await this.pool.query(
+        `insert into client_autopay (${columns.join(', ')})
+         values (${columns.map((_, index) => `$${index + 1}`).join(', ')})
+         on conflict (client_id) do update set ${[...updates, 'updated_at = now()'].join(', ')}
+         returning ${AUTOPAY_SELECT_COLUMNS}`,
+        [clientId, ...keys.map((key) => picked[key])],
+      )
+      return rows.length > 0 ? mapAutopayRow(rows[0]) : null
+    }
+
+    return mutateLocalData((data) => {
+      if (!Array.isArray(data.clientAutopay)) data.clientAutopay = []
+      const index = data.clientAutopay.findIndex((row) => row.clientId === clientId)
+      if (guarded && (index === -1 || !onlyIfStatus.includes(data.clientAutopay[index].status))) {
+        return { result: null, changed: false }
+      }
+      const base = index === -1 ? emptyAutopay(clientId) : data.clientAutopay[index]
+      const next = { ...base, ...picked, clientId, updatedAt: nowIso() }
+      if (index === -1) data.clientAutopay.push(next)
+      else data.clientAutopay[index] = next
+      return { result: { ...next }, changed: true }
+    })
+  }
+
+  /** Every autopay attempt (optionally for one invoice), oldest first. */
+  async listAutopayAttempts({ invoiceId = null } = {}) {
+    if (this.pool) {
+      const { rows } = invoiceId
+        ? await this.pool.query(
+            `select ${AUTOPAY_ATTEMPT_SELECT_COLUMNS} from autopay_attempts
+              where invoice_id = $1 order by attempt_no`,
+            [invoiceId],
+          )
+        : await this.pool.query(
+            `select ${AUTOPAY_ATTEMPT_SELECT_COLUMNS} from autopay_attempts
+              order by invoice_id, attempt_no`,
+          )
+      return rows.map(mapAutopayAttemptRow)
+    }
+    const data = await readJson(localDataPath)
+    return (data.autopayAttempts ?? [])
+      .filter((row) => !invoiceId || row.invoiceId === invoiceId)
+      .map((row) => ({ ...row }))
+      .sort((a, b) => Number(a.attemptNo) - Number(b.attemptNo))
+  }
+
+  /**
+   * THE DOUBLE-CHARGE GUARD. Insert the attempt row BEFORE Stripe is called; no
+   * row inserted means no charge. Returns the claimed attempt, or null.
+   *
+   * Decided in ONE transaction (Postgres: the invoice row is locked `for
+   * update`; file backend: one queue slot), and the invoice is re-checked
+   * inside it: still sent or overdue, and still for exactly `amountCents`. A
+   * void, a payment or an edit that landed since the caller looked answers
+   * null, and so does a second claim of the same (invoice, attemptNo) - the
+   * primary key. Attempt 2 and later are claimable only when the attempt before
+   * them FAILED, which is what makes "Charge again" safe to press twice.
+   */
+  async claimAutopayAttempt(invoiceId, { attemptNo = 1, amountCents, channel = 'ach' } = {}) {
+    const number = Number(attemptNo)
+    const cents = Number(amountCents)
+    if (!invoiceId || !Number.isInteger(number) || number < 1) return null
+    if (!Number.isInteger(cents) || cents <= 0) return null
+    const claimable = (status, total) =>
+      (status === 'sent' || status === 'overdue') &&
+      Math.round((Number(total) || 0) * 100) === cents
+
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('BEGIN')
+        const invoice = await client.query(
+          'select status, total from invoices where id = $1 for update',
+          [invoiceId],
+        )
+        if (invoice.rows.length === 0 || !claimable(invoice.rows[0].status, invoice.rows[0].total)) {
+          await client.query('ROLLBACK')
+          return null
+        }
+        if (number > 1) {
+          const prior = await client.query(
+            'select status from autopay_attempts where invoice_id = $1 and attempt_no = $2',
+            [invoiceId, number - 1],
+          )
+          if (prior.rows[0]?.status !== 'failed') {
+            await client.query('ROLLBACK')
+            return null
+          }
+        }
+        const inserted = await client.query(
+          `insert into autopay_attempts (invoice_id, attempt_no, amount_cents, channel, status)
+           values ($1, $2, $3, $4, 'claimed')
+           on conflict (invoice_id, attempt_no) do nothing
+           returning ${AUTOPAY_ATTEMPT_SELECT_COLUMNS}`,
+          [invoiceId, number, cents, channel],
+        )
+        await client.query('COMMIT')
+        return inserted.rows.length > 0 ? mapAutopayAttemptRow(inserted.rows[0]) : null
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK')
+        } catch {
+          /* already rolled back, or the connection is gone */
+        }
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    return mutateLocalData((data) => {
+      const invoice = (data.invoices ?? []).find((entry) => entry.id === invoiceId)
+      if (!invoice || !claimable(invoice.status, invoice.total)) {
+        return { result: null, changed: false }
+      }
+      if (!Array.isArray(data.autopayAttempts)) data.autopayAttempts = []
+      const attempts = data.autopayAttempts.filter((row) => row.invoiceId === invoiceId)
+      if (attempts.some((row) => Number(row.attemptNo) === number)) {
+        return { result: null, changed: false }
+      }
+      if (number > 1) {
+        const prior = attempts.find((row) => Number(row.attemptNo) === number - 1)
+        if (prior?.status !== 'failed') return { result: null, changed: false }
+      }
+      const at = nowIso()
+      const row = {
+        invoiceId,
+        attemptNo: number,
+        paymentIntentId: null,
+        amountCents: cents,
+        channel,
+        status: 'claimed',
+        error: null,
+        errorCode: null,
+        createdAt: at,
+        updatedAt: at,
+      }
+      data.autopayAttempts.push(row)
+      return { result: { ...row }, changed: true }
+    })
+  }
+
+  /**
+   * Update one attempt (status, intent id, error). `onlyIfStatus` is the
+   * guard that keeps a late event from walking an attempt backwards: a
+   * 'succeeded' attempt is never failed by a stale webhook.
+   *
+   * @returns the attempt as written, or null (no such attempt, or the guard).
+   */
+  async updateAutopayAttempt(invoiceId, attemptNo, patch = {}, { onlyIfStatus = null } = {}) {
+    const number = Number(attemptNo)
+    if (!invoiceId || !Number.isInteger(number)) return null
+    const keys = Object.keys(AUTOPAY_ATTEMPT_PATCH_COLUMNS).filter((key) =>
+      Object.prototype.hasOwnProperty.call(patch ?? {}, key),
+    )
+    const guarded = Array.isArray(onlyIfStatus)
+
+    if (this.pool) {
+      const sets = keys.map((key, index) => `${AUTOPAY_ATTEMPT_PATCH_COLUMNS[key]} = $${index + 4}`)
+      const { rows } = await this.pool.query(
+        `update autopay_attempts
+            set ${[...sets, 'updated_at = now()'].join(', ')}
+          where invoice_id = $1 and attempt_no = $2
+            and ($3::text[] is null or status = any($3::text[]))
+        returning ${AUTOPAY_ATTEMPT_SELECT_COLUMNS}`,
+        [invoiceId, number, guarded ? onlyIfStatus : null, ...keys.map((key) => patch[key] ?? null)],
+      )
+      return rows.length > 0 ? mapAutopayAttemptRow(rows[0]) : null
+    }
+
+    return mutateLocalData((data) => {
+      const index = (data.autopayAttempts ?? []).findIndex(
+        (row) => row.invoiceId === invoiceId && Number(row.attemptNo) === number,
+      )
+      if (index === -1) return { result: null, changed: false }
+      const held = data.autopayAttempts[index]
+      if (guarded && !onlyIfStatus.includes(held.status)) return { result: null, changed: false }
+      const next = { ...held, updatedAt: nowIso() }
+      for (const key of keys) next[key] = patch[key] ?? null
+      data.autopayAttempts[index] = next
+      return { result: { ...next }, changed: true }
+    })
   }
 
   /**

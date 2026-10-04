@@ -181,9 +181,11 @@ import {
   validateSkipRequest,
 } from './lib/checklist-skip.js'
 import { buildQboCsv } from './lib/qbo-export.js'
+import { autopaySummary } from './lib/stripe-autopay.js'
 import {
   createInvoiceCardCheckoutSession,
   createInvoiceCheckoutSession,
+  ensureStripeCustomer,
   expireCheckoutSession,
   retrievePaymentIntentStatus,
   isStripeConfigured,
@@ -1496,6 +1498,10 @@ function scopeAppDataForSession(session, data) {
 
   return {
     ...data,
+    // Server-owned autopay tables, which only the file backend's whole-file read
+    // carries. Enrollment rows hold bearer setup tokens: owners only.
+    clientAutopay: undefined,
+    autopayAttempts: undefined,
     ...(data.firmSettings ? { firmSettings } : {}),
     clients,
     checklists,
@@ -4050,17 +4056,9 @@ const server = createServer(async (request, response) => {
 
         // Reuse the client's Stripe customer, exactly as the send route does, so
         // a repeat payer is one customer in Stripe rather than one per click.
-        let payCustomerId = payClient.stripeCustomerId ?? null
+        let payCustomerId = null
         try {
-          if (!payCustomerId) {
-            const customer = await stripeClient().customers.create({
-              name: payClient.name,
-              ...(payClient.email ? { email: payClient.email } : {}),
-              metadata: { clientId: payClient.id },
-            })
-            payCustomerId = customer.id
-            await appDataStore.setClientStripeCustomerId(payClient.id, payCustomerId)
-          }
+          payCustomerId = await ensureStripeCustomer({ client: payClient, store: appDataStore })
         } catch (error) {
           console.error('[stripe] pay link customer create failed:', error?.message || error)
           sendPayPage(
@@ -4588,6 +4586,25 @@ const server = createServer(async (request, response) => {
         visibleClientIds: teamClientIds,
       })
       sendJson(response, 200, { period, rows })
+      return
+    }
+
+    // GET /api/autopay — every client's autopay enrollment, as the owner's
+    // panel reads it (owner only).
+    //
+    // Its own endpoint rather than a field on the client object: the enrollment
+    // lives in its own table, is server-owned, and the client object is shipped
+    // to every team member. What comes back is `autopaySummary` - words and a
+    // last four - never the setup token, the payment method id or the mandate.
+    if (normalizedPath === '/api/autopay' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see autopay' })
+        return
+      }
+      const enrollments = (await appDataStore.listClientAutopay()).map(autopaySummary)
+      sendJson(response, 200, { enrollments })
       return
     }
 
@@ -5210,17 +5227,9 @@ const server = createServer(async (request, response) => {
 
       // Reuse the client's Stripe customer so a repeat payer is one customer in
       // Stripe rather than one per invoice.
-      let customerId = invoiceClient.stripeCustomerId ?? null
+      let customerId = null
       try {
-        if (!customerId) {
-          const customer = await stripeClient().customers.create({
-            name: invoiceClient.name,
-            ...(invoiceClient.email ? { email: invoiceClient.email } : {}),
-            metadata: { clientId: invoiceClient.id },
-          })
-          customerId = customer.id
-          await appDataStore.setClientStripeCustomerId(invoiceClient.id, customerId)
-        }
+        customerId = await ensureStripeCustomer({ client: invoiceClient, store: appDataStore })
       } catch (error) {
         console.error('[stripe] customer create failed:', error?.message || error)
         sendJson(response, 502, {
@@ -5735,17 +5744,9 @@ const server = createServer(async (request, response) => {
       if (isStripeConfigured() && invoice.total > 0 && !settled) {
         // Reuse the client's Stripe customer so a repeat payer is one customer
         // in Stripe rather than one per invoice.
-        let customerId = sendClient.stripeCustomerId ?? null
+        let customerId = null
         try {
-          if (!customerId) {
-            const customer = await stripeClient().customers.create({
-              name: sendClient.name,
-              ...(sendClient.email ? { email: sendClient.email } : {}),
-              metadata: { clientId: sendClient.id },
-            })
-            customerId = customer.id
-            await appDataStore.setClientStripeCustomerId(sendClient.id, customerId)
-          }
+          customerId = await ensureStripeCustomer({ client: sendClient, store: appDataStore })
         } catch (error) {
           console.error('[stripe] customer create failed:', error?.message || error)
           sendJson(response, 502, {

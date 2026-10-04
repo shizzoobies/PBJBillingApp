@@ -2330,3 +2330,29 @@ export class ApiError extends Error {
     this.code = code
   }
 }
+
+/**
+ * A client's Stripe autopay enrollment, as the OWNER's panel reads it
+ * (featreq-bef42b72). Words and a last four only - the server never sends the
+ * setup token, the payment method id or the mandate.
+ */
+export type AutopayStatus =
+  | 'off'
+  | 'invited'
+  | 'pending_verification'
+  | 'enrolled'
+  | 'withdrawn'
+  | 'revoked'
+
+export type AutopaySummary = {
+  clientId: string | null
+  status: AutopayStatus
+  /** Stripe's payment method type: 'us_bank_account' or 'card'. */
+  methodType: string | null
+  last4: string | null
+  /** The bank's name, or the card brand. */
+  bankOrBrand: string | null
+  invitedAt: string | null
+  consentedAt: string | null
+  withdrawnAt: string | null
+}

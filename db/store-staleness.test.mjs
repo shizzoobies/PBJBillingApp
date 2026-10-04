@@ -36532,3 +36532,302 @@ describe('Accept: the flip and the software rows are one unit (postgres branch)'
     expect(fake.matching(/^ROLLBACK$/i)).toHaveLength(1)
   })
 })
+
+/**
+ * Stripe autopay storage (featreq-bef42b72): the enrollment row and the charge
+ * attempts. Cardinal rule 1 - both backends - so the FILE half is exercised for
+ * real below and the POSTGRES half through a recording pool that emulates just
+ * the autopay statements.
+ *
+ * The thing worth the most here is the double-charge guard: `claimAutopayAttempt`
+ * must hand out attempt 1 of an invoice exactly once, ever.
+ */
+describe('autopay storage (file backend)', () => {
+  async function seedInvoice(overrides = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-ap',
+        clientId: 'c1',
+        period: '2026-09',
+        number: 'INV-2026-09-001',
+        status: 'sent',
+        lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }],
+        subtotal: 100,
+        total: 100,
+        dueDate: '2026-10-15',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: '2026-10-01T00:00:00.000Z',
+        paidAt: null,
+        emailLog: [],
+        createdAt: '2026-10-01T00:00:00.000Z',
+        updatedAt: '2026-10-01T00:00:00.000Z',
+        ...overrides,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  describe('the enrollment row', () => {
+    it('is null until something is written', async () => {
+      expect(await store.getClientAutopay('c1')).toBeNull()
+      expect(await store.listClientAutopay()).toEqual([])
+    })
+
+    it('creates the row on first write and merges later writes into it', async () => {
+      await store.updateClientAutopay('c1', { status: 'invited', setupToken: 'tok_1' })
+      await store.updateClientAutopay('c1', { last4: '6789', bogus: 'dropped' })
+      const row = await store.getClientAutopay('c1')
+      expect(row).toMatchObject({ clientId: 'c1', status: 'invited', setupToken: 'tok_1', last4: '6789' })
+      expect(row).not.toHaveProperty('bogus')
+      expect((await store.findClientAutopayByToken('tok_1')).clientId).toBe('c1')
+      expect(await store.findClientAutopayByToken('tok_nope')).toBeNull()
+    })
+
+    it('onlyIfStatus writes only a row that is in one of those statuses', async () => {
+      await store.updateClientAutopay('c1', { status: 'withdrawn' })
+      expect(
+        await store.updateClientAutopay('c1', { status: 'enrolled' }, { onlyIfStatus: ['invited'] }),
+      ).toBeNull()
+      expect((await store.getClientAutopay('c1')).status).toBe('withdrawn')
+      expect(
+        await store.updateClientAutopay('nobody', { status: 'enrolled' }, { onlyIfStatus: ['invited'] }),
+      ).toBeNull()
+      expect(await store.getClientAutopay('nobody')).toBeNull()
+    })
+  })
+
+  describe('claimAutopayAttempt', () => {
+    it('hands out attempt 1 exactly once', async () => {
+      await seedInvoice()
+      const first = await store.claimAutopayAttempt('inv-ap', { attemptNo: 1, amountCents: 10000, channel: 'ach' })
+      expect(first).toMatchObject({ invoiceId: 'inv-ap', attemptNo: 1, status: 'claimed', amountCents: 10000 })
+      expect(await store.claimAutopayAttempt('inv-ap', { attemptNo: 1, amountCents: 10000 })).toBeNull()
+      expect(await store.listAutopayAttempts({ invoiceId: 'inv-ap' })).toHaveLength(1)
+    })
+
+    it('under a burst of concurrent claims exactly one wins', async () => {
+      await seedInvoice()
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () =>
+          store.claimAutopayAttempt('inv-ap', { attemptNo: 1, amountCents: 10000 }),
+        ),
+      )
+      expect(results.filter(Boolean)).toHaveLength(1)
+      expect(await store.listAutopayAttempts()).toHaveLength(1)
+    })
+
+    it.each(['void', 'paid', 'processing', 'draft', 'reviewed'])(
+      'claims nothing on a %s invoice',
+      async (status) => {
+        await seedInvoice({ status })
+        expect(await store.claimAutopayAttempt('inv-ap', { amountCents: 10000 })).toBeNull()
+        expect(await store.listAutopayAttempts()).toEqual([])
+      },
+    )
+
+    it('claims on an overdue invoice', async () => {
+      await seedInvoice({ status: 'overdue' })
+      expect(await store.claimAutopayAttempt('inv-ap', { amountCents: 10000 })).not.toBeNull()
+    })
+
+    it('claims nothing when the total is no longer the amount the caller looked at', async () => {
+      await seedInvoice({ total: 125 })
+      expect(await store.claimAutopayAttempt('inv-ap', { amountCents: 10000 })).toBeNull()
+    })
+
+    it('claims nothing for a missing invoice, a zero amount or a nonsense attempt number', async () => {
+      await seedInvoice()
+      expect(await store.claimAutopayAttempt('inv-missing', { amountCents: 10000 })).toBeNull()
+      expect(await store.claimAutopayAttempt('inv-ap', { amountCents: 0 })).toBeNull()
+      expect(await store.claimAutopayAttempt('inv-ap', { attemptNo: 0, amountCents: 10000 })).toBeNull()
+      expect(await store.claimAutopayAttempt('inv-ap', { attemptNo: 1.5, amountCents: 10000 })).toBeNull()
+    })
+
+    it('attempt 2 is claimable only after attempt 1 FAILED, and only once', async () => {
+      await seedInvoice()
+      await store.claimAutopayAttempt('inv-ap', { attemptNo: 1, amountCents: 10000 })
+      expect(await store.claimAutopayAttempt('inv-ap', { attemptNo: 2, amountCents: 10000 })).toBeNull()
+
+      await store.updateAutopayAttempt('inv-ap', 1, { status: 'processing', paymentIntentId: 'pi_1' })
+      expect(await store.claimAutopayAttempt('inv-ap', { attemptNo: 2, amountCents: 10000 })).toBeNull()
+
+      await store.updateAutopayAttempt('inv-ap', 1, { status: 'failed', errorCode: 'card_declined' })
+      const again = await store.claimAutopayAttempt('inv-ap', { attemptNo: 2, amountCents: 10000 })
+      expect(again).toMatchObject({ attemptNo: 2, status: 'claimed' })
+      expect(await store.claimAutopayAttempt('inv-ap', { attemptNo: 2, amountCents: 10000 })).toBeNull()
+      expect(await store.claimAutopayAttempt('inv-ap', { attemptNo: 3, amountCents: 10000 })).toBeNull()
+    })
+  })
+
+  describe('updateAutopayAttempt', () => {
+    it('writes the whitelisted fields and answers the row', async () => {
+      await seedInvoice()
+      await store.claimAutopayAttempt('inv-ap', { amountCents: 10000 })
+      const row = await store.updateAutopayAttempt('inv-ap', 1, {
+        status: 'processing',
+        paymentIntentId: 'pi_1',
+        amountCents: 1,
+      })
+      expect(row).toMatchObject({ status: 'processing', paymentIntentId: 'pi_1', amountCents: 10000 })
+    })
+
+    it('onlyIfStatus keeps a stale event from walking a succeeded attempt backwards', async () => {
+      await seedInvoice()
+      await store.claimAutopayAttempt('inv-ap', { amountCents: 10000 })
+      await store.updateAutopayAttempt('inv-ap', 1, { status: 'succeeded' })
+      expect(
+        await store.updateAutopayAttempt('inv-ap', 1, { status: 'failed' }, { onlyIfStatus: ['claimed', 'processing'] }),
+      ).toBeNull()
+      expect((await store.listAutopayAttempts())[0].status).toBe('succeeded')
+      expect(await store.updateAutopayAttempt('inv-ap', 9, { status: 'failed' })).toBeNull()
+    })
+  })
+
+  describe('the bulk save', () => {
+    it('keeps both tables whatever the payload carries', async () => {
+      await seedInvoice()
+      await store.updateClientAutopay('c1', { status: 'enrolled', last4: '6789' })
+      await store.claimAutopayAttempt('inv-ap', { amountCents: 10000 })
+
+      // A stale tab saving nothing about them, a payload inventing its own, and
+      // a client rename - none of these may change or erase either table.
+      await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme Renamed' }] }))
+      await store.write(
+        workspace({
+          clientAutopay: [{ clientId: 'c1', status: 'off' }],
+          autopayAttempts: [],
+        }),
+      )
+
+      const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+      expect(persisted.clientAutopay).toHaveLength(1)
+      expect(persisted.clientAutopay[0]).toMatchObject({ clientId: 'c1', status: 'enrolled', last4: '6789' })
+      expect(persisted.autopayAttempts).toHaveLength(1)
+      expect(persisted.autopayAttempts[0]).toMatchObject({ invoiceId: 'inv-ap', attemptNo: 1 })
+    })
+
+    it('writes no autopay keys that were never there', async () => {
+      await store.write(workspace({ clientAutopay: [{ clientId: 'c1' }] }))
+      const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+      expect(persisted).not.toHaveProperty('clientAutopay')
+      expect(persisted).not.toHaveProperty('autopayAttempts')
+    })
+  })
+})
+
+describe('autopay storage (Postgres statements)', () => {
+  /** A recording pool that emulates only the autopay statements, in memory. */
+  function autopayPool({ invoice = { status: 'sent', total: '100.00' }, attempts = [] } = {}) {
+    const statements = []
+    const held = attempts.map((row) => ({ ...row }))
+    const answer = async (text, params) => {
+      const trimmed = text.replace(/\s+/g, ' ').trim()
+      statements.push({ text: trimmed, params })
+      if (/^select status, total from invoices where id = \$1 for update$/i.test(trimmed)) {
+        return invoice ? { rows: [invoice] } : { rows: [] }
+      }
+      if (/^select status from autopay_attempts where invoice_id = \$1 and attempt_no = \$2$/i.test(trimmed)) {
+        const found = held.find((row) => row.invoice_id === params[0] && row.attempt_no === params[1])
+        return { rows: found ? [{ status: found.status }] : [] }
+      }
+      if (/^insert into autopay_attempts/i.test(trimmed)) {
+        const exists = held.some((row) => row.invoice_id === params[0] && row.attempt_no === params[1])
+        if (exists) return { rows: [], rowCount: 0 }
+        const row = {
+          invoice_id: params[0],
+          attempt_no: params[1],
+          amount_cents: params[2],
+          channel: params[3],
+          status: 'claimed',
+        }
+        held.push(row)
+        return { rows: [row], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+    const client = { query: answer, release() {} }
+    const pool = { connect: async () => client, query: answer }
+    return { pool, statements, held }
+  }
+  const pgStore = (fake) => {
+    const instance = new AppDataStore()
+    instance.pool = fake.pool
+    instance.mode = 'postgres'
+    return instance
+  }
+
+  it('creates both tables with NO foreign keys and a primary key on (invoice_id, attempt_no)', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    const [enrollment] = fake.matching(/create table if not exists client_autopay/i)
+    const [attempts] = fake.matching(/create table if not exists autopay_attempts/i)
+    expect(enrollment).toBeTruthy()
+    expect(attempts).toBeTruthy()
+    expect(enrollment.text).not.toMatch(/references/i)
+    expect(attempts.text).not.toMatch(/references/i)
+    expect(attempts.text).toMatch(/primary key \(invoice_id, attempt_no\)/i)
+  })
+
+  it('claims inside one transaction: lock the invoice, insert on conflict do nothing, commit', async () => {
+    const fake = autopayPool()
+    const claimed = await pgStore(fake).claimAutopayAttempt('inv-1', { amountCents: 10000 })
+    expect(claimed).toMatchObject({ invoiceId: 'inv-1', attemptNo: 1, status: 'claimed' })
+    const texts = fake.statements.map((entry) => entry.text)
+    expect(texts[0]).toBe('BEGIN')
+    expect(texts[1]).toMatch(/for update$/i)
+    expect(texts[2]).toMatch(/on conflict \(invoice_id, attempt_no\) do nothing/i)
+    expect(texts[3]).toBe('COMMIT')
+  })
+
+  it('a second claim of the same attempt inserts nothing and answers null', async () => {
+    const fake = autopayPool()
+    const store = pgStore(fake)
+    expect(await store.claimAutopayAttempt('inv-1', { amountCents: 10000 })).not.toBeNull()
+    expect(await store.claimAutopayAttempt('inv-1', { amountCents: 10000 })).toBeNull()
+    expect(fake.held).toHaveLength(1)
+  })
+
+  it.each([
+    [{ status: 'void', total: '100.00' }],
+    [{ status: 'paid', total: '100.00' }],
+    [{ status: 'sent', total: '125.00' }],
+    [null],
+  ])('rolls back without inserting when the invoice is %j', async (invoice) => {
+    const fake = autopayPool({ invoice })
+    expect(await pgStore(fake).claimAutopayAttempt('inv-1', { amountCents: 10000 })).toBeNull()
+    expect(fake.statements.some((entry) => /^insert/i.test(entry.text))).toBe(false)
+    expect(fake.statements.at(-1).text).toBe('ROLLBACK')
+  })
+
+  it('attempt 2 needs attempt 1 to have FAILED', async () => {
+    const stillGoing = autopayPool({ attempts: [{ invoice_id: 'inv-1', attempt_no: 1, status: 'processing' }] })
+    expect(await pgStore(stillGoing).claimAutopayAttempt('inv-1', { attemptNo: 2, amountCents: 10000 })).toBeNull()
+    expect(stillGoing.held).toHaveLength(1)
+
+    const failed = autopayPool({ attempts: [{ invoice_id: 'inv-1', attempt_no: 1, status: 'failed' }] })
+    expect(
+      await pgStore(failed).claimAutopayAttempt('inv-1', { attemptNo: 2, amountCents: 10000 }),
+    ).toMatchObject({ attemptNo: 2 })
+  })
+
+  it('the guarded enrollment update names the allowed statuses in its where clause', async () => {
+    const statements = []
+    const instance = new AppDataStore()
+    instance.pool = {
+      query: async (text, params) => {
+        statements.push({ text: text.replace(/\s+/g, ' ').trim(), params })
+        return { rows: [], rowCount: 0 }
+      },
+    }
+    instance.mode = 'postgres'
+    expect(
+      await instance.updateClientAutopay('c1', { status: 'enrolled' }, { onlyIfStatus: ['invited'] }),
+    ).toBeNull()
+    expect(statements[0].text).toMatch(/^update client_autopay set status = \$3, updated_at = now\(\) where client_id = \$1 and status = any\(\$2::text\[\]\)/i)
+    expect(statements[0].params).toEqual(['c1', ['invited'], 'enrolled'])
+  })
+})

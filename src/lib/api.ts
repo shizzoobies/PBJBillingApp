@@ -2,6 +2,7 @@
   ApiError,
   type ActivityEntry,
   type AppData,
+  type AutopaySummary,
   type BillRateVersion,
   type CostRateVersion,
   type Checklist,
@@ -4737,4 +4738,16 @@ export async function answerInvoiceAiReviewQuestionRequest(
     )
   }
   return ((await response.json()) as { review: InvoiceAiReview }).review
+}
+
+/**
+ * Every client's autopay enrollment (owner only). A client with no row is simply
+ * absent from the list, which the panel reads as "not enrolled".
+ */
+export async function listAutopayRequest() {
+  const response = await apiFetch('/api/autopay', { credentials: 'same-origin' })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load autopay (${response.status})`)
+  }
+  return ((await response.json()) as { enrollments: AutopaySummary[] }).enrollments
 }

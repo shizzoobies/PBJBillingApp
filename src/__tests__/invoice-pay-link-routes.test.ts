@@ -72,7 +72,7 @@ describe('the pay link route is reachable at all', () => {
     expect(head).toBeGreaterThan(-1)
     expect(head).toBeLessThan(payBlock.indexOf('createInvoiceCardCheckoutSession'))
     expect(head).toBeLessThan(payBlock.indexOf('recordInvoicePayLinkOpened'))
-    expect(head).toBeLessThan(payBlock.indexOf('customers.create'))
+    expect(head).toBeLessThan(payBlock.indexOf('ensureStripeCustomer('))
   })
 
   // A scanner that does GET without asking for HTML is not a client reading
@@ -501,8 +501,7 @@ describe('the Payment link route is only for an invoice that has been sent', () 
   it('is decided before any Stripe call or store write', () => {
     for (const later of [
       'appDataStore.read()',
-      'customers.create(',
-      'setClientStripeCustomerId(',
+      'ensureStripeCustomer(',
       'createInvoiceCheckoutSession(',
       'swapInvoiceCheckoutSession(',
       'expireCheckoutSession(',
@@ -573,7 +572,7 @@ describe('the money routes refuse a client invoiced outside the app', () => {
     expect(refusalAt).toBeGreaterThan(-1)
     expect(paymentLinkBlock).toContain("error: 'client_opted_out'")
     expect(refusalAt).toBeLessThan(paymentLinkBlock.indexOf('createInvoiceCheckoutSession('))
-    expect(refusalAt).toBeLessThan(paymentLinkBlock.indexOf('customers.create('))
+    expect(refusalAt).toBeLessThan(paymentLinkBlock.indexOf('ensureStripeCustomer('))
   })
 
   // The public page says as little as it can — the same sentence a client with
@@ -584,7 +583,7 @@ describe('the money routes refuse a client invoiced outside the app', () => {
     expect(payBlock.slice(refusalAt, refusalAt + 400)).toContain(
       'This invoice cannot be paid online right now',
     )
-    expect(refusalAt).toBeLessThan(payBlock.indexOf('customers.create('))
+    expect(refusalAt).toBeLessThan(payBlock.indexOf('ensureStripeCustomer('))
     // The pay route picks the session minter conditionally, so the name is not
     // followed by its own paren — match the bare name.
     expect(refusalAt).toBeLessThan(payBlock.indexOf('createInvoiceCardCheckoutSession'))
@@ -613,17 +612,23 @@ describe('the money routes refuse a client invoiced outside the app', () => {
  * pins that the routes still consult the client rather than minting blind.
  */
 describe('a repeat payer stays one Stripe customer', () => {
-  it('the send route reads the client’s customer before creating one', () => {
-    const readAt = serverSource.indexOf('let customerId = sendClient.stripeCustomerId ?? null')
-    expect(readAt, 'the send route stopped reading the stored customer').toBeGreaterThan(-1)
-    const afterRead = serverSource.slice(readAt, readAt + 600)
-    expect(afterRead).toContain('if (!customerId)')
-    expect(afterRead).toContain('customers.create(')
-    expect(afterRead).toContain('setClientStripeCustomerId(sendClient.id, customerId)')
+  // The read-before-create now lives in ONE helper (lib/stripe-rail.js
+  // `ensureStripeCustomer`, tested in lib/stripe-customer.test.mjs). What is
+  // pinned here is that every route goes THROUGH it with the client it read -
+  // no route may create a customer by hand again.
+  it('the send, payment-link and pay routes all go through ensureStripeCustomer', () => {
+    expect(serverSource).toContain(
+      'customerId = await ensureStripeCustomer({ client: sendClient, store: appDataStore })',
+    )
+    expect(serverSource).toContain(
+      'customerId = await ensureStripeCustomer({ client: invoiceClient, store: appDataStore })',
+    )
+    expect(serverSource).toContain(
+      'payCustomerId = await ensureStripeCustomer({ client: payClient, store: appDataStore })',
+    )
   })
 
-  it('the payment-link and pay routes read it too', () => {
-    expect(serverSource).toContain('let customerId = invoiceClient.stripeCustomerId ?? null')
-    expect(serverSource).toContain('let payCustomerId = payClient.stripeCustomerId ?? null')
+  it('no route creates a Stripe customer by hand', () => {
+    expect(serverSource).not.toContain('customers.create(')
   })
 })

@@ -16,6 +16,7 @@ import { useAppContext } from '../AppContext'
 import { ChecklistCard, NewTaskForm } from './ChecklistsPage'
 import { SectionScopeContext } from '../components/sectionScope'
 import { AssignedTeamControl } from '../components/AssignedTeamControl'
+import { AutopayPanel } from '../components/AutopayPanel'
 import { BilledOnCard } from '../components/BilledOnCard'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { ClientTimeModal } from '../components/ClientTimeModal'
@@ -555,6 +556,9 @@ export function ClientDetailPage() {
 
           <CollapsibleSection id="client-section-invoice" kicker="Invoice settings" title="Invoice customization" lockable>
             <InvoiceSettingsSectionBody client={client} onCommit={commit} />
+            {/* A company billed on a master's combined invoice has no invoice
+                of its own to charge, so autopay lives on the master. */}
+            {client.billToClientId ? null : <AutopayPanel key={client.id} clientId={client.id} />}
           </CollapsibleSection>
 
           <CollapsibleSection

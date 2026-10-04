@@ -101,11 +101,9 @@ describe('what she types for one send is saved nowhere', () => {
     expect(sendBlock).not.toMatch(
       /appDataStore\.(write|updateClient|createClient|saveClient|upsertContact|createContact|saveContact|updateContact|addContact)\b/,
     )
-    // The one write it already made for the Stripe customer is the client's
-    // Stripe id and nothing else.
-    expect(sendBlock.match(/appDataStore\.set\w+\(/g)).toEqual([
-      'appDataStore.setClientStripeCustomerId(',
-    ])
+    // The Stripe customer id is written by ensureStripeCustomer (the client's
+    // Stripe id and nothing else), so the route itself makes no set* write.
+    expect(sendBlock.match(/appDataStore\.set\w+\(/g)).toBeNull()
     expect(sendBlock).not.toContain('contacts.push')
     expect(sendBlock).not.toContain('companyEmails')
   })
