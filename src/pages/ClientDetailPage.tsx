@@ -99,6 +99,7 @@ import {
   formatHoursMinutes,
   getBillingPeriodLabel,
   getChecklistFrequencyLabel,
+  INVOICE_NOTE_MAX_LENGTH,
   isDueThisMonth,
   isSafeImageSrc,
   localDateOnly,
@@ -559,7 +560,13 @@ export function ClientDetailPage() {
             <InvoiceSettingsSectionBody client={client} onCommit={commit} />
             {/* A company billed on a master's combined invoice has no invoice
                 of its own to charge, so autopay lives on the master. */}
-            {client.billToClientId ? null : <AutopayPanel key={client.id} clientId={client.id} />}
+            {client.billToClientId ? null : (
+              <AutopayPanel
+                key={client.id}
+                clientId={client.id}
+                neverEmailed={client.invoiceNoEmail === true}
+              />
+            )}
           </CollapsibleSection>
 
           {/* Its OWN card, deliberately apart from the opt-out switch in Invoice
@@ -1863,6 +1870,7 @@ function InvoiceNoteField({
   return (
     <>
       <SaveTextareaField
+        maxLength={INVOICE_NOTE_MAX_LENGTH}
         label="Note on every invoice"
         helper="Starts the note to the client on every new invoice for this client. Invoices already created keep their own note. Leave it empty for none."
         onCommit={(value) => void keep(value)}

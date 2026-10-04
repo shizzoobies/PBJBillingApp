@@ -13549,6 +13549,22 @@ export class AppDataStore {
   }
 
   /**
+   * The ids of every client whose invoices are never emailed. The bulk-save
+   * route reads it BEFORE a save so it can tell which clients the save has just
+   * switched ON (their open payment links are then closed).
+   */
+  async clientIdsWithNoEmail() {
+    if (this.pool) {
+      const { rows } = await this.pool.query(`select id from clients where invoice_no_email = true`)
+      return rows.map((row) => row.id)
+    }
+    const data = await readJson(localDataPath)
+    return (data.clients ?? [])
+      .filter((entry) => entry && entry.invoiceNoEmail === true)
+      .map((entry) => entry.id)
+  }
+
+  /**
    * Keep (or clear) the "note to the client" for FUTURE invoices.
    *
    * A TARGETED writer, deliberately: `clients.invoice_note` is snapshotted and
@@ -17176,6 +17192,11 @@ export class AppDataStore {
       return null
     }
 
+    // The never-email stamp is only ever the step AFTER a review. A Back to
+    // draft from another tab (or a void, handled above) between the review and
+    // this write must not be stamped sent, so anything but Reviewed is refused.
+    if (notEmailed && current.status !== 'reviewed') return null
+
     // THE SEND MOMENT. The send route decides it once, before it builds the
     // email and the PDF, and hands the same value here, so what the documents
     // printed and what is stored cannot land on different sides of UTC midnight.
@@ -17292,8 +17313,9 @@ export class AppDataStore {
                                 then $5::date::text else due_date end,
                 updated_at = now()
           where id = $1 and status <> 'void'
+            and (not $6::boolean or status = 'reviewed')
           returning ${INVOICE_SELECT_COLUMNS}`,
-        [invoiceId, JSON.stringify([entry]), marksSent, entry.at, firstSendDueDate],
+        [invoiceId, JSON.stringify([entry]), marksSent, entry.at, firstSendDueDate, notEmailed],
       )
       if (rowCount === 0) return null
       return mapInvoiceRow(rows[0])
@@ -17315,6 +17337,9 @@ export class AppDataStore {
         console.warn(`[invoices] recordInvoiceSent skipped: ${invoiceId} is void`)
         return null
       }
+      // Same guard as the Postgres statement's `status = 'reviewed'`, decided on
+      // the row read inside this slot rather than the read above.
+      if (notEmailed && stored.status !== 'reviewed') return null
       const storedEntry = entryFor(stored)
       // The file backend's read IS the whole file, so appending here cannot drop
       // entries the way the Postgres read-modify-write did — the branch above

@@ -96,6 +96,40 @@ describe('<AutopayPanel>', () => {
   })
 })
 
+describe('<AutopayPanel> for a never-email client', () => {
+  beforeEach(() => {
+    listAutopayRequest.mockReset()
+    inviteToAutopayRequest.mockReset()
+    turnOffAutopayRequest.mockReset()
+  })
+
+  it('stays visible but disables Invite, with the reason', async () => {
+    listAutopayRequest.mockResolvedValue([])
+    render(<AutopayPanel clientId="c1" neverEmailed />)
+    await waitFor(() => expect(screen.getByTestId('autopay-status')).toBeInTheDocument())
+    const invite = screen.getByRole('button', { name: 'Invite to autopay' })
+    expect(invite).toBeDisabled()
+    expect(invite).toHaveAttribute('title', expect.stringContaining('never emailed'))
+    expect(screen.getByText(/invoices are never emailed, so automatic payments are not offered/i)).toBeVisible()
+    fireEvent.click(invite)
+    expect(inviteToAutopayRequest).not.toHaveBeenCalled()
+  })
+
+  it('still shows an existing enrollment and lets it be turned off', async () => {
+    listAutopayRequest.mockResolvedValue([summary()])
+    render(<AutopayPanel clientId="c1" neverEmailed />)
+    await waitFor(() => expect(screen.getByTestId('autopay-status')).toHaveTextContent('ending 6789'))
+    expect(screen.getByRole('button', { name: 'Turn off' })).toBeEnabled()
+  })
+
+  it('an ordinary client’s Invite is enabled', async () => {
+    listAutopayRequest.mockResolvedValue([])
+    render(<AutopayPanel clientId="c1" />)
+    await waitFor(() => expect(screen.getByTestId('autopay-status')).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Invite to autopay' })).toBeEnabled()
+  })
+})
+
 describe('<AutopayPanel> actions', () => {
   beforeEach(() => {
     listAutopayRequest.mockReset()

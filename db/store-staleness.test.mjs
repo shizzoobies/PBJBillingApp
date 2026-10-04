@@ -38299,19 +38299,35 @@ describe('the never-email switch (clients.invoice_no_email)', () => {
       expect(updated.stripeCardSessionId ?? null).toBeNull()
     })
 
-    it('file: stamping twice keeps the first sent date and due date (a re-stamp moves nothing)', async () => {
-      await seed()
-      const first = await store.recordInvoiceSent('inv-ne', stampOpts)
-      const second = await store.recordInvoiceSent('inv-ne', stampOpts)
-      expect(second.sentAt).toBe(first.sentAt)
-      expect(second.dueDate).toBe(first.dueDate)
-      expect(second.emailLog).toHaveLength(2)
+    // The stamp is only ever the step AFTER a review: anything but Reviewed is
+    // refused (null) and nothing is written, so a Back to draft from another tab
+    // cannot be stamped sent.
+    it.each([
+      ['a second stamp (already Sent)', { status: 'sent', sentAt: '2026-09-01T00:00:00.000Z', dueDate: '2026-10-01' }],
+      ['a paid invoice', { status: 'paid', paidAt: '2026-09-01T00:00:00.000Z', sentAt: '2026-08-31T00:00:00.000Z' }],
+      ['a draft (Back to draft from another tab)', { status: 'draft' }],
+    ])('file: refuses %s and writes nothing', async (_name, overrides) => {
+      await seed(overrides)
+      const before = JSON.parse(await readFile(localDataPath, 'utf8')).invoices[0]
+      expect(await store.recordInvoiceSent('inv-ne', stampOpts)).toBeNull()
+      const after = JSON.parse(await readFile(localDataPath, 'utf8')).invoices[0]
+      expect(after).toEqual(before)
     })
 
-    it('file: a paid invoice stays paid', async () => {
-      await seed({ status: 'paid', paidAt: '2026-09-01T00:00:00.000Z', sentAt: '2026-08-31T00:00:00.000Z' })
-      const updated = await store.recordInvoiceSent('inv-ne', stampOpts)
-      expect(updated.status).toBe('paid')
+    it('clientIdsWithNoEmail lists exactly the switched-on clients (file and Postgres)', async () => {
+      await store.write(
+        workspace({
+          clients: [
+            { id: 'c1', name: 'Acme', invoiceNoEmail: true },
+            { id: 'c2', name: 'Globex' },
+          ],
+        }),
+      )
+      expect(await store.clientIdsWithNoEmail()).toEqual(['c1'])
+
+      const fake = fakePostgres({ clientRows: [{ id: 'c1', name: 'Acme' }] })
+      await postgresStore(fake).clientIdsWithNoEmail()
+      expect(fake.matching(/^select id from clients where invoice_no_email = true$/i)).toHaveLength(1)
     })
 
     it('file: a voided invoice is refused', async () => {
@@ -38319,8 +38335,26 @@ describe('the never-email switch (clients.invoice_no_email)', () => {
       expect(await store.recordInvoiceSent('inv-ne', stampOpts)).toBeNull()
     })
 
+    it('Postgres: refuses an invoice that is not Reviewed before writing anything', async () => {
+      const fake = fakePostgres({ invoices: [existingInvoice] }) // status 'sent'
+      expect(await postgresStore(fake).recordInvoiceSent('inv-1', stampOpts)).toBeNull()
+      expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+    })
+
+    it('Postgres: the statement itself only stamps a Reviewed row (a race after the read is refused too)', async () => {
+      const fake = fakePostgres({ invoices: [{ ...existingInvoice, status: 'reviewed', sent_at: null }] })
+      await postgresStore(fake).recordInvoiceSent('inv-1', stampOpts)
+      const update = fake.matching(/^update invoices/i)[0]
+      expect(update.text).toMatch(/and \(not \$6::boolean or status = 'reviewed'\)/)
+      expect(update.params[5]).toBe(true)
+      // An ordinary send binds false, so it is not narrowed to Reviewed.
+      const sendFake = fakePostgres({ invoices: [existingInvoice] })
+      await postgresStore(sendFake).recordInvoiceSent('inv-1', { to: ['a@b.test'], subject: 'x', ok: true })
+      expect(sendFake.matching(/^update invoices/i)[0].params[5]).toBe(false)
+    })
+
     it('Postgres: the same statement as a send, with kind not-emailed on the entry and marks-sent true', async () => {
-      const fake = fakePostgres({ invoices: [existingInvoice] })
+      const fake = fakePostgres({ invoices: [{ ...existingInvoice, status: 'reviewed', sent_at: null }] })
       await postgresStore(fake).recordInvoiceSent('inv-1', stampOpts)
       const update = fake.matching(/^update invoices/i)[0]
       expect(update.params[2]).toBe(true)

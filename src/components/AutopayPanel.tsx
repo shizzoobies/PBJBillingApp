@@ -13,7 +13,18 @@ import { autopayStatusText } from '../lib/autopayText'
  * the setup link, the payment method id or the mandate. Inviting EMAILS the
  * client a link; nothing is charged by anything on this panel.
  */
-export function AutopayPanel({ clientId }: { clientId: string }) {
+export function AutopayPanel({
+  clientId,
+  neverEmailed = false,
+}: {
+  clientId: string
+  /**
+   * This client's invoices are never emailed, so the invitation (an email) is
+   * refused. The panel stays so an existing enrollment still shows and can be
+   * turned off; only Invite is disabled, with the reason.
+   */
+  neverEmailed?: boolean
+}) {
   const [summary, setSummary] = useState<AutopaySummary | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -70,7 +81,12 @@ export function AutopayPanel({ clientId }: { clientId: string }) {
         {status !== 'enrolled' ? (
           <button
             className="ghost-action"
-            disabled={busy}
+            disabled={busy || neverEmailed}
+            title={
+              neverEmailed
+                ? 'This client’s invoices are never emailed, so automatic payments are not offered'
+                : undefined
+            }
             onClick={() => void run(() => inviteToAutopayRequest(clientId))}
             type="button"
           >
@@ -97,6 +113,11 @@ export function AutopayPanel({ clientId }: { clientId: string }) {
           </button>
         ) : null}
       </div>
+      {neverEmailed && status !== 'enrolled' ? (
+        <small className="field-helper">
+          This client’s invoices are never emailed, so automatic payments are not offered.
+        </small>
+      ) : null}
       {error ? (
         <small className="invoice-run-error" role="alert">
           {error}

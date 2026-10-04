@@ -106,6 +106,11 @@ afterEach(() => {
 })
 
 describe('the note choice in the invoice editor', () => {
+  it('limits the note to the same 2000 characters a kept note may have', async () => {
+    await openRun(makeInvoice())
+    expect(note().maxLength).toBe(2000)
+  })
+
   it('defaults to This invoice only, and says it stays on this invoice', async () => {
     await openRun(makeInvoice())
     expect(thisOnly().checked).toBe(true)

@@ -47,6 +47,11 @@ describe('the "Note on every invoice" field', () => {
     expect(field().value).toBe('')
   })
 
+  it('limits the note to 2000 characters, the most the server will keep', () => {
+    render(<InvoiceSettingsSectionBody client={client()} onCommit={vi.fn()} />)
+    expect(field().maxLength).toBe(2000)
+  })
+
   it('says what it does, and that existing invoices keep their own note', () => {
     render(<InvoiceSettingsSectionBody client={client()} onCommit={vi.fn()} />)
     expect(screen.getByText(/starts the note to the client on every new invoice/i)).toBeVisible()

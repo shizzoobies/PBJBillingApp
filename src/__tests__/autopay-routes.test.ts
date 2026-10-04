@@ -113,6 +113,7 @@ describe('POST /api/clients/:id/autopay/(invite|turn-off)', () => {
     const emailAt = block.indexOf('sendInvoiceEmail(')
     for (const refusal of [
       "error: 'client_opted_out'",
+      "error: 'client_not_emailed'",
       "error: 'autopay_on_master'",
       "error: 'already_enrolled'",
       "error: 'invoice_no_recipient'",

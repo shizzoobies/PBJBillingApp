@@ -105,6 +105,7 @@ import {
   type TimesheetLock,
 } from '../lib/types'
 import {
+  INVOICE_NOTE_MAX_LENGTH,
   INVOICE_STATUS_LABELS,
   currency,
   daysPastDueLabel,
@@ -4050,6 +4051,7 @@ function InvoiceEditor({
           rows={2}
           value={blurb}
           readOnly={Boolean(lockMessage) || savingDates}
+          maxLength={INVOICE_NOTE_MAX_LENGTH}
           placeholder="Optional note shown on the invoice."
           onChange={(event) => {
             setRetainerError(null)

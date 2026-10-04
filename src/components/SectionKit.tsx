@@ -269,10 +269,12 @@ export function SavingTextarea({
   placeholder,
   ariaLabel,
   className = 'input',
+  maxLength,
 }: {
   canonical: string
   onCommit: (value: string) => void
   rows?: number
+  maxLength?: number
   placeholder?: string
   ariaLabel?: string
   className?: string
@@ -302,6 +304,7 @@ export function SavingTextarea({
       aria-label={ariaLabel}
       className={className}
       rows={rows}
+      maxLength={maxLength}
       placeholder={placeholder}
       value={draft}
       onFocus={() => setFocused(true)}
@@ -450,12 +453,14 @@ export function SaveTextareaField({
   onCommit,
   value,
   rows,
+  maxLength,
 }: {
   label: string
   helper?: string
   onCommit: (value: string) => void
   value: string
   rows?: number
+  maxLength?: number
 }) {
   const { state, flash } = useSaveFlash()
   return (
@@ -467,6 +472,7 @@ export function SaveTextareaField({
       <SavingTextarea
         canonical={value}
         rows={rows}
+        maxLength={maxLength}
         onCommit={(next) => {
           onCommit(next)
           flash()

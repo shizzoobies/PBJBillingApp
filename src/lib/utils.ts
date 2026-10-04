@@ -60,6 +60,12 @@ export const monthShortNames = [
 /** Largest day-of-month a specific-months template may use (caps short months). */
 export const MAX_DUE_DAY_OF_MONTH = 28
 
+/**
+ * The longest note a client may keep for every future invoice. Mirrors
+ * `INVOICE_NOTE_MAX_LENGTH` in db/store.js, which is what enforces it.
+ */
+export const INVOICE_NOTE_MAX_LENGTH = 2000
+
 export function dateOffset(days: number) {
   const date = new Date()
   date.setDate(date.getDate() + days)
