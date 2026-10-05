@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-10-04. Everything below is committed on
+Written 2026-07-21, last updated 2026-10-05. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -24,6 +24,17 @@ developer you talk to; Brittany (user id `emp-patrice`!) is the client whose
 requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
+
+**2026-10-05 (midday, read-only session plus two tracker writes):** production healthy on
+`2718d31`; Brittany marked four Shipped items done between 16:22 and 16:27 UTC (statement
+dates box, Statements button, QuickBooks covered dates, rate history) - she is reviewing;
+her six follow-up questions on the Software / questionnaire / autopay tickets show no
+activity. On Alex's word the engagement umbrella `featreq-79b6d974` (in_progress since Aug
+20, most of it shipped under other tickets) was closed to Shipped with a nothing-to-test
+note, and the two leftover pieces got their own New ticket `featreq-98527217`: the sidebar
+regroup into her seven sections (plan Track A) and accepted-proposal-builds-the-plan (P4).
+Mid-month item. The only other in_progress ticket is `featreq-459bdfc2`, item 3 only.
+Everything below is still current.
 
 **State right now (2026-10-04, end of day - READ THIS FIRST):** `main` = `c2ebc46` (+ this
 handoff), deployed, `/health` 200 with that commit, voice agent re-provisioned after every ship.
