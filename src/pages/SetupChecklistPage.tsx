@@ -50,9 +50,12 @@ export function SetupChecklistPage() {
   const [expandedCats, setExpandedCats] = useState<Set<string>>(new Set())
   const [showIgnored, setShowIgnored] = useState(false)
   const [fixTarget, setFixTarget] = useState<SetupIssue | null>(null)
-  // Packages aren't in the workspace data; until they load (or if the fetch
-  // fails) plan checklist nudges stay one per plan.
+  // Packages aren't in the workspace data. Plan checklist nudges are held back
+  // until the fetch settles, so the first paint never offers a per-plan Fix
+  // that the package grouping would then replace; after a failure they stay
+  // one per plan.
   const [packages, setPackages] = useState<Package[] | undefined>(undefined)
+  const [packagesSettled, setPackagesSettled] = useState(false)
 
   useEffect(() => {
     if (!ownerMode) return
@@ -63,6 +66,9 @@ export function SetupChecklistPage() {
       })
       .catch(() => {
         /* non-fatal: plan checklist nudges stay per plan */
+      })
+      .then(() => {
+        if (alive) setPackagesSettled(true)
       })
     return () => {
       alive = false
@@ -94,7 +100,9 @@ export function SetupChecklistPage() {
         checklistTemplates: data.checklistTemplates,
         checklists: data.checklists,
         packages,
-      }),
+      }).filter(
+        (issue) => packagesSettled || !issue.id.startsWith('client:plan-checklists:'),
+      ),
     [
       data.clients,
       data.contacts,
@@ -103,6 +111,7 @@ export function SetupChecklistPage() {
       data.checklistTemplates,
       data.checklists,
       packages,
+      packagesSettled,
     ],
   )
 

@@ -60,7 +60,9 @@ fix. It checks:
 - **Billing** — Monthly/Annual clients that have no rate set (invoice would be
   $0).
 - **Clients** — clients missing a billing email, with no assigned team member,
-  with no contact, or on a plan whose plan-checklists haven't been set up yet.
+  with no contact, or on a plan whose plan-checklists haven't been set up yet
+  (grouped by package like the client page: one item per covering package,
+  its own checklists only; plans no package covers get their own).
 - **Team** — team members (including you) with no **bill rate** set.
 - **Plans** — plans with no checklist templates attached.
 - **Contacts** — contacts not linked to any client (link them or archive them).
