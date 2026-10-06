@@ -12685,6 +12685,14 @@ tr.is-inactive-client .client-name-link {
   color: var(--muted);
 }
 
+/* A retainer recorded as paid outside the app: sits under its Paid pill, quiet,
+   because it is a fact about where the money came in, not a state to act on. */
+.invoice-recorded-tag {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 /* Same horizontal inset as the row above it, so the editor reads as the row
    opening rather than as a differently-aligned panel. */
 .invoice-run-editor {

@@ -2060,6 +2060,16 @@ function InvoiceRow({
           <span className={`invoice-status is-${invoice.status}`}>
             {INVOICE_STATUS_LABELS[invoice.status] ?? invoice.status}
           </span>
+          {/* Paid and recorded by hand for money that arrived outside the app:
+              it is already in QuickBooks, so Download for QBO skips it. */}
+          {invoice.recordedOutsideApp === true ? (
+            <span
+              className="invoice-recorded-tag"
+              title="Invoiced and paid outside the app. It is left out of Download for QBO."
+            >
+              Recorded outside the app
+            </span>
+          ) : null}
         </span>
       </button>
       {/* An automatic payment failed. Nothing was collected. The three moves are
@@ -4562,6 +4572,7 @@ function InvoiceEditor({
               voided instead (the server refuses the undo as well). */}
           {invoice.status === 'paid' &&
           invoice.paymentMethod === 'manual' &&
+          invoice.recordedOutsideApp !== true &&
           !recordedRetainerNeverSent(invoice) ? (
             <button
               type="button"

@@ -141,6 +141,39 @@ describe('Mark paid', () => {
   })
 })
 
+describe('the Recorded outside the app tag', () => {
+  it('sits on the row of a recorded retainer, beside its Paid state', async () => {
+    mockList.mockResolvedValue([
+      makeInvoice({
+        kind: 'retainer',
+        status: 'paid',
+        paymentMethod: 'manual',
+        paidAt: '2026-06-10T12:00:00.000Z',
+        recordedOutsideApp: true,
+      }),
+    ])
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('tab', { name: /Paid/ }))
+    await screen.findByText('INV-2026-08-001')
+    expect(screen.getByText('Recorded outside the app')).toBeInTheDocument()
+  })
+
+  it('is not on an ordinary paid invoice', async () => {
+    mockList.mockResolvedValue([
+      makeInvoice({
+        status: 'paid',
+        paymentMethod: 'manual',
+        paidAt: '2026-09-01T00:00:00.000Z',
+        recordedOutsideApp: false,
+      }),
+    ])
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('tab', { name: /Paid/ }))
+    await screen.findByText('INV-2026-08-001')
+    expect(screen.queryByText('Recorded outside the app')).not.toBeInTheDocument()
+  })
+})
+
 describe('Undo manual payment', () => {
   it('is offered only on a manual mark, and returns the invoice to Sent', async () => {
     mockList.mockResolvedValue([
@@ -169,6 +202,39 @@ describe('Undo manual payment', () => {
     await openEditor(/Paid/)
     await waitFor(() => expect(screen.getByText(/locked because it has been paid/i)).toBeInTheDocument())
     expect(undoButton()).not.toBeInTheDocument()
+  })
+
+  // featreq-22de88a5: the marker is the fact, so it hides the undo even where
+  // the send log would otherwise make the heuristic say yes.
+  it('is not offered on a retainer carrying the recorded-outside-app marker', async () => {
+    mockList.mockResolvedValue([
+      makeInvoice({
+        kind: 'retainer',
+        status: 'paid',
+        paymentMethod: 'manual',
+        paidAt: '2026-06-10T12:00:00.000Z',
+        recordedOutsideApp: true,
+        emailLog: [{ ok: true, to: ['pat@acme.test'], sentAt: '2026-06-01T00:00:00.000Z' }],
+      } as unknown as Partial<PersistedInvoice>),
+    ])
+    await openEditor(/Paid/)
+    await waitFor(() => expect(screen.getByText(/locked because it has been paid/i)).toBeInTheDocument())
+    expect(undoButton()).not.toBeInTheDocument()
+  })
+
+  it('is offered on a retainer whose marker is false and that was emailed', async () => {
+    mockList.mockResolvedValue([
+      makeInvoice({
+        kind: 'retainer',
+        status: 'paid',
+        paymentMethod: 'manual',
+        paidAt: '2026-06-10T12:00:00.000Z',
+        recordedOutsideApp: false,
+        emailLog: [{ ok: true, to: ['pat@acme.test'], sentAt: '2026-06-01T00:00:00.000Z' }],
+      } as unknown as Partial<PersistedInvoice>),
+    ])
+    await openEditor(/Paid/)
+    await waitFor(() => expect(undoButton()).toBeInTheDocument())
   })
 
   it('is offered on a draft retainer marked paid by hand: it returns to reviewed, not Sent', async () => {

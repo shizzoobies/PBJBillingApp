@@ -11983,6 +11983,78 @@ describe('retainer invoices (file backend)', () => {
     expect(stored).toMatchObject({ status: 'paid', paymentMethod: 'manual' })
   })
 
+  // featreq-22de88a5: a retainer recorded as paid outside the app is already in
+  // QuickBooks, so it carries a durable marker the QBO export reads.
+  it('marks a recorded retainer as recorded outside the app, and nothing else', async () => {
+    await seedClients()
+    const recorded = await store.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 500,
+      recordOnly: true,
+      period,
+    })
+    const ordinary = await store.createRetainerInvoice({ clientId: 'c1', amount: 700, period })
+    expect(recorded.recordedOutsideApp).toBe(true)
+    expect(ordinary.recordedOutsideApp).toBe(false)
+
+    const stored = await storedInvoices()
+    expect(stored.find((invoice) => invoice.id === recorded.id).recordedOutsideApp).toBe(true)
+    expect(stored.find((invoice) => invoice.id === ordinary.id).recordedOutsideApp).toBe(false)
+
+    // Reading back answers the same boolean, and an ordinary paid-by-hand
+    // retainer does not pick the marker up.
+    await store.markInvoicePaidManually(ordinary.id, {})
+    const listed = await store.listInvoices()
+    expect(listed.find((invoice) => invoice.id === recorded.id).recordedOutsideApp).toBe(true)
+    expect(listed.find((invoice) => invoice.id === ordinary.id).recordedOutsideApp).toBe(false)
+  })
+
+  it('answers recordedOutsideApp false for a stored invoice written before the marker existed', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({ clientId: 'c1', amount: 500, period })
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    delete data.invoices[0].recordedOutsideApp
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    const listed = await store.listInvoices()
+    expect(listed.find((invoice) => invoice.id === retainer.id).recordedOutsideApp).toBe(false)
+  })
+
+  // The marker is the fact; the sent-but-never-emailed heuristic is only the
+  // fallback for rows recorded before the column existed.
+  it('refuses the undo on the marker alone, even when the log shows a send', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 500,
+      recordOnly: true,
+      period,
+    })
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices[0].emailLog = [
+      { ok: true, to: ['a@b.co'], sentAt: '2026-06-11T00:00:00.000Z' },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await expect(store.unmarkManualInvoicePayment(retainer.id, {})).rejects.toThrow(
+      'This retainer was recorded as paid outside the app - void it instead.',
+    )
+  })
+
+  it('still refuses the undo on a recorded retainer that has no marker (recorded before the column)', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 500,
+      recordOnly: true,
+      period,
+    })
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    delete data.invoices[0].recordedOutsideApp
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await expect(store.unmarkManualInvoicePayment(retainer.id, {})).rejects.toThrow(
+      'This retainer was recorded as paid outside the app - void it instead.',
+    )
+  })
+
   // Undo is only refused where it would restore a Sent that never happened.
   it('un-marks a draft retainer that was marked paid by hand, back to reviewed', async () => {
     await seedClients()
@@ -12002,7 +12074,11 @@ describe('retainer invoices (file backend)', () => {
       period,
     })
     const data = JSON.parse(await readFile(localDataPath, 'utf8'))
-    data.invoices.find((invoice) => invoice.id === retainer.id).emailLog = [
+    const stored = data.invoices.find((invoice) => invoice.id === retainer.id)
+    // The fallback case: a row the heuristic reads, with no marker on it - this
+    // is a never-email client's retainer, not one recorded outside the app.
+    stored.recordedOutsideApp = false
+    stored.emailLog = [
       { ok: true, kind: 'not-emailed', to: [], subject: '', at: '2026-08-01T00:00:00.000Z' },
     ]
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
@@ -12019,7 +12095,10 @@ describe('retainer invoices (file backend)', () => {
       period,
     })
     const data = JSON.parse(await readFile(localDataPath, 'utf8'))
-    data.invoices.find((invoice) => invoice.id === retainer.id).emailLog = [
+    const stored = data.invoices.find((invoice) => invoice.id === retainer.id)
+    // A retainer that was really emailed is not one recorded outside the app.
+    stored.recordedOutsideApp = false
+    stored.emailLog = [
       { ok: true, to: ['pat@acme.test'], sentAt: '2026-08-01T00:00:00.000Z' },
     ]
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
@@ -12471,8 +12550,8 @@ describe('retainer writes on the postgres branch', () => {
     // in the status column when someone adds the next one.
     expect(inserts[0].params[4]).toBe('retainer')
     // A draft is neither sent nor paid: sent_at, paid_at, payment_method are null.
-    expect(inserts[0].params).toHaveLength(16)
-    expect(inserts[0].params.slice(13)).toEqual([null, null, null])
+    expect(inserts[0].params).toHaveLength(17)
+    expect(inserts[0].params.slice(13)).toEqual([null, null, null, false])
   })
 
   it('marks the retainer inside the same transaction as the lines', async () => {
@@ -12553,7 +12632,7 @@ describe('retainer writes on the postgres branch', () => {
     expect(restores).toHaveLength(1)
     expect(restores[0].text).toMatch(/number, kind, status/i)
     expect(restores[0].text).toMatch(
-      /email_log, applied_to_invoice_id, original_line_items, pay_token,\s*created_at/i,
+      /email_log, applied_to_invoice_id, original_line_items, pay_token,\s*recorded_outside_app,\s*created_at/i,
     )
     // A retainer that came back as 'monthly' would collide with that client's
     // real invoice on the very next generate; one that came back unapplied
@@ -17369,12 +17448,12 @@ describe('bulk save round-trips original_line_items (postgres branch)', () => {
     await postgresStore(fake).write(workspace())
 
     const restore = fake.matching(/^insert into invoices \(/i)[0]
-    // The column sits two before created_at in the parameter list (`pay_token`
-    // came between them). NULL, not the '[]' that `scope_flags` and `email_log`
-    // legitimately carry — an empty array here would read as "she deleted every
-    // line".
+    // The column sits three before created_at in the parameter list (`pay_token`
+    // and `recorded_outside_app` came between them). NULL, not the '[]' that
+    // `scope_flags` and `email_log` legitimately carry — an empty array here
+    // would read as "she deleted every line".
     expect(restore.params[20]).toBeNull()
-    expect(restore.params[22]).toBe(existingInvoice.created_at)
+    expect(restore.params[23]).toBe(existingInvoice.created_at)
   })
 
   it('writes the snapshot on insert and never on update', async () => {
@@ -38639,14 +38718,19 @@ describe('recorded retainers (postgres branch)', () => {
     })
     const { text, params } = fake.matching(/^insert into invoices \(/i)[0]
     const highest = Math.max(...[...text.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))
-    expect(params).toHaveLength(16)
+    expect(params).toHaveLength(17)
     expect(highest).toBe(params.length)
     expect(params[13]).toBe(retainer.sentAt)
     expect(params[14]).toBe(retainer.paidAt)
     expect(params[15]).toBe('manual')
+    // The marker a recorded retainer carries so Download for QBO leaves it out.
+    expect(params[16]).toBe(true)
     expect(params[14].slice(0, 10)).toBe('2026-06-10')
-    // The columns line up with the placeholders by position.
-    expect(text).toMatch(/sent_at, paid_at, payment_method, created_at, updated_at/)
+    // The columns line up with the placeholders by position, now() twice last.
+    expect(text).toMatch(
+      /sent_at, paid_at, payment_method, recorded_outside_app, created_at, updated_at/,
+    )
+    expect(text).toMatch(/\$14, \$15, \$16, \$17, now\(\), now\(\)/)
   })
 
   it('rolls the invoice back when the audit event cannot be written, so a retry cannot duplicate it', async () => {
@@ -38713,6 +38797,77 @@ describe('recorded retainers (postgres branch)', () => {
     await pgStore.createRetainerInvoice({ clientId: 'c1', amount: 500 })
     expect(fake.matching(/^insert into invoice_review_events/i)).toHaveLength(0)
     const { params } = fake.matching(/^insert into invoices \(/i)[0]
-    expect(params.slice(13)).toEqual([null, null, null])
+    expect(params.slice(13)).toEqual([null, null, null, false])
+  })
+
+  it('binds the marker false for an ordinary monthly insert too', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    await pgStore._insertInvoice({
+      id: 'inv-m',
+      clientId: 'c1',
+      period: '2026-08',
+      number: 'INV-2026-08-001',
+      status: 'draft',
+      lineItems: [],
+      subtotal: 0,
+      total: 0,
+      dueDate: null,
+      blurb: '',
+      scopeFlags: [],
+    })
+    const { params } = fake.matching(/^insert into invoices \(/i)[0]
+    expect(params).toHaveLength(17)
+    expect(params[16]).toBe(false)
+  })
+
+  it('adds the column with the same idempotent migration as pay_token', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    expect(
+      fake.matching(
+        /alter table invoices add column if not exists recorded_outside_app boolean not null default false/i,
+      ),
+    ).toHaveLength(1)
+  })
+})
+
+describe('recorded_outside_app through the bulk save and the reads (postgres branch)', () => {
+  it('selects recorded_outside_app on every invoice read', () => {
+    expect(INVOICE_SELECT_COLUMNS).toMatch(/recorded_outside_app/)
+  })
+
+  it('maps the column to a boolean, false when absent', () => {
+    expect(mapInvoiceRow({ ...existingInvoice, recorded_outside_app: true }).recordedOutsideApp).toBe(
+      true,
+    )
+    expect(mapInvoiceRow({ ...existingInvoice, recorded_outside_app: false }).recordedOutsideApp).toBe(
+      false,
+    )
+    expect(mapInvoiceRow(existingInvoice).recordedOutsideApp).toBe(false)
+  })
+
+  it('carries the marker through the wipe, in the snapshot and the restore', async () => {
+    const fake = fakePostgres({ invoices: [{ ...existingInvoice, recorded_outside_app: true }] })
+    await postgresStore(fake).write(workspace())
+
+    const snapshot = fake.matching(/^select[\s\S]*from invoices$/i)[0]
+    expect(snapshot.text).toMatch(/recorded_outside_app/)
+
+    const restore = fake.matching(/^insert into invoices \(/i)[0]
+    expect(restore.text).toMatch(/pay_token,\s*recorded_outside_app,\s*created_at/i)
+    expect(restore.params[22]).toBe(true)
+    expect(restore.params[23]).toBe(existingInvoice.created_at)
+    const highest = Math.max(...[...restore.text.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))
+    expect(highest).toBe(restore.params.length)
+  })
+
+  it('restores false for a row that has no marker', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).write(workspace())
+    const restore = fake.matching(/^insert into invoices \(/i)[0]
+    expect(restore.params[22]).toBe(false)
   })
 })

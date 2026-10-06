@@ -1938,7 +1938,7 @@ export const INVOICE_SELECT_COLUMNS = `id, client_id, period, number, kind, stat
           due_date, blurb, scope_flags, sent_at, paid_at, payment_method,
           stripe_checkout_session_id, stripe_card_session_id,
           stripe_payment_intent_id, email_log, applied_to_invoice_id,
-          original_line_items, pay_token, created_at, updated_at`
+          original_line_items, pay_token, recorded_outside_app, created_at, updated_at`
 
 /**
  * One invoices row -> the camelCase shape the app and the API speak. jsonb
@@ -1985,6 +1985,9 @@ export function mapInvoiceRow(row) {
     // The durable pay link's token — the invoice's public name at /pay/<token>.
     // Null until a send (or the Payment link button) mints one.
     payToken: row.pay_token ?? null,
+    // A retainer recorded as paid outside the app: already in QuickBooks, so the
+    // QBO export leaves it out and the undo is refused. Boolean, never null.
+    recordedOutsideApp: row.recorded_outside_app === true,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
   }
@@ -2010,6 +2013,8 @@ function normalizeStoredInvoice(invoice) {
     // Same as `mapInvoiceRow`: null, never undefined, so the two backends answer
     // the same shape for a row minted before the column existed.
     payToken: invoice.payToken ?? null,
+    // Same as `mapInvoiceRow`: a boolean, false on a row minted before it existed.
+    recordedOutsideApp: invoice.recordedOutsideApp === true,
   }
 }
 
@@ -5926,6 +5931,13 @@ export class AppDataStore {
       await this.pool.query(
         `create unique index if not exists invoices_pay_token_key on invoices (pay_token)`,
       )
+      // A retainer RECORDED as paid outside the app (featreq-22de88a5): it is
+      // already in QuickBooks, so Download for QBO leaves it out. A durable fact
+      // on the row, set only by `createRetainerInvoice` with recordOnly; NOT NULL
+      // with a default so every existing row reads false and nothing backfills.
+      await this.pool.query(
+        `alter table invoices add column if not exists recorded_outside_app boolean not null default false`,
+      )
       // PARTIAL unique — one live invoice per client per month, but a VOIDED
       // one must not block re-generating. Same lesson as the checklist
       // materializer's instance index, applied from day one rather than after
@@ -8079,7 +8091,7 @@ export class AppDataStore {
                     stripe_checkout_session_id, stripe_card_session_id,
                     stripe_payment_intent_id, payment_method,
                     email_log, applied_to_invoice_id, original_line_items, pay_token,
-                    created_at
+                    recorded_outside_app, created_at
                from invoices`,
           )
         ).rows
@@ -8546,9 +8558,9 @@ export class AppDataStore {
                 stripe_checkout_session_id, stripe_card_session_id,
                 stripe_payment_intent_id, payment_method,
                 email_log, applied_to_invoice_id, original_line_items, pay_token,
-                created_at, updated_at
+                recorded_outside_app, created_at, updated_at
               )
-              values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21::jsonb,$22,$23, now())
+              values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21::jsonb,$22,$23,$24, now())
             `,
             [
               invoice.id,
@@ -8585,6 +8597,10 @@ export class AppDataStore {
               // NULLs it — every Pay button already in a client's inbox goes to
               // a "not valid" page, with nothing in the app to say why.
               invoice.pay_token ?? null,
+              // The recorded-outside-app marker rides the restore too: dropped
+              // from either half it would reset to false on the next autosave
+              // and a recorded retainer would start exporting to QuickBooks.
+              invoice.recorded_outside_app === true,
               invoice.created_at,
             ],
           )
@@ -14281,6 +14297,10 @@ export class AppDataStore {
       sentAt: recordOnly ? paidStamp : null,
       paidAt: recordOnly ? paidStamp : null,
       paymentMethod: recordOnly ? 'manual' : null,
+      // Already invoiced somewhere else, so it is already in QuickBooks: the
+      // QBO export leaves it out and the undo is refused. Set here and nowhere
+      // else, and only for a recorded retainer.
+      recordedOutsideApp: recordOnly === true,
       appliedToInvoiceId: null,
       createdAt: nowIso(),
       updatedAt: nowIso(),
@@ -17150,7 +17170,9 @@ export class AppDataStore {
     // Send could email a pay link for money already collected. Void it instead.
     // (A draft marked paid by hand, or a never-email client's retainer, has an
     // honest state to go back to and is not caught here.)
-    if (recordedRetainerNeverSent(current)) {
+    // The marker is the fact; `recordedRetainerNeverSent` is the fallback for a
+    // row recorded before the column existed (it reads false there).
+    if (current.recordedOutsideApp === true || recordedRetainerNeverSent(current)) {
       throw new ManualPaymentError(
         'This retainer was recorded as paid outside the app - void it instead.',
       )
@@ -18143,10 +18165,10 @@ export class AppDataStore {
         `insert into invoices (
            id, client_id, period, number, kind, status, line_items, subtotal, total,
            due_date, blurb, scope_flags, original_line_items,
-           sent_at, paid_at, payment_method, created_at, updated_at
+           sent_at, paid_at, payment_method, recorded_outside_app, created_at, updated_at
          )
          values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13::jsonb,
-                 $14, $15, $16, now(), now())
+                 $14, $15, $16, $17, now(), now())
          on conflict (client_id, period) where kind = 'monthly' and status <> 'void' do nothing
          returning id`,
         [
@@ -18168,6 +18190,10 @@ export class AppDataStore {
           record.sentAt ?? null,
           record.paidAt ?? null,
           record.paymentMethod ?? null,
+          // False on every insert but a recorded retainer's (see the column's
+          // migration); the file backend stores the whole record, so it carries
+          // the same field there.
+          record.recordedOutsideApp === true,
         ],
       )
       return rows.length > 0 ? { ...record, originalLineItems } : null

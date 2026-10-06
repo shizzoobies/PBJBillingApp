@@ -1609,7 +1609,7 @@ export function RetainerSectionBody({ client }: { client: Client }) {
       ? `Record a ${currency.format(value)} retainer for ${client.name} as paid on ` +
         `${longDate(paidDay)}, filed under ${monthYear(paidDay)}? ` +
         'Nothing is emailed. It appears on the Invoices page as a paid retainer and can be ' +
-        'credited on a later invoice.'
+        'credited on a later invoice. It is left out of Download for QBO.'
       : `Issue a ${currency.format(value)} retainer invoice for ${client.name}? ` +
         'It appears as a draft on the Invoices page, where you review and send it like any other.'
     if (!window.confirm(question)) {

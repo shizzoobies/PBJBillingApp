@@ -752,6 +752,12 @@ export type PersistedInvoice = {
    */
   payToken?: string | null
   /**
+   * `true` on a retainer recorded as paid outside the app (record-only): it is
+   * already in QuickBooks, so Download for QBO leaves it out and Undo manual
+   * payment is not offered. Optional like `payToken`; absent reads as false.
+   */
+  recordedOutsideApp?: boolean
+  /**
    * `true` on a SENT invoice whose client-visible content (the lines, the note to
    * the client, so the total) was edited after its most recent send. Derived by
    * the server on every response from the send log and the edit record, never

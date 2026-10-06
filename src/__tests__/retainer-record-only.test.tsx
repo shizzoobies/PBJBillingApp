@@ -71,7 +71,7 @@ describe('RetainerSectionBody record-only option', () => {
     expect(confirmMock).toHaveBeenCalledWith(
       'Record a $2,500.00 retainer for Acme as paid on June 10, 2026, filed under June 2026? ' +
         'Nothing is emailed. It appears on the Invoices page as a paid retainer and can be ' +
-        'credited on a later invoice.',
+        'credited on a later invoice. It is left out of Download for QBO.',
     )
     await waitFor(() => expect(issueRetainerInvoiceRequest).toHaveBeenCalledTimes(1))
     expect(issueRetainerInvoiceRequest).toHaveBeenCalledWith('c1', 2500, undefined, {
