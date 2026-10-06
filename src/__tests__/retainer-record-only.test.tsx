@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RetainerSectionBody } from '../pages/ClientDetailPage'
 import type { Client } from '../lib/types'
@@ -15,6 +16,8 @@ import type { Client } from '../lib/types'
 
 vi.mock('../lib/api', () => ({
   issueRetainerInvoiceRequest: (...args: unknown[]) => issueRetainerInvoiceRequest(...args),
+  // No retainer on file, so the section shows the form these tests are about.
+  listClientRetainersRequest: vi.fn(async () => []),
   // ClientDetailPage imports these from the same module; the component under
   // test never reaches them.
   applyPackageRequest: vi.fn(),
@@ -32,6 +35,16 @@ const client = { id: 'c1', name: 'Acme' } as unknown as Client
 
 const RECORD_LABEL = 'Already invoiced and paid outside the app - record it only'
 
+/** The section reads the retainer position first, then shows the form when there is none. */
+async function renderSection() {
+  render(
+    <MemoryRouter>
+      <RetainerSectionBody client={client} />
+    </MemoryRouter>,
+  )
+  await screen.findByPlaceholderText('0.00')
+}
+
 function fillAmount(value: string) {
   fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value } })
 }
@@ -48,7 +61,7 @@ afterEach(() => {
 
 describe('RetainerSectionBody record-only option', () => {
   it('issues as before when the box is not ticked: draft wording, no recordOnly key', async () => {
-    render(<RetainerSectionBody client={client} />)
+    await renderSection()
     fillAmount('2500')
     fireEvent.click(screen.getByRole('button', { name: 'Issue retainer invoice…' }))
 
@@ -62,7 +75,7 @@ describe('RetainerSectionBody record-only option', () => {
   })
 
   it('ticking the box changes the confirm and the button, and sends recordOnly: true', async () => {
-    render(<RetainerSectionBody client={client} />)
+    await renderSection()
     fillAmount('2500')
     fireEvent.click(screen.getByLabelText(RECORD_LABEL))
     fireEvent.change(screen.getByLabelText('Date paid'), { target: { value: '2026-06-10' } })
@@ -82,7 +95,7 @@ describe('RetainerSectionBody record-only option', () => {
   })
 
   it('resets the box after a successful record, so the next one is a normal issue', async () => {
-    render(<RetainerSectionBody client={client} />)
+    await renderSection()
     fillAmount('100')
     const box = screen.getByLabelText(RECORD_LABEL) as HTMLInputElement
     fireEvent.click(box)
@@ -94,7 +107,7 @@ describe('RetainerSectionBody record-only option', () => {
 
   // A retainer paid by check in June should read June.
   it('shows a Date paid input only while the box is ticked, and sends the date she picks', async () => {
-    render(<RetainerSectionBody client={client} />)
+    await renderSection()
     expect(screen.queryByLabelText('Date paid')).toBeNull()
     fillAmount('2500')
     fireEvent.click(screen.getByLabelText(RECORD_LABEL))
@@ -108,7 +121,7 @@ describe('RetainerSectionBody record-only option', () => {
   })
 
   it('sends no paidOn when the date is left at today', async () => {
-    render(<RetainerSectionBody client={client} />)
+    await renderSection()
     fillAmount('2500')
     fireEvent.click(screen.getByLabelText(RECORD_LABEL))
     fireEvent.click(screen.getByRole('button', { name: 'Record retainer…' }))
@@ -118,8 +131,8 @@ describe('RetainerSectionBody record-only option', () => {
     })
   })
 
-  it('names today and its month in the confirm when the date is left alone', () => {
-    render(<RetainerSectionBody client={client} />)
+  it('names today and its month in the confirm when the date is left alone', async () => {
+    await renderSection()
     fillAmount('2500')
     fireEvent.click(screen.getByLabelText(RECORD_LABEL))
     fireEvent.click(screen.getByRole('button', { name: 'Record retainer…' }))
@@ -129,8 +142,8 @@ describe('RetainerSectionBody record-only option', () => {
   })
 
   // Chrome's date field emits years like 0202 while one is being typed.
-  it('refuses a date before 2000 without asking or sending, and the input has a floor', () => {
-    render(<RetainerSectionBody client={client} />)
+  it('refuses a date before 2000 without asking or sending, and the input has a floor', async () => {
+    await renderSection()
     fillAmount('2500')
     fireEvent.click(screen.getByLabelText(RECORD_LABEL))
     const input = screen.getByLabelText('Date paid') as HTMLInputElement
@@ -147,7 +160,7 @@ describe('RetainerSectionBody record-only option', () => {
     issueRetainerInvoiceRequest = vi.fn(
       () => new Promise((resolve) => (finish = resolve)),
     )
-    render(<RetainerSectionBody client={client} />)
+    await renderSection()
     fillAmount('2500')
     fireEvent.click(screen.getByLabelText(RECORD_LABEL))
     fireEvent.click(screen.getByRole('button', { name: 'Record retainer…' }))
@@ -160,10 +173,10 @@ describe('RetainerSectionBody record-only option', () => {
     await screen.findByText('Recorded INV-RET-2026-001 as paid.')
   })
 
-  it('does not call the API when the owner cancels the record confirm', () => {
+  it('does not call the API when the owner cancels the record confirm', async () => {
     confirmMock = vi.fn(() => false)
     vi.stubGlobal('confirm', confirmMock)
-    render(<RetainerSectionBody client={client} />)
+    await renderSection()
     fillAmount('2500')
     fireEvent.click(screen.getByLabelText(RECORD_LABEL))
     fireEvent.click(screen.getByRole('button', { name: 'Record retainer…' }))

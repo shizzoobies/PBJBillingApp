@@ -14350,6 +14350,58 @@ export class AppDataStore {
   }
 
   /**
+   * One client's retainer position (featreq-9d3721d4, the send-back): every
+   * retainer the client has that is not void, oldest first, as MONEY ROWS (no
+   * lines, no send log) with what each was credited for.
+   *
+   * Unlike `listUnappliedRetainers` this keeps the sent-but-unpaid and the
+   * already-applied ones: the client page shows where the retainer stands, not
+   * only what is still creditable. `credit` is read off the invoice it was
+   * given back on, from the credit line that names this retainer (the line is
+   * what the client was actually credited, which can be less than the retainer
+   * held); null while unapplied. It reads through `listInvoices`, so it is the
+   * same on both backends and persists nothing.
+   */
+  async listClientRetainers(clientId) {
+    const all = await this.listInvoices()
+    return all
+      .filter(
+        (invoice) =>
+          invoice.kind === 'retainer' && invoice.clientId === clientId && invoice.status !== 'void',
+      )
+      .sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')))
+      .map((retainer) => {
+        const target = retainer.appliedToInvoiceId
+          ? (all.find((invoice) => invoice.id === retainer.appliedToInvoiceId) ?? null)
+          : null
+        const line = target?.lineItems?.find(
+          (entry) => entry?.kind === 'retainer_credit' && entry.retainerInvoiceId === retainer.id,
+        )
+        return {
+          id: retainer.id,
+          number: retainer.number,
+          status: retainer.status,
+          period: retainer.period,
+          total: retainer.total,
+          sentAt: retainer.sentAt,
+          paidAt: retainer.paidAt,
+          paymentMethod: retainer.paymentMethod,
+          recordedOutsideApp: retainer.recordedOutsideApp === true,
+          appliedToInvoiceId: retainer.appliedToInvoiceId ?? null,
+          credit: target
+            ? {
+                invoiceId: target.id,
+                number: target.number,
+                period: target.period,
+                // The line's own amount; the retainer's total when the line is gone.
+                amount: line ? Math.abs(Number(line.amount) || 0) : retainer.total,
+              }
+            : null,
+        }
+      })
+  }
+
+  /**
    * Void every UNSENT invoice in a period — the voiding half of "Void &
    * regenerate", which refreshes a whole month that was built mid-month and has
    * since gone stale.

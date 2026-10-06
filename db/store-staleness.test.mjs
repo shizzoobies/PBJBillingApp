@@ -12340,6 +12340,35 @@ describe('applying a retainer credit (file backend)', () => {
     expect((await byId('inv-ret')).appliedToInvoiceId).toBe('inv-final')
   })
 
+  // featreq-9d3721d4 (send-back): the client page shows the retainer position,
+  // so it asks for ONE client's retainers, whatever their status, with what each
+  // was credited for.
+  it('lists one client retainers with the credit each gave back, and nothing else', async () => {
+    await seed([
+      retainerRow({ recordedOutsideApp: true, paidAt: '2026-01-10T12:00:00.000Z' }),
+      retainerRow({ id: 'inv-ret2', number: 'INV-RET-2026-002', status: 'sent', total: 250 }),
+      retainerRow({ id: 'inv-void', number: 'INV-RET-2026-003', status: 'void' }),
+      retainerRow({ id: 'inv-other', clientId: 'c2', number: 'INV-RET-2026-004' }),
+      invoiceRow('inv-final'),
+    ])
+    await store.updateInvoice('inv-final', { lineItems: [{ ...hoursLine }, creditLine()] })
+
+    const listed = await store.listClientRetainers('c1')
+    expect(listed.map((row) => row.id)).toEqual(['inv-ret', 'inv-ret2'])
+    expect(listed[0]).toMatchObject({
+      number: 'INV-RET-2026-001',
+      status: 'paid',
+      total: 500,
+      recordedOutsideApp: true,
+      appliedToInvoiceId: 'inv-final',
+      credit: { invoiceId: 'inv-final', number: 'inv-final', period: '2026-08', amount: 500 },
+    })
+    expect(listed[1]).toMatchObject({ status: 'sent', total: 250, appliedToInvoiceId: null, credit: null })
+    // Money rows only: no lines, no send log.
+    expect(listed[0]).not.toHaveProperty('lineItems')
+    expect(await store.listClientRetainers('nobody')).toEqual([])
+  })
+
   it('is offered only while it is unspent', async () => {
     await seed([retainerRow(), invoiceRow('inv-final')])
     expect(await store.listUnappliedRetainers()).toHaveLength(1)

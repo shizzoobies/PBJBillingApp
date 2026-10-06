@@ -15910,6 +15910,27 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // GET /api/clients/:id/retainers — owner-only: this client's retainer
+    // position (featreq-9d3721d4): every retainer that is not void, with what
+    // each was credited for. The client page's Retainer section reads it so a
+    // recorded or sent retainer shows its amount instead of a blank form.
+    // Read-only, and money, so owner-only like every other invoice read.
+    const clientRetainersMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/retainers$/)
+    if (clientRetainersMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see invoices' })
+        return
+      }
+      sendJson(response, 200, {
+        retainers: await appDataStore.listClientRetainers(
+          decodeURIComponent(clientRetainersMatch[1]),
+        ),
+      })
+      return
+    }
+
     // POST /api/clients/:id/start-onboarding — owner-only: open a client's
     // 3-stage onboarding case (Proposal → Onboarding → Client) and move the
     // client to 'proposal'. Mirrors the checklist-create endpoints' guards

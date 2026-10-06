@@ -4319,6 +4319,43 @@ export async function listBilledOnInvoicesRequest(clientId: string, period?: str
 }
 
 /**
+ * One retainer of a client's, as the Retainer section shows it: the money
+ * facts only (featreq-9d3721d4). Void ones are never listed. `credit` is what
+ * the retainer was given back as, read off the invoice that carries the credit
+ * line; null while it has not been applied.
+ */
+export type ClientRetainer = {
+  id: string
+  number: string | null
+  status: PersistedInvoice['status']
+  /** 'YYYY-MM' it was issued or recorded in. */
+  period: string
+  total: number
+  sentAt: string | null
+  paidAt: string | null
+  paymentMethod: string | null
+  /** Recorded as paid outside the app: nothing was sent from here. */
+  recordedOutsideApp: boolean
+  appliedToInvoiceId: string | null
+  credit: { invoiceId: string; number: string | null; period: string; amount: number } | null
+}
+
+/**
+ * A client's retainer position: every retainer that is not void, oldest first.
+ * Owner-only, like every invoice read.
+ */
+export async function listClientRetainersRequest(clientId: string) {
+  const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/retainers`, {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to load retainers (${response.status})`)
+  }
+  return ((await response.json()) as { retainers: ClientRetainer[] }).retainers
+}
+
+/**
  * Build the month's drafts. Idempotent — an existing invoice is never rewritten.
  *
  * `clientId` narrows it to one client (the per-client "Email invoice" button

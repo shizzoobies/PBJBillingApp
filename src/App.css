@@ -13821,3 +13821,44 @@ details.invoice-run-sent ul,
   gap: 8px;
   margin-top: 8px;
 }
+
+/* Retainer section (featreq-9d3721d4): the position once a retainer is on file. */
+.retainer-position dl {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.retainer-position dl > div {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.retainer-position dt {
+  color: var(--muted);
+}
+
+.retainer-position dd {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  margin: 0;
+}
+
+.retainer-position-list {
+  color: var(--muted);
+  display: grid;
+  font-size: 13px;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.retainer-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}

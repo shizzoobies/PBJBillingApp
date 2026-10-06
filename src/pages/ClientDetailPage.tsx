@@ -44,10 +44,12 @@ import {
   SavingTextInput,
 } from '../components/SectionKit'
 import {
+  type ClientRetainer,
   applyPackageRequest,
   fetchClientInvoiceCount,
   fetchRateVersions,
   issueRetainerInvoiceRequest,
+  listClientRetainersRequest,
   listPackagesRequest,
   recordClientProfileActivity,
   setClientAssignedTeamRequest,
@@ -83,6 +85,8 @@ import { normalizeTimeBreakdownMode } from '../../lib/invoice-lines.js'
 import { mailingAddressLines } from '../../lib/mailing-address.js'
 // The one rule for whether Delete is offered; the server enforces the same one.
 import { clientDeleteVerdict } from '../../lib/client-delete-rule.js'
+import { dateOnlyInZone } from '../../lib/firm-time.js'
+import { retainerPosition } from '../lib/retainerPosition'
 // The one resolver for "what did this person's hour bill at back then" —
 // shared with the invoice, so the block below can never quote a rate the
 // invoice would not charge.
@@ -1568,8 +1572,193 @@ const monthYear = (day: string) =>
     timeZone: 'UTC',
   })
 
+/** The day (en-US long form) a stored instant falls on, on the firm's calendar. */
+const stampDay = (stamp: string | null) => {
+  const day = stamp ? dateOnlyInZone(new Date(stamp)) : null
+  return day ? longDate(day) : ''
+}
+
+/** How this retainer came to be, in the words she uses. */
+function retainerOrigin(row: ClientRetainer) {
+  if (row.recordedOutsideApp) return `Recorded as paid outside the app on ${stampDay(row.paidAt)}`
+  if (row.status === 'paid') {
+    return row.sentAt
+      ? `Sent ${stampDay(row.sentAt)}, paid ${stampDay(row.paidAt)}`
+      : `Paid ${stampDay(row.paidAt)}`
+  }
+  if (row.status === 'draft' || row.status === 'reviewed') {
+    return 'Draft, not sent yet. Review and send it from the Invoices page.'
+  }
+  return `Sent ${stampDay(row.sentAt)}, not paid yet`
+}
+
 /**
- * Issue the retainer invoice that opens an engagement.
+ * The Retainer invoice section (featreq-9d3721d4).
+ *
+ * With no retainer on file it is the form that opens an engagement. Once one
+ * is recorded or sent (any status but void) it is the retainer's POSITION
+ * instead: the amount, what has been applied as credit, what remains, and how
+ * each retainer came to be, with exactly two actions, Increase retainer and
+ * Apply. The blank form is no longer the default then; it opens from Increase
+ * retainer only. The position is read from the server, so it is there after a
+ * reload.
+ *
+ * INCREASE is a second retainer through the same request and the same
+ * record-only choice, not an edit of the first: each retainer is its own
+ * invoice with its own number and its own credit, so an increase never
+ * rewrites a document that was already sent or recorded. APPLY goes to the
+ * Invoices page: a credit is applied to ONE invoice at a time from that
+ * invoice's editor ("Apply retainer credit", offered on a draft or reviewed
+ * invoice), sized to that invoice, and nothing applies it automatically.
+ */
+export function RetainerSectionBody({ client }: { client: Client }) {
+  const [rows, setRows] = useState<ClientRetainer[] | null>(null)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
+  const [increasing, setIncreasing] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  useEffect(() => {
+    let stale = false
+    listClientRetainersRequest(client.id).then(
+      (listed) => {
+        if (stale) return
+        setRows(listed)
+        setLoadFailed(false)
+      },
+      () => {
+        if (!stale) setLoadFailed(true)
+      },
+    )
+    return () => {
+      stale = true
+    }
+  }, [client.id, reloadKey])
+
+  if (rows === null && !loadFailed) {
+    return (
+      <div className="retainer-issue">
+        <p className="retainer-issue-help">Loading the retainer on file…</p>
+      </div>
+    )
+  }
+
+  const onFile = rows !== null && rows.length > 0
+
+  return (
+    <div className="retainer-issue">
+      {loadFailed ? (
+        <p className="invoice-run-error" role="alert">
+          Could not load the retainer on file, so this may not be the whole picture.{' '}
+          <button type="button" className="link-button" onClick={() => setReloadKey((n) => n + 1)}>
+            Try again
+          </button>
+        </p>
+      ) : null}
+      {notice ? <p className="invoice-run-note">{notice}</p> : null}
+      {onFile && !increasing ? (
+        <RetainerPosition rows={rows} onIncrease={() => setIncreasing(true)} />
+      ) : (
+        <RetainerIssueForm
+          client={client}
+          additional={onFile}
+          onCancel={onFile ? () => setIncreasing(false) : undefined}
+          onIssued={(message) => {
+            setNotice(message)
+            setIncreasing(false)
+            setReloadKey((n) => n + 1)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+/** The amount, the credit applied, the balance, each retainer's story, and the two actions. */
+function RetainerPosition({
+  rows,
+  onIncrease,
+}: {
+  rows: ClientRetainer[]
+  onIncrease: () => void
+}) {
+  const position = retainerPosition(rows)
+  return (
+    <>
+      <div role="group" aria-label="Retainer position" className="retainer-position">
+        <dl>
+          <div>
+            <dt>Retainer</dt>
+            <dd>{currency.format(position.total)}</dd>
+          </div>
+          <div>
+            <dt>Applied as credit</dt>
+            <dd>{currency.format(position.applied)}</dd>
+          </div>
+          <div>
+            <dt>Remaining balance</dt>
+            <dd>{currency.format(position.remaining)}</dd>
+          </div>
+          {position.awaiting > 0 ? (
+            <div>
+              <dt>Awaiting payment</dt>
+              <dd>{currency.format(position.awaiting)}</dd>
+            </div>
+          ) : null}
+        </dl>
+        <ul className="retainer-position-list">
+          {rows.map((row) => (
+            <li key={row.id}>
+              <strong>{row.number ?? row.id}</strong> <span>{currency.format(row.total)}</span>
+              <br />
+              <span>{retainerOrigin(row)}</span>
+              {row.credit ? (
+                <>
+                  <br />
+                  <span>
+                    {`Applied ${currency.format(row.credit.amount)} on ${row.credit.number ?? row.credit.invoiceId} (${monthYear(`${row.credit.period}-01`)})`}
+                  </span>
+                  {row.credit.amount < row.total ? (
+                    <span>
+                      {` The other ${currency.format(row.total - row.credit.amount)} is yours to return outside the app.`}
+                    </span>
+                  ) : null}
+                </>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      </div>
+      <p className="retainer-issue-help">
+        To apply it, open the invoice on the Invoices page while it is a draft or reviewed and
+        press Apply retainer credit. The credit is sized to that invoice, and nothing applies it on
+        its own. To add to what the client has paid, use Increase retainer.
+      </p>
+      <div className="retainer-actions">
+        <button type="button" className="secondary-action" onClick={onIncrease}>
+          Increase retainer
+        </button>
+        {position.remaining > 0 ? (
+          <Link className="secondary-action" to="/invoices">
+            Apply
+          </Link>
+        ) : (
+          <button
+            type="button"
+            className="secondary-action"
+            disabled
+            title="Nothing is paid and waiting to be applied"
+          >
+            Apply
+          </button>
+        )}
+      </div>
+    </>
+  )
+}
+
+/**
+ * Issue the retainer invoice that opens an engagement, or an additional one.
  *
  * MANUAL, and it lives here rather than in the month run because that is what
  * it actually is: the app has no idea when an engagement letter comes back
@@ -1581,7 +1770,18 @@ const monthYear = (day: string) =>
  * invoiced and paid OUTSIDE the app: it is saved straight as a paid retainer,
  * visible and creditable later, and nothing is emailed.
  */
-export function RetainerSectionBody({ client }: { client: Client }) {
+function RetainerIssueForm({
+  client,
+  additional,
+  onIssued,
+  onCancel,
+}: {
+  client: Client
+  /** An increase on a retainer already on file rather than the first one. */
+  additional: boolean
+  onIssued: (message: string) => void
+  onCancel?: () => void
+}) {
   const [amount, setAmount] = useState('')
   const [note, setNote] = useState('')
   const [recordOnly, setRecordOnly] = useState(false)
@@ -1590,7 +1790,6 @@ export function RetainerSectionBody({ client }: { client: Client }) {
   const today = localDateOnly()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [issued, setIssued] = useState<{ number: string; recorded: boolean } | null>(null)
 
   const value = Number(amount)
   const valid = Number.isFinite(value) && value > 0
@@ -1617,7 +1816,6 @@ export function RetainerSectionBody({ client }: { client: Client }) {
     }
     setBusy(true)
     setError(null)
-    setIssued(null)
     try {
       const invoice = await (recordOnly
         ? issueRetainerInvoiceRequest(client.id, value, note.trim() || undefined, {
@@ -1625,11 +1823,16 @@ export function RetainerSectionBody({ client }: { client: Client }) {
             ...(paidOn ? { paidOn } : {}),
           })
         : issueRetainerInvoiceRequest(client.id, value, note.trim() || undefined))
-      setIssued({ number: invoice.number ?? invoice.id, recorded: recordOnly })
+      const number = invoice.number ?? invoice.id
       setAmount('')
       setNote('')
       setRecordOnly(false)
       setPaidOn('')
+      onIssued(
+        recordOnly
+          ? `Recorded ${number} as paid.`
+          : `Issued ${number} as a draft. Review and send it from the Invoices page.`,
+      )
     } catch (err) {
       setError(
         err instanceof Error
@@ -1644,12 +1847,15 @@ export function RetainerSectionBody({ client }: { client: Client }) {
   }
 
   return (
-    <div className="retainer-issue">
+    <>
       <p className="retainer-issue-help">
-        Issue this once the engagement letter is signed. When the engagement ends, the paid
-        retainer is offered back as a credit on the invoice you choose — you decide which one.
-        If the retainer was already invoiced and paid outside the app, tick the box to record it
-        as paid instead: nothing is emailed, and it stays on file to credit later.
+        {additional
+          ? 'An increase is a second retainer for this client, issued or recorded the same way as the first. The first one is not changed. '
+          : 'Issue this once the engagement letter is signed. '}
+        When the engagement ends, the paid retainer is offered back as a credit on the invoice you
+        choose — you decide which one. If the retainer was already invoiced and paid outside the
+        app, tick the box to record it as paid instead: nothing is emailed, and it stays on file to
+        credit later.
       </p>
       <div className="form-grid two-col">
         <label className="field">
@@ -1704,35 +1910,35 @@ export function RetainerSectionBody({ client }: { client: Client }) {
           {error}
         </p>
       ) : null}
-      {issued ? (
-        <p className="invoice-run-note">
-          {issued.recorded
-            ? `Recorded ${issued.number} as paid.`
-            : `Issued ${issued.number} as a draft. Review and send it from the Invoices page.`}
-        </p>
-      ) : null}
-      <button
-        type="button"
-        className="secondary-action"
-        disabled={busy || !valid}
-        title={
-          valid
-            ? recordOnly
-              ? 'Record a paid retainer for this client'
-              : 'Issue a retainer invoice for this client'
-            : 'Enter an amount first'
-        }
-        onClick={() => void issue()}
-      >
-        {recordOnly
-          ? busy
-            ? 'Recording…'
-            : 'Record retainer…'
-          : busy
-            ? 'Issuing…'
-            : 'Issue retainer invoice…'}
-      </button>
-    </div>
+      <div className="retainer-actions">
+        <button
+          type="button"
+          className="secondary-action"
+          disabled={busy || !valid}
+          title={
+            valid
+              ? recordOnly
+                ? 'Record a paid retainer for this client'
+                : 'Issue a retainer invoice for this client'
+              : 'Enter an amount first'
+          }
+          onClick={() => void issue()}
+        >
+          {recordOnly
+            ? busy
+              ? 'Recording…'
+              : 'Record retainer…'
+            : busy
+              ? 'Issuing…'
+              : 'Issue retainer invoice…'}
+        </button>
+        {onCancel ? (
+          <button type="button" className="secondary-action" disabled={busy} onClick={onCancel}>
+            Cancel
+          </button>
+        ) : null}
+      </div>
+    </>
   )
 }
 
