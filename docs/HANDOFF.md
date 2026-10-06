@@ -25,12 +25,22 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-06, evening - READ THIS FIRST):** `main` = `14899a9` (+ this
+**State right now (2026-10-06, night - READ THIS FIRST):** `main` = `27b6e35` (+ this
 handoff), pushed, deployed, `/health` 200 with that commit, voice agent re-provisioned after
-the last ship. Suite **319 files / 7032 tests**, green. Manifest **204,911 bytes - 89 under the
+the last ship. Suite **319 files / 7050 tests**, green. Manifest **204,848 bytes - 152 under the
 205,000 tripwire. TRIM FIRST, before ANY manifest edit** (condense a long paragraph the way the
-10-06 evening entry describes). Seven ships today, one deploy each, every one through an
-independent reviewer and at least one fix round. The afternoon queue run (four Planned items
+10-06 evening entry describes; line 316, the pending-notes paragraph, is still the longest).
+Nine ships today, one deploy each, every one through an independent reviewer and at least one
+fix round. The last two (night, after Brittany answered and sent one back) are the
+"2026-10-06 (night)" entry at the top of section 5:
+- `20b9ad0` **Pending notes for teammates** (send-back on `featreq-b688e73c`, Shipped again):
+  `canAddPendingClientNote` now allows any staff user the client is visible to - one shared
+  predicate behind the add form, the repeat checkbox, Dismiss and both server routes.
+- `39bdba3` + `27b6e35` **Recorded retainers out of QBO** (`featreq-22de88a5`, Brittany's answer,
+  Done, deploy confirmed): `recorded_outside_app` on invoices, set only by
+  record-only, skipped by Download for QBO, read by the Undo guard, tagged on the row. Rolled-back
+  production trial covered the migration and BOTH changed inserts. No retainer had been recorded
+  in production before the marker existed (0 `retainer_recorded_paid` events), so no backfill. The afternoon queue run (four Planned items
 Alex put in) is the "2026-10-06 (evening)" entry at the top of section 5; the morning's three
 (Preview, Plans picker, Railway) are the entries under it:
 - `c498fa0` **Service Value tiles** on the Client Recap (`featreq-6c27b7c5`, Done): Service Value |
@@ -733,6 +743,40 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-06 (night) — Two more Planned: Brittany's send-back on pending notes (`20b9ad0`) and her
+answer on recorded retainers in QBO (`39bdba3`, `27b6e35`).**
+
+*Pending notes send-back.* "Allison & Lisa are not able to do this - option is not there like it
+is on mine." Reproduced against production before touching code: the shared predicate
+`canAddPendingClientNote` (lib/checklist-write-permission.js) allowed a staff user only as the
+assignee or an editor of the recurring template or one of its live checklists; her teammates sit
+on a client's team while she holds most of its recurring checklists (1969 Beach: four of five
+templates assigned to `emp-patrice`), so they saw the waiting list but no controls - the
+"For an upcoming checklist" area, the "Repeat on every checklist" checkbox inside it, and Dismiss
+all read that one predicate. Fix: the predicate now allows any staff user the CLIENT is visible to
+(plus an existing template), on the page and in both server routes, which establish visibility
+first (`visibleClientIdSet`, the task-widened set that gates checklists/time/notes, not the money
+team set). Delete stays owner-or-writer. Reviewer approved; stale comments fixed. A teammate can
+now add a Task step to a recurring checklist the owner holds and dismiss a repeating copy on a
+checklist they do not work - what "anyone who can work that client's checklists" means.
+
+*Recorded retainers in QBO.* Brittany: "yes past retainers should be left out". Build (executor in
+`AP-laneC`): `recorded_outside_app boolean not null default false` on invoices (idempotent ALTER
+in `initialize()`, which runs before `listen`), set only by `createRetainerInvoice({ recordOnly })`,
+threaded through `_insertInvoice` (17 params, marker $17), the bulk-save snapshot + restore insert
+(24 params + now(), marker $23, created_at $24; a snapshot row without the column restores false),
+`INVOICE_SELECT_COLUMNS` + `mapInvoiceRow` + `normalizeStoredInvoice` (booleanized with `=== true`),
+`lib/qbo-export.js` skips it beside the void skip, `unmarkManualInvoicePayment` and the Undo button
+refuse on the marker OR the older `recordedRetainerNeverSent` heuristic (rows recorded before the
+column), the record-only confirm says "It is left out of Download for QBO", and the month-run row
+shows a "Recorded outside the app" tag. Rolled-back production trial (scratchpad
+`recorded-retainer-trial.js` pattern: extract every `insert into invoices` from the lane's
+store.js, ALTER inside the transaction, bind by column name with null for unknown columns, expect
+23503 on a fake client id, ROLLBACK, re-count, confirm the column is gone) passed for both inserts.
+Reviewer: APPROVE; the one caution is that a REVERT past `39bdba3` would restore every invoice
+without the marker on the next whole-workspace save - re-run the recorded-retainer query
+(`invoice_review_events.event = 'retainer_recorded_paid'`) before and after any such revert.
 
 **2026-10-06 (evening) — The afternoon queue run: four Planned items, four deploys, twelve review
 rounds (`c498fa0`, `5448585`, `53b4cdc`, `14899a9`).** Alex said "got some new ones in planned"; two
