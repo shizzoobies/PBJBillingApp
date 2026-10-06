@@ -29,17 +29,18 @@ describe('the send route builds both documents from one send moment', () => {
     expect(at).toBeGreaterThan(-1)
     expect(route.match(/const sendStamp = new Date\(\)\.toISOString\(\)/g)).toHaveLength(1)
     const stampAt = route.indexOf('const sendStamp')
-    expect(stampAt).toBeLessThan(route.indexOf('buildInvoiceEmail({'))
-    expect(stampAt).toBeLessThan(route.indexOf('buildInvoicePdf({'))
+    // One call builds both documents (lib/invoice-documents.js), after the stamp.
+    expect(stampAt).toBeLessThan(route.indexOf('buildInvoiceDocuments({'))
   })
 
   it('builds the email, the PDF and its filename from the invoice as it will be stored', () => {
     expect(route).toContain(
       'const sendInvoice = invoiceAsSent(invoice, { client: sendClient, stamp: sendStamp })',
     )
-    expect(route).toMatch(/buildInvoiceEmail\(\{\s*invoice: sendInvoice,/)
-    expect(route).toMatch(/buildInvoicePdf\(\{\s*invoice: sendInvoice,/)
-    expect(route).toContain('invoicePdfFilename(sendInvoice)')
+    expect(route).toMatch(/buildInvoiceDocuments\(\{\s*invoice: sendInvoice,/)
+    // The attachment's filename is the one the builder derived from that same invoice
+    // (lib/invoice-documents.test.mjs pins it as invoicePdfFilename(invoice)).
+    expect(route).toContain('filename: sendDocuments.pdfFilename, content: sendDocuments.pdf')
   })
 
   it('hands the same stamp to the store on a delivered send, and never on a failed one', () => {

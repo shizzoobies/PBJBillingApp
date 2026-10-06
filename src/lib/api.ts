@@ -4653,6 +4653,46 @@ export async function acknowledgeInvoiceAmountMismatchRequest(invoiceId: string)
   return ((await response.json()) as { invoice: PersistedInvoice }).invoice
 }
 
+/** What the preview route answers: the email as the client will read it, and the facts around it. */
+export type InvoicePreview = {
+  subject: string
+  html: string
+  text: string
+  /** The addresses Send would use, resolved by the same code. Empty with `recipientNote` when it would refuse. */
+  to: string[]
+  recipientNote: string | null
+  pdfAvailable: boolean
+  pdfFilename: string
+  /** 'durable' = the invoice's real pay address; 'placeholder' = it is minted at send; 'none' = no Pay button. */
+  payLink: 'durable' | 'placeholder' | 'none'
+  /** Not sent yet, so the invoice and due dates are shown as of today. */
+  datesAsIfSentToday: boolean
+  /** Send would refuse until the covered dates are confirmed (the same check). */
+  coverageUnconfirmed: boolean
+  delivery: 'email' | 'never-emailed' | 'opted-out'
+}
+
+/**
+ * Exactly what the client receives for one invoice (featreq-459bdfc2 item 3),
+ * built by the server with the same code as Send. Read-only: nothing is
+ * minted, sent or saved.
+ */
+export async function previewInvoiceRequest(invoiceId: string): Promise<InvoicePreview> {
+  const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/preview`, {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const { message } = await safeError(response)
+    throw new ApiError(response.status, message || `Could not build the preview (${response.status})`)
+  }
+  return (await response.json()) as InvoicePreview
+}
+
+/** The PDF half of the preview, streamed by the server for an embedded frame. */
+export function invoicePreviewPdfUrl(invoiceId: string) {
+  return `/api/invoices/${encodeURIComponent(invoiceId)}/preview.pdf`
+}
+
 export async function sendInvoiceRequest(invoiceId: string, to?: string[], extra?: string[]) {
   const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/send`, {
     credentials: 'same-origin',

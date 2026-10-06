@@ -13169,6 +13169,34 @@ tr.is-inactive-client .client-name-link {
   gap: 8px;
 }
 
+/* Preview: what the client receives. A wide panel, since the email and the
+   PDF are both page-shaped; the frames take the height the viewport allows. */
+.invoice-preview-panel {
+  max-width: 880px;
+}
+
+.invoice-preview-notes {
+  color: var(--muted);
+  display: grid;
+  font-size: 13px;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.invoice-preview-subject {
+  font-size: 13px;
+  margin: 0;
+}
+
+.invoice-preview-frame {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  height: min(68vh, 760px);
+  width: 100%;
+}
+
 /* Payment link, shown after one is created. The owner SENDS this to the client
    rather than opening it, so it presents as copyable text, not a link. */
 .invoice-run-paylink {

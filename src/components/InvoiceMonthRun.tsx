@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  Eye,
   Link as LinkIcon,
   Lock,
   Mail,
@@ -46,6 +47,7 @@ import {
   setClientInvoiceNote,
   updateInvoiceRequest,
 } from '../lib/api'
+import { InvoicePreviewModal } from './InvoicePreviewModal'
 import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
 import { useAutopayAttempts } from '../hooks/useAutopayAttempts'
 import {
@@ -2657,6 +2659,8 @@ function InvoiceEditor({
   const [noteScope, setNoteScope] = useState<'invoice' | 'keep'>('invoice')
   const [saved, setSaved] = useState(false)
   const [paymentLink, setPaymentLink] = useState<string | null>(null)
+  // The preview dialog: what the client receives, built by the server.
+  const [previewOpen, setPreviewOpen] = useState(false)
   const [payBusy, setPayBusy] = useState(false)
   const [payError, setPayError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -4337,6 +4341,13 @@ function InvoiceEditor({
         </div>
       ) : null}
 
+      {previewOpen ? (
+        <InvoicePreviewModal
+          invoiceId={invoice.id}
+          invoiceLabel={`${invoice.number ? `Invoice ${invoice.number}` : 'This invoice'} for ${clientName}`}
+          onClose={() => setPreviewOpen(false)}
+        />
+      ) : null}
       <div className="invoice-run-editor-footer">
         <span className="invoice-run-running-total">
           Total {currency.format(localTotal)}
@@ -4355,6 +4366,26 @@ function InvoiceEditor({
             <Printer size={15} />
             Print
           </button>
+          {/* Exactly what the client receives - the email and the PDF, built by
+              the server with the same code as Send - on any invoice that can
+              still go out, drafts included: the point is to look BEFORE Mark
+              reviewed. Nothing is sent or saved from it. */}
+          {invoice.status !== 'void' ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={dirty}
+              title={
+                dirty
+                  ? 'Save your changes first'
+                  : 'See the email and the PDF exactly as the client will receive them'
+              }
+              onClick={() => setPreviewOpen(true)}
+            >
+              <Eye size={15} />
+              Preview
+            </button>
+          ) : null}
           {lockMessage ? null : (
             <button
               type="button"

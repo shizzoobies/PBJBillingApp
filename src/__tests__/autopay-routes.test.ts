@@ -247,7 +247,7 @@ describe('the send route and autopay', () => {
     expect(planAt).toBeGreaterThan(-1)
     expect(planAt).toBeLessThan(send.indexOf('createInvoiceCheckoutSession('))
     expect(planAt).toBeLessThan(send.indexOf('getOrCreateInvoicePayToken('))
-    expect(planAt).toBeLessThan(send.indexOf('buildInvoiceEmail('))
+    expect(planAt).toBeLessThan(send.indexOf('buildInvoiceDocuments('))
   })
 
   it('mints no pay token or session for an autopay send, or for one with a charge in flight', () => {
@@ -258,11 +258,18 @@ describe('the send route and autopay', () => {
   })
 
   it('hands the email the charge it announces, and nothing else changes for other sends', () => {
-    const email = send.slice(send.indexOf('buildInvoiceEmail('), send.indexOf('buildInvoicePdf('))
-    expect(email).toContain('autopay: autopaySend.plan')
-    expect(email).toContain('autopayChargeCents(invoice, autopaySend.plan.channel) / 100')
-    expect(email).toContain('/autopay/${autopaySend.plan.enrollment.setupToken}/withdraw')
-    expect(email).toContain(': null,')
+    // The documents call carries the autopay details only for a planned send.
+    const documents = send.slice(
+      send.indexOf('buildInvoiceDocuments('),
+      send.indexOf('const email = sendDocuments.email'),
+    )
+    expect(documents).toContain(
+      'autopay: autopaySend.plan ? autopayEmailDetails(request, invoice, autopaySend.plan) : null,',
+    )
+    // The details themselves, shared with the preview route (featreq-459bdfc2 item 3).
+    const details = sliceBetween('function autopayEmailDetails(', 'async function assembleInvoicePreview(')
+    expect(details).toContain('autopayChargeCents(invoice, plan.channel) / 100')
+    expect(details).toContain('/autopay/${plan.enrollment.setupToken}/withdraw')
   })
 
   // THE CHARGE. After the email is out AND recorded, never in the failed-send
@@ -553,9 +560,10 @@ describe('the send route tells the charge what the email said (M2, M3)', () => {
   })
 
   it('a card email names its processing fee', () => {
-    expect(send).toContain("autopaySend.plan.channel === 'card'")
-    expect(send).toContain("autopayChargeCents(invoice, 'card') - autopayChargeCents(invoice, 'ach')")
-    expect(send).toContain('cardFee:')
+    const details = sliceBetween('function autopayEmailDetails(', 'async function assembleInvoicePreview(')
+    expect(details).toContain("plan.channel === 'card'")
+    expect(details).toContain("autopayChargeCents(invoice, 'card') - autopayChargeCents(invoice, 'ach')")
+    expect(details).toContain('cardFee:')
   })
 })
 
@@ -643,7 +651,7 @@ describe('a session minted while a charge starts is closed, not handed over', ()
     expect(closeAt).toBeGreaterThan(recheck)
     expect(send.slice(closeAt, closeAt + 400)).toContain("error: 'autopay_in_flight'")
     // Before the email is built or sent.
-    expect(closeAt).toBeLessThan(send.indexOf('buildInvoiceEmail('))
+    expect(closeAt).toBeLessThan(send.indexOf('buildInvoiceDocuments('))
     expect(closeAt).toBeLessThan(send.indexOf('sendInvoiceEmail('))
   })
 

@@ -239,8 +239,7 @@ describe('the send route looks once more immediately before the email leaves', (
     expect(bankGuard).toBeGreaterThan(-1)
     expect(cardGuard).toBeGreaterThan(bankGuard)
     for (const later of [
-      'buildInvoiceEmail({',
-      'buildInvoicePdf({',
+      'buildInvoiceDocuments({',
       'await sendInvoiceEmail({',
       'recordInvoiceSent(',
     ]) {

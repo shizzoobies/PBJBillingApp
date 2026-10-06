@@ -72,7 +72,7 @@ describe('the send route validates `extra` before anything leaves', () => {
       'isStripeConfigured()',
       'createInvoiceCheckoutSession(',
       'swapInvoiceCheckoutSession(',
-      'buildInvoiceEmail(',
+      'buildInvoiceDocuments(',
       'sendInvoiceEmail(',
       'recordInvoiceSent(',
     ]) {

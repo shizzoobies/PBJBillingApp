@@ -78,7 +78,6 @@ import {
   sendReportEmail,
 } from './lib/notify.js'
 import {
-  buildInvoiceEmail,
   paymentEmailKindFor,
   resolveInvoiceRecipients,
   sendInvoicePaymentEmail,
@@ -98,6 +97,7 @@ import {
   verifyResendWebhook,
 } from './lib/resend-webhook.js'
 import { buildInvoicePdf, invoicePdfFilename } from './lib/invoice-pdf.js'
+import { buildInvoiceDocuments } from './lib/invoice-documents.js'
 import { buildProposalPdf, proposalPdfFilename } from './lib/proposal-pdf.js'
 import { buildProposalEmail } from './lib/proposal-email.js'
 import { buildQuestionnaireEmail } from './lib/proposal-questionnaire-email.js'
@@ -2206,6 +2206,108 @@ async function reportUnrecordedAutopaySend(request, invoice, channel) {
     channel,
     notifyOwners: autopayOwnerNotifier(request),
   })
+}
+
+/**
+ * What an autopay send tells the client: the amount that will be debited (a
+ * card's includes its fee), from what, and the page that turns it off. Built
+ * the same way for the send and for the preview.
+ */
+function autopayEmailDetails(request, invoice, plan) {
+  return {
+    chargedAmount: autopayChargeCents(invoice, plan.channel) / 100,
+    // A card's charge includes the processing fee: the email names it.
+    cardFee:
+      plan.channel === 'card'
+        ? (autopayChargeCents(invoice, 'card') - autopayChargeCents(invoice, 'ach')) / 100
+        : 0,
+    methodWords: autopayMethodWords(plan.enrollment),
+    withdrawUrl: `${getPublicAppUrl(request)}/autopay/${plan.enrollment.setupToken}/withdraw`,
+  }
+}
+
+/**
+ * Exactly what the client would receive if this invoice were sent now
+ * (featreq-459bdfc2 item 3): the same as-sent invoice, the same autopay
+ * decision, the same pay-link shape and the same document builder as the
+ * send route - minus everything that has a side effect. Nothing here mints a
+ * Stripe session or a pay token, emails, stamps or records anything.
+ *
+ * The Pay button: the invoice's durable `/pay/<token>` address when a token
+ * already exists (an earlier send or payment link), otherwise a marked
+ * placeholder on the same path, because the token is minted by the send.
+ * Who it goes to is resolved by the same code as the send, for the notes;
+ * a client the send would refuse (an unnamed master sub) previews with a
+ * note rather than a refusal, since looking is not sending.
+ *
+ * @returns {Promise<{refusal: [number, object]} | {invoice: object, client: object, docs: object, to: string[], recipientNote: string|null, payLink: "durable"|"placeholder"|"none", datesAsIfSentToday: boolean, delivery: "email"|"never-emailed"|"opted-out"}>}
+ */
+async function assembleInvoicePreview(request, invoiceId) {
+  const invoice = (await appDataStore.listInvoices()).find((entry) => entry.id === invoiceId)
+  if (!invoice) return { refusal: [404, { error: 'Invoice not found' }] }
+  const data = await appDataStore.read()
+  const client = (data.clients ?? []).find((entry) => entry.id === invoice.clientId)
+  if (!client) return { refusal: [409, { error: 'This invoice has no client on file.' }] }
+  const firmSettings = await appDataStore.getFirmSettings().catch(() => null)
+
+  // The same stamp rule as the send: a first send is built as the record will
+  // hold it afterwards; an invoice already sent is built exactly as stored.
+  const stamp = new Date().toISOString()
+  const asSent = invoiceAsSent(invoice, { client, stamp })
+  const settled = invoice.status === 'paid' || invoice.status === 'processing'
+  const autopaySend = await planAutopaySend(invoice, client)
+
+  let payLink = 'none'
+  let payUrl = ''
+  let cardPayUrl = ''
+  if (
+    isStripeConfigured() &&
+    invoice.total > 0 &&
+    !settled &&
+    !autopaySend.plan &&
+    !autopaySend.active
+  ) {
+    const token = typeof invoice.payToken === 'string' && invoice.payToken ? invoice.payToken : null
+    payLink = token ? 'durable' : 'placeholder'
+    const base = `${getPublicAppUrl(request)}/pay/${token ?? 'created-when-sent'}`
+    payUrl = base
+    if (client.cardPaymentsEnabled) cardPayUrl = `${base}/card`
+  }
+
+  const docs = await buildInvoiceDocuments({
+    invoice: asSent,
+    client,
+    firmSettings,
+    payUrl,
+    cardPayUrl,
+    autopay: autopaySend.plan ? autopayEmailDetails(request, invoice, autopaySend.plan) : null,
+  })
+
+  const addressee = invoiceEmailAddressee(client, data.clients ?? [])
+  const to = addressee.refusal
+    ? []
+    : resolveInvoiceRecipients({ client: addressee.addressee, contacts: data.contacts ?? [] }).to
+  const recipientNote = addressee.refusal ? (addressee.refusal.message ?? null) : null
+  // The same order as the send's refusals: opted out first, then never emailed.
+  const delivery = client.platformInvoicingOptOut
+    ? 'opted-out'
+    : client.invoiceNoEmail
+      ? 'never-emailed'
+      : 'email'
+  // Send refuses an invoice whose covered-date window is unanswered; the
+  // preview says so instead, with the same read-only check.
+  const coverageUnconfirmed = await appDataStore.invoiceHasUnconfirmedCoverage(invoice)
+  return {
+    invoice,
+    client,
+    docs,
+    to,
+    recipientNote,
+    payLink,
+    datesAsIfSentToday: !invoice.sentAt,
+    coverageUnconfirmed,
+    delivery,
+  }
 }
 
 /**
@@ -6831,51 +6933,29 @@ const server = createServer(async (request, response) => {
       // only after the provider accepts the email.
       const sendStamp = new Date().toISOString()
       const sendInvoice = invoiceAsSent(invoice, { client: sendClient, stamp: sendStamp })
-      const email = buildInvoiceEmail({
+      // The email and the PDF, built together by the code the preview route also
+      // uses (featreq-459bdfc2 item 3), so what she previewed is what leaves.
+      const sendDocuments = await buildInvoiceDocuments({
         invoice: sendInvoice,
         client: sendClient,
+        firmSettings,
         payUrl,
         cardPayUrl,
         // An invoice that is about to be charged automatically: what will be
         // debited (a card's includes its fee), from what, and the way to turn it
         // off. Null for every other send, which is then the email it always was.
-        autopay: autopaySend.plan
-          ? {
-              chargedAmount: autopayChargeCents(invoice, autopaySend.plan.channel) / 100,
-              // A card's charge includes the processing fee: the email names it.
-              cardFee:
-                autopaySend.plan.channel === 'card'
-                  ? (autopayChargeCents(invoice, 'card') - autopayChargeCents(invoice, 'ach')) / 100
-                  : 0,
-              methodWords: autopayMethodWords(autopaySend.plan.enrollment),
-              withdrawUrl: `${getPublicAppUrl(request)}/autopay/${autopaySend.plan.enrollment.setupToken}/withdraw`,
-            }
-          : null,
-        // The same per-client note the printed sheet and the PDF carry. It is
-        // the INVOICE's client, the one whose name and address the email uses:
-        // a billing master's invoice carries the master's note, not a sub's.
-        footerNote: sendClient.footerNote ?? '',
-        firmName: firmSettings?.name || undefined,
-        // Phone, address and email in the footer, from the same settings the
-        // PDF letterhead reads. A client who can see how to reach the firm is
-        // reading an invoice, not a suspicious link.
-        firmSettings,
+        autopay: autopaySend.plan ? autopayEmailDetails(request, invoice, autopaySend.plan) : null,
       })
-      // The invoice as a document, built from the invoice as it stands right
-      // now. Best-effort on purpose: the email is the payment vehicle and the
-      // PDF is a nicety, so a rendering failure sends the email without it
+      const email = sendDocuments.email
+      // The PDF is best-effort on purpose: the email is the payment vehicle and
+      // the PDF is a nicety, so a rendering failure sends the email without it
       // rather than holding back the thing the client is waiting for.
-      let sendAttachments = []
-      try {
-        const pdf = await buildInvoicePdf({
-          invoice: sendInvoice,
-          client: sendClient,
-          firmSettings,
-        })
-        sendAttachments = [{ filename: invoicePdfFilename(sendInvoice), content: pdf }]
-      } catch (error) {
-        console.error('[invoice] PDF attachment failed, sending without it:', error?.message || error)
+      if (sendDocuments.pdfError) {
+        console.error('[invoice] PDF attachment failed, sending without it:', sendDocuments.pdfError.message)
       }
+      const sendAttachments = sendDocuments.pdf
+        ? [{ filename: sendDocuments.pdfFilename, content: sendDocuments.pdf }]
+        : []
 
       // THE LAST LOOK before the email leaves (it cannot be unsent): a void that
       // landed any time since this route read the invoice, including on an
@@ -6993,6 +7073,74 @@ const server = createServer(async (request, response) => {
         await reportUnrecordedAutopaySend(request, invoice, autopaySend.plan.channel)
       }
       sendJson(response, 200, { invoice: sentInvoice })
+      return
+    }
+
+    // GET /api/invoices/:id/preview - exactly what the client receives
+    // (featreq-459bdfc2 item 3): the email as it will read and whether the PDF
+    // built, from the same code as Send. Owner-only, read-only, uncached.
+    const invoicePreviewMatch = normalizedPath.match(/^\/api\/invoices\/([^/]+)\/preview$/)
+    if (invoicePreviewMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can preview an invoice' })
+        return
+      }
+      const preview = await assembleInvoicePreview(request, decodeURIComponent(invoicePreviewMatch[1]))
+      if (preview.refusal) {
+        sendJson(response, preview.refusal[0], preview.refusal[1])
+        return
+      }
+      sendJson(
+        response,
+        200,
+        {
+          subject: preview.docs.email.subject,
+          html: preview.docs.email.html,
+          text: preview.docs.email.text,
+          to: preview.to,
+          recipientNote: preview.recipientNote,
+          pdfAvailable: Boolean(preview.docs.pdf),
+          pdfFilename: preview.docs.pdfFilename,
+          payLink: preview.payLink,
+          datesAsIfSentToday: preview.datesAsIfSentToday,
+          coverageUnconfirmed: preview.coverageUnconfirmed,
+          delivery: preview.delivery,
+        },
+        { 'Cache-Control': 'no-store' },
+      )
+      return
+    }
+
+    // GET /api/invoices/:id/preview.pdf - the PDF the send would attach, built
+    // the same way, streamed inline for the preview dialog.
+    const invoicePreviewPdfMatch = normalizedPath.match(/^\/api\/invoices\/([^/]+)\/preview\.pdf$/)
+    if (invoicePreviewPdfMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can preview an invoice' })
+        return
+      }
+      const preview = await assembleInvoicePreview(request, decodeURIComponent(invoicePreviewPdfMatch[1]))
+      if (preview.refusal) {
+        sendJson(response, preview.refusal[0], preview.refusal[1])
+        return
+      }
+      if (!preview.docs.pdf) {
+        sendJson(response, 502, {
+          error: 'pdf_failed',
+          message: 'The PDF could not be built. Send would go out without it.',
+        })
+        return
+      }
+      response.writeHead(200, {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `inline; filename="${preview.docs.pdfFilename}"`,
+        'Cache-Control': 'no-store',
+      })
+      response.end(preview.docs.pdf)
       return
     }
 
