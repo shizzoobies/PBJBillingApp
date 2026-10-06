@@ -98,6 +98,12 @@ export declare function latestInvoiceSend(
   emailLog: InvoiceLogEntry[] | undefined,
 ): InvoiceSendLogEntry | null
 
+export declare function recordedRetainerNeverSent(invoice: {
+  kind?: string | null
+  sentAt?: string | null
+  emailLog?: readonly unknown[] | null
+}): boolean
+
 export declare function unresolvedPaymentFailure(
   invoice: InvoiceSignalSource | null | undefined,
 ): InvoicePaymentFailureLogEntry | null

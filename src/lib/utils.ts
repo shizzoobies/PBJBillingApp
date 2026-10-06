@@ -306,6 +306,7 @@ export {
   daysPastDueLabel,
   latestInvoiceSend,
   pastDueInvoice,
+  recordedRetainerNeverSent,
   unresolvedPaymentFailure,
 } from '../../lib/invoice-overdue.js'
 export type { InvoiceSignalSource, PastDueInvoice } from '../../lib/invoice-overdue.js'

@@ -106,7 +106,7 @@ import {
   isScopeTag,
   scopeRetagApplies,
 } from '../lib/invoice-scope-retag.js'
-import { latestInvoiceSend } from '../lib/invoice-overdue.js'
+import { latestInvoiceSend, recordedRetainerNeverSent } from '../lib/invoice-overdue.js'
 import { AUTOPAY_ACTIVE_ATTEMPT_STATUSES, emptyAutopay } from '../lib/stripe-autopay.js'
 import {
   AMOUNT_MISMATCH_EVENT,
@@ -1029,6 +1029,13 @@ export class RetainerCreditError extends Error {
     this.name = 'RetainerCreditError'
   }
 }
+
+/**
+ * Earliest day a recorded retainer may say it was paid. A date field emits years
+ * like 0202 while one is being typed, which would mint period 0202-06 and an
+ * INV-RET-0202 number. The route and the client page enforce the same floor.
+ */
+export const RETAINER_PAID_ON_FLOOR = '2000-01-01'
 
 /**
  * A manual payment action the invoice's state cannot honor — marking paid what
@@ -12766,6 +12773,9 @@ export class AppDataStore {
   async _withTransaction(work) {
     if (!this.pool) return await work(null)
     const dbClient = await this.pool.connect()
+    // Set only when the rollback itself fails: the client is then released WITH
+    // the error, so `pg` destroys the connection instead of pooling it.
+    let releaseError
     try {
       await dbClient.query('BEGIN')
       const result = await work(dbClient)
@@ -12774,12 +12784,13 @@ export class AppDataStore {
     } catch (error) {
       try {
         await dbClient.query('ROLLBACK')
-      } catch {
-        /* already rolled back, or the connection is gone */
+      } catch (rollbackError) {
+        releaseError = rollbackError
+        console.error('[store] rollback failed; discarding the connection:', rollbackError)
       }
       throw error
     } finally {
-      dbClient.release()
+      dbClient.release(releaseError)
     }
   }
 
@@ -14216,6 +14227,7 @@ export class AppDataStore {
     let paidDay = null
     if (recordOnly && paidOn !== null && paidOn !== undefined && paidOn !== '') {
       const text = String(paidOn)
+      if (text < RETAINER_PAID_ON_FLOOR) return null
       const ms = Date.parse(`${text}T00:00:00Z`)
       const real =
         /^\d{4}-\d{2}-\d{2}$/.test(text) &&
@@ -14274,6 +14286,9 @@ export class AppDataStore {
       updatedAt: nowIso(),
     }
 
+    // Postgres: the invoice and its event commit together. The file backend
+    // (dev and tests only) has no transaction, so there the two are separate
+    // writes.
     return await this._withTransaction(async (dbClient) => {
       const inserted = await this._insertInvoice(record, { dbClient })
       if (inserted && recordOnly) {
@@ -17133,7 +17148,9 @@ export class AppDataStore {
     // A retainer recorded as paid outside the app was never sent from here, so
     // "sent" is a state it never had: past-due notices would fire on it and a
     // Send could email a pay link for money already collected. Void it instead.
-    if (current.kind === 'retainer' && !latestInvoiceSend(current.emailLog)) {
+    // (A draft marked paid by hand, or a never-email client's retainer, has an
+    // honest state to go back to and is not caught here.)
+    if (recordedRetainerNeverSent(current)) {
       throw new ManualPaymentError(
         'This retainer was recorded as paid outside the app - void it instead.',
       )

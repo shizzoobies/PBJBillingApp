@@ -1548,6 +1548,26 @@ export function MasterInvoiceRecipientBody({
 /* Retainer invoice                                                           */
 /* -------------------------------------------------------------------------- */
 
+/** Earliest "date paid" accepted for a recorded retainer; the server enforces the same floor. */
+const RETAINER_PAID_ON_FLOOR = '2000-01-01'
+
+/** "June 10, 2026" from a YYYY-MM-DD, with no time-zone drift. */
+const longDate = (day: string) =>
+  new Date(`${day}T00:00:00Z`).toLocaleDateString('en-US', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone: 'UTC',
+  })
+
+/** "June 2026" from a YYYY-MM-DD. */
+const monthYear = (day: string) =>
+  new Date(`${day}T00:00:00Z`).toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  })
+
 /**
  * Issue the retainer invoice that opens an engagement.
  *
@@ -1577,10 +1597,17 @@ export function RetainerSectionBody({ client }: { client: Client }) {
 
   const issue = async () => {
     if (!valid) return
+    const paidDay = paidOn || today
+    // A date field emits years like 0202 while one is being typed.
+    if (recordOnly && paidDay < RETAINER_PAID_ON_FLOOR) {
+      setError('Enter a valid date paid.')
+      return
+    }
     // A money document going out under a number that is then real. Worth one
     // question, because there is no delete — the way back is voiding it.
     const question = recordOnly
-      ? `Record a ${currency.format(value)} retainer for ${client.name} as already paid? ` +
+      ? `Record a ${currency.format(value)} retainer for ${client.name} as paid on ` +
+        `${longDate(paidDay)}, filed under ${monthYear(paidDay)}? ` +
         'Nothing is emailed. It appears on the Invoices page as a paid retainer and can be ' +
         'credited on a later invoice.'
       : `Issue a ${currency.format(value)} retainer invoice for ${client.name}? ` +
@@ -1634,6 +1661,7 @@ export function RetainerSectionBody({ client }: { client: Client }) {
             step="0.01"
             value={amount}
             placeholder="0.00"
+            disabled={busy}
             onChange={(event) => setAmount(event.target.value)}
           />
         </label>
@@ -1643,6 +1671,7 @@ export function RetainerSectionBody({ client }: { client: Client }) {
             className="input"
             value={note}
             placeholder="Shown on the invoice line"
+            disabled={busy}
             onChange={(event) => setNote(event.target.value)}
           />
         </label>
@@ -1663,6 +1692,7 @@ export function RetainerSectionBody({ client }: { client: Client }) {
             className="input"
             type="date"
             value={paidOn || today}
+            min={RETAINER_PAID_ON_FLOOR}
             max={today}
             disabled={busy}
             onChange={(event) => setPaidOn(event.target.value === today ? '' : event.target.value)}

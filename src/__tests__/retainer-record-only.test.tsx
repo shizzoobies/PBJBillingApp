@@ -65,15 +65,18 @@ describe('RetainerSectionBody record-only option', () => {
     render(<RetainerSectionBody client={client} />)
     fillAmount('2500')
     fireEvent.click(screen.getByLabelText(RECORD_LABEL))
+    fireEvent.change(screen.getByLabelText('Date paid'), { target: { value: '2026-06-10' } })
     fireEvent.click(screen.getByRole('button', { name: 'Record retainer…' }))
 
     expect(confirmMock).toHaveBeenCalledWith(
-      'Record a $2,500.00 retainer for Acme as already paid? Nothing is emailed. ' +
-        'It appears on the Invoices page as a paid retainer and can be credited on a later invoice.',
+      'Record a $2,500.00 retainer for Acme as paid on June 10, 2026, filed under June 2026? ' +
+        'Nothing is emailed. It appears on the Invoices page as a paid retainer and can be ' +
+        'credited on a later invoice.',
     )
     await waitFor(() => expect(issueRetainerInvoiceRequest).toHaveBeenCalledTimes(1))
     expect(issueRetainerInvoiceRequest).toHaveBeenCalledWith('c1', 2500, undefined, {
       recordOnly: true,
+      paidOn: '2026-06-10',
     })
     expect(await screen.findByText('Recorded INV-RET-2026-001 as paid.')).toBeTruthy()
   })
@@ -115,6 +118,30 @@ describe('RetainerSectionBody record-only option', () => {
     })
   })
 
+  it('names today and its month in the confirm when the date is left alone', () => {
+    render(<RetainerSectionBody client={client} />)
+    fillAmount('2500')
+    fireEvent.click(screen.getByLabelText(RECORD_LABEL))
+    fireEvent.click(screen.getByRole('button', { name: 'Record retainer…' }))
+    expect(confirmMock).toHaveBeenCalledWith(
+      expect.stringMatching(/as paid on [A-Z][a-z]+ \d{1,2}, \d{4}, filed under [A-Z][a-z]+ \d{4}\? Nothing is emailed\./),
+    )
+  })
+
+  // Chrome's date field emits years like 0202 while one is being typed.
+  it('refuses a date before 2000 without asking or sending, and the input has a floor', () => {
+    render(<RetainerSectionBody client={client} />)
+    fillAmount('2500')
+    fireEvent.click(screen.getByLabelText(RECORD_LABEL))
+    const input = screen.getByLabelText('Date paid') as HTMLInputElement
+    expect(input.min).toBe('2000-01-01')
+    fireEvent.change(input, { target: { value: '0202-06-10' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Record retainer…' }))
+    expect(confirmMock).not.toHaveBeenCalled()
+    expect(issueRetainerInvoiceRequest).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert').textContent).toMatch(/valid date/i)
+  })
+
   it('locks the box and the date while the request is in flight', async () => {
     let finish: (value: unknown) => void = () => {}
     issueRetainerInvoiceRequest = vi.fn(
@@ -126,6 +153,9 @@ describe('RetainerSectionBody record-only option', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Record retainer…' }))
     await waitFor(() => expect(screen.getByLabelText(RECORD_LABEL)).toBeDisabled())
     expect(screen.getByLabelText('Date paid')).toBeDisabled()
+    // Edits made mid-request would be wiped when it succeeds.
+    expect(screen.getByLabelText('Retainer amount')).toBeDisabled()
+    expect(screen.getByLabelText('Note (optional)')).toBeDisabled()
     finish({ id: 'inv-1', number: 'INV-RET-2026-001' })
     await screen.findByText('Recorded INV-RET-2026-001 as paid.')
   })

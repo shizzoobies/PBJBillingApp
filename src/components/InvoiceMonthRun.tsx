@@ -118,6 +118,7 @@ import {
   localDateOnly,
   pastDueInvoice,
   recipientCountLabel,
+  recordedRetainerNeverSent,
   resolveInvoiceRecipients,
   shiftReviewPeriod,
   toCents,
@@ -4561,7 +4562,7 @@ function InvoiceEditor({
               voided instead (the server refuses the undo as well). */}
           {invoice.status === 'paid' &&
           invoice.paymentMethod === 'manual' &&
-          !(invoice.kind === 'retainer' && !latestInvoiceSend(invoice.emailLog)) ? (
+          !recordedRetainerNeverSent(invoice) ? (
             <button
               type="button"
               className="secondary-action"

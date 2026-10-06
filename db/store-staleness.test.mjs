@@ -11945,9 +11945,10 @@ describe('retainer invoices (file backend)', () => {
     ])
   })
 
-  it('refuses a paid-on date in the future or one that is not a date', async () => {
+  it('refuses a paid-on date in the future, before the floor, or that is not a date', async () => {
     await seedClients()
-    for (const paidOn of ['2099-01-01', '2026-13-45', 'last June']) {
+    // 0202 is what a date field emits while a year is being typed.
+    for (const paidOn of ['2099-01-01', '2026-13-45', 'last June', '0202-06-10', '1999-12-31']) {
       expect(
         await store.createRetainerInvoice({ clientId: 'c1', amount: 500, recordOnly: true, paidOn }),
       ).toBeNull()
@@ -11980,6 +11981,33 @@ describe('retainer invoices (file backend)', () => {
     )
     const stored = (await storedInvoices()).find((invoice) => invoice.id === retainer.id)
     expect(stored).toMatchObject({ status: 'paid', paymentMethod: 'manual' })
+  })
+
+  // Undo is only refused where it would restore a Sent that never happened.
+  it('un-marks a draft retainer that was marked paid by hand, back to reviewed', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({ clientId: 'c1', amount: 500, period })
+    expect(retainer.sentAt).toBeNull()
+    await store.markInvoicePaidManually(retainer.id, {})
+    const restored = await store.unmarkManualInvoicePayment(retainer.id, {})
+    expect(restored.status).toBe('reviewed')
+  })
+
+  it('un-marks a never-email client retainer whose send was logged as not-emailed', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 500,
+      recordOnly: true,
+      period,
+    })
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices.find((invoice) => invoice.id === retainer.id).emailLog = [
+      { ok: true, kind: 'not-emailed', to: [], subject: '', at: '2026-08-01T00:00:00.000Z' },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    const restored = await store.unmarkManualInvoicePayment(retainer.id, {})
+    expect(restored.status).toBe('sent')
   })
 
   it('still lets a retainer that really was emailed be un-marked', async () => {
@@ -38630,6 +38658,54 @@ describe('recorded retainers (postgres branch)', () => {
     ).rejects.toThrow('connection reset')
     expect(fake.matching(/^ROLLBACK$/i)).toHaveLength(1)
     expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+  })
+
+  // A dead connection must not go back into the pool.
+  it('releases the client WITH the error when the rollback itself fails', async () => {
+    const released = []
+    const pgStore = new AppDataStore()
+    pgStore.mode = 'postgres'
+    pgStore.pool = {
+      connect: async () => ({
+        async query(text) {
+          if (/^ROLLBACK$/i.test(text)) throw new Error('connection gone')
+          return { rows: [], rowCount: 0 }
+        },
+        release(error) {
+          released.push(error)
+        },
+      }),
+    }
+    await expect(
+      pgStore._withTransaction(async () => {
+        throw new Error('work failed')
+      }),
+    ).rejects.toThrow('work failed')
+    expect(released).toHaveLength(1)
+    expect(released[0]).toBeInstanceOf(Error)
+    expect(released[0].message).toBe('connection gone')
+  })
+
+  it('releases the client cleanly when the rollback succeeds', async () => {
+    const released = []
+    const pgStore = new AppDataStore()
+    pgStore.mode = 'postgres'
+    pgStore.pool = {
+      connect: async () => ({
+        async query() {
+          return { rows: [], rowCount: 0 }
+        },
+        release(error) {
+          released.push(error)
+        },
+      }),
+    }
+    await expect(
+      pgStore._withTransaction(async () => {
+        throw new Error('work failed')
+      }),
+    ).rejects.toThrow('work failed')
+    expect(released).toEqual([undefined])
   })
 
   it('writes no event for an ordinary retainer, and leaves its three payment columns null', async () => {

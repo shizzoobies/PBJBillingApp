@@ -17,6 +17,7 @@ import {
   InvoicePaymentProcessingError,
   ManualPaymentError,
   NothingToPushError,
+  RETAINER_PAID_ON_FLOOR,
   PackageApplyError,
   ProposalQuestionnaireError,
   ProposalStateError,
@@ -7246,10 +7247,9 @@ const server = createServer(async (request, response) => {
       const retainerRecordOnly = payload?.recordOnly === true
       // The day it was really paid (record only): a past date files it under
       // that month. A date after today is refused; the store re-checks too.
-      const retainerPaidOn =
-        retainerRecordOnly && typeof payload?.paidOn === 'string' && payload.paidOn
-          ? payload.paidOn
-          : null
+      const paidOnRaw = retainerRecordOnly ? payload?.paidOn : undefined
+      const paidOnPresent = paidOnRaw !== undefined && paidOnRaw !== null
+      const retainerPaidOn = typeof paidOnRaw === 'string' && paidOnRaw ? paidOnRaw : null
       if (!retainerClientId) {
         sendJson(response, 400, { error: 'clientId is required' })
         return
@@ -7258,14 +7258,24 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: 'amount must be more than zero' })
         return
       }
-      if (retainerPaidOn !== null) {
+      if (paidOnPresent) {
+        // Present but not a usable string (a number, an object, empty) is a
+        // refusal, not a silent "today".
         const paidOnMs = Date.parse(`${retainerPaidOn}T00:00:00Z`)
         const validDay =
+          retainerPaidOn !== null &&
           /^\d{4}-\d{2}-\d{2}$/.test(retainerPaidOn) &&
           Number.isFinite(paidOnMs) &&
           new Date(paidOnMs).toISOString().slice(0, 10) === retainerPaidOn
         if (!validDay) {
           sendJson(response, 400, { error: 'paidOn must be a date (YYYY-MM-DD)' })
+          return
+        }
+        // A date field emits years like 0202 while one is being typed.
+        if (retainerPaidOn < RETAINER_PAID_ON_FLOOR) {
+          sendJson(response, 400, {
+            error: `paidOn cannot be before ${RETAINER_PAID_ON_FLOOR}`,
+          })
           return
         }
         if (retainerPaidOn > firmToday()) {
@@ -7311,11 +7321,17 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'Client not found' })
         return
       }
-      await appDataStore.recordActivity(
-        session.user.id,
-        retainerRecordOnly ? 'retainer_recorded_paid' : 'retainer_invoice_issued',
-        `${retainer.number ?? retainer.id}: ${retainer.total}`,
-      )
+      // The retainer is COMMITTED by now: a failed activity line must not turn
+      // a saved write into a reported failure (a retry would duplicate it).
+      try {
+        await appDataStore.recordActivity(
+          session.user.id,
+          retainerRecordOnly ? 'retainer_recorded_paid' : 'retainer_invoice_issued',
+          `${retainer.number ?? retainer.id}: ${retainer.total}`,
+        )
+      } catch (error) {
+        console.error('[invoices] retainer saved but its activity line failed:', error)
+      }
       sendJson(response, 200, { invoice: retainer })
       return
     }

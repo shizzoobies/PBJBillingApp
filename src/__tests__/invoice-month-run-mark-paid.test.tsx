@@ -171,6 +171,34 @@ describe('Undo manual payment', () => {
     expect(undoButton()).not.toBeInTheDocument()
   })
 
+  it('is offered on a draft retainer marked paid by hand: it returns to reviewed, not Sent', async () => {
+    mockList.mockResolvedValue([
+      makeInvoice({
+        kind: 'retainer',
+        status: 'paid',
+        paymentMethod: 'manual',
+        sentAt: null,
+        paidAt: '2026-06-10T12:00:00.000Z',
+      }),
+    ])
+    await openEditor(/Paid/)
+    await waitFor(() => expect(undoButton()).toBeInTheDocument())
+  })
+
+  it('is offered on a never-email client retainer whose send was logged as not-emailed', async () => {
+    mockList.mockResolvedValue([
+      makeInvoice({
+        kind: 'retainer',
+        status: 'paid',
+        paymentMethod: 'manual',
+        paidAt: '2026-06-10T12:00:00.000Z',
+        emailLog: [{ ok: true, kind: 'not-emailed', to: [], subject: '', at: '2026-06-01T00:00:00.000Z' }],
+      } as unknown as Partial<PersistedInvoice>),
+    ])
+    await openEditor(/Paid/)
+    await waitFor(() => expect(undoButton()).toBeInTheDocument())
+  })
+
   it('is still offered on a retainer that really was emailed before it was marked paid', async () => {
     mockList.mockResolvedValue([
       makeInvoice({
