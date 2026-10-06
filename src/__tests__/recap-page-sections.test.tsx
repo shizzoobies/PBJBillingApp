@@ -108,6 +108,10 @@ const RECAP: ClientRecap = {
       direction: 'under',
       revenueDelta: 42,
       revenueDirection: 'over',
+      // 18.35 hours at bill rates came to $2,400 against a $2,202 invoice.
+      serviceValue: 2400,
+      serviceValueDelta: 198,
+      serviceValueDirection: 'over',
     },
   },
   projection: null,
@@ -148,10 +152,43 @@ describe('Client Recap page layout', () => {
     expect(screen.queryByText('Administrative')).not.toBeInTheDocument()
     expect(screen.queryByText(/Realized rate/)).not.toBeInTheDocument()
     expect(screen.queryByText('Margin')).not.toBeInTheDocument()
-    // Billing still uses tiles — now her three: Estimated | Actual | Over/Under
-    // (round two of this feature renamed them off the sent-back printout).
-    expect(screen.getByText('Estimated invoice')).toBeInTheDocument()
-    expect(screen.getByText('Actual invoice')).toBeInTheDocument()
+    // Billing still uses tiles — Service value | Invoice | Over/Under since
+    // featreq-6c27b7c5 (Alex): what the hours were worth, against what was billed.
+    expect(screen.getByText('Service value')).toBeInTheDocument()
+    expect(screen.getByText('$2,400.00')).toBeInTheDocument()
+    expect(screen.getByText('Invoice')).toBeInTheDocument()
+    expect(screen.queryByText('Estimated invoice')).not.toBeInTheDocument()
+    expect(screen.queryByText('Actual invoice')).not.toBeInTheDocument()
+    // The owner's convention: positive = the work exceeded what was billed,
+    // and that is the costly direction for the firm, so it is marked bad.
+    const over = screen.getByText('+$198.00 over')
+    expect(over).toHaveClass('recap-variance-bad')
+    expect(screen.getByText(/Over\/Under = service value/)).toBeInTheDocument()
+  })
+
+  it('marks billing at or above the service value as the good direction, and an exact match as a match', async () => {
+    mockFetch.mockResolvedValue({
+      ...RECAP,
+      estimates: {
+        ...RECAP.estimates!,
+        profit: { ...RECAP.estimates!.profit, serviceValue: 2102, serviceValueDelta: -100, serviceValueDirection: 'under' },
+      },
+    })
+    const { unmount } = render(<ClientRecapPage />)
+    const under = await screen.findByText(/100\.00 under/)
+    expect(under).toHaveClass('recap-variance-good')
+    unmount()
+
+    mockFetch.mockResolvedValue({
+      ...RECAP,
+      estimates: {
+        ...RECAP.estimates!,
+        profit: { ...RECAP.estimates!.profit, serviceValue: 2202, serviceValueDelta: 0, serviceValueDirection: 'on' },
+      },
+    })
+    render(<ClientRecapPage />)
+    expect(await screen.findByText('Matches invoice')).toBeInTheDocument()
+    expect(screen.queryByText('On estimate')).not.toBeInTheDocument()
   })
 })
 
@@ -214,7 +251,7 @@ describe('Client Recap page — Billing says when it is a restatement', () => {
       monthsInPeriod: 1,
     })
     render(<ClientRecapPage />)
-    await waitFor(() => expect(screen.getByText('Actual invoice')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Invoice')).toBeInTheDocument())
     expect(
       screen.queryByText(/Priced at the client's current rates and plans/),
     ).not.toBeInTheDocument()
@@ -289,7 +326,7 @@ describe('the multi-month caption after rate history', () => {
       billing: { ...RECAP_BILLING, billingMode, monthsInPeriod },
     })
     render(<ClientRecapPage />)
-    await waitFor(() => expect(screen.getByText('Actual invoice')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Invoice')).toBeInTheDocument())
   }
 
   it('tells an HOURLY client the months were priced at the rates in force each month', async () => {

@@ -75,9 +75,12 @@ const varianceText = (
   delta: number | null,
   direction: ClientRecapDirection,
   format: (value: number) => string,
+  // What an exact match is called. "On estimate" for the plan-vs-actual rows;
+  // the Billing tiles compare against the invoice, not an estimate.
+  onLabel = 'On estimate',
 ) => {
   if (delta == null) return '—'
-  if (direction === 'on') return 'On estimate'
+  if (direction === 'on') return onLabel
   return `${signed(delta, format)} ${direction}`
 }
 
@@ -347,37 +350,51 @@ export function ClientRecapPage() {
           {recap.billing ? (
             <section className="panel recap-card">
               <h3>Billing</h3>
-              {/* Her tiles, off the sent-back printout: Estimated Invoice |
-                  Actual Invoice | Over/Under. Service revenue on both sides —
-                  reimbursements are excluded from both, and keep their own
-                  line + list below. Over on revenue is the good direction. */}
+              {/* Service Value | Invoice | Over/Under (featreq-6c27b7c5, Alex).
+                  Service value is the hourly invoice the period's billable
+                  hours would have produced (each person at their own rate,
+                  month by month); Invoice is the period's service revenue as
+                  invoicing prices it; Over/Under = service value − invoice,
+                  positive when the work was worth more than what was billed.
+                  Reimbursements are excluded from both and keep their own
+                  line + list below. UNDER is the good direction here: the firm
+                  billed at least what the work was worth. */}
               <div className="recap-stats">
                 <div className="recap-stat">
                   <span className="recap-stat-value">
-                    {money(recap.estimates?.profit.estimatedRevenue)}
+                    {money(recap.estimates?.profit.serviceValue)}
                   </span>
-                  <span className="recap-stat-label">Estimated invoice</span>
+                  <span className="recap-stat-label">Service value</span>
                 </div>
                 <div className="recap-stat">
                   <span className="recap-stat-value">{money(recap.billing.revenue)}</span>
-                  <span className="recap-stat-label">Actual invoice</span>
+                  <span className="recap-stat-label">Invoice</span>
                 </div>
                 <div className="recap-stat">
                   <span
                     className={
                       'recap-stat-value ' +
-                      varianceClass(recap.estimates?.profit.revenueDirection ?? null, 'over')
+                      varianceClass(recap.estimates?.profit.serviceValueDirection ?? null, 'under')
                     }
                   >
                     {varianceText(
-                      recap.estimates?.profit.revenueDelta ?? null,
-                      recap.estimates?.profit.revenueDirection ?? null,
+                      recap.estimates?.profit.serviceValueDelta ?? null,
+                      recap.estimates?.profit.serviceValueDirection ?? null,
                       money,
+                      'Matches invoice',
                     )}
                   </span>
                   <span className="recap-stat-label">Over/Under</span>
                 </div>
               </div>
+              <p className="recap-estimate-caption">
+                Service value = this period&apos;s billable hours priced as an hourly invoice
+                would price them (each person&apos;s bill rate, month by month). Invoice = the
+                period&apos;s service revenue as invoicing prices it, the same figure
+                Profitability measures against (ad hoc work at its default; edits made on a
+                draft are not reflected). Over/Under = service value − invoice: a positive
+                figure means the work was worth more than what was billed.
+              </p>
               {recap.billing.planNames.length > 0 ? (
                 <p className="muted-text">Plans: {recap.billing.planNames.join(', ')}</p>
               ) : null}

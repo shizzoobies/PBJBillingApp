@@ -129,9 +129,9 @@ describe('ClientRecapPage — a billing master', () => {
     render(<ClientRecapPage />)
 
     // Billing and profitability read exactly as they do for one company —
-    // the tiles are her round-two set: Estimated | Actual | Over/Under.
+    // the tiles are Service value | Invoice | Over/Under (featreq-6c27b7c5).
     expect(await screen.findByText('$1,250.00')).toBeInTheDocument()
-    expect(screen.getByText('Actual invoice')).toBeInTheDocument()
+    expect(screen.getByText('Invoice')).toBeInTheDocument()
     expect(screen.getByText('$850.00')).toBeInTheDocument()
     // …and the time table is the same ESTIMATE | ACTUAL | OVER/UNDER one.
     expect(screen.getByText('Time & hours')).toBeInTheDocument()
@@ -163,7 +163,7 @@ describe('ClientRecapPage — a billing master', () => {
     mockRecap.mockResolvedValue(masterRecap)
     render(<ClientRecapPage />)
 
-    await screen.findByText('Actual invoice')
+    await screen.findByText('Invoice')
     expect(screen.queryByText('$0.00/mo')).not.toBeInTheDocument()
     expect(screen.queryByText(/Billing type:/)).not.toBeInTheDocument()
   })

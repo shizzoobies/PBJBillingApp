@@ -3470,6 +3470,8 @@ export type ClientRecapRoleRow = {
 
 /** A {@link ClientRecapRoleRow} with the money added — owner-only. */
 export type ClientRecapEstimateTier = ClientRecapRoleRow & {
+  /** The hourly invoice this role's billable hours would have produced (featreq-6c27b7c5). */
+  serviceValue: number
   /** Null = nobody in this role has a cost rate, so the role costs nothing. */
   costRate: number | null
   costRateBasis: ClientRecapRateBasis
@@ -3514,9 +3516,19 @@ export type ClientRecapEstimates = {
     actualProfit: number
     delta: number | null
     direction: ClientRecapDirection
-    /** Actual invoice − estimated invoice (service revenue, both sides). */
+    /** Invoiced − estimated service revenue; feeds the estimated-profit caption, no tile. */
     revenueDelta: number | null
     revenueDirection: ClientRecapDirection
+    /**
+     * The Billing tiles (featreq-6c27b7c5). Service value = the hourly invoice
+     * the period's BILLABLE hours would have produced (each person at their own
+     * bill rate, month by month); the invoice it is compared with is
+     * `actualRevenue`. Delta = service value − invoice: positive means the work
+     * was worth more than what was billed.
+     */
+    serviceValue: number
+    serviceValueDelta: number
+    serviceValueDirection: ClientRecapDirection
   }
 }
 

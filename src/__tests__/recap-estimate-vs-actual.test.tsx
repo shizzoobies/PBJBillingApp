@@ -112,6 +112,9 @@ const ESTIMATES: ClientRecapEstimates = {
     direction: 'over',
     revenueDelta: 240,
     revenueDirection: 'over',
+    serviceValue: 1440,
+    serviceValueDelta: 0,
+    serviceValueDirection: 'on',
   },
 }
 
@@ -349,6 +352,7 @@ const ESTIMATES_WITH_COST: ClientRecapEstimates = {
       actualCost: 284.55,
       costDelta: 4.55,
       costDirection: 'over',
+      serviceValue: 975.6,
     },
     {
       ...TIME.byRole[1],
@@ -359,6 +363,7 @@ const ESTIMATES_WITH_COST: ClientRecapEstimates = {
       actualCost: 163.52,
       costDelta: null,
       costDirection: null,
+      serviceValue: 1226.4,
     },
   ],
   cost: { estimated: 280, actual: 448.07, delta: 168.07, direction: 'over' },
