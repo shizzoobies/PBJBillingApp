@@ -25,7 +25,7 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-06, afternoon - READ THIS FIRST):** `main` = `77c93e3` (+ this
+**State right now (2026-10-06, end of day - READ THIS FIRST):** `main` = `77c93e3` (+ this
 handoff), pushed, deployed, `/health` 200 with that commit, voice agent re-provisioned after
 each of the two ships. Suite **314 files / 6956 tests**, green. Manifest 204,373 bytes (627 under
 the 205,000 tripwire - TRIM BEFORE THE NEXT MANIFEST EDIT). Two ships today, one deploy each,
@@ -50,14 +50,69 @@ section 5):
   RUN THE IAC CLI HERE, and the two traps, are in the file's header and the 2026-10-06 entry.
 Lanes: `AP-laneC` is at the merged branch; `AP-laneB` / `AP-laneD` unchanged. Nothing is held.
 
-**Pick up here (2026-10-06):** unchanged from the 10-04 list below except that items 3 (the
-preview) is done and the engagement umbrella is closed. First: Tuesday 2026-10-07 is the autopay
-test (item 1 below). Preview follow-ups worth a small pass later (from the review, none
-blocking): the preview JSON route builds the PDF only to report `pdfAvailable` and the PDF
-route rebuilds the email (two workspace reads per open); no focus trap in the dialog (matches
-the recipient picker); check once that the Windows desktop shell renders the inline PDF frame
-rather than downloading it; `decodeURIComponent` on an already-decoded path can throw on a
-malformed id (same as the send route today).
+**Pick up here (2026-10-06, end of day - this list supersedes the 10-04 one below):**
+
+1. **Tuesday 2026-10-07: the autopay end-to-end test** is Alex's and Brittany's (Test client:
+   Invite -> enroll a bank account -> set `AUTOPAY_CHARGING=on` in Railway -> send a small
+   invoice -> Processing -> Paid -> withdraw). Do not nudge before it. After it: confirm
+   `AUTOPAY_CHARGING` is on (`railway variables --service PBJBillingApp --json`), read the
+   Railway log for the first `[autopay]` lines, and check `autopay_attempts` (read-only) for the
+   Test invoice: one row, processing -> succeeded. A stuck `claimed` attempt is resolved by
+   "Check with Stripe" on the row; a declined card lands on Payment failed with the usual notice.
+   NOTE for the IaC file: if `AUTOPAY_CHARGING` is added as a NEW variable, add
+   `AUTOPAY_CHARGING: preserve()` to `.railway/railway.ts` BEFORE any later `config apply`, or
+   that apply deletes it (item 6).
+2. **Brittany's six open questions**, on her Shipped tickets (answers come back through the
+   tracker, never ask Alex in chat): Software `featreq-a69a3cc0` (start the QBO lines in the
+   acceptance month or the next?), questionnaire `featreq-8f139178` (standing website link?
+   question list review? year-end / entity type / software as client-page fields?), autopay
+   `featreq-bef42b72` (card fee on autopay? email the client on a failed charge?). No activity
+   on any of them since 10-04. Each answer may be a small build.
+3. **Her review queue (Shipped)** now also holds `featreq-2986c16c` (the Preview button) and the
+   engagement umbrella `featreq-79b6d974` with the Plans-picker note. Watch for send-backs on
+   today's ships: Preview's Pay button does nothing inside the frame BY DESIGN (the base tag;
+   a sent invoice's link is live money), its "dates as if sent today" wording, and the Plans
+   picker beside the package dropdown. Also still watching from 10-04: Saturday-evening gating,
+   firm-day invoice dates, "retire from the client page only", the role labels on new invoices,
+   the Software section's "Not yet priced".
+4. **Alex's own items:** (a) backups / resilience owner steps - he said the week of 10-05; the
+   Cloudflare token arrives by `setx CLOUDFLARE_API_TOKEN` in HIS terminal, never in chat
+   (`featreq-4caec5d3`); one-line ask per session, no pressure. (b) Open Preview once in the
+   Windows desktop shell to see whether the inline PDF frame renders or downloads (the review's
+   one open question). (c) The two `planned_not_eom` items (TOTP encryption re-enrollment,
+   "Brittany pushes her own update") when he wants them.
+5. **Preview follow-ups** (from the review, none blocking): the JSON route builds the PDF only to
+   report `pdfAvailable` and the PDF route rebuilds the email (two workspace reads per open; a
+   `skipPdf` / `skipEmail` option on `buildInvoiceDocuments` and `getClientById` + contacts
+   instead of `read()` would fix it); no focus trap in the dialog (matches the recipient picker);
+   `decodeURIComponent` on an already-decoded path can throw on a malformed id (same as the
+   send route today).
+6. **Railway IaC rules now in force** (`.railway/railway.ts` header + the 2026-10-06 afternoon
+   entry): the file is NOT read at deploy time - settings live on the service; every service
+   variable must appear as `NAME: preserve()` or the next `config apply` DELETES it; always
+   `config plan` first and read "to destroy"; per machine, `npm install --no-save railway` and
+   run the CLI as `exe=$(find "$(npm config get cache)/_npx" -name railway.exe | head -1);
+   env _="$exe" "$exe" config plan`. The Dockerfile pin and the restart policy are not in the
+   file; read them with the GraphQL `serviceInstance` query (token from `~/.railway/config.json`,
+   never printed).
+7. **Housekeeping:** lanes `AP-laneB` / `AP-laneC` / `AP-laneD` sit on merged branches (reusable;
+   `node_modules` is a JUNCTION - remove the link, never its target, before `git worktree
+   remove`). Merged local branches to prune: feat/accept-plan-picks, feat/invoice-note-and-no-email,
+   feat/stripe-autopay, feat/invoice-role-lines(-rebased), fix/invoice-answers-2(-r1),
+   claude/vigilant-blackburn-af0c77 (superseded 09-15). `hold/july-security-p3`: never merge,
+   never delete. Manifest 204,373 bytes - TRIM BEFORE THE NEXT MANIFEST EDIT.
+8. **Still watching:** no `[bulk-save] write committed` line has been seen since the table lock
+   shipped on 10-01 (no real whole-workspace save has run) - over ~8 s or repeated
+   `workspace_busy` = batch the inserts (B2 on `featreq-c8e5f169`). October's KLC combined
+   invoice; the Payment failed tab.
+
+**Traps from today** (all written up in their entries): the Bash tool pre-parses the whole
+command, heredoc included - an unbalanced apostrophe, a backtick or a non-ASCII character
+anywhere fails it; write scripts to the scratchpad with Write and run `node <path>`. Source-
+pinning tests that slice the send route to `// GET /api/invoices/export.csv` now include the
+preview routes in their slice (first-occurrence `indexOf`, harmless). A ticket's "what is
+left" can be stale against the code - grep before building (the sidebar regroup had shipped
+in August). Railway took 12-18 minutes per deploy today.
 
 **2026-10-05 (midday, read-only session plus two tracker writes):** production healthy on
 `2718d31`; Brittany marked four Shipped items done between 16:22 and 16:27 UTC (statement
