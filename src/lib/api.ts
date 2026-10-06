@@ -4388,17 +4388,27 @@ export async function regenerateInvoicesRequest(period: string) {
  * Manual on purpose: nothing in the app knows the engagement letter came back
  * signed, so pressing this IS that event. What comes back is an ordinary draft
  * that lives on the normal editor / send / pay rails from here on.
+ *
+ * `recordOnly` saves a retainer that was already invoiced and paid outside the
+ * app straight as a PAID retainer; nothing is emailed. The key is sent only
+ * when set, so every existing caller's request is unchanged.
  */
 export async function issueRetainerInvoiceRequest(
   clientId: string,
   amount: number,
   note?: string,
+  options?: { recordOnly?: boolean },
 ) {
   const response = await apiFetch('/api/invoices/retainer', {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ clientId, amount, ...(note ? { note } : {}) }),
+    body: JSON.stringify({
+      clientId,
+      amount,
+      ...(note ? { note } : {}),
+      ...(options?.recordOnly ? { recordOnly: true } : {}),
+    }),
   })
   if (!response.ok) {
     const message = await safeErrorMessage(response)

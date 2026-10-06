@@ -11857,6 +11857,89 @@ describe('retainer invoices (file backend)', () => {
     ])
   })
 
+  // The default path is untouched by "record only": still a draft, nothing paid,
+  // nothing sent, no audit event.
+  it('leaves a default retainer a draft with no payment fields and no audit event', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 2500,
+      period,
+      actorUserId: 'owner-1',
+    })
+    expect(retainer).toMatchObject({
+      status: 'draft',
+      sentAt: null,
+      paidAt: null,
+      paymentMethod: null,
+    })
+    expect(await store.listUnappliedRetainers()).toHaveLength(0)
+    expect(await store.listInvoiceReviewEvents({ invoiceId: retainer.id })).toHaveLength(0)
+  })
+
+  // featreq-9d3721d4: a retainer already invoiced and paid OUTSIDE the app is
+  // recorded directly as paid, so it is saved, visible and creditable later.
+  it('records a retainer as already paid with recordOnly, creditable and audited', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 2500,
+      note: 'Paid by check in June',
+      period,
+      recordOnly: true,
+      actorUserId: 'owner-1',
+    })
+
+    expect(retainer).toMatchObject({
+      clientId: 'c1',
+      kind: 'retainer',
+      status: 'paid',
+      paymentMethod: 'manual',
+      total: 2500,
+      appliedToInvoiceId: null,
+    })
+    expect(typeof retainer.paidAt).toBe('string')
+    expect(typeof retainer.sentAt).toBe('string')
+
+    // What was stored is the same record.
+    const stored = (await storedInvoices()).find((invoice) => invoice.id === retainer.id)
+    expect(stored).toMatchObject({ status: 'paid', paymentMethod: 'manual' })
+    expect(stored.paidAt).toBe(retainer.paidAt)
+    expect(stored.sentAt).toBe(retainer.sentAt)
+
+    // Money on hand: the month run can offer it as a credit.
+    const unapplied = await store.listUnappliedRetainers()
+    expect(unapplied.map((invoice) => invoice.id)).toEqual([retainer.id])
+
+    // One audit row, naming who recorded it.
+    const events = await store.listInvoiceReviewEvents({ invoiceId: retainer.id })
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      event: 'retainer_recorded_paid',
+      actorUserId: 'owner-1',
+      clientId: 'c1',
+      changes: { status: { before: null, after: 'paid' } },
+    })
+  })
+
+  it('still refuses an opted-out client or a bad amount when recording only', async () => {
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100, platformInvoicingOptOut: true },
+        ],
+        timeEntries: [],
+      }),
+    )
+    expect(
+      await store.createRetainerInvoice({ clientId: 'c1', amount: 500, recordOnly: true }),
+    ).toBeNull()
+    expect(
+      await store.createRetainerInvoice({ clientId: 'c1', amount: 0, recordOnly: true }),
+    ).toBeNull()
+    expect(await storedInvoices()).toHaveLength(0)
+  })
+
   it('refuses an amount that is not real money', async () => {
     await seedClients()
     expect(await store.createRetainerInvoice({ clientId: 'c1', amount: 0 })).toBeNull()

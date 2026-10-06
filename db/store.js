@@ -14174,6 +14174,12 @@ export class AppDataStore {
    * Returns the invoice, or null when the client does not exist. `amount` must
    * be a positive number — a $0 retainer is a document nobody asked for, and a
    * negative one is a credit note this app has no concept of.
+   *
+   * `recordOnly` is for a retainer that was invoiced and paid OUTSIDE the app
+   * (featreq-9d3721d4): the record is born PAID — `paidAt` and `sentAt` now,
+   * `paymentMethod: 'manual'`, the same durable mark Mark paid leaves — so it
+   * is saved, visible and creditable later (`listUnappliedRetainers`), and
+   * nothing is ever sent. One review event says who recorded it.
    */
   async createRetainerInvoice({
     clientId,
@@ -14181,6 +14187,8 @@ export class AppDataStore {
     note = '',
     period = null,
     windowDays = DEFAULT_PAYMENT_WINDOW_DAYS,
+    recordOnly = false,
+    actorUserId = null,
   }) {
     const value = roundMoney(amount)
     if (!Number.isFinite(value) || value <= 0) return null
@@ -14208,13 +14216,14 @@ export class AppDataStore {
       .filter(Boolean)
 
     const detail = String(note ?? '').trim().slice(0, 300)
+    const recordedAt = nowIso()
     const record = {
       id: `inv-${randomUUID().slice(0, 8)}`,
       clientId: client.id,
       period: issuedPeriod,
       number: nextRetainerInvoiceNumber(year, takenNumbers),
       kind: 'retainer',
-      status: 'draft',
+      status: recordOnly ? 'paid' : 'draft',
       lineItems: [{ kind: 'retainer', label: RETAINER_LABEL, detail, amount: value }],
       // The one line as issued. A retainer is rated by nobody (see the plan
       // doc), but the snapshot costs nothing and keeps every invoice row
@@ -14230,15 +14239,29 @@ export class AppDataStore {
       // The kept note, same rule as a monthly draft.
       blurb: client.invoiceNote ?? '',
       scopeFlags: [],
-      sentAt: null,
-      paidAt: null,
-      paymentMethod: null,
+      // Recorded only: issued and paid somewhere else, so both stamps are now.
+      sentAt: recordOnly ? recordedAt : null,
+      paidAt: recordOnly ? recordedAt : null,
+      paymentMethod: recordOnly ? 'manual' : null,
       appliedToInvoiceId: null,
       createdAt: nowIso(),
       updatedAt: nowIso(),
     }
 
-    return await this._insertInvoice(record)
+    const inserted = await this._insertInvoice(record)
+    if (inserted && recordOnly) {
+      await this._insertInvoiceReviewEvent({
+        id: `invev-${randomUUID().slice(0, 8)}`,
+        invoiceId: inserted.id,
+        clientId: inserted.clientId,
+        period: inserted.period,
+        actorUserId,
+        event: 'retainer_recorded_paid',
+        changes: { status: { before: null, after: 'paid' } },
+        createdAt: recordedAt,
+      })
+    }
+    return inserted
   }
 
   /**
@@ -18063,9 +18086,11 @@ export class AppDataStore {
       const { rows } = await (dbClient ?? this.pool).query(
         `insert into invoices (
            id, client_id, period, number, kind, status, line_items, subtotal, total,
-           due_date, blurb, scope_flags, original_line_items, created_at, updated_at
+           due_date, blurb, scope_flags, original_line_items,
+           sent_at, paid_at, payment_method, created_at, updated_at
          )
-         values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13::jsonb, now(), now())
+         values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13::jsonb,
+                 $14, $15, $16, now(), now())
          on conflict (client_id, period) where kind = 'monthly' and status <> 'void' do nothing
          returning id`,
         [
@@ -18082,6 +18107,11 @@ export class AppDataStore {
           record.blurb,
           JSON.stringify(record.scopeFlags),
           originalLineItems ? JSON.stringify(originalLineItems) : null,
+          // Null on every ordinary insert (a draft is neither sent nor paid);
+          // set only by a retainer recorded as already paid outside the app.
+          record.sentAt ?? null,
+          record.paidAt ?? null,
+          record.paymentMethod ?? null,
         ],
       )
       return rows.length > 0 ? { ...record, originalLineItems } : null

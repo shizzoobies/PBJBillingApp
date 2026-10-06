@@ -1556,13 +1556,18 @@ export function MasterInvoiceRecipientBody({
  * signed, so this button IS that event. One amount, an optional note, and a
  * confirm — everything after it is the ordinary invoice life, on the Invoices
  * page, so this deliberately does not grow a second editor.
+ *
+ * "Record it only" (featreq-9d3721d4) is for a retainer that was already
+ * invoiced and paid OUTSIDE the app: it is saved straight as a paid retainer,
+ * visible and creditable later, and nothing is emailed.
  */
-function RetainerSectionBody({ client }: { client: Client }) {
+export function RetainerSectionBody({ client }: { client: Client }) {
   const [amount, setAmount] = useState('')
   const [note, setNote] = useState('')
+  const [recordOnly, setRecordOnly] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [issued, setIssued] = useState<string | null>(null)
+  const [issued, setIssued] = useState<{ number: string; recorded: boolean } | null>(null)
 
   const value = Number(amount)
   const valid = Number.isFinite(value) && value > 0
@@ -1571,22 +1576,28 @@ function RetainerSectionBody({ client }: { client: Client }) {
     if (!valid) return
     // A money document going out under a number that is then real. Worth one
     // question, because there is no delete — the way back is voiding it.
-    if (
-      !window.confirm(
-        `Issue a ${currency.format(value)} retainer invoice for ${client.name}? ` +
-          'It appears as a draft on the Invoices page, where you review and send it like any other.',
-      )
-    ) {
+    const question = recordOnly
+      ? `Record a ${currency.format(value)} retainer for ${client.name} as already paid? ` +
+        'Nothing is emailed. It appears on the Invoices page as a paid retainer and can be ' +
+        'credited on a later invoice.'
+      : `Issue a ${currency.format(value)} retainer invoice for ${client.name}? ` +
+        'It appears as a draft on the Invoices page, where you review and send it like any other.'
+    if (!window.confirm(question)) {
       return
     }
     setBusy(true)
     setError(null)
     setIssued(null)
     try {
-      const invoice = await issueRetainerInvoiceRequest(client.id, value, note.trim() || undefined)
-      setIssued(invoice.number ?? invoice.id)
+      const invoice = await (recordOnly
+        ? issueRetainerInvoiceRequest(client.id, value, note.trim() || undefined, {
+            recordOnly: true,
+          })
+        : issueRetainerInvoiceRequest(client.id, value, note.trim() || undefined))
+      setIssued({ number: invoice.number ?? invoice.id, recorded: recordOnly })
       setAmount('')
       setNote('')
+      setRecordOnly(false)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not issue the retainer invoice.')
     } finally {
@@ -1599,6 +1610,8 @@ function RetainerSectionBody({ client }: { client: Client }) {
       <p className="retainer-issue-help">
         Issue this once the engagement letter is signed. When the engagement ends, the paid
         retainer is offered back as a credit on the invoice you choose — you decide which one.
+        If the retainer was already invoiced and paid outside the app, tick the box to record it
+        as paid instead: nothing is emailed, and it stays on file to credit later.
       </p>
       <div className="form-grid two-col">
         <label className="field">
@@ -1623,6 +1636,14 @@ function RetainerSectionBody({ client }: { client: Client }) {
           />
         </label>
       </div>
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={recordOnly}
+          onChange={(event) => setRecordOnly(event.target.checked)}
+        />
+        <span>Already invoiced and paid outside the app - record it only</span>
+      </label>
       {error ? (
         <p className="invoice-run-error" role="alert">
           {error}
@@ -1630,17 +1651,31 @@ function RetainerSectionBody({ client }: { client: Client }) {
       ) : null}
       {issued ? (
         <p className="invoice-run-note">
-          Issued {issued} as a draft. Review and send it from the Invoices page.
+          {issued.recorded
+            ? `Recorded ${issued.number} as paid.`
+            : `Issued ${issued.number} as a draft. Review and send it from the Invoices page.`}
         </p>
       ) : null}
       <button
         type="button"
         className="secondary-action"
         disabled={busy || !valid}
-        title={valid ? 'Issue a retainer invoice for this client' : 'Enter an amount first'}
+        title={
+          valid
+            ? recordOnly
+              ? 'Record a paid retainer for this client'
+              : 'Issue a retainer invoice for this client'
+            : 'Enter an amount first'
+        }
         onClick={() => void issue()}
       >
-        {busy ? 'Issuing…' : 'Issue retainer invoice…'}
+        {recordOnly
+          ? busy
+            ? 'Recording…'
+            : 'Record retainer…'
+          : busy
+            ? 'Issuing…'
+            : 'Issue retainer invoice…'}
       </button>
     </div>
   )

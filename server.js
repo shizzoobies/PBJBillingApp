@@ -7241,6 +7241,9 @@ const server = createServer(async (request, response) => {
       const payload = await readJsonBody(request)
       const retainerClientId = typeof payload?.clientId === 'string' ? payload.clientId : ''
       const retainerAmount = Number(payload?.amount)
+      // Already invoiced and paid outside the app: saved as a PAID retainer, and
+      // nothing below can send or charge anything either way.
+      const retainerRecordOnly = payload?.recordOnly === true
       if (!retainerClientId) {
         sendJson(response, 400, { error: 'clientId is required' })
         return
@@ -7269,6 +7272,8 @@ const server = createServer(async (request, response) => {
           clientId: retainerClientId,
           amount: retainerAmount,
           note: typeof payload?.note === 'string' ? payload.note : '',
+          recordOnly: retainerRecordOnly,
+          actorUserId: session.user.id,
         })
       } catch (error) {
         console.error('[invoices] retainer create failed:', error)
@@ -7284,7 +7289,7 @@ const server = createServer(async (request, response) => {
       }
       await appDataStore.recordActivity(
         session.user.id,
-        'retainer_invoice_issued',
+        retainerRecordOnly ? 'retainer_recorded_paid' : 'retainer_invoice_issued',
         `${retainer.number ?? retainer.id}: ${retainer.total}`,
       )
       sendJson(response, 200, { invoice: retainer })
