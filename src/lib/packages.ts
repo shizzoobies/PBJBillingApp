@@ -36,15 +36,29 @@ export function defaultPackageTemplateIds(
  * The packages that COVER a client's plans: every one of the package's plans is
  * on the client (and it has at least one). A package is not stored on the
  * client - applying one unions its plans in - so coverage is how the client page
- * recognizes "this client is on that package". Sorted by name. Pure.
+ * recognizes "this client is on that package". A covering package whose plans
+ * are a strict subset of another covering package's is dropped. Sorted by name.
+ * Pure.
  */
 export function packagesCoveringPlans(
   clientPlanIds: readonly string[],
   packages: readonly Package[],
 ): Package[] {
   const have = new Set(clientPlanIds)
-  return packages
-    .filter((pkg) => pkg.planIds.length > 0 && pkg.planIds.every((id) => have.has(id)))
+  const covering = packages.filter(
+    (pkg) => pkg.planIds.length > 0 && pkg.planIds.every((id) => have.has(id)),
+  )
+  // A package whose plans are a strict subset of another covering package's adds
+  // nothing the larger one does not already show, so it is dropped.
+  return covering
+    .filter(
+      (pkg) =>
+        !covering.some(
+          (other) =>
+            other.planIds.length > pkg.planIds.length &&
+            pkg.planIds.every((id) => other.planIds.includes(id)),
+        ),
+    )
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 

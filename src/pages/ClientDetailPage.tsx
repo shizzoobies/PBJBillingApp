@@ -1674,10 +1674,13 @@ function cloneTemplateForClient(
 export function PlanChecklistsBody({ client, data }: { client: Client; data: AppData }) {
   const { ownerMode, addChecklistTemplate } = useAppContext()
   const [packages, setPackages] = useState<Package[]>([])
+  const [loaded, setLoaded] = useState(false)
 
   // Packages are endpoint-managed (not in AppData), so they are fetched here,
-  // the way ApplyPackageField does. A failed fetch just leaves the per-plan
-  // groups below, which is what the panel showed before packages existed.
+  // the way ApplyPackageField does. The panel paints nothing until the fetch
+  // settles, so per-plan groups never flash and then collapse into a package;
+  // a failed fetch leaves the per-plan groups, which is what the panel showed
+  // before packages existed.
   useEffect(() => {
     if (!ownerMode) return
     let cancelled = false
@@ -1686,6 +1689,9 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
         if (!cancelled) setPackages(rows)
       })
       .catch(() => {})
+      .then(() => {
+        if (!cancelled) setLoaded(true)
+      })
     return () => {
       cancelled = true
     }
@@ -1707,10 +1713,56 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
     () => packagesCoveringPlans(client.planIds ?? [], packages),
     [client.planIds, packages],
   )
-  const uncoveredPlans = useMemo(() => {
-    const covered = new Set(coveringPackages.flatMap((pkg) => pkg.planIds))
-    return clientPlans.filter((plan) => !covered.has(plan.id))
-  }, [clientPlans, coveringPackages])
+
+  // What each group lists. A package's own set is only a default copy and is
+  // editable, so a covered plan's checklist the set leaves out is listed under
+  // the package too - nothing a plan bundles disappears. A checklist shows in
+  // the first group that lists it, never twice across groups.
+  const groups = useMemo(() => {
+    const shown = new Set<string>()
+    const take = (ids: readonly string[]) => {
+      const fresh = ids.filter((id, index) => !shown.has(id) && ids.indexOf(id) === index)
+      for (const id of fresh) shown.add(id)
+      return fresh
+    }
+    const planById = new Map(clientPlans.map((plan) => [plan.id, plan]))
+    const result: {
+      key: string
+      name: string
+      kind: 'plan' | 'package'
+      templateIds: string[]
+      handledElsewhere: boolean
+    }[] = []
+    const covered = new Set<string>()
+    for (const pkg of coveringPackages) {
+      const own = planTemplates(pkg, data.checklistTemplates).map((template) => template.id)
+      const extra = pkg.planIds.flatMap((planId) => {
+        covered.add(planId)
+        const plan = planById.get(planId)
+        return plan ? planTemplates(plan, data.checklistTemplates).map((template) => template.id) : []
+      })
+      result.push({
+        key: `pkg-${pkg.id}`,
+        name: pkg.name,
+        kind: 'package',
+        templateIds: take([...own, ...extra]),
+        handledElsewhere: false,
+      })
+    }
+    for (const plan of clientPlans) {
+      if (covered.has(plan.id)) continue
+      const own = planTemplates(plan, data.checklistTemplates).map((template) => template.id)
+      const templateIds = take(own)
+      result.push({
+        key: plan.id,
+        name: plan.name,
+        kind: 'plan',
+        templateIds,
+        handledElsewhere: own.length > 0 && templateIds.length === 0,
+      })
+    }
+    return result
+  }, [clientPlans, coveringPackages, data.checklistTemplates])
 
   if (!ownerMode) return null
 
@@ -1723,14 +1775,19 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
     )
   }
 
-  // One group, for a plan or a package: both carry `templateIds`, so the
-  // template list, the Set up / Not set up status and the clone are the same.
-  const renderGroup = (
-    source: Pick<SubscriptionPlan, 'templateIds'>,
-    key: string,
-    name: string,
-    kind: 'plan' | 'package',
-  ) => {
+  // Nothing paints until the packages fetch settles (see the effect above).
+  if (!loaded) return null
+
+  // One group, for a plan or a package: the template list, the Set up / Not set
+  // up status and the clone are the same for both.
+  const renderGroup = ({
+    key,
+    name,
+    kind,
+    templateIds,
+    handledElsewhere,
+  }: (typeof groups)[number]) => {
+    const source = { templateIds }
     const templates = planTemplates(source, data.checklistTemplates)
     const missing = missingPlanTemplatesForClient(
       source,
@@ -1759,7 +1816,11 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
           ) : null}
         </div>
         {templates.length === 0 ? (
-          <p className="muted-text">No checklists are bundled with this {kind} yet.</p>
+          <p className="muted-text">
+            {handledElsewhere
+              ? 'Its checklists are listed above.'
+              : `No checklists are bundled with this ${kind} yet.`}
+          </p>
         ) : (
           <ul className="plan-checklists-list">
             {templates.map((template) => {
@@ -1796,8 +1857,7 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
 
   return (
     <div className="plan-checklists">
-      {coveringPackages.map((pkg) => renderGroup(pkg, `pkg-${pkg.id}`, pkg.name, 'package'))}
-      {uncoveredPlans.map((plan) => renderGroup(plan, plan.id, plan.name, 'plan'))}
+      {groups.map(renderGroup)}
     </div>
   )
 }

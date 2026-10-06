@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PlanChecklistsBody } from '../pages/ClientDetailPage'
 import type { AppContextValue } from '../AppContext'
@@ -67,6 +67,7 @@ const PLANS = [
   plan('C', 'Plan C', ['T2']),
   plan('D', 'Plan D', []),
   plan('E', 'Plan E', ['T3']),
+  plan('F', 'Plan F', ['T1', 'T3']),
 ]
 const TEMPLATES = [
   blueprint('T1', 'Monthly close'),
@@ -76,11 +77,28 @@ const TEMPLATES = [
 const P = pkg('P', 'Quarterly Accounting', ['A', 'B', 'C', 'D'], ['T1', 'T2'])
 
 function renderPanel(planIds: string[], templates: ChecklistTemplate[] = TEMPLATES) {
-  const client = { id: 'c1', name: 'Acme', planIds } as Client
-  const data = { plans: PLANS, clients: [client], checklistTemplates: templates } as unknown as AppData
-  contextValue = { ownerMode: true, data, addChecklistTemplate } as unknown as AppContextValue
-  return render(<PlanChecklistsBody client={client} data={data} />)
+  const element = (ids: string[]) => {
+    const client = { id: 'c1', name: 'Acme', planIds: ids } as Client
+    const data = {
+      plans: PLANS,
+      clients: [client],
+      checklistTemplates: templates,
+    } as unknown as AppData
+    contextValue = { ownerMode: true, data, addChecklistTemplate } as unknown as AppContextValue
+    return <PlanChecklistsBody client={client} data={data} />
+  }
+  const view = render(element(planIds))
+  // The same mounted panel, handed a different plan list - what "+ Add package"
+  // does to the client page.
+  const rerenderWith = (ids: string[]) => view.rerender(element(ids))
+  return { container: view.container, rerenderWith }
 }
+
+/** Let the panel's one packages fetch settle and React apply the result. */
+const flushPackages = () =>
+  act(async () => {
+    await vi.mocked(listPackagesRequest).mock.results[0].value.catch(() => undefined)
+  })
 
 const groupHeadings = (container: HTMLElement) =>
   Array.from(container.querySelectorAll('.plan-checklists-head > strong')).map(
@@ -109,14 +127,18 @@ describe('Plan checklists grouped by package', () => {
     expect(screen.queryByText('Plan B')).toBeNull()
   })
 
-  it('keeps today\'s per-plan groups when the package needs a plan the client lacks', async () => {
-    const { container } = renderPanel(['A', 'B', 'C'])
+  it('keeps per-plan groups while a package needs a plan the client lacks, and regroups once it has it', async () => {
+    const { container, rerenderWith } = renderPanel(['A', 'B', 'C'])
+    await flushPackages()
 
-    await waitFor(() => expect(listPackagesRequest).toHaveBeenCalled())
-    await screen.findByText('Plan A')
     expect(groupHeadings(container)).toEqual(['Plan A', 'Plan B', 'Plan C'])
     expect(screen.queryByText('Quarterly Accounting')).toBeNull()
     expect(screen.queryByText('Package')).toBeNull()
+
+    // "+ Add package" unions Plan D into the client; the same panel regroups.
+    rerenderWith(['A', 'B', 'C', 'D'])
+    await screen.findByText('Quarterly Accounting')
+    expect(groupHeadings(container)).toEqual(['Quarterly Accounting'])
   })
 
   it('renders the package group, then the group of a plan no package covers', async () => {
@@ -150,5 +172,58 @@ describe('Plan checklists grouped by package', () => {
     expect(rows).toHaveLength(2)
     expect(within(rows[0] as HTMLElement).getByText('Set up')).toBeTruthy()
     expect(within(rows[1] as HTMLElement).getByText('Not set up')).toBeTruthy()
+  })
+
+  it("surfaces a covered plan's checklist that the package's own set leaves out", async () => {
+    // The package set is only a default copy and is editable: this one omits
+    // Plan B's second checklist, which must not vanish from the panel.
+    listPackagesRequest = vi.fn(async () => [pkg('P2', 'Close only', ['A', 'B'], ['T1'])])
+    const { container } = renderPanel(['A', 'B'])
+
+    await screen.findByText('Close only')
+    expect(groupHeadings(container)).toEqual(['Close only'])
+    expect(screen.getAllByText('Monthly close')).toHaveLength(1)
+    expect(screen.getAllByText('Quarterly review')).toHaveLength(1)
+  })
+
+  it('shows a checklist once when a package and an uncovered plan both carry it', async () => {
+    const { container } = renderPanel(['A', 'B', 'C', 'D', 'F'])
+
+    await screen.findByText('Quarterly Accounting')
+    expect(groupHeadings(container)).toEqual(['Quarterly Accounting', 'Plan F'])
+    expect(screen.getAllByText('Monthly close')).toHaveLength(1)
+    expect(screen.getAllByText('Sales tax filing')).toHaveLength(1)
+  })
+
+  it('does not render a package whose plans are a strict subset of another covering package', async () => {
+    listPackagesRequest = vi.fn(async () => [
+      pkg('P2', 'Aardvark pair', ['A', 'B'], ['T1']),
+      P,
+    ])
+    const { container } = renderPanel(['A', 'B', 'C', 'D'])
+
+    await screen.findByText('Quarterly Accounting')
+    expect(groupHeadings(container)).toEqual(['Quarterly Accounting'])
+    expect(screen.queryByText('Aardvark pair')).toBeNull()
+  })
+
+  it('paints nothing until the packages fetch settles, then falls back to plans if it fails', async () => {
+    let reject: (reason: Error) => void = () => undefined
+    listPackagesRequest = vi.fn(
+      () =>
+        new Promise<Package[]>((_resolve, rej) => {
+          reject = rej
+        }),
+    )
+    const { container } = renderPanel(['A', 'B', 'C', 'D'])
+
+    expect(container.querySelector('.plan-checklists-group')).toBeNull()
+    expect(screen.queryByText('Plan A')).toBeNull()
+
+    await act(async () => {
+      reject(new Error('offline'))
+      await Promise.resolve()
+    })
+    expect(groupHeadings(container)).toEqual(['Plan A', 'Plan B', 'Plan C', 'Plan D'])
   })
 })

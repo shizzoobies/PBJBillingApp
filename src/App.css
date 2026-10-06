@@ -7529,7 +7529,8 @@ h2 {
 }
 
 .plan-checklists-kind {
-  background: var(--surface-muted, rgba(0, 0, 0, 0.06));
+  background: var(--soft);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
   color: var(--muted);
   font-size: 11px;
