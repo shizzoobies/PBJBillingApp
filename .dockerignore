@@ -4,6 +4,7 @@
 .github
 .claude
 .omc
+.railway
 .vscode
 node_modules
 dist
