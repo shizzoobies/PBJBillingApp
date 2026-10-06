@@ -279,7 +279,7 @@ Sidebar: **Proposals**. Every prospect's estimate, letter, chat and outcome is s
 
 **Questionnaires** (Proposals list): **Send questionnaire** emails a link the prospect fills in alone; **Fill in on the call** opens the same questions as a sheet, with ones only she can ask. Answers start a draft proposal with nothing priced (**Not yet priced**), shown in **From the questionnaire** on its Estimate tab, and notify owners. A Questionnaires block lists Waiting, Answered, Expired (**New link**, **Start draft** if one failed).
 
-Header actions: **Accept** turns a new prospect into an Onboarding client billed monthly at the proposal's total (firm-default terms, optional package); an existing client is asked before any fee change; invoices untouched. Once accepted, **Open the client** jumps straight to its page. **Decline** (note), **Copy to new proposal**, **Delete** (drafts only).
+Header actions: **Accept** turns a new prospect into an Onboarding client billed monthly at the proposal's total (firm-default terms, an optional package, and any plans ticked in the **Plans** picker beside the package dropdown; the confirm names them); an existing client is asked before any fee change; invoices untouched. Once accepted, **Open the client** jumps straight to its page. **Decline** (note), **Copy to new proposal**, **Delete** (drafts only).
 
 **Software** (QBO, payroll, QB Time, Bill Pay) is its own section, priced at cost from Settings > Proposal pricing (a base plus a per-employee or per-contractor amount) and kept out of the monthly fee. Accept adds each priced line as a monthly recurring expense marked Software.
 
