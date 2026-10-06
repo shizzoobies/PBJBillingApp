@@ -175,16 +175,19 @@ describe('Plan checklists grouped by package', () => {
     expect(within(rows[1] as HTMLElement).getByText('Not set up')).toBeTruthy()
   })
 
-  it("surfaces a covered plan's checklist that the package's own set leaves out", async () => {
-    // The package set is only a default copy and is editable: this one omits
-    // Plan B's second checklist, which must not vanish from the panel.
-    listPackagesRequest = vi.fn(async () => [pkg('P2', 'Close only', ['A', 'B'], ['T1'])])
-    const { container } = renderPanel(['A', 'B'])
+  it("mirrors the package exactly: a covered plan's checklist the package leaves out is not listed", async () => {
+    // 1969 Beach: the package's set is two checklists; the Client Meeting plan
+    // bundles a third (T3) the package leaves out. The panel lists the package's
+    // own two and nothing from the covered plans' bundles.
+    listPackagesRequest = vi.fn(async () => [pkg('P2', 'Quarterly Accounting', ['A', 'B', 'E'], ['T1', 'T2'])])
+    const { container } = renderPanel(['A', 'B', 'E'])
 
-    await screen.findByText('Close only')
-    expect(groupHeadings(container)).toEqual(['Close only'])
+    await screen.findByText('Quarterly Accounting')
+    expect(groupHeadings(container)).toEqual(['Quarterly Accounting'])
+    expect(container.querySelectorAll('.plan-checklists-row')).toHaveLength(2)
     expect(screen.getAllByText('Monthly close')).toHaveLength(1)
     expect(screen.getAllByText('Quarterly review')).toHaveLength(1)
+    expect(screen.queryByText('Sales tax filing')).toBeNull()
   })
 
   it('shows a checklist once when a package and an uncovered plan both carry it', async () => {
@@ -225,14 +228,14 @@ describe('Plan checklists grouped by package', () => {
   it('says the checklists are listed above when overlapping packages leave a later group nothing new', async () => {
     listPackagesRequest = vi.fn(async () => [
       pkg('Pa', 'Alpha', ['A', 'B'], ['T1']),
-      pkg('Pb', 'Beta', ['B', 'C'], ['T2']),
+      pkg('Pb', 'Beta', ['B', 'C'], ['T1']),
     ])
     const { container } = renderPanel(['A', 'B', 'C'])
 
     await screen.findByText('Alpha')
     expect(groupHeadings(container)).toEqual(['Alpha', 'Beta'])
     expect(screen.getAllByText('Monthly close')).toHaveLength(1)
-    expect(screen.getAllByText('Quarterly review')).toHaveLength(1)
+    expect(screen.queryByText('Quarterly review')).toBeNull()
     expect(screen.getByText('Its checklists are listed above.')).toBeTruthy()
     expect(screen.queryByText(/No checklists are bundled/)).toBeNull()
   })

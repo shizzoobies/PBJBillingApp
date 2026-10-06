@@ -1804,10 +1804,10 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
     [client.planIds, packages],
   )
 
-  // What each group lists. A package's own set is only a default copy and is
-  // editable, so a covered plan's checklist the set leaves out is listed under
-  // the package too - nothing a plan bundles disappears. A checklist shows in
-  // the first group that lists it, never twice across groups.
+  // What each group lists. A package group mirrors the package exactly: only
+  // its own checklist set, nothing a covered plan bundles beyond it
+  // (featreq-3ce2d75d). A covered plan still gets no group of its own. A
+  // checklist shows in the first group that lists it, never twice across groups.
   const groups = useMemo(() => {
     const shown = new Set<string>()
     const take = (ids: readonly string[]) => {
@@ -1815,7 +1815,6 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
       for (const id of fresh) shown.add(id)
       return fresh
     }
-    const planById = new Map(clientPlans.map((plan) => [plan.id, plan]))
     const result: {
       key: string
       name: string
@@ -1826,18 +1825,14 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
     const covered = new Set<string>()
     for (const pkg of coveringPackages) {
       const own = planTemplates(pkg, data.checklistTemplates).map((template) => template.id)
-      const extra = pkg.planIds.flatMap((planId) => {
-        covered.add(planId)
-        const plan = planById.get(planId)
-        return plan ? planTemplates(plan, data.checklistTemplates).map((template) => template.id) : []
-      })
-      const templateIds = take([...own, ...extra])
+      for (const planId of pkg.planIds) covered.add(planId)
+      const templateIds = take(own)
       result.push({
         key: `pkg-${pkg.id}`,
         name: pkg.name,
         kind: 'package',
         templateIds,
-        handledElsewhere: own.length + extra.length > 0 && templateIds.length === 0,
+        handledElsewhere: own.length > 0 && templateIds.length === 0,
       })
     }
     for (const plan of clientPlans) {
