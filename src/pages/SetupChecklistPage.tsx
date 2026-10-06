@@ -20,8 +20,10 @@ import {
 import {
   dismissSetupIssueRequest,
   fetchDismissedSetupIssues,
+  listPackagesRequest,
   restoreSetupIssueRequest,
 } from '../lib/api'
+import type { Package } from '../lib/types'
 import { getAssignedTeamIds } from '../lib/utils'
 
 const SEVERITY_LABEL: Record<SetupSeverity, string> = {
@@ -48,6 +50,24 @@ export function SetupChecklistPage() {
   const [expandedCats, setExpandedCats] = useState<Set<string>>(new Set())
   const [showIgnored, setShowIgnored] = useState(false)
   const [fixTarget, setFixTarget] = useState<SetupIssue | null>(null)
+  // Packages aren't in the workspace data; until they load (or if the fetch
+  // fails) plan checklist nudges stay one per plan.
+  const [packages, setPackages] = useState<Package[] | undefined>(undefined)
+
+  useEffect(() => {
+    if (!ownerMode) return
+    let alive = true
+    listPackagesRequest()
+      .then((rows) => {
+        if (alive) setPackages(rows)
+      })
+      .catch(() => {
+        /* non-fatal: plan checklist nudges stay per plan */
+      })
+    return () => {
+      alive = false
+    }
+  }, [ownerMode])
 
   useEffect(() => {
     if (!ownerMode) return
@@ -73,6 +93,7 @@ export function SetupChecklistPage() {
         employees: data.employees,
         checklistTemplates: data.checklistTemplates,
         checklists: data.checklists,
+        packages,
       }),
     [
       data.clients,
@@ -81,6 +102,7 @@ export function SetupChecklistPage() {
       data.employees,
       data.checklistTemplates,
       data.checklists,
+      packages,
     ],
   )
 

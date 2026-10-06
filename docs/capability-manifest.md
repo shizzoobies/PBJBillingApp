@@ -629,7 +629,7 @@ Header actions: **Accept** turns a new prospect into an Onboarding client billed
 - Ignore: any item can be IGNORED (something the owner knows about but doesn't need to fix). Ignored items move to a collapsible "Ignored" section at the bottom and can be Restored anytime; the ignore list is saved per owner.
 - RECURRING CHECKLISTS THAT WON'T GENERATE (the "Checklists" category): the most important check. Each broken recipe is named (title · client) with the exact missing field, a link to it, and whether it has NEVER generated a checklist or merely stopped: no client attached; no stages; first stage has NO STEPS; a specific-months recipe with no months chosen; no next due date; "repeat every year" off with a past scheduled year; the recipe is switched off; or the first stage has no assignee (it generates, but lands on nobody — and only the assigned person or an owner can complete a step). Standard blueprints are skipped: they're recipes to copy, never scheduled, so an empty one isn't a fault.
 - Shows "You're all set — 100%" when nothing is misconfigured anywhere.
-- Suggestions that stand for several outstanding things name each one rather than only counting them: the "plan checklists not set up" item lists each specific missing checklist by name (already-added ones are excluded, and the count matches the named list).
+- Suggestions that stand for several things name each one: the "plan checklists not set up" item lists each missing checklist (already-added ones excluded) and groups by package like the client page, one item per covering package with its own checklists only.
 
 ## Team (owner only)
 

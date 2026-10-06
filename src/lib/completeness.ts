@@ -16,11 +16,18 @@ import type {
   Client,
   Contact,
   Employee,
+  Package,
   SubscriptionPlan,
 } from './types'
 import { resolveInvoiceRecipients } from '../../lib/invoice-recipients.js'
 import { evaluateRecurringTemplate } from '../../lib/recurring-gate.js'
-import { getAssignedTeamIds, missingPlanTemplatesForClient, unlinkedContacts } from './utils'
+import { packagesCoveringPlans } from './packages'
+import {
+  getAssignedTeamIds,
+  missingPlanTemplatesForClient,
+  planTemplates,
+  unlinkedContacts,
+} from './utils'
 
 /** The sidebar tab an issue belongs to — the page groups by these. */
 export type SetupCategory =
@@ -75,6 +82,12 @@ export interface CompletenessInput {
   checklistTemplates: ChecklistTemplate[]
   /** Live checklists — used only to say whether a recipe has ever generated. */
   checklists?: Checklist[]
+  /**
+   * Packages (endpoint-managed, so not in the workspace data). When given, plan
+   * checklist nudges group by package exactly like the client page's Plan
+   * checklists panel; when absent (not loaded) they fall back to one per plan.
+   */
+  packages?: Package[]
 }
 
 const isPositive = (value: unknown): boolean =>
@@ -246,20 +259,40 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     const clientTemplates = checklistTemplates.filter(
       (template) => template.clientId === client.id,
     )
+    // One nudge per GROUP, grouped exactly like the client page's Plan
+    // checklists panel (ClientDetailPage `groups`): a package covering the
+    // client is one group listing only the package's own checklist set, and
+    // every plan it combines gets no nudge of its own; plans no package covers
+    // keep their own. A checklist is named in at most one nudge.
+    const shown = new Set<string>()
+    const groups: { id: string; name: string; kind: 'package' | 'plan'; templateIds: string[] }[] =
+      []
+    const covered = new Set<string>()
+    for (const pkg of packagesCoveringPlans(client.planIds ?? [], input.packages ?? [])) {
+      for (const planId of pkg.planIds) covered.add(planId)
+      groups.push({ id: `pkg-${pkg.id}`, name: pkg.name, kind: 'package', templateIds: pkg.templateIds })
+    }
     for (const planId of client.planIds ?? []) {
       const plan = planById.get(planId)
-      if (!plan) continue
+      if (!plan || covered.has(plan.id)) continue
+      groups.push({ id: plan.id, name: plan.name, kind: 'plan', templateIds: plan.templateIds ?? [] })
+    }
+    for (const group of groups) {
+      const own = planTemplates({ templateIds: group.templateIds }, checklistTemplates)
+        .map((template) => template.id)
+        .filter((id) => !shown.has(id))
+      for (const id of own) shown.add(id)
       const missing = missingPlanTemplatesForClient(
-        plan,
+        { templateIds: own },
         checklistTemplates,
         client.id,
         clientTemplates,
       )
       if (missing.length > 0) {
         issues.push({
-          id: `client:plan-checklists:${client.id}:${plan.id}`,
+          id: `client:plan-checklists:${client.id}:${group.id}`,
           category: 'Clients',
-          title: `Set up ${plan.name} checklists for ${client.name}`,
+          title: `Set up ${group.name}${group.kind === 'package' ? ' package' : ''} checklists for ${client.name}`,
           detail: `${missing.length} plan checklist${missing.length === 1 ? '' : 's'} not yet added:`,
           // Name each missing checklist so the owner sees exactly which ones are
           // outstanding, not just a count. Already-added ones are filtered out

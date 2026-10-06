@@ -9,6 +9,7 @@ import type {
   Client,
   Contact,
   Employee,
+  Package,
   SubscriptionPlan,
   ChecklistTemplate,
 } from '../lib/types'
@@ -454,6 +455,128 @@ describe('computeSetupIssues', () => {
     expect(issue?.items).toEqual(['Monthly Close', 'Sales Tax'])
     expect(issue?.items?.length).toBe(2)
     expect(issue?.detail).toContain('2 plan checklists')
+  })
+})
+
+describe('computeSetupIssues — plan checklists group by package like the client page', () => {
+  const tmpl = (id: string, title: string, clientId = ''): ChecklistTemplate =>
+    ({
+      id,
+      title,
+      clientId,
+      assigneeId: '',
+      frequency: 'monthly',
+      active: true,
+      isStandard: clientId === '',
+      stages: [],
+    }) as unknown as ChecklistTemplate
+  const plan = (id: string, name: string, templateIds: string[]): SubscriptionPlan => ({
+    id,
+    name,
+    notes: '',
+    templateIds,
+  })
+  const pkg = (id: string, name: string, planIds: string[], templateIds: string[]): Package => ({
+    id,
+    name,
+    description: '',
+    planIds,
+    templateIds,
+    createdAt: '2026-10-01T00:00:00.000Z',
+    updatedAt: null,
+  })
+  const nudges = (input: CompletenessInput) =>
+    computeSetupIssues(input).filter((i) => i.id.startsWith('client:plan-checklists:'))
+
+  // The 1969 Beach shape: the package's own set is T1, T2; a covered plan also
+  // bundles T3, which the package deliberately leaves out.
+  const beach = (): CompletenessInput => ({
+    ...emptyInput,
+    clients: [makeClient({ planIds: ['plan-a', 'plan-b'] })],
+    plans: [plan('plan-a', 'Accounting', ['t1', 't2']), plan('plan-b', 'Quarterly', ['t2', 't3'])],
+    checklistTemplates: [tmpl('t1', 'Close'), tmpl('t2', 'Reconcile'), tmpl('t3', 'Client Meeting')],
+    packages: [pkg('pk-1', 'Quarterly Accounting', ['plan-a', 'plan-b'], ['t1', 't2'])],
+  })
+
+  it('gives a fully covered client ONE nudge naming the package, with only the package templates', () => {
+    const found = nudges(beach())
+    expect(found).toHaveLength(1)
+    expect(found[0].id).toBe('client:plan-checklists:client-1:pkg-pk-1')
+    expect(found[0].title).toBe('Set up Quarterly Accounting package checklists for Acme')
+    // T3 is bundled by a covered plan but not in the package: never nudged.
+    expect(found[0].items).toEqual(['Close', 'Reconcile'])
+    expect(found[0].detail).toContain('2 plan checklists')
+    expect(found[0].fix).toEqual({
+      kind: 'planChecklists',
+      clientId: 'client-1',
+      templateIds: ['t1', 't2'],
+    })
+  })
+
+  it('lists only what is still missing, and no nudge once the package set is set up', () => {
+    const input = beach()
+    input.checklistTemplates = [
+      ...input.checklistTemplates,
+      tmpl('c-1', 'Close', 'client-1'),
+    ]
+    const partial = nudges(input)
+    expect(partial).toHaveLength(1)
+    expect(partial[0].items).toEqual(['Reconcile'])
+    expect(partial[0].fix).toEqual({
+      kind: 'planChecklists',
+      clientId: 'client-1',
+      templateIds: ['t2'],
+    })
+    input.checklistTemplates = [...input.checklistTemplates, tmpl('c-2', 'Reconcile', 'client-1')]
+    // T3 is still not set up, but no package or plan nudge asks for it.
+    expect(nudges(input)).toEqual([])
+  })
+
+  it('keeps a per-plan nudge for a plan no package covers, without repeating a checklist', () => {
+    const input = beach()
+    input.clients = [makeClient({ planIds: ['plan-a', 'plan-b', 'plan-c'] })]
+    input.plans = [...input.plans, plan('plan-c', 'Payroll', ['t2', 't4'])]
+    input.checklistTemplates = [...input.checklistTemplates, tmpl('t4', 'Payroll Run')]
+    const found = nudges(input)
+    expect(found.map((i) => i.id)).toEqual([
+      'client:plan-checklists:client-1:pkg-pk-1',
+      'client:plan-checklists:client-1:plan-c',
+    ])
+    // t2 already shown by the package nudge, so the plan's nudge has only t4.
+    expect(found[1].items).toEqual(['Payroll Run'])
+    expect(found[1].fix).toEqual({
+      kind: 'planChecklists',
+      clientId: 'client-1',
+      templateIds: ['t4'],
+    })
+  })
+
+  it('does not group when the package is not fully covered, or when packages are not loaded', () => {
+    const uncovered = beach()
+    uncovered.clients = [makeClient({ planIds: ['plan-a'] })]
+    expect(nudges(uncovered).map((i) => i.id)).toEqual(['client:plan-checklists:client-1:plan-a'])
+    const notLoaded = beach()
+    delete notLoaded.packages
+    expect(nudges(notLoaded).map((i) => i.id)).toEqual([
+      'client:plan-checklists:client-1:plan-a',
+      'client:plan-checklists:client-1:plan-b',
+    ])
+  })
+
+  it('folds a dropped subset package into the kept one, like the panel', () => {
+    const input = beach()
+    input.clients = [makeClient({ planIds: ['plan-a', 'plan-b', 'plan-c'] })]
+    input.plans = [...input.plans, plan('plan-c', 'Payroll', [])]
+    input.checklistTemplates = [...input.checklistTemplates, tmpl('t5', 'Extra')]
+    input.packages = [
+      pkg('pk-1', 'Quarterly Accounting', ['plan-a', 'plan-b'], ['t1', 't2']),
+      pkg('pk-2', 'Everything', ['plan-a', 'plan-b', 'plan-c'], ['t1']),
+    ]
+    // pk-1 is a strict subset of pk-2: one nudge, and pk-1's own t2 is folded in.
+    input.packages[0].templateIds = ['t1', 't2', 't5']
+    const found = nudges(input)
+    expect(found.map((i) => i.id)).toEqual(['client:plan-checklists:client-1:pkg-pk-2'])
+    expect(found[0].items).toEqual(['Close', 'Reconcile', 'Extra'])
   })
 })
 
