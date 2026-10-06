@@ -25,8 +25,21 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-06, night - READ THIS FIRST):** `main` = `27b6e35` (+ this
-handoff), pushed, deployed, `/health` 200 with that commit, voice agent re-provisioned after
+**State right now (2026-10-06, late night):** `main` = `0a4e5c6` (+ this handoff), pushed, deployed,
+`/health` 200, voice re-provisioned. **Three things since the night entry below:** (1) `0a4e5c6` Brittany's
+send-back on the package-grouped Plan checklists (`featreq-3ce2d75d`, Shipped again): her email said the
+client page must look the same as the package, so a package group now lists EXACTLY the package's own
+checklist set - the union with each covered plan's bundle (`extra` in ClientDetailPage `groups`) is gone
+(1969 Beach: two rows, Client Meeting no longer shown). The To 100% nudge still flags a covered plan's
+bundle - scoped onto `featreq-fe428f9f`. (2) **The bulk-save watch answered itself:** ~20 real saves on
+10-06, `write committed in` 10-13 s each (one 20 s), two `could not lock ... 55P03; refusing as busy`
+(the tab retried and won), and autosaves re-running on an unchanged fingerprint - batch the inserts (B2
+on `featreq-c8e5f169`) is now justified by production evidence; propose it to Alex. (3) A new Brittany
+item `featreq-f0b4934f` (legacy status `sent`, shows as New): split the time on the Clean Up / Split
+project evenly across 16 named clients - a production data write on time entries, needs Alex's yes and a
+snapshot. The autopay test with Brittany is Tuesday 10-07 (switch still unset, no enrollments).
+
+**Earlier (2026-10-06, night):** `main` = `27b6e35` (+ that handoff), pushed, deployed, `/health` 200 with that commit, voice agent re-provisioned after
 the last ship. Suite **319 files / 7050 tests**, green. Manifest **204,848 bytes - 152 under the
 205,000 tripwire. TRIM FIRST, before ANY manifest edit** (condense a long paragraph the way the
 10-06 evening entry describes; line 316, the pending-notes paragraph, is still the longest).
@@ -761,6 +774,26 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-06 (late night) - the package-mirror send-back, the bulk-save numbers, a new data request.**
+
+- `0a4e5c6` **featreq-3ce2d75d** (Shipped again): the package group lists only `planTemplates(pkg)`;
+  `covered.add` still removes the covered plans' own groups; `handledElsewhere` = own > 0 && none fresh.
+  packages.ts untouched (dropped-package fold stays). Tests: the "surfaces a covered plan's checklist"
+  case now asserts it is NOT listed anywhere (1969 Beach shape); the overlapping-packages test moved
+  Beta's set to T1 so it still exercises the listed-above branch. Manifest line 304 rewritten, 65 bytes
+  smaller (204,783 on disk). Reviewer: ship; MEDIUM follow-up = completeness.ts nudge still per-plan
+  (on `featreq-fe428f9f`).
+- **Bulk save on production, measured** (Railway logs, 10-06): `[bulk-save] write committed in` 9,898 -
+  12,944 ms, one 20,548 ms (04:31Z); refusals "could not lock the workspace tables after 3 attempts
+  (55P03)" at 04:31Z and 19:44Z, each followed by a successful retry a second later; stale-save 409
+  pairs at 14:05Z/14:06Z (two tabs); several saves with identical before/after fingerprints
+  (`dd2ef9d4... -> dd2ef9d4...`) that still rewrote 3,003 time entries. Follow-up B2 (batch the
+  inserts, and skip a save whose fingerprint did not change) is the recommendation.
+- `featreq-f0b4934f` (Brittany, 16:18 Eastern, legacy status `sent` = New): "[Review] CLEAN UP/SPLIT
+  PROJECT - the time to this project should be split between the following clients evenly" + 16 client
+  names. Not started; it is a prod write on time entries (split provenance rules in memory
+  `time-accuracy-audit-2026-08`); needs Alex's yes, a snapshot, and a rolled-back trial first.
 
 **2026-10-06 (night) — Two more Planned: Brittany's send-back on pending notes (`20b9ad0`) and her
 answer on recorded retainers in QBO (`39bdba3`, `27b6e35`).**
