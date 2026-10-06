@@ -54,7 +54,7 @@ import {
   setClientInvoiceNote,
   setClientHourlyRatePeriod,
 } from '../lib/api'
-import { applyPackageConfirmText } from '../lib/packages'
+import { applyPackageConfirmText, packagesCoveringPlans } from '../lib/packages'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
 import { pendingNoteCount as pendingNoteCountOf, useClientPendingNotes } from '../hooks/useClientPendingNotes'
@@ -1671,8 +1671,25 @@ function cloneTemplateForClient(
   return cloneChecklistTemplate(source, { clientId, active: true })
 }
 
-function PlanChecklistsBody({ client, data }: { client: Client; data: AppData }) {
+export function PlanChecklistsBody({ client, data }: { client: Client; data: AppData }) {
   const { ownerMode, addChecklistTemplate } = useAppContext()
+  const [packages, setPackages] = useState<Package[]>([])
+
+  // Packages are endpoint-managed (not in AppData), so they are fetched here,
+  // the way ApplyPackageField does. A failed fetch just leaves the per-plan
+  // groups below, which is what the panel showed before packages existed.
+  useEffect(() => {
+    if (!ownerMode) return
+    let cancelled = false
+    void listPackagesRequest()
+      .then((rows) => {
+        if (!cancelled) setPackages(rows)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [ownerMode])
 
   // The plans this client is on (planIds chips on the Billing panel).
   const clientPlans = useMemo(
@@ -1682,6 +1699,18 @@ function PlanChecklistsBody({ client, data }: { client: Client; data: AppData })
         .filter((plan): plan is SubscriptionPlan => Boolean(plan)),
     [client.planIds, data.plans],
   )
+
+  // A package covers the client when every plan it combines is on the client;
+  // its plans then fold into one group instead of one group per plan
+  // (featreq-3ce2d75d). Plans no package covers keep their own group.
+  const coveringPackages = useMemo(
+    () => packagesCoveringPlans(client.planIds ?? [], packages),
+    [client.planIds, packages],
+  )
+  const uncoveredPlans = useMemo(() => {
+    const covered = new Set(coveringPackages.flatMap((pkg) => pkg.planIds))
+    return clientPlans.filter((plan) => !covered.has(plan.id))
+  }, [clientPlans, coveringPackages])
 
   if (!ownerMode) return null
 
@@ -1694,78 +1723,81 @@ function PlanChecklistsBody({ client, data }: { client: Client; data: AppData })
     )
   }
 
-  const setUpMissing = (plan: SubscriptionPlan) => {
+  // One group, for a plan or a package: both carry `templateIds`, so the
+  // template list, the Set up / Not set up status and the clone are the same.
+  const renderGroup = (
+    source: Pick<SubscriptionPlan, 'templateIds'>,
+    key: string,
+    name: string,
+    kind: 'plan' | 'package',
+  ) => {
+    const templates = planTemplates(source, data.checklistTemplates)
     const missing = missingPlanTemplatesForClient(
-      plan,
+      source,
       data.checklistTemplates,
       client.id,
       data.checklistTemplates,
     )
-    for (const template of missing) {
-      addChecklistTemplate(cloneTemplateForClient(template, client.id))
-    }
+    const missingIds = new Set(missing.map((template) => template.id))
+    return (
+      <div className="plan-checklists-group" key={key}>
+        <div className="plan-checklists-head">
+          <strong>{name}</strong>
+          {kind === 'package' ? <span className="plan-checklists-kind">Package</span> : null}
+          {templates.length > 0 && missing.length > 0 ? (
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => {
+                for (const template of missing) {
+                  addChecklistTemplate(cloneTemplateForClient(template, client.id))
+                }
+              }}
+            >
+              <Plus size={14} /> Set up {kind} checklists ({missing.length})
+            </button>
+          ) : null}
+        </div>
+        {templates.length === 0 ? (
+          <p className="muted-text">No checklists are bundled with this {kind} yet.</p>
+        ) : (
+          <ul className="plan-checklists-list">
+            {templates.map((template) => {
+              const isMissing = missingIds.has(template.id)
+              return (
+                <li className="plan-checklists-row" key={template.id}>
+                  <span className="apply-existing-info">
+                    <strong>{template.title}</strong>
+                    <span className="apply-existing-meta">
+                      {getChecklistFrequencyLabel(template.frequency)}
+                    </span>
+                  </span>
+                  <span
+                    className={
+                      isMissing ? 'plan-checklist-status missing' : 'plan-checklist-status ready'
+                    }
+                  >
+                    {isMissing ? (
+                      'Not set up'
+                    ) : (
+                      <>
+                        <Check size={12} /> Set up
+                      </>
+                    )}
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+    )
   }
 
   return (
     <div className="plan-checklists">
-      {clientPlans.map((plan) => {
-        const templates = planTemplates(plan, data.checklistTemplates)
-        const missing = missingPlanTemplatesForClient(
-          plan,
-          data.checklistTemplates,
-          client.id,
-          data.checklistTemplates,
-        )
-        const missingIds = new Set(missing.map((template) => template.id))
-        return (
-          <div className="plan-checklists-group" key={plan.id}>
-            <div className="plan-checklists-head">
-              <strong>{plan.name}</strong>
-              {templates.length > 0 && missing.length > 0 ? (
-                <button
-                  type="button"
-                  className="secondary-action"
-                  onClick={() => setUpMissing(plan)}
-                >
-                  <Plus size={14} /> Set up plan checklists ({missing.length})
-                </button>
-              ) : null}
-            </div>
-            {templates.length === 0 ? (
-              <p className="muted-text">No checklists are bundled with this plan yet.</p>
-            ) : (
-              <ul className="plan-checklists-list">
-                {templates.map((template) => {
-                  const isMissing = missingIds.has(template.id)
-                  return (
-                    <li className="plan-checklists-row" key={template.id}>
-                      <span className="apply-existing-info">
-                        <strong>{template.title}</strong>
-                        <span className="apply-existing-meta">
-                          {getChecklistFrequencyLabel(template.frequency)}
-                        </span>
-                      </span>
-                      <span
-                        className={
-                          isMissing ? 'plan-checklist-status missing' : 'plan-checklist-status ready'
-                        }
-                      >
-                        {isMissing ? (
-                          'Not set up'
-                        ) : (
-                          <>
-                            <Check size={12} /> Set up
-                          </>
-                        )}
-                      </span>
-                    </li>
-                  )
-                })}
-              </ul>
-            )}
-          </div>
-        )
-      })}
+      {coveringPackages.map((pkg) => renderGroup(pkg, `pkg-${pkg.id}`, pkg.name, 'package'))}
+      {uncoveredPlans.map((plan) => renderGroup(plan, plan.id, plan.name, 'plan'))}
     </div>
   )
 }

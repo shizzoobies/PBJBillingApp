@@ -7,7 +7,7 @@
  * page applies one) and because both are worth testing without rendering
  * anything.
  */
-import type { SubscriptionPlan } from './types'
+import type { Package, SubscriptionPlan } from './types'
 
 /**
  * A package's default checklist set: the union of its plans' own blueprints, in
@@ -30,6 +30,22 @@ export function defaultPackageTemplateIds(
     }
   }
   return out
+}
+
+/**
+ * The packages that COVER a client's plans: every one of the package's plans is
+ * on the client (and it has at least one). A package is not stored on the
+ * client - applying one unions its plans in - so coverage is how the client page
+ * recognizes "this client is on that package". Sorted by name. Pure.
+ */
+export function packagesCoveringPlans(
+  clientPlanIds: readonly string[],
+  packages: readonly Package[],
+): Package[] {
+  const have = new Set(clientPlanIds)
+  return packages
+    .filter((pkg) => pkg.planIds.length > 0 && pkg.planIds.every((id) => have.has(id)))
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 /**
