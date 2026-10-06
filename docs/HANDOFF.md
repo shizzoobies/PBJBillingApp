@@ -75,7 +75,7 @@ Earlier today:
   RUN THE IAC CLI HERE, and the two traps, are in the file's header and the 2026-10-06 entry.
 Lanes: `AP-laneC` is at the merged branch; `AP-laneB` / `AP-laneD` unchanged. Nothing is held.
 
-**Pick up here (2026-10-06, end of day - this list supersedes the 10-04 one below):**
+**Pick up here (2026-10-06, night - this list supersedes the 10-04 one below). THE PLANNED QUEUE IS EMPTY; nothing is in flight or held.**
 
 1. **Tuesday 2026-10-07: the autopay end-to-end test** is Alex's and Brittany's (Test client:
    Invite -> enroll a bank account -> set `AUTOPAY_CHARGING=on` in Railway -> send a small
@@ -93,13 +93,20 @@ Lanes: `AP-laneC` is at the merged branch; `AP-laneB` / `AP-laneD` unchanged. No
    question list review? year-end / entity type / software as client-page fields?), autopay
    `featreq-bef42b72` (card fee on autopay? email the client on a failed charge?). No activity
    on any of them since 10-04. Each answer may be a small build.
-3. **Her review queue (Shipped)** now also holds `featreq-2986c16c` (the Preview button) and the
-   engagement umbrella `featreq-79b6d974` with the Plans-picker note. Watch for send-backs on
-   today's ships: Preview's Pay button does nothing inside the frame BY DESIGN (the base tag;
-   a sent invoice's link is live money), its "dates as if sent today" wording, and the Plans
-   picker beside the package dropdown. Also still watching from 10-04: Saturday-evening gating,
-   firm-day invoice dates, "retire from the client page only", the role labels on new invoices,
-   the Software section's "Not yet priced".
+3. **Her review queue (Shipped)** holds today's: `featreq-2986c16c` (Preview), the engagement
+   umbrella `featreq-79b6d974` (Plans-picker note), `featreq-3ce2d75d` (package-grouped Plan
+   checklists), `featreq-9d3721d4` (record-only retainer + Date paid) and `featreq-b688e73c`
+   (pending notes, re-shipped after her send-back; teammates must refresh once). Watch for
+   send-backs: Preview's Pay button does nothing inside the frame BY DESIGN (a sent invoice's
+   link is live money); "dates as if sent today"; the Plans picker beside the package dropdown;
+   a package's checklists are what the PACKAGE carries (Quarterly Accounting has two - if she
+   expects one, the fix is on the Plans page, not in code); a recorded retainer cannot be
+   un-marked (void instead) and is left out of QBO. Still watching from 10-04: Saturday-evening
+   gating, firm-day invoice dates, "retire from the client page only", role labels on new
+   invoices, the Software section's "Not yet priced".
+3a. **Follow-up tickets filed today, Alex's to triage:** `featreq-fe428f9f` (To 100% nudges should
+   group plan checklists by package like the panel now does). The QBO question
+   (`featreq-22de88a5`) is answered and Done.
 4. **Alex's own items:** (a) backups / resilience owner steps - he said the week of 10-05; the
    Cloudflare token arrives by `setx CLOUDFLARE_API_TOKEN` in HIS terminal, never in chat
    (`featreq-4caec5d3`); one-line ask per session, no pressure. (b) Open Preview once in the
@@ -120,12 +127,23 @@ Lanes: `AP-laneC` is at the merged branch; `AP-laneB` / `AP-laneD` unchanged. No
    env _="$exe" "$exe" config plan`. The Dockerfile pin and the restart policy are not in the
    file; read them with the GraphQL `serviceInstance` query (token from `~/.railway/config.json`,
    never printed).
-7. **Housekeeping:** lanes `AP-laneB` / `AP-laneC` / `AP-laneD` sit on merged branches (reusable;
-   `node_modules` is a JUNCTION - remove the link, never its target, before `git worktree
-   remove`). Merged local branches to prune: feat/accept-plan-picks, feat/invoice-note-and-no-email,
-   feat/stripe-autopay, feat/invoice-role-lines(-rebased), fix/invoice-answers-2(-r1),
-   claude/vigilant-blackburn-af0c77 (superseded 09-15). `hold/july-security-p3`: never merge,
-   never delete. Manifest 204,373 bytes - TRIM BEFORE THE NEXT MANIFEST EDIT.
+7. **Housekeeping:** lanes `AP-laneB` (feat/package-checklists), `AP-laneC`
+   (feat/recorded-retainer-qbo) and `AP-laneD` (feat/stripe-autopay) all sit on MERGED branches
+   (reusable: `git checkout -B <new> origin/main` there; `node_modules` is a JUNCTION - remove
+   the link, never its target, before `git worktree remove`). Merged local branches to prune:
+   feat/accept-plan-picks, feat/package-checklists, feat/retainer-record-only,
+   feat/recorded-retainer-qbo, feat/invoice-note-and-no-email, feat/stripe-autopay,
+   feat/invoice-role-lines(-rebased), fix/invoice-answers-2(-r1), claude/vigilant-blackburn-af0c77.
+   `hold/july-security-p3`: never merge, never delete. Manifest **204,848 bytes - TRIM BEFORE THE
+   NEXT MANIFEST EDIT** (line 316, pending notes, is the longest paragraph; the 10-06 evening
+   entry shows the condensing pattern). The `railway` npm SDK is installed `--no-save` on this
+   machine only.
+7a. **Revert caution (new):** a deploy reverted past `39bdba3` runs the OLD bulk-save restore,
+   which does not carry `recorded_outside_app`: the next whole-workspace save would clear the
+   marker on every recorded retainer (Undo stays refused through the heuristic; the QBO skip
+   would not). Before and after any such revert, query
+   `invoice_review_events where event = 'retainer_recorded_paid'` and re-set the marker on those
+   invoices with Alex's approval. As of tonight there are none.
 8. **Still watching:** no `[bulk-save] write committed` line has been seen since the table lock
    shipped on 10-01 (no real whole-workspace save has run) - over ~8 s or repeated
    `workspace_busy` = batch the inserts (B2 on `featreq-c8e5f169`). October's KLC combined
