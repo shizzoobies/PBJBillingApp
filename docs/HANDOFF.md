@@ -37,8 +37,11 @@ behind Issue anyway (duplicate-retainer guard), subs hide Apply, Postgres reads 
 is a real column), older rows without the marker fall back to `recordedRetainerNeverSent`. Review LOW
 leftovers (not built): a void target still pointed at by an older retainer counts as applied in
 `retainerPosition.ts`; the Applied total includes pending credits; a sub's paid retainer still says
-"not applied yet". Open for Alex: his YES on Brittany's split-time request (`featreq-f0b4934f`, plan in the
-late-night entry) and the bulk-save batching proposal.
+"not applied yet". **Approved prod write (Alex, 21:15Z):** `scripts/prod/split-cleanup-project-2026-10.mjs --apply` split the
+11 entries (538 min) on the holding client across her 18 clients via the app's `splitTimeEntry` (186 slices,
+11 groups `grp-cer9ehh ... grp-ebctvw1`) and approved them as emp-alex-anderson; snapshot in
+`docs/prod-snapshots/`; undo in the script header. `featreq-f0b4934f` Shipped. Still open for Alex: the
+bulk-save batching proposal.
 
 **Earlier (2026-10-06, late night):** `main` = `0a4e5c6` (+ that handoff), pushed, deployed,
 `/health` 200, voice re-provisioned. **Three things since the night entry below:** (1) `0a4e5c6` Brittany's
