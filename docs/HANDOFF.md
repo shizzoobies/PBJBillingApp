@@ -25,12 +25,27 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-06, end of day - READ THIS FIRST):** `main` = `77c93e3` (+ this
+**State right now (2026-10-06, evening - READ THIS FIRST):** `main` = `14899a9` (+ this
 handoff), pushed, deployed, `/health` 200 with that commit, voice agent re-provisioned after
-each of the two ships. Suite **314 files / 6956 tests**, green. Manifest 204,373 bytes (627 under
-the 205,000 tripwire - TRIM BEFORE THE NEXT MANIFEST EDIT). Two ships today, one deploy each,
-both through an independent reviewer and a fix round (the "2026-10-06" entry at the top of
-section 5):
+the last ship. Suite **319 files / 7032 tests**, green. Manifest **204,911 bytes - 89 under the
+205,000 tripwire. TRIM FIRST, before ANY manifest edit** (condense a long paragraph the way the
+10-06 evening entry describes). Seven ships today, one deploy each, every one through an
+independent reviewer and at least one fix round. The afternoon queue run (four Planned items
+Alex put in) is the "2026-10-06 (evening)" entry at the top of section 5; the morning's three
+(Preview, Plans picker, Railway) are the entries under it:
+- `c498fa0` **Service Value tiles** on the Client Recap (`featreq-6c27b7c5`, Done): Service Value |
+  Invoice | Over/Under, where service value is the hourly invoice the period's billable hours would
+  have produced (same calculator as revenue, per person, per month).
+- `5448585` (3 commits) **Plan checklists grouped by package** on the client page
+  (`featreq-3ce2d75d`, Shipped for Brittany; 1969 Beach now shows one Quarterly Accounting group).
+- `53b4cdc` **Download CSV** on the Client Recap (`featreq-0f761138`, Done).
+- `14899a9` (4 commits) **Record-only retainers** (`featreq-9d3721d4`, Shipped for Brittany, QBO question filed as its own needs_input item; the
+  entry has it): "Already invoiced and paid outside the app - record it only"
+  + Date paid, saved as a paid retainer in one transaction with its audit event, never emailed,
+  creditable later, cannot be un-marked (void instead). The Postgres insert gained the three
+  payment columns it never wrote; proven with a rolled-back production trial.
+New follow-up ticket `featreq-fe428f9f` (To 100% nudges should group by package like the panel).
+Earlier today:
 - `ab930f9` **Invoice Preview** (item 3 of `featreq-459bdfc2`, the last open one): a Preview
   button beside Print in the invoice editor shows the email and the PDF exactly as the client
   receives them, built by the SAME code as Send (`lib/invoice-documents.js`, called by the send
@@ -718,6 +733,72 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-06 (evening) — The afternoon queue run: four Planned items, four deploys, twelve review
+rounds (`c498fa0`, `5448585`, `53b4cdc`, `14899a9`).** Alex said "got some new ones in planned"; two
+were his (Service Value, CSV export), two Brittany's (package checklists, record-only retainer).
+Each carried a "confirm before building" note; his were settled in chat (CSV, not Excel; the
+Invoice tile stays what invoicing prices, not estimated hours x rate), hers by reproduction
+against production and a stated interpretation on the ticket. Built as three lanes: me in the
+primary tree (both recap items, one after the other), executors in `AP-laneB` (package) and
+`AP-laneC` (retainer). Every item: independent review -> fix round -> second review where the
+first found something real -> rebase -> lane verify -> fast-forward -> push -> `/health` hash.
+
+*Service Value (`c498fa0`).* First cut priced actual hours at the ESTIMATE's averaged role rate
+pinned to the period start; the review showed an hourly client would not land on zero (two
+people at different rates, a mid-quarter raise, non-billable time). Fix: `hourlyInvoiceValue`
+in lib/client-recap.js runs `buildInvoiceLines` per month with the client forced hourly and
+`ratePeriodAsOf(client, month)`, summing hourly + adhoc lines rounded per line - the same call
+`revenue` makes - so service value IS the invoice for an hourly client; per-tier rows filter the
+client's entries by tier. Second review: months before 2026-06 price a monthly client's hours at
+the CLIENT rate (0), so those months now price per person at bill rates; `hourlyRate` forced to a
+number (NaN guard). Tiles: Service value | Invoice | Over/Under, UNDER is the good direction,
+"Matches invoice" for an exact match; caption states the definitions. `revenueDelta` stays in the
+payload for the AI assistant; no tile shows it.
+
+*Package checklists (`7ce59aa` + `5b5f387` + `5448585`).* `packagesCoveringPlans` (src/lib/
+packages.ts): a package covers when every plan of it is on the client; a strict-subset package is
+folded into the superset (its own templates kept); identical plan sets collapse to the first by
+name. The panel fetches packages itself (endpoint-managed), waits for the fetch (`loaded` gate, no
+flash), renders package groups first (own templates + anything a covered plan bundles that the
+package omits, each template in the first group that lists it), then uncovered plans; a group
+whose checklists an earlier group claimed says "Its checklists are listed above."
+`completeness.ts` still nudges per plan -> `featreq-fe428f9f`.
+
+*CSV export (`53b4cdc`).* `src/lib/clientRecapCsv.ts`: a LONG table (Section, Row, Field, Value)
+of every card, blanks for the page's em dashes, plain numbers, text starting like a formula
+prefixed with an apostrophe, task rows keyed title + due date (a master's companies and a
+quarter's months repeat titles), filename `client-recap-<slug>-<period>.csv` with the client id
+as the slug fallback. Button disabled until the recap loads; the page test proves it exports the
+recap on screen after a period change, not the first one loaded.
+
+*Record-only retainer (`7ff8cdc` + `5903eeb` + `7309077` + `14899a9`).* THE FIND: `_insertInvoice`'s
+Postgres branch never wrote `sent_at`, `paid_at`, `payment_method` (harmless until now - every
+insert was a draft); it now binds them as $14-$16, and a rolled-back production trial of the
+exact statement (scratchpad pattern: pull the SQL text out of store.js, BEGIN, run with a fake
+client id, expect 23503, ROLLBACK, re-count) proved it parses and binds against the real table.
+The record path: `createRetainerInvoice({ recordOnly, paidOn, actorUserId })` makes a
+`paid` retainer (sentAt = paidAt = noon UTC of the paid day, `paymentMethod: 'manual'`, period =
+that month, due date from that day) and its `retainer_recorded_paid` review event INSIDE ONE
+`_withTransaction` (the first cut was two commits, so a failed event + "try again" would have
+minted a second paid retainer); `recordActivity` after the commit is guarded so a committed write
+never reports as a failure. "Undo mark paid" is refused ONLY for a retainer with `sentAt` set
+and no ok send entry (untagged or `not-emailed`) - `recordedRetainerNeverSent` in
+lib/invoice-overdue.js, shared by server and UI - so a hand-marked draft retainer and a
+never-email client's retainer can still be undone; a recorded one is voided instead. `paidOn`:
+400 when not a string, in the future, or before 2000-01-01; the confirm names the day and the
+month it files under. `_withTransaction` now releases a dead connection WITH its error. OPEN
+QUESTION FOR BRITTANY (ask on the ticket, not Alex): a recorded retainer still appears in
+"Download for QBO" like any retainer; if the outside invoice was issued in QuickBooks that is a
+double entry - skip it (then the later credit line will not net) or keep it and say so.
+
+*Process notes.* Reviewers found real defects in three of four items on the first pass (the
+averaged rate, the two-commit retainer, the over-broad undo guard) - keep the two-review rhythm
+for money and calculation changes. The manifest ran out of room mid-run: three Client Recap
+paragraphs and two long ones elsewhere (statement dates, delete-a-step) were condensed; it is
+89 bytes under the cap now. A lane's manifest sentence goes in at merge time, in the primary tree
+or the lane after rebase - never in parallel. Railway deploys took 12-18 minutes each; four in
+an afternoon is the practical ceiling.
 
 **2026-10-06 (afternoon) — Railway deploy settings: `railway.json` retired, settings applied to
 the service (`77c93e3`, `featreq-d84ddb16`).** Alex asked what the ticket needed and whether he
