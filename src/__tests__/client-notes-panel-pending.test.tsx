@@ -168,7 +168,11 @@ describe('the "for an upcoming checklist" block', () => {
     expect(await screen.findByText('New hire starting')).toBeInTheDocument()
   })
 
-  it('shows a staff user with no write access the LIST of what is waiting, but not the add form', async () => {
+  it('shows a teammate the LIST and the add form, even when they are not on the recurring checklist', async () => {
+    // Brittany's send-back of 2026-10-06: Allison and Lisa are on the client's
+    // team but not on its recurring checklists; they get the same controls as
+    // the owner. The client is visible to them (the page loaded), so that is
+    // the whole gate.
     listPending = vi.fn(async () => [pendingNote({ body: 'Waiting for the next run' })])
     renderPanel({
       ownerMode: false,
@@ -176,18 +180,19 @@ describe('the "for an upcoming checklist" block', () => {
       templates: [payrollTemplate({ assigneeId: 'emp-lisa' })],
     })
     expect(await screen.findByText('Waiting for the next run')).toBeInTheDocument()
-    expect(screen.queryByPlaceholderText(/hasn't come up yet/i)).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /^Add$/ })).not.toBeInTheDocument()
-    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
-    // Not theirs, so nothing to delete either.
+    expect(screen.getByText('For an upcoming checklist')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText(/hasn't come up yet/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Add$/ })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: /Repeat on every checklist/ })).toBeInTheDocument()
+    // Not theirs, so nothing to delete.
     expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
   })
 
-  it('is hidden for a staff user with no write access to any active template', async () => {
+  it('is hidden for a staff user when the client has no active recurring checklist', async () => {
     renderPanel({
       ownerMode: false,
       currentUserId: 'emp-stranger',
-      templates: [payrollTemplate()],
+      templates: [],
     })
     // Give the plain-notes load a tick so we are not just catching a loading flash.
     await screen.findByText('No notes yet.')
@@ -209,17 +214,20 @@ describe('the "for an upcoming checklist" block', () => {
     expect(addButton).not.toBeDisabled()
   })
 
-  it('shows the block, but disables Add, for a staff user who can see the template with no write access to it — only via a live checklist they are on', async () => {
+  it('lets a teammate add against a recurring checklist that has no live copy yet', async () => {
     renderPanel({
       ownerMode: false,
       currentUserId: 'emp-brit',
       templates: [payrollTemplate({ assigneeId: 'emp-lisa' })],
       checklists: [],
     })
-    // Not the template's assignee/editor and no live checklist of it yet —
-    // nothing eligible, so the block does not render at all.
-    await screen.findByText('No notes yet.')
-    expect(screen.queryByText('For an upcoming checklist')).not.toBeInTheDocument()
+    expect(await screen.findByText('For an upcoming checklist')).toBeInTheDocument()
+    const addButton = screen.getByRole('button', { name: /^Add$/ })
+    expect(addButton).toBeDisabled() // no body typed yet
+    fireEvent.change(screen.getByPlaceholderText(/hasn't come up yet/i), {
+      target: { value: 'Reimburse the mileage' },
+    })
+    expect(addButton).not.toBeDisabled()
   })
 
   it('submits a new note against the selected template', async () => {

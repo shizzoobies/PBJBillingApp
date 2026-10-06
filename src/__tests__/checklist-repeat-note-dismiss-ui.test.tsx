@@ -10,9 +10,10 @@ import type { AppData, Checklist, Client, ClientPendingNote } from '../lib/types
  * "(repeat)" marker and a small "Dismiss" text button; clicking it asks nothing,
  * dismisses, and the note leaves the card at once. A refusal shows the server's
  * own sentence under the note. An ordinary note has no Dismiss. Dismiss is shown
- * only to the people the server's `pendingNoteWriteDenial` allows (the owner, or the
- * assignee / an editor of the recurring checklist or of one of its live checklists
- * for this client): both sides read the one predicate,
+ * only to the people the server's `pendingNoteWriteDenial` allows (the owner, or
+ * any teammate the client is visible to - widened on 2026-10-06 from the
+ * assignee / editors of the recurring checklist, after Brittany's send-back that
+ * Allison and Lisa had no controls): both sides read the one predicate,
  * `canAddPendingClientNote` in lib/checklist-write-permission.js. The route and the
  * store are pinned in `pending-client-notes-routes.test.ts` and
  * `db/store-staleness.test.mjs`.
@@ -208,10 +209,11 @@ describe('Dismiss on the checklist card', () => {
       return within(noteRow('Remind them about the 1099s')).queryByRole('button', { name: 'Dismiss' })
     }
 
-    it('hides it from a staffer who is neither assignee nor editor of the template or its checklists', async () => {
+    it('shows it to a teammate the client is visible to, even one on neither the template nor its checklists', async () => {
+      // Brittany's send-back of 2026-10-06: teammates get the same controls as
+      // the owner on their clients. The client is visible (the page loaded).
       viewAs('emp-lisa', { assigneeId: 'emp-owner', editorIds: [] })
-      expect(await dismissButton()).not.toBeInTheDocument()
-      // The note itself and its "(repeat)" marker are still shown to them.
+      expect(await dismissButton()).toBeInTheDocument()
       expect(noteRow('Remind them about the 1099s').textContent).toContain('(repeat)')
     })
 
@@ -230,9 +232,9 @@ describe('Dismiss on the checklist card', () => {
       expect(await dismissButton()).toBeInTheDocument()
     })
 
-    it('ignores a checklist of a different recurring template', async () => {
+    it('does not depend on which recurring template the live checklist belongs to', async () => {
       viewAs('emp-lisa', { assigneeId: 'emp-lisa', templateId: 'tmpl-other' })
-      expect(await dismissButton()).not.toBeInTheDocument()
+      expect(await dismissButton()).toBeInTheDocument()
     })
   })
 

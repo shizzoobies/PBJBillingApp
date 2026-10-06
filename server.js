@@ -8853,7 +8853,7 @@ const server = createServer(async (request, response) => {
             !checklist.deletedAt,
         ),
         error:
-          'Only the owner, or someone who can write this client’s checklists, may dismiss a note.',
+          'Only the owner, or a teammate who can see this client, may dismiss a note.',
       })
       if (denial) {
         sendJson(response, denial.status, { error: denial.error })
