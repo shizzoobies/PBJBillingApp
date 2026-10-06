@@ -25,7 +25,7 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-06, midday - READ THIS FIRST):** `main` = `4ea4b50` (+ this
+**State right now (2026-10-06, afternoon - READ THIS FIRST):** `main` = `77c93e3` (+ this
 handoff), pushed, deployed, `/health` 200 with that commit, voice agent re-provisioned after
 each of the two ships. Suite **314 files / 6956 tests**, green. Manifest 204,373 bytes (627 under
 the 205,000 tripwire - TRIM BEFORE THE NEXT MANIFEST EDIT). Two ships today, one deploy each,
@@ -42,6 +42,12 @@ section 5):
   them; `planIds` goes out only when ticked (the server already unioned them). Built by an
   executor in `AP-laneC`, reviewed twice. The ticket's FIRST piece (the sidebar regroup) had
   already shipped as `61a7d35` on 2026-08; the ticket is closed Done with that correction.
+- `77c93e3` **Railway deploy settings migrated** (`featreq-d84ddb16`, Done): `railway.json` is
+  gone; the start command and the `/health` check (120 s) were APPLIED to the service from
+  `.railway/railway.ts`, the Dockerfile path is pinned on the service through the API, and the
+  restart policy was already on-failure x10. The deploy of this commit built from the Dockerfile
+  without the file and `/health` reported its hash. The CLI deprecation warning is gone. HOW TO
+  RUN THE IAC CLI HERE, and the two traps, are in the file's header and the 2026-10-06 entry.
 Lanes: `AP-laneC` is at the merged branch; `AP-laneB` / `AP-laneD` unchanged. Nothing is held.
 
 **Pick up here (2026-10-06):** unchanged from the 10-04 list below except that items 3 (the
@@ -361,7 +367,7 @@ Then the queue / watch list:
    save rewrites, so a stale owner tab can clobber re-picked teams
    (targeted-endpoint pass); remove the eight inert `grantClientVisibility`
    call sites; share `firmDetailLines` between the PDF and the email;
-   migrate `railway.json` to `.railway/railway.ts` before 2026-12-01.
+   migrate `railway.json` to `.railway/railway.ts` before 2026-12-01 (DONE 2026-10-06, `77c93e3`).
 
 **The permission classifier (2026-09-14, now mostly solved).** In a Claude Code
 desktop session running in auto mode the classifier can refuse `git push`,
@@ -657,6 +663,44 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-06 (afternoon) — Railway deploy settings: `railway.json` retired, settings applied to
+the service (`77c93e3`, `featreq-d84ddb16`).** Alex asked what the ticket needed and whether he
+had to do any of it. Read-only findings first (Railway's GraphQL `serviceInstance` and
+`railway config pull --json`): the service's own record said builder RAILPACK, no start command,
+no health check, and restart on-failure x10 - so the Dockerfile build, `npm start`, `/health`
+and its 120 s window all came from `railway.json` as overrides and would have vanished on
+2026-12-01 (the health check and the hash-polling ship ritual with them; the Dockerfile itself
+would likely have survived because Railway auto-uses one at the repo root, and its CMD is the
+same command). What the new format carries: start, healthcheck, healthcheckTimeout, source,
+replicas, domains, networking, env. What it does NOT: builder / dockerfilePath / restart policy
+(`railway config migrate` comments the builder out and drops the restart policy).
+
+*What was done, in order:* (1) authored `.railway/railway.ts` scoped to the `PBJBillingApp`
+partial; (2) `railway config plan` - THE FIRST PLAN LISTED ALL NINETEEN SERVICE VARIABLES FOR
+DELETION, because an undeclared variable on a declared service is a managed removal; the fix is
+an `env` block with `NAME: preserve()` for each (what `config pull` renders). Second plan: 0 to
+destroy, 1 change (start, healthcheck path, timeout). (3) Pinned `dockerfilePath = "Dockerfile"`
+on the service through GraphQL `serviceInstanceUpdate` (Alex's yes) - Railway's `Builder` enum
+is HEROKU / NIXPACKS / PAKETO / RAILPACK, there is NO DOCKERFILE value, so "set the builder to
+Dockerfile" is not a thing; the pin is the path (same as the `RAILWAY_DOCKERFILE_PATH` variable).
+(4) `railway config apply --yes` - it also redeployed the current commit, successfully. (5)
+Deleted `railway.json`, added `.railway` to `.dockerignore`, pushed; the deploy built from the
+Dockerfile and `/health` served the hash; `railway status` prints no deprecation warning.
+Nothing in the suite pins `railway.json`; `tsc` includes only `src` and `vite.config.ts`; eslint
+lints the new file and passes.
+
+*Running the IaC CLI on this machine (two traps):* the `railway` npm SDK is installed with
+`npm install --no-save railway` (a dev tool; not committed, not in the image). Its runner execs a
+`railway` binary from PATH to check the CLI version and fails under the npx-only setup; point it
+at the cached native binary: `exe=$(find "$(npm config get cache)/_npx" -name railway.exe | head -1);
+env _="$exe" "$exe" config plan`. Always plan before apply and read the plan for "to destroy".
+Adding a service variable later means adding `NAME: preserve()` to the file before the next apply.
+The restart policy and the Dockerfile pin are not in the file (the DSL cannot say them); check
+them with the GraphQL read (`scratchpad/railway-service-settings.js` pattern: `serviceInstance {
+builder dockerfilePath startCommand healthcheckPath healthcheckTimeout restartPolicyType
+restartPolicyMaxRetries }` with the CLI token from `~/.railway/config.json`). The IaC file is NOT
+read at deploy time; the settings live on the service and persist on their own.
 
 **2026-10-06 — Invoice Preview (`ab930f9`) and the Plans picker on Accept (`0bccb8a`,
 `4a07df3`, `4ea4b50`), one deploy each.** Alex picked both up in the morning (the 6th: inside
