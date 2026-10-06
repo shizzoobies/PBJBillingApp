@@ -25,7 +25,22 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-06, late night):** `main` = `0a4e5c6` (+ this handoff), pushed, deployed,
+**State right now (2026-10-06, end of night):** `main` = `1530f3f` (+ this handoff), pushed, deployed, `/health`
+200, voice re-provisioned. Suite **321 files / 7082 tests**. Manifest **204,901 bytes - 99 under the cap, TRIM
+FIRST.** Two more ships after the package-mirror one: `7346c1e` (2 commits) **To 100% nudges group by package**
+(`featreq-fe428f9f`, Done) with a packages-settled gate so a quick Fix cannot create a checklist the package
+leaves out; `1530f3f` (2 commits) **the Retainer section shows the position** (send-back on
+`featreq-9d3721d4`, Shipped again with two questions for her): once any non-void retainer exists the section
+shows Retainer / Applied / Remaining / Awaiting + a provenance line per retainer, only Increase retainer and
+Apply (a link to Invoices; applying stays manual, one retainer per invoice), a failed read hides the form
+behind Issue anyway (duplicate-retainer guard), subs hide Apply, Postgres reads are targeted (`kind='retainer'`
+is a real column), older rows without the marker fall back to `recordedRetainerNeverSent`. Review LOW
+leftovers (not built): a void target still pointed at by an older retainer counts as applied in
+`retainerPosition.ts`; the Applied total includes pending credits; a sub's paid retainer still says
+"not applied yet". Open for Alex: his YES on Brittany's split-time request (`featreq-f0b4934f`, plan in the
+late-night entry) and the bulk-save batching proposal.
+
+**Earlier (2026-10-06, late night):** `main` = `0a4e5c6` (+ that handoff), pushed, deployed,
 `/health` 200, voice re-provisioned. **Three things since the night entry below:** (1) `0a4e5c6` Brittany's
 send-back on the package-grouped Plan checklists (`featreq-3ce2d75d`, Shipped again): her email said the
 client page must look the same as the package, so a package group now lists EXACTLY the package's own
@@ -774,6 +789,20 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-06 (end of night) - nudges by package, the retainer position section.**
+
+- `d2c5696` + `7346c1e` **featreq-fe428f9f** (Done): completeness.ts builds plan-checklist nudges with the
+  SAME rule as the client page (`packagesCoveringPlans`, package set only, covered plans silent, uncovered
+  plans per-plan, one nudge per checklist); SetupChecklistPage fetches packages (owner only) and holds the
+  plan-checklist nudges until the fetch settles (`packagesSettled`); a failed fetch = per-plan nudges. Ignored
+  per-plan nudges are orphaned; the package nudge appears once un-ignored. docs/to-100-status.md updated.
+- `d7e855c` + `1530f3f` **featreq-9d3721d4** (Shipped again): new owner-only read-only
+  `GET /api/clients/:id/retainers` -> `store.listClientRetainers` (two targeted selects on Postgres; file
+  backend filters), lean rows + `credit {invoiceId, number, period, amount, status}`; position math in
+  `src/lib/retainerPosition.ts`; `RetainerSectionBody` keyed by client id chooses position vs form. Prod had
+  exactly ONE retainer (her $200 record-only on 1969 Beach, marker true). Two review rounds; questions for
+  Brittany on the ticket (combine retainers into one credit? count sent-unpaid in the headline?).
 
 **2026-10-06 (late night) - the package-mirror send-back, the bulk-save numbers, a new data request.**
 
