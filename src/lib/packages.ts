@@ -37,29 +37,40 @@ export function defaultPackageTemplateIds(
  * on the client (and it has at least one). A package is not stored on the
  * client - applying one unions its plans in - so coverage is how the client page
  * recognizes "this client is on that package". A covering package whose plans
- * are a strict subset of another covering package's is dropped. Sorted by name.
- * Pure.
+ * are a strict subset of another covering package's is dropped, and of several
+ * with identical plans only the first by name is kept; the dropped package's
+ * checklist ids are folded into the kept one. Sorted by name. Pure.
  */
 export function packagesCoveringPlans(
   clientPlanIds: readonly string[],
   packages: readonly Package[],
 ): Package[] {
   const have = new Set(clientPlanIds)
-  const covering = packages.filter(
-    (pkg) => pkg.planIds.length > 0 && pkg.planIds.every((id) => have.has(id)),
-  )
-  // A package whose plans are a strict subset of another covering package's adds
-  // nothing the larger one does not already show, so it is dropped.
-  return covering
-    .filter(
-      (pkg) =>
-        !covering.some(
-          (other) =>
-            other.planIds.length > pkg.planIds.length &&
-            pkg.planIds.every((id) => other.planIds.includes(id)),
-        ),
-    )
+  const covering = packages
+    .filter((pkg) => pkg.planIds.length > 0 && pkg.planIds.every((id) => have.has(id)))
     .sort((a, b) => a.name.localeCompare(b.name))
+  const contains = (outer: Package, inner: Package) =>
+    inner.planIds.every((id) => outer.planIds.includes(id))
+  const sameSet = (a: Package, b: Package) =>
+    a.planIds.length === b.planIds.length && contains(a, b)
+  const subsumed = (pkg: Package, index: number) =>
+    covering.some(
+      (other, otherIndex) =>
+        other !== pkg &&
+        contains(other, pkg) &&
+        (other.planIds.length > pkg.planIds.length || (sameSet(other, pkg) && otherIndex < index)),
+    )
+  const kept = covering.filter((pkg, index) => !subsumed(pkg, index))
+  // A dropped package's own checklist set is editable and may hold a checklist
+  // no plan bundles, so it is folded into the first kept package that contains it.
+  return kept.map((pkg) => {
+    const folded = covering
+      .filter((other, index) => subsumed(other, index))
+      .filter((other) => kept.find((candidate) => contains(candidate, other)) === pkg)
+      .flatMap((other) => other.templateIds)
+    const templateIds = [...new Set([...pkg.templateIds, ...folded])]
+    return templateIds.length === pkg.templateIds.length ? pkg : { ...pkg, templateIds }
+  })
 }
 
 /**

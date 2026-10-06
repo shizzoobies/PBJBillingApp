@@ -1741,12 +1741,13 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
         const plan = planById.get(planId)
         return plan ? planTemplates(plan, data.checklistTemplates).map((template) => template.id) : []
       })
+      const templateIds = take([...own, ...extra])
       result.push({
         key: `pkg-${pkg.id}`,
         name: pkg.name,
         kind: 'package',
-        templateIds: take([...own, ...extra]),
-        handledElsewhere: false,
+        templateIds,
+        handledElsewhere: own.length + extra.length > 0 && templateIds.length === 0,
       })
     }
     for (const plan of clientPlans) {

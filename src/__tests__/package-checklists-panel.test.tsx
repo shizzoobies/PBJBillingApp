@@ -73,6 +73,7 @@ const TEMPLATES = [
   blueprint('T1', 'Monthly close'),
   blueprint('T2', 'Quarterly review'),
   blueprint('T3', 'Sales tax filing'),
+  blueprint('T9', 'Extra duties'),
 ]
 const P = pkg('P', 'Quarterly Accounting', ['A', 'B', 'C', 'D'], ['T1', 'T2'])
 
@@ -205,6 +206,49 @@ describe('Plan checklists grouped by package', () => {
     await screen.findByText('Quarterly Accounting')
     expect(groupHeadings(container)).toEqual(['Quarterly Accounting'])
     expect(screen.queryByText('Aardvark pair')).toBeNull()
+  })
+
+  it("keeps a checklist that lives only in a dropped subset package's own set", async () => {
+    // T9 is in no plan; only the smaller package lists it.
+    listPackagesRequest = vi.fn(async () => [
+      pkg('P2', 'Aardvark pair', ['A', 'B'], ['T9']),
+      P,
+    ])
+    const { container } = renderPanel(['A', 'B', 'C', 'D'])
+
+    await screen.findByText('Quarterly Accounting')
+    expect(groupHeadings(container)).toEqual(['Quarterly Accounting'])
+    expect(screen.getAllByText('Extra duties')).toHaveLength(1)
+    expect(screen.getAllByText('Monthly close')).toHaveLength(1)
+  })
+
+  it('says the checklists are listed above when overlapping packages leave a later group nothing new', async () => {
+    listPackagesRequest = vi.fn(async () => [
+      pkg('Pa', 'Alpha', ['A', 'B'], ['T1']),
+      pkg('Pb', 'Beta', ['B', 'C'], ['T2']),
+    ])
+    const { container } = renderPanel(['A', 'B', 'C'])
+
+    await screen.findByText('Alpha')
+    expect(groupHeadings(container)).toEqual(['Alpha', 'Beta'])
+    expect(screen.getAllByText('Monthly close')).toHaveLength(1)
+    expect(screen.getAllByText('Quarterly review')).toHaveLength(1)
+    expect(screen.getByText('Its checklists are listed above.')).toBeTruthy()
+    expect(screen.queryByText(/No checklists are bundled/)).toBeNull()
+  })
+
+  it('collapses packages with identical plans into one group, first by name, keeping every checklist', async () => {
+    listPackagesRequest = vi.fn(async () => [
+      P,
+      pkg('P2', 'Aardvark copy', ['D', 'C', 'B', 'A'], ['T9']),
+    ])
+    const { container } = renderPanel(['A', 'B', 'C', 'D'])
+
+    await screen.findByText('Aardvark copy')
+    expect(groupHeadings(container)).toEqual(['Aardvark copy'])
+    expect(screen.getAllByText('Extra duties')).toHaveLength(1)
+    expect(screen.getAllByText('Monthly close')).toHaveLength(1)
+    expect(screen.getAllByText('Quarterly review')).toHaveLength(1)
   })
 
   it('paints nothing until the packages fetch settles, then falls back to plans if it fails', async () => {
