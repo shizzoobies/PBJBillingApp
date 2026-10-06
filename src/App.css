@@ -5398,6 +5398,10 @@ td strong {
   flex-direction: column;
   gap: 2px;
 }
+.plans-menu-popover {
+  max-height: 320px;
+  overflow-y: auto;
+}
 .new-task-menu-item {
   background: transparent;
   border: none;

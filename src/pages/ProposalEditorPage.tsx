@@ -78,6 +78,25 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   // Individual plans to add on accept, on top of any package (featreq-98527217).
   const [planPickIds, setPlanPickIds] = useState<string[]>([])
   const [plansOpen, setPlansOpen] = useState(false)
+  const plansMenuRef = useRef<HTMLDivElement | null>(null)
+
+  // Close the Plans picker on a click outside it or on Escape.
+  useEffect(() => {
+    if (!plansOpen) return
+    const onPointerDown = (event: MouseEvent) => {
+      if (plansMenuRef.current?.contains(event.target as Node)) return
+      setPlansOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPlansOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [plansOpen])
   const [highlight, setHighlight] = useState<ReadonlySet<string>>(new Set())
   // The questionnaire this draft was started from, shown read-only on the
   // Estimate tab (featreq-8f139178). A failed read just means no panel.
@@ -393,10 +412,14 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     const planWords =
       chosenPlans.length === 0
         ? ''
-        : `, with the plan${chosenPlans.length === 1 ? '' : 's'} ${chosenPlans
-            .map((plan) => plan.name)
-            .join(', ')
-            .replace(/, ([^,]*)$/, ' and $1')}`
+        : `, with the plan${chosenPlans.length === 1 ? '' : 's'} ${
+            chosenPlans.length === 1
+              ? chosenPlans[0].name
+              : `${chosenPlans
+                  .slice(0, -1)
+                  .map((plan) => plan.name)
+                  .join(', ')} and ${chosenPlans[chosenPlans.length - 1].name}`
+          }`
     // Software is billed at cost and is not part of the monthly fee; Accept adds
     // each priced line to the client as a monthly expense marked Software.
     const softwareNames = (proposal.pricingSnapshot?.lines ?? [])
@@ -406,10 +429,10 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
       const ok = window.confirm(
         `Accept this proposal? This adds ${proposalTitle(proposal)} as a client in Onboarding, ` +
           `billed monthly at ${monthly}` +
+          planWords +
           (softwareNames.length > 0
             ? `, and adds ${softwareNames.join(', ')} as monthly Software expenses billed at cost`
             : '') +
-          planWords +
           `. Nothing about any invoice changes.`,
       )
       if (!ok) return
@@ -500,7 +523,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
                   </option>
                 ))}
               </select>
-              <div className="new-task-menu">
+              <div className="new-task-menu" ref={plansMenuRef}>
                 <button
                   type="button"
                   className="secondary-action"
@@ -510,7 +533,11 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
                   {planPickIds.length > 0 ? `Plans · ${planPickIds.length}` : 'Plans'}
                 </button>
                 {plansOpen ? (
-                  <div className="new-task-menu-popover" role="group" aria-label="Plans to apply on accept">
+                  <div
+                    className="new-task-menu-popover plans-menu-popover"
+                    role="group"
+                    aria-label="Plans to apply on accept"
+                  >
                     {(data.plans ?? []).length === 0 ? (
                       <p className="muted-text">No plans yet.</p>
                     ) : (

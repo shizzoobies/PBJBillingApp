@@ -1296,6 +1296,54 @@ describe('Accept and Decline', () => {
     )
   })
 
+  it('closes the Plans picker on a click elsewhere and on Escape', async () => {
+    contextValue.data.plans = [
+      { id: 'plan-1', name: 'Monthly Bookkeeping', notes: '' },
+    ] as unknown as SubscriptionPlan[]
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Plans' }))
+    expect(screen.getByRole('checkbox', { name: 'Monthly Bookkeeping' })).toBeTruthy()
+    fireEvent.mouseDown(document.body)
+    expect(screen.queryByRole('checkbox', { name: 'Monthly Bookkeeping' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Plans' }))
+    expect(screen.getByRole('checkbox', { name: 'Monthly Bookkeeping' })).toBeTruthy()
+    fireEvent.mouseDown(screen.getByRole('checkbox', { name: 'Monthly Bookkeeping' }))
+    expect(screen.getByRole('checkbox', { name: 'Monthly Bookkeeping' })).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('checkbox', { name: 'Monthly Bookkeeping' })).toBeNull()
+  })
+
+  it('does not mangle a plan name that contains a comma in the confirm', async () => {
+    contextValue.data.plans = [
+      { id: 'plan-1', name: 'Payroll, Tax', notes: '' },
+    ] as unknown as SubscriptionPlan[]
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Plans' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Payroll, Tax' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+    expect(confirm).toHaveBeenCalledWith(
+      'Accept this proposal? This adds Acme Books as a client in Onboarding, ' +
+        'billed monthly at $630.00, with the plan Payroll, Tax. ' +
+        'Nothing about any invoice changes.',
+    )
+  })
+
+  it('sends no planIds key for an existing client when no plan is ticked', async () => {
+    contextValue.data.plans = [
+      { id: 'plan-1', name: 'Monthly Bookkeeping', notes: '' },
+    ] as unknown as SubscriptionPlan[]
+    api.getProposalRequest = vi.fn(async () => ({ ...PROPOSAL, clientId: 'client-1' }))
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    expect(confirm).toHaveBeenNthCalledWith(1, 'Accept this proposal for Existing Co?')
+    await waitFor(() => expect(api.acceptProposalRequest).toHaveBeenCalled())
+    expect(api.acceptProposalRequest.mock.calls[0][1]).not.toHaveProperty('planIds')
+  })
+
   it('an upsell asks separately before it changes the client’s monthly fee', async () => {
     api.getProposalRequest = vi.fn(async () => ({ ...PROPOSAL, clientId: 'client-1' }))
     const confirm = vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false)
@@ -1688,6 +1736,24 @@ describe('Software on the proposal editor', () => {
       )
       await waitFor(() =>
         expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
+      )
+    })
+
+    it('puts the ticked plans before the software clause in the new-client confirm', async () => {
+      contextValue.data.plans = [
+        { id: 'plan-1', name: 'Monthly Bookkeeping', notes: '' },
+        { id: 'plan-2', name: 'Payroll', notes: '' },
+      ] as unknown as SubscriptionPlan[]
+      api.getProposalRequest = vi.fn(async () => WITH_SOFTWARE)
+      const confirm = vi.fn(() => true)
+      vi.stubGlobal('confirm', confirm)
+      renderEditor()
+      fireEvent.click(await screen.findByRole('button', { name: 'Plans' }))
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Monthly Bookkeeping' }))
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Payroll' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+      expect(confirm).toHaveBeenCalledWith(
+        'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00, with the plans Monthly Bookkeeping and Payroll, and adds QBO Plus as monthly Software expenses billed at cost. Nothing about any invoice changes.',
       )
     })
 
