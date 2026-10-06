@@ -1,6 +1,8 @@
-import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Download } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useAppContext } from '../AppContext'
+import { buildClientRecapCsv, clientRecapCsvFilename } from '../lib/clientRecapCsv'
+import { downloadCsv } from '../lib/csv'
 import {
   fetchClientRecap,
   type ClientRecap,
@@ -315,6 +317,25 @@ export function ClientRecapPage() {
               <ChevronRight size={16} />
             </button>
           </div>
+
+          {/* Export (featreq-0f761138): every figure on this recap, for the
+              client and period showing, as one CSV a spreadsheet can filter and
+              pivot. Disabled until the recap has loaded - there is nothing to
+              export before that, and a half-loaded file would be a wrong file. */}
+          <button
+            type="button"
+            className="secondary-action"
+            disabled={!recap || loading}
+            title="Download every figure on this recap as a CSV file"
+            onClick={() => {
+              if (!recap) return
+              const { headers, rows } = buildClientRecapCsv(recap)
+              downloadCsv(clientRecapCsvFilename(recap), headers, rows)
+            }}
+          >
+            <Download size={15} />
+            Download CSV
+          </button>
         </div>
       </section>
 
