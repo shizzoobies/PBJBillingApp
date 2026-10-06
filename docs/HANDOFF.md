@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-10-05. Everything below is committed on
+Written 2026-07-21, last updated 2026-10-06. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -24,6 +24,34 @@ developer you talk to; Brittany (user id `emp-patrice`!) is the client whose
 requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
+
+**State right now (2026-10-06, midday - READ THIS FIRST):** `main` = `4ea4b50` (+ this
+handoff), pushed, deployed, `/health` 200 with that commit, voice agent re-provisioned after
+each of the two ships. Suite **314 files / 6956 tests**, green. Manifest 204,373 bytes (627 under
+the 205,000 tripwire - TRIM BEFORE THE NEXT MANIFEST EDIT). Two ships today, one deploy each,
+both through an independent reviewer and a fix round (the "2026-10-06" entry at the top of
+section 5):
+- `ab930f9` **Invoice Preview** (item 3 of `featreq-459bdfc2`, the last open one): a Preview
+  button beside Print in the invoice editor shows the email and the PDF exactly as the client
+  receives them, built by the SAME code as Send (`lib/invoice-documents.js`, called by the send
+  route and by two owner-only GET routes `/api/invoices/:id/preview` and `.../preview.pdf` that
+  mint, send and record nothing). The ticket is Done (Alex-filed); Brittany has a Shipped record
+  `featreq-2986c16c` for it. Verified in the dev server end to end.
+- `0bccb8a` + `4a07df3` + `4ea4b50` **Plans picker on Accept** (second piece of
+  `featreq-98527217`): tick individual plans beside the package dropdown; the confirm names
+  them; `planIds` goes out only when ticked (the server already unioned them). Built by an
+  executor in `AP-laneC`, reviewed twice. The ticket's FIRST piece (the sidebar regroup) had
+  already shipped as `61a7d35` on 2026-08; the ticket is closed Done with that correction.
+Lanes: `AP-laneC` is at the merged branch; `AP-laneB` / `AP-laneD` unchanged. Nothing is held.
+
+**Pick up here (2026-10-06):** unchanged from the 10-04 list below except that items 3 (the
+preview) is done and the engagement umbrella is closed. First: Tuesday 2026-10-07 is the autopay
+test (item 1 below). Preview follow-ups worth a small pass later (from the review, none
+blocking): the preview JSON route builds the PDF only to report `pdfAvailable` and the PDF
+route rebuilds the email (two workspace reads per open); no focus trap in the dialog (matches
+the recipient picker); check once that the Windows desktop shell renders the inline PDF frame
+rather than downloading it; `decodeURIComponent` on an already-decoded path can throw on a
+malformed id (same as the send route today).
 
 **2026-10-05 (midday, read-only session plus two tracker writes):** production healthy on
 `2718d31`; Brittany marked four Shipped items done between 16:22 and 16:27 UTC (statement
@@ -629,6 +657,56 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-06 — Invoice Preview (`ab930f9`) and the Plans picker on Accept (`0bccb8a`,
+`4a07df3`, `4ea4b50`), one deploy each.** Alex picked both up in the morning (the 6th: inside
+the mid-month window).
+
+*Preview - what gated it and what it is.* Nothing external; it needed a design choice. There
+were three renderers (the emailed HTML, the attached PDF, the on-screen print sheet), and the
+send route assembled the first two itself. The choice taken (Alex's yes): keep the print sheet,
+move the send's document assembly into ONE function (`buildInvoiceDocuments` in
+`lib/invoice-documents.js`: the as-sent invoice, the invoice's own client, firm settings, pay
+links, autopay details -> email + best-effort PDF), make the send call it, and add two
+owner-only GET routes that call the same function through `assembleInvoicePreview` (server.js,
+just above `planAutopaySend`): the same stamp rule (`invoiceAsSent` with now), the same autopay
+decision (`planAutopaySend`, read-only), the same pay-link shape (the invoice's durable
+`/pay/<token>` when a token exists, else a marked placeholder - the preview NEVER mints), the
+same `invoiceEmailAddressee` for a billing master (an unnamed sub previews with a note rather
+than a refusal), and the send's own `invoiceHasUnconfirmedCoverage` check reported as a note.
+The autopay email details were pulled into `autopayEmailDetails`, shared by both. The dialog
+(`InvoicePreviewModal.tsx`) renders the email in `sandbox=""` with `<base target="_blank">`
+prepended (`PREVIEW_FRAME_PREFIX`) - the review's one MEDIUM: without it a click on Pay inside
+the frame loads a SENT invoice's live `/pay/<token>` page, which mints a Stripe session, swaps
+out the client's open one and logs a click the client never made; with the sandbox allowing no
+popups the retargeted link goes nowhere. The PDF is streamed inline (`application/pdf`,
+`no-store`) into a second frame. Preview is offered on any non-void invoice, drafts included,
+and waits behind unsaved edits like Print. Five source-pinning tests of the send route
+(autopay, voided, extra recipients, stamp, footer note) were re-anchored from
+`buildInvoiceEmail({` / `buildInvoicePdf({` to `buildInvoiceDocuments({`; new tests:
+`lib/invoice-documents.test.mjs` (incl. the equivalence case against `buildInvoiceEmail`),
+`lib/invoice-preview-routes.test.mjs` (wiring + a no-side-effect name blacklist),
+`src/__tests__/invoice-preview.test.tsx`. Dev-server check: the dialog for INV-2026-10-001
+showed the resolved recipient, the subject, the server-built email in the frame, the PDF frame
+at 200 `application/pdf` with `%PDF-1.3`, and an unauthenticated GET answered 401.
+
+*Plans picker.* The Engagements leftover ticket filed on 10-05 was half wrong: the sidebar
+regroup had shipped as `61a7d35` back in August (owners have Brittany's seven sections; staff
+keep the flat list), and Accept already set the new client's monthly rate, applied a package and
+added Software lines. The real gap was that the Accept dialog offered a package but not
+individual plans, though the route and the store already took `planIds`. Built in `AP-laneC`
+by an executor: a "Plans" button beside the package select opens a checklist (reusing the
+Checklists "+ New" menu classes, plus `.plans-menu-popover` for max-height), `planIds` is sent
+only when something is ticked, the confirm names the plans before the software clause, names are
+joined from the array (a comma in a plan name is safe), click-outside and Escape close it.
+Reviewed twice (COMMENT then APPROVE). Manifest: one clause in the Proposals Accept sentence.
+
+*Process notes.* The Bash tool refuses a heredoc whose body has unbalanced quotes or backticks,
+and any command with a non-ASCII character: write patch scripts to the scratchpad with the
+Write tool and run them as files. Two source-pinning test suites now define the send route as
+`const invoiceSendMatch` ... `// GET /api/invoices/:id/preview`; the older ones end at
+`// GET /api/invoices/export.csv` and therefore include the preview routes in their slice -
+harmless today (first-occurrence indexOf), worth knowing. Railway took 12-18 minutes per deploy.
 
 **2026-10-04 - Brittany's Statements button, then the four Planned items shipped one deploy each
 (questionnaire, Software section, autopay), 37 tracker follow-ups moved to Done.**
