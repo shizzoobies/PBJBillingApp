@@ -6,7 +6,7 @@ import { defaultProposalPricing } from '../../lib/proposal-pricing.js'
 import { ProposalEditorPage } from '../pages/ProposalEditorPage'
 import { ProposalsPage } from '../pages/ProposalsPage'
 import { proposalDeliveryBadge, staleLetterFigureCount } from '../lib/proposals'
-import { ApiError, type Client, type Proposal } from '../lib/types'
+import { ApiError, type Client, type Proposal, type SubscriptionPlan } from '../lib/types'
 
 /** A promise plus its own `resolve`, for pinning a mock's response in flight. */
 function deferred<T>() {
@@ -1226,6 +1226,73 @@ describe('Accept and Decline', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
     await waitFor(() =>
       expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: 'pkg-1' }),
+    )
+  })
+
+  it('sends the ticked plans with the accept and names them in the confirm', async () => {
+    contextValue.data.plans = [
+      { id: 'plan-1', name: 'Monthly Bookkeeping', notes: '' },
+      { id: 'plan-2', name: 'Payroll', notes: '' },
+      { id: 'plan-3', name: 'Tax Prep', notes: '' },
+    ] as unknown as SubscriptionPlan[]
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Plans' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Monthly Bookkeeping' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Payroll' }))
+    expect(screen.getByRole('button', { name: 'Plans · 2' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+    expect(confirm).toHaveBeenCalledWith(
+      'Accept this proposal? This adds Acme Books as a client in Onboarding, ' +
+        'billed monthly at $630.00, with the plans Monthly Bookkeeping and Payroll. ' +
+        'Nothing about any invoice changes.',
+    )
+    await waitFor(() =>
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
+        packageId: null,
+        planIds: ['plan-1', 'plan-2'],
+      }),
+    )
+  })
+
+  it('sends no planIds key when no plan is ticked', async () => {
+    contextValue.data.plans = [
+      { id: 'plan-1', name: 'Monthly Bookkeeping', notes: '' },
+    ] as unknown as SubscriptionPlan[]
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Plans' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Monthly Bookkeeping' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Monthly Bookkeeping' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+    await waitFor(() =>
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
+    )
+    expect(api.acceptProposalRequest.mock.calls[0][1]).not.toHaveProperty('planIds')
+  })
+
+  it('names the ticked plans in the existing-client confirm too', async () => {
+    contextValue.data.plans = [
+      { id: 'plan-1', name: 'Monthly Bookkeeping', notes: '' },
+    ] as unknown as SubscriptionPlan[]
+    api.getProposalRequest = vi.fn(async () => ({ ...PROPOSAL, clientId: 'client-1' }))
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Plans' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Monthly Bookkeeping' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+    expect(confirm).toHaveBeenNthCalledWith(
+      1,
+      'Accept this proposal for Existing Co, with the plan Monthly Bookkeeping?',
+    )
+    await waitFor(() =>
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
+        packageId: null,
+        updateMonthlyRate: true,
+        planIds: ['plan-1'],
+      }),
     )
   })
 

@@ -75,6 +75,9 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   const [busy, setBusy] = useState(false)
   const [packages, setPackages] = useState<Package[]>([])
   const [packageId, setPackageId] = useState('')
+  // Individual plans to add on accept, on top of any package (featreq-98527217).
+  const [planPickIds, setPlanPickIds] = useState<string[]>([])
+  const [plansOpen, setPlansOpen] = useState(false)
   const [highlight, setHighlight] = useState<ReadonlySet<string>>(new Set())
   // The questionnaire this draft was started from, shown read-only on the
   // Estimate tab (featreq-8f139178). A failed read just means no panel.
@@ -384,6 +387,16 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     if (!proposal) return
     const monthly = formatProposalMoney(proposal.pricingSnapshot?.totals.monthly ?? 0)
     const chosenPackage = packageId || null
+    // Ticked plans, in the order the firm lists them; ids that no longer exist drop out.
+    const chosenPlans = (data.plans ?? []).filter((plan) => planPickIds.includes(plan.id))
+    const planIds = chosenPlans.map((plan) => plan.id)
+    const planWords =
+      chosenPlans.length === 0
+        ? ''
+        : `, with the plan${chosenPlans.length === 1 ? '' : 's'} ${chosenPlans
+            .map((plan) => plan.name)
+            .join(', ')
+            .replace(/, ([^,]*)$/, ' and $1')}`
     // Software is billed at cost and is not part of the monthly fee; Accept adds
     // each priced line to the client as a monthly expense marked Software.
     const softwareNames = (proposal.pricingSnapshot?.lines ?? [])
@@ -396,11 +409,15 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           (softwareNames.length > 0
             ? `, and adds ${softwareNames.join(', ')} as monthly Software expenses billed at cost`
             : '') +
+          planWords +
           `. Nothing about any invoice changes.`,
       )
       if (!ok) return
       enqueue(async () => {
-        const result = await acceptProposalRequest(proposalId, { packageId: chosenPackage })
+        const result = await acceptProposalRequest(proposalId, {
+          packageId: chosenPackage,
+          ...(planIds.length > 0 ? { planIds } : {}),
+        })
         setNotice(noticeFromAccept(chosenPackage, result.packageApplied))
         return result.proposal
       })
@@ -408,7 +425,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     }
     const client = data.clients.find((entry) => entry.id === proposal.clientId)
     const clientName = client?.name ?? 'this client'
-    if (!window.confirm(`Accept this proposal for ${clientName}?`)) return
+    if (!window.confirm(`Accept this proposal for ${clientName}${planWords}?`)) return
     const monthlyTotal = proposal.pricingSnapshot?.totals.monthly ?? 0
     const skipRateQuestion = monthlyTotal === 0 || client?.billingMode !== 'subscription'
     const updateMonthlyRate = skipRateQuestion
@@ -424,6 +441,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
       const result = await acceptProposalRequest(proposalId, {
         packageId: chosenPackage,
         updateMonthlyRate,
+        ...(planIds.length > 0 ? { planIds } : {}),
         ...(addSoftware === null ? {} : { addSoftware }),
       })
       setNotice(noticeFromAccept(chosenPackage, result.packageApplied))
@@ -482,6 +500,40 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
                   </option>
                 ))}
               </select>
+              <div className="new-task-menu">
+                <button
+                  type="button"
+                  className="secondary-action"
+                  aria-expanded={plansOpen}
+                  onClick={() => setPlansOpen((open) => !open)}
+                >
+                  {planPickIds.length > 0 ? `Plans · ${planPickIds.length}` : 'Plans'}
+                </button>
+                {plansOpen ? (
+                  <div className="new-task-menu-popover" role="group" aria-label="Plans to apply on accept">
+                    {(data.plans ?? []).length === 0 ? (
+                      <p className="muted-text">No plans yet.</p>
+                    ) : (
+                      (data.plans ?? []).map((plan) => (
+                        <label key={plan.id} className="check-row">
+                          <input
+                            type="checkbox"
+                            checked={planPickIds.includes(plan.id)}
+                            onChange={(event) =>
+                              setPlanPickIds((ids) =>
+                                event.target.checked
+                                  ? [...ids, plan.id]
+                                  : ids.filter((id) => id !== plan.id),
+                              )
+                            }
+                          />
+                          <span>{plan.name}</span>
+                        </label>
+                      ))
+                    )}
+                  </div>
+                ) : null}
+              </div>
               <button type="button" className="primary-action" disabled={busy} onClick={accept}>
                 Accept
               </button>
