@@ -35,6 +35,7 @@ vi.mock('../lib/api', () => ({
 
 let issueRetainerInvoiceRequest = vi.fn()
 let listClientRetainersRequest = vi.fn()
+let listClientRetainers: ClientRetainer[] = []
 
 const client = { id: 'c1', name: 'Acme' } as unknown as Client
 
@@ -64,10 +65,10 @@ const sent = row({
   recordedOutsideApp: false,
 })
 
-async function renderSection() {
+async function renderSection(who: Client = client) {
   render(
     <MemoryRouter>
-      <RetainerSectionBody client={client} />
+      <RetainerSectionBody client={who} />
     </MemoryRouter>,
   )
   // The position is read from the server before anything is drawn.
@@ -90,7 +91,7 @@ describe('retainerPosition', () => {
       id: 'inv-a',
       total: 500,
       appliedToInvoiceId: 'inv-final',
-      credit: { invoiceId: 'inv-final', number: 'INV-2026-08-001', period: '2026-08', amount: 300 },
+      credit: { invoiceId: 'inv-final', number: 'INV-2026-08-001', period: '2026-08', status: 'sent', amount: 300 },
     })
     expect(retainerPosition([row(), applied, sent])).toEqual({
       total: 4000,
@@ -116,6 +117,9 @@ describe('RetainerSectionBody with a retainer on file', () => {
     )
     expect(screen.getByRole('button', { name: 'Increase retainer' })).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Apply' })).toBeTruthy()
+    // What each retainer still has to give, and that each goes on its own invoice.
+    expect(screen.getByText('Remaining $2,500.00, not applied yet')).toBeTruthy()
+    expect(screen.getByText(/Each retainer is applied on its own invoice/)).toBeTruthy()
 
     // The blank form is gone.
     expect(screen.queryByPlaceholderText('0.00')).toBeNull()
@@ -165,7 +169,7 @@ describe('RetainerSectionBody with a retainer on file', () => {
     listClientRetainersRequest = vi.fn(async () => [
       row({
         appliedToInvoiceId: 'inv-final',
-        credit: { invoiceId: 'inv-final', number: 'INV-2026-08-001', period: '2026-08', amount: 2000 },
+        credit: { invoiceId: 'inv-final', number: 'INV-2026-08-001', period: '2026-08', status: 'sent', amount: 2000 },
       }),
     ])
     await renderSection()
@@ -179,6 +183,36 @@ describe('RetainerSectionBody with a retainer on file', () => {
     // The part the credit did not use is hers to return, and the page says so.
     expect(screen.getByText(/the other \$500\.00 is yours to return outside the app/i)).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled()
+  })
+
+  // The credit is re-sized on each save and a void puts the retainer back, so
+  // while the invoice is still a draft it is pending, not final.
+  it('calls a credit on a draft or reviewed invoice pending, and does not say the rest is hers to return', async () => {
+    listClientRetainers = [
+      row({
+        appliedToInvoiceId: 'inv-final',
+        credit: { invoiceId: 'inv-final', number: 'INV-2026-08-001', period: '2026-08', status: 'draft', amount: 300 },
+      }),
+    ]
+    listClientRetainersRequest = vi.fn(async () => listClientRetainers)
+    await renderSection()
+    expect(
+      await screen.findByText(
+        'Credit pending on draft INV-2026-08-001 (August 2026), re-sized if the invoice changes',
+      ),
+    ).toBeTruthy()
+    expect(screen.queryByText(/yours to return/i)).toBeNull()
+    expect(screen.queryByText(/^Applied \$/)).toBeNull()
+  })
+
+  it('hides Apply on a company billed on its master, with the reason', async () => {
+    listClientRetainersRequest = vi.fn(async () => [row()])
+    await renderSection({ id: 'c1', name: 'Acme', billToClientId: 'master' } as unknown as Client)
+    await screen.findByRole('group', { name: 'Retainer position' })
+    expect(screen.queryByRole('link', { name: 'Apply' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull()
+    expect(screen.getByText(/billed on its master's combined invoice/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Increase retainer' })).toBeTruthy()
   })
 
   it('Apply goes to the Invoices page, where the credit is applied to an invoice', async () => {
@@ -260,13 +294,43 @@ describe('RetainerSectionBody with no retainer', () => {
 })
 
 describe('RetainerSectionBody when the position cannot be read', () => {
-  it('says so and still offers the form, rather than hiding the way to record one', async () => {
+  // She cannot see what is on file, so a blank form could record a duplicate.
+  it('shows only the alert and Try again, not the form', async () => {
     listClientRetainersRequest = vi.fn(async () => {
       throw new Error('boom')
     })
     await renderSection()
     expect((await screen.findByRole('alert')).textContent).toMatch(/could not load/i)
-    expect(screen.getByPlaceholderText('0.00')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy()
+    expect(screen.queryByPlaceholderText('0.00')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Issue retainer invoice…' })).toBeNull()
+  })
+
+  it('opens the form from Issue anyway only after a confirm that says the retainers could not be checked', async () => {
+    listClientRetainersRequest = vi.fn(async () => {
+      throw new Error('boom')
+    })
+    const confirmMock = vi.fn(() => false)
+    vi.stubGlobal('confirm', confirmMock)
+    await renderSection()
+    fireEvent.click(await screen.findByRole('button', { name: 'Issue anyway' }))
+    expect(confirmMock).toHaveBeenCalledWith(expect.stringMatching(/could not be checked/))
+    expect(screen.queryByPlaceholderText('0.00')).toBeNull()
+
+    confirmMock.mockReturnValue(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Issue anyway' }))
+    expect(await screen.findByPlaceholderText('0.00')).toBeTruthy()
+  })
+
+  it('Try again shows the position when the read then works', async () => {
+    listClientRetainersRequest = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValue([row()])
+    await renderSection()
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }))
+    expect(await screen.findByRole('group', { name: 'Retainer position' })).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByPlaceholderText('0.00')).toBeNull()
   })
 })
-

@@ -12361,12 +12361,70 @@ describe('applying a retainer credit (file backend)', () => {
       total: 500,
       recordedOutsideApp: true,
       appliedToInvoiceId: 'inv-final',
-      credit: { invoiceId: 'inv-final', number: 'inv-final', period: '2026-08', amount: 500 },
+      credit: {
+        invoiceId: 'inv-final',
+        number: 'inv-final',
+        period: '2026-08',
+        status: 'draft',
+        amount: 500,
+      },
     })
     expect(listed[1]).toMatchObject({ status: 'sent', total: 250, appliedToInvoiceId: null, credit: null })
     // Money rows only: no lines, no send log.
     expect(listed[0]).not.toHaveProperty('lineItems')
     expect(await store.listClientRetainers('nobody')).toEqual([])
+  })
+
+  // The credit is what the INVOICE could take, which can be less than the
+  // retainer held; the position must report the line, not the retainer.
+  it('lists a partial credit at the line amount, not the retainer total', async () => {
+    await seed([
+      retainerRow(),
+      invoiceRow('inv-small', {
+        lineItems: [{ ...hoursLine, amount: 300 }],
+        subtotal: 300,
+        total: 300,
+      }),
+    ])
+    await store.updateInvoice('inv-small', {
+      lineItems: [{ ...hoursLine, amount: 300 }, creditLine(-500)],
+    })
+    const [row] = await store.listClientRetainers('c1')
+    expect(row.total).toBe(500)
+    expect(row.credit).toMatchObject({ invoiceId: 'inv-small', status: 'draft', amount: 300 })
+  })
+
+  it('carries the target status, and drops the credit when that invoice is void', async () => {
+    await seed([retainerRow(), invoiceRow('inv-final')])
+    await store.updateInvoice('inv-final', { lineItems: [{ ...hoursLine }, creditLine()] })
+    const withTarget = async (status) => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      data.invoices.find((invoice) => invoice.id === 'inv-final').status = status
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+      return (await store.listClientRetainers('c1'))[0]
+    }
+    expect((await withTarget('reviewed')).credit.status).toBe('reviewed')
+    expect((await withTarget('sent')).credit.status).toBe('sent')
+    const voided = await withTarget('void')
+    expect(voided.credit).toBeNull()
+  })
+
+  // Rows recorded before the marker column exist have it false; the undo
+  // refusal reads the older never-emailed-send heuristic, and so must this.
+  it('reads a recorded row that predates the marker as recorded outside the app', async () => {
+    await seed([
+      retainerRow({ id: 'inv-old', sentAt: '2026-01-10T12:00:00.000Z', paidAt: '2026-01-10T12:00:00.000Z' }),
+      retainerRow({
+        id: 'inv-mailed',
+        number: 'INV-RET-2026-002',
+        sentAt: '2026-02-10T12:00:00.000Z',
+        emailLog: [{ ok: true, to: ['a@b.co'], sentAt: '2026-02-10T12:00:00.000Z' }],
+      }),
+      retainerRow({ id: 'inv-hand', number: 'INV-RET-2026-003', sentAt: null }),
+    ])
+    const listed = await store.listClientRetainers('c1')
+    const byNumber = Object.fromEntries(listed.map((row) => [row.id, row.recordedOutsideApp]))
+    expect(byNumber).toEqual({ 'inv-old': true, 'inv-mailed': false, 'inv-hand': false })
   })
 
   it('is offered only while it is unspent', async () => {
@@ -12500,6 +12558,61 @@ describe('applying a retainer credit (file backend)', () => {
     })
 
     expect(updated.lineItems[1].retainerInvoiceId).toBe('inv-ret')
+  })
+})
+
+describe('listClientRetainers on the postgres branch', () => {
+  const retainerRow = (overrides = {}) => ({
+    ...existingInvoice,
+    id: 'inv-ret',
+    number: 'INV-RET-2026-001',
+    kind: 'retainer',
+    status: 'paid',
+    period: '2026-06',
+    line_items: [{ kind: 'retainer', label: 'Retainer', detail: '', amount: 500 }],
+    subtotal: '500.00',
+    total: '500.00',
+    paid_at: new Date('2026-06-10T12:00:00.000Z'),
+    payment_method: 'manual',
+    applied_to_invoice_id: null,
+    recorded_outside_app: true,
+    ...overrides,
+  })
+
+  it('reads this client\'s retainers and only their credit targets, never the whole table', async () => {
+    const target = {
+      ...existingInvoice,
+      id: 'inv-final',
+      number: 'INV-2026-08-009',
+      status: 'draft',
+      line_items: [
+        { kind: 'hourly', label: 'Hours', detail: '', amount: 300 },
+        { kind: 'retainer_credit', label: 'Retainer applied', detail: '', amount: -300, retainerInvoiceId: 'inv-ret' },
+      ],
+    }
+    const fake = fakePostgres({
+      invoices: [retainerRow({ applied_to_invoice_id: 'inv-final' }), retainerRow({ id: 'inv-void', status: 'void' }), target],
+    })
+    const listed = await postgresStore(fake).listClientRetainers('c1')
+
+    const reads = fake.matching(/^select\b[\s\S]*\bfrom invoices\b/i)
+    expect(reads).toHaveLength(2)
+    expect(reads[0].text).toMatch(/where client_id = \$1 and kind = 'retainer' and status <> 'void'/)
+    expect(reads[0].params).toEqual(['c1'])
+    expect(reads[1].text).toMatch(/where id = any\(\$1::text\[\]\)/)
+    expect(reads[1].params).toEqual([['inv-final']])
+    expect(listed.map((row) => row.id)).toEqual(['inv-ret'])
+    expect(listed[0]).toMatchObject({
+      recordedOutsideApp: true,
+      credit: { invoiceId: 'inv-final', status: 'draft', amount: 300 },
+    })
+    expect(listed[0]).not.toHaveProperty('lineItems')
+  })
+
+  it('makes no second read when nothing is applied', async () => {
+    const fake = fakePostgres({ invoices: [retainerRow()] })
+    await postgresStore(fake).listClientRetainers('c1')
+    expect(fake.matching(/^select\b[\s\S]*\bfrom invoices\b/i)).toHaveLength(1)
   })
 })
 

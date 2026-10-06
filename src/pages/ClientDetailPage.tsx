@@ -586,7 +586,7 @@ export function ClientDetailPage() {
             title="Retainer invoice"
             lockable
           >
-            <RetainerSectionBody client={client} />
+            <RetainerSectionBody key={client.id} client={client} />
           </CollapsibleSection>
         </div>
       ) : null}
@@ -1616,6 +1616,8 @@ export function RetainerSectionBody({ client }: { client: Client }) {
   const [loadFailed, setLoadFailed] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
   const [increasing, setIncreasing] = useState(false)
+  // Opening the form although the retainers on file could not be read.
+  const [issueAnyway, setIssueAnyway] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
@@ -1625,6 +1627,7 @@ export function RetainerSectionBody({ client }: { client: Client }) {
         if (stale) return
         setRows(listed)
         setLoadFailed(false)
+        setIssueAnyway(false)
       },
       () => {
         if (!stale) setLoadFailed(true)
@@ -1644,6 +1647,10 @@ export function RetainerSectionBody({ client }: { client: Client }) {
   }
 
   const onFile = rows !== null && rows.length > 0
+  const showPosition = onFile && !increasing
+  // A failed read means one may already be on file that she cannot see, so the
+  // blank form stays closed until she says she means it.
+  const showForm = !showPosition && (!loadFailed || issueAnyway || increasing)
 
   return (
     <div className="retainer-issue">
@@ -1656,9 +1663,33 @@ export function RetainerSectionBody({ client }: { client: Client }) {
         </p>
       ) : null}
       {notice ? <p className="invoice-run-note">{notice}</p> : null}
-      {onFile && !increasing ? (
-        <RetainerPosition rows={rows} onIncrease={() => setIncreasing(true)} />
-      ) : (
+      {showPosition ? (
+        <RetainerPosition
+          rows={rows}
+          billedOnMaster={Boolean(client.billToClientId)}
+          onIncrease={() => setIncreasing(true)}
+        />
+      ) : null}
+      {!showPosition && !showForm ? (
+        <p className="retainer-issue-help">
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => {
+              if (
+                window.confirm(
+                  'The retainers already on file for this client could not be checked, so a new one may duplicate one that exists. Open the form anyway?',
+                )
+              ) {
+                setIssueAnyway(true)
+              }
+            }}
+          >
+            Issue anyway
+          </button>
+        </p>
+      ) : null}
+      {showForm ? (
         <RetainerIssueForm
           client={client}
           additional={onFile}
@@ -1669,7 +1700,7 @@ export function RetainerSectionBody({ client }: { client: Client }) {
             setReloadKey((n) => n + 1)
           }}
         />
-      )}
+      ) : null}
     </div>
   )
 }
@@ -1677,9 +1708,12 @@ export function RetainerSectionBody({ client }: { client: Client }) {
 /** The amount, the credit applied, the balance, each retainer's story, and the two actions. */
 function RetainerPosition({
   rows,
+  billedOnMaster,
   onIncrease,
 }: {
   rows: ClientRetainer[]
+  /** A company billed on its master's combined invoice has no invoice of its own to credit. */
+  billedOnMaster: boolean
   onIncrease: () => void
 }) {
   const position = retainerPosition(rows)
@@ -1715,14 +1749,29 @@ function RetainerPosition({
               {row.credit ? (
                 <>
                   <br />
-                  <span>
-                    {`Applied ${currency.format(row.credit.amount)} on ${row.credit.number ?? row.credit.invoiceId} (${monthYear(`${row.credit.period}-01`)})`}
-                  </span>
-                  {row.credit.amount < row.total ? (
+                  {row.credit.status === 'draft' || row.credit.status === 'reviewed' ? (
+                    // Not final: re-sized on every save, and voiding the invoice
+                    // puts the retainer back on account.
                     <span>
-                      {` The other ${currency.format(row.total - row.credit.amount)} is yours to return outside the app.`}
+                      {`Credit pending on ${row.credit.status} ${row.credit.number ?? row.credit.invoiceId} (${monthYear(`${row.credit.period}-01`)}), re-sized if the invoice changes`}
                     </span>
-                  ) : null}
+                  ) : (
+                    <>
+                      <span>
+                        {`Applied ${currency.format(row.credit.amount)} on ${row.credit.number ?? row.credit.invoiceId} (${monthYear(`${row.credit.period}-01`)})`}
+                      </span>
+                      {row.credit.amount < row.total ? (
+                        <span>
+                          {` The other ${currency.format(row.total - row.credit.amount)} is yours to return outside the app.`}
+                        </span>
+                      ) : null}
+                    </>
+                  )}
+                </>
+              ) : row.status === 'paid' ? (
+                <>
+                  <br />
+                  <span>{`Remaining ${currency.format(row.total)}, not applied yet`}</span>
                 </>
               ) : null}
             </li>
@@ -1730,15 +1779,15 @@ function RetainerPosition({
         </ul>
       </div>
       <p className="retainer-issue-help">
-        To apply it, open the invoice on the Invoices page while it is a draft or reviewed and
-        press Apply retainer credit. The credit is sized to that invoice, and nothing applies it on
-        its own. To add to what the client has paid, use Increase retainer.
+        {billedOnMaster
+          ? "This company is billed on its master's combined invoice, which cannot take its retainer credit, so there is nothing to apply here. To add to what the client has paid, use Increase retainer."
+          : 'To apply one, open the invoice on the Invoices page while it is a draft or reviewed and press Apply retainer credit. Each retainer is applied on its own invoice, one retainer per invoice, sized to that invoice; nothing applies it on its own. To add to what the client has paid, use Increase retainer.'}
       </p>
       <div className="retainer-actions">
         <button type="button" className="secondary-action" onClick={onIncrease}>
           Increase retainer
         </button>
-        {position.remaining > 0 ? (
+        {billedOnMaster ? null : position.remaining > 0 ? (
           <Link className="secondary-action" to="/invoices">
             Apply
           </Link>

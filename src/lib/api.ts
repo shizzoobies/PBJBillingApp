@@ -4337,7 +4337,14 @@ export type ClientRetainer = {
   /** Recorded as paid outside the app: nothing was sent from here. */
   recordedOutsideApp: boolean
   appliedToInvoiceId: string | null
-  credit: { invoiceId: string; number: string | null; period: string; amount: number } | null
+  credit: {
+    invoiceId: string
+    number: string | null
+    period: string
+    /** The invoice it was applied to: draft or reviewed means the credit is not final yet. */
+    status: PersistedInvoice['status']
+    amount: number
+  } | null
 }
 
 /**

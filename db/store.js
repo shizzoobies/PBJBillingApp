@@ -14359,22 +14359,58 @@ export class AppDataStore {
    * only what is still creditable. `credit` is read off the invoice it was
    * given back on, from the credit line that names this retainer (the line is
    * what the client was actually credited, which can be less than the retainer
-   * held); null while unapplied. It reads through `listInvoices`, so it is the
-   * same on both backends and persists nothing.
+   * held); null while unapplied, or when that invoice has been voided. It
+   * carries the target's `status`, because a credit on a draft or reviewed
+   * invoice is not final: it is re-sized on every save, and voiding or
+   * regenerating the invoice puts the retainer back on account.
+   *
+   * Two targeted reads, never the whole invoice table: this client's retainers,
+   * then only the invoices they were applied to. The file backend mirrors it by
+   * filtering the same rows. `recordedOutsideApp` is the column OR the older
+   * never-emailed-send heuristic, the same fallback the undo refusal uses, so a
+   * row recorded before the column existed still reads as recorded. Persists
+   * nothing.
    */
   async listClientRetainers(clientId) {
-    const all = await this.listInvoices()
-    return all
-      .filter(
-        (invoice) =>
-          invoice.kind === 'retainer' && invoice.clientId === clientId && invoice.status !== 'void',
+    let retainers
+    let appliedTo
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${INVOICE_SELECT_COLUMNS}
+           from invoices
+          where client_id = $1 and kind = 'retainer' and status <> 'void'
+          order by created_at`,
+        [clientId],
       )
+      // The SQL already says this; the filter below is the same rule again, so
+      // both backends share one definition of "this client's retainers".
+      retainers = rows
+        .map(mapInvoiceRow)
+        .filter((invoice) => invoice.kind === 'retainer' && invoice.clientId === clientId)
+      const targetIds = [...new Set(retainers.map((row) => row.appliedToInvoiceId).filter(Boolean))]
+      appliedTo = targetIds.length
+        ? (
+            await this.pool.query(
+              `select ${INVOICE_SELECT_COLUMNS} from invoices where id = any($1::text[])`,
+              [targetIds],
+            )
+          ).rows.map(mapInvoiceRow)
+        : []
+    } else {
+      const all = await this.listInvoices()
+      retainers = all.filter((invoice) => invoice.kind === 'retainer' && invoice.clientId === clientId)
+      const targetIds = new Set(retainers.map((row) => row.appliedToInvoiceId).filter(Boolean))
+      appliedTo = all.filter((invoice) => targetIds.has(invoice.id))
+    }
+    return retainers
+      .filter((invoice) => invoice.status !== 'void')
       .sort((a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')))
       .map((retainer) => {
         const target = retainer.appliedToInvoiceId
-          ? (all.find((invoice) => invoice.id === retainer.appliedToInvoiceId) ?? null)
+          ? (appliedTo.find((invoice) => invoice.id === retainer.appliedToInvoiceId) ?? null)
           : null
-        const line = target?.lineItems?.find(
+        const live = target && target.status !== 'void' ? target : null
+        const line = live?.lineItems?.find(
           (entry) => entry?.kind === 'retainer_credit' && entry.retainerInvoiceId === retainer.id,
         )
         return {
@@ -14386,13 +14422,15 @@ export class AppDataStore {
           sentAt: retainer.sentAt,
           paidAt: retainer.paidAt,
           paymentMethod: retainer.paymentMethod,
-          recordedOutsideApp: retainer.recordedOutsideApp === true,
+          recordedOutsideApp:
+            retainer.recordedOutsideApp === true || recordedRetainerNeverSent(retainer),
           appliedToInvoiceId: retainer.appliedToInvoiceId ?? null,
-          credit: target
+          credit: live
             ? {
-                invoiceId: target.id,
-                number: target.number,
-                period: target.period,
+                invoiceId: live.id,
+                number: live.number,
+                period: live.period,
+                status: live.status,
                 // The line's own amount; the retainer's total when the line is gone.
                 amount: line ? Math.abs(Number(line.amount) || 0) : retainer.total,
               }
