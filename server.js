@@ -7244,6 +7244,12 @@ const server = createServer(async (request, response) => {
       // Already invoiced and paid outside the app: saved as a PAID retainer, and
       // nothing below can send or charge anything either way.
       const retainerRecordOnly = payload?.recordOnly === true
+      // The day it was really paid (record only): a past date files it under
+      // that month. A date after today is refused; the store re-checks too.
+      const retainerPaidOn =
+        retainerRecordOnly && typeof payload?.paidOn === 'string' && payload.paidOn
+          ? payload.paidOn
+          : null
       if (!retainerClientId) {
         sendJson(response, 400, { error: 'clientId is required' })
         return
@@ -7251,6 +7257,21 @@ const server = createServer(async (request, response) => {
       if (!Number.isFinite(retainerAmount) || retainerAmount <= 0) {
         sendJson(response, 400, { error: 'amount must be more than zero' })
         return
+      }
+      if (retainerPaidOn !== null) {
+        const paidOnMs = Date.parse(`${retainerPaidOn}T00:00:00Z`)
+        const validDay =
+          /^\d{4}-\d{2}-\d{2}$/.test(retainerPaidOn) &&
+          Number.isFinite(paidOnMs) &&
+          new Date(paidOnMs).toISOString().slice(0, 10) === retainerPaidOn
+        if (!validDay) {
+          sendJson(response, 400, { error: 'paidOn must be a date (YYYY-MM-DD)' })
+          return
+        }
+        if (retainerPaidOn > firmToday()) {
+          sendJson(response, 400, { error: 'paidOn cannot be in the future' })
+          return
+        }
       }
 
       // Billed outside the app: no document is issued from here. Read the
@@ -7273,13 +7294,16 @@ const server = createServer(async (request, response) => {
           amount: retainerAmount,
           note: typeof payload?.note === 'string' ? payload.note : '',
           recordOnly: retainerRecordOnly,
+          paidOn: retainerPaidOn,
           actorUserId: session.user.id,
         })
       } catch (error) {
         console.error('[invoices] retainer create failed:', error)
         sendJson(response, 500, {
           error: 'retainer_create_failed',
-          message: 'Could not issue the retainer invoice — please try again.',
+          message: retainerRecordOnly
+            ? 'Could not record the retainer. Nothing was saved.'
+            : 'Could not issue the retainer invoice — please try again.',
         })
         return
       }

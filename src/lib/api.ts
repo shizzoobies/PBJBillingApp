@@ -4391,13 +4391,15 @@ export async function regenerateInvoicesRequest(period: string) {
  *
  * `recordOnly` saves a retainer that was already invoiced and paid outside the
  * app straight as a PAID retainer; nothing is emailed. The key is sent only
- * when set, so every existing caller's request is unchanged.
+ * when set, so every existing caller's request is unchanged. `paidOn`
+ * (YYYY-MM-DD) is the day it was really paid, for a retainer from an earlier
+ * month; it is only read together with `recordOnly`.
  */
 export async function issueRetainerInvoiceRequest(
   clientId: string,
   amount: number,
   note?: string,
-  options?: { recordOnly?: boolean },
+  options?: { recordOnly?: boolean; paidOn?: string },
 ) {
   const response = await apiFetch('/api/invoices/retainer', {
     credentials: 'same-origin',
@@ -4408,13 +4410,17 @@ export async function issueRetainerInvoiceRequest(
       amount,
       ...(note ? { note } : {}),
       ...(options?.recordOnly ? { recordOnly: true } : {}),
+      ...(options?.recordOnly && options.paidOn ? { paidOn: options.paidOn } : {}),
     }),
   })
   if (!response.ok) {
     const message = await safeErrorMessage(response)
     throw new ApiError(
       response.status,
-      message || `Could not issue the retainer invoice (${response.status})`,
+      message ||
+        (options?.recordOnly
+          ? `Could not record the retainer (${response.status})`
+          : `Could not issue the retainer invoice (${response.status})`),
     )
   }
   return ((await response.json()) as { invoice: PersistedInvoice }).invoice

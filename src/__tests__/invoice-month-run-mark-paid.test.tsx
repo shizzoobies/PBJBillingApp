@@ -154,6 +154,37 @@ describe('Undo manual payment', () => {
     await waitFor(() => expect(mockUnmark).toHaveBeenCalledWith('inv-1'))
   })
 
+  // Undo would put a recorded retainer into 'sent', a state it never had - and a
+  // Send from there could email a pay link for money already collected.
+  it('is not offered on a retainer recorded as paid outside the app: void it instead', async () => {
+    mockList.mockResolvedValue([
+      makeInvoice({
+        kind: 'retainer',
+        status: 'paid',
+        paymentMethod: 'manual',
+        paidAt: '2026-06-10T12:00:00.000Z',
+        emailLog: [],
+      }),
+    ])
+    await openEditor(/Paid/)
+    await waitFor(() => expect(screen.getByText(/locked because it has been paid/i)).toBeInTheDocument())
+    expect(undoButton()).not.toBeInTheDocument()
+  })
+
+  it('is still offered on a retainer that really was emailed before it was marked paid', async () => {
+    mockList.mockResolvedValue([
+      makeInvoice({
+        kind: 'retainer',
+        status: 'paid',
+        paymentMethod: 'manual',
+        paidAt: '2026-06-10T12:00:00.000Z',
+        emailLog: [{ ok: true, to: ['pat@acme.test'], sentAt: '2026-06-01T00:00:00.000Z' }],
+      } as unknown as Partial<PersistedInvoice>),
+    ])
+    await openEditor(/Paid/)
+    await waitFor(() => expect(undoButton()).toBeInTheDocument())
+  })
+
   it('never appears on a webhook-paid invoice — real money stays what it is', async () => {
     mockList.mockResolvedValue([
       makeInvoice({

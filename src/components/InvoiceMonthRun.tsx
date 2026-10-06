@@ -4556,7 +4556,12 @@ function InvoiceEditor({
               Verify with Stripe
             </button>
           ) : null}
-          {invoice.status === 'paid' && invoice.paymentMethod === 'manual' ? (
+          {/* A retainer recorded as paid outside the app was never sent from
+              here, so there is no "sent" for an undo to return it to - it is
+              voided instead (the server refuses the undo as well). */}
+          {invoice.status === 'paid' &&
+          invoice.paymentMethod === 'manual' &&
+          !(invoice.kind === 'retainer' && !latestInvoiceSend(invoice.emailLog)) ? (
             <button
               type="button"
               className="secondary-action"

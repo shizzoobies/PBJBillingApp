@@ -11922,6 +11922,83 @@ describe('retainer invoices (file backend)', () => {
     })
   })
 
+  // A retainer paid by check in June must read June, not the month it was typed in.
+  it('dates a recorded retainer to the day it was paid: stamps, period, due date', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 1200,
+      recordOnly: true,
+      paidOn: '2026-06-10',
+      actorUserId: 'owner-1',
+    })
+    expect(retainer).toMatchObject({
+      status: 'paid',
+      paymentMethod: 'manual',
+      period: '2026-06',
+      dueDate: '2026-07-10',
+    })
+    expect(retainer.paidAt.slice(0, 10)).toBe('2026-06-10')
+    expect(retainer.sentAt.slice(0, 10)).toBe('2026-06-10')
+    expect((await store.listUnappliedRetainers()).map((invoice) => invoice.id)).toEqual([
+      retainer.id,
+    ])
+  })
+
+  it('refuses a paid-on date in the future or one that is not a date', async () => {
+    await seedClients()
+    for (const paidOn of ['2099-01-01', '2026-13-45', 'last June']) {
+      expect(
+        await store.createRetainerInvoice({ clientId: 'c1', amount: 500, recordOnly: true, paidOn }),
+      ).toBeNull()
+    }
+    expect(await storedInvoices()).toHaveLength(0)
+  })
+
+  it('ignores paidOn on an ordinary issue: still a draft in the current month', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 500,
+      paidOn: '2026-06-10',
+    })
+    expect(retainer).toMatchObject({ status: 'draft', paidAt: null, sentAt: null })
+    expect(retainer.period).not.toBe('2026-06')
+  })
+
+  // Undo would move a recorded retainer to 'sent' - a state that never happened.
+  it('refuses to undo the manual payment of a retainer that was recorded, never sent', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 500,
+      recordOnly: true,
+      period,
+    })
+    await expect(store.unmarkManualInvoicePayment(retainer.id, {})).rejects.toThrow(
+      'This retainer was recorded as paid outside the app - void it instead.',
+    )
+    const stored = (await storedInvoices()).find((invoice) => invoice.id === retainer.id)
+    expect(stored).toMatchObject({ status: 'paid', paymentMethod: 'manual' })
+  })
+
+  it('still lets a retainer that really was emailed be un-marked', async () => {
+    await seedClients()
+    const retainer = await store.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 500,
+      recordOnly: true,
+      period,
+    })
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices.find((invoice) => invoice.id === retainer.id).emailLog = [
+      { ok: true, to: ['pat@acme.test'], sentAt: '2026-08-01T00:00:00.000Z' },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    const restored = await store.unmarkManualInvoicePayment(retainer.id, {})
+    expect(restored.status).toBe('sent')
+  })
+
   it('still refuses an opted-out client or a bad amount when recording only', async () => {
     await store.write(
       workspace({
@@ -12365,6 +12442,9 @@ describe('retainer writes on the postgres branch', () => {
     // Positional, one past `number` — the bug this catches is the kind landing
     // in the status column when someone adds the next one.
     expect(inserts[0].params[4]).toBe('retainer')
+    // A draft is neither sent nor paid: sent_at, paid_at, payment_method are null.
+    expect(inserts[0].params).toHaveLength(16)
+    expect(inserts[0].params.slice(13)).toEqual([null, null, null])
   })
 
   it('marks the retainer inside the same transaction as the lines', async () => {
@@ -38465,5 +38545,98 @@ describe('the never-email switch (clients.invoice_no_email)', () => {
       const [marked] = await store.withChangedSinceSent([edited])
       expect(marked.changedSinceSent).toBeUndefined()
     })
+  })
+})
+
+/**
+ * Recording a retainer that was paid outside the app (featreq-9d3721d4), on the
+ * Postgres branch. The invoice and its audit event commit TOGETHER: if the
+ * event write failed on its own, the route would say "try again" and a retry
+ * would leave a SECOND paid, unapplied retainer for the credit to offer.
+ */
+describe('recorded retainers (postgres branch)', () => {
+  /** The fake, with the insert answering the way a real one does (a row came back). */
+  function recordingStore(options = {}) {
+    const fake = fakePostgres(options)
+    const base = fake.pool.query
+    const query = async (text, params) => {
+      const result = await base(text, params)
+      return /^\s*insert into invoices/i.test(text)
+        ? { rows: [{ id: params[0] }], rowCount: 1 }
+        : result
+    }
+    const pgStore = postgresStore(fake)
+    pgStore.pool = {
+      connect: async () => ({ query, release() {} }),
+      query,
+    }
+    pgStore.read = async () => ({ clients: [{ id: 'c1', name: 'Acme', paymentTerms: 'Net 30' }] })
+    pgStore.listInvoices = async () => []
+    return { fake, pgStore }
+  }
+
+  it('inserts the invoice and the audit event inside one transaction', async () => {
+    const { fake, pgStore } = recordingStore()
+    const retainer = await pgStore.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 500,
+      recordOnly: true,
+      paidOn: '2026-06-10',
+      actorUserId: 'owner-1',
+    })
+    expect(retainer).toMatchObject({ status: 'paid', paymentMethod: 'manual', period: '2026-06' })
+
+    const begin = fake.indexOf(/^BEGIN$/i)
+    const insert = fake.indexOf(/^insert into invoices \(/i)
+    const event = fake.indexOf(/^insert into invoice_review_events/i)
+    const commit = fake.indexOf(/^COMMIT$/i)
+    expect(begin).toBeGreaterThan(-1)
+    expect(insert).toBeGreaterThan(begin)
+    expect(event).toBeGreaterThan(insert)
+    expect(commit).toBeGreaterThan(event)
+    expect(fake.matching(/^ROLLBACK$/i)).toHaveLength(0)
+
+    const eventParams = fake.statements[event].params
+    expect(eventParams).toContain('retainer_recorded_paid')
+    expect(eventParams).toContain('owner-1')
+  })
+
+  it('binds sent_at, paid_at and payment_method to the right columns of the insert', async () => {
+    const { fake, pgStore } = recordingStore()
+    const retainer = await pgStore.createRetainerInvoice({
+      clientId: 'c1',
+      amount: 500,
+      recordOnly: true,
+      paidOn: '2026-06-10',
+    })
+    const { text, params } = fake.matching(/^insert into invoices \(/i)[0]
+    const highest = Math.max(...[...text.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))
+    expect(params).toHaveLength(16)
+    expect(highest).toBe(params.length)
+    expect(params[13]).toBe(retainer.sentAt)
+    expect(params[14]).toBe(retainer.paidAt)
+    expect(params[15]).toBe('manual')
+    expect(params[14].slice(0, 10)).toBe('2026-06-10')
+    // The columns line up with the placeholders by position.
+    expect(text).toMatch(/sent_at, paid_at, payment_method, created_at, updated_at/)
+  })
+
+  it('rolls the invoice back when the audit event cannot be written, so a retry cannot duplicate it', async () => {
+    const { fake, pgStore } = recordingStore({
+      failOn: { pattern: /^insert into invoice_review_events/i, error: new Error('connection reset') },
+    })
+    await expect(
+      pgStore.createRetainerInvoice({ clientId: 'c1', amount: 500, recordOnly: true }),
+    ).rejects.toThrow('connection reset')
+    expect(fake.matching(/^ROLLBACK$/i)).toHaveLength(1)
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+  })
+
+  it('writes no event for an ordinary retainer, and leaves its three payment columns null', async () => {
+    const { fake, pgStore } = recordingStore()
+    await pgStore.createRetainerInvoice({ clientId: 'c1', amount: 500 })
+    expect(fake.matching(/^insert into invoice_review_events/i)).toHaveLength(0)
+    const { params } = fake.matching(/^insert into invoices \(/i)[0]
+    expect(params.slice(13)).toEqual([null, null, null])
   })
 })

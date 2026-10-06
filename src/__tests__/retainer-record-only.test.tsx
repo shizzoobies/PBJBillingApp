@@ -89,6 +89,47 @@ describe('RetainerSectionBody record-only option', () => {
     expect(screen.getByRole('button', { name: 'Issue retainer invoice…' })).toBeTruthy()
   })
 
+  // A retainer paid by check in June should read June.
+  it('shows a Date paid input only while the box is ticked, and sends the date she picks', async () => {
+    render(<RetainerSectionBody client={client} />)
+    expect(screen.queryByLabelText('Date paid')).toBeNull()
+    fillAmount('2500')
+    fireEvent.click(screen.getByLabelText(RECORD_LABEL))
+    fireEvent.change(screen.getByLabelText('Date paid'), { target: { value: '2026-06-10' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Record retainer…' }))
+    await waitFor(() => expect(issueRetainerInvoiceRequest).toHaveBeenCalledTimes(1))
+    expect(issueRetainerInvoiceRequest).toHaveBeenCalledWith('c1', 2500, undefined, {
+      recordOnly: true,
+      paidOn: '2026-06-10',
+    })
+  })
+
+  it('sends no paidOn when the date is left at today', async () => {
+    render(<RetainerSectionBody client={client} />)
+    fillAmount('2500')
+    fireEvent.click(screen.getByLabelText(RECORD_LABEL))
+    fireEvent.click(screen.getByRole('button', { name: 'Record retainer…' }))
+    await waitFor(() => expect(issueRetainerInvoiceRequest).toHaveBeenCalledTimes(1))
+    expect(issueRetainerInvoiceRequest).toHaveBeenCalledWith('c1', 2500, undefined, {
+      recordOnly: true,
+    })
+  })
+
+  it('locks the box and the date while the request is in flight', async () => {
+    let finish: (value: unknown) => void = () => {}
+    issueRetainerInvoiceRequest = vi.fn(
+      () => new Promise((resolve) => (finish = resolve)),
+    )
+    render(<RetainerSectionBody client={client} />)
+    fillAmount('2500')
+    fireEvent.click(screen.getByLabelText(RECORD_LABEL))
+    fireEvent.click(screen.getByRole('button', { name: 'Record retainer…' }))
+    await waitFor(() => expect(screen.getByLabelText(RECORD_LABEL)).toBeDisabled())
+    expect(screen.getByLabelText('Date paid')).toBeDisabled()
+    finish({ id: 'inv-1', number: 'INV-RET-2026-001' })
+    await screen.findByText('Recorded INV-RET-2026-001 as paid.')
+  })
+
   it('does not call the API when the owner cancels the record confirm', () => {
     confirmMock = vi.fn(() => false)
     vi.stubGlobal('confirm', confirmMock)

@@ -1565,6 +1565,9 @@ export function RetainerSectionBody({ client }: { client: Client }) {
   const [amount, setAmount] = useState('')
   const [note, setNote] = useState('')
   const [recordOnly, setRecordOnly] = useState(false)
+  // Empty means "today": the date is sent only when she moves it.
+  const [paidOn, setPaidOn] = useState('')
+  const today = localDateOnly()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [issued, setIssued] = useState<{ number: string; recorded: boolean } | null>(null)
@@ -1592,14 +1595,22 @@ export function RetainerSectionBody({ client }: { client: Client }) {
       const invoice = await (recordOnly
         ? issueRetainerInvoiceRequest(client.id, value, note.trim() || undefined, {
             recordOnly: true,
+            ...(paidOn ? { paidOn } : {}),
           })
         : issueRetainerInvoiceRequest(client.id, value, note.trim() || undefined))
       setIssued({ number: invoice.number ?? invoice.id, recorded: recordOnly })
       setAmount('')
       setNote('')
       setRecordOnly(false)
+      setPaidOn('')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not issue the retainer invoice.')
+      setError(
+        err instanceof Error
+          ? err.message
+          : recordOnly
+            ? 'Could not record the retainer. Nothing was saved.'
+            : 'Could not issue the retainer invoice.',
+      )
     } finally {
       setBusy(false)
     }
@@ -1640,10 +1651,24 @@ export function RetainerSectionBody({ client }: { client: Client }) {
         <input
           type="checkbox"
           checked={recordOnly}
+          disabled={busy}
           onChange={(event) => setRecordOnly(event.target.checked)}
         />
         <span>Already invoiced and paid outside the app - record it only</span>
       </label>
+      {recordOnly ? (
+        <label className="field">
+          <span>Date paid</span>
+          <input
+            className="input"
+            type="date"
+            value={paidOn || today}
+            max={today}
+            disabled={busy}
+            onChange={(event) => setPaidOn(event.target.value === today ? '' : event.target.value)}
+          />
+        </label>
+      ) : null}
       {error ? (
         <p className="invoice-run-error" role="alert">
           {error}

@@ -14179,7 +14179,14 @@ export class AppDataStore {
    * (featreq-9d3721d4): the record is born PAID — `paidAt` and `sentAt` now,
    * `paymentMethod: 'manual'`, the same durable mark Mark paid leaves — so it
    * is saved, visible and creditable later (`listUnappliedRetainers`), and
-   * nothing is ever sent. One review event says who recorded it.
+   * nothing is ever sent. One review event says who recorded it, written in the
+   * SAME transaction as the invoice: were the event to fail alone, the caller
+   * would be told to retry and a retry would leave a second paid retainer.
+   *
+   * `paidOn` (YYYY-MM-DD, recordOnly only) is the day it was really paid: it
+   * dates `paidAt` and `sentAt`, picks the `period` and starts the due-date
+   * clock. A malformed or future date answers null, like any other bad input;
+   * the route says so in a sentence before it gets here.
    */
   async createRetainerInvoice({
     clientId,
@@ -14189,6 +14196,7 @@ export class AppDataStore {
     windowDays = DEFAULT_PAYMENT_WINDOW_DAYS,
     recordOnly = false,
     actorUserId = null,
+    paidOn = null,
   }) {
     const value = roundMoney(amount)
     if (!Number.isFinite(value) || value <= 0) return null
@@ -14203,7 +14211,21 @@ export class AppDataStore {
     if (client.platformInvoicingOptOut === true) return null
 
     const today = firmToday()
-    const issuedPeriod = /^\d{4}-\d{2}$/.test(String(period ?? '')) ? period : today.slice(0, 7)
+    // The day it was actually paid, for a recorded retainer only. A real
+    // calendar date that is not after today; anything else is refused.
+    let paidDay = null
+    if (recordOnly && paidOn !== null && paidOn !== undefined && paidOn !== '') {
+      const text = String(paidOn)
+      const ms = Date.parse(`${text}T00:00:00Z`)
+      const real =
+        /^\d{4}-\d{2}-\d{2}$/.test(text) &&
+        Number.isFinite(ms) &&
+        new Date(ms).toISOString().slice(0, 10) === text
+      if (!real || text > today) return null
+      paidDay = text
+    }
+    const basisDay = paidDay ?? today
+    const issuedPeriod = /^\d{4}-\d{2}$/.test(String(period ?? '')) ? period : basisDay.slice(0, 7)
     const year = issuedPeriod.slice(0, 4)
 
     // Year-scoped counter, derived from the retainers that already exist —
@@ -14217,6 +14239,9 @@ export class AppDataStore {
 
     const detail = String(note ?? '').trim().slice(0, 300)
     const recordedAt = nowIso()
+    // Today it is "now"; a past day is noon UTC of that day, which is that day
+    // in every US time zone.
+    const paidStamp = paidDay && paidDay !== today ? `${paidDay}T12:00:00.000Z` : recordedAt
     const record = {
       id: `inv-${randomUUID().slice(0, 8)}`,
       clientId: client.id,
@@ -14235,33 +14260,39 @@ export class AppDataStore {
       // that way since 2026-09-15, monthly ones included; before then a monthly
       // invoice's clock started at the end of the period it billed for, and
       // this line was the exception that already got it right.
-      dueDate: dueDateFromTerms(today, client.paymentTerms, windowDays),
+      dueDate: dueDateFromTerms(basisDay, client.paymentTerms, windowDays),
       // The kept note, same rule as a monthly draft.
       blurb: client.invoiceNote ?? '',
       scopeFlags: [],
-      // Recorded only: issued and paid somewhere else, so both stamps are now.
-      sentAt: recordOnly ? recordedAt : null,
-      paidAt: recordOnly ? recordedAt : null,
+      // Recorded only: issued and paid somewhere else, on the day she names
+      // (today when she names none), so both stamps are that day.
+      sentAt: recordOnly ? paidStamp : null,
+      paidAt: recordOnly ? paidStamp : null,
       paymentMethod: recordOnly ? 'manual' : null,
       appliedToInvoiceId: null,
       createdAt: nowIso(),
       updatedAt: nowIso(),
     }
 
-    const inserted = await this._insertInvoice(record)
-    if (inserted && recordOnly) {
-      await this._insertInvoiceReviewEvent({
-        id: `invev-${randomUUID().slice(0, 8)}`,
-        invoiceId: inserted.id,
-        clientId: inserted.clientId,
-        period: inserted.period,
-        actorUserId,
-        event: 'retainer_recorded_paid',
-        changes: { status: { before: null, after: 'paid' } },
-        createdAt: recordedAt,
-      })
-    }
-    return inserted
+    return await this._withTransaction(async (dbClient) => {
+      const inserted = await this._insertInvoice(record, { dbClient })
+      if (inserted && recordOnly) {
+        await this._insertInvoiceReviewEvent(
+          {
+            id: `invev-${randomUUID().slice(0, 8)}`,
+            invoiceId: inserted.id,
+            clientId: inserted.clientId,
+            period: inserted.period,
+            actorUserId,
+            event: 'retainer_recorded_paid',
+            changes: { status: { before: null, after: 'paid' } },
+            createdAt: recordedAt,
+          },
+          { dbClient },
+        )
+      }
+      return inserted
+    })
   }
 
   /**
@@ -17097,6 +17128,14 @@ export class AppDataStore {
     if (current.stripePaymentIntentId) {
       throw new ManualPaymentError(
         'A real payment is recorded against this invoice — it cannot be un-marked.',
+      )
+    }
+    // A retainer recorded as paid outside the app was never sent from here, so
+    // "sent" is a state it never had: past-due notices would fire on it and a
+    // Send could email a pay link for money already collected. Void it instead.
+    if (current.kind === 'retainer' && !latestInvoiceSend(current.emailLog)) {
+      throw new ManualPaymentError(
+        'This retainer was recorded as paid outside the app - void it instead.',
       )
     }
 
