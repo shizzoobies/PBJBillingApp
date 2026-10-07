@@ -405,6 +405,153 @@ export function timeEntryBulkRow(entry) {
  * `updated_at` is `now()` written inline.
  */
 export const BULK_INSERT_SHAPES = {
+  subscription_plans: {
+    columns: ['id', 'name', 'notes', 'template_ids', 'created_at'],
+    casts: { template_ids: 'text[]' },
+    literals: { updated_at: 'now()' },
+  },
+  contacts: {
+    columns: [
+      'id',
+      'name',
+      'email',
+      'phone',
+      'title',
+      'notes',
+      'locked',
+      'company_emails',
+      'linked_contact_ids',
+      'archived_at',
+      'group_name',
+      'created_at',
+    ],
+    casts: { company_emails: 'jsonb', linked_contact_ids: 'text[]' },
+    literals: { updated_at: 'now()' },
+  },
+  clients: {
+    columns: [
+      'id',
+      'name',
+      'contact',
+      'billing_mode',
+      'hourly_rate',
+      'plan_id',
+      'custom_monthly_fee',
+      'monthly_rate',
+      'estimated_monthly_hours',
+      'plan_ids',
+      'contact_ids',
+      'email',
+      'contact_name',
+      'phone',
+      'address_line1',
+      'address_line2',
+      'city',
+      'state',
+      'postal_code',
+      'logo_url',
+      'payment_terms',
+      'footer_note',
+      'quickbooks_pay_url',
+      'invoice_show_time_breakdown',
+      'invoice_hide_internal_hours',
+      'invoice_group_by_category',
+      'assigned_bookkeeper_ids',
+      'estimated_bookkeeper_hours',
+      'estimated_accountant_hours',
+      'estimated_cfo_hours',
+      'monthly_service_tier',
+      'annual_rate',
+      'annual_billing_month',
+      'lifecycle_stage',
+      'card_payments_enabled',
+      'platform_invoicing_opt_out',
+      'stripe_customer_id',
+      'invoice_time_breakdown_mode',
+      'invoice_time_breakdown_amounts',
+      'bill_to_client_id',
+      'is_billing_master',
+      'invoice_recipient_client_id',
+      'hourly_rate_period',
+      'hourly_rate_history',
+      'invoice_note',
+      'invoice_no_email',
+      'created_at',
+    ],
+    casts: { hourly_rate_history: 'jsonb' },
+    literals: { updated_at: 'now()' },
+  },
+  invoices: {
+    columns: [
+      'id',
+      'client_id',
+      'period',
+      'number',
+      'kind',
+      'status',
+      'line_items',
+      'subtotal',
+      'total',
+      'due_date',
+      'blurb',
+      'scope_flags',
+      'sent_at',
+      'paid_at',
+      'stripe_checkout_session_id',
+      'stripe_card_session_id',
+      'stripe_payment_intent_id',
+      'payment_method',
+      'email_log',
+      'applied_to_invoice_id',
+      'original_line_items',
+      'pay_token',
+      'recorded_outside_app',
+      'created_at',
+    ],
+    casts: { line_items: 'jsonb', scope_flags: 'jsonb', email_log: 'jsonb', original_line_items: 'jsonb' },
+    literals: { updated_at: 'now()' },
+  },
+  timesheet_locks: {
+    columns: ['id', 'user_id', 'period', 'locked_by', 'locked_at'],
+  },
+  weekly_submissions: {
+    columns: [
+      'id',
+      'user_id',
+      'week_start',
+      'submitted_at',
+      'status',
+      'reviewed_by',
+      'reviewed_at',
+      'review_note',
+    ],
+  },
+  reimbursements: {
+    columns: ['id', 'client_id', 'date', 'description', 'amount', 'created_at'],
+    literals: { updated_at: 'now()' },
+  },
+  recurring_reimbursements: {
+    columns: [
+      'id',
+      'client_id',
+      'description',
+      'amount',
+      'frequency',
+      'start_date',
+      'coverage_enabled',
+      'coverage_template',
+      'coverage_start',
+      'coverage_end',
+      'coverage_anchor_day',
+      'coverage_paused',
+      'coverage_resume_pending',
+      'coverage_history',
+      'category',
+      'created_at',
+    ],
+    casts: { coverage_history: 'jsonb' },
+    literals: { updated_at: 'now()' },
+  },
   checklist_templates: {
     columns: [
       'id',
@@ -717,6 +864,283 @@ export function checklistItemBulkRows(checklist, { priorItemWaits, priorItemComp
     ])
   }
   return rows
+}
+
+/** A plan as a row of BULK_INSERT_SHAPES.subscription_plans. */
+export function subscriptionPlanBulkRow(plan, preservedCreatedAt) {
+  // Pricing left the plan model — only name + notes are written now. The legacy
+  // monthly_fee / included_hours columns keep their DB defaults (0) and are
+  // otherwise ignored. template_ids is FK-free (a listed template may since have
+  // been deleted); coerce to a clean string[] so a malformed payload can't break
+  // the insert. The board link is transitive via each template's category, so no
+  // extra normalization is needed here.
+  const planTemplateIds = Array.isArray(plan.templateIds)
+    ? plan.templateIds.filter((id) => typeof id === 'string' && id)
+    : []
+  return [
+    plan.id,
+    plan.name,
+    plan.notes ?? '',
+    planTemplateIds,
+    snapshotCreatedAt(preservedCreatedAt, 'subscription_plans', plan.id),
+  ]
+}
+
+/** A contact as a row of BULK_INSERT_SHAPES.contacts. */
+export function contactBulkRow(contact, preservedCreatedAt) {
+  // Normalize the new fields so a malformed payload can't break the insert:
+  // company_emails as clean jsonb, linked ids as a text[], archived_at as a
+  // timestamp-or-null.
+  const companyEmails = parseCompanyEmails(contact.companyEmails)
+  const linkedContactIds = Array.isArray(contact.linkedContactIds)
+    ? contact.linkedContactIds.filter((id) => typeof id === 'string')
+    : []
+  const archivedAt =
+    typeof contact.archivedAt === 'string' && contact.archivedAt ? contact.archivedAt : null
+  // Optional group: trim, store null when empty.
+  const groupName =
+    typeof contact.group === 'string' && contact.group.trim() ? contact.group.trim() : null
+  return [
+    contact.id,
+    contact.name,
+    contact.email ?? null,
+    contact.phone ?? null,
+    contact.title ?? null,
+    contact.notes ?? null,
+    Boolean(contact.locked),
+    JSON.stringify(companyEmails),
+    linkedContactIds,
+    archivedAt,
+    groupName,
+    snapshotCreatedAt(preservedCreatedAt, 'contacts', contact.id),
+  ]
+}
+
+/**
+ * A client as a row of BULK_INSERT_SHAPES.clients. `priorClients` is the ONE
+ * snapshot of the four endpoint-owned columns (id -> { stripeCustomerId,
+ * invoiceNote, ratePeriod, rateHistory }): what is stored wins outright and the
+ * payload is not consulted for any of them. `currentRatePeriod` is the month an
+ * hourly client with no stored pin falls back to.
+ */
+export function clientBulkRow(clientRecord, { validPlanIds, priorClients, currentRatePeriod, preservedCreatedAt }) {
+  // FK-safe plan references: drop any plan id not present in this payload's
+  // plans (see sanitizeClientPlanRefs).
+  const planRefs = sanitizeClientPlanRefs(clientRecord, validPlanIds)
+  const prior = priorClients.get(clientRecord.id)
+  return [
+    clientRecord.id,
+    clientRecord.name,
+    clientRecord.contact,
+    clientRecord.billingMode,
+    clientRecord.hourlyRate,
+    // Legacy single plan_id: derived from planIds[0] (or the legacy field), but
+    // only when that plan still exists — a dangling id here would violate the FK
+    // and abort the whole write.
+    planRefs.planId,
+    clientRecord.customMonthlyFee === undefined || clientRecord.customMonthlyFee === null
+      ? null
+      : Number(clientRecord.customMonthlyFee),
+    clientRecord.monthlyRate === undefined || clientRecord.monthlyRate === null
+      ? null
+      : Number(clientRecord.monthlyRate),
+    clientRecord.estimatedMonthlyHours === undefined || clientRecord.estimatedMonthlyHours === null
+      ? null
+      : Number(clientRecord.estimatedMonthlyHours),
+    planRefs.planIds,
+    Array.isArray(clientRecord.contactIds)
+      ? clientRecord.contactIds.filter((id) => typeof id === 'string' && id)
+      : [],
+    clientRecord.email ?? '',
+    clientRecord.contactName ?? '',
+    clientRecord.phone ?? '',
+    clientRecord.addressLine1 ?? '',
+    clientRecord.addressLine2 ?? '',
+    clientRecord.city ?? '',
+    clientRecord.state ?? '',
+    clientRecord.postalCode ?? '',
+    clientRecord.logoUrl ?? '',
+    clientRecord.paymentTerms ?? '',
+    clientRecord.footerNote ?? '',
+    // Only persist a safe http(s) pay link — never a javascript:/data: URL.
+    isSafeHttpUrl(clientRecord.quickbooksPayUrl) ? clientRecord.quickbooksPayUrl : '',
+    clientRecord.invoiceShowTimeBreakdown ?? true,
+    clientRecord.invoiceHideInternalHours ?? true,
+    clientRecord.invoiceGroupByCategory ?? false,
+    Array.isArray(clientRecord.assignedBookkeeperIds) ? clientRecord.assignedBookkeeperIds : [],
+    clientRecord.estimatedBookkeeperHours === undefined || clientRecord.estimatedBookkeeperHours === null
+      ? null
+      : Number(clientRecord.estimatedBookkeeperHours),
+    clientRecord.estimatedAccountantHours === undefined || clientRecord.estimatedAccountantHours === null
+      ? null
+      : Number(clientRecord.estimatedAccountantHours),
+    clientRecord.estimatedCfoHours === undefined || clientRecord.estimatedCfoHours === null
+      ? null
+      : Number(clientRecord.estimatedCfoHours),
+    typeof clientRecord.monthlyServiceTier === 'string' && clientRecord.monthlyServiceTier.trim()
+      ? clientRecord.monthlyServiceTier
+      : null,
+    clientRecord.annualRate === undefined || clientRecord.annualRate === null
+      ? null
+      : Number(clientRecord.annualRate),
+    clientRecord.annualBillingMonth === undefined || clientRecord.annualBillingMonth === null
+      ? null
+      : Number(clientRecord.annualBillingMonth),
+    coerceLifecycleStage(clientRecord.lifecycleStage),
+    clientRecord.cardPaymentsEnabled ?? false,
+    // Miss this and the next autosave silently switches a client's opt-out back
+    // off — and the month run bills someone who is invoiced elsewhere.
+    clientRecord.platformInvoicingOptOut === true,
+    // Stored wins outright (see `priorClients`). A brand-new client has no entry
+    // and gets null, which is exactly right: it has no Stripe customer yet.
+    prior?.stripeCustomerId ?? null,
+    normalizeTimeBreakdownMode(clientRecord.invoiceTimeBreakdownMode),
+    clientRecord.invoiceTimeBreakdownAmounts === true,
+    // Already resolved against this payload by `sanitizeAppData` at the top of
+    // write() — a dangling id never reaches the column.
+    clientRecord.billToClientId ?? null,
+    clientRecord.isBillingMaster === true,
+    clientRecord.invoiceRecipientClientId ?? null,
+    // Stored wins outright. A client with nothing stored falls back to THIS month
+    // when it is hourly, and to null otherwise — a client that is not hourly has
+    // no pin to price off, and `ratePeriodAsOf` answers null for it.
+    prior?.ratePeriod ?? (clientRecord.billingMode === 'hourly' ? currentRatePeriod : null),
+    JSON.stringify(prior?.rateHistory ?? []),
+    // Stored wins outright; a client with none stored — including a brand-new
+    // one — gets null.
+    prior?.invoiceNote ?? null,
+    // Travels with the payload like the opt-out: leave it out of the insert and
+    // the next autosave switches it back off, and the client is emailed an
+    // invoice that is delivered another way.
+    clientRecord.invoiceNoEmail === true,
+    snapshotCreatedAt(preservedCreatedAt, 'clients', clientRecord.id),
+  ]
+}
+
+/**
+ * A snapshotted invoice as a row of BULK_INSERT_SHAPES.invoices. `invoices` is
+ * NOT part of the payload: every column is restored verbatim from the row read
+ * before the wipe, so a sent or paid invoice comes back exactly as it was.
+ */
+export function invoiceRestoreRow(invoice) {
+  return [
+    invoice.id,
+    invoice.client_id,
+    invoice.period,
+    invoice.number,
+    // Both new columns ride the restore verbatim like every other one. A retainer
+    // that came back as 'monthly' would collide with the client's real invoice for
+    // that month on the very next generate; one that came back unapplied would be
+    // spendable a second time.
+    invoice.kind ?? 'monthly',
+    invoice.status,
+    JSON.stringify(invoice.line_items ?? []),
+    invoice.subtotal,
+    invoice.total,
+    invoice.due_date,
+    invoice.blurb ?? '',
+    JSON.stringify(invoice.scope_flags ?? []),
+    invoice.sent_at,
+    invoice.paid_at,
+    invoice.stripe_checkout_session_id,
+    invoice.stripe_card_session_id,
+    invoice.stripe_payment_intent_id,
+    invoice.payment_method,
+    JSON.stringify(invoice.email_log ?? []),
+    invoice.applied_to_invoice_id ?? null,
+    // Rides the restore like every other column, and keeps its NULL rather than
+    // being coerced to `[]`. A snapshot column added to one half of this pair and
+    // not the other is the exact shape of the three past data-loss bugs.
+    invoice.original_line_items ? JSON.stringify(invoice.original_line_items) : null,
+    // The pay token rides the restore like every other column. Drop it from either
+    // half of this pair and the next owner autosave NULLs it — every Pay button
+    // already in a client's inbox goes to a "not valid" page.
+    invoice.pay_token ?? null,
+    // The recorded-outside-app marker rides the restore too: dropped from either
+    // half it would reset to false on the next autosave and a recorded retainer
+    // would start exporting to QuickBooks.
+    invoice.recorded_outside_app === true,
+    invoice.created_at,
+  ]
+}
+
+/** A timesheet lock as a row of BULK_INSERT_SHAPES.timesheet_locks. */
+export function timesheetLockBulkRow(lock) {
+  return [lock.id, lock.userId, lock.period, lock.lockedBy, lock.lockedAt ?? nowIso()]
+}
+
+/** A weekly submission as a row of BULK_INSERT_SHAPES.weekly_submissions. */
+export function weeklySubmissionBulkRow(submission) {
+  return [
+    submission.id,
+    submission.userId,
+    submission.weekStart,
+    submission.submittedAt ?? nowIso(),
+    submission.status,
+    submission.reviewedBy ?? null,
+    submission.reviewedAt ?? null,
+    submission.reviewNote ?? null,
+  ]
+}
+
+/** A reimbursement as a row of BULK_INSERT_SHAPES.reimbursements. */
+export function reimbursementBulkRow(reimbursement, preservedCreatedAt) {
+  return [
+    reimbursement.id,
+    reimbursement.clientId,
+    reimbursement.date,
+    reimbursement.description,
+    reimbursement.amount,
+    snapshotCreatedAt(preservedCreatedAt, 'reimbursements', reimbursement.id),
+  ]
+}
+
+/**
+ * A recurring expense as a row of BULK_INSERT_SHAPES.recurring_reimbursements.
+ * `preservedCoverageById` is the snapshot of the state generation and
+ * confirmation own (id -> { coverageAnchorDay, coverageResumePending,
+ * coverageHistory, category }): the ledger, the anchor and the resume flag are
+ * NEVER taken from the payload, because a tab that loaded before a month run
+ * holds an empty ledger and letting it win would restart every expense's cycle
+ * at its seed window.
+ */
+export function recurringReimbursementBulkRow(recurring, preservedCoverageById, preservedCreatedAt) {
+  // A row with no snapshot entry is genuinely new — the payload's value is all
+  // there is, and for a brand-new expense that is exactly right.
+  const preservedCoverage = (field) => {
+    const stored = preservedCoverageById.get(recurring.id)
+    if (stored) return stored[field]
+    if (field === 'coverageHistory') return recurring.coverageHistory ?? {}
+    if (field === 'coverageAnchorDay') {
+      return anchorDayFromRange(recurring.coverageEnd) ?? null
+    }
+    return Boolean(recurring.coverageResumePending)
+  }
+  // Which invoice section a line prints under. The payload's own value when it
+  // names one; otherwise the stored row's (a payload with no category must not
+  // move a Software line back under Expenses); a brand new row with none is an
+  // ordinary expense.
+  const category = RECURRING_CATEGORIES.includes(recurring.category)
+    ? recurring.category
+    : (preservedCoverageById.get(recurring.id)?.category ?? 'expense')
+  return [
+    recurring.id,
+    recurring.clientId,
+    recurring.description,
+    recurring.amount,
+    recurring.frequency,
+    recurring.startDate,
+    Boolean(recurring.coverageEnabled),
+    recurring.coverageTemplate ?? null,
+    recurring.coverageStart || null,
+    recurring.coverageEnd || null,
+    preservedCoverage('coverageAnchorDay'),
+    Boolean(recurring.coveragePaused),
+    preservedCoverage('coverageResumePending'),
+    JSON.stringify(preservedCoverage('coverageHistory') ?? {}),
+    category,
+    snapshotCreatedAt(preservedCreatedAt, 'recurring_reimbursements', recurring.id),
+  ]
 }
 
 const VALID_BILLING_MODES = new Set(['hourly', 'subscription', 'annual'])
@@ -8582,7 +9006,6 @@ export class AppDataStore {
           const snapshot = await client.query(`select id, created_at from ${table}`)
           preservedCreatedAt.set(table, new Map(snapshot.rows.map((row) => [row.id, row.created_at])))
         }
-        const createdAtFor = (table, id) => preservedCreatedAt.get(table)?.get(id) ?? new Date()
 
         // Covered-date state, snapshotted for the same reason and by the same
         // technique as the two above.
@@ -8612,26 +9035,6 @@ export class AppDataStore {
             },
           ]),
         )
-        // A row with no snapshot entry is genuinely new — the payload's value is
-        // all there is, and for a brand-new expense that is exactly right.
-        const preservedCoverage = (recurring, field) => {
-          const stored = preservedCoverageById.get(recurring.id)
-          if (stored) return stored[field]
-          if (field === 'coverageHistory') return recurring.coverageHistory ?? {}
-          if (field === 'coverageAnchorDay') {
-            return anchorDayFromRange(recurring.coverageEnd) ?? null
-          }
-          return Boolean(recurring.coverageResumePending)
-        }
-        // Which invoice section a line prints under. The payload's own value
-        // when it names one; otherwise the stored row's (a payload with no
-        // category must not move a Software line back under Expenses); a brand
-        // new row with none is an ordinary expense.
-        const categoryOf = (recurring) =>
-          RECURRING_CATEGORIES.includes(recurring.category)
-            ? recurring.category
-            : (preservedCoverageById.get(recurring.id)?.category ?? 'expense')
-
         // Completion stamps, for the same reason and with the same rule (see
         // `preservedItemCompletion`): the payload's copy is ignored, the stored
         // one wins, and only a step this save actually completes gets now().
@@ -8690,49 +9093,36 @@ export class AppDataStore {
           ]),
         )
 
-        // The Stripe customer id, by the same rule as the push stamps: it is
-        // ENDPOINT-OWNED (`setClientStripeCustomerId` is the only writer, called
-        // from the send, payment-link and pay-page paths) and the bulk-save
-        // payload has never carried it. Without this snapshot the re-insert
-        // below writes NULL, so the next owner autosave detaches every client
-        // from their Stripe customer and the following send silently creates a
-        // second one — the same client twice in Stripe, their saved bank
-        // details on the copy nobody is charging. Stored wins; the payload is
-        // not consulted at all.
-        const priorStripeCustomerIds = new Map(
-          (await client.query(`select id, stripe_customer_id from clients`)).rows.map((row) => [
-            row.id,
-            row.stripe_customer_id ?? null,
-          ]),
-        )
-
-        // The kept invoice note, by the same rule: ENDPOINT-OWNED
-        // (`setClientInvoiceNote` is the only writer) and never read from the
-        // payload. Without this snapshot the re-insert below writes NULL and
-        // the next owner autosave — including a stale tab's — erases a note
-        // Brittany chose to keep for every future invoice.
-        const priorInvoiceNotes = new Map(
-          (await client.query(`select id, invoice_note from clients`)).rows.map((row) => [
-            row.id,
-            row.invoice_note ?? null,
-          ]),
-        )
-
-        // The rate-history pin and its ledger, by the same rule as the Stripe
-        // customer id above: they are ENDPOINT-OWNED
-        // (`setClientHourlyRatePeriod` is the only writer) and the bulk-save
-        // payload must not be consulted at all. Without this the re-insert
-        // writes NULL and the next owner autosave un-pins every hourly client —
-        // silently repricing the whole book at today's rates, which is exactly
-        // the thing this feature exists to prevent. Stored wins outright.
-        const priorRatePins = new Map(
+        // The clients columns a bulk payload may not write, ONE read for all four
+        // (they were three selects of the same table). Stored wins outright and
+        // the payload is not consulted for any of them:
+        //
+        // - the Stripe customer id: ENDPOINT-OWNED (`setClientStripeCustomerId` is
+        //   the only writer, called from the send, payment-link and pay-page
+        //   paths) and the payload has never carried it. Without this snapshot the
+        //   re-insert writes NULL, the next owner autosave detaches every client
+        //   from their Stripe customer and the following send silently creates a
+        //   second one - the same client twice in Stripe, their saved bank details
+        //   on the copy nobody is charging.
+        // - the kept invoice note: ENDPOINT-OWNED (`setClientInvoiceNote`). Without
+        //   it the next autosave - including a stale tab's - erases a note
+        //   Brittany chose to keep for every future invoice.
+        // - the rate-history pin and its ledger: ENDPOINT-OWNED
+        //   (`setClientHourlyRatePeriod`). Without them the next autosave un-pins
+        //   every hourly client - silently repricing the whole book at today's
+        //   rates, which is exactly what this feature exists to prevent.
+        const priorClients = new Map(
           (
-            await client.query(`select id, hourly_rate_period, hourly_rate_history from clients`)
+            await client.query(
+              `select id, stripe_customer_id, invoice_note, hourly_rate_period, hourly_rate_history from clients`,
+            )
           ).rows.map((row) => [
             row.id,
             {
-              period: row.hourly_rate_period ?? null,
-              history: Array.isArray(row.hourly_rate_history) ? row.hourly_rate_history : [],
+              stripeCustomerId: row.stripe_customer_id ?? null,
+              invoiceNote: row.invoice_note ?? null,
+              ratePeriod: row.hourly_rate_period ?? null,
+              rateHistory: Array.isArray(row.hourly_rate_history) ? row.hourly_rate_history : [],
             },
           ]),
         )
@@ -8827,200 +9217,29 @@ export class AppDataStore {
           )
         }
 
-        for (const plan of data.plans) {
-          // Pricing left the plan model — only name + notes are written now.
-          // The legacy monthly_fee / included_hours columns keep their DB
-          // defaults (0) and are otherwise ignored.
-          // template_ids is FK-free (a listed template may since have been
-          // deleted); coerce to a clean string[] so a malformed payload can't
-          // break the insert. The board link is transitive via each template's
-          // category, so no extra normalization is needed here.
-          const planTemplateIds = Array.isArray(plan.templateIds)
-            ? plan.templateIds.filter((id) => typeof id === 'string' && id)
-            : []
-          await client.query(
-            `
-              insert into subscription_plans (id, name, notes, template_ids, created_at, updated_at)
-              values ($1, $2, $3, $4::text[], $5, now())
-            `,
-            [
-              plan.id,
-              plan.name,
-              plan.notes ?? '',
-              planTemplateIds,
-              createdAtFor('subscription_plans', plan.id),
-            ],
-          )
-        }
+        // Plans, contacts, clients, the invoice restore, time entries, locks,
+        // submissions and expenses: one multi-row insert per 500 rows each, in
+        // payload order, on this transaction's connection, in the order the
+        // foreign keys need (stage 3 of docs/plans/bulk-save-batching-2026-10.md).
+        await insertRowsBatched(client, {
+          table: 'subscription_plans',
+          ...BULK_INSERT_SHAPES.subscription_plans,
+          rows: data.plans.map((plan) => subscriptionPlanBulkRow(plan, preservedCreatedAt)),
+        })
 
-        for (const contact of data.contacts ?? []) {
-          // Normalize the new fields so a malformed payload can't break the
-          // insert: company_emails as clean jsonb, linked ids as a text[],
-          // archived_at as a timestamp-or-null.
-          const companyEmails = parseCompanyEmails(contact.companyEmails)
-          const linkedContactIds = Array.isArray(contact.linkedContactIds)
-            ? contact.linkedContactIds.filter((id) => typeof id === 'string')
-            : []
-          const archivedAt =
-            typeof contact.archivedAt === 'string' && contact.archivedAt ? contact.archivedAt : null
-          // Optional group: trim, store null when empty.
-          const groupName =
-            typeof contact.group === 'string' && contact.group.trim() ? contact.group.trim() : null
-          await client.query(
-            `
-              insert into contacts (
-                id, name, email, phone, title, notes, locked,
-                company_emails, linked_contact_ids, archived_at, group_name,
-                created_at, updated_at
-              )
-              values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::text[], $10, $11, $12, now())
-            `,
-            [
-              contact.id,
-              contact.name,
-              contact.email ?? null,
-              contact.phone ?? null,
-              contact.title ?? null,
-              contact.notes ?? null,
-              Boolean(contact.locked),
-              JSON.stringify(companyEmails),
-              linkedContactIds,
-              archivedAt,
-              groupName,
-              createdAtFor('contacts', contact.id),
-            ],
-          )
-        }
+        await insertRowsBatched(client, {
+          table: 'contacts',
+          ...BULK_INSERT_SHAPES.contacts,
+          rows: (data.contacts ?? []).map((contact) => contactBulkRow(contact, preservedCreatedAt)),
+        })
 
-        for (const clientRecord of safeClients) {
-          // FK-safe plan references: drop any plan id not present in this
-          // payload's plans (see sanitizeClientPlanRefs).
-          const planRefs = sanitizeClientPlanRefs(clientRecord, validPlanIds)
-          await client.query(
-            `
-              insert into clients (
-                id, name, contact, billing_mode, hourly_rate, plan_id,
-                custom_monthly_fee, monthly_rate, estimated_monthly_hours,
-                plan_ids, contact_ids,
-                email, contact_name, phone, address_line1, address_line2,
-                city, state, postal_code, logo_url, payment_terms,
-                footer_note, quickbooks_pay_url, invoice_show_time_breakdown,
-                invoice_hide_internal_hours, invoice_group_by_category,
-                assigned_bookkeeper_ids,
-                estimated_bookkeeper_hours, estimated_accountant_hours,
-                estimated_cfo_hours, monthly_service_tier,
-                annual_rate, annual_billing_month, lifecycle_stage,
-                card_payments_enabled, platform_invoicing_opt_out,
-                stripe_customer_id,
-                invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
-                bill_to_client_id, is_billing_master, invoice_recipient_client_id,
-                hourly_rate_period, hourly_rate_history, invoice_note,
-                invoice_no_email,
-                created_at, updated_at
-              )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44::jsonb, $45, $46, $47, now())
-            `,
-            [
-              clientRecord.id,
-              clientRecord.name,
-              clientRecord.contact,
-              clientRecord.billingMode,
-              clientRecord.hourlyRate,
-              // Legacy single plan_id: derived from planIds[0] (or the legacy
-              // field), but only when that plan still exists — a dangling id
-              // here would violate the FK and abort the whole write.
-              planRefs.planId,
-              clientRecord.customMonthlyFee === undefined || clientRecord.customMonthlyFee === null
-                ? null
-                : Number(clientRecord.customMonthlyFee),
-              clientRecord.monthlyRate === undefined || clientRecord.monthlyRate === null
-                ? null
-                : Number(clientRecord.monthlyRate),
-              clientRecord.estimatedMonthlyHours === undefined ||
-              clientRecord.estimatedMonthlyHours === null
-                ? null
-                : Number(clientRecord.estimatedMonthlyHours),
-              planRefs.planIds,
-              Array.isArray(clientRecord.contactIds)
-                ? clientRecord.contactIds.filter((id) => typeof id === 'string' && id)
-                : [],
-              clientRecord.email ?? '',
-              clientRecord.contactName ?? '',
-              clientRecord.phone ?? '',
-              clientRecord.addressLine1 ?? '',
-              clientRecord.addressLine2 ?? '',
-              clientRecord.city ?? '',
-              clientRecord.state ?? '',
-              clientRecord.postalCode ?? '',
-              clientRecord.logoUrl ?? '',
-              clientRecord.paymentTerms ?? '',
-              clientRecord.footerNote ?? '',
-              // Only persist a safe http(s) pay link — never a javascript:/data: URL.
-              isSafeHttpUrl(clientRecord.quickbooksPayUrl) ? clientRecord.quickbooksPayUrl : '',
-              clientRecord.invoiceShowTimeBreakdown ?? true,
-              clientRecord.invoiceHideInternalHours ?? true,
-              clientRecord.invoiceGroupByCategory ?? false,
-              Array.isArray(clientRecord.assignedBookkeeperIds)
-                ? clientRecord.assignedBookkeeperIds
-                : [],
-              clientRecord.estimatedBookkeeperHours === undefined ||
-              clientRecord.estimatedBookkeeperHours === null
-                ? null
-                : Number(clientRecord.estimatedBookkeeperHours),
-              clientRecord.estimatedAccountantHours === undefined ||
-              clientRecord.estimatedAccountantHours === null
-                ? null
-                : Number(clientRecord.estimatedAccountantHours),
-              clientRecord.estimatedCfoHours === undefined ||
-              clientRecord.estimatedCfoHours === null
-                ? null
-                : Number(clientRecord.estimatedCfoHours),
-              typeof clientRecord.monthlyServiceTier === 'string' &&
-              clientRecord.monthlyServiceTier.trim()
-                ? clientRecord.monthlyServiceTier
-                : null,
-              clientRecord.annualRate === undefined || clientRecord.annualRate === null
-                ? null
-                : Number(clientRecord.annualRate),
-              clientRecord.annualBillingMonth === undefined ||
-              clientRecord.annualBillingMonth === null
-                ? null
-                : Number(clientRecord.annualBillingMonth),
-              coerceLifecycleStage(clientRecord.lifecycleStage),
-              clientRecord.cardPaymentsEnabled ?? false,
-              // Miss this and the next autosave silently switches a client's
-              // opt-out back off — and the month run bills someone who is
-              // invoiced elsewhere.
-              clientRecord.platformInvoicingOptOut === true,
-              // Stored wins outright (see the snapshot above). A brand-new
-              // client has no entry and gets null, which is exactly right: it
-              // has no Stripe customer yet.
-              priorStripeCustomerIds.get(clientRecord.id) ?? null,
-              normalizeTimeBreakdownMode(clientRecord.invoiceTimeBreakdownMode),
-              clientRecord.invoiceTimeBreakdownAmounts === true,
-              // Already resolved against this payload by `sanitizeAppData` at
-              // the top of write() — a dangling id never reaches the column.
-              clientRecord.billToClientId ?? null,
-              clientRecord.isBillingMaster === true,
-              clientRecord.invoiceRecipientClientId ?? null,
-              // Stored wins outright (see the snapshot above). A client with
-              // nothing stored falls back to THIS month when it is hourly, and
-              // to null otherwise — a client that is not hourly has no pin to
-              // price off, and `ratePeriodAsOf` answers null for it.
-              priorRatePins.get(clientRecord.id)?.period ??
-                (clientRecord.billingMode === 'hourly' ? currentRatePeriod : null),
-              JSON.stringify(priorRatePins.get(clientRecord.id)?.history ?? []),
-              // Stored wins outright (see the snapshot above); a client with
-              // none stored — including a brand-new one — gets null.
-              priorInvoiceNotes.get(clientRecord.id) ?? null,
-              // Travels with the payload like the opt-out: leave it out of the
-              // insert and the next autosave switches it back off, and the
-              // client is emailed an invoice that is delivered another way.
-              clientRecord.invoiceNoEmail === true,
-              createdAtFor('clients', clientRecord.id),
-            ],
-          )
-        }
+        await insertRowsBatched(client, {
+          table: 'clients',
+          ...BULK_INSERT_SHAPES.clients,
+          rows: safeClients.map((clientRecord) =>
+            clientBulkRow(clientRecord, { validPlanIds, priorClients, currentRatePeriod, preservedCreatedAt }),
+          ),
+        })
 
         // Put back the invoices snapshotted before the wipe, now that their
         // clients exist again. An invoice whose client is gone from this
@@ -9033,63 +9252,13 @@ export class AppDataStore {
         // This is a MONEY table: an invoice that has been sent or paid must
         // survive an unrelated owner autosave untouched, so every column is
         // restored verbatim rather than regenerated.
-        for (const invoice of preservedInvoices) {
-          if (!validClientIds.has(invoice.client_id)) continue
-          await client.query(
-            `
-              insert into invoices (
-                id, client_id, period, number, kind, status, line_items, subtotal, total,
-                due_date, blurb, scope_flags, sent_at, paid_at,
-                stripe_checkout_session_id, stripe_card_session_id,
-                stripe_payment_intent_id, payment_method,
-                email_log, applied_to_invoice_id, original_line_items, pay_token,
-                recorded_outside_app, created_at, updated_at
-              )
-              values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21::jsonb,$22,$23,$24, now())
-            `,
-            [
-              invoice.id,
-              invoice.client_id,
-              invoice.period,
-              invoice.number,
-              // Both new columns ride the restore verbatim like every other one.
-              // A retainer that came back as 'monthly' would collide with the
-              // client's real invoice for that month on the very next generate;
-              // one that came back unapplied would be spendable a second time.
-              invoice.kind ?? 'monthly',
-              invoice.status,
-              JSON.stringify(invoice.line_items ?? []),
-              invoice.subtotal,
-              invoice.total,
-              invoice.due_date,
-              invoice.blurb ?? '',
-              JSON.stringify(invoice.scope_flags ?? []),
-              invoice.sent_at,
-              invoice.paid_at,
-              invoice.stripe_checkout_session_id,
-              invoice.stripe_card_session_id,
-              invoice.stripe_payment_intent_id,
-              invoice.payment_method,
-              JSON.stringify(invoice.email_log ?? []),
-              invoice.applied_to_invoice_id ?? null,
-              // Rides the restore like every other column, and keeps its NULL
-              // rather than being coerced to `[]` — see the migration above.
-              // A snapshot column added to one half of this pair and not the
-              // other is the exact shape of the three past data-loss bugs.
-              invoice.original_line_items ? JSON.stringify(invoice.original_line_items) : null,
-              // The pay token rides the restore like every other column. Drop
-              // it from either half of this pair and the next owner autosave
-              // NULLs it — every Pay button already in a client's inbox goes to
-              // a "not valid" page, with nothing in the app to say why.
-              invoice.pay_token ?? null,
-              // The recorded-outside-app marker rides the restore too: dropped
-              // from either half it would reset to false on the next autosave
-              // and a recorded retainer would start exporting to QuickBooks.
-              invoice.recorded_outside_app === true,
-              invoice.created_at,
-            ],
-          )
-        }
+        await insertRowsBatched(client, {
+          table: 'invoices',
+          ...BULK_INSERT_SHAPES.invoices,
+          rows: preservedInvoices
+            .filter((invoice) => validClientIds.has(invoice.client_id))
+            .map(invoiceRestoreRow),
+        })
 
         // One multi-row statement per 500 entries, in payload order, on this
         // transaction's connection (stage 1 of docs/plans/bulk-save-batching-2026-10.md).
@@ -9101,88 +9270,33 @@ export class AppDataStore {
           rows: safeTimeEntries.map(timeEntryBulkRow),
         })
 
-        for (const lock of data.timesheetLocks ?? []) {
-          await client.query(
-            `
-              insert into timesheet_locks (id, user_id, period, locked_by, locked_at)
-              values ($1, $2, $3, $4, $5)
-            `,
-            [lock.id, lock.userId, lock.period, lock.lockedBy, lock.lockedAt ?? nowIso()],
-          )
-        }
+        await insertRowsBatched(client, {
+          table: 'timesheet_locks',
+          ...BULK_INSERT_SHAPES.timesheet_locks,
+          rows: (data.timesheetLocks ?? []).map(timesheetLockBulkRow),
+        })
 
-        for (const submission of (data.weeklySubmissions ?? []).filter(
-          (submission) => submission && validUserIds.has(submission.userId),
-        )) {
-          await client.query(
-            `
-              insert into weekly_submissions (id, user_id, week_start, submitted_at, status, reviewed_by, reviewed_at, review_note)
-              values ($1, $2, $3, $4, $5, $6, $7, $8)
-            `,
-            [
-              submission.id,
-              submission.userId,
-              submission.weekStart,
-              submission.submittedAt ?? nowIso(),
-              submission.status,
-              submission.reviewedBy ?? null,
-              submission.reviewedAt ?? null,
-              submission.reviewNote ?? null,
-            ],
-          )
-        }
+        await insertRowsBatched(client, {
+          table: 'weekly_submissions',
+          ...BULK_INSERT_SHAPES.weekly_submissions,
+          rows: (data.weeklySubmissions ?? [])
+            .filter((submission) => submission && validUserIds.has(submission.userId))
+            .map(weeklySubmissionBulkRow),
+        })
 
-        for (const reimbursement of safeReimbursements) {
-          await client.query(
-            `
-              insert into reimbursements (id, client_id, date, description, amount, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, now())
-            `,
-            [
-              reimbursement.id,
-              reimbursement.clientId,
-              reimbursement.date,
-              reimbursement.description,
-              reimbursement.amount,
-              createdAtFor('reimbursements', reimbursement.id),
-            ],
-          )
-        }
+        await insertRowsBatched(client, {
+          table: 'reimbursements',
+          ...BULK_INSERT_SHAPES.reimbursements,
+          rows: safeReimbursements.map((reimbursement) => reimbursementBulkRow(reimbursement, preservedCreatedAt)),
+        })
 
-        for (const recurring of safeRecurringReimbursements) {
-          await client.query(
-            `
-              insert into recurring_reimbursements
-                (id, client_id, description, amount, frequency, start_date,
-                 coverage_enabled, coverage_template, coverage_start, coverage_end,
-                 coverage_anchor_day, coverage_paused, coverage_resume_pending, coverage_history,
-                 category, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16, now())
-            `,
-            [
-              recurring.id,
-              recurring.clientId,
-              recurring.description,
-              recurring.amount,
-              recurring.frequency,
-              recurring.startDate,
-              Boolean(recurring.coverageEnabled),
-              recurring.coverageTemplate ?? null,
-              recurring.coverageStart || null,
-              recurring.coverageEnd || null,
-              // The ledger, the anchor and the resume flag are NEVER taken from
-              // the payload — see `preservedCoverage`. A tab that loaded before
-              // a month run holds an empty ledger, and letting it win would
-              // restart every expense's cycle at its seed window.
-              preservedCoverage(recurring, 'coverageAnchorDay'),
-              Boolean(recurring.coveragePaused),
-              preservedCoverage(recurring, 'coverageResumePending'),
-              JSON.stringify(preservedCoverage(recurring, 'coverageHistory') ?? {}),
-              categoryOf(recurring),
-              createdAtFor('recurring_reimbursements', recurring.id),
-            ],
-          )
-        }
+        await insertRowsBatched(client, {
+          table: 'recurring_reimbursements',
+          ...BULK_INSERT_SHAPES.recurring_reimbursements,
+          rows: safeRecurringReimbursements.map((recurring) =>
+            recurringReimbursementBulkRow(recurring, preservedCoverageById, preservedCreatedAt),
+          ),
+        })
 
         // Templates, their stages and the stages' items: three multi-row inserts, in
         // that order (stages reference templates, items reference both), each in

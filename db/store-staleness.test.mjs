@@ -1504,15 +1504,26 @@ function fakePostgres({
         })),
       }
     }
-    // The bulk save's Stripe-customer snapshot, taken before the wipe. Answered
-    // out of `clientRows` for the same reason the push stamps are: a fake that
-    // returned nothing would make every stored id look absent, and the
-    // stored-wins assertion would pass against a store that dropped the column.
-    if (/^select id, stripe_customer_id from clients$/i.test(trimmed)) {
+    // The bulk save's ONE snapshot of the clients columns a payload may not write
+    // (Stripe customer, kept invoice note, rate-history pin and ledger), taken
+    // before the wipe. Answered out of `clientRows` for the same reason the push
+    // stamps are: a fake that returned nothing would make every stored value look
+    // absent, and the stored-wins assertions would pass against a store that
+    // dropped the column. Anchored on its exact shape, so a rewrite that went back
+    // to three selects, or stopped reading one of them, falls through to the empty
+    // default and the test fails loudly.
+    if (
+      /^select id, stripe_customer_id, invoice_note, hourly_rate_period, hourly_rate_history from clients$/i.test(
+        trimmed,
+      )
+    ) {
       return {
         rows: clientRows.map((row) => ({
           id: row.id,
           stripe_customer_id: row.stripe_customer_id ?? null,
+          invoice_note: row.invoice_note ?? null,
+          hourly_rate_period: row.hourly_rate_period,
+          hourly_rate_history: row.hourly_rate_history,
         })),
       }
     }
@@ -1657,15 +1668,7 @@ function fakePostgres({
       found.hourly_rate_period = params?.[1]
       return { rows: [{ id: found.id }], rowCount: 1 }
     }
-    // The kept invoice note, snapshotted before the wipe. Answered out of
-    // `clientRows` for the same reason the Stripe customer is: a fake that
-    // answered nothing would make every stored note look absent and the
-    // stored-wins assertion pass against a store that dropped the column.
-    if (/^select id, invoice_note from clients$/i.test(trimmed)) {
-      return {
-        rows: clientRows.map((row) => ({ id: row.id, invoice_note: row.invoice_note ?? null })),
-      }
-    }
+
     // `setClientInvoiceNote`'s ONE targeted update, emulated against the fixture
     // rows and answered with a rowCount (or the store reads its own write as a
     // miss and hands the caller null).
@@ -1675,13 +1678,7 @@ function fakePostgres({
       found.invoice_note = params?.[1]
       return { rows: [{ id: found.id }], rowCount: 1 }
     }
-    // The rate-history pin snapshot the bulk save takes before the wipe — the
-    // same idiom as `priorStripeCustomerIds`. Anchored on its exact shape so a
-    // rewrite that stopped reading it falls through to the empty default and
-    // the test fails loudly rather than passing on a stale answer.
-    if (/^select id, hourly_rate_period, hourly_rate_history from clients$/i.test(trimmed)) {
-      return { rows: clientRows }
-    }
+
     // initialize()'s probe for the v3 instance index.
     if (/^select to_regclass\('checklists_template_instance_uniq_v3'\) is null as missing$/i.test(trimmed)) {
       return { rows: [{ missing: !checklistIndexV3Exists }] }
@@ -1713,6 +1710,10 @@ function fakePostgres({
   const indexOf = (pattern) => statements.findIndex((s) => pattern.test(s.text))
   return { pool, statements, matching, indexOf }
 }
+
+/** The bulk save's single snapshot of the clients columns the payload may not write. */
+const CLIENT_SNAPSHOT_SELECT =
+  /^select id, stripe_customer_id, invoice_note, hourly_rate_period, hourly_rate_history from clients$/i
 
 function postgresStore(fake) {
   const pgStore = new AppDataStore()
@@ -5893,7 +5894,7 @@ describe('the bulk save carries the clients columns it does not own', () => {
     })
     await postgresStore(fake).write(workspace())
 
-    expect(fake.matching(/^select id, stripe_customer_id from clients$/i)).toHaveLength(1)
+    expect(fake.matching(CLIENT_SNAPSHOT_SELECT)).toHaveLength(1)
     const insert = fake.matching(/^insert into clients \(/i)[0]
     expect(insert.text).toMatch(/stripe_customer_id/)
     expect(insertedRows(fake.statements, 'clients')[0].stripe_customer_id).toBe('cus_stored')
@@ -22811,9 +22812,7 @@ describe('rate history: the Postgres statements', () => {
     await postgresStore(fake).write(
       workspace({ clients: [{ id: 'c1', name: 'Acme', hourlyRatePeriod: '2020-01' }] }),
     )
-    const [snapshot] = fake.matching(
-      /^select id, hourly_rate_period, hourly_rate_history from clients$/i,
-    )
+    const [snapshot] = fake.matching(CLIENT_SNAPSHOT_SELECT)
     expect(snapshot, 'the bulk save never snapshotted the stored pin').toBeTruthy()
     const [insert] = fake.matching(/^insert into clients/i)
     expect(insert.text).toMatch(/hourly_rate_period, hourly_rate_history/)
@@ -38517,7 +38516,7 @@ describe('the kept invoice note (clients.invoice_note)', () => {
       })
       await postgresStore(fake).write(workspace())
 
-      expect(fake.matching(/^select id, invoice_note from clients$/i)).toHaveLength(1)
+      expect(fake.matching(CLIENT_SNAPSHOT_SELECT)).toHaveLength(1)
       const insert = fake.matching(/^insert into clients \(/i)[0]
       expect(insertedRows(fake.statements, 'clients')[0].invoice_note).toBe('Kept note')
     })
@@ -40250,5 +40249,315 @@ describe('bulk save: checklists, items and templates as multi-row inserts (postg
     expect(reads[0]).toBeLessThan(begins[0])
     expect(reads[1]).toBeGreaterThan(begins[0])
     expect(reads[2]).toBeGreaterThan(begins[1])
+  })
+})
+
+/**
+ * Stage 3 of the bulk-save batching: clients, the invoice restore and the small
+ * tables as multi-row inserts. What is written is pinned by the golden parity
+ * fixture (unchanged by this stage); this pins the statements, the order and the
+ * snapshot-wins cases across chunk boundaries.
+ */
+describe('bulk save: clients, invoices and the small tables as multi-row inserts (postgres branch)', () => {
+  const pad = (index) => String(index).padStart(5, '0')
+  const clientsOf = (count, overrides = () => ({})) =>
+    Array.from({ length: count }, (_, index) => ({
+      id: `c-${pad(index)}`,
+      name: `Client ${index}`,
+      billingMode: 'hourly',
+      hourlyRate: 100,
+      ...overrides(index),
+    }))
+  const statementsOf = (fake, table) => fake.matching(new RegExp(`^insert into ${table}\\b`, 'i'))
+  const rowsPer = (fake, table, width) => statementsOf(fake, table).map((statement) => statement.params.length / width)
+
+  const INVOICE_COLUMNS = 24
+  const invoiceRow = (index, clientId, overrides = {}) => ({
+    ...existingInvoice,
+    id: `inv-${pad(index)}`,
+    client_id: clientId,
+    period: '2026-08',
+    number: `INV-${pad(index)}`,
+    kind: 'monthly',
+    pay_token: `tok-${index}`,
+    recorded_outside_app: false,
+    original_line_items: null,
+    created_at: new Date('2026-08-01T12:00:00.000Z'),
+    ...overrides,
+  })
+
+  it.each([
+    [0, []],
+    [1, [1]],
+    [500, [500]],
+    [501, [500, 1]],
+    [1001, [500, 500, 1]],
+  ])('sends %i clients as statements of %j rows (47 parameters a row)', async (count, sizes) => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace({ clients: clientsOf(count), timeEntries: [] }))
+
+    expect(rowsPer(fake, 'clients', 47)).toEqual(sizes)
+    expect(insertedRows(fake.statements, 'clients').map((row) => row.id)).toEqual(
+      clientsOf(count).map((client) => client.id),
+    )
+  })
+
+  it('reads ONE snapshot of the clients columns the payload may not write, not three', async () => {
+    const fake = fakePostgres({ clientRows: [{ id: 'c1', name: 'Acme', stripe_customer_id: 'cus_1' }] })
+    await postgresStore(fake).write(workspace())
+
+    expect(fake.matching(CLIENT_SNAPSHOT_SELECT)).toHaveLength(1)
+    expect(fake.matching(/^select id, stripe_customer_id from clients$/i)).toHaveLength(0)
+    expect(fake.matching(/^select id, invoice_note from clients$/i)).toHaveLength(0)
+    expect(fake.matching(/^select id, hourly_rate_period, hourly_rate_history from clients$/i)).toHaveLength(0)
+    // ...taken before the first delete, like every snapshot.
+    expect(fake.indexOf(CLIENT_SNAPSHOT_SELECT)).toBeLessThan(fake.indexOf(/^delete from /i))
+  })
+
+  it('takes the Stripe customer, the kept note and the rate pin from the snapshot on both sides of a chunk boundary', async () => {
+    const clientRows = [0, 499, 500, 600].map((index) => ({
+      id: `c-${pad(index)}`,
+      name: `Client ${index}`,
+      stripe_customer_id: `cus_${index}`,
+      invoice_note: `kept ${index}`,
+      hourly_rate_period: '2026-06',
+      hourly_rate_history: [{ from: '2026-06', rate: index }],
+    }))
+    const fake = fakePostgres({ clientRows })
+    await postgresStore(fake).write(
+      workspace({
+        timeEntries: [],
+        clients: clientsOf(601, () => ({
+          // What a stale tab hands back: all three, and none of it may count.
+          stripeCustomerId: 'cus_payload',
+          invoiceNote: 'from the payload',
+          hourlyRatePeriod: '2020-01',
+        })),
+      }),
+    )
+
+    expect(rowsPer(fake, 'clients', 47)).toEqual([500, 101])
+    const rows = new Map(insertedRows(fake.statements, 'clients').map((row) => [row.id, row]))
+    for (const index of [0, 499, 500, 600]) {
+      const row = rows.get(`c-${pad(index)}`)
+      expect(row.stripe_customer_id, `client ${index}`).toBe(`cus_${index}`)
+      expect(row.invoice_note, `client ${index}`).toBe(`kept ${index}`)
+      expect(row.hourly_rate_period, `client ${index}`).toBe('2026-06')
+      expect(row.hourly_rate_history, `client ${index}`).toBe(JSON.stringify([{ from: '2026-06', rate: index }]))
+    }
+    // A client with nothing stored: no customer, no note, this month's pin (it is hourly).
+    const fresh = rows.get(`c-${pad(1)}`)
+    expect(fresh.stripe_customer_id).toBeNull()
+    expect(fresh.invoice_note).toBeNull()
+    expect(fresh.hourly_rate_period).toBe(firmToday().slice(0, 7))
+    expect(fresh.hourly_rate_history).toBe('[]')
+    expect(Object.values(fresh)).not.toContain('cus_payload')
+  })
+
+  it.each([
+    [0, []],
+    [1, [1]],
+    [500, [500]],
+    [501, [500, 1]],
+  ])('restores %i invoices as statements of %j rows, every column verbatim from the snapshot', async (count, sizes) => {
+    const invoices = Array.from({ length: count }, (_, index) =>
+      invoiceRow(index, 'c1', {
+        pay_token: `tok-${index}`,
+        recorded_outside_app: index === count - 1,
+        stripe_card_session_id: `cs_${index}`,
+        original_line_items: index % 2 ? [{ kind: 'plan', amount: index }] : null,
+      }),
+    )
+    const fake = fakePostgres({ invoices })
+    await postgresStore(fake).write(workspace({ timeEntries: [] }))
+
+    expect(rowsPer(fake, 'invoices', INVOICE_COLUMNS)).toEqual(sizes)
+    const restored = insertedRows(fake.statements, 'invoices')
+    expect(restored.map((row) => row.id)).toEqual(invoices.map((invoice) => invoice.id))
+    for (const [index, row] of restored.entries()) {
+      expect(row.pay_token, `invoice ${index}`).toBe(`tok-${index}`)
+      expect(row.stripe_card_session_id).toBe(`cs_${index}`)
+      expect(row.recorded_outside_app).toBe(index === count - 1)
+      // NULL stays NULL (not '[]'), a value stays its JSON string.
+      expect(row.original_line_items).toBe(index % 2 ? JSON.stringify([{ kind: 'plan', amount: index }]) : null)
+      expect(row.created_at).toBe(invoices[index].created_at)
+    }
+  })
+
+  it('drops the invoices of a client that is gone from the payload, wherever they sit in a chunk', async () => {
+    const invoices = [
+      invoiceRow(0, 'c1'),
+      invoiceRow(1, 'c-gone'),
+      invoiceRow(2, 'c1'),
+      invoiceRow(3, 'c-gone'),
+    ]
+    const fake = fakePostgres({ invoices })
+    await postgresStore(fake).write(workspace({ timeEntries: [] }))
+
+    expect(insertedRows(fake.statements, 'invoices').map((row) => row.id)).toEqual(['inv-00000', 'inv-00002'])
+  })
+
+  it.each([
+    ['subscription_plans', 5, (index) => ({ plans: [{ id: `plan-${pad(index)}`, name: `Plan ${index}` }] })],
+    ['contacts', 12, (index) => ({ contacts: [{ id: `contact-${pad(index)}`, name: `Contact ${index}` }] })],
+    [
+      'reimbursements',
+      6,
+      (index) => ({ reimbursements: [{ id: `reim-${pad(index)}`, clientId: 'c1', date: '2026-02-10', description: 'x', amount: index }] }),
+    ],
+    [
+      'timesheet_locks',
+      5,
+      (index) => ({ timesheetLocks: [{ id: `lock-${pad(index)}`, userId: 'emp-1', period: '2026-01', lockedBy: 'emp-1', lockedAt: '2026-02-01T00:00:00.000Z' }] }),
+    ],
+  ])('sends %s in chunks of 500 in payload order', async (table, width, make) => {
+    const key = Object.keys(make(0))[0]
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({ timeEntries: [], [key]: Array.from({ length: 1001 }, (_, index) => make(index)[key][0]) }),
+    )
+
+    expect(rowsPer(fake, table, width)).toEqual([500, 500, 1])
+    expect(insertedRows(fake.statements, table).map((row) => row.id)).toEqual(
+      Array.from({ length: 1001 }, (_, index) => make(index)[key][0].id),
+    )
+  })
+
+  it('drops weekly submissions for a user nobody knows, and sends the rest in chunks', async () => {
+    const submissions = Array.from({ length: 502 }, (_, index) => ({
+      id: `ws-${pad(index)}`,
+      userId: index === 3 ? 'emp-nobody' : 'emp-1',
+      weekStart: '2026-02-01',
+      status: 'pending',
+    }))
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace({ timeEntries: [], weeklySubmissions: submissions }))
+
+    expect(rowsPer(fake, 'weekly_submissions', 8)).toEqual([500, 1])
+    expect(insertedRows(fake.statements, 'weekly_submissions').map((row) => row.id)).not.toContain('ws-00003')
+  })
+
+  it('keeps the covered-date ledger, anchor, resume flag and category of a stored expense wherever it sits in a chunk', async () => {
+    const recurring = Array.from({ length: 501 }, (_, index) => ({
+      id: `rec-${pad(index)}`,
+      clientId: 'c1',
+      description: `Expense ${index}`,
+      amount: 10,
+      frequency: 'monthly',
+      startDate: '2026-01-01',
+      coverageEnd: '2026-02-20',
+      // A stale tab's ledger, anchor and category: none may win over what is stored.
+      coverageHistory: { stale: true },
+      coverageAnchorDay: 1,
+      coverageResumePending: false,
+      category: index === 500 ? undefined : 'expense',
+    }))
+    const stored = [0, 500].map((index) => ({
+      id: `rec-${pad(index)}`,
+      coverage_anchor_day: 13,
+      coverage_resume_pending: true,
+      coverage_history: { '2026-01': { start: '2026-01-13', end: '2026-02-13' } },
+      category: 'software',
+    }))
+    const fake = fakePostgres({ recurringRows: stored })
+    await postgresStore(fake).write(workspace({ timeEntries: [], recurringReimbursements: recurring }))
+
+    expect(rowsPer(fake, 'recurring_reimbursements', 16)).toEqual([500, 1])
+    const rows = new Map(insertedRows(fake.statements, 'recurring_reimbursements').map((row) => [row.id, row]))
+    // Stored: first of the first chunk, and the only row of the second.
+    for (const id of ['rec-00000', 'rec-00500']) {
+      expect(rows.get(id).coverage_anchor_day).toBe(13)
+      expect(rows.get(id).coverage_resume_pending).toBe(true)
+      expect(rows.get(id).coverage_history).toBe(JSON.stringify({ '2026-01': { start: '2026-01-13', end: '2026-02-13' } }))
+    }
+    // The payload names 'expense' for the first, so it wins; the last names none, so the stored 'software' does.
+    expect(rows.get('rec-00000').category).toBe('expense')
+    expect(rows.get('rec-00500').category).toBe('software')
+    // Nothing stored: the anchor comes from the payload's end date, the ledger from the payload.
+    expect(rows.get('rec-00001').coverage_anchor_day).toBe(20)
+    expect(rows.get('rec-00001').coverage_history).toBe(JSON.stringify({ stale: true }))
+  })
+
+  it('keeps the users insert per row, with its hash logic and its on conflict tail', async () => {
+    const fake = fakePostgres({ userRows: [{ id: 'emp-1' }] })
+    await postgresStore(fake).write(
+      workspace({
+        employees: [
+          { id: 'emp-1', name: 'Lisa', role: 'bookkeeper' },
+          { id: 'emp-2', name: 'Priya', role: 'bookkeeper' },
+        ],
+      }),
+    )
+
+    const inserts = statementsOf(fake, 'users')
+    expect(inserts).toHaveLength(2)
+    for (const statement of inserts) {
+      expect(statement.text).toMatch(/on conflict \(id\) do update\s+set name = excluded\.name,\s+updated_at = now\(\)$/)
+    }
+    expect(inserts[0].params[5]).toBeNull()
+    expect(inserts[1].params[5]).toMatch(/^[0-9a-f-]{36}:[0-9a-f]{128}$/)
+  })
+
+  it('writes the tables in the order the foreign keys need', async () => {
+    const fake = fakePostgres({ invoices: [invoiceRow(0, 'c1')] })
+    await postgresStore(fake).write(
+      workspace({
+        plans: [{ id: 'plan-1', name: 'P' }],
+        contacts: [{ id: 'contact-1', name: 'K' }],
+        reimbursements: [{ id: 'reim-1', clientId: 'c1', date: '2026-02-10', description: 'x', amount: 1 }],
+        recurringReimbursements: [
+          { id: 'rec-1', clientId: 'c1', description: 'x', amount: 1, frequency: 'monthly', startDate: '2026-01-01' },
+        ],
+        timesheetLocks: [{ id: 'lock-1', userId: 'emp-1', period: '2026-01', lockedBy: 'emp-1' }],
+        weeklySubmissions: [{ id: 'ws-1', userId: 'emp-1', weekStart: '2026-02-01', status: 'pending' }],
+        checklistTemplates: [{ id: 'tpl-1', title: 'T', assigneeId: 'emp-1', stages: [{ id: 's', name: 'S', items: [] }] }],
+        checklists: [{ id: 'cl-1', title: 'C', clientId: 'c1', assigneeId: 'emp-1', dueDate: '2026-02-28', items: [] }],
+      }),
+    )
+
+    const order = [
+      'users',
+      'subscription_plans',
+      'contacts',
+      'clients',
+      'invoices',
+      'time_entries',
+      'timesheet_locks',
+      'weekly_submissions',
+      'reimbursements',
+      'recurring_reimbursements',
+      'checklist_templates',
+      'checklist_template_stages',
+      'checklists',
+    ]
+    const at = order.map((table) => fake.indexOf(new RegExp(`^insert into ${table}\\b`, 'i')))
+    expect(at.every((index) => index > -1), JSON.stringify(at)).toBe(true)
+    expect(at).toEqual([...at].sort((a, b) => a - b))
+    // All of it after the wipe and before the commit.
+    expect(Math.min(...at)).toBeGreaterThan(fake.indexOf(/^delete from contacts$/i))
+    expect(Math.max(...at)).toBeLessThan(fake.indexOf(/^commit$/i))
+  })
+
+  it('reports the rows of each table in the write-committed breakdown', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      // A pool that says how many rows an INSERT carried, as Postgres does.
+      const fake = fakePostgres()
+      const run = async (text, params) => {
+        const result = await fake.pool.query(text, params)
+        const table = /^\s*insert\s+into\s+(\w+)/i.exec(text)?.[1]
+        return table
+          ? { ...result, rowCount: insertedRows([{ text: String(text).trim(), params }], table).length }
+          : result
+      }
+      const client = { query: run, release() {} }
+      await postgresStore({ ...fake, pool: { connect: async () => client, query: run } }).write(
+        workspace({ clients: clientsOf(501), timeEntries: [] }),
+      )
+      const line = log.mock.calls.map((call) => String(call[0])).find((text) => text.startsWith('[bulk-save] write committed'))
+      expect(line).toMatch(/clients 501 in \d+ms/)
+    } finally {
+      log.mockRestore()
+    }
   })
 })
