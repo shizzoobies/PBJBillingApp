@@ -77,6 +77,18 @@ covered one is charged the remainder; a prepayment invoice is an ordinary first 
 be charged. **KLC:** credit belongs to the master that pays; no billing period on masters or
 subs in v1. **Hourly clients:** no billing period; a manual credit (a deposit) still works.
 
+## Brittany's answers (2026-10-07, on the ticket)
+
+1. The prepayment invoice goes out WITH the first covered month's invoice (October's): it covers
+   October and carries the ESTIMATED fee for the later months (November, December). Each later
+   month still gets its own invoice, which draws from the remaining prepayment; when the
+   prepayment is used up, the next period's prepayment invoice is issued. So stage 2 is: on the
+   anchor month the monthly invoice itself carries extra "Prepayment for <month>" lines for
+   months 2..N (not a separate invoice the run before), and paying it creates the credit for
+   those months.
+2. The QuickBooks item for prepayments and for the credit drawn on each monthly invoice is
+   "Deferred Revenue".
+
 ## Billing period (stage 2)
 
 Client fields `billing_period_months` (any whole number of months, 1 = monthly as today,
