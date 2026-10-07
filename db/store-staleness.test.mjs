@@ -38,6 +38,7 @@ import {
   WaitRefusedError,
   WorkspaceBusyError,
   WorkspaceChangedError,
+  bulkSaveBreakdown,
   mapChecklistItemRow,
   mapClientRow,
   mapInvoiceRow,
@@ -39629,5 +39630,154 @@ describe('bulk save golden parity (postgres branch)', () => {
     const first = await capture()
     const second = await capture()
     expect(second.golden).toEqual(first.golden)
+  })
+})
+
+/**
+ * Stage 0 of the bulk-save batching (docs/plans/bulk-save-batching-2026-10.md):
+ * two changes that alter nothing the save writes.
+ */
+describe('bulk save: password hashing (postgres branch)', () => {
+  // The password parameter of `insert into users` ($6): `coalesce((select
+  // password_hash ...), $6)` keeps the stored hash for an existing id, so $6 only
+  // ever matters for a user the save creates.
+  const passwordParam = (fake, id) =>
+    fake.matching(/^insert into users/i).find((statement) => statement.params[0] === id).params[5]
+
+  const twoEmployees = () =>
+    workspace({
+      employees: [
+        { id: 'emp-1', name: 'Lisa', role: 'bookkeeper' },
+        { id: 'emp-2', name: 'Priya', role: 'bookkeeper' },
+      ],
+    })
+
+  it('hashes a password only for a user the save is creating', async () => {
+    const fake = fakePostgres({ userRows: [{ id: 'emp-1' }] })
+    await postgresStore(fake).write(twoEmployees())
+
+    // emp-1 is already stored: nothing to hash, and the stored hash wins in SQL.
+    expect(passwordParam(fake, 'emp-1')).toBeNull()
+    // emp-2 is new: a real salted scrypt hash, 'salt:128 hex characters'.
+    expect(passwordParam(fake, 'emp-2')).toMatch(/^[0-9a-f-]{36}:[0-9a-f]{128}$/)
+  })
+
+  it('still hashes every employee on an empty users table, a different one each', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(twoEmployees())
+
+    const hashes = ['emp-1', 'emp-2'].map((id) => passwordParam(fake, id))
+    for (const hash of hashes) expect(hash).toMatch(/^[0-9a-f-]{36}:[0-9a-f]{128}$/)
+    expect(hashes[0]).not.toBe(hashes[1])
+  })
+
+  it('leaves the rest of the users statement as it was', async () => {
+    const fake = fakePostgres({ userRows: [{ id: 'emp-1' }] })
+    await postgresStore(fake).write(twoEmployees())
+
+    const [first] = fake.matching(/^insert into users/i)
+    expect(first.text).toMatch(/coalesce\(\(select password_hash from users where id = \$1\), \$6\)/)
+    expect(first.text).toMatch(/on conflict \(id\) do update\s+set name = excluded\.name,\s+updated_at = now\(\)/)
+    expect(first.params.slice(0, 5)).toEqual(['emp-1', 'Lisa', 'emp-1@pbj.local', 'bookkeeper', 'Bookkeeper'])
+  })
+})
+
+describe('bulk save: the write-committed line (postgres branch)', () => {
+  it('formats the phase breakdown with the slowest insert table first', () => {
+    expect(
+      bulkSaveBreakdown(
+        { lock: 12, check: 310, snapshots: 95, deletes: 40, inserts: 9100, version: 280, commit: 30 },
+        new Map([
+          ['checklist_items', { rows: 2557, ms: 2700 }],
+          ['time_entries', { rows: 3178, ms: 3400 }],
+          ['contacts', { rows: 0, ms: 3 }],
+        ]),
+      ),
+    ).toBe(
+      ' | lock 12ms check 310ms snapshots 95ms deletes 40ms inserts 9.1s' +
+        ' (time_entries 3178 in 3.4s, checklist_items 2557 in 2.7s, contacts 0 in 3ms)' +
+        ' version 280ms commit 30ms',
+    )
+  })
+
+  it('says 0ms for a phase that did not run and leaves the list off when nothing was inserted', () => {
+    expect(bulkSaveBreakdown({ lock: 1 }, new Map())).toBe(
+      ' | lock 1ms check 0ms snapshots 0ms deletes 0ms inserts 0ms version 0ms commit 0ms',
+    )
+  })
+
+  /** A pool where every statement takes 1 ms of a controlled clock and an INSERT reports the rows it carried. */
+  function clockedFake(options) {
+    const fake = fakePostgres(options)
+    const run = async (text, params) => {
+      vi.setSystemTime(Date.now() + 1)
+      const result = await fake.pool.query(text, params)
+      const table = /^\s*insert\s+into\s+(\w+)/i.exec(text)?.[1]
+      return table
+        ? { ...result, rowCount: insertedRows([{ text: String(text).trim(), params }], table).length }
+        : result
+    }
+    const client = { query: run, release() {} }
+    return { ...fake, pool: { connect: async () => client, query: run } }
+  }
+
+  async function committedLines(fake, options = {}) {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-03-05T16:00:00.000Z'))
+    try {
+      await postgresStore(fake).write(
+        workspace({
+          timeEntries: [
+            { id: 't1', minutes: 30, clientId: 'c1', employeeId: 'emp-1' },
+            { id: 't2', minutes: 45, clientId: 'c1', employeeId: 'emp-1' },
+          ],
+        }),
+        options,
+      )
+      return log.mock.calls.map((call) => String(call[0])).filter((line) => line.startsWith('[bulk-save]'))
+    } finally {
+      vi.useRealTimers()
+      log.mockRestore()
+    }
+  }
+
+  it('keeps the prefix byte for byte and appends the breakdown and row counts', async () => {
+    const lines = await committedLines(clockedFake())
+
+    expect(lines).toHaveLength(1)
+    // The first part is what the handoff and the alerting grep for.
+    expect(lines[0]).toMatch(/^\[bulk-save\] write committed in \d+ms after 1 lock attempt \| /)
+    expect(lines[0]).toMatch(
+      /^\[bulk-save\] write committed in \d+ms after 1 lock attempt \| lock 3ms check 2ms snapshots \d+ms deletes 14ms inserts \d+ms \(.*\) version 0ms commit 1ms$/,
+    )
+    // Every row the save inserted, by table: 2 time entries, 1 user, 1 client.
+    expect(lines[0]).toContain('time_entries 2 in 2ms')
+    expect(lines[0]).toContain('clients 1 in 1ms')
+    expect(lines[0]).toContain('users 1 in 1ms')
+  })
+
+  it('times the version read when the caller asked for one', async () => {
+    const lines = await committedLines(clockedFake(), { returnVersion: true })
+    expect(lines[0]).toMatch(/ version 1ms commit 1ms$/)
+  })
+
+  it('describes the attempt that committed, not the ones that gave way at the lock', async () => {
+    const busy = Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' })
+    const lines = await committedLines(
+      clockedFake({ failOn: { pattern: /^lock table/i, error: busy, times: 1 } }),
+    )
+
+    expect(lines[0]).toMatch(/^\[bulk-save\] write committed in \d+ms after 2 lock attempts \| lock 3ms check 2ms /)
+  })
+
+  it('does not touch what the transaction issues: the lock is still the first statement after begin', async () => {
+    const fake = clockedFake()
+    await committedLines(fake)
+
+    const texts = fake.statements.map((statement) => statement.text)
+    const begin = texts.indexOf('begin')
+    expect(texts[begin + 1]).toMatch(/^set local lock_timeout = '1500ms'$/)
+    expect(texts[begin + 2]).toBe(BULK_SAVE_LOCK_SQL)
   })
 })

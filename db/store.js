@@ -1359,6 +1359,55 @@ export const BULK_SAVE_LOCK_SQL = `lock table ${BULK_SAVE_LOCK_TABLES.join(', ')
  */
 export const BULK_SAVE_LOCK_TIMEOUTS = ['1500ms', '1500ms', '3000ms']
 
+const BULK_SAVE_INSERT_TABLE = /^\s*insert\s+into\s+([a-z_]+)/i
+
+/** 850ms, then 9.1s: either reads at a glance. */
+function formatBulkSaveDuration(ms) {
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
+/**
+ * The connection `write()` runs its transaction on, wrapped so every INSERT it
+ * issues is tallied by table (rows that landed, time spent) for the breakdown in
+ * the `[bulk-save] write committed` line. Everything else, and every INSERT's
+ * own result and error, passes through untouched. The row count is the
+ * statement's `rowCount`, so a skipped `on conflict do nothing` row is not
+ * counted and a multi-row statement counts all its rows; a pool that reports no
+ * `rowCount` counts one per statement.
+ */
+function tallyBulkSaveInserts(rawClient, tally) {
+  return {
+    release: (error) => rawClient.release(error),
+    async query(text, params) {
+      const table = typeof text === 'string' ? BULK_SAVE_INSERT_TABLE.exec(text)?.[1] : undefined
+      if (!table) return rawClient.query(text, params)
+      const startedAt = Date.now()
+      const result = await rawClient.query(text, params)
+      tally(table, Number.isInteger(result?.rowCount) ? result.rowCount : 1, Date.now() - startedAt)
+      return result
+    },
+  }
+}
+
+/**
+ * The phase breakdown appended to the `[bulk-save] write committed` line, e.g.
+ * ` | lock 12ms check 310ms snapshots 95ms deletes 40ms inserts 9.1s (time_entries
+ * 3178 in 3.4s, checklist_items 2557 in 2.7s) version 280ms commit 30ms`.
+ * `phases` is milliseconds by phase for the attempt that committed; `inserts`
+ * maps a table to { rows, ms }. Tables are listed slowest first.
+ */
+export function bulkSaveBreakdown(phases, inserts) {
+  const ms = (phase) => formatBulkSaveDuration(phases[phase] ?? 0)
+  const byTable = [...inserts]
+    .sort((a, b) => b[1].ms - a[1].ms || a[0].localeCompare(b[0]))
+    .map(([table, tally]) => `${table} ${tally.rows} in ${formatBulkSaveDuration(tally.ms)}`)
+  return (
+    ` | lock ${ms('lock')} check ${ms('check')} snapshots ${ms('snapshots')} deletes ${ms('deletes')}` +
+    ` inserts ${ms('inserts')}${byTable.length > 0 ? ` (${byTable.join(', ')})` : ''}` +
+    ` version ${ms('version')} commit ${ms('commit')}`
+  )
+}
+
 /** 55P03 lock_not_available (lock_timeout hit) and 40P01 deadlock_detected. */
 function isWorkspaceLockContention(error) {
   return error?.code === '55P03' || error?.code === '40P01'
@@ -7914,7 +7963,14 @@ export class AppDataStore {
     data = sanitizeAppData(data)
 
     if (this.pool) {
-      const client = await this.pool.connect()
+      const rawClient = await this.pool.connect()
+      // Where the time went, for the one log line after the commit: a lap per
+      // phase and the INSERTs by table. Reset by each attempt (see below).
+      const timings = { phases: {}, inserts: new Map() }
+      const client = tallyBulkSaveInserts(rawClient, (table, rows, ms) => {
+        const tally = timings.inserts.get(table) ?? { rows: 0, ms: 0 }
+        timings.inserts.set(table, { rows: tally.rows + rows, ms: tally.ms + ms })
+      })
 
       // Defensive: drop any records that reference an FK target no longer
       // present in this snapshot. Without this guard, an in-memory delete
@@ -8013,6 +8069,7 @@ export class AppDataStore {
       const existingUserIds = (await this.pool.query('select id from users')).rows.map(
         (row) => row.id,
       )
+      const storedUserIds = new Set(existingUserIds)
       const validUserIds = new Set([
         ...existingUserIds,
         ...(Array.isArray(data.employees) ? data.employees : [])
@@ -8024,6 +8081,16 @@ export class AppDataStore {
       // connection, never released mid-loop) only when the table locks could not
       // be had; the rollback and the decision to retry live there.
       const runTransaction = async (lockTimeout) => {
+        // A retried attempt starts the laps over: the line describes the attempt
+        // that committed, not the ones that gave way at the lock.
+        timings.phases = {}
+        timings.inserts.clear()
+        let lapAt = Date.now()
+        const lap = (phase) => {
+          const now = Date.now()
+          timings.phases[phase] = now - lapAt
+          lapAt = now
+        }
         await client.query('begin')
 
         // THE TABLES FIRST, before the fingerprint and before any snapshot. A
@@ -8034,6 +8101,7 @@ export class AppDataStore {
         // deleted one. `set local` per attempt: it dies with the transaction.
         await client.query(`set local lock_timeout = '${lockTimeout}'`)
         await client.query(BULK_SAVE_LOCK_SQL)
+        lap('lock')
 
         // Staleness guard, INSIDE the transaction. Running it here (rather than
         // in the endpoint before calling write) means a concurrent save cannot
@@ -8072,6 +8140,7 @@ export class AppDataStore {
             }),
           )
         }
+        lap('check')
 
         // `invoices` is NOT part of the bulk-save payload — the app never sends
         // invoices through the workspace save, so `data` carries none to
@@ -8279,6 +8348,7 @@ export class AppDataStore {
         // is the same one `createClient` gives a brand-new hourly client.
         const currentRatePeriod = firmToday().slice(0, 7)
 
+        lap('snapshots')
         await client.query('delete from checklist_items')
         await client.query('delete from checklists')
         await client.query('delete from checklist_template_items')
@@ -8293,6 +8363,7 @@ export class AppDataStore {
         await client.query('delete from clients')
         await client.query('delete from subscription_plans')
         await client.query('delete from contacts')
+        lap('deletes')
 
         for (const employee of data.employees) {
           // SECURITY (H4): the bulk save is owner-writable and re-inserts
@@ -8337,7 +8408,15 @@ export class AppDataStore {
               `${employee.id}@pbj.local`,
               roleToDbRole('Bookkeeper'),
               'Bookkeeper',
-              hashPassword(randomBytes(32).toString('base64url')),
+              // Only a user this save is CREATING needs a hash. For an id already
+              // in `users` the `coalesce` above keeps the stored one and throws
+              // this value away, and scrypt blocks the event loop for ~50 ms per
+              // call - once per user, on every save. A user that vanished between
+              // the `select id from users` above and here would fail the NOT NULL
+              // (the save rolls back and the retry sees them gone and hashes);
+              // users are only ever soft-deleted, so that is a boot-time demo
+              // cleanup at most.
+              storedUserIds.has(employee.id) ? null : hashPassword(randomBytes(32).toString('base64url')),
             ],
           )
         }
@@ -8974,9 +9053,12 @@ export class AppDataStore {
         // table locks nothing else can write these tables in between, so the
         // value is exactly the state the commit publishes. Asked for only by
         // the caller that hands it to a tab; everyone else pays no query.
+        lap('inserts')
         const producedVersion = returnVersion ? await postgresWorkspaceVersion(client) : undefined
+        lap('version')
 
         await client.query('commit')
+        lap('commit')
         return producedVersion
       }
 
@@ -9021,7 +9103,8 @@ export class AppDataStore {
         client.release(releaseError)
       }
       console.log(
-        `[bulk-save] write committed in ${Date.now() - startedAt}ms after ${attempts} lock attempt${attempts === 1 ? '' : 's'}`,
+        `[bulk-save] write committed in ${Date.now() - startedAt}ms after ${attempts} lock attempt${attempts === 1 ? '' : 's'}` +
+          bulkSaveBreakdown(timings.phases, timings.inserts),
       )
 
       return producedVersion
