@@ -25,7 +25,30 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-07, late night - READ THIS FIRST):** `main` = `1c7d23d` (+ this handoff),
+**State right now (2026-10-07, about 7:40 pm Eastern - READ THIS FIRST):** `main` = `5ee610d` (+ this
+handoff), deployed, `/health` 200, voice re-provisioned. Suite **340 files / 7692 tests**. Manifest
+**204,952 bytes - 48 under the cap; TRIM FIRST.** **CREDIT ON ACCOUNT IS COMPLETE:** stage 2 (the billing
+period, `featreq-110efd15` SHIPPED with a note in Brittany's words) went out today as `69c5463` (2A: client
+fields `billing_period_months` / `period_anchor_month`, the Billing period card, `prepayment` lines on the
+anchor month's invoice, QBO Deferred Revenue) and `5ee610d` (2B: derived, never-stored credits
+`prepay:<inv>:<YYYY-MM>` from PAID anchor invoices; the send holds - `unpaid` offers Send anyway,
+`processing` and `not_applied` have NO override; void and undo-mark-paid guards under the per-client lock;
+billing masters and subs excluded). Two review rounds fixed three money defects before the ship (I-1: a later
+month generated before the anchor was paid could be billed twice; R-1: a $0 month held forever; R-3: Send
+anyway while the anchor's bank payment was clearing). A rolled-back production trial of the two columns
+through the batched client insert passed; nobody had set a period while 2A was live alone. Read-only checks
+at ship time: 0 clients with a period, 0 invoices with prepayment lines - the feature is off until Brittany
+sets a period on a client. Leftover minors are ticket `featreq-759a281b` (worth reading before touching the
+guard). **Also today:** `featreq-c11c63ea` (Allison "clocked in without a task") was a GROUP timer holding
+block, unsplit - no rule was bypassed; the ticket is Needs input to Brittany with two choices (task box on the
+group timer? block Start until a task is picked?) and the trace is `.superpowers/sdd/clockin-trace.md`;
+four real group blocks are unsplit and on no invoice (hers from Sep 9, 43 min across 19 clients, is the
+biggest). `featreq-5e195707` (1099 engagement email) is Needs input to Brittany with three questions. The
+Planned column is EMPTY. Worktrees `AP-laneB`, `AP-laneC`, `AP-laneD` are all merged and removable (each has a
+`node_modules` JUNCTION to the primary tree - remove the LINK, never its target, then `git worktree remove`).
+The run ledger is `.superpowers/sdd/new-queue-2026-10-01.md` (git-ignored, this machine).
+
+**Earlier (2026-10-07, late night - stage 2 was parked here; superseded by the paragraph above):** `main` = `1c7d23d` (+ this handoff),
 deployed, `/health` 200, voice re-provisioned after every ship. Suite **333 files / 7548 tests**. Manifest
 **204,988 bytes - 12 under the cap; TRIM FIRST.** Today: the bulk-save batching (DONE, measured at
 872-962 ms per save vs 10-13 s), Brittany's split-time request, four send-backs/queue items, and the
