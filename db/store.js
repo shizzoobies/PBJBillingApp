@@ -83,6 +83,7 @@ import {
   postgresWorkspaceVersion,
 } from '../lib/workspace-version.js'
 import { clientHistoryRefusal } from '../lib/client-delete-rule.js'
+import { insertRowsBatched } from '../lib/insert-rows-batched.js'
 import {
   periodLabelForInstance,
   sanitizeCoverageDate,
@@ -289,6 +290,111 @@ function normalizeStoredSessions(rawSessions, startedAt, endedAt) {
     return [{ startAt: startedAt.toISOString(), endAt: endedAt.toISOString() }]
   }
   return []
+}
+
+/** A `time_entries` row in the shape the app (and the bulk-save payload) uses. */
+export function mapTimeEntryRow(row) {
+  return {
+    id: row.id,
+    employeeId: row.user_id,
+    clientId: row.client_id ?? '',
+    isAdministrative: Boolean(row.is_administrative),
+    isAdhoc: Boolean(row.is_adhoc),
+    date: row.entry_date.toISOString().slice(0, 10),
+    minutes: Number(row.minutes),
+    category: row.category,
+    description: row.description,
+    billable: row.billable,
+    taskId: row.task_id ?? null,
+    approvalStatus: row.approval_status ?? 'approved',
+    approvalNote: row.approval_note ?? undefined,
+    approvedBy: row.approved_by ?? undefined,
+    approvedAt: row.approved_at ? row.approved_at.toISOString() : undefined,
+    entryMethod: row.entry_method === 'manual' ? 'manual' : 'timer',
+    manualReason: row.manual_reason ?? undefined,
+    startAt: row.started_at ? row.started_at.toISOString() : undefined,
+    endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
+    sessions: normalizeStoredSessions(row.sessions, row.started_at, row.ended_at),
+    groupId: row.group_id ?? undefined,
+    groupClientIds: Array.isArray(row.group_client_ids)
+      ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
+      : [],
+    ...(row.group_allocation ? { groupAllocation: row.group_allocation } : {}),
+    ...(row.task_label ? { taskLabel: row.task_label } : {}),
+    ...(row.created_at ? { createdAt: row.created_at.toISOString() } : {}),
+  }
+}
+
+/**
+ * What `write()` inserts into `time_entries`, one row per entry: the bound
+ * columns in order, the casts the statement has always carried (only `sessions`
+ * is cast), and the one column the statement fills itself. `updated_at` is
+ * re-stamped by the wipe-and-rewrite like every other row.
+ */
+export const TIME_ENTRY_BULK_COLUMNS = [
+  'id',
+  'user_id',
+  'client_id',
+  'entry_date',
+  'minutes',
+  'category',
+  'description',
+  'billable',
+  'task_id',
+  'approval_status',
+  'approval_note',
+  'approved_by',
+  'approved_at',
+  'entry_method',
+  'manual_reason',
+  'is_administrative',
+  'is_adhoc',
+  'started_at',
+  'ended_at',
+  'sessions',
+  'group_id',
+  'group_client_ids',
+  'group_allocation',
+  'task_label',
+  'created_at',
+]
+export const TIME_ENTRY_BULK_CASTS = { sessions: 'jsonb' }
+export const TIME_ENTRY_BULK_LITERALS = { updated_at: 'now()' }
+
+/** The values of one entry for TIME_ENTRY_BULK_COLUMNS, converted exactly as the per-row insert did. */
+export function timeEntryBulkRow(entry) {
+  return [
+    entry.id,
+    entry.employeeId,
+    // Administrative entries have no client — persist NULL.
+    entry.clientId || null,
+    entry.date,
+    entry.minutes,
+    entry.category ?? 'General',
+    entry.description,
+    entry.billable,
+    entry.taskId ?? null,
+    entry.approvalStatus ?? 'approved',
+    entry.approvalNote ?? null,
+    entry.approvedBy ?? null,
+    entry.approvedAt ?? null,
+    entry.entryMethod === 'manual' ? 'manual' : 'timer',
+    entry.entryMethod === 'manual' ? entry.manualReason ?? null : null,
+    Boolean(entry.isAdministrative),
+    Boolean(entry.isAdhoc),
+    entry.startAt ?? null,
+    entry.endAt ?? null,
+    JSON.stringify(Array.isArray(entry.sessions) ? entry.sessions : []),
+    entry.groupId ? String(entry.groupId) : null,
+    Array.isArray(entry.groupClientIds)
+      ? entry.groupClientIds.filter((id) => typeof id === 'string' && id)
+      : [],
+    normalizeGroupAllocation(entry.groupAllocation),
+    entry.taskId ? null : entry.taskLabel ? String(entry.taskLabel) : null,
+    // Preserve the original creation time across the wipe-and-rewrite
+    // so "most recently logged" ordering survives a bulk save.
+    entry.createdAt ? new Date(entry.createdAt) : nowIso(),
+  ]
 }
 
 const VALID_BILLING_MODES = new Set(['hourly', 'subscription', 'annual'])
@@ -7482,35 +7588,7 @@ export class AppDataStore {
           group: row.group_name ?? undefined,
         })),
         clients: clientsResult.rows.map(mapClientRow),
-        timeEntries: timeEntriesResult.rows.map((row) => ({
-          id: row.id,
-          employeeId: row.user_id,
-          clientId: row.client_id ?? '',
-          isAdministrative: Boolean(row.is_administrative),
-          isAdhoc: Boolean(row.is_adhoc),
-          date: row.entry_date.toISOString().slice(0, 10),
-          minutes: Number(row.minutes),
-          category: row.category,
-          description: row.description,
-          billable: row.billable,
-          taskId: row.task_id ?? null,
-          approvalStatus: row.approval_status ?? 'approved',
-          approvalNote: row.approval_note ?? undefined,
-          approvedBy: row.approved_by ?? undefined,
-          approvedAt: row.approved_at ? row.approved_at.toISOString() : undefined,
-          entryMethod: row.entry_method === 'manual' ? 'manual' : 'timer',
-          manualReason: row.manual_reason ?? undefined,
-          startAt: row.started_at ? row.started_at.toISOString() : undefined,
-          endAt: row.ended_at ? row.ended_at.toISOString() : undefined,
-          sessions: normalizeStoredSessions(row.sessions, row.started_at, row.ended_at),
-          groupId: row.group_id ?? undefined,
-          groupClientIds: Array.isArray(row.group_client_ids)
-            ? row.group_client_ids.filter((id) => typeof id === 'string' && id)
-            : [],
-          ...(row.group_allocation ? { groupAllocation: row.group_allocation } : {}),
-          ...(row.task_label ? { taskLabel: row.task_label } : {}),
-          ...(row.created_at ? { createdAt: row.created_at.toISOString() } : {}),
-        })),
+        timeEntries: timeEntriesResult.rows.map(mapTimeEntryRow),
         checklists: allChecklists.filter((checklist) => !checklist.deletedAt),
         recycledChecklists: allChecklists.filter((checklist) => Boolean(checklist.deletedAt)),
         checklistTemplates: checklistTemplatesResult.rows.map((row) => ({
@@ -8685,48 +8763,15 @@ export class AppDataStore {
           )
         }
 
-        for (const entry of safeTimeEntries) {
-          await client.query(
-            `
-              insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id,
-                                        approval_status, approval_note, approved_by, approved_at, entry_method, manual_reason, is_administrative,
-                                        is_adhoc, started_at, ended_at, sessions, group_id, group_client_ids, group_allocation, task_label, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, now())
-            `,
-            [
-              entry.id,
-              entry.employeeId,
-              // Administrative entries have no client — persist NULL.
-              entry.clientId || null,
-              entry.date,
-              entry.minutes,
-              entry.category ?? 'General',
-              entry.description,
-              entry.billable,
-              entry.taskId ?? null,
-              entry.approvalStatus ?? 'approved',
-              entry.approvalNote ?? null,
-              entry.approvedBy ?? null,
-              entry.approvedAt ?? null,
-              entry.entryMethod === 'manual' ? 'manual' : 'timer',
-              entry.entryMethod === 'manual' ? entry.manualReason ?? null : null,
-              Boolean(entry.isAdministrative),
-              Boolean(entry.isAdhoc),
-              entry.startAt ?? null,
-              entry.endAt ?? null,
-              JSON.stringify(Array.isArray(entry.sessions) ? entry.sessions : []),
-              entry.groupId ? String(entry.groupId) : null,
-              Array.isArray(entry.groupClientIds)
-                ? entry.groupClientIds.filter((id) => typeof id === 'string' && id)
-                : [],
-              normalizeGroupAllocation(entry.groupAllocation),
-              entry.taskId ? null : entry.taskLabel ? String(entry.taskLabel) : null,
-              // Preserve the original creation time across the wipe-and-rewrite
-              // so "most recently logged" ordering survives a bulk save.
-              entry.createdAt ? new Date(entry.createdAt) : nowIso(),
-            ],
-          )
-        }
+        // One multi-row statement per 500 entries, in payload order, on this
+        // transaction's connection (stage 1 of docs/plans/bulk-save-batching-2026-10.md).
+        await insertRowsBatched(client, {
+          table: 'time_entries',
+          columns: TIME_ENTRY_BULK_COLUMNS,
+          casts: TIME_ENTRY_BULK_CASTS,
+          literals: TIME_ENTRY_BULK_LITERALS,
+          rows: safeTimeEntries.map(timeEntryBulkRow),
+        })
 
         for (const lock of data.timesheetLocks ?? []) {
           await client.query(

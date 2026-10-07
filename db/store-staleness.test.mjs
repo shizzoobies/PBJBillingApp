@@ -39751,8 +39751,9 @@ describe('bulk save: the write-committed line (postgres branch)', () => {
     expect(lines[0]).toMatch(
       /^\[bulk-save\] write committed in \d+ms after 1 lock attempt \| lock 3ms check 2ms snapshots \d+ms deletes 14ms inserts \d+ms \(.*\) version 0ms commit 1ms$/,
     )
-    // Every row the save inserted, by table: 2 time entries, 1 user, 1 client.
-    expect(lines[0]).toContain('time_entries 2 in 2ms')
+    // Every row the save inserted, by table: 2 time entries (one statement now,
+    // so one millisecond of the controlled clock), 1 user, 1 client.
+    expect(lines[0]).toContain('time_entries 2 in 1ms')
     expect(lines[0]).toContain('clients 1 in 1ms')
     expect(lines[0]).toContain('users 1 in 1ms')
   })
@@ -39779,5 +39780,154 @@ describe('bulk save: the write-committed line (postgres branch)', () => {
     const begin = texts.indexOf('begin')
     expect(texts[begin + 1]).toMatch(/^set local lock_timeout = '1500ms'$/)
     expect(texts[begin + 2]).toBe(BULK_SAVE_LOCK_SQL)
+  })
+})
+
+/**
+ * Stage 1 of the bulk-save batching (docs/plans/bulk-save-batching-2026-10.md):
+ * `time_entries` goes in as multi-row statements. What it writes is pinned by the
+ * golden parity fixture above; this pins the statement shape.
+ */
+describe('bulk save: time_entries as multi-row inserts (postgres branch)', () => {
+  const entries = (count) =>
+    Array.from({ length: count }, (_, index) => ({
+      id: `te-${String(index).padStart(5, '0')}`,
+      employeeId: 'emp-1',
+      clientId: 'c1',
+      date: '2026-02-03',
+      minutes: 10 + index,
+      description: `work ${index}`,
+      billable: true,
+    }))
+
+  const timeEntryInserts = (fake) => fake.matching(/^insert into time_entries\b/i)
+
+  // The per-row statement's column list and casts, written out so a change to
+  // either has to be made here on purpose.
+  const COLUMNS = [
+    'id',
+    'user_id',
+    'client_id',
+    'entry_date',
+    'minutes',
+    'category',
+    'description',
+    'billable',
+    'task_id',
+    'approval_status',
+    'approval_note',
+    'approved_by',
+    'approved_at',
+    'entry_method',
+    'manual_reason',
+    'is_administrative',
+    'is_adhoc',
+    'started_at',
+    'ended_at',
+    'sessions',
+    'group_id',
+    'group_client_ids',
+    'group_allocation',
+    'task_label',
+    'created_at',
+    'updated_at',
+  ]
+
+  it.each([
+    [0, []],
+    [1, [1]],
+    [500, [500]],
+    [501, [500, 1]],
+    [1001, [500, 500, 1]],
+  ])('sends %i entries as statements of %j rows, in payload order', async (count, sizes) => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace({ timeEntries: entries(count) }))
+
+    const inserts = timeEntryInserts(fake)
+    expect(inserts.map((statement) => statement.params.length / 25)).toEqual(sizes)
+    expect(insertedRows(fake.statements, 'time_entries').map((row) => row.id)).toEqual(
+      entries(count).map((entry) => entry.id),
+    )
+  })
+
+  it('never goes near the parameter ceiling: 25 parameters a row, 500 rows a statement', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace({ timeEntries: entries(5000) }))
+
+    const inserts = timeEntryInserts(fake)
+    expect(inserts).toHaveLength(10)
+    for (const statement of inserts) {
+      expect(statement.params).toHaveLength(12_500)
+      const highest = Math.max(...[...statement.text.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))
+      expect(highest).toBe(12_500)
+    }
+  })
+
+  it('keeps the per-row statement’s columns and casts: only sessions is cast, updated_at is now()', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace({ timeEntries: entries(2) }))
+
+    const [statement] = timeEntryInserts(fake)
+    const parsed = parseInsertStatement(statement.text, 'time_entries')
+    expect(parsed.columns).toEqual(COLUMNS)
+    expect(parsed.rows).toHaveLength(2)
+    // $1..$25 in column order, `$20::jsonb` for sessions, nothing else cast.
+    const expected = COLUMNS.map((column, index) =>
+      column === 'updated_at' ? 'now()' : column === 'sessions' ? `$${index + 1}::jsonb` : `$${index + 1}`,
+    )
+    expect(parsed.rows[0]).toEqual(expected)
+    // The second row's placeholders continue where the first left off.
+    expect(parsed.rows[1]).toEqual(
+      COLUMNS.map((column, index) =>
+        column === 'updated_at' ? 'now()' : column === 'sessions' ? `$${25 + index + 1}::jsonb` : `$${25 + index + 1}`,
+      ),
+    )
+  })
+
+  it('writes them where the per-row loop did: after the clients and invoices, before the timesheet locks', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).write(
+      workspace({
+        timeEntries: entries(3),
+        timesheetLocks: [{ id: 'lock-1', userId: 'emp-1', period: '2026-01', lockedBy: 'emp-1' }],
+      }),
+    )
+
+    const at = (pattern) => fake.indexOf(pattern)
+    expect(at(/^delete from time_entries$/i)).toBeGreaterThan(-1)
+    expect(at(/^insert into time_entries\b/i)).toBeGreaterThan(at(/^delete from time_entries$/i))
+    expect(at(/^insert into time_entries\b/i)).toBeGreaterThan(at(/^insert into invoices\b/i))
+    expect(at(/^insert into time_entries\b/i)).toBeLessThan(at(/^insert into timesheet_locks\b/i))
+  })
+
+  it('runs them inside the transaction, under the lock, before the commit', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace({ timeEntries: entries(501) }))
+
+    const begin = fake.indexOf(/^begin$/i)
+    const lock = fake.indexOf(new RegExp(`^${BULK_SAVE_LOCK_SQL}$`, 'i'))
+    const commit = fake.indexOf(/^commit$/i)
+    expect(begin).toBeGreaterThan(-1)
+    expect(lock).toBe(begin + 2)
+    fake.statements.forEach((statement, index) => {
+      if (/^insert into time_entries\b/i.test(statement.text)) {
+        expect(index).toBeGreaterThan(lock)
+        expect(index).toBeLessThan(commit)
+      }
+    })
+  })
+
+  it('rolls the whole save back when a chunk fails, like the per-row loop did', async () => {
+    const boom = Object.assign(new Error('insert or update violates foreign key constraint'), { code: '23503' })
+    const fake = fakePostgres({
+      failOn: { pattern: /^insert into time_entries\b/i, error: boom, times: 1 },
+    })
+
+    await expect(postgresStore(fake).write(workspace({ timeEntries: entries(1001) }))).rejects.toBe(boom)
+
+    // The first chunk threw, so the other two were never sent.
+    expect(timeEntryInserts(fake)).toHaveLength(1)
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+    expect(fake.matching(/^commit$/i)).toHaveLength(0)
   })
 })
