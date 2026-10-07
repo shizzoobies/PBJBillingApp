@@ -2225,7 +2225,8 @@ function formatBulkSaveDuration(ms) {
  * own result and error, passes through untouched. The row count is the
  * statement's `rowCount`, so a skipped `on conflict do nothing` row is not
  * counted and a multi-row statement counts all its rows; a pool that reports no
- * `rowCount` counts one per statement.
+ * `rowCount` counts one per statement. (The time of a table is not tallied here:
+ * `write()` laps it after the table's insert, which also covers building its rows.)
  */
 function tallyBulkSaveInserts(rawClient, tally) {
   return {
@@ -2233,9 +2234,8 @@ function tallyBulkSaveInserts(rawClient, tally) {
     async query(text, params) {
       const table = typeof text === 'string' ? BULK_SAVE_INSERT_TABLE.exec(text)?.[1] : undefined
       if (!table) return rawClient.query(text, params)
-      const startedAt = Date.now()
       const result = await rawClient.query(text, params)
-      tally(table, Number.isInteger(result?.rowCount) ? result.rowCount : 1, Date.now() - startedAt)
+      tally(table, Number.isInteger(result?.rowCount) ? result.rowCount : 1)
       return result
     },
   }
@@ -8349,9 +8349,9 @@ export class AppDataStore {
           // The day this recipe was set up. Read-only on this side, and the
           // floor every spawn is measured against (lib/checklist-start-floor.js
           // — a recipe produces no work from before it existed). The bulk save
-          // never takes it from the payload: its insert supplies
-          // `createdAtFor('checklist_templates', …)`, the snapshot taken inside
-          // the transaction.
+          // takes the snapshot read inside its transaction first (a stale tab
+          // cannot rewrite it), and only a recipe with no stored row falls back to
+          // `newTemplateCreatedAt`: see `checklistTemplateBulkRows`.
           ...(row.created_at ? { createdAt: row.created_at.toISOString() } : {}),
           categoryId: row.category_id ?? null,
           // Off unless an owner turned it on — a task whose template has this
@@ -8791,9 +8791,9 @@ export class AppDataStore {
       // Where the time went, for the one log line after the commit: a lap per
       // phase and the INSERTs by table. Reset by each attempt (see below).
       const timings = { phases: {}, inserts: new Map() }
-      const client = tallyBulkSaveInserts(rawClient, (table, rows, ms) => {
+      const client = tallyBulkSaveInserts(rawClient, (table, rows) => {
         const tally = timings.inserts.get(table) ?? { rows: 0, ms: 0 }
-        timings.inserts.set(table, { rows: tally.rows + rows, ms: tally.ms + ms })
+        timings.inserts.set(table, { rows: tally.rows + rows, ms: tally.ms })
       })
 
       // Defensive: drop any records that reference an FK target no longer
@@ -8908,10 +8908,19 @@ export class AppDataStore {
         // that committed, not the ones that gave way at the lock.
         timings.phases = {}
         timings.inserts.clear()
+        timings.noOp = false
         let lapAt = Date.now()
         const lap = (phase) => {
           const now = Date.now()
           timings.phases[phase] = now - lapAt
+          lapAt = now
+        }
+        // The time since the last lap, charged to one table: its rows are built and
+        // its statements run in that stretch.
+        const lapTable = (table) => {
+          const now = Date.now()
+          const tally = timings.inserts.get(table) ?? { rows: 0, ms: 0 }
+          timings.inserts.set(table, { rows: tally.rows, ms: tally.ms + (now - lapAt) })
           lapAt = now
         }
         await client.query('begin')
@@ -8931,11 +8940,14 @@ export class AppDataStore {
         // land between the check and the deletes below.
         // Throwing here lands in the attempt loop's catch, which issues the rollback —
         // no second rollback needed (a redundant one only logs a warning).
+        let startVersion = null
         if (expectedVersion) {
           const currentVersion = await postgresWorkspaceVersion(client)
           if (currentVersion !== expectedVersion) {
             throw new StaleWorkspaceError(currentVersion)
           }
+          // What the workspace is, under the lock, before this save touches it.
+          startVersion = currentVersion
         }
 
         // A client with time or invoices in the DATABASE is never deleted by a
@@ -9217,6 +9229,8 @@ export class AppDataStore {
           )
         }
 
+        lapTable('users')
+
         // Plans, contacts, clients, the invoice restore, time entries, locks,
         // submissions and expenses: one multi-row insert per 500 rows each, in
         // payload order, on this transaction's connection, in the order the
@@ -9226,12 +9240,14 @@ export class AppDataStore {
           ...BULK_INSERT_SHAPES.subscription_plans,
           rows: data.plans.map((plan) => subscriptionPlanBulkRow(plan, preservedCreatedAt)),
         })
+        lapTable('subscription_plans')
 
         await insertRowsBatched(client, {
           table: 'contacts',
           ...BULK_INSERT_SHAPES.contacts,
           rows: (data.contacts ?? []).map((contact) => contactBulkRow(contact, preservedCreatedAt)),
         })
+        lapTable('contacts')
 
         await insertRowsBatched(client, {
           table: 'clients',
@@ -9240,6 +9256,7 @@ export class AppDataStore {
             clientBulkRow(clientRecord, { validPlanIds, priorClients, currentRatePeriod, preservedCreatedAt }),
           ),
         })
+        lapTable('clients')
 
         // Put back the invoices snapshotted before the wipe, now that their
         // clients exist again. An invoice whose client is gone from this
@@ -9259,6 +9276,7 @@ export class AppDataStore {
             .filter((invoice) => validClientIds.has(invoice.client_id))
             .map(invoiceRestoreRow),
         })
+        lapTable('invoices')
 
         // One multi-row statement per 500 entries, in payload order, on this
         // transaction's connection (stage 1 of docs/plans/bulk-save-batching-2026-10.md).
@@ -9269,12 +9287,14 @@ export class AppDataStore {
           literals: TIME_ENTRY_BULK_LITERALS,
           rows: safeTimeEntries.map(timeEntryBulkRow),
         })
+        lapTable('time_entries')
 
         await insertRowsBatched(client, {
           table: 'timesheet_locks',
           ...BULK_INSERT_SHAPES.timesheet_locks,
           rows: (data.timesheetLocks ?? []).map(timesheetLockBulkRow),
         })
+        lapTable('timesheet_locks')
 
         await insertRowsBatched(client, {
           table: 'weekly_submissions',
@@ -9283,12 +9303,14 @@ export class AppDataStore {
             .filter((submission) => submission && validUserIds.has(submission.userId))
             .map(weeklySubmissionBulkRow),
         })
+        lapTable('weekly_submissions')
 
         await insertRowsBatched(client, {
           table: 'reimbursements',
           ...BULK_INSERT_SHAPES.reimbursements,
           rows: safeReimbursements.map((reimbursement) => reimbursementBulkRow(reimbursement, preservedCreatedAt)),
         })
+        lapTable('reimbursements')
 
         await insertRowsBatched(client, {
           table: 'recurring_reimbursements',
@@ -9297,6 +9319,7 @@ export class AppDataStore {
             recurringReimbursementBulkRow(recurring, preservedCoverageById, preservedCreatedAt),
           ),
         })
+        lapTable('recurring_reimbursements')
 
         // Templates, their stages and the stages' items: three multi-row inserts, in
         // that order (stages reference templates, items reference both), each in
@@ -9313,16 +9336,19 @@ export class AppDataStore {
           ...BULK_INSERT_SHAPES.checklist_templates,
           rows: templateRows.templates,
         })
+        lapTable('checklist_templates')
         await insertRowsBatched(client, {
           table: 'checklist_template_stages',
           ...BULK_INSERT_SHAPES.checklist_template_stages,
           rows: templateRows.stages,
         })
+        lapTable('checklist_template_stages')
         await insertRowsBatched(client, {
           table: 'checklist_template_items',
           ...BULK_INSERT_SHAPES.checklist_template_items,
           rows: templateRows.items,
         })
+        lapTable('checklist_template_items')
 
         // Re-insert active and recycled checklists in one pass — the bulk
         // wipe above clears the table either way, so we'd lose the recycle
@@ -9375,6 +9401,8 @@ export class AppDataStore {
           }
         }
 
+        lapTable('checklists')
+
         // Nothing was inserted ⇒ an identical instance is already in this
         // transaction. Its items MUST be skipped too: `checklist_items`
         // references `checklists(id)`, so inserting them against a row that
@@ -9398,17 +9426,39 @@ export class AppDataStore {
           ...BULK_INSERT_SHAPES.checklist_items,
           rows: itemRows,
         })
+        lapTable('checklist_items')
 
         // The version of what this save produced, taken on THIS transaction's
         // connection just before the commit (see `returnVersion`). Under the
         // table locks nothing else can write these tables in between, so the
         // value is exactly the state the commit publishes. Asked for only by
         // the caller that hands it to a tab; everyone else pays no query.
-        lap('inserts')
+        timings.phases.inserts = [...timings.inserts.values()].reduce((sum, tally) => sum + tally.ms, 0)
         const producedVersion = returnVersion ? await postgresWorkspaceVersion(client) : undefined
         lap('version')
 
-        await client.query('commit')
+        // A save that produced the version it started from changed nothing the
+        // fingerprint can see, so there is nothing to publish: roll back instead of
+        // committing, and hand the tab the same version (it is the right one). This
+        // is an execution detail of the Postgres branch only - the file backend
+        // rewrites one file and has nothing to avoid - and it is what keeps an
+        // autosave of an unchanged workspace from re-stamping `updated_at` on every
+        // row and leaving ~9,000 dead tuples for autovacuum to chew on under these
+        // tables' locks.
+        //
+        // Why the rollback loses nothing: the fingerprint drops only timestamps
+        // (`created_at`, `updated_at`) and the columns a bulk save cannot write
+        // (`VERSION_IGNORED_COLUMNS`: `invoice_note`, the `coverage_*` ledger), and
+        // every one of those is restored from its snapshot above - or is a stamp
+        // (time_entries.created_at is the one the payload may set; the fingerprint
+        // has always treated it as churn). Everything else a save writes is in the
+        // fingerprint, and the invoices it only restores verbatim. Needs BOTH the
+        // starting version (only known when the caller sent `expectedVersion`, which
+        // the route always does) and the produced one (`returnVersion`); anything
+        // else commits as before.
+        const noOp = startVersion !== null && producedVersion !== undefined && producedVersion === startVersion
+        timings.noOp = noOp
+        await client.query(noOp ? 'rollback' : 'commit')
         lap('commit')
         return producedVersion
       }
@@ -9455,8 +9505,14 @@ export class AppDataStore {
       }
       console.log(
         `[bulk-save] write committed in ${Date.now() - startedAt}ms after ${attempts} lock attempt${attempts === 1 ? '' : 's'}` +
-          bulkSaveBreakdown(timings.phases, timings.inserts),
+          bulkSaveBreakdown(
+            timings.phases,
+            new Map([...timings.inserts].filter(([, tally]) => tally.rows > 0)),
+          ),
       )
+      // The line above says "committed" for either ending, as it always has (the
+      // handoff and the alerting grep for it). This one says which it was.
+      if (timings.noOp) console.log(`[bulk-save] no-op save rolled back (${producedVersion})`)
 
       return producedVersion
     }
@@ -9621,8 +9677,9 @@ export class AppDataStore {
         }
       }
 
-      // Cardinal rule 1 mirror of `priorRatePins` in the Postgres branch:
-      // snapshot the STORED pin and ledger of every client on disk.
+      // Cardinal rule 1 mirror of the `ratePeriod` and `rateHistory` of
+      // `priorClients` in the Postgres branch: snapshot the STORED pin and
+      // ledger of every client on disk.
       //
       // ITS OWN try/catch, and deliberately BEFORE the best-effort block below
       // rather than inside it. The merge that applies this map runs at the very
@@ -9848,8 +9905,9 @@ export class AppDataStore {
         // the slot into a ledger wipe.
       }
 
-      // Cardinal rule 1 mirror of the two `priorRatePins` params in the
-      // Postgres branch, as ONE pass and with the same two expressions:
+      // Cardinal rule 1 mirror of the two rate params (`ratePeriod`,
+      // `rateHistory` of `priorClients`) in the Postgres branch, as ONE pass and
+      // with the same two expressions:
       //
       //   period  = stored ?? (billingMode === 'hourly' ? this month : null)
       //   history = stored ?? []

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -55,6 +56,7 @@ import {
   BULK_SAVE_SLICES,
   BULK_SAVE_TABLES,
   StaleWorkspaceError,
+  VERSION_IGNORED_COLUMNS,
   fileWorkspaceVersion,
   foldVersionRows,
   tableVersionSql,
@@ -39831,11 +39833,12 @@ describe('bulk save: the write-committed line (postgres branch)', () => {
     expect(lines[0]).toMatch(
       /^\[bulk-save\] write committed in \d+ms after 1 lock attempt \| lock 3ms check 2ms snapshots \d+ms deletes 14ms inserts \d+ms \(.*\) version 0ms commit 1ms$/,
     )
-    // Every row the save inserted, by table: 2 time entries (one statement now,
-    // so one millisecond of the controlled clock), 1 user, 1 client.
+    // Every row the save inserted, by table, with that table's own lap: 2 time
+    // entries (one statement, so one millisecond of the controlled clock), 1
+    // client, and 1 user (the stored-users read plus its insert: two).
     expect(lines[0]).toContain('time_entries 2 in 1ms')
     expect(lines[0]).toContain('clients 1 in 1ms')
-    expect(lines[0]).toContain('users 1 in 1ms')
+    expect(lines[0]).toContain('users 1 in 2ms')
   })
 
   it('times the version read when the caller asked for one', async () => {
@@ -40559,5 +40562,256 @@ describe('bulk save: clients, invoices and the small tables as multi-row inserts
     } finally {
       log.mockRestore()
     }
+  })
+})
+
+/**
+ * Stage 2 review: first-wins holds across a chunk boundary, not only inside one statement.
+ */
+describe('bulk save: a clash across a chunk boundary (postgres branch)', () => {
+  it('keeps the first of two rows on the same instance when the second is in the next statement', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const fake = fakePostgres({ simulateChecklistUniqueness: true })
+      const checklists = Array.from({ length: 501 }, (_, index) => ({
+        id: `cl-${String(index).padStart(5, '0')}`,
+        title: `Close ${index}`,
+        clientId: 'c1',
+        assigneeId: 'emp-1',
+        dueDate: '2026-02-28',
+        // Rows 0 and 500 are the same (template, cycle, stage); the rest have no template.
+        ...(index === 0 || index === 500 ? { templateId: 'tpl-1', frequency: 'monthly' } : {}),
+        items: [{ id: `item-${index}`, label: 'One', done: false }],
+      }))
+      await postgresStore(fake).write(workspace({ checklists }))
+
+      const inserts = fake.matching(/^insert into checklists\b/i)
+      expect(inserts.map((statement) => statement.params.length / 28)).toEqual([500, 1])
+      expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
+        '[bulk-save] skipped duplicate checklist cl-00500 (template tpl-1, due 2026-02-28, stage 0) — an identical instance is already being written',
+      ])
+      const itemIds = insertedRows(fake.statements, 'checklist_items').map((row) => row.id)
+      expect(itemIds).toHaveLength(500)
+      expect(itemIds).toContain('item-0')
+      expect(itemIds).not.toContain('item-500')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
+
+/**
+ * Stage 4 of the bulk-save batching: a save that produces the version it started
+ * from is rolled back instead of committed (docs/plans/bulk-save-batching-2026-10.md).
+ *
+ * The fake's fingerprint is not canned: it is computed from the rows the save
+ * actually inserts, by a JavaScript copy of `tableVersionSql` (drop `updated_at`
+ * and `created_at` and `VERSION_IGNORED_COLUMNS`, hash the rest, order-free). So
+ * "an identical payload", "only an ignored column changed" and "a real change"
+ * are decided by the same rule Postgres applies, and the starting version is the
+ * fingerprint of what an earlier identical save left behind.
+ */
+describe('bulk save: a save that changes nothing rolls back (postgres branch)', () => {
+  const FINGERPRINTED = [...BULK_SAVE_TABLES.filter((table) => table !== 'client_assignments'), 'users']
+
+  const rowsToFingerprint = (statements) =>
+    FINGERPRINTED.map((table) => {
+      const dropped = new Set(['updated_at', 'created_at', ...(VERSION_IGNORED_COLUMNS[table] ?? [])])
+      const parts = insertedRows(statements, table).map((row) => {
+        const kept =
+          table === 'users'
+            ? { id: row.id, name: row.name }
+            : Object.fromEntries(Object.entries(row).filter(([column]) => !dropped.has(column)))
+        return JSON.stringify(Object.keys(kept).sort().map((column) => [column, kept[column]]))
+      })
+      return { t: table, h: createHash('md5').update(parts.sort().join(',')).digest('hex') }
+    })
+
+  /** What the database holds after `payload` has been saved once. */
+  async function storedAfter(payload, options = {}) {
+    const fake = fakePostgres(options)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await postgresStore(fake).write(payload)
+    } finally {
+      log.mockRestore()
+    }
+    return rowsToFingerprint(fake.statements)
+  }
+
+  const base = () =>
+    workspace({
+      employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper' }],
+      clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }],
+      timeEntries: [
+        { id: 't1', employeeId: 'emp-1', clientId: 'c1', date: '2026-02-03', minutes: 30, description: 'x', billable: true, createdAt: '2026-02-03T15:00:00.000Z' },
+      ],
+      recurringReimbursements: [
+        { id: 'rec-1', clientId: 'c1', description: 'QBO', amount: 90, frequency: 'monthly', startDate: '2026-01-13', coverageEnd: '2026-02-13' },
+      ],
+      checklists: [
+        { id: 'cl-1', title: 'Close', clientId: 'c1', assigneeId: 'emp-1', dueDate: '2026-02-28', items: [{ id: 'i1', label: 'One', done: false }] },
+      ],
+    })
+
+  // The snapshot rows the database would hand back: the endpoint-owned columns the
+  // fingerprint ignores, so a payload cannot move them.
+  const snapshots = () => ({
+    clientRows: [{ id: 'c1', name: 'Acme', invoice_note: 'Kept note', hourly_rate_period: '2026-01', hourly_rate_history: [] }],
+    recurringRows: [
+      {
+        id: 'rec-1',
+        coverage_anchor_day: 13,
+        coverage_resume_pending: true,
+        coverage_history: { '2026-01': { start: '2026-01-13', end: '2026-02-13' } },
+        category: 'expense',
+      },
+    ],
+    userRows: [{ id: 'emp-1' }],
+  })
+
+  /** Run the save as the route does: expecting the stored version, asking for the produced one. */
+  async function save(payload, storedRows, options = {}) {
+    let holder
+    let calls = 0
+    // 1st fingerprint: under the lock, before anything is touched (the stored state).
+    // 2nd: the same connection, after the inserts (what this save produced).
+    const versionResponses = () => (++calls === 1 ? storedRows : rowsToFingerprint(holder.statements))
+    holder = fakePostgres({ ...snapshots(), versionResponses })
+    const lines = []
+    const log = vi.spyOn(console, 'log').mockImplementation((line) => lines.push(String(line)))
+    try {
+      const returned = await postgresStore(holder).write(payload, {
+        expectedVersion: foldVersionRows(storedRows),
+        returnVersion: true,
+        ...options,
+      })
+      return { fake: holder, returned, lines, calls }
+    } finally {
+      log.mockRestore()
+    }
+  }
+
+  const ended = (fake) => ({
+    commits: fake.matching(/^commit$/i).length,
+    rollbacks: fake.matching(/^rollback$/i).length,
+  })
+
+  it('rolls back an identical payload and hands back the version it started from', async () => {
+    const stored = await storedAfter(base(), snapshots())
+    const { fake, returned, lines } = await save(base(), stored)
+
+    expect(returned).toBe(foldVersionRows(stored))
+    expect(ended(fake)).toEqual({ commits: 0, rollbacks: 1 })
+    // The rollback is the transaction's last statement, after every insert and the version read.
+    const texts = fake.statements.map((statement) => statement.text)
+    expect(texts.at(-1)).toBe('rollback')
+    expect(texts.lastIndexOf('rollback')).toBeGreaterThan(texts.findLastIndex((text) => /^insert into /i.test(text)))
+    // The prefix line is unchanged, and the no-op line follows it as its own line.
+    const at = lines.findIndex((line) => line.startsWith('[bulk-save] write committed in '))
+    expect(at).toBeGreaterThan(-1)
+    expect(lines[at + 1]).toBe(`[bulk-save] no-op save rolled back (${foldVersionRows(stored)})`)
+  })
+
+  it('answers a payload that differs only in an ignored column that a save restores with a rollback too', async () => {
+    const stored = await storedAfter(base(), snapshots())
+    const payload = base()
+    // A stale tab's copy of the endpoint-owned columns: the save ignores all three.
+    payload.clients[0].invoiceNote = 'a note the tab invented'
+    payload.recurringReimbursements[0].coverageHistory = { stale: true }
+    payload.recurringReimbursements[0].coverageResumePending = false
+    payload.recurringReimbursements[0].coverageAnchorDay = 1
+    const { fake, returned } = await save(payload, stored)
+
+    expect(returned).toBe(foldVersionRows(stored))
+    expect(ended(fake)).toEqual({ commits: 0, rollbacks: 1 })
+    // ...because the rows it would have written carry the STORED values.
+    expect(insertedRows(fake.statements, 'clients')[0].invoice_note).toBe('Kept note')
+    expect(insertedRows(fake.statements, 'recurring_reimbursements')[0].coverage_anchor_day).toBe(13)
+  })
+
+  it('rolls back when only a time entry’s created_at changed (a stamp the fingerprint ignores)', async () => {
+    const stored = await storedAfter(base(), snapshots())
+    const payload = base()
+    payload.timeEntries[0].createdAt = '2026-02-04T09:00:00.000Z'
+    const { fake, returned } = await save(payload, stored)
+
+    expect(returned).toBe(foldVersionRows(stored))
+    expect(ended(fake)).toEqual({ commits: 0, rollbacks: 1 })
+  })
+
+  it.each([
+    ['a time entry’s minutes', (payload) => (payload.timeEntries[0].minutes = 45)],
+    ['a client’s name', (payload) => (payload.clients[0].name = 'Acme Inc')],
+    ['a new checklist item', (payload) => payload.checklists[0].items.push({ id: 'i2', label: 'Two', done: false })],
+    ['a member’s name', (payload) => (payload.employees[0].name = 'Lisa A.')],
+    ['a removed time entry', (payload) => (payload.timeEntries = [])],
+  ])('commits when %s changed, and returns the NEW version', async (_label, change) => {
+    const stored = await storedAfter(base(), snapshots())
+    const payload = base()
+    change(payload)
+    const { fake, returned, lines } = await save(payload, stored)
+
+    expect(returned).not.toBe(foldVersionRows(stored))
+    expect(ended(fake)).toEqual({ commits: 1, rollbacks: 0 })
+    expect(lines.some((line) => line.includes('no-op save rolled back'))).toBe(false)
+  })
+
+  it('commits when the caller asked for no version, and when it gave no starting version', async () => {
+    const stored = await storedAfter(base(), snapshots())
+
+    // No returnVersion: nothing is computed after the inserts, so nothing can be compared.
+    const quiet = fakePostgres({ ...snapshots(), versionResponses: () => stored })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await postgresStore(quiet).write(base(), { expectedVersion: foldVersionRows(stored) })
+      expect(ended(quiet)).toEqual({ commits: 1, rollbacks: 0 })
+
+      // No expectedVersion: the version is produced but there is no starting one to equal.
+      const unguarded = fakePostgres({ ...snapshots(), versionResponses: () => stored })
+      const returned = await postgresStore(unguarded).write(base(), { returnVersion: true })
+      expect(returned).toBe(foldVersionRows(stored))
+      expect(ended(unguarded)).toEqual({ commits: 1, rollbacks: 0 })
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('still refuses a stale version, rolled back, with nothing inserted', async () => {
+    const stored = await storedAfter(base(), snapshots())
+    const fake = fakePostgres({ ...snapshots(), versionResponses: () => stored })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await expect(
+        postgresStore(fake).write(base(), { expectedVersion: 'not-the-stored-version', returnVersion: true }),
+      ).rejects.toBeInstanceOf(StaleWorkspaceError)
+    } finally {
+      log.mockRestore()
+    }
+    expect(fake.matching(/^insert into /i)).toHaveLength(0)
+    expect(ended(fake)).toEqual({ commits: 0, rollbacks: 1 })
+  })
+
+  it('leaves the lock, the staleness check and the empty-clients guard where they were', async () => {
+    const stored = await storedAfter(base(), snapshots())
+    const { fake } = await save(base(), stored)
+
+    const texts = fake.statements.map((statement) => statement.text)
+    const begin = texts.indexOf('begin')
+    expect(texts[begin + 2]).toBe(BULK_SAVE_LOCK_SQL)
+    // The fingerprint under the lock comes right after it, before the history check.
+    expect(texts[begin + 3]).toMatch(/md5\(coalesce\(string_agg/i)
+  })
+
+  it('the route hands the tab the version write() returns, 200, whether or not the save committed', async () => {
+    const source = await readFile(path.join(projectRoot, 'server.js'), 'utf8')
+    const at = source.indexOf('postWriteVersion = await appDataStore.write(data, { expectedVersion, returnVersion: true })')
+    expect(at).toBeGreaterThan(-1)
+    const tail = source.slice(at, source.indexOf("sendJson(response, 405, { error: 'Method not allowed' })", at))
+    // A returned version is all that keeps the route off its "no version" path ...
+    expect(tail).toContain('if (!postWriteVersion) {')
+    // ... and it is the one the 200 carries in the header.
+    expect(tail).toContain('let nextVersion = postWriteVersion')
+    expect(tail).toMatch(/200,\s*attachedNotes > 0 \|\| versionFailed \? \{ ok: true, refetch: true \} : \{ ok: true \},\s*nextVersion \? \{ \[WORKSPACE_VERSION_HEADER\]: nextVersion \} : \{\}/)
   })
 })
