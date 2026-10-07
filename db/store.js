@@ -1389,6 +1389,13 @@ const ACCOUNT_CREDIT_MAX_DRAWS = 50
 const ACCOUNT_CREDIT_DRAWN_SQL = `select id, number, period, status, line_items from invoices
           where client_id = $1 and status <> 'void'
             and line_items @> '[{"kind":"account_credit"}]'::jsonb`
+/**
+ * Which clients have a live (not void) credit row at all: read ONCE per generation
+ * run, so the clients that have none (nearly all of them) issue no lock and no
+ * ledger read and get exactly the draft they always did.
+ */
+const ACCOUNT_CREDIT_HOLDERS_SQL =
+  'select distinct client_id from account_credits where voided_at is null'
 const ACCOUNT_CREDIT_CHANGED_MESSAGE =
   'The credit on account changed while this was saving, so nothing was changed. Try again.'
 const ACCOUNT_CREDIT_SELECT_COLUMNS = `id, client_id, amount, source_kind, source_ref, for_period,
@@ -2933,6 +2940,30 @@ function recomputeInvoiceMoney(lineItems) {
         .reduce((sum, line) => sum + line.amount, 0),
     ),
     total: roundMoney(lineItems.reduce((sum, line) => sum + line.amount, 0)),
+  }
+}
+
+/**
+ * A freshly generated monthly draft with credit on account drawn onto it: the same
+ * `planAccountCreditDraws` plan Apply credit uses, its line appended last and the
+ * money recomputed (the line sits outside the subtotal, inside the total). The
+ * as-generated snapshot carries the line too, so it reads as generated, not as an
+ * edit. Nothing to draw (no balance, nothing owed) returns the record untouched.
+ */
+function withGeneratedAccountCredit(record, ledger) {
+  const plan = planAccountCreditDraws({
+    lines: record.lineItems,
+    credits: ledger,
+    invoiceId: record.id,
+    period: record.period,
+  })
+  if (!plan.line) return record
+  const lineItems = [...record.lineItems, plan.line]
+  return {
+    ...record,
+    lineItems,
+    originalLineItems: lineItems,
+    ...recomputeInvoiceMoney(lineItems),
   }
 }
 
@@ -14675,6 +14706,9 @@ export class AppDataStore {
     if (clientId && scoped.length === 0) {
       return { period, created, skipped: [{ clientId, reason: 'no-such-client' }] }
     }
+    // Clients with credit on account (stage 1c). Only these draw it onto their new
+    // draft, and only these take the credit lock below.
+    const creditHolders = await this._clientIdsHoldingAccountCredit()
     for (const client of scoped) {
       // "Already has one" is checked FIRST because it is the more useful answer
       // when both are true: a client who was invoiced and has since been moved
@@ -14882,7 +14916,14 @@ export class AppDataStore {
       // window silently — the exact failure this feature exists to prevent,
       // arriving through the back door.
       const saved = await this._withTransaction(async (dbClient) => {
-        const inserted = await this._insertInvoice(record, { dbClient })
+        // CREDIT ON ACCOUNT (stage 1c): a MONTHLY draft (this loop only builds
+        // those; a billing sub never gets here, its work rides the master's
+        // invoice, and the master draws the master's credit) is born carrying the
+        // credit line stage 1b writes by hand, drawn under the client's credit lock
+        // from a ledger read on this same connection.
+        const inserted = creditHolders.has(client.id)
+          ? await this._insertInvoiceDrawingAccountCredit(record, { dbClient })
+          : await this._insertInvoice(record, { dbClient })
         // A null return means the partial unique index refused it — another run
         // created this client's invoice between our read and our write. That is
         // the index doing its job, not an error, and nothing may advance.
@@ -19396,6 +19437,51 @@ export class AppDataStore {
     })
   }
 
+  /** The ids of the clients that have a live credit-on-account row (void ones do not count). */
+  async _clientIdsHoldingAccountCredit() {
+    if (this.pool) {
+      const { rows } = await this.pool.query(ACCOUNT_CREDIT_HOLDERS_SQL)
+      return new Set(rows.map((row) => row.client_id))
+    }
+    const data = await readJson(localDataPath)
+    return new Set(
+      (data.accountCredits ?? []).filter((row) => !row.voidedAt).map((row) => row.clientId),
+    )
+  }
+
+  /**
+   * `_insertInvoice` for a NEW monthly draft whose client has credit on account:
+   * draws from the ledger onto the draft, then inserts, as one step the caller
+   * runs inside its transaction.
+   *
+   * The draw is `planAccountCreditDraws`, the planner Apply credit uses (the credit
+   * meant for the draft's month first, then the oldest, never more than the
+   * draft's pre-credit total or any credit's balance), so the line has the shape
+   * every later save, the editor, the export and the PDF already know.
+   *
+   * Concurrency is the same rule as a spending save. Postgres: the per-client
+   * advisory lock `account_credit:<clientId>` is taken FIRST (held to commit, like
+   * the save's), and the ledger is read on the transaction's own connection UNDER
+   * it, so a manual apply that committed first is counted and one that comes after
+   * waits for this commit and counts this draw. File backend: the read and the
+   * insert share ONE data-file queue slot. A null return is the live-monthly index
+   * refusing the insert, as in `_insertInvoice`; nothing is drawn then.
+   */
+  async _insertInvoiceDrawingAccountCredit(record, { dbClient = null } = {}) {
+    if (this.pool) {
+      await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [
+        `account_credit:${record.clientId}`,
+      ])
+      const ledger = await this._readAccountCredits(record.clientId, { dbClient })
+      return this._insertInvoice(withGeneratedAccountCredit(record, ledger), { dbClient })
+    }
+    return mutateLocalData(async (data) => {
+      const ledger = await this._readAccountCredits(record.clientId, { data })
+      const inserted = await this._insertInvoice(withGeneratedAccountCredit(record, ledger), { data })
+      return { result: inserted, changed: inserted !== null }
+    })
+  }
+
   /**
    * Insert one invoice; null when the live-monthly-per-(client, period) index
    * refuses it.
@@ -19407,7 +19493,7 @@ export class AppDataStore {
    * monthly invoice, and two live retainers for one client are allowed too
    * (a second engagement is a second retainer).
    */
-  async _insertInvoice(record, { dbClient = null } = {}) {
+  async _insertInvoice(record, { dbClient = null, data: held = null } = {}) {
     const kind = record.kind ?? 'monthly'
     // The as-generated snapshot, set HERE so it cannot depend on a caller
     // remembering. It is written once, on this statement, and by nothing else
@@ -19456,7 +19542,9 @@ export class AppDataStore {
       return rows.length > 0 ? { ...record, originalLineItems } : null
     }
 
-    const data = await readJson(localDataPath)
+    // `held` is a workspace the caller already has open inside a data-file queue
+    // slot (`mutateLocalData`), which then does the write itself.
+    const data = held ?? (await readJson(localDataPath))
     if (!Array.isArray(data.invoices)) data.invoices = []
     // Mirror the partial unique index by hand — the file backend has no
     // constraints, and cardinal rule 1 means it has to behave the same. Kind is
@@ -19477,7 +19565,7 @@ export class AppDataStore {
     // returning the same shape.
     const stored = { ...record, originalLineItems }
     data.invoices.push(stored)
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    if (!held) await writeFile(localDataPath, JSON.stringify(data, null, 2))
     return stored
   }
 

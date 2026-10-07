@@ -65,6 +65,7 @@ import {
   unhandledAmountMismatch,
   unhandledCountSentence,
 } from '../../lib/payment-amount-mismatch.js'
+import { generatedCreditNote } from '../lib/accountCreditText'
 import { invoiceAddressee } from '../lib/completeness'
 import { ListSearch } from './ListSearch'
 import {
@@ -1224,7 +1225,8 @@ export function InvoiceMonthRun({
       // the list unchanged otherwise looks like a broken button.
       setNote(
         (result.created.length > 0
-          ? `Built ${result.created.length} invoice${result.created.length === 1 ? '' : 's'}.`
+          ? `Built ${result.created.length} invoice${result.created.length === 1 ? '' : 's'}.` +
+            generatedCreditNote(result.created)
           : 'Nothing new to build — every client already has one for this month.') + optedOutNote,
       )
     } catch (err) {
@@ -1300,6 +1302,7 @@ export function InvoiceMonthRun({
         `Voided ${result.voided} and rebuilt ${result.created.length} invoice${
           result.created.length === 1 ? '' : 's'
         }.` +
+          generatedCreditNote(result.created) +
           (leftAlone - clearing > 0
             ? ` ${leftAlone - clearing} sent or paid invoice${leftAlone - clearing === 1 ? '' : 's'} left alone.`
             : '') +

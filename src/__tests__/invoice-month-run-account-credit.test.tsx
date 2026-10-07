@@ -28,8 +28,10 @@ vi.mock('../lib/api', () => ({
 
 import {
   applyAccountCreditRequest,
+  generateInvoicesRequest,
   listAccountCreditsRequest,
   listInvoicesRequest,
+  regenerateInvoicesRequest,
   listUnappliedRetainersRequest,
   removeAccountCreditRequest,
   updateInvoiceRequest,
@@ -41,6 +43,8 @@ const mockBalance = vi.mocked(listAccountCreditsRequest)
 const mockApply = vi.mocked(applyAccountCreditRequest)
 const mockRemove = vi.mocked(removeAccountCreditRequest)
 const mockUpdate = vi.mocked(updateInvoiceRequest)
+const mockGenerate = vi.mocked(generateInvoicesRequest)
+const mockRegenerate = vi.mocked(regenerateInvoicesRequest)
 
 const clients = [
   {
@@ -341,5 +345,72 @@ describe('InvoiceMonthRun - the applied credit', () => {
     await waitFor(() => expect(mockUpdate).toHaveBeenCalled())
     const [, body] = mockUpdate.mock.calls[0]
     expect(body.lineItems?.[1]).toMatchObject({ kind: 'account_credit', draws: [{ creditId: 'credit-1', amount: 200 }] })
+  })
+})
+
+/**
+ * Stage 1c: the month run draws credit on account onto each new monthly draft
+ * itself. The draft is the same invoice with the same line (so the editor, the
+ * Remove button and the rest above are unchanged); what is new is that the note
+ * after a build says it happened, so a $0 draft is never a surprise.
+ */
+describe('InvoiceMonthRun - credit drawn at generation', () => {
+  const draftWithCredit = (amount: number) =>
+    makeInvoice({
+      lineItems: [{ ...hours }, { ...creditLine, amount: -amount, draws: [{ creditId: 'credit-1', amount }] }],
+      total: 600 - amount,
+      updatedAt: 'g1',
+    })
+
+  it('Generate says how much credit on account it applied', async () => {
+    mockList.mockResolvedValue([])
+    mockGenerate.mockResolvedValue({
+      period: '2026-10',
+      created: [draftWithCredit(250)],
+      skipped: [],
+    })
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate' }))
+
+    expect(
+      await screen.findByText('Built 1 invoice. Credit on account applied: $250.00 on 1 invoice.'),
+    ).toBeInTheDocument()
+  })
+
+  it('Generate adds nothing to its note when no draft drew credit', async () => {
+    mockList.mockResolvedValue([])
+    mockGenerate.mockResolvedValue({ period: '2026-10', created: [makeInvoice()], skipped: [] })
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate' }))
+
+    expect(await screen.findByText('Built 1 invoice.')).toBeInTheDocument()
+    expect(screen.queryByText(/Credit on account applied/)).not.toBeInTheDocument()
+  })
+
+  it('Void & regenerate says the rebuilt drafts drew their credit again', async () => {
+    mockList.mockResolvedValue([makeInvoice()])
+    mockRegenerate.mockResolvedValue({
+      period: '2026-10',
+      voided: 1,
+      created: [draftWithCredit(600)],
+      skipped: [],
+    })
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /Void & regenerate/ }))
+
+    expect(
+      await screen.findByText('Voided 1 and rebuilt 1 invoice. Credit on account applied: $600.00 on 1 invoice.'),
+    ).toBeInTheDocument()
+  })
+
+  it('a generated draft is the ordinary credited draft: the credit shows and Remove credit is offered', async () => {
+    mockList.mockResolvedValue([draftWithCredit(200)])
+    await openEditor()
+    expect(await screen.findByRole('button', { name: 'Remove credit on account from this invoice' })).toBeInTheDocument()
+    expect(applyButton()).not.toBeInTheDocument()
   })
 })

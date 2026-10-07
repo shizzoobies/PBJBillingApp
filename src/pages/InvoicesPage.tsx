@@ -60,6 +60,7 @@ import {
 } from '../lib/api'
 import { selectableClients } from '../lib/clientLifecycle'
 import { invoiceAddressee } from '../lib/completeness'
+import { generatedCreditNote } from '../lib/accountCreditText'
 import { generateSkipMessage } from '../lib/invoiceSkipMessage'
 
 /**
@@ -857,7 +858,7 @@ export function InvoicesPage({
           key: seedKey,
           // The month is named because the month run keeps its OWN picker and
           // may well be sitting on a different one.
-          note: `${made.number ? `Invoice ${made.number}` : 'The invoice'} created as a draft — mark it reviewed in the ${billingPeriodLabel} month run above, then send.`,
+          note: `${made.number ? `Invoice ${made.number}` : 'The invoice'} created as a draft — mark it reviewed in the ${billingPeriodLabel} month run above, then send.${generatedCreditNote([made])}`,
         })
         return
       }

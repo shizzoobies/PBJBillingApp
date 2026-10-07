@@ -1,4 +1,4 @@
-import type { AccountCredit, AccountCreditDraw } from './types'
+import type { AccountCredit, AccountCreditDraw, PersistedInvoice } from './types'
 
 /** "November 2026" from a YYYY-MM. */
 export function accountCreditMonth(period: string): string {
@@ -22,4 +22,28 @@ export function accountCreditDrawText(draw: AccountCreditDraw): string {
 export function accountCreditSourceText(credit: AccountCredit): string {
   if (credit.sourceKind === 'overpayment') return 'Overpayment'
   return 'Manual credit'
+}
+
+/**
+ * What a build says about credit on account (stage 1c): the month run draws it onto
+ * each new monthly draft by itself, so the note after Generate, a one-client
+ * generate and Void & regenerate adds " Credit on account applied: $X on 1 invoice."
+ * Read off the credit lines of the invoices the server returned, in whole cents, so
+ * the figure she is told is the figure stored. Empty when no new draft drew any.
+ */
+export function generatedCreditNote(created: readonly PersistedInvoice[]): string {
+  let cents = 0
+  let invoices = 0
+  for (const invoice of created) {
+    const drawn = invoice.lineItems
+      .filter((line) => line.kind === 'account_credit')
+      .reduce((sum, line) => sum + Math.round(Math.abs(Number(line.amount) || 0) * 100), 0)
+    if (drawn > 0) {
+      cents += drawn
+      invoices += 1
+    }
+  }
+  if (cents === 0) return ''
+  const dollars = (cents / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' })
+  return ` Credit on account applied: ${dollars} ${invoices === 1 ? 'on 1 invoice' : `across ${invoices} invoices`}.`
 }

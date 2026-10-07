@@ -83,6 +83,8 @@ export type InvoiceLogEntry =
 export interface InvoiceSignalSource {
   status?: string
   dueDate?: string | null
+  /** An invoice that owes nothing (total $0 or less) is never past due. */
+  total?: number
   emailLog?: InvoiceLogEntry[]
 }
 

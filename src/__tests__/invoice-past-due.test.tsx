@@ -254,6 +254,27 @@ describe('pastDueInvoice', () => {
     }
   })
 
+  // Credit on account can cover a whole monthly invoice (stage 1c draws it at
+  // generation), so a sent $0 invoice is routine: nobody owes anything on it, and
+  // the firm has nothing to chase however old its due date is.
+  it('is nothing for an invoice that owes nothing, however old its due date', () => {
+    for (const total of [0, -0, -25]) {
+      expect(
+        pastDueInvoice({ status: 'sent', dueDate: '2026-09-01', total, emailLog: log }, '2026-10-01'),
+      ).toBeNull()
+    }
+    expect(
+      pastDueInvoice({ status: 'overdue', dueDate: '2026-09-01', total: 0, emailLog: log }, '2026-10-01'),
+    ).toBeNull()
+    // Anything owed is still chased, and a total that was never sent along is not a $0 invoice.
+    expect(
+      pastDueInvoice({ status: 'sent', dueDate: '2026-09-01', total: 0.01, emailLog: log }, '2026-10-01'),
+    ).not.toBeNull()
+    expect(
+      pastDueInvoice({ status: 'sent', dueDate: '2026-09-01', emailLog: log }, '2026-10-01'),
+    ).not.toBeNull()
+  })
+
   it('is nothing without a due date', () => {
     expect(pastDueInvoice({ status: 'sent', dueDate: null, emailLog: log }, '2026-10-01')).toBeNull()
     expect(pastDueInvoice({ status: 'sent', emailLog: log }, '2026-10-01')).toBeNull()

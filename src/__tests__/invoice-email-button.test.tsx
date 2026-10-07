@@ -209,4 +209,33 @@ describe('Email invoice picks the month\'s invoice, never a retainer by accident
     )
     expect(mockSend).not.toHaveBeenCalled()
   })
+
+  // Stage 1c: a one-client generate draws the client's credit on account onto the
+  // new draft, and the note that follows says so.
+  it('a generate that drew credit on account says how much, beside "created as a draft"', async () => {
+    mockList.mockResolvedValue([])
+    mockGenerate.mockResolvedValue({
+      period: '2026-09',
+      created: [
+        makeInvoice({
+          status: 'draft',
+          lineItems: [
+            { kind: 'hourly', label: 'Billable hours', detail: 'September', amount: 300 },
+            { kind: 'account_credit', label: 'Credit on account', detail: '', amount: -120, draws: [] },
+          ],
+          total: 180,
+        } as Partial<PersistedInvoice>),
+      ],
+      skipped: [],
+    })
+    renderPage()
+
+    await pressEmail()
+
+    expect(
+      await screen.findByText(
+        /Invoice INV-2026-09-001 created as a draft .* then send\. Credit on account applied: \$120\.00 on 1 invoice\./,
+      ),
+    ).toBeInTheDocument()
+  })
 })

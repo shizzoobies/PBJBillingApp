@@ -1231,6 +1231,9 @@ function fakePostgres({
   // account_credits rows (snake_case), or a function answering them on every
   // read so a test can change the ledger between two reads of one save.
   accountCreditRows = [],
+  // Answer `listInvoices({ period })` for that period only, as Postgres does. Off by
+  // default: older fixtures hold invoices of other months and rely on getting them all.
+  filterInvoicesByPeriod = false,
 } = {}) {
   const statements = []
   // The instance unique index
@@ -1345,6 +1348,21 @@ function fakePostgres({
     const creditRows = () => (typeof accountCreditRows === 'function' ? accountCreditRows() : accountCreditRows)
     if (/^select .* from account_credits where client_id = \$1 order by created_at, id$/i.test(compact)) {
       return { rows: creditRows().filter((row) => row.client_id === params?.[0]) }
+    }
+    // `_insertInvoice`: the row landed (the live-monthly index refused nothing).
+    if (/^insert into invoices \([\s\S]*on conflict \(client_id, period\)[\s\S]*returning id$/i.test(trimmed)) {
+      return { rows: [{ id: params?.[0] }], rowCount: 1 }
+    }
+    // Stage 1c: the generation run asks once which clients hold any live credit at all.
+    if (/^select distinct client_id from account_credits where voided_at is null$/i.test(compact)) {
+      const held = [...new Set(creditRows().filter((row) => !row.voided_at).map((row) => row.client_id))]
+      return { rows: held.map((client_id) => ({ client_id })) }
+    }
+    if (
+      filterInvoicesByPeriod &&
+      /^select .* from invoices where period = \$1 order by number nulls last, created_at$/i.test(compact)
+    ) {
+      return { rows: invoices.filter((invoice) => invoice.period === params?.[0]) }
     }
     if (/^select .* from account_credits where id = \$1$/i.test(compact)) {
       return { rows: creditRows().filter((row) => row.id === params?.[0]) }
@@ -42204,5 +42222,474 @@ describe('credit on account lines (Postgres statements)', () => {
     await postgresStore(fake).write(workspace())
     expect(fake.matching(/line_items @> '\[\{"kind":"account_credit"/i)).toHaveLength(0)
     expect(fake.matching(/account_credits/i)).toHaveLength(0)
+  })
+})
+
+/**
+ * Credit on account, stage 1c: the month run draws it by itself.
+ *
+ * A monthly draft the generator creates for a client with credit on account is
+ * born carrying the same `account_credit` line stage 1b writes by hand (same
+ * planner, same label, same draws), inside the generation transaction and under
+ * the client's credit lock. Additive: a client with no credit gets exactly the
+ * draft it always did. Both backends (cardinal rule 1).
+ */
+describe('generation draws credit on account (file backend)', () => {
+  const period = '2026-10'
+  const flat = (id, name, monthlyRate = 600, over = {}) => ({
+    id,
+    name,
+    billingMode: 'subscription',
+    monthlyRate,
+    ...over,
+  })
+  async function seed(clients) {
+    await store.write(workspace({ clients, timeEntries: [] }))
+    await editFile((data) => {
+      data.invoices = []
+    })
+  }
+  async function editFile(change) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    change(data)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const credit = (clientId, amount, over = {}) =>
+    store.addAccountCredit({ clientId, amount, createdBy: 'u', ...over })
+  const lineOf = (invoice) => invoice.lineItems.find((line) => line.kind === 'account_credit')
+  const stored = async () => (await store.listInvoices()).filter((invoice) => invoice.status !== 'void')
+
+  it('draws up to the draft\'s total, as a negative line with its draws, and the ledger shows it used', async () => {
+    await seed([flat('c1', 'Acme')])
+    const row = await credit('c1', 1000)
+
+    const result = await store.generateInvoicesForPeriod(period)
+
+    expect(result.created).toHaveLength(1)
+    const invoice = result.created[0]
+    expect(lineOf(invoice)).toEqual({
+      kind: 'account_credit',
+      label: 'Credit on account',
+      detail: '',
+      amount: -600,
+      draws: [{ creditId: row.id, amount: 600 }],
+    })
+    expect(invoice.subtotal).toBe(600)
+    expect(invoice.total).toBe(0)
+    expect(invoice.status).toBe('draft')
+    // The as-generated snapshot already includes the credit: it is not an edit.
+    expect(lineOf({ lineItems: invoice.originalLineItems })).toMatchObject({ amount: -600 })
+    // What is stored is what was returned.
+    expect((await stored())[0].lineItems).toEqual(invoice.lineItems)
+    const [after] = await store.listAccountCredits('c1')
+    expect(after.draws).toEqual([
+      { invoiceId: invoice.id, invoiceNumber: invoice.number, period, amount: 600 },
+    ])
+    expect(await store.accountCreditBalance('c1')).toBe(400)
+  })
+
+  it('draws only what the balance has when it is less than the draft', async () => {
+    await seed([flat('c1', 'Acme')])
+    await credit('c1', 250)
+
+    const [invoice] = (await store.generateInvoicesForPeriod(period)).created
+
+    expect(lineOf(invoice).amount).toBe(-250)
+    expect(invoice.total).toBe(350)
+    expect(await store.accountCreditBalance('c1')).toBe(0)
+  })
+
+  it('draws the credit meant for that month first, then the oldest first (the same planner as Apply)', async () => {
+    await seed([flat('c1', 'Acme', 250)])
+    const old = await credit('c1', 100)
+    const mid = await credit('c1', 100)
+    const meant = await credit('c1', 100, { forPeriod: period })
+    await editFile((data) => {
+      const at = (row, createdAt) => {
+        data.accountCredits.find((entry) => entry.id === row.id).createdAt = createdAt
+      }
+      at(old, '2026-08-01T00:00:00.000Z')
+      at(mid, '2026-09-01T00:00:00.000Z')
+      at(meant, '2026-09-15T00:00:00.000Z')
+    })
+
+    const [invoice] = (await store.generateInvoicesForPeriod(period)).created
+
+    expect(lineOf(invoice).draws).toEqual([
+      { creditId: meant.id, amount: 100 },
+      { creditId: old.id, amount: 100 },
+      { creditId: mid.id, amount: 50 },
+    ])
+    // Not every credit it draws was meant for the month, so the label is plain.
+    expect(lineOf(invoice).label).toBe('Credit on account')
+  })
+
+  it('says "meant for <Month>" when every credit it draws was recorded for that month', async () => {
+    await seed([flat('c1', 'Acme')])
+    await credit('c1', 100, { forPeriod: period })
+
+    const [invoice] = (await store.generateInvoicesForPeriod(period)).created
+
+    expect(lineOf(invoice).label).toBe('Credit on account - meant for October 2026')
+  })
+
+  it('changes nothing for a client with no credit, a used-up one, or a void one', async () => {
+    await seed([flat('c1', 'Acme'), flat('c2', 'Globex'), flat('c3', 'Initech'), flat('c4', 'Umbrella')])
+    const voided = await credit('c2', 500)
+    await store.voidAccountCredit(voided.id, 'u')
+    // c3's only credit is already fully spent on an invoice from another month.
+    const spent = await credit('c3', 100)
+    await editFile((data) => {
+      data.invoices.push({
+        id: 'inv-old',
+        clientId: 'c3',
+        period: '2026-09',
+        number: 'INV-OLD',
+        kind: 'monthly',
+        status: 'sent',
+        lineItems: [
+          { kind: 'plan', label: 'Plan', detail: '', amount: 600 },
+          {
+            kind: 'account_credit',
+            label: 'Credit on account',
+            detail: '',
+            amount: -100,
+            draws: [{ creditId: spent.id, amount: 100 }],
+          },
+        ],
+        subtotal: 600,
+        total: 500,
+        dueDate: null,
+        blurb: '',
+        scopeFlags: [],
+        sentAt: null,
+        paidAt: null,
+        paymentMethod: null,
+        appliedToInvoiceId: null,
+        createdAt: '2026-09-30T00:00:00.000Z',
+        updatedAt: '2026-09-30T00:00:00.000Z',
+      })
+    })
+
+    const { created } = await store.generateInvoicesForPeriod(period)
+
+    expect(created).toHaveLength(4)
+    const plain = created.find((invoice) => invoice.clientId === 'c4')
+    for (const invoice of created) {
+      expect(lineOf(invoice)).toBeUndefined()
+      // Same lines, same money as the client who never had a credit.
+      expect(invoice.lineItems).toEqual(plain.lineItems)
+      expect(invoice.subtotal).toBe(plain.subtotal)
+      expect(invoice.total).toBe(plain.total)
+      expect(invoice.originalLineItems).toEqual(plain.originalLineItems)
+    }
+  })
+
+  it('draws for a single-client generate, and only for that client', async () => {
+    await seed([flat('c1', 'Acme'), flat('c2', 'Globex')])
+    await credit('c1', 200)
+    await credit('c2', 200)
+
+    const result = await store.generateInvoicesForPeriod(period, { clientId: 'c1' })
+
+    expect(result.created).toHaveLength(1)
+    expect(lineOf(result.created[0]).amount).toBe(-200)
+    expect(await store.accountCreditBalance('c1')).toBe(0)
+    expect(await store.accountCreditBalance('c2')).toBe(200)
+  })
+
+  it('draws each client\'s own credit on a month-wide run, never another client\'s', async () => {
+    await seed([flat('c1', 'Acme'), flat('c2', 'Globex')])
+    await credit('c1', 100)
+    await credit('c2', 900)
+
+    const { created } = await store.generateInvoicesForPeriod(period)
+
+    const by = (id) => created.find((invoice) => invoice.clientId === id)
+    expect(lineOf(by('c1')).amount).toBe(-100)
+    expect(lineOf(by('c2')).amount).toBe(-600)
+    expect(await store.accountCreditBalance('c1')).toBe(0)
+    expect(await store.accountCreditBalance('c2')).toBe(300)
+  })
+
+  it('a second run is skipped as already generated and draws nothing more', async () => {
+    await seed([flat('c1', 'Acme')])
+    await credit('c1', 1000)
+    await store.generateInvoicesForPeriod(period)
+
+    const again = await store.generateInvoicesForPeriod(period)
+
+    expect(again.created).toHaveLength(0)
+    expect(again.skipped).toEqual([{ clientId: 'c1', reason: 'already-generated' }])
+    expect(await store.accountCreditBalance('c1')).toBe(400)
+  })
+
+  it('never draws for a billing sub: its invoice is merged into the master\'s, which draws the master\'s credit', async () => {
+    await seed([flat('s1', 'Sub One', 300), flat('c1', 'Master', 100)])
+    // Recorded BEFORE it became a sub (the ledger refuses a sub afterwards), so
+    // it sits on the sub's own ledger, which nothing draws.
+    const subCredit = await credit('s1', 500)
+    const masterCredit = await credit('c1', 150)
+    await editFile((data) => {
+      data.clients.find((client) => client.id === 's1').billToClientId = 'c1'
+      data.clients.find((client) => client.id === 'c1').isBillingMaster = true
+    })
+
+    const { created, skipped } = await store.generateInvoicesForPeriod(period)
+
+    expect(created.map((invoice) => invoice.clientId)).toEqual(['c1'])
+    expect(skipped).toContainEqual({ clientId: 's1', reason: 'billed-to-other', billedToClientId: 'c1' })
+    expect(lineOf(created[0]).draws).toEqual([{ creditId: masterCredit.id, amount: 150 }])
+    const [subLedger] = await store.listAccountCredits('s1')
+    expect(subLedger.id).toBe(subCredit.id)
+    expect(subLedger.draws).toEqual([])
+    expect(subLedger.remaining).toBe(500)
+  })
+
+  it('never draws on a retainer invoice', async () => {
+    await seed([flat('c1', 'Acme')])
+    await credit('c1', 500)
+
+    const retainer = await store.createRetainerInvoice({ clientId: 'c1', amount: 400 })
+
+    expect(retainer.kind).toBe('retainer')
+    expect(lineOf(retainer)).toBeUndefined()
+    expect(retainer.total).toBe(400)
+    expect(await store.accountCreditBalance('c1')).toBe(500)
+  })
+
+  it('Void & regenerate: the voided draft gives its draw back and the new draft draws it exactly once', async () => {
+    await seed([flat('c1', 'Acme')])
+    const row = await credit('c1', 1000)
+    const [first] = (await store.generateInvoicesForPeriod(period)).created
+    expect(await store.accountCreditBalance('c1')).toBe(400)
+
+    const voided = await store.voidUnsentInvoicesForPeriod(period)
+    expect(voided.voided).toBe(1)
+    expect(await store.accountCreditBalance('c1')).toBe(1000)
+
+    const rebuilt = await store.generateInvoicesForPeriod(period)
+
+    expect(rebuilt.created).toHaveLength(1)
+    expect(rebuilt.created[0].id).not.toBe(first.id)
+    expect(lineOf(rebuilt.created[0]).draws).toEqual([{ creditId: row.id, amount: 600 }])
+    const [ledger] = await store.listAccountCredits('c1')
+    expect(ledger.draws).toHaveLength(1)
+    expect(ledger.draws[0].invoiceId).toBe(rebuilt.created[0].id)
+    expect(await store.accountCreditBalance('c1')).toBe(400)
+    // The voided draft keeps its line as the record; it just no longer counts.
+    expect(lineOf((await store.listInvoices()).find((invoice) => invoice.id === first.id))).toBeTruthy()
+  })
+
+  it('the draw is a normal line afterwards: Remove credit returns it, and re-sizing on save keeps it honest', async () => {
+    await seed([flat('c1', 'Acme')])
+    await credit('c1', 1000)
+    const [invoice] = (await store.generateInvoicesForPeriod(period)).created
+
+    // A save that shrinks the work shrinks the credit with it (the planner's rule).
+    const shrunk = await store.updateInvoice(invoice.id, {
+      lineItems: [{ kind: 'plan', label: 'Plan', detail: '', amount: 100 }, invoice.lineItems.find((l) => l.kind === 'account_credit')],
+    })
+    expect(lineOf(shrunk).amount).toBe(-100)
+    expect(shrunk.total).toBe(0)
+    expect(await store.accountCreditBalance('c1')).toBe(900)
+
+    const removed = await store.removeAccountCreditFromInvoice(invoice.id, { actorUserId: 'u' })
+    expect(lineOf(removed)).toBeUndefined()
+    expect(await store.accountCreditBalance('c1')).toBe(1000)
+  })
+
+  it('two drafts cannot spend the same credit when a generate and a manual apply race', async () => {
+    await seed([flat('c1', 'Acme')])
+    await credit('c1', 700)
+    // Last month's draft, still open, wants the same credit.
+    await editFile((data) => {
+      data.invoices.push({
+        id: 'inv-prev',
+        clientId: 'c1',
+        period: '2026-09',
+        number: 'INV-PREV',
+        kind: 'monthly',
+        status: 'draft',
+        lineItems: [{ kind: 'plan', label: 'Plan', detail: '', amount: 600 }],
+        subtotal: 600,
+        total: 600,
+        dueDate: null,
+        blurb: '',
+        scopeFlags: [],
+        sentAt: null,
+        paidAt: null,
+        paymentMethod: null,
+        appliedToInvoiceId: null,
+        createdAt: '2026-09-30T00:00:00.000Z',
+        updatedAt: '2026-09-30T00:00:00.000Z',
+      })
+    })
+
+    await Promise.allSettled([
+      store.generateInvoicesForPeriod(period),
+      store.applyAccountCreditToInvoice('inv-prev', { actorUserId: 'u' }),
+    ])
+
+    const drawn = (await stored())
+      .flatMap((invoice) => invoice.lineItems)
+      .filter((line) => line.kind === 'account_credit')
+      .reduce((sum, line) => sum + Math.abs(line.amount), 0)
+    expect(drawn).toBeLessThanOrEqual(700)
+    expect(await store.accountCreditBalance('c1')).toBeGreaterThanOrEqual(0)
+    expect(await store.accountCreditBalance('c1')).toBe(700 - drawn)
+  })
+})
+
+describe('generation draws credit on account (Postgres statements)', () => {
+  const period = '2026-10'
+  const planLine = { kind: 'plan', label: 'Acme monthly service', detail: '', amount: 600 }
+  const clientsFor = (...ids) =>
+    ids.map((id) => ({
+      id,
+      name: id === 'c1' ? 'Acme' : 'Globex',
+      billingMode: 'subscription',
+      monthlyRate: 600,
+      lifecycleStage: 'active',
+    }))
+  const creditRow = (overrides = {}) => ({
+    id: 'credit-1',
+    client_id: 'c1',
+    amount: '1000.00',
+    source_kind: 'manual',
+    source_ref: 'ref-1',
+    for_period: null,
+    note: '',
+    created_by: 'u',
+    created_at: new Date('2026-09-01T00:00:00Z'),
+    voided_at: null,
+    voided_by: null,
+    ...overrides,
+  })
+  /** A Postgres store whose workspace read is stubbed (the rest hits the recording pool). */
+  function storeFor(fake, clients) {
+    const pg = postgresStore(fake)
+    pg.read = async () => ({ clients, timeEntries: [], plans: [], reimbursements: [], recurringReimbursements: [], employees: [] })
+    return pg
+  }
+  const inserts = (fake) => fake.matching(/^insert into invoices \(/i)
+
+  it('takes the client\'s credit lock FIRST inside the generation transaction, reads the ledger under it, then inserts', async () => {
+    const fake = fakePostgres({ accountCreditRows: [creditRow()] })
+
+    const { created } = await storeFor(fake, clientsFor('c1')).generateInvoicesForPeriod(period)
+
+    expect(created).toHaveLength(1)
+    const begin = fake.indexOf(/^BEGIN$/i)
+    const lock = fake.indexOf(/^select pg_advisory_xact_lock\(hashtext\(\$1\)\)$/i)
+    const ledger = fake.statements.findIndex((s, i) => i > lock && /from account_credits\s+where client_id = \$1/i.test(s.text))
+    const drawRead = fake.statements.findIndex((s, i) => i > lock && /line_items @>/i.test(s.text))
+    const insert = fake.indexOf(/^insert into invoices \(/i)
+    const commit = fake.indexOf(/^COMMIT$/i)
+    expect(lock).toBe(begin + 1)
+    expect(fake.statements[lock].params).toEqual(['account_credit:c1'])
+    expect(ledger).toBeGreaterThan(lock)
+    expect(drawRead).toBeGreaterThan(lock)
+    expect(insert).toBeGreaterThan(Math.max(ledger, drawRead))
+    expect(commit).toBeGreaterThan(insert)
+    // The row written already carries the credit line and the reduced total.
+    const [write] = inserts(fake)
+    const lines = JSON.parse(write.params[6])
+    expect(lines).toEqual([
+      expect.objectContaining({ kind: 'plan', amount: 600 }),
+      { kind: 'account_credit', label: 'Credit on account', detail: '', amount: -600, draws: [{ creditId: 'credit-1', amount: 600 }] },
+    ])
+    expect(write.params[7]).toBe(600)
+    expect(write.params[8]).toBe(0)
+    expect(JSON.parse(write.params[12])).toEqual(lines)
+  })
+
+  it('does not lock, nor read any ledger, for a client with no credit - the statements are the ones it always issued', async () => {
+    const withNone = fakePostgres({ accountCreditRows: [] })
+    await storeFor(withNone, clientsFor('c1')).generateInvoicesForPeriod(period)
+    expect(withNone.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+    expect(withNone.matching(/from account_credits\s+where client_id = \$1/i)).toHaveLength(0)
+    expect(withNone.matching(/line_items @>/i)).toHaveLength(0)
+    const [write] = inserts(withNone)
+    expect(JSON.parse(write.params[6])).toHaveLength(1)
+    expect(write.params[8]).toBe(600)
+
+    // A client whose only credit is void is a client with no credit.
+    const voided = fakePostgres({ accountCreditRows: [creditRow({ voided_at: new Date('2026-10-02T00:00:00Z') })] })
+    await storeFor(voided, clientsFor('c1')).generateInvoicesForPeriod(period)
+    expect(voided.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+  })
+
+  it('locks only the clients that have credit: another client in the same run issues no lock', async () => {
+    const fake = fakePostgres({ accountCreditRows: [creditRow()] })
+
+    const { created } = await storeFor(fake, clientsFor('c1', 'c2')).generateInvoicesForPeriod(period)
+
+    expect(created).toHaveLength(2)
+    const locks = fake.matching(/pg_advisory_xact_lock/i)
+    expect(locks).toHaveLength(1)
+    expect(locks[0].params).toEqual(['account_credit:c1'])
+    const writes = inserts(fake)
+    expect(JSON.parse(writes.find((w) => w.params[1] === 'c2').params[6])).toHaveLength(1)
+  })
+
+  it('draws only what the ledger gives under the lock: credit already spent by a live draft is not drawn again', async () => {
+    const fake = fakePostgres({
+      filterInvoicesByPeriod: true,
+      accountCreditRows: [creditRow({ amount: '1000.00' })],
+      invoices: [
+        {
+          id: 'inv-prev',
+          client_id: 'c1',
+          period: '2026-09',
+          number: 'INV-PREV',
+          kind: 'monthly',
+          status: 'draft',
+          line_items: [
+            planLine,
+            { kind: 'account_credit', label: 'Credit on account', detail: '', amount: -700, draws: [{ creditId: 'credit-1', amount: 700 }] },
+          ],
+          subtotal: 600,
+          total: -100,
+        },
+      ],
+    })
+
+    await storeFor(fake, clientsFor('c1')).generateInvoicesForPeriod(period)
+
+    const [write] = inserts(fake)
+    const lines = JSON.parse(write.params[6])
+    expect(lines.find((line) => line.kind === 'account_credit')).toMatchObject({ amount: -300 })
+    expect(write.params[8]).toBe(300)
+  })
+
+  it('a sub issues neither a lock nor a draw; the master\'s combined invoice does', async () => {
+    const clients = [
+      { id: 'c1', name: 'Master', billingMode: 'subscription', monthlyRate: 100, lifecycleStage: 'active', isBillingMaster: true },
+      { id: 's1', name: 'Sub', billingMode: 'subscription', monthlyRate: 300, lifecycleStage: 'active', billToClientId: 'c1' },
+    ]
+    const fake = fakePostgres({
+      accountCreditRows: [creditRow({ client_id: 's1', id: 'credit-sub' }), creditRow({ id: 'credit-m', amount: '150.00' })],
+    })
+
+    const { created } = await storeFor(fake, clients).generateInvoicesForPeriod(period)
+
+    expect(created.map((invoice) => invoice.clientId)).toEqual(['c1'])
+    const locks = fake.matching(/pg_advisory_xact_lock/i)
+    expect(locks.map((lock) => lock.params[0])).toEqual(['account_credit:c1'])
+    const lines = JSON.parse(inserts(fake)[0].params[6])
+    expect(lines.find((line) => line.kind === 'account_credit').draws).toEqual([{ creditId: 'credit-m', amount: 150 }])
+  })
+
+  it('rolls the whole generation of that client back when the insert fails, leaving no draw behind', async () => {
+    const fake = fakePostgres({
+      accountCreditRows: [creditRow()],
+      failOn: { pattern: /^insert into invoices \(/i, error: new Error('connection lost'), times: 1 },
+    })
+
+    await expect(storeFor(fake, clientsFor('c1')).generateInvoicesForPeriod(period)).rejects.toThrow(/connection lost/)
+
+    expect(fake.matching(/^ROLLBACK$/i).length).toBeGreaterThan(0)
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
   })
 })
