@@ -3810,7 +3810,10 @@ function InvoiceEditor({
     try {
       const result = await applyDuplicatePaymentAsCreditRequest(invoice.id, {
         paymentIntentId: amountMismatch.paymentIntentId,
-        ...(applyAsked === null || applyAsked === applyDefault ? {} : { amount: applyAsked }),
+        // What the box shows is what is credited (the server still caps it): the
+        // server's own default can differ from the one drawn here (a card duplicate
+        // flagged before the card flag existed, a partial refund).
+        ...(applyAsked === null ? {} : { amount: applyAsked }),
       })
       onCreditApplied(
         `Added ${currency.format(result.credit.amount)} to ${creditClientName}'s credit on account`,

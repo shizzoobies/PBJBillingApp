@@ -201,7 +201,7 @@ describe('Apply as credit on a second payment', () => {
       expect(within(panel).getByText(/Add \$1,000\.00 to Acme's credit on account\./)).toBeInTheDocument()
     })
 
-    it('sends no amount for the default, and an explicit one when she raises it to the charged amount', async () => {
+    it('sends the shown default, and the charged amount when she raises it to that', async () => {
       mockList.mockResolvedValue([cardInvoice()])
       mockApply.mockResolvedValue({
         credit: creditRow({ amount: 1030.18 }),
@@ -224,7 +224,7 @@ describe('Apply as credit on a second payment', () => {
       )
     })
 
-    it('the default click sends no amount (the server works the same figure from Stripe)', async () => {
+    it('the default click sends the amount the box showed', async () => {
       mockList.mockResolvedValue([cardInvoice()])
       mockApply.mockResolvedValue({
         credit: creditRow({ amount: 1000 }),
@@ -236,7 +236,9 @@ describe('Apply as credit on a second payment', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Apply as credit' }))
       const panel = await screen.findByRole('group', { name: 'Apply as credit' })
       fireEvent.click(within(panel).getByRole('button', { name: 'Add $1,000.00 to credit' }))
-      await waitFor(() => expect(mockApply).toHaveBeenCalledWith('inv-1', { paymentIntentId: 'pi_2' }))
+      await waitFor(() =>
+        expect(mockApply).toHaveBeenCalledWith('inv-1', { paymentIntentId: 'pi_2', amount: 1000 }),
+      )
     })
 
     it('a bank payment shows no breakdown and defaults to the full amount', async () => {
@@ -264,7 +266,7 @@ describe('Apply as credit on a second payment', () => {
     expect(mockApply).not.toHaveBeenCalled()
   })
 
-  it('credits everything by default: the request names the payment and no amount', async () => {
+  it('credits everything by default: the request names the payment and the amount the box showed', async () => {
     mockList.mockResolvedValue([makeInvoice()])
     mockApply.mockResolvedValue({
       credit: creditRow(),
@@ -277,7 +279,9 @@ describe('Apply as credit on a second payment', () => {
     const panel = await screen.findByRole('group', { name: 'Apply as credit' })
     fireEvent.click(within(panel).getByRole('button', { name: 'Add $412.50 to credit' }))
 
-    await waitFor(() => expect(mockApply).toHaveBeenCalledWith('inv-1', { paymentIntentId: 'pi_2' }))
+    await waitFor(() =>
+      expect(mockApply).toHaveBeenCalledWith('inv-1', { paymentIntentId: 'pi_2', amount: 412.5 }),
+    )
   })
 
   it("afterwards the marker is gone and a note says what was added, which survives the editor's reload", async () => {
