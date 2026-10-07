@@ -36,7 +36,25 @@ the `account_credit` invoice line, manual Apply, per-client advisory lock, QBO "
 (method `credit`) + the real paid email/PDF copy for EVERY paid invoice (today's paid re-sends used to say
 Amount due); 1e `1c7d23d` Apply as credit on a double payment (refund/dispute-aware via expand latest_charge;
 card default = what reached her). Each stage: independent review, 1-2 fix rounds, rolled-back prod trial
-where SQL changed. **STAGE 2 (the billing period) is IN FLIGHT in `AP-laneD` branch `feat/billing-period`**
+where SQL changed. **PICK UP HERE - STAGE 2 (the billing period) is PARKED, NOT FINISHED, in `AP-laneD` branch
+`feat/billing-period` (Alex ended the session mid-build on 2026-10-07 night).** Two commits sit on top of
+main `840fa4c` (NOT yet rebased onto 1d/1e): `e48e9d5` = stage 2A, COMPLETE and verified (333 files /
+7456 tests): client fields `billing_period_months` + `period_anchor_month` through the batched client insert
+(golden +2 columns, chunk pins 47 -> 49), the Billing period card, `lib/billing-period.js` +
+`withPrepaymentLines` adding `prepayment` lines on anchor months, the Prepayment section on PDF/email/print,
+QBO Deferred Revenue; `7934398` = stage 2B as a WIP commit (derived virtual credits `prepay:<inv>:<YYYY-MM>`
+from paid prepayment invoices, the void guard, the send guard 409 `prepayment_unpaid` + Send anyway, the
+panel) - `tsc -b` clean and 7 targeted test files pass, the FULL verify was NOT run on it. **READ
+`docs/plans/billing-period-wip-status.md` on that branch FIRST** - it lists done / partial / not started,
+traps, and the next three steps: (1) `npm run verify` in AP-laneD and fix what 2B's extra queries broke in
+statement-count tests, then `git reset --soft e48e9d5` and recommit B as a clean commit; (2) browser check
+with a subscription client on N=3 (card, anchor-month draft with the Prepayment section, mark paid, next
+month draws to $0, Send anyway on an unpaid anchor); (3) rebase onto main (conflicts expected in the
+server.js send route, sendInvoiceRequest in src/lib/api.ts, sendInvoice in InvoiceMonthRun.tsx, types.ts,
+accountCreditText.ts, the manifest - re-trim it, it is at 204,996 on that branch). Then the usual: review,
+rolled-back prod trial of the two client columns through the batched insert, verify, deploy A then B,
+voice, flip `featreq-110efd15` to SHIPPED in her words. Not done in 2B: the lower per-client Email view on
+InvoicesPage has no Send anyway (she uses the month run). Original brief for the stage
 (two commits: A = `clients.billing_period_months` 1..24 default 1 + `period_anchor_month`, Billing-period
 card, `prepayment` lines for months 2..N on the ANCHOR month's own invoice [Brittany's answer], QBO Deferred
 Revenue; B = derived virtual credits `prepay:<inv>:<YYYY-MM>` from PAID anchor invoices [not stored - the
