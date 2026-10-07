@@ -25,7 +25,31 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-07, afternoon):** `main` = `6ba0e5e` (+ this handoff), deployed, `/health` 200.
+**State right now (2026-10-07, late night - READ THIS FIRST):** `main` = `1c7d23d` (+ this handoff),
+deployed, `/health` 200, voice re-provisioned after every ship. Suite **333 files / 7548 tests**. Manifest
+**204,988 bytes - 12 under the cap; TRIM FIRST.** Today: the bulk-save batching (DONE, measured at
+872-962 ms per save vs 10-13 s), Brittany's split-time request, four send-backs/queue items, and the
+**credit on account** build (`featreq-110efd15`, plan `docs/plans/credit-on-account-and-billing-period-2026-10.md`)
+through stage 1e - ALL LIVE: 1a `1e28562` ledger table + client-page card + manual credit; 1b `549f514`
+the `account_credit` invoice line, manual Apply, per-client advisory lock, QBO "Deferred Revenue"; 1c
+`840fa4c` auto-draw at generation (credit meant for a LATER month is left alone); 1d `7497e5b` Paid at Send
+(method `credit`) + the real paid email/PDF copy for EVERY paid invoice (today's paid re-sends used to say
+Amount due); 1e `1c7d23d` Apply as credit on a double payment (refund/dispute-aware via expand latest_charge;
+card default = what reached her). Each stage: independent review, 1-2 fix rounds, rolled-back prod trial
+where SQL changed. **STAGE 2 (the billing period) is IN FLIGHT in `AP-laneD` branch `feat/billing-period`**
+(two commits: A = `clients.billing_period_months` 1..24 default 1 + `period_anchor_month`, Billing-period
+card, `prepayment` lines for months 2..N on the ANCHOR month's own invoice [Brittany's answer], QBO Deferred
+Revenue; B = derived virtual credits `prepay:<inv>:<YYYY-MM>` from PAID anchor invoices [not stored - the
+account_credits CHECK allows manual|overpayment only], the unpaid-prepayment send guard with Send anyway).
+When it lands: review -> rebase onto main (1d/1e touched the send route + manifest - conflicts likely, the
+builder resolves) -> rolled-back prod trial of the two new client columns through the batched client insert
+(the golden fixture pins columns) -> verify -> deploy A then B -> voice -> flip `featreq-110efd15` to
+SHIPPED with a note in her words (its dev_notes are at the 4,000-char cap; older notes roll off). Also filed
+for Alex: `featreq-cadfcb44` (refund/dispute on an applied second payment; needs charge.refunded +
+charge.dispute.created on the Stripe endpoint). Alex's rules for this build: period = ANY months per client,
+no annual migration (two clients on the old annual mode stay as they are), everything existing unchanged.
+
+**Earlier (2026-10-07, afternoon):** `main` = `6ba0e5e` (+ this handoff), deployed, `/health` 200.
 Suite **322 files / 7168 tests**. Alex approved two plans at noon and ordered them: (1) **the bulk-save
 batching is DONE** - five deploys today (`0287a11` measure + password-hash skip, `b8e6c1e` time_entries,
 `a6bbcd2` checklist family, `2b348bd` clients/invoice restore/small tables + one merged clients snapshot,
