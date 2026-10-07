@@ -81,6 +81,12 @@ alter table clients add column if not exists platform_invoicing_opt_out boolean 
 -- "Generate the invoice but never email it": the invoice is built and reviewed
 -- here and marked sent without an email. Off by default.
 alter table clients add column if not exists invoice_no_email boolean not null default false;
+-- Billing period (stage 2 of credit-on-account-and-billing-period): a subscription
+-- client may pay every N months (any whole number 1..24, 1 = monthly as always).
+-- The anchor is the first month of a period ("YYYY-MM"), null while N is 1. Both
+-- default to "monthly, as today" for every existing client.
+alter table clients add column if not exists billing_period_months integer not null default 1;
+alter table clients add column if not exists period_anchor_month text;
 -- The Stripe customer a client's payments are filed under, remembered so the
 -- next invoice reuses it instead of creating a second customer for the same
 -- company. Null until they have paid once.

@@ -38994,6 +38994,293 @@ describe('the never-email switch (clients.invoice_no_email)', () => {
 })
 
 /**
+ * Billing period, stage 2 (commit A): `clients.billing_period_months` and
+ * `clients.period_anchor_month`.
+ *
+ * ORDINARY client fields carried by the bulk save like invoice_no_email: leave them
+ * out of the insert and the next autosave puts a quarterly client back on monthly.
+ * Everyone starts at 1 (monthly) with no anchor, the old `annual` mode never reads
+ * them, and a value that is not a whole number 1..24 / a real YYYY-MM is monthly /
+ * null on both backends (cardinal rule 1).
+ */
+describe('the billing period fields (clients.billing_period_months, clients.period_anchor_month)', () => {
+  it('reads both columns, monthly with no anchor for a row from before them', () => {
+    const before = mapClientRow({ id: 'c1', name: 'Acme' })
+    expect(before.billingPeriodMonths).toBe(1)
+    expect(before.periodAnchorMonth).toBeNull()
+    const quarterly = mapClientRow({ id: 'c1', name: 'Acme', billing_period_months: 3, period_anchor_month: '2026-10' })
+    expect(quarterly.billingPeriodMonths).toBe(3)
+    expect(quarterly.periodAnchorMonth).toBe('2026-10')
+    expect(CLIENT_SELECT_COLUMNS).toMatch(/billing_period_months/)
+    expect(CLIENT_SELECT_COLUMNS).toMatch(/period_anchor_month/)
+  })
+
+  it('reads a bad stored value as monthly / no anchor rather than carrying it', () => {
+    const bad = mapClientRow({ id: 'c1', name: 'Acme', billing_period_months: 99, period_anchor_month: '2026-13' })
+    expect(bad.billingPeriodMonths).toBe(1)
+    expect(bad.periodAnchorMonth).toBeNull()
+  })
+
+  it('sanitizeAppData resolves a malformed value before it reaches either backend', () => {
+    const clean = sanitizeAppData(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme', billingPeriodMonths: '3', periodAnchorMonth: '2026-10' },
+          { id: 'c2', name: 'Globex', billingPeriodMonths: 2.5, periodAnchorMonth: 'soon' },
+          { id: 'c3', name: 'Initech', billingPeriodMonths: 30, periodAnchorMonth: 202610 },
+          { id: 'c4', name: 'Hooli' },
+        ],
+      }),
+    )
+    expect(clean.clients.map((c) => c.billingPeriodMonths)).toEqual([3, 1, 1, undefined])
+    expect(clean.clients.map((c) => c.periodAnchorMonth)).toEqual(['2026-10', null, null, undefined])
+  })
+
+  it('Postgres: carries both through the bulk-save wipe', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 500, billingPeriodMonths: 3, periodAnchorMonth: '2026-10' },
+        ],
+      }),
+    )
+    const [row] = insertedRows(fake.statements, 'clients')
+    expect(row.billing_period_months).toBe(3)
+    expect(row.period_anchor_month).toBe('2026-10')
+  })
+
+  it('Postgres: a client that never had them is saved monthly with no anchor; garbage is too', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex', billingPeriodMonths: 'many', periodAnchorMonth: '2026-99' },
+        ],
+      }),
+    )
+    const rows = insertedRows(fake.statements, 'clients')
+    expect(rows.map((row) => row.billing_period_months)).toEqual([1, 1])
+    expect(rows.map((row) => row.period_anchor_month)).toEqual([null, null])
+  })
+
+  it('Postgres: a newly created client persists them', async () => {
+    const fake = fakePostgres()
+    const created = await postgresStore(fake).createClient({
+      id: 'c9',
+      name: 'Quarterly Co',
+      billingMode: 'subscription',
+      monthlyRate: 500,
+      billingPeriodMonths: 6,
+      periodAnchorMonth: '2027-01',
+    })
+    expect(created.billingPeriodMonths).toBe(6)
+    expect(created.periodAnchorMonth).toBe('2027-01')
+    const [row] = insertedRows(fake.statements, 'clients')
+    expect(row.billing_period_months).toBe(6)
+    expect(row.period_anchor_month).toBe('2027-01')
+  })
+
+  it('file: keeps both across a save and a read, and a created client has them', async () => {
+    await store.write(
+      workspace({ clients: [{ id: 'c1', name: 'Acme', billingMode: 'subscription', billingPeriodMonths: 4, periodAnchorMonth: '2026-10' }] }),
+    )
+    const [read] = (await store.read()).clients
+    expect(read.billingPeriodMonths).toBe(4)
+    expect(read.periodAnchorMonth).toBe('2026-10')
+    await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme', billingMode: 'subscription' }] }))
+    const [reset] = (await store.read()).clients
+    expect(reset.billingPeriodMonths).toBe(1)
+    expect(reset.periodAnchorMonth).toBeNull()
+
+    const created = await store.createClient({ id: 'c2', name: 'Globex', billingPeriodMonths: 12, periodAnchorMonth: '2027-01' })
+    expect(created.billingPeriodMonths).toBe(12)
+    expect((await store.read()).clients.find((c) => c.id === 'c2').periodAnchorMonth).toBe('2027-01')
+  })
+
+  it('file: a bad value is monthly / no anchor after a save', async () => {
+    await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme', billingPeriodMonths: 0, periodAnchorMonth: 'x' }] }))
+    const [client] = (await store.read()).clients
+    expect(client.billingPeriodMonths).toBe(1)
+    expect(client.periodAnchorMonth).toBeNull()
+  })
+})
+
+/**
+ * Billing period, generation (file backend): a subscription client on a 3-month
+ * period anchored on 2026-10 gets, on the monthly invoice of each ANCHOR month only,
+ * one prepayment line per later month of the period at the current fee.
+ */
+describe('generation carries prepayment lines on anchor months (file backend)', () => {
+  const quarterly = (over = {}) => ({
+    id: 'c1',
+    name: 'Quarterly Co',
+    billingMode: 'subscription',
+    monthlyRate: 500,
+    billingPeriodMonths: 3,
+    periodAnchorMonth: '2026-10',
+    lifecycleStage: 'active',
+    ...over,
+  })
+  async function seed(clients) {
+    await store.write(workspace({ clients, timeEntries: [] }))
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const prepayments = (invoice) => invoice.lineItems.filter((line) => line.kind === 'prepayment')
+  const generate = async (period) => (await store.generateInvoicesForPeriod(period)).created
+
+  it('N=3 anchored 2026-10: October carries November and December; November and December carry none; January carries February and March', async () => {
+    await seed([quarterly()])
+
+    const [october] = await generate('2026-10')
+    expect(prepayments(october)).toEqual([
+      { kind: 'prepayment', label: 'Prepayment for November 2026', detail: '', amount: 500, period: '2026-11' },
+      { kind: 'prepayment', label: 'Prepayment for December 2026', detail: '', amount: 500, period: '2026-12' },
+    ])
+    expect(october.lineItems[0].kind).toBe('plan')
+    expect(october.subtotal).toBe(1500)
+    expect(october.total).toBe(1500)
+    // The as-generated snapshot already holds them: they are not an edit.
+    expect(october.originalLineItems.filter((line) => line.kind === 'prepayment')).toHaveLength(2)
+
+    const [november] = await generate('2026-11')
+    const [december] = await generate('2026-12')
+    expect(prepayments(november)).toHaveLength(0)
+    expect(prepayments(december)).toHaveLength(0)
+    expect(november.total).toBe(500)
+    expect(december.total).toBe(500)
+
+    const [january] = await generate('2027-01')
+    expect(prepayments(january).map((line) => [line.period, line.amount])).toEqual([
+      ['2027-02', 500],
+      ['2027-03', 500],
+    ])
+    expect(january.total).toBe(1500)
+  })
+
+  it('what is stored is what was returned, and the lines survive a re-read', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    const stored = (await store.listInvoices()).find((invoice) => invoice.id === october.id)
+    expect(stored.lineItems).toEqual(october.lineItems)
+    expect(stored.total).toBe(1500)
+  })
+
+  it('a client whose anchor is in the future gets the plain monthly invoice until then', async () => {
+    await seed([quarterly({ periodAnchorMonth: '2027-01' })])
+    const [october] = await generate('2026-10')
+    expect(prepayments(october)).toHaveLength(0)
+    expect(october.total).toBe(500)
+    const [january] = await generate('2027-01')
+    expect(prepayments(january)).toHaveLength(2)
+  })
+
+  it('N=1 (everyone today), N above 1 with no anchor, hourly and the old annual mode are unchanged', async () => {
+    await seed([
+      quarterly({ id: 'c1', name: 'Monthly Co', billingPeriodMonths: 1, periodAnchorMonth: null }),
+      quarterly({ id: 'no-anchor', name: 'No Anchor Co', periodAnchorMonth: null }),
+      quarterly({ id: 'hourly', name: 'Hourly Co', billingMode: 'hourly', monthlyRate: undefined, hourlyRate: 100 }),
+      quarterly({ id: 'annual', name: 'Annual Co', billingMode: 'annual', annualRate: 1200, annualBillingMonth: 10, monthlyRate: undefined }),
+    ])
+    const created = await generate('2026-10')
+    expect(created.map((invoice) => invoice.clientId).sort()).toEqual(['annual', 'c1', 'no-anchor'])
+    for (const invoice of created) expect(prepayments(invoice)).toHaveLength(0)
+    expect(created.find((invoice) => invoice.clientId === 'c1').total).toBe(500)
+    expect(created.find((invoice) => invoice.clientId === 'annual').total).toBe(1200)
+  })
+
+  it('Void and regenerate (generate again after the void) carries them again', async () => {
+    await seed([quarterly()])
+    const [first] = await generate('2026-10')
+    await store.updateInvoice(first.id, { status: 'void' })
+    const [again] = await generate('2026-10')
+    expect(again.id).not.toBe(first.id)
+    expect(prepayments(again)).toHaveLength(2)
+    expect(again.total).toBe(1500)
+  })
+
+  it('a single-client generate carries them too', async () => {
+    await seed([quarterly(), quarterly({ id: 'c2', name: 'Other Co', billingPeriodMonths: 1, periodAnchorMonth: null })])
+    const result = await store.generateInvoicesForPeriod('2026-10', { clientId: 'c1' })
+    expect(result.created).toHaveLength(1)
+    expect(prepayments(result.created[0])).toHaveLength(2)
+  })
+
+  it('a billing master with a period carries them on its combined invoice', async () => {
+    await seed([
+      quarterly({ id: 'c1', name: 'KLC Master', isBillingMaster: true, monthlyRate: 300 }),
+      { id: 's1', name: 'Sub One', billingMode: 'subscription', monthlyRate: 200, lifecycleStage: 'active', billToClientId: 'c1' },
+    ])
+    const created = await generate('2026-10')
+    expect(created.map((invoice) => invoice.clientId)).toEqual(['c1'])
+    const [master] = created
+    expect(master.lineItems.filter((line) => line.sourceClientId === 's1')).toHaveLength(1)
+    expect(prepayments(master).map((line) => line.amount)).toEqual([300, 300])
+    expect(master.total).toBe(200 + 600)
+  })
+
+  it('keeps the prepayment kind and its month through an edit, inside the subtotal and total', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    const saved = await store.updateInvoice(october.id, {
+      lineItems: [
+        ...october.lineItems.slice(0, 2),
+        { ...october.lineItems[2], amount: 520 },
+        { kind: 'prepayment', label: 'Prepayment for stray', detail: '', amount: 1, period: 'nonsense' },
+      ],
+    })
+    const kept = saved.lineItems.filter((line) => line.kind === 'prepayment')
+    expect(kept.map((line) => line.period)).toEqual(['2026-11', '2026-12', undefined])
+    expect(saved.subtotal).toBe(500 + 500 + 520 + 1)
+    expect(saved.total).toBe(saved.subtotal)
+  })
+})
+
+describe('generation carries prepayment lines on anchor months (Postgres statements)', () => {
+  const clientRow = (over = {}) => ({
+    id: 'c1',
+    name: 'Quarterly Co',
+    billingMode: 'subscription',
+    monthlyRate: 500,
+    billingPeriodMonths: 3,
+    periodAnchorMonth: '2026-10',
+    lifecycleStage: 'active',
+    ...over,
+  })
+  function storeFor(fake, clients) {
+    const pg = postgresStore(fake)
+    pg.read = async () => ({ clients, timeEntries: [], plans: [], reimbursements: [], recurringReimbursements: [], employees: [] })
+    return pg
+  }
+  const insertedLines = (fake) => JSON.parse(fake.matching(/^insert into invoices \(/i)[0].params[6])
+
+  it('writes the prepayment lines, the subtotal and the total of an anchor-month invoice in the one insert', async () => {
+    const fake = fakePostgres()
+    await storeFor(fake, [clientRow()]).generateInvoicesForPeriod('2026-10')
+    const [write] = fake.matching(/^insert into invoices \(/i)
+    const lines = JSON.parse(write.params[6])
+    expect(lines.map((line) => line.kind)).toEqual(['plan', 'prepayment', 'prepayment'])
+    expect(lines[1]).toMatchObject({ label: 'Prepayment for November 2026', amount: 500, period: '2026-11' })
+    expect(write.params[7]).toBe(1500)
+    expect(write.params[8]).toBe(1500)
+    expect(JSON.parse(write.params[12])).toEqual(lines)
+  })
+
+  it('writes the plain monthly invoice on a non-anchor month and for a monthly client', async () => {
+    const november = fakePostgres()
+    await storeFor(november, [clientRow()]).generateInvoicesForPeriod('2026-11')
+    expect(insertedLines(november).map((line) => line.kind)).toEqual(['plan'])
+
+    const monthly = fakePostgres()
+    await storeFor(monthly, [clientRow({ billingPeriodMonths: 1, periodAnchorMonth: null })]).generateInvoicesForPeriod('2026-10')
+    expect(insertedLines(monthly).map((line) => line.kind)).toEqual(['plan'])
+  })
+})
+
+/**
  * Recording a retainer that was paid outside the app (featreq-9d3721d4), on the
  * Postgres branch. The invoice and its audit event commit TOGETHER: if the
  * event write failed on its own, the route would say "try again" and a retry
@@ -39325,6 +39612,9 @@ describe('bulk save golden parity (postgres branch)', () => {
         assignedBookkeeperIds: [],
         billToClientId: 'c3',
         quickbooksPayUrl: 'javascript:alert(1)',
+        // Billing period: a string count and a real anchor are kept (as 6 and the month).
+        billingPeriodMonths: '6',
+        periodAnchorMonth: '2026-10',
       },
       {
         id: 'c3',
@@ -39334,6 +39624,9 @@ describe('bulk save golden parity (postgres branch)', () => {
         isBillingMaster: true,
         invoiceRecipientClientId: 'c2',
         assignedBookkeeperIds: ['emp-2'],
+        // Billing period: out-of-range / malformed values are saved as monthly, no anchor.
+        billingPeriodMonths: 99,
+        periodAnchorMonth: 'x',
       },
     ],
     reimbursements: [
@@ -40366,11 +40659,11 @@ describe('bulk save: clients, invoices and the small tables as multi-row inserts
     [500, [500]],
     [501, [500, 1]],
     [1001, [500, 500, 1]],
-  ])('sends %i clients as statements of %j rows (47 parameters a row)', async (count, sizes) => {
+  ])('sends %i clients as statements of %j rows (49 parameters a row)', async (count, sizes) => {
     const fake = fakePostgres()
     await postgresStore(fake).write(workspace({ clients: clientsOf(count), timeEntries: [] }))
 
-    expect(rowsPer(fake, 'clients', 47)).toEqual(sizes)
+    expect(rowsPer(fake, 'clients', 49)).toEqual(sizes)
     expect(insertedRows(fake.statements, 'clients').map((row) => row.id)).toEqual(
       clientsOf(count).map((client) => client.id),
     )
@@ -40410,7 +40703,7 @@ describe('bulk save: clients, invoices and the small tables as multi-row inserts
       }),
     )
 
-    expect(rowsPer(fake, 'clients', 47)).toEqual([500, 101])
+    expect(rowsPer(fake, 'clients', 49)).toEqual([500, 101])
     const rows = new Map(insertedRows(fake.statements, 'clients').map((row) => [row.id, row]))
     for (const index of [0, 499, 500, 600]) {
       const row = rows.get(`c-${pad(index)}`)

@@ -266,6 +266,14 @@ export type Client = {
    */
   invoiceNoEmail?: boolean
   /**
+   * Billing period: a subscription client pays every N months (a whole number 1..24)
+   * while still getting a monthly invoice. Absent or 1 is monthly, as always. Only
+   * meaningful with a monthly rate; hourly clients and the old annual mode ignore it.
+   */
+  billingPeriodMonths?: number
+  /** "YYYY-MM": the first month of a billing period. Null/absent while the period is 1. */
+  periodAnchorMonth?: string | null
+  /**
    * The "note to the client" kept for every FUTURE invoice (null or absent: none
    * kept). Starts the note on each new invoice; invoices already created keep
    * their own. Owner-only, and written only through its own endpoint — the bulk
@@ -577,6 +585,9 @@ export type PersistedInvoiceLine = {
     | 'retainer'
     | 'retainer_credit'
     | 'account_credit'
+    /** The estimated fee for a LATER month of a billing period, carried on the period's
+     *  first invoice (it has a `period`). It is a charge, inside the subtotal and total. */
+    | 'prepayment'
     /** Informational hours detail. $0.00 on every GENERATED one — but the store
      *  does not enforce that, and production has a sent invoice whose whole
      *  total sits on hand-built time_detail rows (INV-2026-08-044). A row with
@@ -685,6 +696,8 @@ export type PersistedInvoiceLine = {
    * combined line (`clientFacingInvoiceLines`, lib/invoice-email.js).
    */
   sourceClientId?: string | null
+  /** `prepayment` lines only: the "YYYY-MM" month this line is paid ahead for. */
+  period?: string
 }
 
 /** Something on the draft worth a decision before sending — never a charge. */

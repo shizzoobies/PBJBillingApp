@@ -17,6 +17,8 @@ export type InvoiceLineKind =
   | 'retainer_credit'
   /** Credit on account (a prepayment or an overpayment) drawn on this invoice. Always <= 0. */
   | 'account_credit'
+  /** The estimated fee for a LATER month of a billing period, carried on the period's first invoice. */
+  | 'prepayment'
   /** Informational hours detail. ALWAYS $0.00 — see `timeBreakdownLines`. */
   | 'time_detail'
   /** The card-payment convenience fee, appended when a card payment settles. */
@@ -59,6 +61,8 @@ export type InvoiceLineOut = {
   section?: 'software'
   /** On a billing master's invoice, the SUB this line was built from. */
   sourceClientId?: string
+  /** `prepayment` lines only: the "YYYY-MM" month this line is paid ahead for. */
+  period?: string
   /* -- `recurring` lines with a covered-date window configured -------------- */
   /** The recurring reimbursement this line came from, for confirming its dates. */
   recurringId?: string
@@ -386,7 +390,7 @@ export type InvoiceSectionGroup = {
  * are null for the untitled charges block and in combined mode.
  */
 export type InvoiceSection = {
-  key: 'plan' | 'work' | 'expenses' | 'charges' | 'combined'
+  key: 'plan' | 'work' | 'expenses' | 'software' | 'prepayment' | 'charges' | 'combined'
   title: string | null
   totalLabel: string | null
   rows: InvoiceLineOut[]

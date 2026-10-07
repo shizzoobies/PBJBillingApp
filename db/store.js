@@ -76,7 +76,9 @@ import {
   nextInvoiceNumber,
   nextRetainerInvoiceNumber,
   previousPeriod,
+  withPrepaymentLines,
 } from '../lib/invoice-draft.js'
+import { normalizeBillingPeriodMonths, normalizePeriodAnchorMonth } from '../lib/billing-period.js'
 import {
   StaleWorkspaceError,
   fileWorkspaceVersion,
@@ -483,6 +485,8 @@ export const BULK_INSERT_SHAPES = {
       'hourly_rate_history',
       'invoice_note',
       'invoice_no_email',
+      'billing_period_months',
+      'period_anchor_month',
       'created_at',
     ],
     casts: { hourly_rate_history: 'jsonb' },
@@ -1020,6 +1024,10 @@ export function clientBulkRow(clientRecord, { validPlanIds, priorClients, curren
     // the next autosave switches it back off, and the client is emailed an
     // invoice that is delivered another way.
     clientRecord.invoiceNoEmail === true,
+    // Billing period (stage 2). Travel with the payload like the switches above:
+    // leave them out and the next autosave puts a quarterly client back on monthly.
+    normalizeBillingPeriodMonths(clientRecord.billingPeriodMonths),
+    normalizePeriodAnchorMonth(clientRecord.periodAnchorMonth),
     snapshotCreatedAt(preservedCreatedAt, 'clients', clientRecord.id),
   ]
 }
@@ -1779,6 +1787,10 @@ export function normalizeClientProfile(client) {
     // unless someone switched it on; any other value is off, so a bad payload
     // can never stop a client's invoice reaching them.
     invoiceNoEmail: client.invoiceNoEmail === true,
+    // Billing period (stage 2): monthly (1) and no anchor unless someone set one.
+    // The same shape the Postgres read map produces - cardinal rule 1.
+    billingPeriodMonths: normalizeBillingPeriodMonths(client.billingPeriodMonths),
+    periodAnchorMonth: normalizePeriodAnchorMonth(client.periodAnchorMonth),
     // Consolidated billing (featreq-65f5eac1). `billToClientId` names the
     // BILLING MASTER this client's work is invoiced on; `isBillingMaster` marks
     // that payer row itself; `invoiceRecipientClientId` is the sub whose
@@ -2026,6 +2038,11 @@ const INVOICE_LINE_KINDS = new Set([
   // negative line into an ordinary hand-typed one and lose its draws, which are
   // the ledger.
   'account_credit',
+  // The estimated fee for a later month of a billing period, on the period's first
+  // invoice (stage 2). Listed for the same reason as the credit: falling back to
+  // 'custom' would lose the month the line is paid ahead for, which is what the
+  // derived credit and the unpaid-prepayment check read.
+  'prepayment',
   // The optional time breakdown. Listed for the same reason as the rest:
   // falling back to 'custom' would turn a $0.00 informational line into an
   // ordinary hand-typed one, and the round trip through the editor would lose
@@ -2794,6 +2811,15 @@ export function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly', storedLines
         return { ...base, draws }
       }
 
+      // A prepayment carries the month it is paid ahead for. Without it the line is
+      // just a charge (kept, but it prepays nothing), so a malformed month is dropped,
+      // not stored.
+      if (kind === 'prepayment') {
+        return typeof line?.period === 'string' && ACCOUNT_CREDIT_PERIOD.test(line.period)
+          ? { ...base, period: line.period }
+          : base
+      }
+
       // A recurring line with a covered-date window carries the window itself
       // and the expense it belongs to. Dropping these on save would strip an
       // unconfirmed line of the very thing being confirmed — and, worse, of the
@@ -3198,7 +3224,7 @@ export const CLIENT_SELECT_COLUMNS = `id, name, contact, billing_mode, hourly_ra
           annual_rate, annual_billing_month, lifecycle_stage,
           bill_to_client_id, is_billing_master, invoice_recipient_client_id,
           hourly_rate_period, hourly_rate_history, invoice_note,
-          invoice_no_email`
+          invoice_no_email, billing_period_months, period_anchor_month`
 
 /** One `clients` row -> the camelCase shape the app and the API speak. */
 export function mapClientRow(row) {
@@ -3279,6 +3305,11 @@ export function mapClientRow(row) {
     // (Rivercity). Same shape the file backend produces — cardinal rule 1 — and
     // false for every row written before the column existed.
     invoiceNoEmail: row.invoice_no_email === true,
+    // Billing period (stage 2). 1 = monthly and no anchor for every row written
+    // before the columns existed. Same shape `normalizeClientProfile` produces for
+    // the file backend - cardinal rule 1.
+    billingPeriodMonths: normalizeBillingPeriodMonths(row.billing_period_months),
+    periodAnchorMonth: normalizePeriodAnchorMonth(row.period_anchor_month),
     // The client's Stripe customer, written by `setClientStripeCustomerId` at
     // first send. It was written and never read back on Postgres, so every
     // send, payment link and pay click minted a BRAND NEW Stripe customer for
@@ -4346,6 +4377,15 @@ export function sanitizeAppData(data) {
     // real boolean before it reaches either backend.
     if ('invoiceNoEmail' in client) {
       client.invoiceNoEmail = client.invoiceNoEmail === true
+    }
+    // Billing period: a whole number of months 1..24 (anything else is monthly) and a
+    // real YYYY-MM anchor. The file backend has no column to clamp against, and a
+    // period greater than 1 with no anchor bills nothing special (it reads as monthly).
+    if ('billingPeriodMonths' in client) {
+      client.billingPeriodMonths = normalizeBillingPeriodMonths(client.billingPeriodMonths)
+    }
+    if ('periodAnchorMonth' in client) {
+      client.periodAnchorMonth = normalizePeriodAnchorMonth(client.periodAnchorMonth)
     }
   }
 
@@ -6244,6 +6284,15 @@ export class AppDataStore {
       // page and carried through the bulk save like the opt-out above.
       await this.pool.query(
         `alter table clients add column if not exists invoice_no_email boolean not null default false`,
+      )
+      // Billing period (stage 2): a subscription client pays every N months. Default 1
+      // (monthly, as always) and no anchor, so every existing client is untouched. Both
+      // travel through the bulk save like the switches above.
+      await this.pool.query(
+        `alter table clients add column if not exists billing_period_months integer not null default 1`,
+      )
+      await this.pool.query(
+        `alter table clients add column if not exists period_anchor_month text`,
       )
       await this.pool.query(
         `alter table clients add column if not exists assigned_bookkeeper_ids text[] not null default '{}'`,
@@ -14887,6 +14936,12 @@ export class AppDataStore {
         skipped.push({ clientId: client.id, reason: 'nothing-to-bill' })
         continue
       }
+      // BILLING PERIOD (stage 2). On the first month of a subscription client's period
+      // the monthly invoice itself carries one prepayment line per later month, at the
+      // current fee. Every other month, and every client with no period, is the draft
+      // exactly as built (the same object comes back). A voided anchor invoice that is
+      // regenerated lands here again, so Void & regenerate carries them too.
+      draft = withPrepaymentLines(draft, client)
 
       const number = nextInvoiceNumber(period, takenNumbers)
       takenNumbers.push(number)
@@ -19999,9 +20054,10 @@ export class AppDataStore {
              card_payments_enabled, platform_invoicing_opt_out,
              invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
              bill_to_client_id, is_billing_master, invoice_recipient_client_id,
-             hourly_rate_period, hourly_rate_history, invoice_no_email, updated_at
+             hourly_rate_period, hourly_rate_history, invoice_no_email,
+             billing_period_months, period_anchor_month, updated_at
            )
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42::jsonb,$43, now())`,
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42::jsonb,$43,$44,$45, now())`,
           [
             record.id,
             record.name,
@@ -20053,6 +20109,8 @@ export class AppDataStore {
             record.hourlyRatePeriod,
             JSON.stringify(record.hourlyRateHistory ?? []),
             record.invoiceNoEmail === true,
+            normalizeBillingPeriodMonths(record.billingPeriodMonths),
+            normalizePeriodAnchorMonth(record.periodAnchorMonth),
           ],
         )
         await dbClient.query('commit')

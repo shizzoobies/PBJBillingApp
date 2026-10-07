@@ -83,6 +83,13 @@ import {
 // The one place 'off' is decided, shared with the generator and the invoice
 // preview so all three agree about what an unset client means.
 import { normalizeTimeBreakdownMode } from '../../lib/invoice-lines.js'
+import {
+  BILLING_PERIOD_MAX_MONTHS,
+  billingPeriodSentence,
+  normalizeBillingPeriodMonths,
+  normalizePeriodAnchorMonth,
+  validateBillingPeriod,
+} from '../../lib/billing-period.js'
 import { mailingAddressLines } from '../../lib/mailing-address.js'
 // The one rule for whether Delete is offered; the server enforces the same one.
 import { clientDeleteVerdict } from '../../lib/client-delete-rule.js'
@@ -538,6 +545,14 @@ export function ClientDetailPage() {
           <CollapsibleSection id="client-section-billing" kicker="Billing" title="Rate and services" lockable>
             <BillingSectionBody client={client} plans={data.plans} onCommit={commit} />
           </CollapsibleSection>
+
+          {/* Subscription clients only (hourly and the old annual mode ignore it), and
+              not a company billed on a master's invoice: it has none of its own. */}
+          {client.billingMode === 'subscription' && !client.billToClientId ? (
+            <CollapsibleSection id="client-section-billing-period" kicker="Billing" title="Billing period" lockable>
+              <BillingPeriodSectionBody client={client} onCommit={commit} />
+            </CollapsibleSection>
+          ) : null}
 
           <CollapsibleSection id="client-section-plan-checklists" kicker="Billing" title="Plan checklists" lockable>
             <PlanChecklistsBody client={client} data={data} />
@@ -2361,6 +2376,108 @@ export function InvoiceDeliverySectionBody({
         label="Generate the invoice but never email it"
         onChange={(value) => onCommit({ invoiceNoEmail: value })}
       />
+    </div>
+  )
+}
+
+/**
+ * "Billing period": a subscription client who pays every N months while still
+ * getting a monthly invoice (stage 2 of credit-on-account-and-billing-period).
+ * "Bill every [N] month(s), starting [month]": N is a free whole number 1..24 (1 is
+ * monthly, as always) and the first month of a period is required when N is above 1.
+ * Saved through the page's `onCommit` like any other client field; nothing is saved
+ * while the pair is invalid, and the reason is said out loud. Exported for its own
+ * test, like `InvoiceDeliverySectionBody`. Hourly clients and the old annual mode
+ * have no card.
+ */
+export function BillingPeriodSectionBody({
+  client,
+  onCommit,
+  today = localDateOnly(),
+}: {
+  client: Client
+  onCommit: (patch: Partial<Client>) => void
+  today?: string
+}) {
+  const savedMonths = String(normalizeBillingPeriodMonths(client.billingPeriodMonths))
+  const savedAnchor = normalizePeriodAnchorMonth(client.periodAnchorMonth) ?? ''
+  const [months, setMonths] = useState(savedMonths)
+  const [anchor, setAnchor] = useState(savedAnchor)
+  const { state, flash } = useSaveFlash()
+  // Another client, or a saved value that changed elsewhere, resets what is on screen
+  // (adjusted while rendering, not in an effect).
+  const savedKey = `${client.id}|${savedMonths}|${savedAnchor}`
+  const [seenKey, setSeenKey] = useState(savedKey)
+  if (seenKey !== savedKey) {
+    setSeenKey(savedKey)
+    setMonths(savedMonths)
+    setAnchor(savedAnchor)
+  }
+
+  if (client.billingMode !== 'subscription') return null
+
+  const check = validateBillingPeriod({ months, anchor })
+  // Commit only a valid pair that changes something. Going back to 1 clears the
+  // start (monthly has none); a start picked while still monthly is kept on screen
+  // and saved with the count.
+  const save = (nextMonths: string, nextAnchor: string) => {
+    if (!validateBillingPeriod({ months: nextMonths, anchor: nextAnchor }).ok) return
+    const count = Number(nextMonths)
+    const nextSaved = count > 1 ? nextAnchor : ''
+    if (String(count) === savedMonths && nextSaved === savedAnchor) return
+    onCommit({ billingPeriodMonths: count, periodAnchorMonth: count > 1 ? nextAnchor : null })
+    if (count === 1) setAnchor('')
+    flash()
+  }
+  return (
+    <div className="form-grid two-col">
+      <label className="field">
+        <span className="field-label-row">
+          Bill every
+          <SaveBadge state={state} />
+        </span>
+        <span className="billing-period-months">
+          <input
+            className="input"
+            type="number"
+            min="1"
+            max={BILLING_PERIOD_MAX_MONTHS}
+            step="1"
+            value={months}
+            onChange={(event) => setMonths(event.target.value)}
+            onBlur={() => save(months, anchor)}
+          />{' '}
+          <span>{months === '1' ? 'month' : 'months'}</span>
+        </span>
+        <small className="field-helper">1 is monthly, as always. Any whole number up to 24.</small>
+      </label>
+      <label className="field">
+        <span className="field-label-row">Starting</span>
+        <input
+          className="input"
+          type="month"
+          value={anchor}
+          onChange={(event) => {
+            setAnchor(event.target.value)
+            save(months, event.target.value)
+          }}
+        />
+        <small className="field-helper">The first month of a period.</small>
+      </label>
+      {check.ok ? (
+        <p className="muted-text full-row">
+          {billingPeriodSentence({ months, anchor, today })}
+        </p>
+      ) : (
+        <p className="auth-error full-row" role="alert">
+          {check.message}
+        </p>
+      )}
+      {Number(client.monthlyRate) > 0 ? null : (
+        <p className="muted-text full-row">
+          A billing period needs a monthly rate above $0 to take effect.
+        </p>
+      )}
     </div>
   )
 }
