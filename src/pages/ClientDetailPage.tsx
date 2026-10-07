@@ -548,7 +548,7 @@ export function ClientDetailPage() {
 
           {/* Subscription clients only (hourly and the old annual mode ignore it), and
               not a company billed on a master's invoice: it has none of its own. */}
-          {client.billingMode === 'subscription' && !client.billToClientId ? (
+          {client.billingMode === 'subscription' && !client.billToClientId && !client.isBillingMaster ? (
             <CollapsibleSection id="client-section-billing-period" kicker="Billing" title="Billing period" lockable>
               <BillingPeriodSectionBody client={client} onCommit={commit} />
             </CollapsibleSection>
@@ -2414,7 +2414,8 @@ export function BillingPeriodSectionBody({
     setAnchor(savedAnchor)
   }
 
-  if (client.billingMode !== 'subscription') return null
+  // Billing masters and their subs have no billing period in v1 (credit belongs to the master that pays).
+  if (client.billingMode !== 'subscription' || client.isBillingMaster || client.billToClientId) return null
 
   const check = validateBillingPeriod({ months, anchor })
   // Commit only a valid pair that changes something. Going back to 1 clears the

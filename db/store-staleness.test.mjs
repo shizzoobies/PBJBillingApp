@@ -39209,7 +39209,7 @@ describe('generation carries prepayment lines on anchor months (file backend)', 
     expect(prepayments(result.created[0])).toHaveLength(2)
   })
 
-  it('a billing master with a period carries them on its combined invoice', async () => {
+  it('a billing master with a stored period carries none: no period on masters or subs in v1 (M-3)', async () => {
     await seed([
       quarterly({ id: 'c1', name: 'KLC Master', isBillingMaster: true, monthlyRate: 300 }),
       { id: 's1', name: 'Sub One', billingMode: 'subscription', monthlyRate: 200, lifecycleStage: 'active', billToClientId: 'c1' },
@@ -39218,8 +39218,8 @@ describe('generation carries prepayment lines on anchor months (file backend)', 
     expect(created.map((invoice) => invoice.clientId)).toEqual(['c1'])
     const [master] = created
     expect(master.lineItems.filter((line) => line.sourceClientId === 's1')).toHaveLength(1)
-    expect(prepayments(master).map((line) => line.amount)).toEqual([300, 300])
-    expect(master.total).toBe(200 + 600)
+    expect(prepayments(master)).toEqual([])
+    expect(master.total).toBe(200)
   })
 
   it('keeps the prepayment kind and its month through an edit, inside the subtotal and total', async () => {
@@ -39277,6 +39277,780 @@ describe('generation carries prepayment lines on anchor months (Postgres stateme
     const monthly = fakePostgres()
     await storeFor(monthly, [clientRow({ billingPeriodMonths: 1, periodAnchorMonth: null })]).generateInvoicesForPeriod('2026-10')
     expect(insertedLines(monthly).map((line) => line.kind)).toEqual(['plan'])
+  })
+})
+
+/**
+ * Billing period, stage 2 (commit B): the credit a PAID prepayment invoice yields is
+ * DERIVED, never stored. `listAccountCredits` synthesizes one credit per prepayment
+ * line of every paid, non-void invoice (id `prepay:<invoiceId>:<YYYY-MM>`, a virtual
+ * source kind), the ledger's own draw rule spends it, generation draws it in its
+ * month, and a paid prepayment invoice cannot be voided while a live invoice draws
+ * on it.
+ */
+describe('prepayment credits are derived from paid invoices (file backend)', () => {
+  const quarterly = (over = {}) => ({
+    id: 'c1',
+    name: 'Quarterly Co',
+    billingMode: 'subscription',
+    monthlyRate: 500,
+    billingPeriodMonths: 3,
+    periodAnchorMonth: '2026-10',
+    lifecycleStage: 'active',
+    ...over,
+  })
+  async function editFile(change) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    change(data)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  async function seed(clients) {
+    await store.write(workspace({ clients, timeEntries: [] }))
+    await editFile((data) => {
+      data.invoices = []
+    })
+  }
+  const PAID_AT = '2026-10-20T15:00:00.000Z'
+  const markPaid = (id, at = PAID_AT) =>
+    editFile((data) => {
+      const invoice = data.invoices.find((entry) => entry.id === id)
+      invoice.status = 'paid'
+      invoice.sentAt = at
+      invoice.paidAt = at
+    })
+  const generate = async (period) => (await store.generateInvoicesForPeriod(period)).created
+  const accountLine = (invoice) => invoice.lineItems.find((line) => line.kind === 'account_credit')
+
+  it('yields one credit per prepayment line of a PAID invoice, with the ids, amounts and months of the lines', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    expect(await store.listAccountCredits('c1')).toEqual([])
+    await markPaid(october.id)
+
+    const credits = await store.listAccountCredits('c1')
+    expect(credits.map((credit) => credit.id)).toEqual([`prepay:${october.id}:2026-11`, `prepay:${october.id}:2026-12`])
+    expect(credits[0]).toEqual({
+      id: `prepay:${october.id}:2026-11`,
+      clientId: 'c1',
+      amount: 500,
+      sourceKind: 'prepayment',
+      sourceRef: october.id,
+      forPeriod: '2026-11',
+      note: 'Prepayment on INV-2026-10-001',
+      createdBy: null,
+      createdAt: PAID_AT,
+      voidedAt: null,
+      voidedBy: null,
+      draws: [],
+      remaining: 500,
+      derived: true,
+    })
+    expect(await store.accountCreditBalance('c1')).toBe(1000)
+  })
+
+  it('yields nothing for an unpaid or void invoice, and a stored credit is not marked derived', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    await editFile((data) => {
+      data.invoices[0].status = 'sent'
+    })
+    expect(await store.listAccountCredits('c1')).toEqual([])
+    await markPaid(october.id)
+    expect(await store.listAccountCredits('c1')).toHaveLength(2)
+    await store.updateInvoice(october.id, { status: 'void' })
+    expect(await store.listAccountCredits('c1')).toEqual([])
+
+    const manual = await store.addAccountCredit({ clientId: 'c1', amount: 50, createdBy: 'u' })
+    expect(manual).not.toHaveProperty('derived')
+  })
+
+  it('sums two lines for one month on one invoice into one credit and ignores lines with no valid month or amount', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    await markPaid(october.id)
+    await editFile((data) => {
+      data.invoices[0].lineItems.push(
+        { kind: 'prepayment', label: 'extra', detail: '', amount: 25, period: '2026-11' },
+        { kind: 'prepayment', label: 'no month', detail: '', amount: 99 },
+        { kind: 'prepayment', label: 'zero', detail: '', amount: 0, period: '2027-02' },
+      )
+    })
+    const credits = await store.listAccountCredits('c1')
+    expect(credits.map((credit) => [credit.forPeriod, credit.amount])).toEqual([
+      ['2026-11', 525],
+      ['2026-12', 500],
+    ])
+  })
+
+  it('has no stored row to void: voiding a derived id answers not found and changes nothing', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    await markPaid(october.id)
+    expect(await store.voidAccountCredit(`prepay:${october.id}:2026-11`, 'u')).toBeNull()
+    expect(await store.accountCreditBalance('c1')).toBe(1000)
+  })
+
+  it('the next months\' generation draws each credit in its own month (full coverage is a $0 draft)', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    await markPaid(october.id)
+
+    const [november] = await generate('2026-11')
+    expect(accountLine(november)).toEqual({
+      kind: 'account_credit',
+      label: 'Credit on account - meant for November 2026',
+      detail: '',
+      amount: -500,
+      draws: [{ creditId: `prepay:${october.id}:2026-11`, amount: 500 }],
+    })
+    expect(november.subtotal).toBe(500)
+    expect(november.total).toBe(0)
+
+    // December's credit was not drawn early: it is meant for December.
+    const afterNovember = await store.listAccountCredits('c1')
+    expect(afterNovember.map((credit) => credit.remaining)).toEqual([0, 500])
+    expect(afterNovember[0].draws).toEqual([
+      { invoiceId: november.id, invoiceNumber: november.number, period: '2026-11', amount: 500 },
+    ])
+
+    const [december] = await generate('2026-12')
+    expect(accountLine(december).draws).toEqual([{ creditId: `prepay:${october.id}:2026-12`, amount: 500 }])
+    expect(december.total).toBe(0)
+    expect(await store.accountCreditBalance('c1')).toBe(0)
+  })
+
+  it('draws only the estimate when the real fee went up, and leaves the rest of the month to pay', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    await markPaid(october.id)
+    await store.write(workspace({ clients: [quarterly({ monthlyRate: 650 })], timeEntries: [] }))
+
+    const [november] = await generate('2026-11')
+    expect(accountLine(november).amount).toBe(-500)
+    expect(november.total).toBe(150)
+  })
+
+  it('a client holding only derived credit still takes the draw on a one-client generate', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    await markPaid(october.id)
+    const result = await store.generateInvoicesForPeriod('2026-11', { clientId: 'c1' })
+    expect(accountLine(result.created[0]).amount).toBe(-500)
+  })
+
+  it('a draw survives a save of the invoice and can be removed and re-applied by hand', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    await markPaid(october.id)
+    const [november] = await generate('2026-11')
+
+    const saved = await store.updateInvoice(november.id, { blurb: 'Thanks' })
+    expect(accountLine(saved).draws).toEqual([{ creditId: `prepay:${october.id}:2026-11`, amount: 500 }])
+
+    const removed = await store.removeAccountCreditFromInvoice(november.id)
+    expect(accountLine(removed)).toBeUndefined()
+    expect((await store.listAccountCredits('c1'))[0].remaining).toBe(500)
+
+    const applied = await store.applyAccountCreditToInvoice(november.id)
+    expect(accountLine(applied).draws[0].creditId).toBe(`prepay:${october.id}:2026-11`)
+  })
+
+  describe('voiding the paid prepayment invoice', () => {
+    it('is refused while a live invoice draws on its credit, naming that invoice', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      await markPaid(october.id)
+      const [november] = await generate('2026-11')
+
+      await expect(store.updateInvoice(october.id, { status: 'void' })).rejects.toThrow(AccountCreditError)
+      await expect(store.updateInvoice(october.id, { status: 'void' })).rejects.toThrow(/INV-2026-11-001/)
+      await expect(store.updateInvoice(october.id, { status: 'void' })).rejects.toThrow(/first, then void this one/)
+      expect((await store.listInvoices()).find((invoice) => invoice.id === october.id).status).toBe('paid')
+      expect(november.id).toBeTruthy()
+    })
+
+    it('goes through once the invoices drawing on it are void, and the credit goes with it', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      await markPaid(october.id)
+      const [november] = await generate('2026-11')
+      const [december] = await generate('2026-12')
+
+      await store.updateInvoice(november.id, { status: 'void' })
+      // December still draws on it.
+      await expect(store.updateInvoice(october.id, { status: 'void' })).rejects.toThrow(/INV-2026-12-001/)
+      await store.updateInvoice(december.id, { status: 'void' })
+
+      const voided = await store.updateInvoice(october.id, { status: 'void' })
+      expect(voided.status).toBe('void')
+      expect(await store.listAccountCredits('c1')).toEqual([])
+    })
+
+    it('is allowed when nothing draws on it, and for an invoice without prepayment lines', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      await markPaid(october.id)
+      expect((await store.updateInvoice(october.id, { status: 'void' })).status).toBe('void')
+    })
+  })
+
+  describe('undoing the manual Mark paid on the prepayment invoice (M-2)', () => {
+    it('is refused, like a void, while a live invoice draws on its credit', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      await store.markInvoicePaidManually(october.id, {})
+      const [november] = await generate('2026-11')
+      expect(accountLine(november).draws[0].creditId).toBe(`prepay:${october.id}:2026-11`)
+
+      await expect(store.unmarkManualInvoicePayment(october.id, {})).rejects.toThrow(ManualPaymentError)
+      await expect(store.unmarkManualInvoicePayment(october.id, {})).rejects.toThrow(/INV-2026-11-001/)
+      await expect(store.unmarkManualInvoicePayment(october.id, {})).rejects.toThrow(
+        /first, then undo the payment mark on this one/,
+      )
+      expect((await store.listInvoices()).find((invoice) => invoice.id === october.id).status).toBe('paid')
+    })
+
+    it('goes through once the drawing invoices are void, and when nothing draws on it', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      await store.markInvoicePaidManually(october.id, {})
+      const [november] = await generate('2026-11')
+      await store.updateInvoice(november.id, { status: 'void' })
+      const restored = await store.unmarkManualInvoicePayment(october.id, {})
+      expect(restored.status).not.toBe('paid')
+      expect(await store.listAccountCredits('c1')).toEqual([])
+    })
+  })
+})
+
+describe('the unpaid-prepayment send guard (file backend)', () => {
+  const quarterly = (over = {}) => ({
+    id: 'c1',
+    name: 'Quarterly Co',
+    billingMode: 'subscription',
+    monthlyRate: 500,
+    billingPeriodMonths: 3,
+    periodAnchorMonth: '2026-10',
+    lifecycleStage: 'active',
+    ...over,
+  })
+  async function seed(clients) {
+    await store.write(workspace({ clients, timeEntries: [] }))
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const setStatus = async (id, status) => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices.find((entry) => entry.id === id).status = status
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const generate = async (period) => (await store.generateInvoicesForPeriod(period)).created
+
+  it('stops the first send of a later month while the anchor invoice is unpaid (reason unpaid)', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    const [november] = await generate('2026-11')
+    await setStatus(october.id, 'sent')
+
+    const stop = await store.unpaidPrepaymentFor(november)
+    expect(stop.reason).toBe('unpaid')
+    expect(stop.anchorInvoice).toEqual({ id: october.id, number: 'INV-2026-10-001', status: 'sent' })
+    expect(stop.message).toMatch(/INV-2026-10-001 carries the prepayment for November 2026 and has not been paid yet/)
+  })
+
+  describe('I-1: the month was generated BEFORE the anchor was paid', () => {
+    const NOT_APPLIED =
+      "This month was prepaid on October 2026's invoice, but the prepayment has not been applied to this invoice. Apply credit on account, or Void & regenerate, before sending."
+    const markPaidNow = async (id) => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const invoice = data.invoices.find((entry) => entry.id === id)
+      invoice.status = 'paid'
+      invoice.sentAt = '2026-10-20T15:00:00.000Z'
+      invoice.paidAt = '2026-10-20T15:00:00.000Z'
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+
+    it('holds the month with its own sentence once the anchor is paid, because the draft never drew the credit', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      const [november] = await generate('2026-11')
+      expect(november.lineItems.some((line) => line.kind === 'account_credit')).toBe(false)
+      await markPaidNow(october.id)
+
+      const hold = await store.unpaidPrepaymentFor(november)
+      expect(hold).toMatchObject({
+        reason: 'not_applied',
+        month: '2026-11',
+        anchorInvoice: { id: october.id, number: 'INV-2026-10-001', status: 'paid' },
+        message: NOT_APPLIED,
+      })
+    })
+
+    it('passes after Apply credit on account', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      const [november] = await generate('2026-11')
+      await markPaidNow(october.id)
+      expect((await store.unpaidPrepaymentFor(november))?.reason).toBe('not_applied')
+
+      const applied = await store.applyAccountCreditToInvoice(november.id)
+      expect(applied.lineItems.find((line) => line.kind === 'account_credit').draws[0].creditId).toBe(
+        `prepay:${october.id}:2026-11`,
+      )
+      expect(await store.unpaidPrepaymentFor(applied)).toBeNull()
+    })
+
+    it('passes after Void and regenerate (the new draft draws it at generation)', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      const [november] = await generate('2026-11')
+      await markPaidNow(october.id)
+      await store.updateInvoice(november.id, { status: 'void' })
+      const [again] = await generate('2026-11')
+      expect(again.lineItems.some((line) => line.kind === 'account_credit')).toBe(true)
+      expect(await store.unpaidPrepaymentFor(again)).toBeNull()
+    })
+
+    it('passes when the month was generated AFTER the anchor was paid', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      await markPaidNow(october.id)
+      const [november] = await generate('2026-11')
+      expect(await store.unpaidPrepaymentFor(november)).toBeNull()
+    })
+
+    it('R-1: a month that owes nothing (fee typed down to $0) is not held, paid anchor or not', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      const [november] = await generate('2026-11')
+      const plan = november.lineItems.find((line) => line.kind === 'plan')
+      const zeroed = await store.updateInvoice(november.id, { lineItems: [{ ...plan, amount: 0 }] })
+      expect(zeroed.total).toBe(0)
+      await markPaidNow(october.id)
+      expect(await store.unpaidPrepaymentFor(zeroed)).toBeNull()
+      const marked = await store.withUnpaidPrepayment(await store.listInvoices({ period: '2026-11' }))
+      expect(marked.find((invoice) => invoice.id === november.id)).not.toHaveProperty('unpaidPrepayment')
+    })
+
+    it('R-3: an anchor whose payment is still PROCESSING holds the month with its own reason and sentence', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      const [november] = await generate('2026-11')
+      await setStatus(october.id, 'processing')
+
+      const hold = await store.unpaidPrepaymentFor(november)
+      expect(hold).toMatchObject({
+        reason: 'processing',
+        month: '2026-11',
+        anchorInvoice: { id: october.id, number: 'INV-2026-10-001', status: 'processing' },
+        message:
+          "This month was prepaid on October 2026's invoice and that payment is still clearing. Once it settles, Apply credit on account (or Void & regenerate) and send then.",
+      })
+      const marked = await store.withUnpaidPrepayment(await store.listInvoices({ period: '2026-11' }))
+      expect(marked.find((invoice) => invoice.id === november.id).unpaidPrepayment).toMatchObject({
+        reason: 'processing',
+        anchorInvoiceId: october.id,
+      })
+
+      // Once it settles the hold becomes not_applied (the draft predates the payment).
+      await markPaidNow(october.id)
+      expect((await store.unpaidPrepaymentFor(november))?.reason).toBe('not_applied')
+    })
+
+    it('marks the month list with the not_applied reason, and clears the mark once applied', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      const [november] = await generate('2026-11')
+      await markPaidNow(october.id)
+
+      const marked = await store.withUnpaidPrepayment(await store.listInvoices({ period: '2026-11' }))
+      expect(marked.find((invoice) => invoice.id === november.id).unpaidPrepayment).toMatchObject({
+        reason: 'not_applied',
+        month: '2026-11',
+        anchorInvoiceId: october.id,
+        message: NOT_APPLIED,
+      })
+
+      await store.applyAccountCreditToInvoice(november.id)
+      const after = await store.withUnpaidPrepayment(await store.listInvoices({ period: '2026-11' }))
+      expect(after.find((invoice) => invoice.id === november.id)).not.toHaveProperty('unpaidPrepayment')
+    })
+  })
+
+  it('never stops the anchor month itself, a monthly client or an invoice already sent', async () => {
+    await seed([quarterly(), quarterly({ id: 'c2', name: 'Monthly Co', billingPeriodMonths: 1, periodAnchorMonth: null })])
+    const [october] = await generate('2026-10')
+    expect(await store.unpaidPrepaymentFor(october)).toBeNull()
+    const monthlyNovember = (await generate('2026-11')).find((invoice) => invoice.clientId === 'c2')
+    expect(await store.unpaidPrepaymentFor(monthlyNovember)).toBeNull()
+    const quarterlyNovember = (await store.listInvoices({ period: '2026-11' })).find((invoice) => invoice.clientId === 'c1')
+    await setStatus(quarterlyNovember.id, 'sent')
+    expect(await store.unpaidPrepaymentFor({ ...quarterlyNovember, status: 'sent' })).toBeNull()
+  })
+
+  it('holds nothing when no live anchor invoice billed the month ahead (the anchor invoice was voided)', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    const [november] = await generate('2026-11')
+    await store.updateInvoice(october.id, { status: 'void' })
+    expect(await store.unpaidPrepaymentFor(november)).toBeNull()
+  })
+
+  it('M-4: an anchor set in the past, whose invoice carries no prepayment lines, holds nothing and marks nothing', async () => {
+    // September was invoiced monthly before the period existed; the period is then set
+    // to start in September. October and November are "later months" of a period whose
+    // anchor invoice billed nothing ahead.
+    await seed([quarterly({ billingPeriodMonths: 1, periodAnchorMonth: null })])
+    const [september] = await generate('2026-09')
+    await setStatus(september.id, 'sent')
+    await store.write(
+      workspace({
+        clients: [quarterly({ periodAnchorMonth: '2026-09' })],
+        timeEntries: [],
+      }),
+    )
+    const [october] = await generate('2026-10')
+    expect(await store.unpaidPrepaymentFor(october)).toBeNull()
+    const list = await store.listInvoices({ period: '2026-10' })
+    expect(await store.withUnpaidPrepayment(list)).toBe(list)
+  })
+
+  it('M-3: a billing master or a sub with a stored period is never held', async () => {
+    await seed([
+      quarterly({ id: 'c1', name: 'Master', isBillingMaster: true }),
+      quarterly({ id: 's1', name: 'Sub', billToClientId: 'c1' }),
+    ])
+    const november = {
+      id: 'x', clientId: 's1', kind: 'monthly', period: '2026-11', status: 'draft', lineItems: [],
+    }
+    expect(await store.unpaidPrepaymentFor(november)).toBeNull()
+    expect(await store.unpaidPrepaymentFor({ ...november, clientId: 'c1' })).toBeNull()
+  })
+
+  it('marks the month list: only the unsent later-month rows the guard would stop', async () => {
+    await seed([quarterly(), quarterly({ id: 'c2', name: 'Monthly Co', billingPeriodMonths: 1, periodAnchorMonth: null })])
+    const [october] = await generate('2026-10').then((created) => created.filter((invoice) => invoice.clientId === 'c1'))
+    await generate('2026-11')
+    await setStatus(october.id, 'sent')
+    const list = await store.listInvoices({ period: '2026-11' })
+
+    const marked = await store.withUnpaidPrepayment(list)
+    const byClient = Object.fromEntries(marked.map((invoice) => [invoice.clientId, invoice]))
+    expect(byClient.c1.unpaidPrepayment).toMatchObject({
+      month: '2026-11',
+      anchorInvoiceId: october.id,
+      anchorInvoiceNumber: 'INV-2026-10-001',
+    })
+    expect(byClient.c1.unpaidPrepayment.message).toMatch(/has not been paid yet/)
+    expect(byClient.c2).not.toHaveProperty('unpaidPrepayment')
+
+    expect(byClient.c1.unpaidPrepayment.reason).toBe('unpaid')
+
+    // Paid, but the November draft predates it and never drew the credit: still marked.
+    await setStatus(october.id, 'paid')
+    const paid = await store.withUnpaidPrepayment(await store.listInvoices({ period: '2026-11' }))
+    expect(paid.find((invoice) => invoice.clientId === 'c1').unpaidPrepayment.reason).toBe('not_applied')
+  })
+
+  it('a list with nothing unsent, or no billing-period client, comes back as the same list', async () => {
+    await seed([quarterly({ billingPeriodMonths: 1, periodAnchorMonth: null })])
+    await generate('2026-11')
+    const list = await store.listInvoices({ period: '2026-11' })
+    expect(await store.withUnpaidPrepayment(list)).toBe(list)
+    expect(await store.withUnpaidPrepayment([])).toEqual([])
+  })
+})
+
+describe('prepayment credits and the send guard (Postgres statements)', () => {
+  const clientRow = (over = {}) => ({
+    id: 'c1',
+    name: 'Quarterly Co',
+    billingMode: 'subscription',
+    monthlyRate: 500,
+    billingPeriodMonths: 3,
+    periodAnchorMonth: '2026-10',
+    lifecycleStage: 'active',
+    ...over,
+  })
+  const paidOctober = (over = {}) => ({
+    id: 'inv-oct',
+    client_id: 'c1',
+    number: 'INV-2026-10-001',
+    period: '2026-10',
+    status: 'paid',
+    paid_at: new Date('2026-10-20T15:00:00Z'),
+    line_items: [
+      { kind: 'plan', label: 'Monthly service', detail: '', amount: 500 },
+      { kind: 'prepayment', label: 'Prepayment for November 2026', detail: '', amount: 500, period: '2026-11' },
+      { kind: 'prepayment', label: 'Prepayment for December 2026', detail: '', amount: 500, period: '2026-12' },
+    ],
+    ...over,
+  })
+  /** The invoices the two prepayment reads see, answered on the pool and on its connection. */
+  async function answerPrepaid(fake, rows, { clients = [], drawn = null } = {}) {
+    const holders = [...new Set(rows.map((row) => row.client_id))].map((client_id) => ({ client_id }))
+    const intercept = (target) => {
+      const original = target.query.bind(target)
+      target.query = async (text, params) => {
+        const result = await original(text, params)
+        const compact = String(text).replace(/\s+/g, ' ').trim()
+        if (/^select distinct client_id from invoices where status = 'paid' and jsonb_path_exists\(/i.test(compact)) {
+          return { rows: holders }
+        }
+        if (/^select id, number, period, status, paid_at, line_items from invoices where client_id = \$1 and status = 'paid' and line_items @>/i.test(compact)) {
+          return { rows: rows.filter((row) => row.client_id === params?.[0]) }
+        }
+        if (/from clients where billing_period_months > 1$/i.test(compact)) {
+          return { rows: clients }
+        }
+        if (/from clients where id = \$1$/i.test(compact)) {
+          return { rows: clients.filter((row) => row.id === params?.[0]) }
+        }
+        // The draws read, when a test wants to change the ledger between two reads.
+        if (drawn && /^select id, number, period, status, line_items from invoices where client_id = \$1 and status <> 'void' and line_items @>/i.test(compact)) {
+          return { rows: drawn() }
+        }
+        return result
+      }
+    }
+    intercept(fake.pool)
+    intercept(await fake.pool.connect())
+  }
+  function storeFor(fake, clients) {
+    const pg = postgresStore(fake)
+    pg.read = async () => ({ clients, timeEntries: [], plans: [], reimbursements: [], recurringReimbursements: [], employees: [] })
+    return pg
+  }
+  const inserts = (fake) => fake.matching(/^insert into invoices \(/i)
+
+  it('reads the derived credits beside the stored ledger, as the same views the file backend answers', async () => {
+    const fake = fakePostgres()
+    await answerPrepaid(fake, [paidOctober()])
+    const credits = await postgresStore(fake).listAccountCredits('c1')
+    expect(credits.map((credit) => [credit.id, credit.amount, credit.forPeriod, credit.sourceKind, credit.derived])).toEqual([
+      ['prepay:inv-oct:2026-11', 500, '2026-11', 'prepayment', true],
+      ['prepay:inv-oct:2026-12', 500, '2026-12', 'prepayment', true],
+    ])
+    expect(credits[0]).toMatchObject({
+      note: 'Prepayment on INV-2026-10-001',
+      createdAt: '2026-10-20T15:00:00.000Z',
+      remaining: 500,
+      draws: [],
+      voidedAt: null,
+    })
+    // The prepaid read is its own statement, scoped to this client's PAID invoices.
+    const read = fake.matching(/^select id, number, period, status, paid_at, line_items from invoices/i)
+    expect(read).toHaveLength(1)
+    expect(read[0].params).toEqual(['c1'])
+  })
+
+  it('a client with no stored credit but a paid prepayment invoice takes the lock and draws in its month', async () => {
+    const fake = fakePostgres()
+    await answerPrepaid(fake, [paidOctober()])
+
+    const { created } = await storeFor(fake, [clientRow()]).generateInvoicesForPeriod('2026-11')
+
+    expect(created).toHaveLength(1)
+    const locks = fake.matching(/pg_advisory_xact_lock/i)
+    expect(locks.map((lock) => lock.params[0])).toEqual(['account_credit:c1'])
+    const [write] = inserts(fake)
+    const lines = JSON.parse(write.params[6])
+    expect(lines.map((line) => line.kind)).toEqual(['plan', 'account_credit'])
+    expect(lines[1]).toMatchObject({ amount: -500, draws: [{ creditId: 'prepay:inv-oct:2026-11', amount: 500 }] })
+    expect(write.params[7]).toBe(500)
+    expect(write.params[8]).toBe(0)
+  })
+
+  it('a client without such an invoice takes no lock', async () => {
+    const fake = fakePostgres()
+    await answerPrepaid(fake, [paidOctober({ client_id: 'someone-else' })])
+    await storeFor(fake, [clientRow()]).generateInvoicesForPeriod('2026-11')
+    expect(fake.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+    expect(JSON.parse(inserts(fake)[0].params[6]).map((line) => line.kind)).toEqual(['plan'])
+  })
+
+  it('refuses to void the paid prepayment invoice while a live invoice draws on it (cheap early read)', async () => {
+    const november = {
+      id: 'inv-nov',
+      client_id: 'c1',
+      period: '2026-11',
+      number: 'INV-2026-11-001',
+      kind: 'monthly',
+      status: 'draft',
+      line_items: [
+        { kind: 'plan', label: 'Monthly service', detail: '', amount: 500 },
+        { kind: 'account_credit', label: 'Credit on account', detail: '', amount: -500, draws: [{ creditId: 'prepay:inv-oct:2026-11', amount: 500 }] },
+      ],
+      subtotal: 500,
+      total: 0,
+    }
+    const october = { ...paidOctober(), kind: 'monthly', subtotal: 1500, total: 1500 }
+    const fake = fakePostgres({ invoices: [october, november] })
+    await answerPrepaid(fake, [paidOctober()])
+
+    await expect(postgresStore(fake).updateInvoice('inv-oct', { status: 'void' })).rejects.toThrow(/INV-2026-11-001/)
+
+    expect(fake.matching(/^update invoices\s+set line_items/i)).toHaveLength(0)
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+  })
+
+  it('and checks again INSIDE the transaction, under the credit lock, when a draw landed after the early read', async () => {
+    const october = { ...paidOctober(), kind: 'monthly', subtotal: 1500, total: 1500 }
+    const novemberDraw = {
+      id: 'inv-nov',
+      number: 'INV-2026-11-001',
+      period: '2026-11',
+      status: 'draft',
+      line_items: [
+        { kind: 'account_credit', label: 'Credit on account', detail: '', amount: -500, draws: [{ creditId: 'prepay:inv-oct:2026-11', amount: 500 }] },
+      ],
+    }
+    let reads = 0
+    const fake = fakePostgres({ invoices: [october] })
+    // The first read (the early refusal) sees no draw; every later read sees it.
+    await answerPrepaid(fake, [paidOctober()], { drawn: () => (reads++ === 0 ? [] : [novemberDraw]) })
+
+    await expect(postgresStore(fake).updateInvoice('inv-oct', { status: 'void' })).rejects.toThrow(/INV-2026-11-001/)
+
+    const begin = fake.indexOf(/^BEGIN$/i)
+    const lock = fake.indexOf(/pg_advisory_xact_lock/i)
+    expect(begin).toBeGreaterThan(-1)
+    expect(lock).toBeGreaterThan(begin)
+    expect(fake.statements[lock].params).toEqual(['account_credit:c1'])
+    // Refused under the lock, before the invoice row is locked or written.
+    expect(fake.matching(/for update/i)).toHaveLength(0)
+    expect(fake.matching(/^update invoices\s+set line_items/i)).toHaveLength(0)
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+    expect(fake.matching(/^ROLLBACK$/i).length).toBeGreaterThan(0)
+  })
+
+  it('refuses to undo the manual Mark paid on the prepayment invoice while a live invoice draws on it, under the credit lock', async () => {
+    const november = {
+      id: 'inv-nov',
+      number: 'INV-2026-11-001',
+      period: '2026-11',
+      status: 'draft',
+      line_items: [
+        { kind: 'account_credit', label: 'Credit on account', detail: '', amount: -500, draws: [{ creditId: 'prepay:inv-oct:2026-11', amount: 500 }] },
+      ],
+    }
+    const october = {
+      ...paidOctober(),
+      kind: 'monthly',
+      subtotal: 1500,
+      total: 1500,
+      payment_method: 'manual',
+      sent_at: new Date('2026-10-20T15:00:00Z'),
+    }
+    let reads = 0
+    const fake = fakePostgres({ invoices: [october] })
+    // The early read sees no draw; the read under the lock does.
+    await answerPrepaid(fake, [paidOctober()], { drawn: () => (reads++ === 0 ? [] : [november]) })
+
+    await expect(postgresStore(fake).unmarkManualInvoicePayment('inv-oct', {})).rejects.toThrow(/INV-2026-11-001/)
+
+    const begin = fake.indexOf(/^BEGIN$/i)
+    const lock = fake.indexOf(/pg_advisory_xact_lock/i)
+    expect(lock).toBeGreaterThan(begin)
+    expect(fake.statements[lock].params).toEqual(['account_credit:c1'])
+    expect(fake.matching(/^update invoices\s+set status/i)).toHaveLength(0)
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+    expect(fake.matching(/^ROLLBACK$/i).length).toBeGreaterThan(0)
+  })
+
+  it('holds a month whose anchor payment is PROCESSING (reason processing, no ledger read), and passes a $0 month on a paid anchor (R-1)', async () => {
+    const novemberRow = {
+      id: 'inv-nov',
+      client_id: 'c1',
+      period: '2026-11',
+      number: 'INV-2026-11-001',
+      kind: 'monthly',
+      status: 'reviewed',
+      line_items: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 500 }],
+      subtotal: 500,
+      total: 500,
+    }
+    const clientRowSnake = {
+      id: 'c1',
+      name: 'Quarterly Co',
+      billing_mode: 'subscription',
+      monthly_rate: 500,
+      billing_period_months: 3,
+      period_anchor_month: '2026-10',
+    }
+    const clearing = { ...paidOctober({ status: 'processing', paid_at: null }), kind: 'monthly', subtotal: 1500, total: 1500 }
+    const clearingFake = fakePostgres({ invoices: [clearing, novemberRow], filterInvoicesByPeriod: true })
+    await answerPrepaid(clearingFake, [], { clients: [clientRowSnake] })
+    const clearingPg = postgresStore(clearingFake)
+    const november = (await clearingPg.listInvoices({ period: '2026-11' }))[0]
+    const hold = await clearingPg.unpaidPrepaymentFor(november)
+    expect(hold).toMatchObject({ reason: 'processing', anchorInvoice: { id: 'inv-oct', status: 'processing' } })
+    expect(hold.message).toBe(
+      "This month was prepaid on October 2026's invoice and that payment is still clearing. Once it settles, Apply credit on account (or Void & regenerate) and send then.",
+    )
+    expect(clearingFake.matching(/^select id, number, period, status, paid_at, line_items from invoices/i)).toHaveLength(0)
+    const marked = await clearingPg.withUnpaidPrepayment([november])
+    expect(marked[0].unpaidPrepayment.reason).toBe('processing')
+
+    // A paid anchor and a month that owes nothing: nothing to apply, nothing held.
+    const paidRow = { ...clearing, status: 'paid', paid_at: new Date('2026-10-20T15:00:00Z') }
+    const zeroRow = { ...novemberRow, total: 0, subtotal: 0, line_items: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 0 }] }
+    const paidFake = fakePostgres({ invoices: [paidRow, zeroRow], filterInvoicesByPeriod: true })
+    await answerPrepaid(paidFake, [paidOctober()], { clients: [clientRowSnake] })
+    const paidPg = postgresStore(paidFake)
+    const zero = (await paidPg.listInvoices({ period: '2026-11' }))[0]
+    expect(zero.total).toBe(0)
+    expect(await paidPg.unpaidPrepaymentFor(zero)).toBeNull()
+  })
+
+  it('marks the month list on Postgres from one read of the billing-period clients', async () => {
+    const octoberRow = { ...paidOctober({ status: 'sent' }), kind: 'monthly', subtotal: 1500, total: 1500 }
+    const novemberRow = {
+      id: 'inv-nov',
+      client_id: 'c1',
+      period: '2026-11',
+      number: 'INV-2026-11-001',
+      kind: 'monthly',
+      status: 'reviewed',
+      line_items: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 500 }],
+      subtotal: 500,
+      total: 500,
+    }
+    const fake = fakePostgres({ invoices: [octoberRow, novemberRow], filterInvoicesByPeriod: true })
+    const clientRowSnake = {
+      id: 'c1',
+      name: 'Quarterly Co',
+      billing_mode: 'subscription',
+      monthly_rate: 500,
+      billing_period_months: 3,
+      period_anchor_month: '2026-10',
+    }
+    await answerPrepaid(fake, [], { clients: [clientRowSnake] })
+    const pg = postgresStore(fake)
+    const marked = await pg.withUnpaidPrepayment(await pg.listInvoices({ period: '2026-11' }))
+    expect(marked[0].unpaidPrepayment).toMatchObject({ anchorInvoiceNumber: 'INV-2026-10-001', month: '2026-11', reason: 'unpaid' })
+    expect(fake.matching(/from clients where billing_period_months > 1$/i)).toHaveLength(1)
+    // The other half of the I-1 hold: a PAID anchor and a November draft that drew nothing.
+    const paidRow = { ...octoberRow, status: 'paid', paid_at: new Date('2026-10-20T15:00:00Z') }
+    const paidFake = fakePostgres({ invoices: [paidRow, novemberRow], filterInvoicesByPeriod: true })
+    await answerPrepaid(paidFake, [paidOctober()], { clients: [clientRowSnake] })
+    const paidPg = postgresStore(paidFake)
+    const november = (await paidPg.listInvoices({ period: '2026-11' }))[0]
+    const hold = await paidPg.unpaidPrepaymentFor(november)
+    expect(hold).toMatchObject({ reason: 'not_applied', month: '2026-11', anchorInvoice: { id: 'inv-oct', status: 'paid' } })
+    expect(hold.message).toBe(
+      "This month was prepaid on October 2026's invoice, but the prepayment has not been applied to this invoice. Apply credit on account, or Void & regenerate, before sending.",
+    )
+    // The ledger is read (credits, draws, prepaid) only because a PAID anchor carries the month.
+    expect(paidFake.matching(/^select id, number, period, status, paid_at, line_items from invoices/i)).toHaveLength(1)
+    // An UNPAID anchor needs no ledger read at all.
+    expect(fake.matching(/^select id, number, period, status, paid_at, line_items from invoices/i)).toHaveLength(0)
+    // Nothing unsent in the list: no client read at all.
+    const quiet = fakePostgres()
+    await answerPrepaid(quiet, [])
+    await postgresStore(quiet).withUnpaidPrepayment([{ id: 'x', kind: 'monthly', status: 'paid', clientId: 'c1', period: '2026-11' }])
+    expect(quiet.matching(/billing_period_months > 1/i)).toHaveLength(0)
   })
 })
 
@@ -42312,7 +43086,8 @@ describe('credit on account lines (Postgres statements)', () => {
 
     const [credit] = await store2.listAccountCredits('c1')
 
-    const drawReads = fake.matching(/line_items @>/i)
+    // Draw reads only: the derived-prepayment read (kind prepayment) is a separate select.
+    const drawReads = fake.matching(/line_items @> '\[\{"kind":"account_credit"\}\]'/i)
     expect(drawReads).toHaveLength(1)
     expect(drawReads[0].text.replace(/\s+/g, ' ')).toBe(
       `select id, number, period, status, line_items from invoices where client_id = $1 and status <> 'void' and line_items @> '[{"kind":"account_credit"}]'::jsonb`,
@@ -42361,7 +43136,7 @@ describe('credit on account lines (Postgres statements)', () => {
     )
     // Two ledger reads: one to size the line, one under the lock.
     expect(fake.matching(/from account_credits\s+where client_id = \$1/i)).toHaveLength(2)
-    expect(fake.matching(/line_items @>/i)).toHaveLength(2)
+    expect(fake.matching(/line_items @> '\[\{"kind":"account_credit"\}\]'/i)).toHaveLength(2)
   })
 
   it('refuses the save whole, rolled back with nothing written, when the ledger moved under the lock', async () => {

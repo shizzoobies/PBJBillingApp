@@ -788,6 +788,19 @@ export type PersistedInvoice = {
    */
   changedSinceSent?: boolean
   /**
+   * An unsent later-month invoice of a billing-period client whose period's prepayment
+   * invoice is not paid (or missing): sending it would bill the month again, so the
+   * server asks first. Derived on the month list, never stored; the row flags it.
+   */
+  unpaidPrepayment?: {
+    message: string
+    /** 'unpaid': the anchor is not paid (Send anyway allowed). 'processing': its payment is still clearing, and 'not_applied': it is paid but this invoice does not draw it (no override for either). */
+    reason?: 'unpaid' | 'processing' | 'not_applied'
+    month: string
+    anchorInvoiceId: string | null
+    anchorInvoiceNumber: string | null
+  }
+  /**
    * Said once, on the response to a save, when the invoice's credit on account
    * line could not be kept (the credit was voided or used elsewhere) and was taken
    * off. Never stored.
@@ -2378,10 +2391,14 @@ export class ApiError extends Error {
    */
   code?: string
 
-  constructor(status: number, message: string, code?: string) {
+  /** The send guard's 409 `reason` ('unpaid' | 'not_applied') when `code` is `prepayment_unpaid`. */
+  reason?: string
+
+  constructor(status: number, message: string, code?: string, reason?: string) {
     super(message)
     this.status = status
     this.code = code
+    this.reason = reason
   }
 }
 
@@ -2391,7 +2408,7 @@ export class ApiError extends Error {
  * invoices have drawn from it and `remaining` is the amount less those draws.
  * A void credit stays in the ledger with `voidedAt` set and nothing remaining.
  */
-export type AccountCreditSourceKind = 'manual' | 'overpayment'
+export type AccountCreditSourceKind = 'manual' | 'overpayment' | 'prepayment'
 
 export type AccountCredit = {
   id: string
@@ -2409,6 +2426,11 @@ export type AccountCredit = {
   voidedBy: string | null
   draws: AccountCreditDraw[]
   remaining: number
+  /**
+   * True on a prepayment credit: derived from a paid invoice's prepayment lines
+   * (billing period), never stored, so it has no Void (void the invoice instead).
+   */
+  derived?: boolean
 }
 
 /** One invoice's draw on a credit: which invoice (and month), and how much. */

@@ -4796,7 +4796,14 @@ export function invoicePreviewPdfUrl(invoiceId: string) {
   return `/api/invoices/${encodeURIComponent(invoiceId)}/preview.pdf`
 }
 
-export async function sendInvoiceRequest(invoiceId: string, to?: string[], extra?: string[]) {
+export async function sendInvoiceRequest(
+  invoiceId: string,
+  to?: string[],
+  extra?: string[],
+  // `allowUnpaidPrepayment` is the owner's "Send anyway" after the server refused with
+  // `prepayment_unpaid` (a later month of a billing period whose prepayment is not paid).
+  options?: { allowUnpaidPrepayment?: boolean },
+) {
   const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/send`, {
     credentials: 'same-origin',
     method: 'POST',
@@ -4805,16 +4812,24 @@ export async function sendInvoiceRequest(invoiceId: string, to?: string[], extra
     body: JSON.stringify({
       ...(to ? { to } : {}),
       ...(extra && extra.length > 0 ? { extra } : {}),
+      ...(options?.allowUnpaidPrepayment ? { allowUnpaidPrepayment: true } : {}),
     }),
   })
   if (!response.ok) {
     // The code rides along: `invoice_voided` (a void landed mid-send) makes the
     // month run reload itself so the row shows Void.
+    // The prepayment hold's `reason` decides whether the page may offer "Send anyway".
+    const reason = await response
+      .clone()
+      .json()
+      .then((body: { reason?: unknown }) => (typeof body?.reason === 'string' ? body.reason : undefined))
+      .catch(() => undefined)
     const { message, code } = await safeError(response)
     throw new ApiError(
       response.status,
       message || `Could not send the invoice (${response.status})`,
       code,
+      reason,
     )
   }
   return (await response.json()) as { invoice: PersistedInvoice }

@@ -387,7 +387,15 @@ function amountMismatchFlagText(mismatch: AmountMismatchView, inProgress: boolea
  * she most needs telling, so the same question is asked here of the two versions
  * the save moved between. Never UN-marks: an earlier edit still counts.
  */
-function markedAfterEdit(before: PersistedInvoice, after: PersistedInvoice): PersistedInvoice {
+function markedAfterEdit(before: PersistedInvoice, afterSave: PersistedInvoice): PersistedInvoice {
+  // The unpaid-prepayment flag comes with the month list, not with a save: carry it
+  // across a save of the same unsent invoice (the server still refuses at Send).
+  const after =
+    before.unpaidPrepayment &&
+    !afterSave.unpaidPrepayment &&
+    (afterSave.status === 'draft' || afterSave.status === 'reviewed')
+      ? { ...afterSave, unpaidPrepayment: before.unpaidPrepayment }
+      : afterSave
   if (after.changedSinceSent || before.status !== 'sent' || after.status !== 'sent') return after
   // Never marks what the server never would: with no successful send on the log
   // there is no earlier version the client is holding.
@@ -1413,12 +1421,18 @@ export function InvoiceMonthRun({
    * invoice rewrites the label the client reads, and the notice has to follow it
    * even when the server's best-effort mark could not be derived.
    */
-  const mergeInvoice = (updated: PersistedInvoice) =>
+  const mergeInvoice = (updated: PersistedInvoice) => {
+    // The "Prepayment unpaid" mark is derived by the list read, and a save or an
+    // Apply credit can change it: carry it for the moment, then re-read the month
+    // so it never outlives what the server would now say.
+    const hadMark = invoices.some((invoice) => invoice.id === updated.id && invoice.unpaidPrepayment)
     setInvoices((current) =>
       current.map((invoice) =>
         invoice.id === updated.id ? markedAfterEdit(invoice, updated) : invoice,
       ),
     )
+    if (hadMark) void reloadMonth()
+  }
 
   /**
    * Re-read the month on screen, flushed, so the rows show what the invoices
@@ -1443,11 +1457,15 @@ export function InvoiceMonthRun({
     setError(null)
     try {
       const updated = await updateInvoiceRequest(invoiceId, body)
+      const hadMark = invoices.some((invoice) => invoice.id === updated.id && invoice.unpaidPrepayment)
       setInvoices((current) =>
         current.map((invoice) =>
           invoice.id === updated.id ? markedAfterEdit(invoice, updated) : invoice,
         ),
       )
+      // The prepayment mark is derived by the list read: re-read so a save never
+      // leaves a stale one (the server still decides at Send).
+      if (hadMark) void reloadMonth()
       // A save can have spent a retainer or handed one back. Re-ask rather than
       // guess: the server decides, and the offer on the next row has to agree
       // with what it decided.
@@ -2050,6 +2068,20 @@ function InvoiceRow({
                 title="This invoice was changed after it was sent. The client has the earlier version."
               >
                 Changed since sent
+              </span>
+            </span>
+          ) : null}
+          {/* Billing period: this later month's prepayment is not paid, so Send will
+              ask before billing the month again. */}
+          {invoice.unpaidPrepayment && (invoice.status === 'draft' || invoice.status === 'reviewed') ? (
+            <span className="invoice-run-flags">
+              <span className="invoice-run-flag" title={invoice.unpaidPrepayment.message}>
+                <AlertTriangle size={13} />
+                {invoice.unpaidPrepayment.reason === 'not_applied'
+                  ? 'Prepayment not applied'
+                  : invoice.unpaidPrepayment.reason === 'processing'
+                    ? 'Prepayment clearing'
+                    : 'Prepayment unpaid'}
               </span>
             </span>
           ) : null}
@@ -2736,6 +2768,15 @@ function InvoiceEditor({
   const [copied, setCopied] = useState(false)
   const [sendBusy, setSendBusy] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  // The send guard's question (billing period): this later month's prepayment is not
+  // paid, so sending would bill the month again. Held with the addresses of the send
+  // it interrupted so "Send anyway" repeats exactly that send.
+  const [prepaymentAsk, setPrepaymentAsk] = useState<{
+    message: string
+    to?: string[]
+    extra?: string[]
+    canOverride: boolean
+  } | null>(null)
   // Open only when there is a choice to make — see `startSend`.
   const [picking, setPicking] = useState(false)
   // Why the last save's retainer credit was refused. Kept here rather than on
@@ -3070,17 +3111,33 @@ function InvoiceEditor({
    * the id — and on failure we keep the invoice we have, because pushing a new
    * one up would remount this editor and wipe the message before it was read.
    */
-  const sendInvoice = async (to?: string[], extra?: string[]) => {
-    setSendBusy(true)
+  const sendInvoice = async (to?: string[], extra?: string[], allowUnpaidPrepayment = false) => {
     setSendError(null)
+    // No local pre-check: the list's mark can be stale, so the SERVER decides on the
+    // rows as they are now and the page only asks when it answers prepayment_unpaid.
+    setPrepaymentAsk(null)
+    setSendBusy(true)
     try {
       // `extra` is only passed when the picker added some for this one send.
-      const result = await (extra && extra.length > 0
-        ? sendInvoiceRequest(invoice.id, to, extra)
-        : sendInvoiceRequest(invoice.id, to))
+      const result = await (allowUnpaidPrepayment
+        ? sendInvoiceRequest(invoice.id, to, extra, { allowUnpaidPrepayment: true })
+        : extra && extra.length > 0
+          ? sendInvoiceRequest(invoice.id, to, extra)
+          : sendInvoiceRequest(invoice.id, to))
       setPicking(false)
       onInvoiceChanged(result.invoice)
     } catch (err) {
+      // The server's question (billing period): ask, do not fail. "Send anyway" is
+      // offered only for the 'unpaid' reason; an anchor whose payment is still clearing
+      // ('processing') or that is paid but never drawn by this invoice ('not_applied')
+      // has to be settled first, and the row's mark is re-read.
+      if (err instanceof ApiError && err.code === 'prepayment_unpaid') {
+        setPicking(false)
+        const canOverride = err.reason !== 'not_applied' && err.reason !== 'processing'
+        setPrepaymentAsk({ message: err.message, to, extra, canOverride })
+        if (!canOverride) await onInvoiceMoved()
+        return
+      }
       // A void that landed mid-send: re-read the month first, so the row shows
       // Void and the sentence goes where the reload leaves room for it (once).
       if (err instanceof ApiError && INVOICE_MOVED_CODES.has(err.code)) await onInvoiceMoved()
@@ -4334,6 +4391,29 @@ function InvoiceEditor({
         <p className="invoice-run-error" role="alert">
           {sendError}
         </p>
+      ) : null}
+
+      {/* Billing period: a later month whose prepayment is not paid. It asks; it never
+          decides for her. */}
+      {prepaymentAsk ? (
+        <div className="invoice-run-error invoice-run-prepayment-ask" role="alert">
+          <p>{prepaymentAsk.message}</p>
+          {prepaymentAsk.canOverride ? (
+            <>
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={sendBusy}
+                onClick={() => void sendInvoice(prepaymentAsk.to, prepaymentAsk.extra, true)}
+              >
+                Send anyway
+              </button>{' '}
+            </>
+          ) : null}
+          <button type="button" className="link-button" onClick={() => setPrepaymentAsk(null)}>
+            {prepaymentAsk.canOverride ? 'Not now' : 'OK'}
+          </button>
+        </div>
       ) : null}
 
       {/* The client is holding the earlier version. A STATUS, not an alert: it

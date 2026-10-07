@@ -117,3 +117,21 @@ describe('the Billing period card', () => {
     expect(container).toBeEmptyDOMElement()
   })
 })
+
+describe('billing masters and their subs (M-3)', () => {
+  it('shows no card on a billing master or on a sub, whatever period is stored on them', () => {
+    for (const over of [
+      { isBillingMaster: true },
+      { billToClientId: 'master-1' },
+    ] as Partial<Client>[]) {
+      const { container } = render(
+        <BillingPeriodSectionBody
+          client={client({ billingPeriodMonths: 3, periodAnchorMonth: '2026-10', ...over })}
+          onCommit={vi.fn()}
+          today="2026-10-07"
+        />,
+      )
+      expect(container).toBeEmptyDOMElement()
+    }
+  })
+})

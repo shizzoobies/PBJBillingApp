@@ -5224,6 +5224,13 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         console.error('[invoices] changed-since-sent mark failed on the list, answering unmarked:', error)
       }
+      // And which unsent later-month invoices of a billing-period client the send
+      // guard would stop (their period's prepayment is not paid).
+      try {
+        marked = await appDataStore.withUnpaidPrepayment(marked)
+      } catch (error) {
+        console.error('[invoices] unpaid-prepayment mark failed on the list, answering unmarked:', error)
+      }
       sendJson(response, 200, { invoices: marked })
       return
     }
@@ -7072,6 +7079,25 @@ const server = createServer(async (request, response) => {
         sendJson(response, 409, {
           error: 'client_not_emailed',
           message: `${sendClient.name}'s invoices are delivered outside the app and never emailed. Mark the invoice reviewed to mark it sent.`,
+        })
+        return
+      }
+
+      // BILLING PERIOD (stage 2): a later month billed ahead on its period's anchor
+      // invoice would be billed a second time, so the route asks first. ALWAYS decided
+      // here from the rows as they are NOW (never from a flag the page carried), so a
+      // stale "Send anyway" cannot skip it. `allowUnpaidPrepayment: true` lifts only the
+      // 'unpaid' hold (the anchor is not paid yet); the 'not_applied' hold (the anchor
+      // IS paid but this invoice does not draw it) has no override: Apply credit on
+      // account or Void & regenerate. Nothing else about the send changes.
+      const prepaymentHold = await appDataStore.unpaidPrepaymentFor(invoice)
+      if (prepaymentHold && !(prepaymentHold.reason === 'unpaid' && sendPayload?.allowUnpaidPrepayment === true)) {
+        sendJson(response, 409, {
+          error: 'prepayment_unpaid',
+          reason: prepaymentHold.reason,
+          message: prepaymentHold.message,
+          anchorInvoiceId: prepaymentHold.anchorInvoice?.id ?? null,
+          anchorInvoiceNumber: prepaymentHold.anchorInvoice?.number ?? null,
         })
         return
       }

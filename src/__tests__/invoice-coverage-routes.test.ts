@@ -44,8 +44,9 @@ describe('the send route refuses an unanswered covered-date window', () => {
   // `sendInvoiceEmail`, so it stays inside the pre-send half of the route.
   // Widened again from 8000 for the never-email refusal (Rivercity), and from
   // 9000 for the paid-at-send stamp (credit on account, stage 1d), which sits
-  // between the refusals and the mint.
-  const block = () => routeBlock(/This invoice is voided, so it cannot be sent\./, 11200)
+  // between the refusals and the mint. And from 11200 for the unpaid-prepayment
+  // question (billing period, stage 2), which sits ahead of the recipients.
+  const block = () => routeBlock(/This invoice is voided, so it cannot be sent\./, 12400)
 
   // The UI disables Send behind review, and review is gated — but this route is
   // reachable directly, and an invoice reviewed BEFORE the question existed

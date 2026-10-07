@@ -78,7 +78,13 @@ import {
   previousPeriod,
   withPrepaymentLines,
 } from '../lib/invoice-draft.js'
-import { normalizeBillingPeriodMonths, normalizePeriodAnchorMonth } from '../lib/billing-period.js'
+import {
+  hasBillingPeriod,
+  normalizeBillingPeriodMonths,
+  normalizePeriodAnchorMonth,
+  periodAnchorFor,
+  unpaidPrepaymentFor as unpaidPrepaymentCheck,
+} from '../lib/billing-period.js'
 import {
   StaleWorkspaceError,
   fileWorkspaceVersion,
@@ -1407,6 +1413,17 @@ const ACCOUNT_CREDIT_DRAWN_SQL = `select id, number, period, status, line_items 
  */
 const ACCOUNT_CREDIT_HOLDERS_SQL =
   'select distinct client_id from account_credits where voided_at is null'
+/**
+ * A client's PAID invoices that carry prepayment lines (billing period, stage 2):
+ * each yields derived credit, one per covered month. Read beside the stored
+ * ledger, under the same credit lock.
+ */
+const ACCOUNT_CREDIT_PREPAID_SQL = `select id, number, period, status, paid_at, line_items from invoices
+          where client_id = $1 and status = 'paid'
+            and line_items @> '[{"kind":"prepayment"}]'::jsonb`
+/** Which clients have such an invoice at all: read ONCE per generation run beside the stored holders. */
+const ACCOUNT_CREDIT_PREPAID_HOLDERS_SQL = `select distinct client_id from invoices
+          where status = 'paid' and jsonb_path_exists(line_items, '$[*] ? (@.kind == "prepayment")')`
 const ACCOUNT_CREDIT_CHANGED_MESSAGE =
   'The credit on account changed while this was saving, so nothing was changed. Try again.'
 const ACCOUNT_CREDIT_SELECT_COLUMNS = `id, client_id, amount, source_kind, source_ref, for_period,
@@ -1437,6 +1454,9 @@ function accountCreditView(row, draws = []) {
     voidedBy: row.voidedBy ?? null,
     draws,
     remaining: voidedAt ? 0 : remainingCents / 100,
+    // A prepayment credit is DERIVED from a paid invoice, never stored: it has no
+    // row to void (void the invoice instead).
+    ...(row.derived === true ? { derived: true } : {}),
   }
 }
 
@@ -1459,6 +1479,52 @@ function accountCreditRowOf(row) {
 
 function mapAccountCreditRow(row) {
   return accountCreditView(accountCreditRowOf(row))
+}
+
+/**
+ * The credits a client's PAID prepayment invoices yield (billing period): one per
+ * covered month, id `prepay:<invoiceId>:<YYYY-MM>`, the amount the line billed for
+ * that month (two lines for one month on one invoice are one credit), meant for that
+ * month, dated when the invoice was paid. A VIRTUAL kind: nothing is stored, so a
+ * void or an unpaid invoice has no credit, and the ledger's own rule (draws are
+ * lines on non-void invoices, keyed by credit id) spends it like any other.
+ */
+function derivedPrepaymentCredits(clientId, invoices) {
+  const out = []
+  for (const invoice of invoices) {
+    if (invoice?.status !== 'paid') continue
+    const cents = new Map()
+    for (const line of invoice.lineItems ?? []) {
+      if (line?.kind !== 'prepayment' || !ACCOUNT_CREDIT_PERIOD.test(String(line.period ?? ''))) continue
+      const lineCents = accountCreditCents(line.amount)
+      if (lineCents > 0) cents.set(line.period, (cents.get(line.period) ?? 0) + lineCents)
+    }
+    for (const [month, total] of cents) {
+      out.push({
+        id: `prepay:${invoice.id}:${month}`,
+        clientId,
+        amount: total / 100,
+        sourceKind: 'prepayment',
+        sourceRef: invoice.id,
+        forPeriod: month,
+        note: `Prepayment on ${invoice.number ?? invoice.id}`,
+        createdBy: null,
+        createdAt: invoice.paidAt ?? null,
+        voidedAt: null,
+        voidedBy: null,
+        derived: true,
+      })
+    }
+  }
+  return out
+}
+
+/** The stored rows and the derived ones as ONE ledger, oldest first only when there is a derived one to place. */
+function withDerivedCredits(stored, derived) {
+  if (derived.length === 0) return stored
+  return [...stored, ...derived].sort(
+    (a, b) => String(a.createdAt ?? '').localeCompare(String(b.createdAt ?? '')) || String(a.id).localeCompare(String(b.id)),
+  )
 }
 
 /**
@@ -13930,6 +13996,101 @@ export class AppDataStore {
     )
   }
 
+  /**
+   * THE UNPAID-PREPAYMENT SEND GUARD (billing period, stage 2): null when this
+   * invoice may go out, else the check's answer (a sentence and the anchor invoice
+   * that is not paid). Only a first send of a NON-anchor month's invoice of a
+   * billing-period client can be stopped; every other invoice costs one client read.
+   * `lib/billing-period.js` owns the rule.
+   */
+  async unpaidPrepaymentFor(invoice) {
+    if (!invoice || invoice.kind !== 'monthly') return null
+    const client = await this.getClientById(invoice.clientId)
+    if (!client || !hasBillingPeriod(client)) return null
+    const anchorPeriod = periodAnchorFor(client, invoice.period)
+    if (!anchorPeriod || anchorPeriod === invoice.period) return null
+    const invoices = await this.listInvoices({ period: anchorPeriod })
+    return unpaidPrepaymentCheck({
+      client,
+      invoice,
+      invoices,
+      credits: await this._creditsWhenAnchorPaid(client.id, invoices, invoice.period),
+    })
+  }
+
+  /**
+   * The client's credit ledger, read ONLY when a PAID anchor invoice carries a
+   * prepayment line for `month` (the one case where the send guard has to look at
+   * what the derived credit still holds); otherwise nothing is read.
+   */
+  async _creditsWhenAnchorPaid(clientId, anchorInvoices, month) {
+    const paidAhead = (anchorInvoices ?? []).some(
+      (entry) =>
+        entry?.clientId === clientId &&
+        entry.kind === 'monthly' &&
+        entry.status === 'paid' &&
+        (entry.lineItems ?? []).some((line) => line?.kind === 'prepayment' && line.period === month),
+    )
+    return paidAhead ? this._readAccountCredits(clientId) : []
+  }
+
+  /**
+   * The month run's flag: each unsent monthly invoice the guard above would stop
+   * carries `unpaidPrepayment` ({ message, anchorInvoiceId, anchorInvoiceNumber,
+   * month }). ONE read of the billing-period clients (none in most months) and one
+   * list per distinct anchor month, and none at all when nothing in the list is an
+   * unsent monthly draft. A derived mark like `changedSinceSent`, never stored.
+   */
+  async withUnpaidPrepayment(invoices) {
+    const list = Array.isArray(invoices) ? invoices : []
+    const unsent = list.filter(
+      (invoice) =>
+        invoice?.kind === 'monthly' && (invoice.status === 'draft' || invoice.status === 'reviewed'),
+    )
+    if (unsent.length === 0) return list
+    let clients
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${CLIENT_SELECT_COLUMNS} from clients where billing_period_months > 1`,
+      )
+      clients = rows.map(mapClientRow)
+    } else {
+      const data = await readJson(localDataPath)
+      clients = (Array.isArray(data.clients) ? data.clients : []).map(normalizeClientProfile)
+    }
+    const periodClients = new Map(clients.filter(hasBillingPeriod).map((client) => [client.id, client]))
+    if (periodClients.size === 0) return list
+    const anchorLists = new Map()
+    const marks = new Map()
+    for (const invoice of unsent) {
+      const client = periodClients.get(invoice.clientId)
+      const anchorPeriod = client ? periodAnchorFor(client, invoice.period) : null
+      if (!anchorPeriod || anchorPeriod === invoice.period) continue
+      if (!anchorLists.has(anchorPeriod)) {
+        anchorLists.set(anchorPeriod, await this.listInvoices({ period: anchorPeriod }))
+      }
+      const found = unpaidPrepaymentCheck({
+        client,
+        invoice,
+        invoices: anchorLists.get(anchorPeriod),
+        credits: await this._creditsWhenAnchorPaid(client.id, anchorLists.get(anchorPeriod), invoice.period),
+      })
+      if (found) {
+        marks.set(invoice.id, {
+          message: found.message,
+          reason: found.reason,
+          month: found.month,
+          anchorInvoiceId: found.anchorInvoice?.id ?? null,
+          anchorInvoiceNumber: found.anchorInvoice?.number ?? null,
+        })
+      }
+    }
+    if (marks.size === 0) return list
+    return list.map((invoice) =>
+      marks.has(invoice?.id) ? { ...invoice, unpaidPrepayment: marks.get(invoice.id) } : invoice,
+    )
+  }
+
   /** Every expense id a set of invoices' recurring lines names. */
   _coveredExpenseIds(invoices) {
     const ids = []
@@ -15914,6 +16075,16 @@ export class AppDataStore {
         throw autopayInFlight()
       }
     }
+    // A PAID PREPAYMENT INVOICE is the source of credit that later months' invoices
+    // draw (billing period, stage 2); voiding it while one still does would leave a
+    // draw on a credit that no longer exists. Void those first. This early read is the
+    // cheap refusal; the decision that counts is made AGAIN inside the write, under
+    // the credit lock on Postgres and on the data being written on the file backend.
+    const voidsPrepayment =
+      voiding &&
+      current.status === 'paid' &&
+      (current.lineItems ?? []).some((line) => line?.kind === 'prepayment')
+    if (voidsPrepayment) await this._assertPrepaymentCreditUndrawn(current)
 
     // The hours panel beside the invoice stages her scope decisions and sends
     // them with the lines they moved. Read HERE, above the backend split and
@@ -16087,6 +16258,12 @@ export class AppDataStore {
         // other sees it: a claim that committed first is found here (each
         // statement reads fresh in READ COMMITTED), and a void that committed
         // first is found by the claim's own status check.
+        if (voidsPrepayment) {
+          await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [
+            `account_credit:${current.clientId}`,
+          ])
+          await this._assertPrepaymentCreditUndrawn(current, { dbClient })
+        }
         if (voiding) {
           await dbClient.query('select id from invoices where id = $1 for update', [id])
           const active = await dbClient.query(
@@ -16239,6 +16416,7 @@ export class AppDataStore {
       ) {
         throw autopayInFlight()
       }
+      if (voidsPrepayment) await this._assertPrepaymentCreditUndrawn(current, { data })
       // Against the SAME data this save is about to write, and before a single
       // field of it moves — the file backend's version of the in-transaction
       // check above.
@@ -17323,8 +17501,21 @@ export class AppDataStore {
         [clientId],
       )
       const drawn = await runner.query(ACCOUNT_CREDIT_DRAWN_SQL, [clientId])
+      const prepaid = await runner.query(ACCOUNT_CREDIT_PREPAID_SQL, [clientId])
       return accountCreditsWithDraws(
-        credits.rows.map(accountCreditRowOf),
+        withDerivedCredits(
+          credits.rows.map(accountCreditRowOf),
+          derivedPrepaymentCredits(
+            clientId,
+            prepaid.rows.map((row) => ({
+              id: row.id,
+              number: row.number,
+              status: row.status,
+              paidAt: isoOrNull(row.paid_at),
+              lineItems: Array.isArray(row.line_items) ? row.line_items : [],
+            })),
+          ),
+        ),
         drawn.rows.map((row) => ({
           id: row.id,
           number: row.number,
@@ -17335,9 +17526,13 @@ export class AppDataStore {
       )
     }
     const workspace = data ?? (await readJson(localDataPath))
+    const own = (workspace.invoices ?? []).filter((invoice) => invoice.clientId === clientId)
     return accountCreditsWithDraws(
-      (workspace.accountCredits ?? []).filter((row) => row.clientId === clientId),
-      (workspace.invoices ?? []).filter((invoice) => invoice.clientId === clientId),
+      withDerivedCredits(
+        (workspace.accountCredits ?? []).filter((row) => row.clientId === clientId),
+        derivedPrepaymentCredits(clientId, own),
+      ),
+      own,
     )
   }
 
@@ -17714,6 +17909,27 @@ export class AppDataStore {
       row.voidedBy = byUserId
       return { result: accountCreditView(row), changed: true }
     })
+  }
+
+  /**
+   * Refuse to void a PAID prepayment invoice while a live invoice still draws on the
+   * credit it yields (its derived `prepay:<invoiceId>:<month>` credits). The sentence
+   * names the invoices drawing, so she knows what to take the credit off first.
+   */
+  async _assertPrepaymentCreditUndrawn(
+    invoice,
+    { dbClient = null, data = null, ErrorClass = AccountCreditError, action = 'void' } = {},
+  ) {
+    const ledger = await this._readAccountCredits(invoice.clientId, { dbClient, data })
+    const using = new Map()
+    for (const credit of ledger) {
+      if (credit.derived !== true || credit.sourceRef !== invoice.id) continue
+      for (const draw of credit.draws) using.set(draw.invoiceId, draw.invoiceNumber ?? 'a draft invoice')
+    }
+    if (using.size === 0) return
+    throw new ErrorClass(
+      `${invoice.number ?? 'This invoice'} was paid ahead for later months, and ${[...using.values()].join(', ')} already draws on that prepayment. Remove the credit from ${using.size === 1 ? 'that invoice' : 'those invoices'} (or void ${using.size === 1 ? 'it' : 'them'}) first, then ${action} this one.`,
+    )
   }
 
   /**
@@ -18822,6 +19038,18 @@ export class AppDataStore {
       )
     }
 
+    // A paid anchor invoice (billing period) IS the credit a later month draws: undoing
+    // its payment while one does would orphan that draw. Refused like a void (cheap read
+    // here, decided again under the credit lock inside the write).
+    const undoesPrepayment = (current.lineItems ?? []).some((line) => line?.kind === 'prepayment')
+    const prepaymentUndrawn = (extra) =>
+      this._assertPrepaymentCreditUndrawn(current, {
+        ErrorClass: ManualPaymentError,
+        action: 'undo the payment mark on',
+        ...extra,
+      })
+    if (undoesPrepayment) await prepaymentUndrawn({})
+
     const restored = current.sentAt ? 'sent' : 'reviewed'
     const now = nowIso()
     const reviewEvent = {
@@ -18839,6 +19067,12 @@ export class AppDataStore {
       const dbClient = await this.pool.connect()
       try {
         await dbClient.query('begin')
+        if (undoesPrepayment) {
+          await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [
+            `account_credit:${current.clientId}`,
+          ])
+          await prepaymentUndrawn({ dbClient })
+        }
         const { rowCount } = await dbClient.query(
           `update invoices
               set status = $2, payment_method = null, paid_at = null, updated_at = now()
@@ -18864,6 +19098,7 @@ export class AppDataStore {
     if (!Array.isArray(data.invoices)) data.invoices = []
     const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
     if (index === -1) return null
+    if (undoesPrepayment) await prepaymentUndrawn({ data })
     const next = {
       ...data.invoices[index],
       status: restored,
@@ -19790,12 +20025,22 @@ export class AppDataStore {
   async _clientIdsHoldingAccountCredit() {
     if (this.pool) {
       const { rows } = await this.pool.query(ACCOUNT_CREDIT_HOLDERS_SQL)
-      return new Set(rows.map((row) => row.client_id))
+      // Plus whoever has a PAID prepayment invoice: derived credit is credit, and a
+      // client holding only that must still take the lock and draw it.
+      const prepaid = await this.pool.query(ACCOUNT_CREDIT_PREPAID_HOLDERS_SQL)
+      return new Set([...rows, ...prepaid.rows].map((row) => row.client_id))
     }
     const data = await readJson(localDataPath)
-    return new Set(
-      (data.accountCredits ?? []).filter((row) => !row.voidedAt).map((row) => row.clientId),
-    )
+    return new Set([
+      ...(data.accountCredits ?? []).filter((row) => !row.voidedAt).map((row) => row.clientId),
+      ...(data.invoices ?? [])
+        .filter(
+          (invoice) =>
+            invoice.status === 'paid' &&
+            (invoice.lineItems ?? []).some((line) => line?.kind === 'prepayment'),
+        )
+        .map((invoice) => invoice.clientId),
+    ])
   }
 
   /**

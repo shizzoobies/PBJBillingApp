@@ -99,6 +99,16 @@ kind-scoped unique index lets it share a month with the monthly invoice. If a co
 prepayment is unpaid at Send, the row is flagged and Send asks before billing the fee again.
 A fee change inside a prepaid period bills the difference on the monthly invoice.
 
+As built: 2A puts the prepayment lines for months 2..N on the ANCHOR month's own invoice
+(`lib/billing-period.js`, `withPrepaymentLines`); 2B derives the credits (`prepay:<inv>:<YYYY-MM>`)
+from PAID anchor invoices at read time in both backends, refuses to void an anchor invoice whose
+prepayment credit is already drawn, and holds a send when the anchor's prepayment is unpaid (409
+`prepayment_unpaid`, overridden by `allowUnpaidPrepayment` / "Send anyway" in the month run). The
+lower per-client "Email invoice" view only shows the 409 sentence; the month run is the override.
+The postgres statements 2B adds (one prepaid select per credit-ledger read, one holders query per
+generation run, one `billing_period_months > 1` read per month-list read) are pinned in
+`db/store-staleness.test.mjs`; its fake answers new SQL with no rows, so those tests wrap the pool.
+
 ## Alternatives considered
 
 - Generate the monthly invoice already Paid: literal, but Paid locks the invoice (no late

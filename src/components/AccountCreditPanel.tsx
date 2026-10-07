@@ -253,7 +253,7 @@ function AccountCreditLedger({ clientId, retiredName }: { clientId: string; reti
                     <td>{currency.format(credit.amount)}</td>
                     <td>{accountCreditSourceText(credit)}</td>
                     <td>{credit.forPeriod ? accountCreditMonth(credit.forPeriod) : '—'}</td>
-                    <td>{credit.note || '—'}</td>
+                    <td>{credit.derived ? '—' : credit.note || '—'}</td>
                     <td>
                       {credit.draws.length === 0 ? (
                         '—'
@@ -269,6 +269,9 @@ function AccountCreditLedger({ clientId, retiredName }: { clientId: string; reti
                     <td>
                       {isVoid ? (
                         <span className="account-credit-void-flag">Void</span>
+                      ) : credit.derived ? (
+                        // Derived from a paid invoice: there is no row to void (void the invoice).
+                        <span className="account-credit-help">From a paid invoice</span>
                       ) : (
                         <button
                           type="button"

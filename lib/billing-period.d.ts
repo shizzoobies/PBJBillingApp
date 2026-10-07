@@ -10,6 +10,8 @@ type PeriodClient = {
   monthlyRate?: number | null
   billingPeriodMonths?: number | null
   periodAnchorMonth?: string | null
+  isBillingMaster?: boolean | null
+  billToClientId?: string | null
 }
 
 export declare function normalizeBillingPeriodMonths(value: unknown): number
@@ -26,5 +28,34 @@ export declare function prepaymentLines(
   client: PeriodClient | null | undefined,
   period: string,
 ): Array<{ kind: 'prepayment'; label: string; detail: string; amount: number; period: string }>
+export declare function unpaidPrepaymentFor(args: {
+  client: PeriodClient & { id: string }
+  invoice:
+    | {
+        kind?: string
+        status?: string
+        period: string
+        total?: number | null
+        lineItems?: Array<{ kind?: string; draws?: Array<{ creditId?: string }> }>
+      }
+    | null
+    | undefined
+  invoices: Array<{
+    clientId?: string
+    kind?: string
+    status?: string
+    period?: string
+    id: string
+    number?: string | null
+    lineItems?: Array<{ kind?: string; period?: string }>
+  }>
+  credits?: Array<{ id: string; remaining?: number }>
+}): {
+  month: string
+  anchorPeriod: string
+  reason: 'unpaid' | 'processing' | 'not_applied'
+  anchorInvoice: { id: string; number: string | null; status: string }
+  message: string
+} | null
 export declare function nextPrepaymentMonth(client: PeriodClient | null | undefined, fromPeriod: string): string | null
 export declare function billingPeriodSentence(args: { months: unknown; anchor: unknown; today: string }): string

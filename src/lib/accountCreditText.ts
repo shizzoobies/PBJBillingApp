@@ -21,6 +21,8 @@ export function accountCreditDrawText(draw: AccountCreditDraw): string {
 /** Where a credit came from, in the words the ledger shows. */
 export function accountCreditSourceText(credit: AccountCredit): string {
   if (credit.sourceKind === 'overpayment') return 'Overpayment'
+  // Derived from a paid invoice; the note already names it ("Prepayment on INV-2026-10-001").
+  if (credit.sourceKind === 'prepayment') return credit.note || 'Prepayment'
   return 'Manual credit'
 }
 
