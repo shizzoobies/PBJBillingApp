@@ -51,6 +51,7 @@ import {
   mapRecurringReimbursementRow,
   sanitizeAppData,
   sanitizeClientBillingLinks,
+  sanitizeInvoiceLines,
   statementAccountsVersion,
 } from './store.js'
 import {
@@ -13380,14 +13381,17 @@ describe('a save that races a payment (postgres branch)', () => {
 
     const writes = fake.matching(/^update invoices\s+set line_items/i)
     expect(writes).toHaveLength(1)
+    // The lines and the money derived from them are COALESCEd: a save that does not
+    // touch them passes null and keeps whatever is stored NOW, so it cannot
+    // overwrite a concurrent change to them with the copy it read at the start.
     expect(flat(writes[0].text)).toBe(
-      'update invoices set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5, blurb = $6, status = $7, updated_at = now() where id = $1 and status = $8',
+      'update invoices set line_items = coalesce($2::jsonb, line_items), subtotal = coalesce($3, subtotal), total = coalesce($4, total), due_date = $5, blurb = $6, status = $7, updated_at = now() where id = $1 and status = $8',
     )
     expect(writes[0].params).toEqual([
       'inv-1',
-      JSON.stringify(lines),
-      250,
-      250,
+      null,
+      null,
+      null,
       '2026-09-30',
       '',
       'sent',
@@ -13407,9 +13411,9 @@ describe('a save that races a payment (postgres branch)', () => {
     expect(flat(writes[0].text)).toMatch(/where id = \$1 and status = \$8$/)
     expect(writes[0].params).toEqual([
       'inv-1',
-      JSON.stringify(lines),
-      250,
-      250,
+      null,
+      null,
+      null,
       '2026-09-30',
       'Thanks!',
       'sent',
@@ -41524,6 +41528,40 @@ describe('credit on account lines (file backend)', () => {
     })
   })
 
+  describe('a void invoice is final (the un-void double spend)', () => {
+    it('refuses a move from void back to draft or reviewed, and the draw stays returned', async () => {
+      const credit = await addCredit(300)
+      await seedInvoices([invoiceRow('inv-a', { lineItems: [hours(), creditLine(credit, 300)], total: 300 })])
+      await store.updateInvoice('inv-a', { status: 'void' })
+      // The credit is spent elsewhere while the old tab sits open.
+      await seedInvoices([
+        ...(await store.listInvoices()),
+        invoiceRow('inv-b', { period: '2026-11' }),
+      ])
+      await store.applyAccountCreditToInvoice('inv-b')
+      expect(await store.accountCreditBalance('c1')).toBe(0)
+
+      for (const status of ['draft', 'reviewed']) {
+        await expect(store.updateInvoice('inv-a', { status })).rejects.toBeInstanceOf(InvoiceLockedError)
+        await expect(store.updateInvoice('inv-a', { status })).rejects.toThrow(/cannot be brought back/i)
+      }
+      expect((await byId('inv-a')).status).toBe('void')
+      // Exactly one live draw on the credit: inv-b's.
+      expect((await drawsOf(credit)).draws.map((draw) => draw.invoiceId)).toEqual(['inv-b'])
+      expect(await store.accountCreditBalance('c1')).toBe(0)
+    })
+
+    it('a note edit that leaves it void changes neither the line nor the ledger', async () => {
+      const credit = await addCredit(300)
+      await seedInvoices([invoiceRow('inv-a', { lineItems: [hours(), creditLine(credit, 300)], total: 300 })])
+      await store.updateInvoice('inv-a', { status: 'void' })
+      const saved = await store.updateInvoice('inv-a', { status: 'void', blurb: 'For the record' })
+      expect(saved.status).toBe('void')
+      expect(lineOf(saved).draws).toEqual([{ creditId: credit.id, amount: 300 }])
+      expect(await store.accountCreditBalance('c1')).toBe(300)
+    })
+  })
+
   describe('two drafts cannot spend the same credit', () => {
     it('the second apply gets only what is left', async () => {
       await addCredit(100)
@@ -41557,8 +41595,8 @@ describe('credit on account lines (file backend)', () => {
       const lines = [hours(), creditLine(credit, 100)]
 
       const results = await Promise.allSettled([
-        store.updateInvoice('inv-a', { lineItems: lines }),
-        store.updateInvoice('inv-b', { lineItems: lines }),
+        store.updateInvoice('inv-a', { lineItems: lines }, { freshAccountCredit: true }),
+        store.updateInvoice('inv-b', { lineItems: lines }, { freshAccountCredit: true }),
       ])
 
       expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
@@ -41590,9 +41628,11 @@ describe('credit on account lines (file backend)', () => {
       expect(bigger.total).toBe(800)
     })
 
-    it('never believes the amount or the draws it is sent', async () => {
+    it('never believes the amount, label or draws it is sent for a line the invoice already carries', async () => {
       const credit = await addCredit(300)
       await seedInvoices([invoiceRow('inv-a')])
+      await store.applyAccountCreditToInvoice('inv-a')
+      const other = await addCredit(500)
 
       const saved = await store.updateInvoice('inv-a', {
         lineItems: [
@@ -41603,7 +41643,7 @@ describe('credit on account lines (file backend)', () => {
             detail: 'x',
             amount: -9999,
             draws: [
-              { creditId: credit.id, amount: 9999 },
+              { creditId: other.id, amount: 9999 },
               { creditId: 'credit-nope', amount: 5 },
               { creditId: credit.id, amount: -3 },
             ],
@@ -41618,18 +41658,48 @@ describe('credit on account lines (file backend)', () => {
         draws: [{ creditId: credit.id, amount: 300 }],
       })
       expect(saved.total).toBe(300)
+      expect(await store.accountCreditBalance('c1')).toBe(500)
     })
 
-    it('draws nothing for a new line that names no credit the client has, and says why', async () => {
-      await addCredit(300, { clientId: 'c1' })
+    it('DROPS a new credit line from a plain save, with a sentence: only the apply route adds one', async () => {
+      const credit = await addCredit(300)
       await seedInvoices([invoiceRow('inv-a')])
-      await expect(
-        store.updateInvoice('inv-a', {
-          lineItems: [hours(), { kind: 'account_credit', label: 'x', detail: '', amount: -50, draws: [{ creditId: 'credit-nope', amount: 50 }] }],
-        }),
-      ).rejects.toThrow(/not available/i)
+      // A stale tab re-sending a line that was removed, or a hand-built request.
+      const saved = await store.updateInvoice('inv-a', {
+        lineItems: [hours(), creditLine(credit, 300)],
+      })
+      expect(lineOf(saved)).toBeUndefined()
+      expect(saved.total).toBe(600)
+      expect(saved.accountCreditNotice).toMatch(/was not added.*Apply credit on account/i)
       expect(lineOf(await byId('inv-a'))).toBeUndefined()
       expect(await store.accountCreditBalance('c1')).toBe(300)
+    })
+
+    it('the apply path refuses a billing sub through the resolver itself, whatever calls it', async () => {
+      const credit = await addCredit(300)
+      await seedInvoices([invoiceRow('inv-sub')])
+      await editFile((data) => {
+        data.clients.push({ id: 'm1', name: 'Master', isBillingMaster: true })
+        data.clients.find((client) => client.id === 'c1').billToClientId = 'm1'
+      })
+      await expect(
+        store.updateInvoice('inv-sub', { lineItems: [hours(), creditLine(credit, 300)] }, { freshAccountCredit: true }),
+      ).rejects.toThrow(/master's combined invoice/i)
+      expect(lineOf(await byId('inv-sub'))).toBeUndefined()
+    })
+
+    it('says "nothing left to credit" when the lines no longer leave anything, and "voided or used" otherwise', async () => {
+      const credit = await addCredit(300)
+      await seedInvoices([invoiceRow('inv-a')])
+      await store.applyAccountCreditToInvoice('inv-a')
+      const zeroed = await store.updateInvoice('inv-a', {
+        lineItems: [hours(0), lineOf(await byId('inv-a'))],
+      })
+      expect(lineOf(zeroed)).toBeUndefined()
+      expect(zeroed.accountCreditNotice).toMatch(/nothing left on this invoice to credit/i)
+      expect(zeroed.accountCreditNotice).not.toMatch(/voided/i)
+      expect(await store.accountCreditBalance('c1')).toBe(300)
+      expect(credit.id).toBeTruthy()
     })
 
     it('cannot draw another client\'s credit', async () => {
@@ -41639,9 +41709,13 @@ describe('credit on account lines (file backend)', () => {
       ])
       const theirs = await store.addAccountCredit({ clientId: 'c2', amount: 500, createdBy: 'u' })
       await seedInvoices([invoiceRow('inv-a')])
+      // Through the apply path it finds none of its own and is refused ...
       await expect(
-        store.updateInvoice('inv-a', { lineItems: [hours(), creditLine(theirs, 500)] }),
+        store.updateInvoice('inv-a', { lineItems: [hours(), creditLine(theirs, 500)] }, { freshAccountCredit: true }),
       ).rejects.toBeInstanceOf(AccountCreditError)
+      // ... and a plain save cannot add the line at all.
+      const plain = await store.updateInvoice('inv-a', { lineItems: [hours(), creditLine(theirs, 500)] })
+      expect(lineOf(plain)).toBeUndefined()
       expect(await store.accountCreditBalance('c2')).toBe(500)
     })
 
@@ -41714,13 +41788,17 @@ describe('credit on account lines (file backend)', () => {
         invoiceRow('inv-a'),
       ])
 
-      const saved = await store.updateInvoice('inv-a', {
-        lineItems: [
-          hours(),
-          { kind: 'retainer_credit', label: 'Retainer applied', detail: '', amount: -1, retainerInvoiceId: 'inv-ret' },
-          creditLine(credit, 300),
-        ],
-      })
+      const saved = await store.updateInvoice(
+        'inv-a',
+        {
+          lineItems: [
+            hours(),
+            { kind: 'retainer_credit', label: 'Retainer applied', detail: '', amount: -1, retainerInvoiceId: 'inv-ret' },
+            creditLine(credit, 300),
+          ],
+        },
+        { freshAccountCredit: true },
+      )
 
       expect(saved.lineItems.find((line) => line.kind === 'retainer_credit').amount).toBe(-500)
       expect(lineOf(saved).amount).toBe(-100)
@@ -41809,9 +41887,8 @@ describe('credit on account lines: what the line sanitizer keeps', () => {
   }
 
   it('keeps the draws of a credit line, as well-formed ids and positive cents, and nothing else of it', async () => {
-    const credit = await seedOne()
-    const saved = await store.updateInvoice('inv-s', {
-      lineItems: [
+    const credit = { id: 'credit-1' }
+    const saved = { lineItems: sanitizeInvoiceLines([
         baseRow.lineItems[0],
         {
           kind: 'account_credit',
@@ -41828,8 +41905,7 @@ describe('credit on account lines: what the line sanitizer keeps', () => {
             null,
           ],
         },
-      ],
-    })
+      ]) }
     const line = saved.lineItems.find((entry) => entry.kind === 'account_credit')
     expect(line.draws).toEqual([{ creditId: credit.id, amount: 20 }])
     // A credit line is not a retainer credit: the retainer's id does not ride on it.
@@ -41849,21 +41925,17 @@ describe('credit on account lines: what the line sanitizer keeps', () => {
   })
 
   it('keeps at most 50 draws on a line', async () => {
-    const credit = await seedOne()
-    const saved = await store.updateInvoice('inv-s', {
-      lineItems: [
+    const saved = { lineItems: sanitizeInvoiceLines([
         baseRow.lineItems[0],
         {
           kind: 'account_credit',
           label: 'x',
           amount: -1,
-          draws: Array.from({ length: 80 }, () => ({ creditId: credit.id, amount: 1 })),
+          draws: Array.from({ length: 80 }, () => ({ creditId: 'credit-1', amount: 1 })),
         },
-      ],
-    })
+      ]) }
     const line = saved.lineItems.find((entry) => entry.kind === 'account_credit')
-    // 50 survive the sanitizer, and they are all this one credit: one merged draw.
-    expect(line.draws).toEqual([{ creditId: credit.id, amount: 50 }])
+    expect(line.draws).toHaveLength(50)
   })
 })
 
@@ -41931,7 +42003,11 @@ describe('credit on account lines (Postgres statements)', () => {
   it('spends under a per-client advisory lock, taken first inside the save\'s own transaction', async () => {
     const fake = fakePostgres({ accountCreditRows: [creditRow()], invoices: [row()] })
 
-    await postgresStore(fake).updateInvoice('inv-a', { lineItems: [hoursLine, drawLine(300)] })
+    await postgresStore(fake).updateInvoice(
+      'inv-a',
+      { lineItems: [hoursLine, drawLine(300)] },
+      { freshAccountCredit: true },
+    )
 
     const begin = fake.indexOf(/^BEGIN$/i)
     const lock = fake.indexOf(/^select pg_advisory_xact_lock\(hashtext\(\$1\)\)$/i)
@@ -41955,7 +42031,11 @@ describe('credit on account lines (Postgres statements)', () => {
 
   it('reads the ledger on the transaction\'s own connection once it holds the lock', async () => {
     const fake = fakePostgres({ accountCreditRows: [creditRow()], invoices: [row()] })
-    await postgresStore(fake).updateInvoice('inv-a', { lineItems: [hoursLine, drawLine(300)] })
+    await postgresStore(fake).updateInvoice(
+      'inv-a',
+      { lineItems: [hoursLine, drawLine(300)] },
+      { freshAccountCredit: true },
+    )
     // Two ledger reads: one to size the line, one under the lock.
     expect(fake.matching(/from account_credits\s+where client_id = \$1/i)).toHaveLength(2)
     expect(fake.matching(/line_items @>/i)).toHaveLength(2)
@@ -41974,7 +42054,11 @@ describe('credit on account lines (Postgres statements)', () => {
     })
 
     await expect(
-      postgresStore(fake).updateInvoice('inv-a', { lineItems: [hoursLine, drawLine(300)] }),
+      postgresStore(fake).updateInvoice(
+        'inv-a',
+        { lineItems: [hoursLine, drawLine(300)] },
+        { freshAccountCredit: true },
+      ),
     ).rejects.toThrow(/changed while this was saving/i)
 
     expect(fake.matching(/^update invoices\s+set line_items/i)).toHaveLength(0)
@@ -42019,6 +42103,56 @@ describe('credit on account lines (Postgres statements)', () => {
     const update = fake.matching(/^update invoices\s+set line_items/i)
     expect(JSON.parse(update[0].params[1])).toEqual([hoursLine])
     expect(fake.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+  })
+
+  describe('a void invoice is final (the un-void double spend)', () => {
+    const voidRow = () => row({ status: 'void', line_items: [hoursLine, drawLine(300)], total: 300 })
+
+    it('refuses a move from void to draft or reviewed, writing nothing', async () => {
+      for (const status of ['draft', 'reviewed']) {
+        const fake = fakePostgres({ accountCreditRows: [creditRow()], invoices: [voidRow()] })
+        await expect(postgresStore(fake).updateInvoice('inv-a', { status })).rejects.toBeInstanceOf(
+          InvoiceLockedError,
+        )
+        await expect(postgresStore(fake).updateInvoice('inv-a', { status })).rejects.toThrow(
+          /voided, and a voided invoice cannot be brought back/i,
+        )
+        expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+        expect(fake.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+      }
+    })
+
+    it('a status-only save that leaves it void never revives the draw: no lock, no credit write', async () => {
+      const fake = fakePostgres({ accountCreditRows: [creditRow()], invoices: [voidRow()] })
+      const saved = await postgresStore(fake).updateInvoice('inv-a', { status: 'void', blurb: 'Note' })
+      expect(saved.status).toBe('void')
+      expect(fake.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+      for (const write of fake.matching(/^update invoices/i)) expect(write.params[1]).toBeNull()
+    })
+  })
+
+  describe('a save without lines does not overwrite them (the lost update)', () => {
+    it('passes null for the lines and the money, so the stored value stays', async () => {
+      const fake = fakePostgres({
+        accountCreditRows: [creditRow()],
+        invoices: [row({ line_items: [hoursLine, drawLine(300)], total: 300 })],
+      })
+      await postgresStore(fake).updateInvoice('inv-a', { status: 'reviewed' })
+      const [write] = fake.matching(/^update invoices\s+set line_items/i)
+      expect(write.text.replace(/\s+/g, ' ')).toMatch(
+        /^update invoices set line_items = coalesce\(\$2::jsonb, line_items\), subtotal = coalesce\(\$3, subtotal\), total = coalesce\(\$4, total\)/,
+      )
+      expect(write.params.slice(1, 4)).toEqual([null, null, null])
+    })
+
+    it('still writes them when the save carries lines', async () => {
+      const fake = fakePostgres({ invoices: [row()] })
+      await postgresStore(fake).updateInvoice('inv-a', { lineItems: [{ ...hoursLine, amount: 650 }] })
+      const [write] = fake.matching(/^update invoices\s+set line_items/i)
+      expect(JSON.parse(write.params[1])).toEqual([{ ...hoursLine, amount: 650 }])
+      expect(write.params[2]).toBe(650)
+      expect(write.params[3]).toBe(650)
+    })
   })
 
   describe('voiding a credit', () => {

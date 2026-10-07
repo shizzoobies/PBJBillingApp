@@ -2712,7 +2712,7 @@ function hasLaterCoveragePeriod(history, period) {
   return Object.keys(history ?? {}).some((key) => /^\d{4}-\d{2}$/.test(key) && key > period)
 }
 
-function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly', storedLines = [] } = {}) {
+export function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly', storedLines = [] } = {}) {
   // The hourly rates the invoice ALREADY stores, for the over-cap rule below.
   const storedRates = new Set(
     (Array.isArray(storedLines) ? storedLines : [])
@@ -15474,10 +15474,33 @@ export class AppDataStore {
     }
     const line = credits[0]
     const stored = current.lineItems.find((entry) => entry.kind === 'account_credit') ?? null
-    if (stored && !fresh && !Array.isArray(patch?.lineItems)) return none
+    // A save that does not touch the lines is not a statement about the credit -
+    // unless the invoice is void (a revive path must still re-size under the lock).
+    if (stored && !fresh && !Array.isArray(patch?.lineItems) && current.status !== 'void') {
+      return none
+    }
+
+    // A NEW line is honored ONLY from the apply route (`fresh`). A plain save that
+    // carries a credit line the stored invoice does not (a stale tab re-sending a
+    // line that was removed, a hand-built request) is dropped and said so: the
+    // apply path is where the sub, kind and status rules and the draw choice live.
+    if (!stored && !fresh) {
+      next.lineItems = next.lineItems.filter((entry) => entry.kind !== 'account_credit')
+      return {
+        ...none,
+        notice:
+          'The credit on account line was not added. Use Apply credit on account to draw a credit onto an invoice.',
+      }
+    }
 
     const isNew = !stored || fresh
     if (isNew) {
+      const client = await this.getClientById(current.clientId)
+      if (client?.billToClientId) {
+        throw new AccountCreditError(
+          `${client.name || 'That client'} is billed on a master's combined invoice, so credit on account is applied on the master's invoice.`,
+        )
+      }
       if (current.kind !== 'monthly') {
         throw new AccountCreditError('A credit on account belongs on a monthly invoice.')
       }
@@ -15510,7 +15533,9 @@ export class AppDataStore {
       return {
         ...none,
         notice:
-          'The credit on account on this invoice could not be kept (it was voided or used elsewhere), so it was taken off.',
+          accountCreditWantedCents(next.lineItems) === 0
+            ? 'There is nothing left on this invoice to credit, so the credit on account was taken off.'
+            : 'The credit on account on this invoice could not be kept (it was voided or used on another invoice), so it was taken off.',
       }
     }
     Object.assign(line, {
@@ -15755,6 +15780,18 @@ export class AppDataStore {
     const voidRefusal = invoiceVoidRefusal(current, patch)
     if (voidRefusal) throw new InvoicePaymentProcessingError(voidRefusal.message, voidRefusal.code)
 
+    // A VOID INVOICE IS FINAL. Void is not a locked status (a void invoice can
+    // still have its note edited), so without this a stale tab's status move
+    // would revive it - and with it every credit on account it drew, which were
+    // handed back to the ledger the moment it was voided and may be spent
+    // elsewhere by now. The way back is to generate the month again. Same place
+    // and same error as the paid lock, so both backends refuse it.
+    if (current.status === 'void' && EDITABLE_INVOICE_STATUSES.has(patch.status) && patch.status !== 'void') {
+      throw new InvoiceLockedError(
+        'This invoice was voided, and a voided invoice cannot be brought back. Generate the month again to bill it.',
+      )
+    }
+
     // AN AUTOPAY CHARGE THAT IS CLAIMED, IN FLIGHT OR COLLECTED (featreq-bef42b72).
     // The claim is written BEFORE Stripe is called and the invoice only reads
     // 'processing' once the bank debit has been created, so for a moment (and
@@ -15846,6 +15883,14 @@ export class AppDataStore {
     // credit on account line was dropped (it reaches the page, unlike the facts).
     const finish = (invoice) =>
       withAccountCreditNotice(withTotalChanged(invoice, totalChanged, wasSent), accountWork.notice)
+    // The lines, and the money derived from them, are written ONLY when this save
+    // changed them. A save of the note or the status carries no lines, and writing
+    // the copy read at the start of the request would overwrite a concurrent
+    // shrink or remove of a credit line with the old one (Postgres: the UPDATE
+    // below keeps the stored value when these parameters are null).
+    const writeLines =
+      Array.isArray(patch.lineItems) ||
+      JSON.stringify(next.lineItems) !== JSON.stringify(current.lineItems)
 
     // Built BEFORE the write, from the two versions that only exist together
     // here. Null when the save changed nothing at all.
@@ -15886,14 +15931,15 @@ export class AppDataStore {
         // the payment.
         const { rowCount } = await this.pool.query(
           `update invoices
-              set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5,
+              set line_items = coalesce($2::jsonb, line_items), subtotal = coalesce($3, subtotal),
+                  total = coalesce($4, total), due_date = $5,
                   blurb = $6, status = $7, updated_at = now()
             where id = $1 and status = $8`,
           [
             id,
-            JSON.stringify(next.lineItems),
-            next.subtotal,
-            next.total,
+            writeLines ? JSON.stringify(next.lineItems) : null,
+            writeLines ? next.subtotal : null,
+            writeLines ? next.total : null,
             next.dueDate,
             next.blurb,
             next.status,
@@ -15952,14 +15998,15 @@ export class AppDataStore {
         }
         const { rowCount } = await dbClient.query(
           `update invoices
-              set line_items = $2::jsonb, subtotal = $3, total = $4, due_date = $5,
+              set line_items = coalesce($2::jsonb, line_items), subtotal = coalesce($3, subtotal),
+                  total = coalesce($4, total), due_date = $5,
                   blurb = $6, status = $7, updated_at = now()
             where id = $1 and status = $8`,
           [
             id,
-            JSON.stringify(next.lineItems),
-            next.subtotal,
-            next.total,
+            writeLines ? JSON.stringify(next.lineItems) : null,
+            writeLines ? next.subtotal : null,
+            writeLines ? next.total : null,
             next.dueDate,
             next.blurb,
             next.status,
@@ -17376,12 +17423,6 @@ export class AppDataStore {
   async applyAccountCreditToInvoice(id, opts = {}) {
     const current = (await this.listInvoices()).find((invoice) => invoice.id === id)
     if (!current) return null
-    const client = await this.getClientById(current.clientId)
-    if (client?.billToClientId) {
-      throw new AccountCreditError(
-        `${client.name || 'That client'} is billed on a master's combined invoice, so credit on account is applied on the master's invoice.`,
-      )
-    }
     const lines = [
       ...current.lineItems.filter((line) => line.kind !== 'account_credit'),
       { kind: 'account_credit', label: ACCOUNT_CREDIT_LABEL, detail: '', amount: 0, draws: [] },
