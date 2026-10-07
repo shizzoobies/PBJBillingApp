@@ -397,6 +397,328 @@ export function timeEntryBulkRow(entry) {
   ]
 }
 
+/**
+ * The columns, casts and self-filled columns of the bulk save's multi-row inserts
+ * for the checklist family (stage 2 of docs/plans/bulk-save-batching-2026-10.md).
+ * `columns` are bound to parameters in the order each builder below lists its
+ * values; only the jsonb columns carry a cast, as they always have, and
+ * `updated_at` is `now()` written inline.
+ */
+export const BULK_INSERT_SHAPES = {
+  checklist_templates: {
+    columns: [
+      'id',
+      'title',
+      'client_id',
+      'assignee_id',
+      'frequency',
+      'next_due_date',
+      'active',
+      'is_standard',
+      'viewer_ids',
+      'editor_ids',
+      'scheduled_months',
+      'due_day_of_month',
+      'monthly_due_days',
+      'repeat_annually',
+      'schedule_year',
+      'lead_days',
+      'category_id',
+      'source_template_id',
+      'onboarding_for_client_id',
+      'skip_allowed',
+      'period_label_enabled',
+      'period_coverage_start',
+      'period_coverage_end',
+      'period_coverage_anchor_due',
+      'created_at',
+    ],
+    literals: { updated_at: 'now()' },
+  },
+  checklist_template_stages: {
+    columns: [
+      'id',
+      'template_id',
+      'name',
+      'assignee_id',
+      'offset_days',
+      'due_date',
+      'due_day_of_month',
+      'position',
+      'viewer_ids',
+      'editor_ids',
+    ],
+    literals: { updated_at: 'now()' },
+  },
+  checklist_template_items: {
+    columns: [
+      'id',
+      'template_id',
+      'label',
+      'sort_order',
+      'due_date',
+      'due_day_of_month',
+      'assignee_id',
+      'stage_id',
+      'sub_items',
+      'created_at',
+    ],
+    casts: { sub_items: 'jsonb' },
+    literals: { updated_at: 'now()' },
+  },
+  checklists: {
+    columns: [
+      'id',
+      'title',
+      'client_id',
+      'assignee_id',
+      'template_id',
+      'frequency',
+      'due_date',
+      'viewer_ids',
+      'editor_ids',
+      'case_id',
+      'stage_id',
+      'stage_index',
+      'stage_count',
+      'category_id',
+      'deleted_at',
+      'deletion_requested_by',
+      'deletion_requested_at',
+      'onboarding_for_client_id',
+      'created_by',
+      'skipped_at',
+      'skipped_by',
+      'cycle_due_date',
+      'pushed_at',
+      'pushed_by',
+      'pushed_from_checklist_id',
+      'pushed_to_checklist_id',
+      'period_label',
+      'created_at',
+    ],
+    literals: { updated_at: 'now()' },
+  },
+  checklist_items: {
+    columns: [
+      'id',
+      'checklist_id',
+      'label',
+      'done',
+      'sort_order',
+      'due_date',
+      'due_day_of_month',
+      'assignee_id',
+      'waiting_on',
+      'waiting',
+      'waiting_for_checklist_id',
+      'waiting_ons',
+      'sub_items',
+      'created_at',
+      'completed_at',
+    ],
+    casts: { waiting_ons: 'jsonb', sub_items: 'jsonb' },
+    literals: { updated_at: 'now()' },
+  },
+}
+
+/** What a snapshot taken inside the transaction says a row's created_at was; a row with none is new. */
+function snapshotCreatedAt(preservedCreatedAt, table, id) {
+  return preservedCreatedAt.get(table)?.get(id) ?? new Date()
+}
+
+/**
+ * One template as the rows of three tables: the template, its stages, and the
+ * stages' items, each in the order `BULK_INSERT_SHAPES` lists the columns.
+ * Values are converted exactly as the per-row inserts converted them.
+ */
+export function checklistTemplateBulkRows(template, preservedCreatedAt) {
+  const row = [
+    template.id,
+    template.title,
+    // Standard templates are client-agnostic — client_id may be empty.
+    template.clientId ? template.clientId : null,
+    template.assigneeId,
+    template.frequency,
+    // Specific-months templates have no next-due date.
+    template.nextDueDate ? template.nextDueDate : null,
+    template.active,
+    Boolean(template.isStandard),
+    Array.isArray(template.viewerIds) ? template.viewerIds : [],
+    Array.isArray(template.editorIds) ? template.editorIds : [],
+    Array.isArray(template.scheduledMonths)
+      ? template.scheduledMonths.filter((m) => Number.isInteger(m) && m >= 1 && m <= 12)
+      : [],
+    typeof template.dueDayOfMonth === 'number' ? template.dueDayOfMonth : null,
+    template.monthlyDueDays && typeof template.monthlyDueDays === 'object'
+      ? JSON.stringify(template.monthlyDueDays)
+      : null,
+    // Defaults to true (repeat every year) when unset.
+    template.repeatAnnually === false ? false : true,
+    typeof template.scheduleYear === 'number' ? template.scheduleYear : null,
+    typeof template.leadDays === 'number' && template.leadDays > 0
+      ? Math.min(Math.floor(template.leadDays), 120)
+      : 0,
+    template.categoryId ? template.categoryId : null,
+    typeof template.sourceTemplateId === 'string' && template.sourceTemplateId
+      ? template.sourceTemplateId
+      : null,
+    typeof template.onboardingForClientId === 'string' && template.onboardingForClientId
+      ? template.onboardingForClientId
+      : null,
+    // Skipping is opt-in: anything other than an explicit true is off.
+    template.skipAllowed === true,
+    template.periodLabelEnabled === true,
+    sanitizeCoverageDate(template.periodCoverageStart),
+    sanitizeCoverageDate(template.periodCoverageEnd),
+    sanitizeCoverageDate(template.periodCoverageAnchorDue),
+    // NOT `snapshotCreatedAt`: an id this transaction's snapshot holds takes the
+    // snapshot's value (that is what stops a stale tab rewriting history), but a
+    // row that is genuinely new may carry its own stamp —
+    // `copyTemplateToClient` puts an owner's chosen first due date there so the
+    // floor cannot argue with it. Same rule on the file backend; see
+    // `newTemplateCreatedAt`.
+    preservedCreatedAt.get('checklist_templates')?.get(template.id) ?? newTemplateCreatedAt(template),
+  ]
+
+  // Stages-aware persistence. Migrate flat `items` into a synthetic Stage 1 if
+  // the template still carries the legacy shape so writes never lose data.
+  const stages = []
+  const items = []
+  const migratedTemplate = ensureTemplateStages(template)
+  for (const [stageIdx, stage] of migratedTemplate.stages.entries()) {
+    stages.push([
+      stage.id,
+      template.id,
+      stage.name,
+      stage.assigneeId || null,
+      Number(stage.offsetDays) || 0,
+      stage.dueDate || null,
+      typeof stage.dueDayOfMonth === 'number' && stage.dueDayOfMonth >= 1
+        ? stage.dueDayOfMonth
+        : null,
+      stageIdx,
+      Array.isArray(stage.viewerIds) ? stage.viewerIds : [],
+      Array.isArray(stage.editorIds) ? stage.editorIds : [],
+    ])
+    for (const [index, item] of (stage.items ?? []).entries()) {
+      items.push([
+        item.id,
+        template.id,
+        item.label,
+        index,
+        item.dueDate ?? null,
+        typeof item.dueDayOfMonth === 'number' && item.dueDayOfMonth >= 1
+          ? item.dueDayOfMonth
+          : null,
+        item.assigneeId ?? null,
+        stage.id,
+        JSON.stringify(normalizeSubItems(item.subItems, { withDone: false })),
+        snapshotCreatedAt(preservedCreatedAt, 'checklist_template_items', item.id),
+      ])
+    }
+  }
+  return { template: row, stages, items }
+}
+
+/**
+ * One checklist (active or recycled) as a row of BULK_INSERT_SHAPES.checklists.
+ * `priorChecklistPushStamps` is the snapshot taken before the wipe: the push and
+ * split stamps and the cycle date come from IT, never from the payload.
+ */
+export function checklistBulkRow(checklist, priorChecklistPushStamps, preservedCreatedAt) {
+  // What was STORED for this row's push (see `priorChecklistPushStamps`). A row
+  // this save is genuinely creating has none — and correctly so: nothing but the
+  // push endpoint may ever mint these.
+  const storedPush = priorChecklistPushStamps.get(checklist.id) ?? null
+  return [
+    checklist.id,
+    checklist.title,
+    checklist.clientId,
+    checklist.assigneeId,
+    checklist.templateId ?? null,
+    checklist.frequency ?? null,
+    checklist.dueDate,
+    Array.isArray(checklist.viewerIds) ? checklist.viewerIds : [],
+    Array.isArray(checklist.editorIds) ? checklist.editorIds : [],
+    checklist.caseId ?? checklist.id,
+    checklist.stageId ?? null,
+    typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0,
+    typeof checklist.stageCount === 'number' ? checklist.stageCount : 1,
+    checklist.categoryId ? checklist.categoryId : null,
+    checklist.deletedAt ?? null,
+    checklist.deletionRequestedBy ?? null,
+    checklist.deletionRequestedAt ?? null,
+    checklist.onboardingForClientId ?? null,
+    checklist.createdBy ?? null,
+    // A skip must survive the owner's next bulk save. The tab round-trips these
+    // two fields untouched (nothing in the UI edits them — POST
+    // /api/checklists/:id/skip is the only writer), so persisting them here is
+    // what stops an autosave silently un-skipping a task.
+    checklist.skippedAt ?? null,
+    checklist.skippedBy ?? null,
+    // A push must survive the owner's next bulk save for the same reason a skip
+    // must — and with more at stake: losing `cycle_due_date` would hand the
+    // instance back to the materializer under the WRONG identity, respawning the
+    // cycle it was pushed out of. Stronger than the skip stamps above,
+    // therefore: these come from what was STORED, never from the payload, so a
+    // stale tab cannot erase a push OR collide its way out of this save.
+    storedPush ? storedPush.cycleDueDate : null,
+    storedPush ? storedPush.pushedAt : null,
+    storedPush ? storedPush.pushedBy : null,
+    // The split link, preserved the same way: only the push endpoint may ever
+    // set either id, so a payload's copy (present or absent) never gets a vote.
+    storedPush ? storedPush.pushedFromChecklistId : null,
+    storedPush ? storedPush.pushedToChecklistId : null,
+    // Preserved like the skip stamps above: the bulk save wipes and reinserts,
+    // and a column missing here is a label that vanishes on the next autosave
+    // with no error anywhere.
+    sanitizePeriodLabel(checklist.periodLabel),
+    snapshotCreatedAt(preservedCreatedAt, 'checklists', checklist.id),
+  ]
+}
+
+/**
+ * The rows of BULK_INSERT_SHAPES.checklist_items for one checklist that was
+ * actually inserted. `priorItemWaits` / `priorItemCompletion` are the snapshots:
+ * what is stored wins for every waiting field and for completion stamps.
+ */
+export function checklistItemBulkRows(checklist, { priorItemWaits, priorItemCompletion, preservedCreatedAt }) {
+  const rows = []
+  for (const [index, payloadItem] of checklist.items.entries()) {
+    // What is stored wins for every waiting field on this step and on each of
+    // its sub-nodes — a bulk save has no business writing them.
+    const item = preservedNodeWaits(payloadItem, priorItemWaits.get(payloadItem.id))
+    const subItems = normalizeSubItems(item.subItems, { withDone: true })
+    // `done` is derived for items with sub-items (recursing through any
+    // sub-sub-items) — persist the roll-up.
+    const itemDone =
+      subItems.length > 0 ? rollUpItemDone({ ...item, subItems }) : Boolean(item.done)
+    rows.push([
+      item.id,
+      checklist.id,
+      item.label,
+      itemDone,
+      index,
+      item.dueDate ?? null,
+      typeof item.dueDayOfMonth === 'number' && item.dueDayOfMonth >= 1
+        ? item.dueDayOfMonth
+        : null,
+      item.assigneeId ?? null,
+      item.waitingOn ? String(item.waitingOn) : null,
+      Boolean(item.waiting),
+      item.waitingForChecklistId ? String(item.waitingForChecklistId) : null,
+      JSON.stringify(normalizeWaitingOns(item.waitingOns)),
+      JSON.stringify(subItems),
+      snapshotCreatedAt(preservedCreatedAt, 'checklist_items', item.id),
+      // The stored stamp wins over anything the payload carries, so a bulk save
+      // can neither erase a completion date nor invent one.
+      preservedItemCompletion(itemDone, priorItemCompletion.get(item.id)),
+    ])
+  }
+  return rows
+}
+
 const VALID_BILLING_MODES = new Set(['hourly', 'subscription', 'annual'])
 
 // 4-level priority for the owner-only "Updates" tracker. Items group by level
@@ -8147,7 +8469,6 @@ export class AppDataStore {
       const existingUserIds = (await this.pool.query('select id from users')).rows.map(
         (row) => row.id,
       )
-      const storedUserIds = new Set(existingUserIds)
       const validUserIds = new Set([
         ...existingUserIds,
         ...(Array.isArray(data.employees) ? data.employees : [])
@@ -8443,6 +8764,12 @@ export class AppDataStore {
         await client.query('delete from contacts')
         lap('deletes')
 
+        // Who is already stored, read inside the transaction so that every
+        // attempt (a lock retry runs this closure again) decides afresh which
+        // users need a hash. `validUserIds` above is the looser early read.
+        const storedUserIds = new Set(
+          (await client.query('select id from users')).rows.map((row) => row.id),
+        )
         for (const employee of data.employees) {
           // SECURITY (H4): the bulk save is owner-writable and re-inserts
           // every employee, but it must NEVER be a path to escalate
@@ -8489,11 +8816,12 @@ export class AppDataStore {
               // Only a user this save is CREATING needs a hash. For an id already
               // in `users` the `coalesce` above keeps the stored one and throws
               // this value away, and scrypt blocks the event loop for ~50 ms per
-              // call - once per user, on every save. A user that vanished between
-              // the `select id from users` above and here would fail the NOT NULL
-              // (the save rolls back and the retry sees them gone and hashes);
-              // users are only ever soft-deleted, so that is a boot-time demo
-              // cleanup at most.
+              // call - once per user, on every save. A user deleted between the
+              // `select id from users` just above and this insert would fail the
+              // NOT NULL (23502). That is NOT retried - the loop retries only lock
+              // contention (55P03 / 40P01) - so the save fails once and the next
+              // one, seeing them gone, hashes. Users are only ever soft-deleted;
+              // the one hard delete is the boot-time demo-user cleanup.
               storedUserIds.has(employee.id) ? null : hashPassword(randomBytes(32).toString('base64url')),
             ],
           )
@@ -8856,113 +9184,31 @@ export class AppDataStore {
           )
         }
 
+        // Templates, their stages and the stages' items: three multi-row inserts, in
+        // that order (stages reference templates, items reference both), each in
+        // payload order. Stage 2 of docs/plans/bulk-save-batching-2026-10.md.
+        const templateRows = { templates: [], stages: [], items: [] }
         for (const template of safeTemplates) {
-          await client.query(
-            `
-              insert into checklist_templates (id, title, client_id, assignee_id, frequency, next_due_date, active, is_standard, viewer_ids, editor_ids, scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id, onboarding_for_client_id, skip_allowed, period_label_enabled, period_coverage_start, period_coverage_end, period_coverage_anchor_due, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, now())
-            `,
-            [
-              template.id,
-              template.title,
-              // Standard templates are client-agnostic — client_id may be empty.
-              template.clientId ? template.clientId : null,
-              template.assigneeId,
-              template.frequency,
-              // Specific-months templates have no next-due date.
-              template.nextDueDate ? template.nextDueDate : null,
-              template.active,
-              Boolean(template.isStandard),
-              Array.isArray(template.viewerIds) ? template.viewerIds : [],
-              Array.isArray(template.editorIds) ? template.editorIds : [],
-              Array.isArray(template.scheduledMonths)
-                ? template.scheduledMonths.filter((m) => Number.isInteger(m) && m >= 1 && m <= 12)
-                : [],
-              typeof template.dueDayOfMonth === 'number' ? template.dueDayOfMonth : null,
-              template.monthlyDueDays && typeof template.monthlyDueDays === 'object'
-                ? JSON.stringify(template.monthlyDueDays)
-                : null,
-              // Defaults to true (repeat every year) when unset.
-              template.repeatAnnually === false ? false : true,
-              typeof template.scheduleYear === 'number' ? template.scheduleYear : null,
-              typeof template.leadDays === 'number' && template.leadDays > 0
-                ? Math.min(Math.floor(template.leadDays), 120)
-                : 0,
-              template.categoryId ? template.categoryId : null,
-              typeof template.sourceTemplateId === 'string' && template.sourceTemplateId
-                ? template.sourceTemplateId
-                : null,
-              typeof template.onboardingForClientId === 'string' && template.onboardingForClientId
-                ? template.onboardingForClientId
-                : null,
-              // Skipping is opt-in: anything other than an explicit true is off.
-              template.skipAllowed === true,
-              template.periodLabelEnabled === true,
-              sanitizeCoverageDate(template.periodCoverageStart),
-              sanitizeCoverageDate(template.periodCoverageEnd),
-              sanitizeCoverageDate(template.periodCoverageAnchorDue),
-              // NOT `createdAtFor`: an id this transaction's snapshot holds
-              // takes the snapshot's value (that is what the helper does, and
-              // what stops a stale tab rewriting history), but a row that is
-              // genuinely new may carry its own stamp —
-              // `copyTemplateToClient` puts an owner's chosen first due date
-              // there so the floor cannot argue with it. Same rule on the file
-              // backend; see `newTemplateCreatedAt`.
-              preservedCreatedAt.get('checklist_templates')?.get(template.id) ??
-                newTemplateCreatedAt(template),
-            ],
-          )
-
-          // Stages-aware persistence. Migrate flat `items` into a synthetic
-          // Stage 1 if the template still carries the legacy shape so writes
-          // never lose data.
-          const migratedTemplate = ensureTemplateStages(template)
-          for (const [stageIdx, stage] of migratedTemplate.stages.entries()) {
-            await client.query(
-              `
-                insert into checklist_template_stages (id, template_id, name, assignee_id, offset_days, due_date, due_day_of_month, position, viewer_ids, editor_ids, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
-              `,
-              [
-                stage.id,
-                template.id,
-                stage.name,
-                stage.assigneeId || null,
-                Number(stage.offsetDays) || 0,
-                stage.dueDate || null,
-                typeof stage.dueDayOfMonth === 'number' && stage.dueDayOfMonth >= 1
-                  ? stage.dueDayOfMonth
-                  : null,
-                stageIdx,
-                Array.isArray(stage.viewerIds) ? stage.viewerIds : [],
-                Array.isArray(stage.editorIds) ? stage.editorIds : [],
-              ],
-            )
-
-            for (const [index, item] of (stage.items ?? []).entries()) {
-              await client.query(
-                `
-                  insert into checklist_template_items (id, template_id, label, sort_order, due_date, due_day_of_month, assignee_id, stage_id, sub_items, created_at, updated_at)
-                  values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, now())
-                `,
-                [
-                  item.id,
-                  template.id,
-                  item.label,
-                  index,
-                  item.dueDate ?? null,
-                  typeof item.dueDayOfMonth === 'number' && item.dueDayOfMonth >= 1
-                    ? item.dueDayOfMonth
-                    : null,
-                  item.assigneeId ?? null,
-                  stage.id,
-                  JSON.stringify(normalizeSubItems(item.subItems, { withDone: false })),
-                  createdAtFor('checklist_template_items', item.id),
-                ],
-              )
-            }
-          }
+          const built = checklistTemplateBulkRows(template, preservedCreatedAt)
+          templateRows.templates.push(built.template)
+          templateRows.stages.push(...built.stages)
+          templateRows.items.push(...built.items)
         }
+        await insertRowsBatched(client, {
+          table: 'checklist_templates',
+          ...BULK_INSERT_SHAPES.checklist_templates,
+          rows: templateRows.templates,
+        })
+        await insertRowsBatched(client, {
+          table: 'checklist_template_stages',
+          ...BULK_INSERT_SHAPES.checklist_template_stages,
+          rows: templateRows.stages,
+        })
+        await insertRowsBatched(client, {
+          table: 'checklist_template_items',
+          ...BULK_INSERT_SHAPES.checklist_template_items,
+          rows: templateRows.items,
+        })
 
         // Re-insert active and recycled checklists in one pass — the bulk
         // wipe above clears the table either way, so we'd lose the recycle
@@ -8971,81 +9217,57 @@ export class AppDataStore {
         // pre-filtered safe lists so orphan checklists (whose client was
         // deleted locally) don't wedge the FK insert.
         const checklistsToWrite = [...safeChecklists, ...safeRecycledChecklists]
-        for (const checklist of checklistsToWrite) {
-          // What was STORED for this row's push (see `priorChecklistPushStamps`).
-          // A row this save is genuinely creating has none — and correctly so:
-          // nothing but the push endpoint may ever mint these.
-          const storedPush = priorChecklistPushStamps.get(checklist.id) ?? null
-          // `on conflict do nothing` is the write-side half of the duplicate
-          // backstop. A stale tab that still holds a duplicate instance in
-          // memory would otherwise re-upload it here. Two conflicts are
-          // possible: the primary key (same id twice in one payload) and the
-          // UNIQUE partial index on (template_id, the CYCLE date, stage_index).
-          // Either way the row is skipped rather than aborting the transaction
-          // — an aborted bulk save 500s every read and takes the app offline
-          // (the 2026-06-17 incident), which is far worse than dropping a row
-          // we already have.
-          const insertResult = await client.query(
-            `
-              insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, deleted_at, deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by, skipped_at, skipped_by, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id, period_label, created_at, updated_at)
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, now())
-              on conflict do nothing
-            `,
-            [
-              checklist.id,
-              checklist.title,
-              checklist.clientId,
-              checklist.assigneeId,
-              checklist.templateId ?? null,
-              checklist.frequency ?? null,
-              checklist.dueDate,
-              Array.isArray(checklist.viewerIds) ? checklist.viewerIds : [],
-              Array.isArray(checklist.editorIds) ? checklist.editorIds : [],
-              checklist.caseId ?? checklist.id,
-              checklist.stageId ?? null,
-              typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0,
-              typeof checklist.stageCount === 'number' ? checklist.stageCount : 1,
-              checklist.categoryId ? checklist.categoryId : null,
-              checklist.deletedAt ?? null,
-              checklist.deletionRequestedBy ?? null,
-              checklist.deletionRequestedAt ?? null,
-              checklist.onboardingForClientId ?? null,
-              checklist.createdBy ?? null,
-              // A skip must survive the owner's next bulk save. The tab round-
-              // trips these two fields untouched (nothing in the UI edits them —
-              // POST /api/checklists/:id/skip is the only writer), so persisting
-              // them here is what stops an autosave silently un-skipping a task.
-              checklist.skippedAt ?? null,
-              checklist.skippedBy ?? null,
-              // A push must survive the owner's next bulk save for the same
-              // reason a skip must — and with more at stake: losing
-              // `cycle_due_date` would hand the instance back to the
-              // materializer under the WRONG identity, respawning the cycle it
-              // was pushed out of. Stronger than the skip stamps above,
-              // therefore: these come from what was STORED, never from the
-              // payload, so a stale tab cannot erase a push OR collide its way
-              // out of this save (see `priorChecklistPushStamps`).
-              storedPush ? storedPush.cycleDueDate : null,
-              storedPush ? storedPush.pushedAt : null,
-              storedPush ? storedPush.pushedBy : null,
-              // The split link, preserved the same way and for the same reason:
-              // only the push endpoint may ever set either id, so a payload's
-              // copy (present or absent) never gets a vote.
-              storedPush ? storedPush.pushedFromChecklistId : null,
-              storedPush ? storedPush.pushedToChecklistId : null,
-              // Preserved like the skip stamps above: the bulk save wipes and
-              // reinserts, and a column missing here is a label that vanishes on
-              // the next autosave with no error anywhere.
-              sanitizePeriodLabel(checklist.periodLabel),
-              createdAtFor('checklists', checklist.id),
-            ],
-          )
+        const checklistRows = checklistsToWrite.map((checklist) =>
+          checklistBulkRow(checklist, priorChecklistPushStamps, preservedCreatedAt),
+        )
+        // `on conflict do nothing` is the write-side half of the duplicate
+        // backstop. A stale tab that still holds a duplicate instance in
+        // memory would otherwise re-upload it here. Two conflicts are
+        // possible: the primary key (same id twice in one payload) and the
+        // UNIQUE partial index on (template_id, the CYCLE date, stage_index).
+        // Either way the row is skipped rather than aborting the transaction
+        // — an aborted bulk save 500s every read and takes the app offline
+        // (the 2026-06-17 incident), which is far worse than dropping a row
+        // we already have. Rows go in payload order, so the FIRST of two
+        // clashing rows wins, exactly as one statement per row did.
+        //
+        // `returning id` says which rows landed. With every id distinct in the
+        // payload that answers it exactly. The same id twice (an active and a
+        // recycled copy) would leave "which of the two landed" ambiguous when
+        // the first was skipped on the instance index and the second was not, so
+        // that payload goes one row per statement, as it always did.
+        const checklistConflict = 'on conflict do nothing'
+        const checklistLanded = []
+        if (new Set(checklistsToWrite.map((checklist) => checklist.id)).size === checklistsToWrite.length) {
+          const { rows: returned } = await insertRowsBatched(client, {
+            table: 'checklists',
+            ...BULK_INSERT_SHAPES.checklists,
+            rows: checklistRows,
+            onConflict: checklistConflict,
+            returning: 'id',
+          })
+          const landedIds = new Set(returned.map((row) => row.id))
+          for (const checklist of checklistsToWrite) checklistLanded.push(landedIds.has(checklist.id))
+        } else {
+          for (const row of checklistRows) {
+            const { rows: returned } = await insertRowsBatched(client, {
+              table: 'checklists',
+              ...BULK_INSERT_SHAPES.checklists,
+              rows: [row],
+              onConflict: checklistConflict,
+              returning: 'id',
+            })
+            checklistLanded.push(returned.length > 0)
+          }
+        }
 
-          // Nothing was inserted ⇒ an identical instance is already in this
-          // transaction. Its items MUST be skipped too: `checklist_items`
-          // references `checklists(id)`, so inserting them against a row that
-          // was never written would blow up the whole save.
-          if (insertResult.rowCount === 0) {
+        // Nothing was inserted ⇒ an identical instance is already in this
+        // transaction. Its items MUST be skipped too: `checklist_items`
+        // references `checklists(id)`, so inserting them against a row that
+        // was never written would blow up the whole save.
+        const itemRows = []
+        for (const [index, checklist] of checklistsToWrite.entries()) {
+          if (!checklistLanded[index]) {
             console.warn(
               `[bulk-save] skipped duplicate checklist ${checklist.id} ` +
                 `(template ${checklist.templateId ?? 'none'}, due ${checklist.dueDate}, ` +
@@ -9053,45 +9275,15 @@ export class AppDataStore {
             )
             continue
           }
-
-          for (const [index, payloadItem] of checklist.items.entries()) {
-            // What is stored wins for every waiting field on this step and on
-            // each of its sub-nodes — a bulk save has no business writing them.
-            const item = preservedNodeWaits(payloadItem, priorItemWaits.get(payloadItem.id))
-            const subItems = normalizeSubItems(item.subItems, { withDone: true })
-            // `done` is derived for items with sub-items (recursing through any
-            // sub-sub-items) — persist the roll-up.
-            const itemDone =
-              subItems.length > 0 ? rollUpItemDone({ ...item, subItems }) : Boolean(item.done)
-            await client.query(
-              `
-                insert into checklist_items (id, checklist_id, label, done, sort_order, due_date, due_day_of_month, assignee_id, waiting_on, waiting, waiting_for_checklist_id, waiting_ons, sub_items, created_at, completed_at, updated_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, now())
-              `,
-              [
-                item.id,
-                checklist.id,
-                item.label,
-                itemDone,
-                index,
-                item.dueDate ?? null,
-                typeof item.dueDayOfMonth === 'number' && item.dueDayOfMonth >= 1
-                  ? item.dueDayOfMonth
-                  : null,
-                item.assigneeId ?? null,
-                item.waitingOn ? String(item.waitingOn) : null,
-                Boolean(item.waiting),
-                item.waitingForChecklistId ? String(item.waitingForChecklistId) : null,
-                JSON.stringify(normalizeWaitingOns(item.waitingOns)),
-                JSON.stringify(subItems),
-                createdAtFor('checklist_items', item.id),
-                // The stored stamp wins over anything the payload carries, so a
-                // bulk save can neither erase a completion date nor invent one.
-                preservedItemCompletion(itemDone, priorItemCompletion.get(item.id)),
-              ],
-            )
-          }
+          itemRows.push(
+            ...checklistItemBulkRows(checklist, { priorItemWaits, priorItemCompletion, preservedCreatedAt }),
+          )
         }
+        await insertRowsBatched(client, {
+          table: 'checklist_items',
+          ...BULK_INSERT_SHAPES.checklist_items,
+          rows: itemRows,
+        })
 
         // The version of what this save produced, taken on THIS transaction's
         // connection just before the commit (see `returnVersion`). Under the

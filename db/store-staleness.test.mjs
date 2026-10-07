@@ -37,8 +37,12 @@ import {
   TooManyPendingNotesError,
   WaitRefusedError,
   WorkspaceBusyError,
+  BULK_INSERT_SHAPES,
   WorkspaceChangedError,
   bulkSaveBreakdown,
+  checklistBulkRow,
+  checklistItemBulkRows,
+  checklistTemplateBulkRows,
   mapChecklistItemRow,
   mapClientRow,
   mapInvoiceRow,
@@ -1123,7 +1127,38 @@ function parseInsertStatement(text, table) {
     at += 1
     while (/\s/.test(text[at] ?? '')) at += 1
   }
-  return { columns, rows }
+  // Whatever follows the last value list: `on conflict ...`, `returning ...`.
+  return { columns, rows, tail: text.slice(at).replace(/\s+/g, ' ').trim() }
+}
+
+/**
+ * The SHAPE of every insert into `table` that the values do not show: the cast on
+ * each bound column (`::jsonb`, or '' for none), what a non-placeholder
+ * expression is (`now()`, a `coalesce(...)`, with its `$n` made `$n`), and the
+ * text after the value list. Positions of placeholders are not part of it, so a
+ * per-row and a multi-row statement of the same insert have the same shape.
+ */
+function insertShape(statements, table) {
+  const casts = {}
+  const tails = new Set()
+  for (const statement of statements) {
+    const parsed = parseInsertStatement(statement.text, table)
+    if (!parsed) continue
+    tails.add(parsed.tail)
+    for (const expressions of parsed.rows) {
+      parsed.columns.forEach((column, index) => {
+        const placeholder = /^\$\d+(\s*::\s*[a-z_]+(?:\[\])?)?$/i.exec(expressions[index])
+        const shape = placeholder
+          ? (placeholder[1] ?? '').replace(/\s+/g, '')
+          : `<${expressions[index].replace(/\$\d+/g, '$n')}>`
+        if (casts[column] !== undefined && casts[column] !== shape) {
+          throw new Error(`insert into ${table}: ${column} is ${casts[column]} in one row and ${shape} in another`)
+        }
+        casts[column] = shape
+      })
+    }
+  }
+  return { casts, tails: [...tails].sort() }
 }
 
 /** Every row the recorded statements inserted into `table`, in order, as { column: value }. */
@@ -1650,6 +1685,13 @@ function fakePostgres({
     // initialize()'s probe for the v3 instance index.
     if (/^select to_regclass\('checklists_template_instance_uniq_v3'\) is null as missing$/i.test(trimmed)) {
       return { rows: [{ missing: !checklistIndexV3Exists }] }
+    }
+    // The bulk save's checklists insert asks `returning id` to learn which rows
+    // landed. Without the instance-index simulation nothing ever clashes, so
+    // every row lands; the simulation (above) answers for itself.
+    if (/^insert into checklists \(/i.test(trimmed) && /\breturning id$/i.test(trimmed)) {
+      const landed = insertedRows([{ text: trimmed, params }], 'checklists').map((row) => ({ id: row.id }))
+      return { rows: landed, rowCount: landed.length }
     }
     return { rows: [] }
   }
@@ -20233,9 +20275,45 @@ describe('the checklist period label round-trips the bulk save (file backend)', 
         expect(columns).toContain('period_coverage_anchor_due')
       }
     }
-    // Split push (featreq-fbab3370) added a FOURTH: `pushChecklistInstance`'s
-    // own `insert into checklists (...)` for the new row a mixed push creates.
-    expect(statements).toBe(4)
+    // The two statements left in the source are the single-row ones:
+    // `createChecklist`'s and `pushChecklistInstance`'s (featreq-fbab3370) for the
+    // new row a mixed push creates. The bulk save's two (checklists and
+    // templates) became multi-row inserts built from BULK_INSERT_SHAPES.
+    expect(statements).toBe(2)
+  })
+
+  it('keeps the bulk save’s column lists and its row builders the same width, and carrying the period columns', () => {
+    expect(BULK_INSERT_SHAPES.checklists.columns).toContain('period_label')
+    for (const column of [
+      'period_label_enabled',
+      'period_coverage_start',
+      'period_coverage_end',
+      'period_coverage_anchor_due',
+    ]) {
+      expect(BULK_INSERT_SHAPES.checklist_templates.columns).toContain(column)
+    }
+
+    const stored = new Map()
+    const template = checklistTemplateBulkRows(
+      {
+        id: 't',
+        title: 'T',
+        stages: [{ id: 's', name: 'S', items: [{ id: 'i', label: 'I' }] }],
+      },
+      stored,
+    )
+    expect(template.template).toHaveLength(BULK_INSERT_SHAPES.checklist_templates.columns.length)
+    expect(template.stages[0]).toHaveLength(BULK_INSERT_SHAPES.checklist_template_stages.columns.length)
+    expect(template.items[0]).toHaveLength(BULK_INSERT_SHAPES.checklist_template_items.columns.length)
+
+    const checklist = { id: 'c', title: 'C', clientId: 'c1', assigneeId: 'emp-1', dueDate: '2026-01-31', items: [{ id: 'i', label: 'I' }] }
+    expect(checklistBulkRow(checklist, new Map(), stored)).toHaveLength(BULK_INSERT_SHAPES.checklists.columns.length)
+    const [item] = checklistItemBulkRows(checklist, {
+      priorItemWaits: new Map(),
+      priorItemCompletion: new Map(),
+      preservedCreatedAt: stored,
+    })
+    expect(item).toHaveLength(BULK_INSERT_SHAPES.checklist_items.columns.length)
   })
 })
 
@@ -39581,10 +39659,11 @@ describe('bulk save golden parity (postgres branch)', () => {
       const tableOrder = WRITTEN_TABLES.filter((table) => firstWrite(table) !== -1).sort(
         (a, b) => firstWrite(a) - firstWrite(b),
       )
+      const shapes = Object.fromEntries(WRITTEN_TABLES.map((table) => [table, insertShape(fake.statements, table)]))
       const duplicateWarnings = warn.mock.calls
         .map((call) => String(call[0]))
         .filter((message) => message.startsWith('[bulk-save] skipped duplicate checklist'))
-      return { fake, golden: { tableOrder, tables }, duplicateWarnings }
+      return { fake, golden: { tableOrder, tables, shapes }, duplicateWarnings }
     } finally {
       vi.useRealTimers()
       warn.mockRestore()
@@ -39602,6 +39681,8 @@ describe('bulk save golden parity (postgres branch)', () => {
     expect(golden.tableOrder).toEqual(pinned.tableOrder)
     for (const table of WRITTEN_TABLES) {
       expect(golden.tables[table], `rows written to ${table}`).toEqual(pinned.tables[table])
+      // The casts the statement puts on each column and what follows its value list.
+      expect(golden.shapes[table], `statement shape of ${table}`).toEqual(pinned.shapes[table])
     }
   })
 
@@ -39929,5 +40010,245 @@ describe('bulk save: time_entries as multi-row inserts (postgres branch)', () =>
     expect(timeEntryInserts(fake)).toHaveLength(1)
     expect(fake.matching(/^rollback$/i)).toHaveLength(1)
     expect(fake.matching(/^commit$/i)).toHaveLength(0)
+  })
+})
+
+/**
+ * Stage 2 of the bulk-save batching: the checklist family as multi-row inserts.
+ * What is written is pinned by the golden parity fixture; this pins the
+ * statements, the duplicate handling and the order.
+ */
+describe('bulk save: checklists, items and templates as multi-row inserts (postgres branch)', () => {
+  const checklist = (index, overrides = {}) => ({
+    id: `cl-${String(index).padStart(5, '0')}`,
+    title: `Close ${index}`,
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    dueDate: '2026-02-28',
+    items: [
+      { id: `item-${index}-a`, label: 'One', done: false },
+      { id: `item-${index}-b`, label: 'Two', done: true },
+    ],
+    ...overrides,
+  })
+  const statementsOf = (fake, table) => fake.matching(new RegExp(`^insert into ${table}\\b`, 'i'))
+  const quietly = async (run) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await run()
+      return warn.mock.calls.map((call) => String(call[0]))
+    } finally {
+      warn.mockRestore()
+    }
+  }
+
+  it.each([
+    [0, []],
+    [1, [1]],
+    [500, [500]],
+    [501, [500, 1]],
+    [1001, [500, 500, 1]],
+  ])('sends %i checklists as statements of %j rows with on conflict do nothing returning id', async (count, sizes) => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({ checklists: Array.from({ length: count }, (_, index) => checklist(index)) }),
+    )
+
+    const inserts = statementsOf(fake, 'checklists')
+    expect(inserts.map((statement) => statement.params.length / 28)).toEqual(sizes)
+    for (const statement of inserts) expect(statement.text).toMatch(/\) on conflict do nothing returning id$/)
+    // Every item of every checklist, in payload order, in one run of statements.
+    expect(insertedRows(fake.statements, 'checklist_items').map((row) => row.id)).toEqual(
+      Array.from({ length: count }, (_, index) => [`item-${index}-a`, `item-${index}-b`]).flat(),
+    )
+  })
+
+  it('writes templates, then stages, then items, then checklists, then their items', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({
+        checklistTemplates: [
+          { id: 'tpl-1', title: 'A', assigneeId: 'emp-1', stages: [{ id: 's1', name: 'S1', items: [{ id: 'i1', label: 'x' }] }] },
+          { id: 'tpl-2', title: 'B', assigneeId: 'emp-1', stages: [{ id: 's2', name: 'S2', items: [{ id: 'i2', label: 'y' }] }] },
+        ],
+        checklists: [checklist(1)],
+      }),
+    )
+
+    const first = (table) => fake.indexOf(new RegExp(`^insert into ${table}\\b`, 'i'))
+    const order = [
+      'checklist_templates',
+      'checklist_template_stages',
+      'checklist_template_items',
+      'checklists',
+      'checklist_items',
+    ]
+    expect(order.map(first)).toEqual([...order.map(first)].sort((a, b) => a - b))
+    for (const table of order) expect(statementsOf(fake, table), table).toHaveLength(1)
+    expect(insertedRows(fake.statements, 'checklist_templates').map((row) => row.id)).toEqual(['tpl-1', 'tpl-2'])
+    expect(insertedRows(fake.statements, 'checklist_template_stages').map((row) => row.id)).toEqual(['s1', 's2'])
+    expect(insertedRows(fake.statements, 'checklist_template_items').map((row) => row.id)).toEqual(['i1', 'i2'])
+  })
+
+  it('skips the items of a checklist the instance index refused, with the same warning as before', async () => {
+    const fake = fakePostgres({ simulateChecklistUniqueness: true })
+    const warnings = await quietly(() =>
+      postgresStore(fake).write(
+        workspace({
+          checklists: [
+            checklist(1, { templateId: 'tpl-1', frequency: 'monthly' }),
+            // Another id, the same (template, cycle, stage): the index drops it.
+            checklist(2, { templateId: 'tpl-1', frequency: 'monthly' }),
+            checklist(3, { templateId: 'tpl-1', frequency: 'monthly', dueDate: '2026-03-31' }),
+          ],
+        }),
+      ),
+    )
+
+    expect(warnings).toEqual([
+      '[bulk-save] skipped duplicate checklist cl-00002 (template tpl-1, due 2026-02-28, stage 0) — an identical instance is already being written',
+    ])
+    expect(insertedRows(fake.statements, 'checklist_items').map((row) => row.checklist_id)).toEqual([
+      'cl-00001',
+      'cl-00001',
+      'cl-00003',
+      'cl-00003',
+    ])
+  })
+
+  it('keeps the first of two clashing rows inside ONE statement, and drops the second one’s items', async () => {
+    const fake = fakePostgres({ simulateChecklistUniqueness: true })
+    await quietly(() =>
+      postgresStore(fake).write(
+        workspace({
+          checklists: [
+            checklist(1, { templateId: 'tpl-1', frequency: 'monthly' }),
+            checklist(2, { templateId: 'tpl-1', frequency: 'monthly' }),
+          ],
+        }),
+      ),
+    )
+
+    // Both went to the server in one statement...
+    expect(statementsOf(fake, 'checklists')).toHaveLength(1)
+    // ...and only the first one's items followed.
+    expect(new Set(insertedRows(fake.statements, 'checklist_items').map((row) => row.checklist_id))).toEqual(
+      new Set(['cl-00001']),
+    )
+  })
+
+  it('sends a payload with the same id twice one row per statement, so which copy landed is exact', async () => {
+    const fake = fakePostgres({ simulateChecklistUniqueness: true })
+    const warnings = await quietly(() =>
+      postgresStore(fake).write(
+        workspace({
+          checklists: [
+            checklist(1, { templateId: 'tpl-1', frequency: 'monthly' }),
+            // Shares its id with the recycled copy below and its instance with the
+            // first checklist: refused by the INSTANCE index...
+            checklist(2, {
+              id: 'cl-dup',
+              templateId: 'tpl-1',
+              frequency: 'monthly',
+              items: [{ id: 'item-from-active', label: 'A', done: false }],
+            }),
+          ],
+          // ...while this one, same id but another instance, lands. Deciding that
+          // "the first returned occurrence of cl-dup landed" would hand it the
+          // wrong items.
+          recycledChecklists: [
+            checklist(3, {
+              id: 'cl-dup',
+              templateId: 'tpl-2',
+              frequency: 'monthly',
+              deletedAt: '2026-02-02T08:00:00.000Z',
+              items: [{ id: 'item-from-recycled', label: 'R', done: false }],
+            }),
+          ],
+        }),
+      ),
+    )
+
+    expect(statementsOf(fake, 'checklists')).toHaveLength(3)
+    expect(warnings).toHaveLength(1)
+    const itemIds = insertedRows(fake.statements, 'checklist_items').map((row) => row.id)
+    expect(itemIds).toContain('item-from-recycled')
+    expect(itemIds).not.toContain('item-from-active')
+  })
+
+  it('still takes every preserved column from its snapshot, never from the payload', async () => {
+    const fake = fakePostgres({
+      priorChecklistRows: [
+        {
+          id: 'cl-00001',
+          cycle_due_date: '2026-01-31',
+          pushed_at: '2026-02-01T00:00:00.000Z',
+          pushed_by: 'emp-9',
+          pushed_from_checklist_id: 'cl-from',
+          pushed_to_checklist_id: 'cl-to',
+        },
+      ],
+      createdAtRows: { checklists: [{ id: 'cl-00001', created_at: new Date('2025-05-05T05:05:05.000Z') }] },
+      priorItemRows: [
+        {
+          id: 'item-1-b',
+          done: true,
+          completed_at: new Date('2025-06-06T06:06:06.000Z'),
+          waiting: false,
+          waiting_ons: [],
+          sub_items: [],
+        },
+      ],
+    })
+    await postgresStore(fake).write(
+      workspace({
+        checklists: [
+          checklist(1, {
+            cycleDueDate: '2020-01-01',
+            pushedAt: '2020-01-01T00:00:00.000Z',
+            pushedBy: 'someone-else',
+            createdAt: '2019-01-01T00:00:00.000Z',
+          }),
+        ],
+      }),
+    )
+
+    const [row] = insertedRows(fake.statements, 'checklists')
+    expect(row).toMatchObject({
+      cycle_due_date: '2026-01-31',
+      pushed_at: '2026-02-01T00:00:00.000Z',
+      pushed_by: 'emp-9',
+      pushed_from_checklist_id: 'cl-from',
+      pushed_to_checklist_id: 'cl-to',
+      created_at: new Date('2025-05-05T05:05:05.000Z'),
+    })
+    const items = insertedRows(fake.statements, 'checklist_items')
+    expect(items.find((item) => item.id === 'item-1-b').completed_at).toEqual(new Date('2025-06-06T06:06:06.000Z'))
+    expect(items.find((item) => item.id === 'item-1-a').completed_at).toBeNull()
+  })
+
+  it('reads the stored users inside the transaction, once per attempt', async () => {
+    // A deadlock picked this save as the victim after it had already read the users.
+    const deadlock = Object.assign(new Error('deadlock detected'), { code: '40P01' })
+    const fake = fakePostgres({
+      userRows: [{ id: 'emp-1' }],
+      failOn: { pattern: /^insert into users\b/i, error: deadlock, times: 1 },
+    })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await postgresStore(fake).write(workspace())
+    } finally {
+      log.mockRestore()
+    }
+
+    // One early read for the FK-safe id set, then one after each attempt's lock.
+    const where = (pattern) => fake.statements.flatMap((s, i) => (pattern.test(s.text) ? [i] : []))
+    const begins = where(/^begin$/i)
+    const reads = where(/^select id from users\s*$/i)
+    expect(begins).toHaveLength(2)
+    expect(reads).toHaveLength(3)
+    expect(reads[0]).toBeLessThan(begins[0])
+    expect(reads[1]).toBeGreaterThan(begins[0])
+    expect(reads[2]).toBeGreaterThan(begins[1])
   })
 })

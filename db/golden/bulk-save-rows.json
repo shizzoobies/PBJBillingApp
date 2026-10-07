@@ -1044,5 +1044,367 @@
         "updated_at": "now()"
       }
     ]
+  },
+  "shapes": {
+    "users": {
+      "casts": {
+        "id": "",
+        "name": "",
+        "email": "<coalesce((select email from users where id = $n), $n)>",
+        "role": "",
+        "staff_role": "",
+        "password_hash": "<coalesce((select password_hash from users where id = $n), $n)>",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        "on conflict (id) do update set name = excluded.name, updated_at = now()"
+      ]
+    },
+    "subscription_plans": {
+      "casts": {
+        "id": "",
+        "name": "",
+        "notes": "",
+        "template_ids": "::text[]",
+        "created_at": "",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        ""
+      ]
+    },
+    "contacts": {
+      "casts": {
+        "id": "",
+        "name": "",
+        "email": "",
+        "phone": "",
+        "title": "",
+        "notes": "",
+        "locked": "",
+        "company_emails": "::jsonb",
+        "linked_contact_ids": "::text[]",
+        "archived_at": "",
+        "group_name": "",
+        "created_at": "",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        ""
+      ]
+    },
+    "clients": {
+      "casts": {
+        "id": "",
+        "name": "",
+        "contact": "",
+        "billing_mode": "",
+        "hourly_rate": "",
+        "plan_id": "",
+        "custom_monthly_fee": "",
+        "monthly_rate": "",
+        "estimated_monthly_hours": "",
+        "plan_ids": "",
+        "contact_ids": "",
+        "email": "",
+        "contact_name": "",
+        "phone": "",
+        "address_line1": "",
+        "address_line2": "",
+        "city": "",
+        "state": "",
+        "postal_code": "",
+        "logo_url": "",
+        "payment_terms": "",
+        "footer_note": "",
+        "quickbooks_pay_url": "",
+        "invoice_show_time_breakdown": "",
+        "invoice_hide_internal_hours": "",
+        "invoice_group_by_category": "",
+        "assigned_bookkeeper_ids": "",
+        "estimated_bookkeeper_hours": "",
+        "estimated_accountant_hours": "",
+        "estimated_cfo_hours": "",
+        "monthly_service_tier": "",
+        "annual_rate": "",
+        "annual_billing_month": "",
+        "lifecycle_stage": "",
+        "card_payments_enabled": "",
+        "platform_invoicing_opt_out": "",
+        "stripe_customer_id": "",
+        "invoice_time_breakdown_mode": "",
+        "invoice_time_breakdown_amounts": "",
+        "bill_to_client_id": "",
+        "is_billing_master": "",
+        "invoice_recipient_client_id": "",
+        "hourly_rate_period": "",
+        "hourly_rate_history": "::jsonb",
+        "invoice_note": "",
+        "invoice_no_email": "",
+        "created_at": "",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        ""
+      ]
+    },
+    "invoices": {
+      "casts": {
+        "id": "",
+        "client_id": "",
+        "period": "",
+        "number": "",
+        "kind": "",
+        "status": "",
+        "line_items": "::jsonb",
+        "subtotal": "",
+        "total": "",
+        "due_date": "",
+        "blurb": "",
+        "scope_flags": "::jsonb",
+        "sent_at": "",
+        "paid_at": "",
+        "stripe_checkout_session_id": "",
+        "stripe_card_session_id": "",
+        "stripe_payment_intent_id": "",
+        "payment_method": "",
+        "email_log": "::jsonb",
+        "applied_to_invoice_id": "",
+        "original_line_items": "::jsonb",
+        "pay_token": "",
+        "recorded_outside_app": "",
+        "created_at": "",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        ""
+      ]
+    },
+    "time_entries": {
+      "casts": {
+        "id": "",
+        "user_id": "",
+        "client_id": "",
+        "entry_date": "",
+        "minutes": "",
+        "category": "",
+        "description": "",
+        "billable": "",
+        "task_id": "",
+        "approval_status": "",
+        "approval_note": "",
+        "approved_by": "",
+        "approved_at": "",
+        "entry_method": "",
+        "manual_reason": "",
+        "is_administrative": "",
+        "is_adhoc": "",
+        "started_at": "",
+        "ended_at": "",
+        "sessions": "::jsonb",
+        "group_id": "",
+        "group_client_ids": "",
+        "group_allocation": "",
+        "task_label": "",
+        "created_at": "",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        ""
+      ]
+    },
+    "timesheet_locks": {
+      "casts": {
+        "id": "",
+        "user_id": "",
+        "period": "",
+        "locked_by": "",
+        "locked_at": ""
+      },
+      "tails": [
+        ""
+      ]
+    },
+    "weekly_submissions": {
+      "casts": {
+        "id": "",
+        "user_id": "",
+        "week_start": "",
+        "submitted_at": "",
+        "status": "",
+        "reviewed_by": "",
+        "reviewed_at": "",
+        "review_note": ""
+      },
+      "tails": [
+        ""
+      ]
+    },
+    "reimbursements": {
+      "casts": {
+        "id": "",
+        "client_id": "",
+        "date": "",
+        "description": "",
+        "amount": "",
+        "created_at": "",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        ""
+      ]
+    },
+    "recurring_reimbursements": {
+      "casts": {
+        "id": "",
+        "client_id": "",
+        "description": "",
+        "amount": "",
+        "frequency": "",
+        "start_date": "",
+        "coverage_enabled": "",
+        "coverage_template": "",
+        "coverage_start": "",
+        "coverage_end": "",
+        "coverage_anchor_day": "",
+        "coverage_paused": "",
+        "coverage_resume_pending": "",
+        "coverage_history": "::jsonb",
+        "category": "",
+        "created_at": "",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        ""
+      ]
+    },
+    "checklist_templates": {
+      "casts": {
+        "id": "",
+        "title": "",
+        "client_id": "",
+        "assignee_id": "",
+        "frequency": "",
+        "next_due_date": "",
+        "active": "",
+        "is_standard": "",
+        "viewer_ids": "",
+        "editor_ids": "",
+        "scheduled_months": "",
+        "due_day_of_month": "",
+        "monthly_due_days": "",
+        "repeat_annually": "",
+        "schedule_year": "",
+        "lead_days": "",
+        "category_id": "",
+        "source_template_id": "",
+        "onboarding_for_client_id": "",
+        "skip_allowed": "",
+        "period_label_enabled": "",
+        "period_coverage_start": "",
+        "period_coverage_end": "",
+        "period_coverage_anchor_due": "",
+        "created_at": "",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        ""
+      ]
+    },
+    "checklist_template_stages": {
+      "casts": {
+        "id": "",
+        "template_id": "",
+        "name": "",
+        "assignee_id": "",
+        "offset_days": "",
+        "due_date": "",
+        "due_day_of_month": "",
+        "position": "",
+        "viewer_ids": "",
+        "editor_ids": "",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        ""
+      ]
+    },
+    "checklist_template_items": {
+      "casts": {
+        "id": "",
+        "template_id": "",
+        "label": "",
+        "sort_order": "",
+        "due_date": "",
+        "due_day_of_month": "",
+        "assignee_id": "",
+        "stage_id": "",
+        "sub_items": "::jsonb",
+        "created_at": "",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        ""
+      ]
+    },
+    "checklists": {
+      "casts": {
+        "id": "",
+        "title": "",
+        "client_id": "",
+        "assignee_id": "",
+        "template_id": "",
+        "frequency": "",
+        "due_date": "",
+        "viewer_ids": "",
+        "editor_ids": "",
+        "case_id": "",
+        "stage_id": "",
+        "stage_index": "",
+        "stage_count": "",
+        "category_id": "",
+        "deleted_at": "",
+        "deletion_requested_by": "",
+        "deletion_requested_at": "",
+        "onboarding_for_client_id": "",
+        "created_by": "",
+        "skipped_at": "",
+        "skipped_by": "",
+        "cycle_due_date": "",
+        "pushed_at": "",
+        "pushed_by": "",
+        "pushed_from_checklist_id": "",
+        "pushed_to_checklist_id": "",
+        "period_label": "",
+        "created_at": "",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        "on conflict do nothing returning id"
+      ]
+    },
+    "checklist_items": {
+      "casts": {
+        "id": "",
+        "checklist_id": "",
+        "label": "",
+        "done": "",
+        "sort_order": "",
+        "due_date": "",
+        "due_day_of_month": "",
+        "assignee_id": "",
+        "waiting_on": "",
+        "waiting": "",
+        "waiting_for_checklist_id": "",
+        "waiting_ons": "::jsonb",
+        "sub_items": "::jsonb",
+        "created_at": "",
+        "completed_at": "",
+        "updated_at": "<now()>"
+      },
+      "tails": [
+        ""
+      ]
+    }
   }
 }
