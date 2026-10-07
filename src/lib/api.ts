@@ -3,6 +3,7 @@
   type ActivityEntry,
   type AppData,
   type AutopayAttemptSummary,
+  type AccountCredit,
   type AutopaySummary,
   type BillRateVersion,
   type CostRateVersion,
@@ -4873,6 +4874,58 @@ export async function answerInvoiceAiReviewQuestionRequest(
     )
   }
   return ((await response.json()) as { review: InvoiceAiReview }).review
+}
+
+/**
+ * A client's credit on account (owner only): the balance and the whole ledger,
+ * void rows included. Reference only in this stage; nothing applies a credit yet.
+ */
+export async function listAccountCreditsRequest(clientId: string) {
+  const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/credits`, {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to load credit on account (${response.status})`)
+  }
+  return (await response.json()) as { balance: number; credits: AccountCredit[] }
+}
+
+/** Record a credit by hand (owner only). `forPeriod` is the optional YYYY-MM it is meant for. */
+export async function addAccountCreditRequest(
+  clientId: string,
+  input: { amount: number; note: string; forPeriod: string | null },
+) {
+  const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/credits`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      amount: input.amount,
+      note: input.note,
+      ...(input.forPeriod ? { forPeriod: input.forPeriod } : {}),
+    }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Could not add the credit (${response.status})`)
+  }
+  return (await response.json()) as AccountCredit
+}
+
+/** Void a credit (owner only): it stays in the ledger, struck through, and stops counting. */
+export async function voidAccountCreditRequest(creditId: string) {
+  const response = await apiFetch(`/api/account-credits/${encodeURIComponent(creditId)}/void`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Could not void the credit (${response.status})`)
+  }
+  return (await response.json()) as AccountCredit
 }
 
 /**

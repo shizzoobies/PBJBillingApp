@@ -16,6 +16,7 @@ import { useAppContext } from '../AppContext'
 import { ChecklistCard, NewTaskForm } from './ChecklistsPage'
 import { SectionScopeContext } from '../components/sectionScope'
 import { AssignedTeamControl } from '../components/AssignedTeamControl'
+import { AccountCreditPanel } from '../components/AccountCreditPanel'
 import { AutopayPanel } from '../components/AutopayPanel'
 import { BilledOnCard } from '../components/BilledOnCard'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
@@ -587,6 +588,24 @@ export function ClientDetailPage() {
             lockable
           >
             <RetainerSectionBody key={client.id} client={client} />
+          </CollapsibleSection>
+
+          {/* Money the client has paid ahead or paid twice, held for a future
+              invoice. A record for now: nothing applies it yet. A sub's lives on
+              its master, so for a sub this is one line pointing there. */}
+          <CollapsibleSection
+            id="client-section-account-credit"
+            kicker="Engagement"
+            title="Credit on account"
+            lockable
+          >
+            <AccountCreditPanel
+              clientId={client.id}
+              billedOnMaster={Boolean(client.billToClientId)}
+              masterName={
+                data.clients.find((entry) => entry.id === client.billToClientId)?.name ?? null
+              }
+            />
           </CollapsibleSection>
         </div>
       ) : null}

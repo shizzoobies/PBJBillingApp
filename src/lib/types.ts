@@ -2358,6 +2358,33 @@ export class ApiError extends Error {
 }
 
 /**
+ * One credit on account (featreq-110efd15, stage 1a): money a client has paid
+ * ahead or paid twice, held for a future invoice. `draws` and `remaining`
+ * are the draw model: empty and the whole amount until invoices can draw on a
+ * credit. A void credit stays in the ledger with `voidedAt` set and nothing
+ * remaining.
+ */
+export type AccountCreditSourceKind = 'manual' | 'overpayment' | 'prepayment'
+
+export type AccountCredit = {
+  id: string
+  clientId: string
+  amount: number
+  sourceKind: AccountCreditSourceKind
+  /** What makes the credit unique: a UUID for a manual one, a payment or invoice month otherwise. */
+  sourceRef: string
+  /** The month (YYYY-MM) the credit is meant for, when she said. */
+  forPeriod: string | null
+  note: string
+  createdBy: string | null
+  createdAt: string
+  voidedAt: string | null
+  voidedBy: string | null
+  draws: { invoiceId: string; amount: number }[]
+  remaining: number
+}
+
+/**
  * A client's Stripe autopay enrollment, as the OWNER's panel reads it
  * (featreq-bef42b72). Words and a last four only - the server never sends the
  * setup token, the payment method id or the mandate.

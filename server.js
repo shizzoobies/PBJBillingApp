@@ -5,6 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
 import {
+  AccountCreditError,
   AppDataStore,
   BillingMasterError,
   ClientHasHistoryError,
@@ -1130,6 +1131,12 @@ const PREVIEW_AWARE_API_PATHS = new Set([
   '/api/events',
 ])
 
+// Credit on account (featreq-110efd15): what the owner may type into the Add
+// credit form. The store rounds to cents and refuses the rest.
+const MAX_CREDIT_AMOUNT = 1_000_000
+const MAX_CREDIT_NOTE = 500
+const CREDIT_PERIOD = /^\d{4}-(0[1-9]|1[0-2])$/
+
 // Most checklist ids one batched pending-notes request may ask about.
 const PENDING_NOTES_BATCH_LIMIT = 500
 
@@ -1554,6 +1561,8 @@ function scopeAppDataForSession(session, data) {
     // carries. Enrollment rows hold bearer setup tokens: owners only.
     clientAutopay: undefined,
     autopayAttempts: undefined,
+    // The credit-on-account ledger: owners only, like autopay.
+    accountCredits: undefined,
     ...(data.firmSettings ? { firmSettings } : {}),
     clients,
     checklists,
@@ -5159,6 +5168,141 @@ const server = createServer(async (request, response) => {
       }
       const enrollments = (await appDataStore.listClientAutopay()).map(autopaySummary)
       sendJson(response, 200, { enrollments })
+      return
+    }
+
+    // GET /api/clients/:id/credits — what the client has on account: the balance
+    // and the ledger, void rows included (owner only).
+    // POST /api/clients/:id/credits — record a credit by hand (owner only).
+    // POST /api/account-credits/:id/void — take one back off the books.
+    //
+    // Reference only until a later stage draws on it: nothing here is read by
+    // generating, sending or charging anything, and none of it rides the
+    // workspace payload (the ledger is server-owned, like autopay).
+    const creditsMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/credits$/)
+    if (creditsMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see credit on account' })
+        return
+      }
+      const creditClientId = decodeURIComponent(creditsMatch[1])
+      if (!(await appDataStore.getClientById(creditClientId))) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      const credits = await appDataStore.listAccountCredits(creditClientId)
+      const balance = await appDataStore.accountCreditBalance(creditClientId)
+      sendJson(response, 200, { balance, credits })
+      return
+    }
+
+    if (creditsMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can add credit on account' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const creditContentType = String(request.headers['content-type'] || '')
+      if (!creditContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const creditClientId = decodeURIComponent(creditsMatch[1])
+      const creditClient = await appDataStore.getClientById(creditClientId)
+      if (!creditClient) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      const creditBody = (await readJsonBody(request)) ?? {}
+      const amount = typeof creditBody.amount === 'string' ? Number(creditBody.amount.trim()) : creditBody.amount
+      if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0 || amount > MAX_CREDIT_AMOUNT) {
+        sendJson(response, 400, {
+          error: 'invalid_amount',
+          message: 'Enter an amount above $0.00 and no more than $1,000,000.',
+        })
+        return
+      }
+      const note = creditBody.note === undefined || creditBody.note === null ? '' : creditBody.note
+      if (typeof note !== 'string' || note.length > MAX_CREDIT_NOTE) {
+        sendJson(response, 400, {
+          error: 'invalid_note',
+          message: `Keep the reason to ${MAX_CREDIT_NOTE} characters or fewer.`,
+        })
+        return
+      }
+      const forPeriod = creditBody.forPeriod === undefined || creditBody.forPeriod === '' ? null : creditBody.forPeriod
+      if (forPeriod !== null && !(typeof forPeriod === 'string' && CREDIT_PERIOD.test(forPeriod))) {
+        sendJson(response, 400, {
+          error: 'invalid_period',
+          message: 'The month a credit is meant for must look like 2026-11.',
+        })
+        return
+      }
+      let credit
+      try {
+        credit = await appDataStore.addAccountCredit({
+          clientId: creditClientId,
+          amount,
+          note,
+          forPeriod,
+          createdBy: session.user.id,
+        })
+      } catch (error) {
+        if (error instanceof AccountCreditError) {
+          sendJson(response, 409, { error: 'credit_refused', message: error.message })
+          return
+        }
+        throw error
+      }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'account_credit_added',
+        `${creditClient.name} $${credit.amount.toFixed(2)}`,
+      )
+      sendJson(response, 200, credit)
+      return
+    }
+
+    const voidCreditMatch = normalizedPath.match(/^\/api\/account-credits\/([^/]+)\/void$/)
+    if (voidCreditMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can void credit on account' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      let voided
+      try {
+        voided = await appDataStore.voidAccountCredit(decodeURIComponent(voidCreditMatch[1]), session.user.id)
+      } catch (error) {
+        if (error instanceof AccountCreditError) {
+          sendJson(response, 409, { error: 'credit_refused', message: error.message })
+          return
+        }
+        throw error
+      }
+      if (!voided) {
+        sendJson(response, 404, { error: 'Credit not found' })
+        return
+      }
+      const voidedClientName = await appDataStore.getClientNameById(voided.clientId)
+      await appDataStore.recordActivity(
+        session.user.id,
+        'account_credit_voided',
+        `${voidedClientName ?? voided.clientId} $${voided.amount.toFixed(2)}`,
+      )
+      sendJson(response, 200, voided)
       return
     }
 

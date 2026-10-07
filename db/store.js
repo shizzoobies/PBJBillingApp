@@ -1362,6 +1362,88 @@ function pickAutopayPatch(patch) {
 }
 
 /**
+ * Credit on account (featreq-110efd15, stage 1a): money a client has paid ahead
+ * or paid twice, kept as a ledger of credits. NO foreign keys, deliberately and
+ * for the same reason as autopay above: the bulk save deletes and re-inserts
+ * clients, so a cascade would erase the ledger on an autosave. Server-owned;
+ * nothing in the workspace payload touches it, and the file backend keeps it in
+ * a top-level `accountCredits` array the bulk save carries over untouched.
+ */
+const ACCOUNT_CREDIT_SOURCE_KINDS = ['manual', 'overpayment', 'prepayment']
+const ACCOUNT_CREDIT_NOTE_MAX = 500
+const ACCOUNT_CREDIT_PERIOD = /^\d{4}-(0[1-9]|1[0-2])$/
+const ACCOUNT_CREDIT_SELECT_COLUMNS = `id, client_id, amount, source_kind, source_ref, for_period,
+          note, created_by, created_at, voided_at, voided_by`
+
+/** A dollar amount as whole cents (NaN when it is not a number). Half-cents round up. */
+const accountCreditCents = (value) => Math.round(Number((Number(value) * 100).toPrecision(15)))
+
+/**
+ * One credit as the app reads it, on either backend. `draws` is empty and
+ * `remaining` is the whole amount until the draw model (stage 1b) fills them:
+ * a void credit has nothing left to spend.
+ */
+function accountCreditView(row) {
+  const amount = Number(row.amount)
+  const voidedAt = row.voidedAt ?? null
+  return {
+    id: row.id,
+    clientId: row.clientId,
+    amount,
+    sourceKind: row.sourceKind,
+    sourceRef: row.sourceRef,
+    forPeriod: row.forPeriod ?? null,
+    note: row.note ?? '',
+    createdBy: row.createdBy ?? null,
+    createdAt: row.createdAt ?? null,
+    voidedAt,
+    voidedBy: row.voidedBy ?? null,
+    draws: [],
+    remaining: voidedAt ? 0 : amount,
+  }
+}
+
+function mapAccountCreditRow(row) {
+  return accountCreditView({
+    id: row.id,
+    clientId: row.client_id,
+    amount: row.amount,
+    sourceKind: row.source_kind,
+    sourceRef: row.source_ref,
+    forPeriod: row.for_period,
+    note: row.note,
+    createdBy: row.created_by,
+    createdAt: isoOrNull(row.created_at),
+    voidedAt: isoOrNull(row.voided_at),
+    voidedBy: row.voided_by,
+  })
+}
+
+/** Throws the sentence for a client that cannot hold a credit. */
+function assertClientTakesCredit(client) {
+  if (!client) throw new AccountCreditError('That client was not found.')
+  const name = client.name || 'That client'
+  if (client.billToClientId) {
+    throw new AccountCreditError(
+      `${name} is billed on a master's combined invoice, so credit on account belongs to the master. Add it there.`,
+    )
+  }
+  if (isInactiveClientStage(client.lifecycleStage)) {
+    throw new AccountCreditError(
+      `${name} is retired, so credit cannot be added to them. Reactivate them first.`,
+    )
+  }
+}
+
+/** The recorded credit a repeated source names, or a refusal when it is another client's. */
+function sameSourceCredit(existing, clientId) {
+  if (!existing || existing.clientId !== clientId) {
+    throw new AccountCreditError('That payment is already recorded as a credit for a different client.')
+  }
+  return accountCreditView(existing)
+}
+
+/**
  * Read-modify-write on the app-data file inside ONE queue slot, for the
  * server-owned autopay arrays. `mutate(data)` returns `{ result, changed }`.
  * Raw fs calls only in here: `readJson` / `writeFile` enqueue behind this very
@@ -1867,6 +1949,18 @@ const INVOICE_LINE_KINDS = new Set([
   // what it is. It carries no amount by construction — see `timeBreakdownLines`.
   'time_detail',
 ])
+
+/**
+ * A credit-on-account write the data refuses: a bad amount, a client that is
+ * absent, retired or billed on a master, a credit that is already void. A
+ * sentence the owner can act on, for the same reason `RetainerCreditError` is.
+ */
+export class AccountCreditError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'AccountCreditError'
+  }
+}
 
 /**
  * The retainer-credit rules the store enforces, raised so the API can answer
@@ -6952,6 +7046,30 @@ export class AppDataStore {
           primary key (invoice_id, attempt_no)
         )
       `)
+      // Credit on account (featreq-110efd15). NO foreign keys, like the autopay
+      // tables above: the bulk save deletes and re-inserts clients, and the
+      // ledger must survive it. Server-owned; nothing in the workspace payload
+      // touches it. (source_kind, source_ref) is what makes a credit be created
+      // once however many times its source is replayed.
+      await this.pool.query(`
+        create table if not exists account_credits (
+          id text primary key,
+          client_id text not null,
+          amount numeric(12,2) not null check (amount > 0),
+          source_kind text not null check (source_kind in ('manual', 'overpayment', 'prepayment')),
+          source_ref text not null,
+          for_period text,
+          note text not null default '',
+          created_by text,
+          created_at timestamptz not null default now(),
+          voided_at timestamptz,
+          voided_by text,
+          unique (source_kind, source_ref)
+        )
+      `)
+      await this.pool.query(`
+        create index if not exists account_credits_client_id_idx on account_credits (client_id)
+      `)
       // ---- RATE HISTORY (docs/plans/rate-history-2026-09.md) ----
       //
       // Brittany raises rates one client at a time, at that client's yearly
@@ -9985,6 +10103,8 @@ export class AppDataStore {
         // tab's copy (or none) must never roll back, or erase, either.
         clientAutopay: _payloadAutopay,
         autopayAttempts: _payloadAutopayAttempts,
+        // The credit-on-account ledger, same reasoning.
+        accountCredits: _payloadAccountCredits,
         ...withoutServerOwned
       } = toPersist
       toPersist = {
@@ -10001,6 +10121,7 @@ export class AppDataStore {
         ...(Array.isArray(previous?.autopayAttempts)
           ? { autopayAttempts: previous.autopayAttempts }
           : {}),
+        ...(Array.isArray(previous?.accountCredits) ? { accountCredits: previous.accountCredits } : {}),
       }
 
       const serialized = JSON.stringify(toPersist, null, 2)
@@ -16769,6 +16890,161 @@ export class AppDataStore {
     if (!client) return
     client.stripeCustomerId = customerId
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  /**
+   * A client's credits on account, oldest first, void ones included (flagged by
+   * `voidedAt`). Each carries `draws` and `remaining`: both backends answer
+   * the same shape (`accountCreditView`).
+   */
+  async listAccountCredits(clientId) {
+    if (!clientId) return []
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits
+          where client_id = $1 order by created_at, id`,
+        [clientId],
+      )
+      return rows.map(mapAccountCreditRow)
+    }
+    const data = await readJson(localDataPath)
+    return (data.accountCredits ?? []).filter((row) => row.clientId === clientId).map(accountCreditView)
+  }
+
+  /** What a client has left on account: the sum of what remains of every credit that is not void. */
+  async accountCreditBalance(clientId) {
+    const credits = await this.listAccountCredits(clientId)
+    const cents = credits.reduce(
+      (sum, credit) => (credit.voidedAt ? sum : sum + accountCreditCents(credit.remaining)),
+      0,
+    )
+    return cents / 100
+  }
+
+  /**
+   * Record a credit. A manual one gets a fresh UUID as its source ref; any other
+   * kind must name its source (a PaymentIntent id, an invoice month), and the
+   * insert is idempotent on (source kind, source ref): the same source twice is
+   * one credit, answered with the row already there.
+   *
+   * Refuses (AccountCreditError) an amount that is not a positive number of
+   * cents, a client that is absent, retired or billed on a master (the credit
+   * belongs to the master, which pays), and a source already recorded for
+   * another client.
+   */
+  async addAccountCredit({
+    clientId,
+    amount,
+    note = '',
+    forPeriod = null,
+    createdBy = null,
+    sourceKind = 'manual',
+    sourceRef = null,
+  } = {}) {
+    if (!ACCOUNT_CREDIT_SOURCE_KINDS.includes(sourceKind)) {
+      throw new AccountCreditError('That is not a kind of credit on account.')
+    }
+    const cents = accountCreditCents(amount)
+    if (!(cents > 0)) throw new AccountCreditError('The amount must be more than $0.00.')
+    const ref = sourceKind === 'manual' ? String(sourceRef || randomUUID()) : String(sourceRef ?? '').trim()
+    if (!ref) throw new AccountCreditError('A credit that is not manual has to name where it came from.')
+    const period = forPeriod === null || forPeriod === undefined || forPeriod === '' ? null : String(forPeriod)
+    if (period !== null && !ACCOUNT_CREDIT_PERIOD.test(period)) {
+      throw new AccountCreditError('The month a credit is meant for must look like 2026-11.')
+    }
+    const text = String(note ?? '').trim().slice(0, ACCOUNT_CREDIT_NOTE_MAX)
+    const id = `credit-${randomUUID()}`
+
+    if (this.pool) {
+      const found = await this.pool.query(
+        'select id, name, bill_to_client_id, lifecycle_stage from clients where id = $1',
+        [clientId],
+      )
+      assertClientTakesCredit(
+        found.rows[0]
+          ? {
+              name: found.rows[0].name,
+              billToClientId: found.rows[0].bill_to_client_id,
+              lifecycleStage: found.rows[0].lifecycle_stage,
+            }
+          : null,
+      )
+      const inserted = await this.pool.query(
+        `insert into account_credits
+           (id, client_id, amount, source_kind, source_ref, for_period, note, created_by)
+         values ($1, $2, $3, $4, $5, $6, $7, $8)
+         on conflict (source_kind, source_ref) do nothing
+         returning ${ACCOUNT_CREDIT_SELECT_COLUMNS}`,
+        [id, clientId, cents / 100, sourceKind, ref, period, text, createdBy],
+      )
+      if (inserted.rows.length > 0) return mapAccountCreditRow(inserted.rows[0])
+      const existing = await this.pool.query(
+        `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits
+          where source_kind = $1 and source_ref = $2`,
+        [sourceKind, ref],
+      )
+      return sameSourceCredit(
+        existing.rows[0] ? mapAccountCreditRow(existing.rows[0]) : null,
+        clientId,
+      )
+    }
+
+    return mutateLocalData((data) => {
+      assertClientTakesCredit((data.clients ?? []).find((client) => client.id === clientId) ?? null)
+      if (!Array.isArray(data.accountCredits)) data.accountCredits = []
+      const existing = data.accountCredits.find(
+        (row) => row.sourceKind === sourceKind && row.sourceRef === ref,
+      )
+      if (existing) return { result: sameSourceCredit(existing, clientId), changed: false }
+      const row = {
+        id,
+        clientId,
+        amount: cents / 100,
+        sourceKind,
+        sourceRef: ref,
+        forPeriod: period,
+        note: text,
+        createdBy,
+        createdAt: nowIso(),
+        voidedAt: null,
+        voidedBy: null,
+      }
+      data.accountCredits.push(row)
+      return { result: accountCreditView(row), changed: true }
+    })
+  }
+
+  /**
+   * Void a credit: it stays in the ledger, flagged, and stops counting toward the
+   * balance. Null when there is no such credit; AccountCreditError when it is
+   * already void. Stage 1b adds a second refusal here: a credit that an invoice
+   * has drawn from cannot be voided (void the invoice, or remove the line, first).
+   */
+  async voidAccountCredit(id, byUserId = null) {
+    if (!id) return null
+    if (this.pool) {
+      const updated = await this.pool.query(
+        `update account_credits set voided_at = now(), voided_by = $2
+          where id = $1 and voided_at is null
+          returning ${ACCOUNT_CREDIT_SELECT_COLUMNS}`,
+        [id, byUserId],
+      )
+      if (updated.rows.length > 0) return mapAccountCreditRow(updated.rows[0])
+      const existing = await this.pool.query(
+        `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits where id = $1`,
+        [id],
+      )
+      if (existing.rows.length === 0) return null
+      throw new AccountCreditError('That credit is already void.')
+    }
+    return mutateLocalData((data) => {
+      const row = (data.accountCredits ?? []).find((entry) => entry.id === id)
+      if (!row) return { result: null, changed: false }
+      if (row.voidedAt) throw new AccountCreditError('That credit is already void.')
+      row.voidedAt = nowIso()
+      row.voidedBy = byUserId
+      return { result: accountCreditView(row), changed: true }
+    })
   }
 
   /**

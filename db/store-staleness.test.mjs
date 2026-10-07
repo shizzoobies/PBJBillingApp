@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  AccountCreditError,
   AppDataStore,
   BULK_SAVE_LOCK_SQL,
   BULK_SAVE_LOCK_TABLES,
@@ -40813,5 +40814,363 @@ describe('bulk save: a save that changes nothing rolls back (postgres branch)', 
     // ... and it is the one the 200 carries in the header.
     expect(tail).toContain('let nextVersion = postWriteVersion')
     expect(tail).toMatch(/200,\s*attachedNotes > 0 \|\| versionFailed \? \{ ok: true, refetch: true \} : \{ ok: true \},\s*nextVersion \? \{ \[WORKSPACE_VERSION_HEADER\]: nextVersion \} : \{\}/)
+  })
+})
+
+/**
+ * Credit on account, stage 1a (featreq-110efd15; docs/plans/credit-on-account-and-billing-period-2026-10.md).
+ * A ledger of money a client has paid ahead or paid twice, recorded by hand for
+ * now. Cardinal rule 1 - both backends - so the FILE half runs for real below
+ * and the POSTGRES half runs through a recording pool that emulates just the
+ * account_credits statements. Nothing here touches an invoice.
+ */
+describe('credit on account (file backend)', () => {
+  async function seedClients(clients) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients = clients
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  it('adds a manual credit and lists it with the draw shape stage 1b will fill', async () => {
+    const row = await store.addAccountCredit({
+      clientId: 'c1',
+      amount: 250,
+      note: 'Double payment, check 1042',
+      forPeriod: '2026-11',
+      createdBy: 'user-owner',
+    })
+    expect(row).toMatchObject({
+      clientId: 'c1',
+      amount: 250,
+      sourceKind: 'manual',
+      forPeriod: '2026-11',
+      note: 'Double payment, check 1042',
+      createdBy: 'user-owner',
+      voidedAt: null,
+      voidedBy: null,
+      draws: [],
+      remaining: 250,
+    })
+    expect(row.id).toBeTruthy()
+    expect(row.sourceRef).toMatch(/^[0-9a-f-]{36}$/)
+    expect(Number.isNaN(Date.parse(row.createdAt))).toBe(false)
+    expect(await store.listAccountCredits('c1')).toEqual([row])
+    expect(await store.accountCreditBalance('c1')).toBe(250)
+  })
+
+  it('rounds to cents and keeps the balance exact', async () => {
+    await store.addAccountCredit({ clientId: 'c1', amount: 0.1, createdBy: 'u' })
+    await store.addAccountCredit({ clientId: 'c1', amount: 0.2, createdBy: 'u' })
+    await store.addAccountCredit({ clientId: 'c1', amount: 10.005, createdBy: 'u' })
+    expect(await store.accountCreditBalance('c1')).toBe(10.31)
+  })
+
+  it('the balance is the sum of the credits that are not void, per client', async () => {
+    await seedClients([
+      { id: 'c1', name: 'Acme' },
+      { id: 'c2', name: 'Other' },
+    ])
+    const a = await store.addAccountCredit({ clientId: 'c1', amount: 100, createdBy: 'u' })
+    await store.addAccountCredit({ clientId: 'c1', amount: 40.5, createdBy: 'u' })
+    await store.addAccountCredit({ clientId: 'c2', amount: 999, createdBy: 'u' })
+    expect(await store.accountCreditBalance('c1')).toBe(140.5)
+    expect(await store.accountCreditBalance('c2')).toBe(999)
+    expect(await store.accountCreditBalance('nobody')).toBe(0)
+
+    const voided = await store.voidAccountCredit(a.id, 'user-owner')
+    expect(voided).toMatchObject({ id: a.id, voidedBy: 'user-owner', remaining: 0, amount: 100 })
+    expect(voided.voidedAt).toBeTruthy()
+    expect(await store.accountCreditBalance('c1')).toBe(40.5)
+    // A void row stays in the ledger, flagged.
+    const listed = await store.listAccountCredits('c1')
+    expect(listed).toHaveLength(2)
+    expect(listed.find((row) => row.id === a.id).voidedAt).toBeTruthy()
+    expect(listed.map((row) => row.clientId)).toEqual(['c1', 'c1'])
+  })
+
+  it('voiding twice is refused with a sentence; an unknown id is null', async () => {
+    const a = await store.addAccountCredit({ clientId: 'c1', amount: 5, createdBy: 'u' })
+    await store.voidAccountCredit(a.id, 'u')
+    await expect(store.voidAccountCredit(a.id, 'u2')).rejects.toBeInstanceOf(AccountCreditError)
+    await expect(store.voidAccountCredit(a.id, 'u2')).rejects.toThrow(/already void/i)
+    expect(await store.voidAccountCredit('credit-nope', 'u')).toBeNull()
+    // The refused second void did not rewrite who voided it.
+    expect((await store.listAccountCredits('c1'))[0].voidedBy).toBe('u')
+  })
+
+  it('is idempotent on (source kind, source ref): the same payment is one credit', async () => {
+    const first = await store.addAccountCredit({
+      clientId: 'c1',
+      amount: 80,
+      sourceKind: 'overpayment',
+      sourceRef: 'pi_dup_1',
+      createdBy: 'u',
+    })
+    const again = await store.addAccountCredit({
+      clientId: 'c1',
+      amount: 80,
+      sourceKind: 'overpayment',
+      sourceRef: 'pi_dup_1',
+      createdBy: 'u',
+    })
+    expect(again.id).toBe(first.id)
+    expect(await store.listAccountCredits('c1')).toHaveLength(1)
+    expect(await store.accountCreditBalance('c1')).toBe(80)
+    // The same ref under another kind is a different source.
+    await store.addAccountCredit({
+      clientId: 'c1',
+      amount: 5,
+      sourceKind: 'prepayment',
+      sourceRef: 'pi_dup_1',
+      createdBy: 'u',
+    })
+    expect(await store.listAccountCredits('c1')).toHaveLength(2)
+    // ...and a recorded source is never handed to a different client.
+    await seedClients([
+      { id: 'c1', name: 'Acme' },
+      { id: 'c2', name: 'Other' },
+    ])
+    await expect(
+      store.addAccountCredit({
+        clientId: 'c2',
+        amount: 80,
+        sourceKind: 'overpayment',
+        sourceRef: 'pi_dup_1',
+        createdBy: 'u',
+      }),
+    ).rejects.toBeInstanceOf(AccountCreditError)
+  })
+
+  it.each([[0], [-5], [Number.NaN], ['abc'], [null], [0.004]])('refuses an amount of %j', async (amount) => {
+    await expect(store.addAccountCredit({ clientId: 'c1', amount, createdBy: 'u' })).rejects.toBeInstanceOf(
+      AccountCreditError,
+    )
+    expect(await store.listAccountCredits('c1')).toEqual([])
+  })
+
+  it('refuses a client that does not exist', async () => {
+    await expect(store.addAccountCredit({ clientId: 'ghost', amount: 10, createdBy: 'u' })).rejects.toThrow(
+      /client .*not found/i,
+    )
+    expect((await persisted()).accountCredits ?? []).toEqual([])
+  })
+
+  it('refuses a billing sub and says the credit belongs to the master', async () => {
+    await seedClients([
+      { id: 'master', name: 'KLC', isBillingMaster: true },
+      { id: 'sub', name: 'Sub Co', billToClientId: 'master' },
+    ])
+    await expect(store.addAccountCredit({ clientId: 'sub', amount: 10, createdBy: 'u' })).rejects.toThrow(
+      /master/i,
+    )
+    // The master itself takes one.
+    await expect(
+      store.addAccountCredit({ clientId: 'master', amount: 10, createdBy: 'u' }),
+    ).resolves.toMatchObject({ clientId: 'master' })
+  })
+
+  it('refuses a retired client', async () => {
+    await seedClients([{ id: 'c1', name: 'Acme', lifecycleStage: 'inactive' }])
+    await expect(store.addAccountCredit({ clientId: 'c1', amount: 10, createdBy: 'u' })).rejects.toThrow(
+      /retired/i,
+    )
+  })
+
+  it('refuses an unknown source kind, and a non-manual credit with no source ref', async () => {
+    await expect(
+      store.addAccountCredit({ clientId: 'c1', amount: 10, sourceKind: 'gift', sourceRef: 'x', createdBy: 'u' }),
+    ).rejects.toBeInstanceOf(AccountCreditError)
+    await expect(
+      store.addAccountCredit({ clientId: 'c1', amount: 10, sourceKind: 'overpayment', createdBy: 'u' }),
+    ).rejects.toBeInstanceOf(AccountCreditError)
+  })
+
+  it('a bulk save keeps the credits whatever the payload carries', async () => {
+    const credit = await store.addAccountCredit({ clientId: 'c1', amount: 75, createdBy: 'u' })
+
+    // A rename, a payload inventing its own credits, and one carrying an empty
+    // ledger (a stale tab): none may change or erase what is on disk.
+    await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme Renamed' }] }))
+    await store.write(
+      workspace({ accountCredits: [{ id: 'invented', clientId: 'c1', amount: 99999, sourceKind: 'manual' }] }),
+    )
+    await store.write(workspace({ accountCredits: [] }))
+
+    const after = await persisted()
+    expect(after.accountCredits).toHaveLength(1)
+    expect(after.accountCredits[0]).toMatchObject({ id: credit.id, clientId: 'c1', amount: 75 })
+    expect(await store.accountCreditBalance('c1')).toBe(75)
+  })
+
+  it('a bulk save writes no accountCredits key that was never there', async () => {
+    await store.write(workspace({ accountCredits: [{ id: 'x', clientId: 'c1', amount: 5 }] }))
+    expect(await persisted()).not.toHaveProperty('accountCredits')
+  })
+})
+
+describe('credit on account (Postgres statements)', () => {
+  /** A recording pool that emulates only the account_credits statements, in memory. */
+  function creditPool({
+    client = { id: 'c1', name: 'Acme', bill_to_client_id: null, lifecycle_stage: 'active' },
+  } = {}) {
+    const statements = []
+    const held = []
+    const answer = async (text, params) => {
+      const trimmed = text.replace(/\s+/g, ' ').trim()
+      statements.push({ text: trimmed, params })
+      if (/^select id, name, bill_to_client_id, lifecycle_stage from clients where id = \$1$/i.test(trimmed)) {
+        return { rows: client && client.id === params[0] ? [client] : [] }
+      }
+      if (/^insert into account_credits/i.test(trimmed)) {
+        const exists = held.some((row) => row.source_kind === params[3] && row.source_ref === params[4])
+        if (exists) return { rows: [], rowCount: 0 }
+        const row = {
+          id: params[0],
+          client_id: params[1],
+          amount: Number(params[2]).toFixed(2),
+          source_kind: params[3],
+          source_ref: params[4],
+          for_period: params[5],
+          note: params[6],
+          created_by: params[7],
+          created_at: new Date('2026-10-07T15:00:00Z'),
+          voided_at: null,
+          voided_by: null,
+        }
+        held.push(row)
+        return { rows: [row], rowCount: 1 }
+      }
+      if (/^select .* from account_credits where source_kind = \$1 and source_ref = \$2$/i.test(trimmed)) {
+        return { rows: held.filter((row) => row.source_kind === params[0] && row.source_ref === params[1]) }
+      }
+      if (/^select .* from account_credits where client_id = \$1 order by created_at, id$/i.test(trimmed)) {
+        return { rows: held.filter((row) => row.client_id === params[0]) }
+      }
+      if (
+        /^update account_credits set voided_at = now\(\), voided_by = \$2 where id = \$1 and voided_at is null returning/i.test(
+          trimmed,
+        )
+      ) {
+        const row = held.find((entry) => entry.id === params[0] && !entry.voided_at)
+        if (!row) return { rows: [], rowCount: 0 }
+        row.voided_at = new Date('2026-10-08T15:00:00Z')
+        row.voided_by = params[1]
+        return { rows: [row], rowCount: 1 }
+      }
+      if (/^select .* from account_credits where id = \$1$/i.test(trimmed)) {
+        return { rows: held.filter((row) => row.id === params[0]) }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+    const pool = { connect: async () => ({ query: answer, release() {} }), query: answer }
+    return { pool, statements, held, matching: (pattern) => statements.filter((s) => pattern.test(s.text)) }
+  }
+  const pgStore = (fake) => {
+    const instance = new AppDataStore()
+    instance.pool = fake.pool
+    instance.mode = 'postgres'
+    return instance
+  }
+
+  it('creates the table with NO foreign keys, the checks and the unique source', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    const [table] = fake.matching(/create table if not exists account_credits/i)
+    expect(table).toBeTruthy()
+    const sql = table.text.replace(/\s+/g, ' ')
+    expect(sql).not.toMatch(/references/i)
+    expect(sql).toMatch(/id text primary key/i)
+    expect(sql).toMatch(/client_id text not null/i)
+    expect(sql).toMatch(/amount numeric\(12, ?2\) not null check \(amount > 0\)/i)
+    expect(sql).toMatch(
+      /source_kind text not null check \(source_kind in \('manual', ?'overpayment', ?'prepayment'\)\)/i,
+    )
+    expect(sql).toMatch(/source_ref text not null/i)
+    expect(sql).toMatch(/for_period text/i)
+    expect(sql).toMatch(/note text not null default ''/i)
+    expect(sql).toMatch(/created_at timestamptz not null default now\(\)/i)
+    expect(sql).toMatch(/voided_at timestamptz/i)
+    expect(sql).toMatch(/unique \(source_kind, source_ref\)/i)
+  })
+
+  it('adds a credit with one insert that is a no-op on a repeated source', async () => {
+    const fake = creditPool()
+    const store2 = pgStore(fake)
+    const first = await store2.addAccountCredit({
+      clientId: 'c1',
+      amount: 125.5,
+      note: 'Advance',
+      forPeriod: '2026-11',
+      createdBy: 'user-owner',
+    })
+    expect(first).toMatchObject({
+      clientId: 'c1',
+      amount: 125.5,
+      sourceKind: 'manual',
+      forPeriod: '2026-11',
+      note: 'Advance',
+      createdBy: 'user-owner',
+      voidedAt: null,
+      draws: [],
+      remaining: 125.5,
+    })
+    const [insert] = fake.matching(/^insert into account_credits/i)
+    expect(insert.text).toMatch(/on conflict \(source_kind, source_ref\) do nothing returning/i)
+
+    const replay = await store2.addAccountCredit({
+      clientId: 'c1',
+      amount: 125.5,
+      sourceKind: first.sourceKind,
+      sourceRef: first.sourceRef,
+      createdBy: 'user-owner',
+    })
+    expect(replay.id).toBe(first.id)
+    expect(fake.held).toHaveLength(1)
+  })
+
+  it('lists, sums and voids', async () => {
+    const fake = creditPool()
+    const store2 = pgStore(fake)
+    const a = await store2.addAccountCredit({ clientId: 'c1', amount: 100, createdBy: 'u' })
+    await store2.addAccountCredit({ clientId: 'c1', amount: 25.25, createdBy: 'u' })
+    expect(await store2.accountCreditBalance('c1')).toBe(125.25)
+    const voided = await store2.voidAccountCredit(a.id, 'user-owner')
+    expect(voided).toMatchObject({ id: a.id, voidedBy: 'user-owner', remaining: 0 })
+    expect(await store2.accountCreditBalance('c1')).toBe(25.25)
+    expect(await store2.listAccountCredits('c1')).toHaveLength(2)
+    await expect(store2.voidAccountCredit(a.id, 'u')).rejects.toThrow(/already void/i)
+    expect(await store2.voidAccountCredit('credit-nope', 'u')).toBeNull()
+  })
+
+  it('refuses a missing client, a billing sub and a retired client before inserting', async () => {
+    const absent = creditPool({ client: null })
+    await expect(
+      pgStore(absent).addAccountCredit({ clientId: 'c1', amount: 10, createdBy: 'u' }),
+    ).rejects.toBeInstanceOf(AccountCreditError)
+    const sub = creditPool({
+      client: { id: 'c1', name: 'Sub', bill_to_client_id: 'master', lifecycle_stage: 'active' },
+    })
+    await expect(pgStore(sub).addAccountCredit({ clientId: 'c1', amount: 10, createdBy: 'u' })).rejects.toThrow(
+      /master/i,
+    )
+    const retired = creditPool({
+      client: { id: 'c1', name: 'Gone', bill_to_client_id: null, lifecycle_stage: 'inactive' },
+    })
+    await expect(
+      pgStore(retired).addAccountCredit({ clientId: 'c1', amount: 10, createdBy: 'u' }),
+    ).rejects.toThrow(/retired/i)
+    for (const fake of [absent, sub, retired]) {
+      expect(fake.matching(/^insert into account_credits/i)).toHaveLength(0)
+    }
+  })
+
+  it('a bulk save never reads, deletes or inserts account_credits', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace())
+    expect(fake.statements.length).toBeGreaterThan(5)
+    expect(fake.matching(/account_credits/i)).toHaveLength(0)
   })
 })

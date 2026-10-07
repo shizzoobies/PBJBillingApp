@@ -13862,3 +13862,74 @@ details.invoice-run-sent ul,
   gap: 8px;
   margin-top: 8px;
 }
+
+/* Credit on account (featreq-110efd15): the balance, the add form and the ledger. */
+.account-credit-balance {
+  align-items: baseline;
+  display: flex;
+  gap: 12px;
+  margin: 0 0 6px;
+}
+
+.account-credit-balance-label {
+  color: var(--muted);
+}
+
+.account-credit-balance strong {
+  font-size: 28px;
+  font-variant-numeric: tabular-nums;
+}
+
+.account-credit-help {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+
+.account-credit-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.account-credit-scroll {
+  overflow-x: auto;
+}
+
+.account-credit-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  width: 100%;
+}
+
+.account-credit-table th,
+.account-credit-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 7px 8px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.account-credit-table th {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.account-credit-table td:nth-child(2),
+.account-credit-table td:nth-child(6) {
+  font-variant-numeric: tabular-nums;
+}
+
+.account-credit-table tr.is-void td {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.account-credit-table tr.is-void td:last-child {
+  text-decoration: none;
+}
