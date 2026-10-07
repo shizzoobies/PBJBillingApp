@@ -143,8 +143,9 @@ describe('the invoice PATCH route answers a locked invoice with a sentence', () 
   // the block grew when the scope re-tag's 409 joined the other three
   // (featreq-8cec48db), and a window that stopped short would report the
   // fallback as missing rather than as out of order. Widened from 4000 when the
-  // credit on account refusal joined them (stage 1b).
-  const block = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 4400)
+  // credit on account refusal joined them (stage 1b), and to 4800 for the
+  // unfinished-paid-stamp call (stage 1d) ahead of the save.
+  const block = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 4800)
 
   it('catches the locked error rather than letting it fall to the 500', () => {
     expect(block).toContain('error instanceof InvoiceLockedError')

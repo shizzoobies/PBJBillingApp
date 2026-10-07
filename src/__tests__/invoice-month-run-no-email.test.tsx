@@ -227,3 +227,61 @@ describe('a never-email client on the month run', () => {
     expect(editor().getByRole('button', { name: /^Payment link/ })).toBeInTheDocument()
   })
 })
+
+// Credit on account stage 1d: a never-email invoice a credit covers in full is
+// stamped sent and THEN paid by credit; when the second step failed it is left
+// Sent at $0, and Mark reviewed is how she finishes it (the server runs only the
+// paid stamp: lib/invoice-paid-by-credit-routes.test.mjs).
+describe('a never-email invoice left Sent at $0 by a failed paid stamp', () => {
+  const sentStamp = {
+    kind: 'not-emailed',
+    at: '2026-09-01T12:00:00.000Z',
+    to: [],
+    subject: 'Marked sent - delivered outside the app',
+    ok: true,
+  } as never
+  const covered = (over: Partial<PersistedInvoice> = {}) =>
+    makeInvoice({
+      status: 'sent',
+      sentAt: '2026-09-01T12:00:00.000Z',
+      emailLog: [sentStamp],
+      lineItems: [
+        { kind: 'custom', label: 'Bookkeeping', detail: '', amount: 600 },
+        { kind: 'account_credit', label: 'Credit on account', detail: '', amount: -600, draws: [] } as never,
+      ],
+      total: 0,
+      ...over,
+    })
+
+  it('offers Mark reviewed with the finish wording, and Mark reviewed sends just the status', async () => {
+    await open(covered(), { tab: 'sent' })
+    const button = editor().getByRole('button', { name: 'Mark reviewed' })
+    expect(button).toHaveAttribute('title', 'Finish marking this paid by credit')
+    expect(document.querySelector('.invoice-run-editor')).toHaveTextContent('Finish marking this paid by credit.')
+
+    mockUpdate.mockResolvedValue(covered({ status: 'paid', paymentMethod: 'credit', paidAt: '2026-09-01T12:00:00.000Z' }))
+    fireEvent.click(button)
+
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1))
+    expect(mockUpdate.mock.calls[0][1]).toEqual({ status: 'reviewed' })
+  })
+
+  it('offers nothing of the kind on a sent invoice that still owes money', async () => {
+    await open(makeInvoice({ status: 'sent', sentAt: '2026-09-01T12:00:00.000Z', emailLog: [sentStamp] }), { tab: 'sent' })
+    expect(editor().queryByRole('button', { name: 'Mark reviewed' })).toBeNull()
+    expect(document.querySelector('.invoice-run-editor')).not.toHaveTextContent('Finish marking')
+  })
+
+  it('offers nothing of the kind on a sent $0 invoice with no credit line', async () => {
+    await open(
+      covered({ lineItems: [{ kind: 'custom', label: 'Nothing', detail: '', amount: 0 }] }),
+      { tab: 'sent' },
+    )
+    expect(editor().queryByRole('button', { name: 'Mark reviewed' })).toBeNull()
+  })
+
+  it('an ordinary client’s sent covered invoice gets no Mark reviewed either', async () => {
+    await open(covered(), { clients: [client()], tab: 'sent' })
+    expect(editor().queryByRole('button', { name: 'Mark reviewed' })).toBeNull()
+  })
+})

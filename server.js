@@ -2270,6 +2270,86 @@ function autopayEmailDetails(request, invoice, plan) {
 }
 
 /**
+ * Mark an invoice PAID BY CREDIT and close what it leaves behind (stage 1d), for
+ * the two places that do it: Send, and a never-email client's Mark reviewed.
+ * Returns the paid invoice, or null when it is no longer there. Throws what the
+ * store throws (a `ManualPaymentError` is a refusal, anything else a failure).
+ *
+ * The checkout sessions an earlier send left on it are expired from the row the
+ * stamp RETURNED (the truth after the write), like Mark paid does, and the
+ * activity line is best-effort: the stamp has committed and is the truth either
+ * way, so a failed log write must not turn it into a failed request.
+ */
+async function markPaidByCreditAndClose(userId, invoice, { paidAt = null } = {}) {
+  const paid = await appDataStore.markInvoicePaidByCredit(invoice.id, {
+    actorUserId: userId,
+    paidAt,
+  })
+  if (!paid) return null
+  await expireInvoiceSessions(
+    [paid.stripeCheckoutSessionId, paid.stripeCardSessionId],
+    paid.id,
+    'paid by credit',
+  )
+  try {
+    await appDataStore.recordActivity(userId, 'invoice_paid_by_credit', `${paid.number ?? paid.id}`)
+  } catch (error) {
+    console.error('[invoices] paid by credit but its activity line failed:', error)
+  }
+  return paid
+}
+
+/**
+ * FINISHING A NEVER-EMAIL PAID STAMP (stage 1d). Mark reviewed on a never-email
+ * client's invoice stamps it sent and then paid by credit; when the second step
+ * failed, the invoice is left SENT at $0 and unpaid, and the editor offers Mark
+ * reviewed again. A plain review would rewind it to Reviewed and stamp it sent a
+ * second time, so for a never-email, SENT, credit-covered invoice the only thing
+ * left to do is the paid stamp. A body that carries anything but the status goes
+ * the ordinary way.
+ *
+ * @returns {Promise<null | [number, object]>} null when this does not apply;
+ *   otherwise the [status, body] the PATCH route answers with
+ */
+async function finishUnfinishedCreditPayment(userId, invoiceId, payload) {
+  if (payload?.status !== 'reviewed' || !Object.keys(payload).every((key) => key === 'status')) {
+    return null
+  }
+  let finishing = null
+  try {
+    const existing = (await appDataStore.listInvoices()).find((entry) => entry.id === invoiceId)
+    if (existing?.status === 'sent' && invoicePaidByCreditAtSend(existing)) {
+      const finishClient = await appDataStore.getClientById(existing.clientId)
+      if (finishClient?.invoiceNoEmail === true && finishClient.platformInvoicingOptOut !== true) {
+        finishing = existing
+      }
+    }
+  } catch (error) {
+    // Not knowing is not a reason to refuse: the ordinary review follows.
+    console.error('[invoices] could not check for an unfinished paid stamp:', error)
+  }
+  if (!finishing) return null
+  try {
+    const finished = await markPaidByCreditAndClose(userId, finishing)
+    if (!finished) return [404, { error: 'Invoice not found' }]
+    return [200, { invoice: await withCoverageChangeable(finished) }]
+  } catch (error) {
+    if (error instanceof ManualPaymentError) {
+      return [409, { error: 'invoice_changed', message: error.message }]
+    }
+    console.error('[invoices] could not finish marking paid by credit:', error)
+    return [
+      500,
+      {
+        error: 'not_emailed_paid_failed',
+        message:
+          'The invoice is marked sent, but could not be marked paid by credit on account. Press Mark reviewed again to finish.',
+      },
+    ]
+  }
+}
+
+/**
  * Exactly what the client would receive if this invoice were sent now
  * (featreq-459bdfc2 item 3): the same as-sent invoice, the same autopay
  * decision, the same pay-link shape and the same document builder as the
@@ -6956,6 +7036,12 @@ const server = createServer(async (request, response) => {
       // stamp, so the dates the client reads, a later reprint and the record
       // cannot disagree.
       const sendStamp = new Date().toISOString()
+      /** The answer when the invoice was marked paid by credit above and the email then did not leave. */
+      const paidNotSent = (paidInvoice, reason) => ({
+        error: 'invoice_paid_not_sent',
+        message: `The invoice is marked paid by credit on account; press Send again to email the paid copy.${reason ? ` (${reason})` : ''}`,
+        invoice: paidInvoice,
+      })
       // PAID AT SEND (stage 1d of docs/plans/credit-on-account-and-billing-
       // period-2026-10.md). The invoice is marked PAID, payment method 'credit',
       // BEFORE the documents are built, so the email and the PDF are built from
@@ -6966,17 +7052,18 @@ const server = createServer(async (request, response) => {
       // never charged) and before the sessions it would otherwise mint. A re-send
       // of an invoice already paid by credit skips it (the store is idempotent
       // either way). The sessions an earlier send left on it are closed, like Mark
-      // paid does.
+      // paid does. From here on the invoice IS paid, so a send that then fails
+      // says so (`paidNotSent`) and the row reloads.
       if (coveredByCredit) {
         let paidByCredit
         try {
-          paidByCredit = await appDataStore.markInvoicePaidByCredit(invoice.id, {
-            actorUserId: session.user.id,
-            paidAt: sendStamp,
-          })
+          paidByCredit = await markPaidByCreditAndClose(session.user.id, invoice, { paidAt: sendStamp })
         } catch (error) {
+          // The invoice moved between this route's read and the stamp (voided,
+          // a payment started, no longer covered): the same answer as every
+          // other "moved under you" refusal, so the row reloads.
           if (error instanceof ManualPaymentError) {
-            sendJson(response, 409, { error: 'manual_payment_refused', message: error.message })
+            sendJson(response, 409, { error: 'invoice_changed', message: error.message })
             return
           }
           console.error('[invoices] send: could not mark the invoice paid by credit:', error)
@@ -6990,17 +7077,7 @@ const server = createServer(async (request, response) => {
           sendJson(response, 404, { error: 'Invoice not found' })
           return
         }
-        await expireInvoiceSessions(
-          [invoice.stripeCheckoutSessionId, invoice.stripeCardSessionId],
-          invoice.id,
-          'paid by credit at send',
-        )
         invoice = paidByCredit
-        await appDataStore.recordActivity(
-          session.user.id,
-          'invoice_paid_by_credit',
-          `${invoice.number ?? invoice.id}`,
-        )
       }
       // STRIPE AUTOPAY (featreq-bef42b72), decided BEFORE anything is minted or
       // emailed. `autopaySend.plan` is set only for the FIRST ok send of an
@@ -7219,6 +7296,10 @@ const server = createServer(async (request, response) => {
         lastLook = await readInvoiceNow(invoice)
       } catch (error) {
         console.error('[invoices] send: could not re-read the invoice before sending:', error)
+        if (coveredByCredit) {
+          sendJson(response, 502, paidNotSent(invoice, 'Could not confirm the invoice before sending.'))
+          return
+        }
         sendJson(response, 502, {
           error: 'invoice_send_failed',
           message: 'Could not confirm the invoice before sending, so nothing was emailed. Try again.',
@@ -7270,6 +7351,12 @@ const server = createServer(async (request, response) => {
           providerId: sendResult.providerId ?? null,
           oneTime: sendOneTime,
         })
+        // The invoice WAS marked paid by credit above: say that, and hand back the
+        // paid row so the page shows Paid instead of leaving the old row on screen.
+        if (coveredByCredit) {
+          sendJson(response, 502, paidNotSent(invoice, sendResult.error))
+          return
+        }
         sendJson(response, 502, { error: 'invoice_send_failed', message: sendResult.error })
         return
       }
@@ -7609,6 +7696,14 @@ const server = createServer(async (request, response) => {
       const payload = await readJsonBody(request)
       const invoiceId = decodeURIComponent(invoicePatchMatch[1])
 
+      // A never-email invoice left Sent at $0 by a failed paid stamp is finished
+      // here instead of being reviewed again (see `finishUnfinishedCreditPayment`).
+      const unfinished = await finishUnfinishedCreditPayment(session.user.id, invoiceId, payload)
+      if (unfinished) {
+        sendJson(response, unfinished[0], unfinished[1])
+        return
+      }
+
       let updated
       try {
         // The actor comes from the SESSION, never from the body. `updateInvoice`
@@ -7705,9 +7800,12 @@ const server = createServer(async (request, response) => {
         }
         if (stampClient?.invoiceNoEmail === true && stampClient.platformInvoicingOptOut !== true) {
           try {
+            // ONE moment for both stamps (sent, then paid by credit).
+            const stampAt = new Date().toISOString()
             const stamped = await appDataStore.recordInvoiceSent(updated.id, {
               notEmailed: true,
               subject: 'Marked sent - delivered outside the app',
+              stamp: stampAt,
             })
             // Null is a void, or a Back to draft from another tab, that landed in
             // between: the review stands and nothing is claimed.
@@ -7721,20 +7819,14 @@ const server = createServer(async (request, response) => {
               // A credit-covered invoice is also PAID (stage 1d): sent first (the
               // stamp above needs a reviewed invoice), then paid by credit, the
               // same stamp Send makes. Its own failure sentence: the sent stamp
-              // stands, and Mark reviewed again re-runs both.
+              // stands, and Mark reviewed again finishes the paid stamp (the
+              // finishing branch above the review).
               if (invoicePaidByCreditAtSend(updated)) {
                 try {
-                  const paidRow = await appDataStore.markInvoicePaidByCredit(updated.id, {
-                    actorUserId: session.user.id,
+                  const paidRow = await markPaidByCreditAndClose(session.user.id, updated, {
+                    paidAt: stampAt,
                   })
-                  if (paidRow) {
-                    updated = { ...updated, ...paidRow }
-                    await appDataStore.recordActivity(
-                      session.user.id,
-                      'invoice_paid_by_credit',
-                      `${updated.number ?? updated.id}`,
-                    )
-                  }
+                  if (paidRow) updated = { ...updated, ...paidRow }
                 } catch (paidError) {
                   console.error(
                     '[invoices] marked sent but could not be marked paid by credit:',

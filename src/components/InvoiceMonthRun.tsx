@@ -76,6 +76,7 @@ import {
   defaultHoursRowRate,
   hourlyLineDetail,
   invoiceLockMessage,
+  invoicePaidByCreditAtSend,
   normalizeAdhocMode,
   renderedInvoiceLines,
   withoutEmptyLines,
@@ -296,6 +297,9 @@ const INVOICE_MOVED_CODES: ReadonlySet<string | undefined> = new Set([
   'invoice_locked',
   'invoice_changed',
   'invoice_voided',
+  // Send marked a covered invoice paid by credit and then the email did not
+  // leave: the row is Paid now and must reload to say so.
+  'invoice_paid_not_sent',
 ])
 
 /** Why a billing master that names no receiving company cannot be sent: the server's own sentence. */
@@ -2915,6 +2919,12 @@ function InvoiceEditor({
     if (!result.ok) sayPatchRefusal(result)
   }
 
+  // A never-email invoice a credit covers in full is stamped sent and then paid by
+  // credit; when the second step failed it is left Sent at $0, and Mark reviewed
+  // (the server finishes the paid stamp) is how she completes it.
+  const unfinishedCreditPayment =
+    noEmail && invoice.status === 'sent' && invoicePaidByCreditAtSend(invoice)
+
   const markReviewed = () => {
     if (unansweredQuestions.length > 0) {
       setAiError(null)
@@ -4308,7 +4318,9 @@ function InvoiceEditor({
             {invoice.status === 'draft' || invoice.status === 'reviewed'
               ? 'Mark reviewed also marks this invoice sent, without sending anything.'
               : invoice.sentAt
-                ? `Marked sent ${formatSentOn(invoice.sentAt)}.`
+                ? `Marked sent ${formatSentOn(invoice.sentAt)}.${
+                    unfinishedCreditPayment ? ' Finish marking this paid by credit.' : ''
+                  }`
                 : ''}
           </p>
         )
@@ -4534,7 +4546,9 @@ function InvoiceEditor({
               the last step for them, and the server marks the invoice sent when
               it lands - so an invoice reviewed before the switch went on (or one
               whose stamp failed) finishes the same way. */}
-          {(invoice.status === 'draft' || (noEmail && invoice.status === 'reviewed')) &&
+          {(invoice.status === 'draft' ||
+            (noEmail && invoice.status === 'reviewed') ||
+            unfinishedCreditPayment) &&
           !approving ? (
             <button
               type="button"
@@ -4547,9 +4561,11 @@ function InvoiceEditor({
                     ? // The server refuses this too — saying so here is what stops
                       // the refusal arriving as a surprise after the click.
                       'Confirm the covered dates above first'
-                    : noEmail
-                      ? 'Mark this invoice reviewed and sent. Nothing is emailed.'
-                      : 'Mark this invoice reviewed'
+                    : unfinishedCreditPayment
+                      ? 'Finish marking this paid by credit'
+                      : noEmail
+                        ? 'Mark this invoice reviewed and sent. Nothing is emailed.'
+                        : 'Mark this invoice reviewed'
               }
               onClick={markReviewed}
             >
