@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -1032,6 +1032,120 @@ describe('edit a session-backed entry, then split it (file backend)', () => {
 })
 
 /**
+ * Decode the INSERT statements a fake pool recorded back into rows.
+ *
+ * The bulk save issues one `insert into <table> (cols) values (...)` per row
+ * today and will issue multi-row `values (...), (...)` statements once it is
+ * batched. A test that reads `statement.params[17]` is welded to the first
+ * shape and to a column's position; this reads BOTH shapes and answers one
+ * object per row, keyed by column name, in statement order and row order.
+ *
+ *   - a `$n` placeholder (with or without a `::cast`) becomes `params[n - 1]`,
+ *     exactly as bound (a Date stays a Date, a jsonb stays its JSON string, a
+ *     text[] stays an array, null stays null);
+ *   - anything else (`now()`, `coalesce((select ...), $3)`) becomes its SQL
+ *     text, with any `$n` inside it replaced by that parameter as JSON, so a
+ *     column the statement fills itself is still visible and still pins the
+ *     values it was handed.
+ *
+ * It throws on an INSERT that is not a plain VALUES list (an `insert ... select`),
+ * so a statement it cannot read never silently decodes to nothing.
+ */
+const PLACEHOLDER = /^\$(\d+)(?:\s*::\s*[a-z_]+(?:\[\])?)?$/i
+
+function splitTopLevel(text) {
+  const parts = []
+  let depth = 0
+  let quoted = false
+  let start = 0
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at]
+    if (quoted) {
+      if (char === "'") quoted = false
+    } else if (char === "'") {
+      quoted = true
+    } else if (char === '(') {
+      depth += 1
+    } else if (char === ')') {
+      depth -= 1
+    } else if (char === ',' && depth === 0) {
+      parts.push(text.slice(start, at).trim())
+      start = at + 1
+    }
+  }
+  parts.push(text.slice(start).trim())
+  return parts
+}
+
+/** The column list and the raw SQL of every value in every row, or null when `text` is no insert into `table`. */
+function parseInsertStatement(text, table) {
+  const head = new RegExp(`^insert\\s+into\\s+${table}\\s*\\(`, 'i').exec(text)
+  if (!head) return null
+  const columnsEnd = text.indexOf(')', head[0].length)
+  const columns = text
+    .slice(head[0].length, columnsEnd)
+    .split(',')
+    .map((column) => column.trim())
+    .filter(Boolean)
+  const values = /^\s*values\s*/i.exec(text.slice(columnsEnd + 1))
+  if (!values) throw new Error(`insert into ${table} is not a VALUES insert: ${text.slice(0, 120)}`)
+  const rows = []
+  let at = columnsEnd + 1 + values[0].length
+  for (;;) {
+    if (text[at] !== '(') throw new Error(`insert into ${table}: expected a value list at ${at}`)
+    let depth = 0
+    let quoted = false
+    let end = at
+    for (; end < text.length; end += 1) {
+      const char = text[end]
+      if (quoted) {
+        if (char === "'") quoted = false
+      } else if (char === "'") {
+        quoted = true
+      } else if (char === '(') {
+        depth += 1
+      } else if (char === ')') {
+        depth -= 1
+        if (depth === 0) break
+      }
+    }
+    const expressions = splitTopLevel(text.slice(at + 1, end))
+    if (expressions.length !== columns.length) {
+      throw new Error(
+        `insert into ${table}: ${columns.length} columns but ${expressions.length} values in row ${rows.length + 1}`,
+      )
+    }
+    rows.push(expressions)
+    at = end + 1
+    while (/\s/.test(text[at] ?? '')) at += 1
+    if (text[at] !== ',') break
+    at += 1
+    while (/\s/.test(text[at] ?? '')) at += 1
+  }
+  return { columns, rows }
+}
+
+/** Every row the recorded statements inserted into `table`, in order, as { column: value }. */
+function insertedRows(statements, table) {
+  const decoded = []
+  for (const statement of statements) {
+    const parsed = parseInsertStatement(statement.text, table)
+    if (!parsed) continue
+    for (const expressions of parsed.rows) {
+      const row = {}
+      parsed.columns.forEach((column, index) => {
+        const placeholder = PLACEHOLDER.exec(expressions[index])
+        row[column] = placeholder
+          ? statement.params[Number(placeholder[1]) - 1]
+          : expressions[index].replace(/\$(\d+)/g, (_match, n) => JSON.stringify(statement.params[Number(n) - 1]))
+      })
+      decoded.push(row)
+    }
+  }
+  return decoded
+}
+
+/**
  * A minimal stand-in for a `pg` Pool, enough to drive the POSTGRES branch of
  * `write()` without a database. Every statement is recorded so a test can
  * assert on what the transaction actually issued and in what order.
@@ -1089,6 +1203,7 @@ function fakePostgres({
     cycle: row.cycle_due_date ?? row.due_date,
     stage_index: row.stage_index ?? 0,
     pushed_to: row.pushed_to_checklist_id ?? null,
+    deleted: row.deleted_at ?? null,
   }))
   let liveRowsAtBegin = liveRows
   const simulateUniqueness = (trimmed, params) => {
@@ -1100,35 +1215,46 @@ function fakePostgres({
       const row = liveRows.find((entry) => entry.id === params[0])
       if (row) row.pushed_to = params[2]
     } else if (/^insert into checklists \(/i.test(trimmed)) {
-      const columns = /^insert into checklists \(([\s\S]*?)\)\s*values/i
-        .exec(trimmed)[1]
-        .split(',')
-        .map((column) => column.trim())
-      const at = (name) => params[columns.indexOf(name)]
-      const fresh = {
-        id: at('id'),
-        template_id: at('template_id') ?? null,
-        cycle: at('cycle_due_date') ?? at('due_date'),
-        stage_index: at('stage_index') ?? 0,
-        pushed_to: null,
+      // One row per tuple, so a multi-row INSERT is checked against the rows
+      // before it in the SAME statement too, as the real index does. Without
+      // `on conflict do nothing` a clash raises 23505 (a unique index is never
+      // deferrable); with it the clashing row is skipped and the rest land,
+      // and the answer carries what landed (`rowCount`, and the ids for a
+      // `returning id`) the way the bulk save reads it. Two clashes are real:
+      // the primary key, and the instance index over live rows.
+      const skipsConflicts = /\bon conflict do nothing\b/i.test(trimmed)
+      const landed = []
+      for (const row of insertedRows([{ text: trimmed, params }], 'checklists')) {
+        const fresh = {
+          id: row.id,
+          template_id: row.template_id ?? null,
+          cycle: row.cycle_due_date ?? row.due_date,
+          stage_index: row.stage_index ?? 0,
+          pushed_to: null,
+          deleted: row.deleted_at ?? null,
+        }
+        const sameInstance = (live) =>
+          fresh.template_id !== null &&
+          fresh.deleted === null &&
+          live.deleted === null &&
+          live.template_id === fresh.template_id &&
+          live.cycle === fresh.cycle &&
+          live.stage_index === fresh.stage_index &&
+          live.pushed_to === null
+        const clash = liveRows.some((live) => live.id === fresh.id || sameInstance(live))
+        if (clash) {
+          if (skipsConflicts) continue
+          throw Object.assign(
+            new Error('duplicate key value violates unique constraint "checklists_template_instance_uniq_v3"'),
+            { code: '23505' },
+          )
+        }
+        liveRows = [...liveRows, fresh]
+        landed.push(fresh.id)
       }
-      const clash =
-        fresh.template_id !== null &&
-        liveRows.some(
-          (row) =>
-            row.template_id === fresh.template_id &&
-            row.cycle === fresh.cycle &&
-            row.stage_index === fresh.stage_index &&
-            row.pushed_to === null,
-        )
-      if (clash) {
-        throw Object.assign(
-          new Error('duplicate key value violates unique constraint "checklists_template_instance_uniq_v3"'),
-          { code: '23505' },
-        )
-      }
-      liveRows = [...liveRows, fresh]
+      if (skipsConflicts) return { rows: landed.map((id) => ({ id })), rowCount: landed.length }
     }
+    return undefined
   }
   const record = (text, params) => {
     const trimmed = String(text).trim()
@@ -1142,7 +1268,10 @@ function fakePostgres({
         throw failOn.error
       }
     }
-    if (simulateChecklistUniqueness) simulateUniqueness(trimmed, params)
+    if (simulateChecklistUniqueness) {
+      const simulated = simulateUniqueness(trimmed, params)
+      if (simulated) return simulated
+    }
     // The bulk save's "never delete a client who has history" read. FIRST, and
     // actually filtering by the kept ids ($1), for two reasons: its text names
     // `from invoices` and `from time_entries`, so the general invoice select
@@ -1631,22 +1760,22 @@ describe('bulk save preserves invoices (postgres branch)', () => {
     const fake = fakePostgres({ invoices: [existingInvoice] })
     await postgresStore(fake).write(workspace())
 
-    const inserts = fake.matching(/^insert into invoices/i)
-    expect(inserts).toHaveLength(1)
+    const restored = insertedRows(fake.statements, 'invoices')
+    expect(restored).toHaveLength(1)
     // Every column restored verbatim — a SENT invoice must come back exactly
     // as it was, not regenerated from current data. `kind` sits between the
     // number and the status; a fixture written before that column existed
     // restores as 'monthly', which is what it is.
-    expect(inserts[0].params.slice(0, 6)).toEqual([
-      'inv-1',
-      'c1',
-      '2026-08',
-      'INV-2026-08-001',
-      'monthly',
-      'sent',
-    ])
-    expect(inserts[0].params).toContain(existingInvoice.created_at)
-    expect(inserts[0].params).toContain(existingInvoice.sent_at)
+    expect(restored[0]).toMatchObject({
+      id: 'inv-1',
+      client_id: 'c1',
+      period: '2026-08',
+      number: 'INV-2026-08-001',
+      kind: 'monthly',
+      status: 'sent',
+      created_at: existingInvoice.created_at,
+      sent_at: existingInvoice.sent_at,
+    })
   })
 
   it('still deletes first — the clients wipe cannot run past the FK otherwise', async () => {
@@ -1675,7 +1804,7 @@ describe('bulk save preserves invoices (postgres branch)', () => {
     })
     await postgresStore(fake).write(workspace())
 
-    const restoredIds = fake.matching(/^insert into invoices/i).map((s) => s.params[0])
+    const restoredIds = insertedRows(fake.statements, 'invoices').map((row) => row.id)
     expect(restoredIds).toEqual(['inv-1'])
   })
   it('issues no restore at all when there were no invoices', async () => {
@@ -1701,8 +1830,9 @@ describe('bulk save preserves invoices (postgres branch)', () => {
 
     const restore = fake.matching(/^insert into invoices/i)[0]
     expect(restore.text).toMatch(/stripe_card_session_id/)
-    expect(restore.params).toContain('cs_ach_1')
-    expect(restore.params).toContain('cs_card_1')
+    const [restored] = insertedRows(fake.statements, 'invoices')
+    expect(restored.stripe_checkout_session_id).toBe('cs_ach_1')
+    expect(restored.stripe_card_session_id).toBe('cs_card_1')
   })
 
   /**
@@ -1725,7 +1855,7 @@ describe('bulk save preserves invoices (postgres branch)', () => {
 
     const restore = fake.matching(/^insert into invoices \(/i)[0]
     expect(restore.text).toMatch(/pay_token/)
-    expect(restore.params).toContain('tok_durable_1')
+    expect(insertedRows(fake.statements, 'invoices')[0].pay_token).toBe('tok_durable_1')
   })
 
   // The other half of the same contract: a column in the mapper but not in the
@@ -2329,8 +2459,7 @@ describe('bulk save leaves client_assignments alone (postgres branch)', () => {
       }),
     )
 
-    const insert = fake.matching(/^insert into clients/i)[0]
-    expect(insert.params).toContainEqual(['emp-1'])
+    expect(insertedRows(fake.statements, 'clients')[0].assigned_bookkeeper_ids).toEqual(['emp-1'])
   })
 })
 
@@ -2673,27 +2802,13 @@ describe('createClient writes every form field to Postgres', () => {
     assignedEmployeeIds: ['emp-1'],
   }
 
-  // Zip the statement's column list against its bound parameters, so a test can
-  // assert per COLUMN instead of by positional index. `updated_at` is last in
-  // the column list and is `now()` rather than a parameter, so it simply falls
-  // off the end of the shorter params array.
-  const boundColumns = (statement) => {
-    const match = /insert into clients\s*\(([\s\S]*?)\)\s*values/i.exec(statement.text)
-    const columns = match[1].split(',').map((column) => column.trim())
-    const bound = {}
-    statement.params.forEach((value, index) => {
-      bound[columns[index]] = value
-    })
-    return bound
-  }
-
   it('binds every column the form fills', async () => {
     const fake = fakePostgres()
     await postgresStore(fake).createClient(formValues)
 
-    const inserts = fake.matching(/^insert into clients/i)
+    const inserts = insertedRows(fake.statements, 'clients')
     expect(inserts).toHaveLength(1)
-    expect(boundColumns(inserts[0])).toMatchObject({
+    expect(inserts[0]).toMatchObject({
       name: 'Northwind Traders',
       contact: 'Dana Reyes',
       billing_mode: 'subscription',
@@ -2731,7 +2846,7 @@ describe('createClient writes every form field to Postgres', () => {
     // `assignedEmployeeIds` is what the Add-client form sends. It used to land
     // ONLY in client_assignments while this column went in empty, so the team
     // just picked could not see the client (2026-08-13).
-    const bound = boundColumns(fake.matching(/^insert into clients/i)[0])
+    const bound = insertedRows(fake.statements, 'clients')[0]
     expect(bound.assigned_bookkeeper_ids).toEqual(['emp-1'])
   })
 
@@ -2743,7 +2858,7 @@ describe('createClient writes every form field to Postgres', () => {
       assignedBookkeeperIds: ['emp-2', 'emp-3'],
     })
 
-    const bound = boundColumns(fake.matching(/^insert into clients/i)[0])
+    const bound = insertedRows(fake.statements, 'clients')[0]
     expect([...bound.assigned_bookkeeper_ids].sort()).toEqual(['emp-1', 'emp-2', 'emp-3'])
   })
 
@@ -2751,7 +2866,7 @@ describe('createClient writes every form field to Postgres', () => {
     const fake = fakePostgres()
     await postgresStore(fake).createClient({ name: 'Bare Co', contact: 'Someone' })
 
-    const bound = boundColumns(fake.matching(/^insert into clients/i)[0])
+    const bound = insertedRows(fake.statements, 'clients')[0]
     expect(bound.monthly_rate).toBeNull()
     expect(bound.annual_rate).toBeNull()
     expect(bound.annual_billing_month).toBeNull()
@@ -2767,7 +2882,7 @@ describe('createClient writes every form field to Postgres', () => {
       quickbooksPayUrl: 'javascript:alert(1)',
     })
 
-    expect(boundColumns(fake.matching(/^insert into clients/i)[0]).quickbooks_pay_url).toBe('')
+    expect(insertedRows(fake.statements, 'clients')[0].quickbooks_pay_url).toBe('')
   })
 })
 
@@ -3215,16 +3330,16 @@ describe('adjustSplitGroup (postgres branch)', () => {
     expect(deletes).toHaveLength(1)
     expect(deletes[0].params).toEqual(['grp-live'])
 
-    const inserts = fake.matching(/^insert into time_entries/i)
+    const inserts = insertedRows(fake.statements, 'time_entries')
     expect(inserts).toHaveLength(2)
     // group_id ($18) is the same one, and it is set on every new slice.
-    expect(inserts.map((statement) => statement.params[17])).toEqual(['grp-live', 'grp-live'])
-    expect(inserts.map((statement) => statement.params[2])).toEqual(['c1', 'c3'])
-    expect(inserts.map((statement) => statement.params[4])).toEqual([45, 15])
+    expect(inserts.map((row) => row.group_id)).toEqual(['grp-live', 'grp-live'])
+    expect(inserts.map((row) => row.client_id)).toEqual(['c1', 'c3'])
+    expect(inserts.map((row) => row.minutes)).toEqual([45, 15])
     // approval_status ($10): back in the queue.
-    expect(inserts.map((statement) => statement.params[9])).toEqual(['pending', 'pending'])
+    expect(inserts.map((row) => row.approval_status)).toEqual(['pending', 'pending'])
     // sessions ($17) carried across verbatim as JSON.
-    expect(JSON.parse(inserts[0].params[16])).toEqual(row('s1', 'c1', 30).sessions)
+    expect(JSON.parse(inserts[0].sessions)).toEqual(row('s1', 'c1', 30).sessions)
 
     const audit = fake.matching(/^insert into activity_log/i)
     expect(audit).toHaveLength(1)
@@ -3641,12 +3756,12 @@ describe('split shares keep the task and clock in/out (postgres branch)', () => 
       sessions: [{ startAt: START, endAt: STOP }],
       groupId: 'grp-manual',
     })
-    const [insert] = fake.matching(/^insert into time_entries/i)
-    expect(insert.params[4]).toBe(9.5)
-    expect(insert.params[14]).toBe(START)
-    expect(insert.params[15]).toBe(STOP)
-    expect(JSON.parse(insert.params[16])).toEqual([{ startAt: START, endAt: STOP }])
-    expect(insert.params[20]).toBe('Monthly close')
+    const [insert] = insertedRows(fake.statements, 'time_entries')
+    expect(insert.minutes).toBe(9.5)
+    expect(insert.started_at).toBe(START)
+    expect(insert.ended_at).toBe(STOP)
+    expect(JSON.parse(insert.sessions)).toEqual([{ startAt: START, endAt: STOP }])
+    expect(insert.task_label).toBe('Monthly close')
   })
 
   it('splitTimeEntry keeps the checklist on its own client and names it on the others', async () => {
@@ -3663,16 +3778,16 @@ describe('split shares keep the task and clock in/out (postgres branch)', () => 
     )
 
     expect(fake.matching(/^select id, client_id, title from checklists where id = \$1$/i)).toHaveLength(1)
-    const inserts = fake.matching(/^insert into time_entries/i)
-    expect(inserts.map((each) => each.params[2])).toEqual(['c1', 'c2'])
-    expect(inserts.map((each) => each.params[8])).toEqual(['task-close', null])
-    expect(inserts.map((each) => each.params[20])).toEqual([null, 'Monthly close'])
+    const inserts = insertedRows(fake.statements, 'time_entries')
+    expect(inserts.map((row) => row.client_id)).toEqual(['c1', 'c2'])
+    expect(inserts.map((row) => row.task_id)).toEqual(['task-close', null])
+    expect(inserts.map((row) => row.task_label)).toEqual([null, 'Monthly close'])
     // Allocation minutes, whole-block span.
-    expect(inserts.map((each) => each.params[4])).toEqual([9.5, 9.5])
+    expect(inserts.map((row) => row.minutes)).toEqual([9.5, 9.5])
     for (const each of inserts) {
-      expect(each.params[14]).toBe(START)
-      expect(each.params[15]).toBe(STOP)
-      expect(JSON.parse(each.params[16])).toEqual([{ startAt: START, endAt: STOP }])
+      expect(each.started_at).toBe(START)
+      expect(each.ended_at).toBe(STOP)
+      expect(JSON.parse(each.sessions)).toEqual([{ startAt: START, endAt: STOP }])
     }
     expect(fake.matching(/^commit$/i)).toHaveLength(1)
   })
@@ -3692,9 +3807,9 @@ describe('split shares keep the task and clock in/out (postgres branch)', () => 
       'even',
     )
     expect(fake.matching(/from checklists/i)).toHaveLength(0)
-    const inserts = fake.matching(/^insert into time_entries/i)
-    expect(inserts.map((each) => each.params[8])).toEqual([null, null])
-    expect(inserts.map((each) => each.params[20])).toEqual(['Payroll', 'Payroll'])
+    const inserts = insertedRows(fake.statements, 'time_entries')
+    expect(inserts.map((row) => row.task_id)).toEqual([null, null])
+    expect(inserts.map((row) => row.task_label)).toEqual(['Payroll', 'Payroll'])
   })
 
   it('adjustSplitGroup finds the task on whichever share kept it', async () => {
@@ -3716,11 +3831,11 @@ describe('split shares keep the task and clock in/out (postgres branch)', () => 
       'owner-1',
       'custom',
     )
-    const inserts = fake.matching(/^insert into time_entries/i)
-    expect(inserts.map((each) => each.params[2])).toEqual(['c3', 'c1'])
-    expect(inserts.map((each) => each.params[8])).toEqual([null, 'task-close'])
-    expect(inserts.map((each) => each.params[20])).toEqual(['Monthly close', null])
-    expect(inserts.map((each) => each.params[4])).toEqual([7, 12])
+    const inserts = insertedRows(fake.statements, 'time_entries')
+    expect(inserts.map((row) => row.client_id)).toEqual(['c3', 'c1'])
+    expect(inserts.map((row) => row.task_id)).toEqual([null, 'task-close'])
+    expect(inserts.map((row) => row.task_label)).toEqual(['Monthly close', null])
+    expect(inserts.map((row) => row.minutes)).toEqual([7, 12])
   })
 
   it('adjustSplitGroup keeps each client its own task and falls back only for a new client', async () => {
@@ -3743,11 +3858,11 @@ describe('split shares keep the task and clock in/out (postgres branch)', () => 
       'owner-1',
       'custom',
     )
-    const inserts = fake.matching(/^insert into time_entries/i)
-    expect(inserts.map((each) => each.params[2])).toEqual(['c2', 'c1', 'c3'])
-    expect(inserts.map((each) => each.params[8])).toEqual(['task-payroll', 'task-close', null])
-    expect(inserts.map((each) => each.params[20])).toEqual([null, null, 'Monthly close'])
-    expect(inserts.map((each) => each.params[4])).toEqual([10, 5, 4])
+    const inserts = insertedRows(fake.statements, 'time_entries')
+    expect(inserts.map((row) => row.client_id)).toEqual(['c2', 'c1', 'c3'])
+    expect(inserts.map((row) => row.task_id)).toEqual(['task-payroll', 'task-close', null])
+    expect(inserts.map((row) => row.task_label)).toEqual([null, null, 'Monthly close'])
+    expect(inserts.map((row) => row.minutes)).toEqual([10, 5, 4])
   })
 })
 
@@ -5729,17 +5844,6 @@ describe('read() selects every column mapClientRow reads', () => {
  * decides which Stripe customer a repeat payer is.
  */
 describe('the bulk save carries the clients columns it does not own', () => {
-  // Zip the clients insert's column list against its bound parameters.
-  const boundClientColumns = (statement) => {
-    const match = /insert into clients\s*\(([\s\S]*?)\)\s*values/i.exec(statement.text)
-    const columns = match[1].split(',').map((column) => column.trim())
-    const bound = {}
-    statement.params.forEach((value, index) => {
-      bound[columns[index]] = value
-    })
-    return bound
-  }
-
   it('snapshots the stored Stripe customer before the wipe and writes it back', async () => {
     const fake = fakePostgres({
       clientRows: [{ id: 'c1', name: 'Acme', stripe_customer_id: 'cus_stored' }],
@@ -5749,7 +5853,7 @@ describe('the bulk save carries the clients columns it does not own', () => {
     expect(fake.matching(/^select id, stripe_customer_id from clients$/i)).toHaveLength(1)
     const insert = fake.matching(/^insert into clients \(/i)[0]
     expect(insert.text).toMatch(/stripe_customer_id/)
-    expect(boundClientColumns(insert).stripe_customer_id).toBe('cus_stored')
+    expect(insertedRows(fake.statements, 'clients')[0].stripe_customer_id).toBe('cus_stored')
   })
 
   // The payload is not consulted AT ALL. A stale tab that somehow carried a
@@ -5762,7 +5866,7 @@ describe('the bulk save carries the clients columns it does not own', () => {
       workspace({ clients: [{ id: 'c1', name: 'Acme', stripeCustomerId: 'cus_from_payload' }] }),
     )
 
-    const bound = boundClientColumns(fake.matching(/^insert into clients \(/i)[0])
+    const bound = insertedRows(fake.statements, 'clients')[0]
     expect(bound.stripe_customer_id).toBe('cus_stored')
   })
 
@@ -5772,7 +5876,7 @@ describe('the bulk save carries the clients columns it does not own', () => {
     const fake = fakePostgres({ clientRows: [] })
     await postgresStore(fake).write(workspace())
 
-    const bound = boundClientColumns(fake.matching(/^insert into clients \(/i)[0])
+    const bound = insertedRows(fake.statements, 'clients')[0]
     expect(bound.stripe_customer_id).toBeNull()
   })
 
@@ -5784,7 +5888,7 @@ describe('the bulk save carries the clients columns it does not own', () => {
 
     const insert = fake.matching(/^insert into clients \(/i)[0]
     expect(insert.text).toMatch(/platform_invoicing_opt_out/)
-    expect(boundClientColumns(insert).platform_invoicing_opt_out).toBe(true)
+    expect(insertedRows(fake.statements, 'clients')[0].platform_invoicing_opt_out).toBe(true)
   })
 
   // The file backend's half of both contracts (cardinal rule 1). It re-writes
@@ -7354,8 +7458,8 @@ describe('bulk save preserves created_at (postgres branch)', () => {
     await postgresStore(fake).write(historyWorkspace())
 
     for (const table of CREATED_AT_PRESERVED_TABLES) {
-      const insert = fake.matching(new RegExp(`^insert into ${table}\\b`, 'i'))[0]
-      expect(insert.params, `${table} lost its original created_at`).toContain(ORIGINAL)
+      const row = insertedRows(fake.statements, table)[0]
+      expect(row.created_at, `${table} lost its original created_at`).toBe(ORIGINAL)
     }
   })
 
@@ -7365,8 +7469,7 @@ describe('bulk save preserves created_at (postgres branch)', () => {
     const before = Date.now()
     await postgresStore(fake).write(historyWorkspace())
 
-    const insert = fake.matching(/^insert into checklists\b/i)[0]
-    const supplied = insert.params.find((param) => param instanceof Date)
+    const supplied = insertedRows(fake.statements, 'checklists')[0].created_at
     expect(supplied).toBeInstanceOf(Date)
     expect(supplied.getTime()).toBeGreaterThanOrEqual(before)
   })
@@ -7377,9 +7480,9 @@ describe('bulk save preserves created_at (postgres branch)', () => {
     payload.checklists[0].createdAt = '2019-01-01T00:00:00.000Z'
     await postgresStore(fake).write(payload)
 
-    const insert = fake.matching(/^insert into checklists\b/i)[0]
-    expect(insert.params).toContain(ORIGINAL)
-    expect(insert.params).not.toContain('2019-01-01T00:00:00.000Z')
+    const row = insertedRows(fake.statements, 'checklists')[0]
+    expect(row.created_at).toBe(ORIGINAL)
+    expect(Object.values(row)).not.toContain('2019-01-01T00:00:00.000Z')
   })
 })
 
@@ -7508,8 +7611,9 @@ describe('completed_at on checklist items (postgres branch)', () => {
 
     const insert = fake.matching(/^insert into checklist_items\b/i)[0]
     expect(insert.text).toMatch(/\bcompleted_at\b/)
-    expect(insert.params).toContain(stamped)
-    expect(insert.params).not.toContain('2019-01-01T00:00:00.000Z')
+    const [row] = insertedRows(fake.statements, 'checklist_items')
+    expect(row.completed_at).toBe(stamped)
+    expect(Object.values(row)).not.toContain('2019-01-01T00:00:00.000Z')
   })
 
   it('bulk save writes null for a step that is not done', async () => {
@@ -7534,8 +7638,7 @@ describe('completed_at on checklist items (postgres branch)', () => {
       }),
     )
 
-    const insert = fake.matching(/^insert into checklist_items\b/i)[0]
-    expect(insert.params[14]).toBeNull()
+    expect(insertedRows(fake.statements, 'checklist_items')[0].completed_at).toBeNull()
   })
 
   it('leaves a legacy complete-but-unstamped row unstamped rather than backdating it', async () => {
@@ -7560,8 +7663,7 @@ describe('completed_at on checklist items (postgres branch)', () => {
       }),
     )
 
-    const insert = fake.matching(/^insert into checklist_items\b/i)[0]
-    expect(insert.params[14]).toBeNull()
+    expect(insertedRows(fake.statements, 'checklist_items')[0].completed_at).toBeNull()
   })
 })
 
@@ -10909,15 +11011,16 @@ describe('quiet skip (postgres branch)', () => {
     expect(handoff.text).toMatch(/pushed_to_checklist_id = \$3/i)
     expect(handoff.params[0]).toBe('cl-mixed')
     // The hand-off names the id the INSERT then creates.
-    expect(handoff.params[2]).toBe(insert.params[0])
+    expect(handoff.params[2]).toBe(insertedRows(fake.statements, 'checklists')[0].id)
 
     expect(insert.text).toMatch(/pushed_from_checklist_id/i)
     // The new row's cycle_due_date inherits exactly what the no-split branch
     // would have stamped onto the original: coalesce(cycle_due_date, due_date).
-    expect(insert.params).toContain('2026-08-31')
+    const [pushed] = insertedRows(fake.statements, 'checklists')
+    expect(Object.values(pushed)).toContain('2026-08-31')
     // ...and it is the STRING the lock select's to_char produced, never a Date.
-    expect(insert.params[14]).toBe('2026-08-31')
-    expect(insert.params.some((value) => value instanceof Date)).toBe(false)
+    expect(pushed.cycle_due_date).toBe('2026-08-31')
+    expect(Object.values(pushed).some((value) => value instanceof Date)).toBe(false)
     const [lock] = fake.matching(/^select id, client_id, title, assignee_id[\s\S]*for update$/i)
     expect(lock.text).toMatch(
       /to_char\(coalesce\(cycle_due_date, due_date\), 'YYYY-MM-DD'\) as identity_date/,
@@ -10952,11 +11055,10 @@ describe('quiet skip (postgres branch)', () => {
 
     await postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
 
-    const [insert] = fake.matching(/^insert into checklists \(/i)
     const [notes] = fake.matching(/^update client_pending_notes/i)
     // (The statement order test above pins that it runs between begin and commit.)
     // new id, original id, the ids of the items that moved.
-    expect(notes.params).toEqual([insert.params[0], 'cl-mixed', ['item-open']])
+    expect(notes.params).toEqual([insertedRows(fake.statements, 'checklists')[0].id, 'cl-mixed', ['item-open']])
     expect(notes.text).toMatch(/set attached_checklist_id = \$1/i)
     expect(notes.text).toMatch(/where attached_checklist_id = \$2/i)
     // Note-kind notes always follow; task-kind notes only when their item moved.
@@ -11102,9 +11204,9 @@ describe('quiet skip (postgres branch)', () => {
     })
     await postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
 
-    const [insert] = fake.matching(/^insert into checklists \(/i)
-    expect(insert.params[14]).toBe('2026-08-31')
-    expect(insert.params.some((value) => value instanceof Date)).toBe(false)
+    const [pushed] = insertedRows(fake.statements, 'checklists')
+    expect(pushed.cycle_due_date).toBe('2026-08-31')
+    expect(Object.values(pushed).some((value) => value instanceof Date)).toBe(false)
   })
 
   it('locks the sub-step waiter rows it rewrites (for update)', async () => {
@@ -11124,8 +11226,7 @@ describe('quiet skip (postgres branch)', () => {
     })
     await postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
 
-    const [insert] = fake.matching(/^insert into checklists \(/i)
-    const newId = insert.params[0]
+    const newId = insertedRows(fake.statements, 'checklists')[0].id
     const [deletions] = fake.matching(/^update item_deletion_requests\b/i)
     expect(deletions.text).toMatch(/set checklist_id = \$1/i)
     expect(deletions.text).toMatch(/item_id = any\(\$3::text\[\]\)/i)
@@ -11165,8 +11266,7 @@ describe('quiet skip (postgres branch)', () => {
     })
     await postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-1', '2026-09-30')
 
-    const [insert] = fake.matching(/^insert into checklists \(/i)
-    const newId = insert.params[0]
+    const newId = insertedRows(fake.statements, 'checklists')[0].id
     const [waits] = fake.matching(/^update checklist_items set waiting_for_checklist_id/i)
     expect(waits.params).toEqual([newId, 'cl-mixed'])
 
@@ -11327,15 +11427,16 @@ describe('quiet skip (postgres branch)', () => {
     expect(snapshotAt).toBeLessThan(fake.indexOf(/^delete from checklists$/i))
 
     const [statement] = fake.matching(/insert into checklists \(/i)
+    const [stored] = insertedRows(fake.statements, 'checklists')
     expect(statement.text).toMatch(/cycle_due_date, pushed_at, pushed_by/i)
     // `cycle_due_date` is the row's identity and the insert is `on conflict do
     // nothing`: a payload's wrong cycle date does not merely lose a stamp, it
     // collides on the unique index and drops the checklist AND all of its items
     // with only a warn. So the payload's copy is ignored outright.
-    expect(statement.params).toContain('2026-08-31')
-    expect(statement.params).toContain('2026-08-20T10:00:00.000Z')
-    expect(statement.params).toContain('emp-1')
-    expect(statement.params).not.toContain('2026-12-31')
+    expect(stored.cycle_due_date).toBe('2026-08-31')
+    expect(stored.pushed_at).toBe('2026-08-20T10:00:00.000Z')
+    expect(stored.pushed_by).toBe('emp-1')
+    expect(Object.values(stored)).not.toContain('2026-12-31')
   })
 
   it('writes the STORED pushedFromChecklistId / pushedToChecklistId through the bulk save', async () => {
@@ -11370,7 +11471,7 @@ describe('quiet skip (postgres branch)', () => {
 
     const [statement] = fake.matching(/insert into checklists \(/i)
     expect(statement.text).toMatch(/pushed_from_checklist_id, pushed_to_checklist_id/i)
-    expect(statement.params).toContain('cl-original')
+    expect(insertedRows(fake.statements, 'checklists')[0].pushed_from_checklist_id).toBe('cl-original')
   })
 
   it('carries skipped_at / skipped_by through the bulk save', async () => {
@@ -11394,7 +11495,7 @@ describe('quiet skip (postgres branch)', () => {
 
     const [statement] = fake.matching(/insert into checklists \(/i)
     expect(statement.text).toMatch(/skipped_at, skipped_by/i)
-    expect(statement.params).toContain('2026-08-14T10:00:00.000Z')
+    expect(insertedRows(fake.statements, 'checklists')[0].skipped_at).toBe('2026-08-14T10:00:00.000Z')
   })
 
   it('carries skip_allowed through the bulk save, defaulting to false', async () => {
@@ -11427,37 +11528,21 @@ describe('quiet skip (postgres branch)', () => {
       }),
     )
 
-    const inserts = fake.matching(/insert into checklist_templates/i)
+    expect(fake.matching(/insert into checklist_templates/i)[0].text).toMatch(/skip_allowed/i)
+    // Read by COLUMN NAME, not by counting from the end: `params.at(-2)` once
+    // quietly meant "skip_allowed is the second-to-last column" until two more
+    // columns were added after it and the assertion read the wrong one.
+    const inserts = insertedRows(fake.statements, 'checklist_templates')
     expect(inserts).toHaveLength(2)
-    expect(inserts[0].text).toMatch(/skip_allowed/i)
-
-    /**
-     * Read a parameter by its COLUMN NAME rather than by counting from the end.
-     *
-     * This used to be `params.at(-2)`, which quietly meant "skip_allowed is the
-     * second-to-last column" — true until featreq-81429ad1 added two columns
-     * after it, at which point the assertion silently started reading the
-     * period-label offset instead. Naming the column makes the next addition a
-     * non-event.
-     */
-    const paramFor = (insert, column) => {
-      const columns = insert.text
-        .slice(insert.text.indexOf('(') + 1, insert.text.indexOf(')'))
-        .split(',')
-        .map((name) => name.trim())
-      const index = columns.indexOf(column)
-      expect(index, `column ${column} not in the statement`).toBeGreaterThan(-1)
-      return insert.params[index]
-    }
 
     // Anything other than an explicit true is off — skipping is opt-in.
-    expect(paramFor(inserts[0], 'skip_allowed')).toBe(true)
-    expect(paramFor(inserts[1], 'skip_allowed')).toBe(false)
+    expect(inserts[0].skip_allowed).toBe(true)
+    expect(inserts[1].skip_allowed).toBe(false)
     // The period label is opt-in the same way, and its window is null until
     // she picks the dates.
-    expect(paramFor(inserts[0], 'period_label_enabled')).toBe(false)
-    expect(paramFor(inserts[0], 'period_coverage_start')).toBeNull()
-    expect(paramFor(inserts[0], 'period_coverage_end')).toBeNull()
+    expect(inserts[0].period_label_enabled).toBe(false)
+    expect(inserts[0].period_coverage_start).toBeNull()
+    expect(inserts[0].period_coverage_end).toBeNull()
   })
 })
 
@@ -11740,12 +11825,12 @@ describe('ad hoc time on the postgres branch', () => {
       entryMethod: 'timer',
     })
 
-    const inserts = fake.matching(/insert into time_entries/i)
+    expect(fake.matching(/insert into time_entries/i)[0].text).toMatch(/is_administrative,\s*is_adhoc/i)
+    const inserts = insertedRows(fake.statements, 'time_entries')
     expect(inserts).toHaveLength(1)
-    expect(inserts[0].text).toMatch(/is_administrative,\s*is_adhoc/i)
-    // Positional, one past is_administrative. `toContain(true)` would pass on
-    // the fixture's `billable: true` no matter where the flag actually landed.
-    expect(inserts[0].params[13]).toBe(true)
+    // Read by column. `toContain(true)` would pass on the fixture's
+    // `billable: true` no matter where the flag actually landed.
+    expect(inserts[0].is_adhoc).toBe(true)
   })
 
   it('writes is_adhoc on the bulk save, defaulting to false', async () => {
@@ -11772,13 +11857,13 @@ describe('ad hoc time on the postgres branch', () => {
       }),
     )
 
-    const inserts = fake.matching(/insert into time_entries/i)
+    expect(fake.matching(/insert into time_entries/i)[0].text).toMatch(/is_administrative,\s*\n?\s*is_adhoc/i)
+    const inserts = insertedRows(fake.statements, 'time_entries')
     expect(inserts).toHaveLength(2)
-    expect(inserts[0].text).toMatch(/is_administrative,\s*\n?\s*is_adhoc/i)
-    // Positional, one past is_administrative — the bug this catches is a value
-    // landing in the wrong column when someone adds the next one.
-    expect(inserts[0].params[16]).toBe(true)
-    expect(inserts[1].params[16]).toBe(false)
+    // Read by column — the bug this catches is a value landing in the wrong
+    // column when someone adds the next one.
+    expect(inserts[0].is_adhoc).toBe(true)
+    expect(inserts[1].is_adhoc).toBe(false)
   })
 
   it('sets is_adhoc when an update carries it', async () => {
@@ -12779,8 +12864,9 @@ describe('retainer writes on the postgres branch', () => {
     // A retainer that came back as 'monthly' would collide with that client's
     // real invoice on the very next generate; one that came back unapplied
     // would be spendable a second time.
-    expect(restores[0].params[4]).toBe('retainer')
-    expect(restores[0].params[19]).toBe('inv-final')
+    const [restored] = insertedRows(fake.statements, 'invoices')
+    expect(restored.kind).toBe('retainer')
+    expect(restored.applied_to_invoice_id).toBe('inv-final')
   })
 })
 
@@ -14293,7 +14379,7 @@ describe('reimbursed-expense covered dates (postgres branch)', () => {
     for (const column of COVERAGE_COLUMNS) {
       expect(insert[0].text).toMatch(new RegExp(`\\b${column}\\b`))
     }
-    expect(JSON.parse(insert[0].params[13])).toEqual({
+    expect(JSON.parse(insertedRows(fake.statements, 'recurring_reimbursements')[0].coverage_history)).toEqual({
       '2026-08': { start: '2026-07-13', end: '2026-08-13' },
     })
   })
@@ -14347,10 +14433,10 @@ describe('reimbursed-expense covered dates (postgres branch)', () => {
       })
       .catch(() => {})
 
-    const insert = fake.matching(/^insert into recurring_reimbursements/i)[0]
-    expect(insert.params[10]).toBe(20)
-    expect(insert.params[12]).toBe(true)
-    expect(JSON.parse(insert.params[13])).toEqual({
+    const [insert] = insertedRows(fake.statements, 'recurring_reimbursements')
+    expect(insert.coverage_anchor_day).toBe(20)
+    expect(insert.coverage_resume_pending).toBe(true)
+    expect(JSON.parse(insert.coverage_history)).toEqual({
       '2026-08': { start: '2026-07-13', end: '2026-08-13' },
     })
   })
@@ -17286,12 +17372,12 @@ describe('a bulk save cannot touch a saved wait (postgres branch)', () => {
     const fake = fakePostgres({ priorItemRows: [priorRow] })
     await postgresStore(fake).write(payload({ waitingOns: [] }))
 
-    const insert = fake.matching(/^insert into checklist_items\b/i)[0]
-    const waitingOns = JSON.parse(insert.params[11])
+    const [insert] = insertedRows(fake.statements, 'checklist_items')
+    const waitingOns = JSON.parse(insert.waiting_ons)
     expect(waitingOns).toHaveLength(1)
     expect(waitingOns[0].id).toBe('wo-keep')
     // The sub-item's wait rides the sub_items JSONB and survives the same way.
-    expect(String(insert.params[12])).toContain('wo-sub')
+    expect(String(insert.sub_items)).toContain('wo-sub')
   })
 
   it('re-inserts the stored note, task link and flag while the wait is live', async () => {
@@ -17305,10 +17391,10 @@ describe('a bulk save cannot touch a saved wait (postgres branch)', () => {
       }),
     )
 
-    const insert = fake.matching(/^insert into checklist_items\b/i)[0]
-    expect(insert.params[8]).toBe('Lisa to send them')
-    expect(insert.params[9]).toBe(true)
-    expect(insert.params[10]).toBe('cl-other')
+    const [insert] = insertedRows(fake.statements, 'checklist_items')
+    expect(insert.waiting_on).toBe('Lisa to send them')
+    expect(insert.waiting).toBe(true)
+    expect(insert.waiting_for_checklist_id).toBe('cl-other')
   })
 
   it('lets the payload win once the stored wait is approved', async () => {
@@ -17332,12 +17418,12 @@ describe('a bulk save cannot touch a saved wait (postgres branch)', () => {
       payload({ waiting: false, waitingOn: '', waitingForChecklistId: '' }),
     )
 
-    const insert = fake.matching(/^insert into checklist_items\b/i)[0]
-    expect(insert.params[8]).toBeNull()
-    expect(insert.params[9]).toBe(false)
-    expect(insert.params[10]).toBeNull()
+    const [insert] = insertedRows(fake.statements, 'checklist_items')
+    expect(insert.waiting_on).toBeNull()
+    expect(insert.waiting).toBe(false)
+    expect(insert.waiting_for_checklist_id).toBeNull()
     // The record is still restored — it is never the thing that goes.
-    expect(JSON.parse(insert.params[11])[0].id).toBe('wo-keep')
+    expect(JSON.parse(insert.waiting_ons)[0].id).toBe('wo-keep')
   })
 })
 
@@ -17582,20 +17668,20 @@ describe('bulk save round-trips original_line_items (postgres branch)', () => {
 
     const restore = fake.matching(/^insert into invoices \(/i)[0]
     expect(restore.text).toMatch(/original_line_items/)
-    expect(restore.params).toContain(JSON.stringify(generated))
+    expect(insertedRows(fake.statements, 'invoices')[0].original_line_items).toBe(
+      JSON.stringify(generated),
+    )
   })
 
   it('restores a pre-feature row’s NULL as NULL, not as []', async () => {
     const fake = fakePostgres({ invoices: [{ ...existingInvoice, original_line_items: null }] })
     await postgresStore(fake).write(workspace())
 
-    const restore = fake.matching(/^insert into invoices \(/i)[0]
-    // The column sits three before created_at in the parameter list (`pay_token`
-    // and `recorded_outside_app` came between them). NULL, not the '[]' that
-    // `scope_flags` and `email_log` legitimately carry — an empty array here
-    // would read as "she deleted every line".
-    expect(restore.params[20]).toBeNull()
-    expect(restore.params[23]).toBe(existingInvoice.created_at)
+    const [restored] = insertedRows(fake.statements, 'invoices')
+    // NULL, not the '[]' that `scope_flags` and `email_log` legitimately carry —
+    // an empty array here would read as "she deleted every line".
+    expect(restored.original_line_items).toBeNull()
+    expect(restored.created_at).toBe(existingInvoice.created_at)
   })
 
   it('writes the snapshot on insert and never on update', async () => {
@@ -19442,19 +19528,6 @@ describe('consolidated billing: a sub’s covered-date ledger rides the master�
  * the database.
  */
 describe('consolidated billing: the Postgres statements', () => {
-  const boundClientColumns = (statement) => {
-    const match = /insert into clients\s*\(([\s\S]*?)\)\s*\n?\s*values/i.exec(statement.text)
-    const columns = match[1]
-      .split(',')
-      .map((column) => column.replace(/\/\/[^\n]*/g, '').trim())
-      .filter(Boolean)
-    const bound = {}
-    statement.params.forEach((value, index) => {
-      bound[columns[index]] = value
-    })
-    return bound
-  }
-
   it('creates the three columns on boot', async () => {
     const fake = fakePostgres()
     // The fake cannot answer every probe `initialize()` makes (it returns no
@@ -19489,15 +19562,15 @@ describe('consolidated billing: the Postgres statements', () => {
       }),
     )
 
-    const inserts = fake.matching(/^insert into clients/i)
+    const inserts = insertedRows(fake.statements, 'clients')
     expect(inserts).toHaveLength(2)
-    expect(boundClientColumns(inserts[0])).toMatchObject({
+    expect(inserts[0]).toMatchObject({
       id: 'klc-master',
       is_billing_master: true,
       bill_to_client_id: null,
       invoice_recipient_client_id: 'sub-x',
     })
-    expect(boundClientColumns(inserts[1])).toMatchObject({
+    expect(inserts[1]).toMatchObject({
       id: 'sub-x',
       is_billing_master: false,
       bill_to_client_id: 'klc-master',
@@ -19515,7 +19588,7 @@ describe('consolidated billing: the Postgres statements', () => {
     })
 
     const [insert] = fake.matching(/^insert into clients/i)
-    expect(boundClientColumns(insert)).toMatchObject({
+    expect(insertedRows(fake.statements, 'clients')[0]).toMatchObject({
       bill_to_client_id: null,
       is_billing_master: false,
       invoice_recipient_client_id: null,
@@ -19655,7 +19728,7 @@ describe('consolidated billing: the Postgres statements', () => {
     })
 
     expect(created.billToClientId).toBe('klc-master')
-    expect(boundClientColumns(fake.matching(/^insert into clients/i)[0])).toMatchObject({
+    expect(insertedRows(fake.statements, 'clients')[0]).toMatchObject({
       bill_to_client_id: 'klc-master',
     })
   })
@@ -19686,8 +19759,8 @@ describe('consolidated billing: the Postgres statements', () => {
       workspace({ clients: [{ id: 'klc-master', name: 'KLC Master', isBillingMaster: true }], timeEntries: [] }),
     )
 
-    const [restore] = fake.matching(/^insert into invoices/i)
-    const lineItems = JSON.parse(restore.params[6])
+    const [restored] = insertedRows(fake.statements, 'invoices')
+    const lineItems = JSON.parse(restored.line_items)
     expect(lineItems[0].sourceClientId).toBe('sub-b')
   })
 })
@@ -21607,15 +21680,14 @@ describe('copyTemplateToClient starts the copy today, not at the blueprint’s s
     expect(copy.nextDueDate).toBe(expected)
     if (frozenAt) expect(expected).toBe('2026-09-30')
 
-    const inserts = fake.matching(/^insert into checklist_templates\b/i)
-    const copyInsert = inserts.find((statement) => statement.params[0] === copy.id)
+    const inserts = insertedRows(fake.statements, 'checklist_templates')
+    const copyInsert = inserts.find((row) => row.id === copy.id)
     expect(copyInsert).toBeTruthy()
-    // `next_due_date` is $6 — the sixth parameter, index 5.
-    expect(copyInsert.params[5]).toBe(expected)
+    expect(copyInsert.next_due_date).toBe(expected)
     // The blueprint itself is re-inserted unchanged: the floor applies to the
     // COPY, never to the source.
-    const sourceInsert = inserts.find((statement) => statement.params[0] === 'tpl-blueprint')
-    expect(sourceInsert.params[5]).toBe(staleDue)
+    const sourceInsert = inserts.find((row) => row.id === 'tpl-blueprint')
+    expect(sourceInsert.next_due_date).toBe(staleDue)
   })
 })
 
@@ -21707,12 +21779,11 @@ describe('work the store dates today is dated on the firm’s clock', () => {
       { title: 'No day given', steps: [{ title: 'Open' }] },
     ])
     expect(result.templates.map((t) => t.nextDueDate)).toEqual(['2026-09-30', '2026-09-30'])
-    const inserts = fake.matching(/^insert into checklist_templates\b/i)
+    const inserts = insertedRows(fake.statements, 'checklist_templates')
     for (const template of result.templates) {
-      const insert = inserts.find((statement) => statement.params[0] === template.id)
+      const insert = inserts.find((row) => row.id === template.id)
       expect(insert).toBeTruthy()
-      // `next_due_date` is $6 — the sixth parameter, index 5.
-      expect(insert.params[5]).toBe('2026-09-30')
+      expect(insert.next_due_date).toBe('2026-09-30')
     }
   })
 })
@@ -22668,10 +22739,10 @@ describe('rate history: the Postgres statements', () => {
     const [insert] = fake.matching(/^insert into clients/i)
     expect(insert.text).toMatch(/hourly_rate_period, hourly_rate_history/)
     // Naming the columns proves nothing about what was BOUND to them. The pin
-    // is `$43` in that insert, so `params[42]` has to be the STORED '2026-06'
-    // — if the payload's '2020-01' reached the bind list, a stale owner tab
-    // would silently reprice the client and this assertion is what catches it.
-    expect(insert.params[42]).toBe('2026-06')
+    // has to be the STORED '2026-06' — if the payload's '2020-01' reached the
+    // bind list, a stale owner tab would silently reprice the client and this
+    // assertion is what catches it.
+    expect(insertedRows(fake.statements, 'clients')[0].hourly_rate_period).toBe('2026-06')
   })
 })
 
@@ -23550,10 +23621,10 @@ describe('a client that becomes Hourly is pinned at save time (postgres branch)'
         clients: [{ id: 'c-new', name: 'New Co', billingMode: 'hourly', hourlyRate: 100 }],
       }),
     )
-    const [insert] = fake.matching(/^insert into clients/i)
-    // The pin is `$43` in that insert — see the stored-pin test above.
-    expect(insert.params[42]).toBe(thisMonth())
-    expect(insert.params[43]).toBe('[]')
+    const [insert] = insertedRows(fake.statements, 'clients')
+    // The pin and its ledger — see the stored-pin test above.
+    expect(insert.hourly_rate_period).toBe(thisMonth())
+    expect(insert.hourly_rate_history).toBe('[]')
   })
 
   it('binds null for a client that is not Hourly', async () => {
@@ -23563,8 +23634,7 @@ describe('a client that becomes Hourly is pinned at save time (postgres branch)'
         clients: [{ id: 'c-new', name: 'New Co', billingMode: 'subscription', monthlyRate: 500 }],
       }),
     )
-    const [insert] = fake.matching(/^insert into clients/i)
-    expect(insert.params[42]).toBeNull()
+    expect(insertedRows(fake.statements, 'clients')[0].hourly_rate_period).toBeNull()
   })
 })
 
@@ -25400,7 +25470,7 @@ describe('accepting a proposal: the lost-link race retires the orphan (postgres 
     expect(lifecycleAt).toBeGreaterThan(insertClientAt)
     expect(noteAt).toBeGreaterThan(insertClientAt)
 
-    const insertedClientId = fake.matching(/^insert into clients\b/i)[0].params[0]
+    const insertedClientId = insertedRows(fake.statements, 'clients')[0].id
     expect(err.createdClientId).toBe(insertedClientId)
     // The link that lost is a DIFFERENT client — the retire targets the one
     // THIS call created, never the one that won the race.
@@ -35441,12 +35511,7 @@ describe('the store dates its own "today" and "this month" on the firm’s clock
       billingMode: 'hourly',
       hourlyRate: 100,
     })
-    const insert = fake.matching(/^insert into clients/i)[0]
-    const columns = /insert into clients\s*\(([\s\S]*?)\)\s*values/i
-      .exec(insert.text)[1]
-      .split(',')
-      .map((column) => column.trim())
-    expect(insert.params[columns.indexOf('hourly_rate_period')]).toBe('2026-09')
+    expect(insertedRows(fake.statements, 'clients')[0].hourly_rate_period).toBe('2026-09')
   })
 
   it('defaults an unpinned hourly client on a bulk save to the firm’s month', async () => {
@@ -36721,17 +36786,17 @@ describe('a recurring expense and its invoice section (postgres branch)', () => 
     await saveWith(fake, [payloadRow])
     const insert = fake.matching(/^insert into recurring_reimbursements/i)[0]
     expect(insert.text).toMatch(/\bcategory\b/)
-    expect(insert.params[14]).toBe('software')
+    expect(insertedRows(fake.statements, 'recurring_reimbursements')[0].category).toBe('software')
   })
 
   it('a payload that names a category is taken; a new row with none is an expense', async () => {
     const named = fakePostgres({ recurringRows: [{ ...baseRow, category: 'expense' }] })
     await saveWith(named, [{ ...payloadRow, category: 'software' }])
-    expect(named.matching(/^insert into recurring_reimbursements/i)[0].params[14]).toBe('software')
+    expect(insertedRows(named.statements, 'recurring_reimbursements')[0].category).toBe('software')
 
     const fresh = fakePostgres()
     await saveWith(fresh, [payloadRow])
-    expect(fresh.matching(/^insert into recurring_reimbursements/i)[0].params[14]).toBe('expense')
+    expect(insertedRows(fresh.statements, 'recurring_reimbursements')[0].category).toBe('expense')
   })
 })
 
@@ -38358,16 +38423,6 @@ describe('releaseUnchargedAutopayAttempt (Postgres statement)', () => {
  * not erase it.
  */
 describe('the kept invoice note (clients.invoice_note)', () => {
-  const boundClientColumns = (statement) => {
-    const match = /insert into clients\s*\(([\s\S]*?)\)\s*values/i.exec(statement.text)
-    const columns = match[1].split(',').map((column) => column.trim())
-    const bound = {}
-    statement.params.forEach((value, index) => {
-      bound[columns[index]] = value
-    })
-    return bound
-  }
-
   it('reads invoice_note into invoiceNote, null when there is none', () => {
     expect(mapClientRow({ id: 'c1', name: 'Acme' }).invoiceNote).toBeNull()
     expect(mapClientRow({ id: 'c1', name: 'Acme', invoice_note: 'Thanks!' }).invoiceNote).toBe(
@@ -38385,7 +38440,7 @@ describe('the kept invoice note (clients.invoice_note)', () => {
 
       expect(fake.matching(/^select id, invoice_note from clients$/i)).toHaveLength(1)
       const insert = fake.matching(/^insert into clients \(/i)[0]
-      expect(boundClientColumns(insert).invoice_note).toBe('Kept note')
+      expect(insertedRows(fake.statements, 'clients')[0].invoice_note).toBe('Kept note')
     })
 
     it('lets the stored note win over a stale value in the payload', async () => {
@@ -38395,7 +38450,7 @@ describe('the kept invoice note (clients.invoice_note)', () => {
       await postgresStore(fake).write(
         workspace({ clients: [{ id: 'c1', name: 'Acme', invoiceNote: 'stale from a tab' }] }),
       )
-      const bound = boundClientColumns(fake.matching(/^insert into clients \(/i)[0])
+      const bound = insertedRows(fake.statements, 'clients')[0]
       expect(bound.invoice_note).toBe('Kept note')
     })
 
@@ -38404,7 +38459,7 @@ describe('the kept invoice note (clients.invoice_note)', () => {
         clientRows: [{ id: 'c1', name: 'Acme', invoice_note: 'Kept note' }],
       })
       await postgresStore(fake).write(workspace({ clients: [{ id: 'c1', name: 'Acme' }] }))
-      const bound = boundClientColumns(fake.matching(/^insert into clients \(/i)[0])
+      const bound = insertedRows(fake.statements, 'clients')[0]
       expect(bound.invoice_note).toBe('Kept note')
     })
 
@@ -38413,7 +38468,7 @@ describe('the kept invoice note (clients.invoice_note)', () => {
       await postgresStore(fake).write(
         workspace({ clients: [{ id: 'c1', name: 'Acme', invoiceNote: 'smuggled' }] }),
       )
-      const bound = boundClientColumns(fake.matching(/^insert into clients \(/i)[0])
+      const bound = insertedRows(fake.statements, 'clients')[0]
       expect(bound.invoice_note).toBeNull()
     })
   })
@@ -38559,16 +38614,6 @@ describe('the kept invoice note (clients.invoice_note)', () => {
  * "Mark reviewed" marks it sent without sending anything.
  */
 describe('the never-email switch (clients.invoice_no_email)', () => {
-  const boundClientColumns = (statement) => {
-    const match = /insert into clients\s*\(([\s\S]*?)\)\s*values/i.exec(statement.text)
-    const columns = match[1].split(',').map((column) => column.trim())
-    const bound = {}
-    statement.params.forEach((value, index) => {
-      bound[columns[index]] = value
-    })
-    return bound
-  }
-
   it('reads invoice_no_email into invoiceNoEmail, false for a row from before the column', () => {
     expect(mapClientRow({ id: 'c1', name: 'Acme' }).invoiceNoEmail).toBe(false)
     expect(mapClientRow({ id: 'c1', name: 'Acme', invoice_no_email: true }).invoiceNoEmail).toBe(true)
@@ -38581,7 +38626,7 @@ describe('the never-email switch (clients.invoice_no_email)', () => {
       workspace({ clients: [{ id: 'c1', name: 'Acme', invoiceNoEmail: true }] }),
     )
     const insert = fake.matching(/^insert into clients \(/i)[0]
-    expect(boundClientColumns(insert).invoice_no_email).toBe(true)
+    expect(insertedRows(fake.statements, 'clients')[0].invoice_no_email).toBe(true)
   })
 
   it('Postgres: a client that never had it is saved as false, and a non-boolean is false too', async () => {
@@ -38594,9 +38639,9 @@ describe('the never-email switch (clients.invoice_no_email)', () => {
         ],
       }),
     )
-    const inserts = fake.matching(/^insert into clients \(/i)
-    expect(boundClientColumns(inserts[0]).invoice_no_email).toBe(false)
-    expect(boundClientColumns(inserts[1]).invoice_no_email).toBe(false)
+    const inserts = insertedRows(fake.statements, 'clients')
+    expect(inserts[0].invoice_no_email).toBe(false)
+    expect(inserts[1].invoice_no_email).toBe(false)
   })
 
   it('Postgres: a newly created client persists the switch', async () => {
@@ -38607,7 +38652,7 @@ describe('the never-email switch (clients.invoice_no_email)', () => {
       invoiceNoEmail: true,
     })
     expect(created.invoiceNoEmail).toBe(true)
-    expect(boundClientColumns(fake.matching(/^insert into clients \(/i)[0]).invoice_no_email).toBe(true)
+    expect(insertedRows(fake.statements, 'clients')[0].invoice_no_email).toBe(true)
   })
 
   it('file: keeps the switch across a save and a read', async () => {
@@ -39000,8 +39045,9 @@ describe('recorded_outside_app through the bulk save and the reads (postgres bra
 
     const restore = fake.matching(/^insert into invoices \(/i)[0]
     expect(restore.text).toMatch(/pay_token,\s*recorded_outside_app,\s*created_at/i)
-    expect(restore.params[22]).toBe(true)
-    expect(restore.params[23]).toBe(existingInvoice.created_at)
+    const [restored] = insertedRows(fake.statements, 'invoices')
+    expect(restored.recorded_outside_app).toBe(true)
+    expect(restored.created_at).toBe(existingInvoice.created_at)
     const highest = Math.max(...[...restore.text.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))
     expect(highest).toBe(restore.params.length)
   })
@@ -39009,7 +39055,579 @@ describe('recorded_outside_app through the bulk save and the reads (postgres bra
   it('restores false for a row that has no marker', async () => {
     const fake = fakePostgres({ invoices: [existingInvoice] })
     await postgresStore(fake).write(workspace())
-    const restore = fake.matching(/^insert into invoices \(/i)[0]
-    expect(restore.params[22]).toBe(false)
+    expect(insertedRows(fake.statements, 'invoices')[0].recorded_outside_app).toBe(false)
+  })
+})
+
+/**
+ * GOLDEN PARITY for the bulk save's inserts (docs/plans/bulk-save-batching-2026-10.md).
+ *
+ * One rich payload, every table the save writes, through the real `write()` on
+ * the fake pool; the rows each table received are decoded (`insertedRows`, so it
+ * reads one-row-per-statement and multi-row statements alike) and compared with
+ * `db/golden/bulk-save-rows.json`, which was captured on the per-row code BEFORE
+ * any batching. Every stage of the batching has to reproduce it exactly: values,
+ * the JSON strings jsonb columns receive, the arrays text[] columns receive
+ * (ragged on purpose), Dates, nulls, payload order, and the order the tables are
+ * first written in (the foreign keys depend on it).
+ *
+ * A change that is MEANT to alter what is written regenerates the file with
+ * `UPDATE_GOLDEN=1 npx vitest run db/store-staleness.test.mjs -t "golden parity"`
+ * and says so in its commit; a batching change that needs to must not.
+ *
+ * Not in the golden: `users.password_hash` (a fresh random salt every run; its
+ * contract has its own tests).
+ */
+describe('bulk save golden parity (postgres branch)', () => {
+  const GOLDEN_PATH = path.join(projectRoot, 'db', 'golden', 'bulk-save-rows.json')
+  const WRITTEN_TABLES = [
+    'users',
+    'subscription_plans',
+    'contacts',
+    'clients',
+    'invoices',
+    'time_entries',
+    'timesheet_locks',
+    'weekly_submissions',
+    'reimbursements',
+    'recurring_reimbursements',
+    'checklist_templates',
+    'checklist_template_stages',
+    'checklist_template_items',
+    'checklists',
+    'checklist_items',
+  ]
+  const STORED_AT = new Date('2026-03-02T09:30:00.000Z')
+
+  /** Dates and undefined survive JSON only if they are named. */
+  const toGolden = (value) => {
+    if (value instanceof Date) return { $date: value.toISOString() }
+    if (value === undefined) return { $undefined: true }
+    if (Array.isArray(value)) return value.map(toGolden)
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, toGolden(inner)]))
+    }
+    return value
+  }
+
+  const payload = () => ({
+    employees: [
+      { id: 'emp-1', name: 'Lisa Alvarez', role: 'bookkeeper' },
+      { id: 'emp-2', name: 'Priya Natarajan', role: 'bookkeeper' },
+    ],
+    plans: [
+      { id: 'plan-1', name: 'Essentials', notes: 'Monthly close', templateIds: ['tpl-1', 'tpl-2', 7, ''] },
+      { id: 'plan-2', name: 'Advisory' },
+    ],
+    contacts: [
+      {
+        id: 'contact-1',
+        name: 'Dana Reyes',
+        email: 'dana@example.com',
+        phone: '555-0100',
+        title: 'Controller',
+        notes: "O'Hara's note, with a comma, and (parentheses)",
+        locked: true,
+        companyEmails: [
+          { clientId: 'c1', email: 'ap@acme.example' },
+          { clientId: 3, email: 'dropped@example.com' },
+        ],
+        linkedContactIds: ['contact-2', 4],
+        archivedAt: '2026-02-01T00:00:00.000Z',
+        group: '  Vendors  ',
+      },
+      { id: 'contact-2', name: 'Sam Ortiz' },
+    ],
+    clients: [
+      {
+        id: 'c1',
+        name: 'Acme',
+        contact: 'Dana Reyes',
+        billingMode: 'hourly',
+        hourlyRate: 125.5,
+        planIds: ['plan-1', 'plan-gone'],
+        contactIds: ['contact-1', '', 5],
+        email: 'billing@acme.example',
+        quickbooksPayUrl: 'https://pay.example.com/acme',
+        invoiceShowTimeBreakdown: false,
+        invoiceTimeBreakdownMode: 'detailed',
+        invoiceTimeBreakdownAmounts: true,
+        assignedBookkeeperIds: ['emp-1', 'emp-2', 'emp-3'],
+        estimatedBookkeeperHours: '12.5',
+        monthlyServiceTier: '  Premium ',
+        annualBillingMonth: 7,
+        lifecycleStage: 'active',
+        cardPaymentsEnabled: true,
+        platformInvoicingOptOut: true,
+        invoiceNoEmail: true,
+        stripeCustomerId: 'cus_from_the_payload',
+        invoiceNote: 'from the payload',
+        hourlyRatePeriod: '2020-01',
+      },
+      {
+        id: 'c2',
+        name: 'Bluebird LLC',
+        billingMode: 'subscription',
+        monthlyRate: 900,
+        customMonthlyFee: 950,
+        planIds: ['plan-2'],
+        assignedBookkeeperIds: [],
+        billToClientId: 'c3',
+        quickbooksPayUrl: 'javascript:alert(1)',
+      },
+      {
+        id: 'c3',
+        name: 'Cobalt Holdings',
+        billingMode: 'hourly',
+        hourlyRate: 100,
+        isBillingMaster: true,
+        invoiceRecipientClientId: 'c2',
+        assignedBookkeeperIds: ['emp-2'],
+      },
+    ],
+    reimbursements: [
+      { id: 'reim-1', clientId: 'c1', date: '2026-02-10', description: 'Postage', amount: 12.34 },
+      { id: 'reim-2', clientId: 'c2', date: '2026-02-11', description: 'Filing fee', amount: 75 },
+      { id: 'reim-gone', clientId: 'c-gone', date: '2026-02-12', description: 'Orphan', amount: 1 },
+    ],
+    recurringReimbursements: [
+      {
+        id: 'rec-1',
+        clientId: 'c1',
+        description: 'QuickBooks Online',
+        amount: 90,
+        frequency: 'monthly',
+        startDate: '2026-01-13',
+        coverageEnabled: true,
+        coverageTemplate: 'billing-month',
+        coverageStart: '2026-01-13',
+        coverageEnd: '2026-02-13',
+        coveragePaused: true,
+        coverageHistory: { '2026-01': { start: 'stale', end: 'stale' } },
+        category: 'software',
+      },
+      {
+        id: 'rec-2',
+        clientId: 'c2',
+        description: 'Registered agent',
+        amount: 150,
+        frequency: 'annual',
+        startDate: '2026-03-01',
+        coverageEnd: '2026-03-20',
+      },
+    ],
+    checklistTemplates: [
+      {
+        id: 'tpl-1',
+        title: 'Monthly close',
+        clientId: 'c1',
+        assigneeId: 'emp-1',
+        frequency: 'monthly',
+        nextDueDate: '2026-03-31',
+        active: true,
+        viewerIds: ['emp-2'],
+        editorIds: [],
+        scheduledMonths: [1, 6, 13, 'x', 12],
+        dueDayOfMonth: 28,
+        monthlyDueDays: { 1: 15, 2: 20 },
+        repeatAnnually: false,
+        scheduleYear: 2026,
+        leadDays: 400,
+        categoryId: 'cat-1',
+        skipAllowed: true,
+        periodLabelEnabled: true,
+        periodCoverageStart: '2026-02-01',
+        periodCoverageEnd: '2026-02-28',
+        periodCoverageAnchorDue: '2026-03-31',
+        stages: [
+          {
+            id: 'tpl-1-stage-1',
+            name: 'Prepare',
+            assigneeId: 'emp-1',
+            offsetDays: 0,
+            viewerIds: ['emp-2'],
+            editorIds: [],
+            items: [
+              {
+                id: 'tpl-1-item-1',
+                label: 'Reconcile "main" account',
+                dueDayOfMonth: 5,
+                assigneeId: 'emp-1',
+                subItems: [{ id: 'tpl-1-sub-1', title: 'Download statement' }],
+              },
+              { id: 'tpl-1-item-2', label: 'Categorize', dueDate: '2026-03-10' },
+            ],
+          },
+          {
+            id: 'tpl-1-stage-2',
+            name: 'Review',
+            assigneeId: 'emp-2',
+            offsetDays: 3,
+            dueDate: '2026-03-31',
+            dueDayOfMonth: 31,
+            viewerIds: [],
+            editorIds: ['emp-1'],
+            items: [{ id: 'tpl-1-item-3', label: 'Sign off' }],
+          },
+        ],
+      },
+      {
+        id: 'tpl-2',
+        title: 'Standard onboarding',
+        assigneeId: 'emp-2',
+        frequency: 'once',
+        active: false,
+        isStandard: true,
+        sourceTemplateId: 'tpl-1',
+        stages: [{ id: 'tpl-2-stage-1', name: 'Kick off', items: [{ id: 'tpl-2-item-1', label: 'Welcome call' }] }],
+      },
+    ],
+    checklists: [
+      {
+        id: 'cl-1',
+        title: 'February close',
+        clientId: 'c1',
+        assigneeId: 'emp-1',
+        templateId: 'tpl-1',
+        frequency: 'monthly',
+        dueDate: '2026-02-28',
+        viewerIds: ['emp-2'],
+        editorIds: [],
+        stageId: 'tpl-1-stage-1',
+        stageIndex: 0,
+        stageCount: 2,
+        categoryId: 'cat-1',
+        periodLabel: 'February 2026',
+        items: [
+          {
+            id: 'item-1',
+            label: 'Reconcile',
+            done: true,
+            dueDate: '2026-02-20',
+            dueDayOfMonth: 20,
+            assigneeId: 'emp-1',
+            completedAt: '2019-01-01T00:00:00.000Z',
+            waitingOns: [
+              { id: 'wo-payload', blockerId: 'emp-2', requestedBy: 'emp-1', createdAt: '2026-02-01T00:00:00.000Z' },
+            ],
+            subItems: [
+              { id: 'sub-1', title: 'Pull statement', done: true },
+              {
+                id: 'sub-2',
+                title: 'Tie out',
+                done: false,
+                subItems: [{ id: 'subsub-1', title: 'Cash', done: true }],
+              },
+            ],
+          },
+          { id: 'item-2', label: 'Send to the client', done: false, waiting: true, waitingOn: 'Client' },
+          { id: 'item-3', label: 'File', done: false },
+        ],
+      },
+      {
+        id: 'cl-2',
+        title: 'February close (review)',
+        clientId: 'c1',
+        assigneeId: 'emp-2',
+        templateId: 'tpl-1',
+        frequency: 'monthly',
+        dueDate: '2026-03-03',
+        stageId: 'tpl-1-stage-2',
+        stageIndex: 1,
+        stageCount: 2,
+        items: [{ id: 'item-4', label: 'Review', done: false }],
+      },
+      {
+        id: 'cl-3',
+        title: 'One-off cleanup',
+        clientId: 'c2',
+        assigneeId: 'emp-1',
+        dueDate: '2026-04-01',
+        caseId: 'case-77',
+        onboardingForClientId: 'c2',
+        createdBy: 'emp-2',
+        skippedAt: '2026-02-14T10:00:00.000Z',
+        skippedBy: 'emp-1',
+        items: [],
+      },
+      // The same instance as cl-1 under another id: the unique index drops it,
+      // and its items with it.
+      {
+        id: 'cl-dup-instance',
+        title: 'February close (duplicate)',
+        clientId: 'c1',
+        assigneeId: 'emp-1',
+        templateId: 'tpl-1',
+        frequency: 'monthly',
+        dueDate: '2026-02-28',
+        stageIndex: 0,
+        stageCount: 2,
+        items: [{ id: 'item-dup-1', label: 'Never written', done: false }],
+      },
+      { id: 'cl-orphan', title: 'Orphan', clientId: 'c-gone', assigneeId: 'emp-1', dueDate: '2026-02-01', items: [] },
+    ],
+    recycledChecklists: [
+      {
+        id: 'cl-4',
+        title: 'Deleted close',
+        clientId: 'c1',
+        assigneeId: 'emp-1',
+        templateId: 'tpl-2',
+        dueDate: '2026-01-31',
+        deletedAt: '2026-02-02T08:00:00.000Z',
+        deletionRequestedBy: 'emp-1',
+        deletionRequestedAt: '2026-02-01T08:00:00.000Z',
+        items: [{ id: 'item-5', label: 'Gone', done: true }],
+      },
+      // The same id as an active checklist: the primary key drops this one.
+      { id: 'cl-1', title: 'Same id as cl-1', clientId: 'c1', assigneeId: 'emp-1', dueDate: '2026-02-28', items: [{ id: 'item-dup-2', label: 'Never written', done: false }] },
+    ],
+    timeEntries: [
+      {
+        id: 'te-1',
+        employeeId: 'emp-1',
+        clientId: 'c1',
+        date: '2026-02-03',
+        minutes: 95.5,
+        category: 'Bookkeeping',
+        description: 'Reconciled "main" account, per Dana\'s email (see notes)',
+        billable: true,
+        taskId: 'item-1',
+        approvalStatus: 'approved',
+        approvalNote: 'ok',
+        approvedBy: 'emp-2',
+        approvedAt: '2026-02-04T10:00:00.000Z',
+        entryMethod: 'timer',
+        startAt: '2026-02-03T14:00:00.000Z',
+        endAt: '2026-02-03T15:35:30.000Z',
+        sessions: [
+          { startAt: '2026-02-03T14:00:00.000Z', endAt: '2026-02-03T14:30:00.000Z' },
+          { startAt: '2026-02-03T15:00:00.000Z', endAt: '2026-02-03T15:35:30.000Z' },
+        ],
+        createdAt: '2026-02-03T15:36:00.000Z',
+      },
+      {
+        id: 'te-2',
+        employeeId: 'emp-2',
+        clientId: 'c2',
+        date: '2026-02-04',
+        minutes: 30,
+        description: 'Split share',
+        billable: false,
+        entryMethod: 'manual',
+        manualReason: 'Forgot to start the timer',
+        isAdhoc: true,
+        groupId: 99,
+        groupClientIds: ['c2', 'c3', '', 5],
+        groupAllocation: 'custom',
+        taskLabel: 'Payroll',
+        sessions: 'not an array',
+      },
+      {
+        id: 'te-3',
+        employeeId: 'emp-1',
+        clientId: '',
+        date: '2026-02-05',
+        minutes: 0.4,
+        description: 'Admin',
+        billable: false,
+        isAdministrative: true,
+        groupClientIds: [],
+        taskId: 'item-2',
+        taskLabel: 'ignored because a task is set',
+        approvalStatus: 'pending',
+      },
+      {
+        id: 'te-4',
+        employeeId: 'emp-2',
+        clientId: 'c3',
+        date: '2026-02-06',
+        minutes: 15,
+        description: '',
+        billable: true,
+        entryMethod: 'timer',
+        manualReason: 'ignored for a timer entry',
+        groupAllocation: 'bogus',
+      },
+      { id: 'te-orphan', employeeId: 'emp-1', clientId: 'c-gone', date: '2026-02-07', minutes: 5, description: 'x', billable: true },
+    ],
+    timesheetLocks: [
+      { id: 'lock-1', userId: 'emp-1', period: '2026-01', lockedBy: 'emp-2', lockedAt: '2026-02-01T00:00:00.000Z' },
+      { id: 'lock-2', userId: 'emp-2', period: '2026-01', lockedBy: 'emp-2' },
+    ],
+    weeklySubmissions: [
+      {
+        id: 'ws-1',
+        userId: 'emp-1',
+        weekStart: '2026-02-01',
+        submittedAt: '2026-02-08T12:00:00.000Z',
+        status: 'approved',
+        reviewedBy: 'emp-2',
+        reviewedAt: '2026-02-09T12:00:00.000Z',
+        reviewNote: 'Looks right',
+      },
+      { id: 'ws-2', userId: 'emp-2', weekStart: '2026-02-08', status: 'pending' },
+      { id: 'ws-gone', userId: 'emp-nobody', weekStart: '2026-02-08', status: 'pending' },
+    ],
+  })
+
+  /** What the database already holds: every snapshot the save restores from. */
+  const stored = () => ({
+    userRows: [{ id: 'emp-1' }],
+    invoices: [
+      {
+        ...existingInvoice,
+        kind: 'monthly',
+        pay_token: 'tok_golden_1',
+        original_line_items: [{ kind: 'plan', label: 'August work', amount: 250 }],
+        email_log: [{ at: '2026-09-01T12:00:00.000Z', to: ["o'brien@example.com"], ok: true }],
+        recorded_outside_app: false,
+        created_at: new Date('2026-08-01T12:00:00.000Z'),
+      },
+      {
+        ...existingInvoice,
+        id: 'inv-2',
+        period: '2026-09',
+        number: 'INV-2026-09-001',
+        kind: 'retainer',
+        status: 'paid',
+        sent_at: '2026-09-02T00:00:00.000Z',
+        paid_at: new Date('2026-09-03T00:00:00.000Z'),
+        applied_to_invoice_id: 'inv-1',
+        original_line_items: null,
+        recorded_outside_app: true,
+        created_at: '2026-09-01T00:00:00.000Z',
+      },
+      { ...existingInvoice, id: 'inv-gone', client_id: 'c-gone' },
+    ],
+    createdAtRows: Object.fromEntries(
+      [
+        'users',
+        'contacts',
+        'clients',
+        'reimbursements',
+        'recurring_reimbursements',
+        'checklist_templates',
+        'checklist_template_items',
+        'checklists',
+        'subscription_plans',
+        'time_entries',
+      ].map((table) => [table, [{ id: `${table}-nothing`, created_at: STORED_AT }]]),
+    ),
+    clientRows: [
+      {
+        id: 'c1',
+        name: 'Acme',
+        stripe_customer_id: 'cus_stored',
+        invoice_note: 'Kept note',
+        hourly_rate_period: '2026-06',
+        hourly_rate_history: [{ from: '2026-06', rate: 110 }],
+      },
+      { id: 'c3', name: 'Cobalt Holdings', stripe_customer_id: null, invoice_note: null, hourly_rate_period: null },
+    ],
+    recurringRows: [
+      {
+        id: 'rec-1',
+        coverage_anchor_day: 13,
+        coverage_resume_pending: true,
+        coverage_history: { '2026-01': { start: '2026-01-13', end: '2026-02-13' } },
+        category: 'software',
+      },
+    ],
+    priorItemRows: [
+      { id: 'item-1', done: true, completed_at: new Date('2026-02-20T12:00:00.000Z'), waiting: false, waiting_ons: [], sub_items: [] },
+      {
+        id: 'item-2',
+        done: false,
+        completed_at: null,
+        waiting: true,
+        waiting_on: 'Lisa to send them',
+        waiting_for_checklist_id: 'cl-3',
+        waiting_ons: [{ id: 'wo-stored', blockerId: 'emp-1', requestedBy: 'emp-2', createdAt: '2026-02-02T00:00:00.000Z' }],
+        sub_items: [],
+      },
+    ],
+    priorChecklistRows: [
+      {
+        id: 'cl-1',
+        cycle_due_date: '2026-02-28',
+        pushed_at: '2026-02-27T10:00:00.000Z',
+        pushed_by: 'emp-1',
+        pushed_from_checklist_id: 'cl-origin',
+        pushed_to_checklist_id: 'cl-next',
+      },
+    ],
+  })
+
+  async function capture() {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-03-05T16:00:00.000Z'))
+    try {
+      const fake = fakePostgres({ ...stored(), simulateChecklistUniqueness: true })
+      await postgresStore(fake).write(payload())
+      const tables = {}
+      for (const table of WRITTEN_TABLES) {
+        tables[table] = insertedRows(fake.statements, table).map((row) => {
+          const copy = { ...row }
+          if (table === 'users') delete copy.password_hash
+          return toGolden(copy)
+        })
+      }
+      const firstWrite = (table) =>
+        fake.statements.findIndex((statement) => new RegExp(`^insert into ${table}\\s*\\(`, 'i').test(statement.text))
+      const tableOrder = WRITTEN_TABLES.filter((table) => firstWrite(table) !== -1).sort(
+        (a, b) => firstWrite(a) - firstWrite(b),
+      )
+      const duplicateWarnings = warn.mock.calls
+        .map((call) => String(call[0]))
+        .filter((message) => message.startsWith('[bulk-save] skipped duplicate checklist'))
+      return { fake, golden: { tableOrder, tables }, duplicateWarnings }
+    } finally {
+      vi.useRealTimers()
+      warn.mockRestore()
+      log.mockRestore()
+    }
+  }
+
+  it('writes exactly the pinned rows for a payload that touches every table', async () => {
+    const { golden } = await capture()
+    if (process.env.UPDATE_GOLDEN === '1') {
+      await mkdir(path.dirname(GOLDEN_PATH), { recursive: true })
+      await writeFile(GOLDEN_PATH, `${JSON.stringify(golden, null, 2)}\n`)
+    }
+    const pinned = JSON.parse(await readFile(GOLDEN_PATH, 'utf8'))
+    expect(golden.tableOrder).toEqual(pinned.tableOrder)
+    for (const table of WRITTEN_TABLES) {
+      expect(golden.tables[table], `rows written to ${table}`).toEqual(pinned.tables[table])
+    }
+  })
+
+  it('covers every table the save writes, with more than one row where it matters', async () => {
+    const { golden } = await capture()
+    for (const table of WRITTEN_TABLES) {
+      expect(golden.tables[table].length, `${table} has no golden rows`).toBeGreaterThan(0)
+    }
+    for (const table of ['time_entries', 'clients', 'checklists', 'checklist_items']) {
+      expect(golden.tables[table].length, table).toBeGreaterThan(2)
+    }
+    expect(golden.tables.checklist_templates.length).toBeGreaterThan(1)
+  })
+
+  it('drops the duplicate checklist ids and instances with one warning each, and their items', async () => {
+    const { fake, duplicateWarnings } = await capture()
+    expect(duplicateWarnings).toHaveLength(2)
+    expect(duplicateWarnings.some((message) => message.includes('cl-1 '))).toBe(true)
+    expect(duplicateWarnings.some((message) => message.includes('cl-dup-instance'))).toBe(true)
+    const itemIds = insertedRows(fake.statements, 'checklist_items').map((row) => row.id)
+    expect(itemIds).not.toContain('item-dup-1')
+    expect(itemIds).not.toContain('item-dup-2')
+  })
+
+  it('captures the same rows twice in a row (nothing in the fixture is random)', async () => {
+    const first = await capture()
+    const second = await capture()
+    expect(second.golden).toEqual(first.golden)
   })
 })

@@ -1,0 +1,1048 @@
+{
+  "tableOrder": [
+    "users",
+    "subscription_plans",
+    "contacts",
+    "clients",
+    "invoices",
+    "time_entries",
+    "timesheet_locks",
+    "weekly_submissions",
+    "reimbursements",
+    "recurring_reimbursements",
+    "checklist_templates",
+    "checklist_template_stages",
+    "checklist_template_items",
+    "checklists",
+    "checklist_items"
+  ],
+  "tables": {
+    "users": [
+      {
+        "id": "emp-1",
+        "name": "Lisa Alvarez",
+        "email": "coalesce((select email from users where id = \"emp-1\"), \"emp-1@pbj.local\")",
+        "role": "bookkeeper",
+        "staff_role": "Bookkeeper",
+        "updated_at": "now()"
+      },
+      {
+        "id": "emp-2",
+        "name": "Priya Natarajan",
+        "email": "coalesce((select email from users where id = \"emp-2\"), \"emp-2@pbj.local\")",
+        "role": "bookkeeper",
+        "staff_role": "Bookkeeper",
+        "updated_at": "now()"
+      }
+    ],
+    "subscription_plans": [
+      {
+        "id": "plan-1",
+        "name": "Essentials",
+        "notes": "Monthly close",
+        "template_ids": [
+          "tpl-1",
+          "tpl-2"
+        ],
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "plan-2",
+        "name": "Advisory",
+        "notes": "",
+        "template_ids": [],
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      }
+    ],
+    "contacts": [
+      {
+        "id": "contact-1",
+        "name": "Dana Reyes",
+        "email": "dana@example.com",
+        "phone": "555-0100",
+        "title": "Controller",
+        "notes": "O'Hara's note, with a comma, and (parentheses)",
+        "locked": true,
+        "company_emails": "[{\"clientId\":\"c1\",\"email\":\"ap@acme.example\"}]",
+        "linked_contact_ids": [
+          "contact-2"
+        ],
+        "archived_at": "2026-02-01T00:00:00.000Z",
+        "group_name": "Vendors",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "contact-2",
+        "name": "Sam Ortiz",
+        "email": null,
+        "phone": null,
+        "title": null,
+        "notes": null,
+        "locked": false,
+        "company_emails": "[]",
+        "linked_contact_ids": [],
+        "archived_at": null,
+        "group_name": null,
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      }
+    ],
+    "clients": [
+      {
+        "id": "c1",
+        "name": "Acme",
+        "contact": "Dana Reyes",
+        "billing_mode": "hourly",
+        "hourly_rate": 125.5,
+        "plan_id": "plan-1",
+        "custom_monthly_fee": null,
+        "monthly_rate": null,
+        "estimated_monthly_hours": null,
+        "plan_ids": [
+          "plan-1"
+        ],
+        "contact_ids": [
+          "contact-1"
+        ],
+        "email": "billing@acme.example",
+        "contact_name": "",
+        "phone": "",
+        "address_line1": "",
+        "address_line2": "",
+        "city": "",
+        "state": "",
+        "postal_code": "",
+        "logo_url": "",
+        "payment_terms": "",
+        "footer_note": "",
+        "quickbooks_pay_url": "https://pay.example.com/acme",
+        "invoice_show_time_breakdown": false,
+        "invoice_hide_internal_hours": true,
+        "invoice_group_by_category": false,
+        "assigned_bookkeeper_ids": [
+          "emp-1",
+          "emp-2",
+          "emp-3"
+        ],
+        "estimated_bookkeeper_hours": 12.5,
+        "estimated_accountant_hours": null,
+        "estimated_cfo_hours": null,
+        "monthly_service_tier": "  Premium ",
+        "annual_rate": null,
+        "annual_billing_month": 7,
+        "lifecycle_stage": "active",
+        "card_payments_enabled": true,
+        "platform_invoicing_opt_out": true,
+        "stripe_customer_id": "cus_stored",
+        "invoice_time_breakdown_mode": "off",
+        "invoice_time_breakdown_amounts": true,
+        "bill_to_client_id": null,
+        "is_billing_master": false,
+        "invoice_recipient_client_id": null,
+        "hourly_rate_period": "2026-06",
+        "hourly_rate_history": "[{\"from\":\"2026-06\",\"rate\":110}]",
+        "invoice_note": "Kept note",
+        "invoice_no_email": true,
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "c2",
+        "name": "Bluebird LLC",
+        "contact": {
+          "$undefined": true
+        },
+        "billing_mode": "subscription",
+        "hourly_rate": {
+          "$undefined": true
+        },
+        "plan_id": "plan-2",
+        "custom_monthly_fee": 950,
+        "monthly_rate": 900,
+        "estimated_monthly_hours": null,
+        "plan_ids": [
+          "plan-2"
+        ],
+        "contact_ids": [],
+        "email": "",
+        "contact_name": "",
+        "phone": "",
+        "address_line1": "",
+        "address_line2": "",
+        "city": "",
+        "state": "",
+        "postal_code": "",
+        "logo_url": "",
+        "payment_terms": "",
+        "footer_note": "",
+        "quickbooks_pay_url": "",
+        "invoice_show_time_breakdown": true,
+        "invoice_hide_internal_hours": true,
+        "invoice_group_by_category": false,
+        "assigned_bookkeeper_ids": [],
+        "estimated_bookkeeper_hours": null,
+        "estimated_accountant_hours": null,
+        "estimated_cfo_hours": null,
+        "monthly_service_tier": null,
+        "annual_rate": null,
+        "annual_billing_month": null,
+        "lifecycle_stage": "active",
+        "card_payments_enabled": false,
+        "platform_invoicing_opt_out": false,
+        "stripe_customer_id": null,
+        "invoice_time_breakdown_mode": "off",
+        "invoice_time_breakdown_amounts": false,
+        "bill_to_client_id": "c3",
+        "is_billing_master": false,
+        "invoice_recipient_client_id": null,
+        "hourly_rate_period": null,
+        "hourly_rate_history": "[]",
+        "invoice_note": null,
+        "invoice_no_email": false,
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "c3",
+        "name": "Cobalt Holdings",
+        "contact": {
+          "$undefined": true
+        },
+        "billing_mode": "hourly",
+        "hourly_rate": 100,
+        "plan_id": null,
+        "custom_monthly_fee": null,
+        "monthly_rate": null,
+        "estimated_monthly_hours": null,
+        "plan_ids": [],
+        "contact_ids": [],
+        "email": "",
+        "contact_name": "",
+        "phone": "",
+        "address_line1": "",
+        "address_line2": "",
+        "city": "",
+        "state": "",
+        "postal_code": "",
+        "logo_url": "",
+        "payment_terms": "",
+        "footer_note": "",
+        "quickbooks_pay_url": "",
+        "invoice_show_time_breakdown": true,
+        "invoice_hide_internal_hours": true,
+        "invoice_group_by_category": false,
+        "assigned_bookkeeper_ids": [
+          "emp-2"
+        ],
+        "estimated_bookkeeper_hours": null,
+        "estimated_accountant_hours": null,
+        "estimated_cfo_hours": null,
+        "monthly_service_tier": null,
+        "annual_rate": null,
+        "annual_billing_month": null,
+        "lifecycle_stage": "active",
+        "card_payments_enabled": false,
+        "platform_invoicing_opt_out": false,
+        "stripe_customer_id": null,
+        "invoice_time_breakdown_mode": "off",
+        "invoice_time_breakdown_amounts": false,
+        "bill_to_client_id": null,
+        "is_billing_master": true,
+        "invoice_recipient_client_id": "c2",
+        "hourly_rate_period": "2026-03",
+        "hourly_rate_history": "[]",
+        "invoice_note": null,
+        "invoice_no_email": false,
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      }
+    ],
+    "invoices": [
+      {
+        "id": "inv-1",
+        "client_id": "c1",
+        "period": "2026-08",
+        "number": "INV-2026-08-001",
+        "kind": "monthly",
+        "status": "sent",
+        "line_items": "[{\"kind\":\"plan\",\"label\":\"August work\",\"detail\":\"Monthly service\",\"amount\":250}]",
+        "subtotal": "250.00",
+        "total": "250.00",
+        "due_date": "2026-09-30",
+        "blurb": "",
+        "scope_flags": "[]",
+        "sent_at": {
+          "$date": "2026-09-01T12:00:00.000Z"
+        },
+        "paid_at": null,
+        "stripe_checkout_session_id": "cs_ach_1",
+        "stripe_card_session_id": "cs_card_1",
+        "stripe_payment_intent_id": null,
+        "payment_method": null,
+        "email_log": "[{\"at\":\"2026-09-01T12:00:00.000Z\",\"to\":[\"o'brien@example.com\"],\"ok\":true}]",
+        "applied_to_invoice_id": null,
+        "original_line_items": "[{\"kind\":\"plan\",\"label\":\"August work\",\"amount\":250}]",
+        "pay_token": "tok_golden_1",
+        "recorded_outside_app": false,
+        "created_at": {
+          "$date": "2026-08-01T12:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "inv-2",
+        "client_id": "c1",
+        "period": "2026-09",
+        "number": "INV-2026-09-001",
+        "kind": "retainer",
+        "status": "paid",
+        "line_items": "[{\"kind\":\"plan\",\"label\":\"August work\",\"detail\":\"Monthly service\",\"amount\":250}]",
+        "subtotal": "250.00",
+        "total": "250.00",
+        "due_date": "2026-09-30",
+        "blurb": "",
+        "scope_flags": "[]",
+        "sent_at": "2026-09-02T00:00:00.000Z",
+        "paid_at": {
+          "$date": "2026-09-03T00:00:00.000Z"
+        },
+        "stripe_checkout_session_id": "cs_ach_1",
+        "stripe_card_session_id": "cs_card_1",
+        "stripe_payment_intent_id": null,
+        "payment_method": null,
+        "email_log": "[]",
+        "applied_to_invoice_id": "inv-1",
+        "original_line_items": null,
+        "pay_token": null,
+        "recorded_outside_app": true,
+        "created_at": "2026-09-01T00:00:00.000Z",
+        "updated_at": "now()"
+      }
+    ],
+    "time_entries": [
+      {
+        "id": "te-1",
+        "user_id": "emp-1",
+        "client_id": "c1",
+        "entry_date": "2026-02-03",
+        "minutes": 95.5,
+        "category": "Bookkeeping",
+        "description": "Reconciled \"main\" account, per Dana's email (see notes)",
+        "billable": true,
+        "task_id": "item-1",
+        "approval_status": "approved",
+        "approval_note": "ok",
+        "approved_by": "emp-2",
+        "approved_at": "2026-02-04T10:00:00.000Z",
+        "entry_method": "timer",
+        "manual_reason": null,
+        "is_administrative": false,
+        "is_adhoc": false,
+        "started_at": "2026-02-03T14:00:00.000Z",
+        "ended_at": "2026-02-03T15:35:30.000Z",
+        "sessions": "[{\"startAt\":\"2026-02-03T14:00:00.000Z\",\"endAt\":\"2026-02-03T14:30:00.000Z\"},{\"startAt\":\"2026-02-03T15:00:00.000Z\",\"endAt\":\"2026-02-03T15:35:30.000Z\"}]",
+        "group_id": null,
+        "group_client_ids": [],
+        "group_allocation": null,
+        "task_label": null,
+        "created_at": {
+          "$date": "2026-02-03T15:36:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "te-2",
+        "user_id": "emp-2",
+        "client_id": "c2",
+        "entry_date": "2026-02-04",
+        "minutes": 30,
+        "category": "General",
+        "description": "Split share",
+        "billable": false,
+        "task_id": null,
+        "approval_status": "approved",
+        "approval_note": null,
+        "approved_by": null,
+        "approved_at": null,
+        "entry_method": "manual",
+        "manual_reason": "Forgot to start the timer",
+        "is_administrative": false,
+        "is_adhoc": true,
+        "started_at": null,
+        "ended_at": null,
+        "sessions": "[]",
+        "group_id": "99",
+        "group_client_ids": [
+          "c2",
+          "c3"
+        ],
+        "group_allocation": "custom",
+        "task_label": "Payroll",
+        "created_at": "2026-03-05T16:00:00.000Z",
+        "updated_at": "now()"
+      },
+      {
+        "id": "te-3",
+        "user_id": "emp-1",
+        "client_id": null,
+        "entry_date": "2026-02-05",
+        "minutes": 0.4,
+        "category": "General",
+        "description": "Admin",
+        "billable": false,
+        "task_id": "item-2",
+        "approval_status": "pending",
+        "approval_note": null,
+        "approved_by": null,
+        "approved_at": null,
+        "entry_method": "timer",
+        "manual_reason": null,
+        "is_administrative": true,
+        "is_adhoc": false,
+        "started_at": null,
+        "ended_at": null,
+        "sessions": "[]",
+        "group_id": null,
+        "group_client_ids": [],
+        "group_allocation": null,
+        "task_label": null,
+        "created_at": "2026-03-05T16:00:00.000Z",
+        "updated_at": "now()"
+      },
+      {
+        "id": "te-4",
+        "user_id": "emp-2",
+        "client_id": "c3",
+        "entry_date": "2026-02-06",
+        "minutes": 15,
+        "category": "General",
+        "description": "",
+        "billable": true,
+        "task_id": null,
+        "approval_status": "approved",
+        "approval_note": null,
+        "approved_by": null,
+        "approved_at": null,
+        "entry_method": "timer",
+        "manual_reason": null,
+        "is_administrative": false,
+        "is_adhoc": false,
+        "started_at": null,
+        "ended_at": null,
+        "sessions": "[]",
+        "group_id": null,
+        "group_client_ids": [],
+        "group_allocation": null,
+        "task_label": null,
+        "created_at": "2026-03-05T16:00:00.000Z",
+        "updated_at": "now()"
+      }
+    ],
+    "timesheet_locks": [
+      {
+        "id": "lock-1",
+        "user_id": "emp-1",
+        "period": "2026-01",
+        "locked_by": "emp-2",
+        "locked_at": "2026-02-01T00:00:00.000Z"
+      },
+      {
+        "id": "lock-2",
+        "user_id": "emp-2",
+        "period": "2026-01",
+        "locked_by": "emp-2",
+        "locked_at": "2026-03-05T16:00:00.000Z"
+      }
+    ],
+    "weekly_submissions": [
+      {
+        "id": "ws-1",
+        "user_id": "emp-1",
+        "week_start": "2026-02-01",
+        "submitted_at": "2026-02-08T12:00:00.000Z",
+        "status": "approved",
+        "reviewed_by": "emp-2",
+        "reviewed_at": "2026-02-09T12:00:00.000Z",
+        "review_note": "Looks right"
+      },
+      {
+        "id": "ws-2",
+        "user_id": "emp-2",
+        "week_start": "2026-02-08",
+        "submitted_at": "2026-03-05T16:00:00.000Z",
+        "status": "pending",
+        "reviewed_by": null,
+        "reviewed_at": null,
+        "review_note": null
+      }
+    ],
+    "reimbursements": [
+      {
+        "id": "reim-1",
+        "client_id": "c1",
+        "date": "2026-02-10",
+        "description": "Postage",
+        "amount": 12.34,
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "reim-2",
+        "client_id": "c2",
+        "date": "2026-02-11",
+        "description": "Filing fee",
+        "amount": 75,
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      }
+    ],
+    "recurring_reimbursements": [
+      {
+        "id": "rec-1",
+        "client_id": "c1",
+        "description": "QuickBooks Online",
+        "amount": 90,
+        "frequency": "monthly",
+        "start_date": "2026-01-13",
+        "coverage_enabled": true,
+        "coverage_template": "billing-month",
+        "coverage_start": "2026-01-13",
+        "coverage_end": "2026-02-13",
+        "coverage_anchor_day": 13,
+        "coverage_paused": true,
+        "coverage_resume_pending": true,
+        "coverage_history": "{\"2026-01\":{\"start\":\"2026-01-13\",\"end\":\"2026-02-13\"}}",
+        "category": "software",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "rec-2",
+        "client_id": "c2",
+        "description": "Registered agent",
+        "amount": 150,
+        "frequency": "annual",
+        "start_date": "2026-03-01",
+        "coverage_enabled": false,
+        "coverage_template": null,
+        "coverage_start": null,
+        "coverage_end": "2026-03-20",
+        "coverage_anchor_day": 20,
+        "coverage_paused": false,
+        "coverage_resume_pending": false,
+        "coverage_history": "{}",
+        "category": "expense",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      }
+    ],
+    "checklist_templates": [
+      {
+        "id": "tpl-1",
+        "title": "Monthly close",
+        "client_id": "c1",
+        "assignee_id": "emp-1",
+        "frequency": "monthly",
+        "next_due_date": "2026-03-31",
+        "active": true,
+        "is_standard": false,
+        "viewer_ids": [
+          "emp-2"
+        ],
+        "editor_ids": [],
+        "scheduled_months": [
+          1,
+          6,
+          12
+        ],
+        "due_day_of_month": 28,
+        "monthly_due_days": "{\"1\":15,\"2\":20}",
+        "repeat_annually": false,
+        "schedule_year": 2026,
+        "lead_days": 120,
+        "category_id": "cat-1",
+        "source_template_id": null,
+        "onboarding_for_client_id": null,
+        "skip_allowed": true,
+        "period_label_enabled": true,
+        "period_coverage_start": "2026-02-01",
+        "period_coverage_end": "2026-02-28",
+        "period_coverage_anchor_due": "2026-03-31",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "tpl-2",
+        "title": "Standard onboarding",
+        "client_id": null,
+        "assignee_id": "emp-2",
+        "frequency": "once",
+        "next_due_date": null,
+        "active": false,
+        "is_standard": true,
+        "viewer_ids": [],
+        "editor_ids": [],
+        "scheduled_months": [],
+        "due_day_of_month": null,
+        "monthly_due_days": null,
+        "repeat_annually": true,
+        "schedule_year": null,
+        "lead_days": 0,
+        "category_id": null,
+        "source_template_id": "tpl-1",
+        "onboarding_for_client_id": null,
+        "skip_allowed": false,
+        "period_label_enabled": false,
+        "period_coverage_start": null,
+        "period_coverage_end": null,
+        "period_coverage_anchor_due": null,
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      }
+    ],
+    "checklist_template_stages": [
+      {
+        "id": "tpl-1-stage-1",
+        "template_id": "tpl-1",
+        "name": "Prepare",
+        "assignee_id": "emp-1",
+        "offset_days": 0,
+        "due_date": null,
+        "due_day_of_month": null,
+        "position": 0,
+        "viewer_ids": [
+          "emp-2"
+        ],
+        "editor_ids": [],
+        "updated_at": "now()"
+      },
+      {
+        "id": "tpl-1-stage-2",
+        "template_id": "tpl-1",
+        "name": "Review",
+        "assignee_id": "emp-2",
+        "offset_days": 3,
+        "due_date": "2026-03-31",
+        "due_day_of_month": 31,
+        "position": 1,
+        "viewer_ids": [],
+        "editor_ids": [
+          "emp-1"
+        ],
+        "updated_at": "now()"
+      },
+      {
+        "id": "tpl-2-stage-1",
+        "template_id": "tpl-2",
+        "name": "Kick off",
+        "assignee_id": "emp-2",
+        "offset_days": 0,
+        "due_date": null,
+        "due_day_of_month": null,
+        "position": 0,
+        "viewer_ids": [],
+        "editor_ids": [],
+        "updated_at": "now()"
+      }
+    ],
+    "checklist_template_items": [
+      {
+        "id": "tpl-1-item-1",
+        "template_id": "tpl-1",
+        "label": "Reconcile \"main\" account",
+        "sort_order": 0,
+        "due_date": null,
+        "due_day_of_month": 5,
+        "assignee_id": "emp-1",
+        "stage_id": "tpl-1-stage-1",
+        "sub_items": "[{\"id\":\"tpl-1-sub-1\",\"title\":\"Download statement\"}]",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "tpl-1-item-2",
+        "template_id": "tpl-1",
+        "label": "Categorize",
+        "sort_order": 1,
+        "due_date": "2026-03-10",
+        "due_day_of_month": null,
+        "assignee_id": null,
+        "stage_id": "tpl-1-stage-1",
+        "sub_items": "[]",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "tpl-1-item-3",
+        "template_id": "tpl-1",
+        "label": "Sign off",
+        "sort_order": 0,
+        "due_date": null,
+        "due_day_of_month": null,
+        "assignee_id": null,
+        "stage_id": "tpl-1-stage-2",
+        "sub_items": "[]",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "tpl-2-item-1",
+        "template_id": "tpl-2",
+        "label": "Welcome call",
+        "sort_order": 0,
+        "due_date": null,
+        "due_day_of_month": null,
+        "assignee_id": null,
+        "stage_id": "tpl-2-stage-1",
+        "sub_items": "[]",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      }
+    ],
+    "checklists": [
+      {
+        "id": "cl-1",
+        "title": "February close",
+        "client_id": "c1",
+        "assignee_id": "emp-1",
+        "template_id": "tpl-1",
+        "frequency": "monthly",
+        "due_date": "2026-02-28",
+        "viewer_ids": [
+          "emp-2"
+        ],
+        "editor_ids": [],
+        "case_id": "cl-1",
+        "stage_id": "tpl-1-stage-1",
+        "stage_index": 0,
+        "stage_count": 2,
+        "category_id": "cat-1",
+        "deleted_at": null,
+        "deletion_requested_by": null,
+        "deletion_requested_at": null,
+        "onboarding_for_client_id": null,
+        "created_by": null,
+        "skipped_at": null,
+        "skipped_by": null,
+        "cycle_due_date": "2026-02-28",
+        "pushed_at": "2026-02-27T10:00:00.000Z",
+        "pushed_by": "emp-1",
+        "pushed_from_checklist_id": "cl-origin",
+        "pushed_to_checklist_id": "cl-next",
+        "period_label": "February 2026",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "cl-2",
+        "title": "February close (review)",
+        "client_id": "c1",
+        "assignee_id": "emp-2",
+        "template_id": "tpl-1",
+        "frequency": "monthly",
+        "due_date": "2026-03-03",
+        "viewer_ids": [],
+        "editor_ids": [],
+        "case_id": "cl-2",
+        "stage_id": "tpl-1-stage-2",
+        "stage_index": 1,
+        "stage_count": 2,
+        "category_id": null,
+        "deleted_at": null,
+        "deletion_requested_by": null,
+        "deletion_requested_at": null,
+        "onboarding_for_client_id": null,
+        "created_by": null,
+        "skipped_at": null,
+        "skipped_by": null,
+        "cycle_due_date": null,
+        "pushed_at": null,
+        "pushed_by": null,
+        "pushed_from_checklist_id": null,
+        "pushed_to_checklist_id": null,
+        "period_label": null,
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "cl-3",
+        "title": "One-off cleanup",
+        "client_id": "c2",
+        "assignee_id": "emp-1",
+        "template_id": null,
+        "frequency": null,
+        "due_date": "2026-04-01",
+        "viewer_ids": [],
+        "editor_ids": [],
+        "case_id": "case-77",
+        "stage_id": null,
+        "stage_index": 0,
+        "stage_count": 1,
+        "category_id": null,
+        "deleted_at": null,
+        "deletion_requested_by": null,
+        "deletion_requested_at": null,
+        "onboarding_for_client_id": "c2",
+        "created_by": "emp-2",
+        "skipped_at": "2026-02-14T10:00:00.000Z",
+        "skipped_by": "emp-1",
+        "cycle_due_date": null,
+        "pushed_at": null,
+        "pushed_by": null,
+        "pushed_from_checklist_id": null,
+        "pushed_to_checklist_id": null,
+        "period_label": null,
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "cl-dup-instance",
+        "title": "February close (duplicate)",
+        "client_id": "c1",
+        "assignee_id": "emp-1",
+        "template_id": "tpl-1",
+        "frequency": "monthly",
+        "due_date": "2026-02-28",
+        "viewer_ids": [],
+        "editor_ids": [],
+        "case_id": "cl-dup-instance",
+        "stage_id": null,
+        "stage_index": 0,
+        "stage_count": 2,
+        "category_id": null,
+        "deleted_at": null,
+        "deletion_requested_by": null,
+        "deletion_requested_at": null,
+        "onboarding_for_client_id": null,
+        "created_by": null,
+        "skipped_at": null,
+        "skipped_by": null,
+        "cycle_due_date": null,
+        "pushed_at": null,
+        "pushed_by": null,
+        "pushed_from_checklist_id": null,
+        "pushed_to_checklist_id": null,
+        "period_label": null,
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "cl-4",
+        "title": "Deleted close",
+        "client_id": "c1",
+        "assignee_id": "emp-1",
+        "template_id": "tpl-2",
+        "frequency": null,
+        "due_date": "2026-01-31",
+        "viewer_ids": [],
+        "editor_ids": [],
+        "case_id": "cl-4",
+        "stage_id": null,
+        "stage_index": 0,
+        "stage_count": 1,
+        "category_id": null,
+        "deleted_at": "2026-02-02T08:00:00.000Z",
+        "deletion_requested_by": "emp-1",
+        "deletion_requested_at": "2026-02-01T08:00:00.000Z",
+        "onboarding_for_client_id": null,
+        "created_by": null,
+        "skipped_at": null,
+        "skipped_by": null,
+        "cycle_due_date": null,
+        "pushed_at": null,
+        "pushed_by": null,
+        "pushed_from_checklist_id": null,
+        "pushed_to_checklist_id": null,
+        "period_label": null,
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "cl-1",
+        "title": "Same id as cl-1",
+        "client_id": "c1",
+        "assignee_id": "emp-1",
+        "template_id": null,
+        "frequency": null,
+        "due_date": "2026-02-28",
+        "viewer_ids": [],
+        "editor_ids": [],
+        "case_id": "cl-1",
+        "stage_id": null,
+        "stage_index": 0,
+        "stage_count": 1,
+        "category_id": null,
+        "deleted_at": null,
+        "deletion_requested_by": null,
+        "deletion_requested_at": null,
+        "onboarding_for_client_id": null,
+        "created_by": null,
+        "skipped_at": null,
+        "skipped_by": null,
+        "cycle_due_date": "2026-02-28",
+        "pushed_at": "2026-02-27T10:00:00.000Z",
+        "pushed_by": "emp-1",
+        "pushed_from_checklist_id": "cl-origin",
+        "pushed_to_checklist_id": "cl-next",
+        "period_label": null,
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      }
+    ],
+    "checklist_items": [
+      {
+        "id": "item-1",
+        "checklist_id": "cl-1",
+        "label": "Reconcile",
+        "done": true,
+        "sort_order": 0,
+        "due_date": "2026-02-20",
+        "due_day_of_month": 20,
+        "assignee_id": "emp-1",
+        "waiting_on": null,
+        "waiting": false,
+        "waiting_for_checklist_id": null,
+        "waiting_ons": "[]",
+        "sub_items": "[{\"id\":\"sub-1\",\"title\":\"Pull statement\",\"done\":true},{\"id\":\"sub-2\",\"title\":\"Tie out\",\"subItems\":[{\"id\":\"subsub-1\",\"title\":\"Cash\",\"done\":true}],\"done\":true}]",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "completed_at": {
+          "$date": "2026-02-20T12:00:00.000Z"
+        },
+        "updated_at": "now()"
+      },
+      {
+        "id": "item-2",
+        "checklist_id": "cl-1",
+        "label": "Send to the client",
+        "done": false,
+        "sort_order": 1,
+        "due_date": null,
+        "due_day_of_month": null,
+        "assignee_id": null,
+        "waiting_on": "Lisa to send them",
+        "waiting": true,
+        "waiting_for_checklist_id": "cl-3",
+        "waiting_ons": "[{\"id\":\"wo-stored\",\"blockerId\":\"emp-1\",\"requestedBy\":\"emp-2\",\"createdAt\":\"2026-02-02T00:00:00.000Z\"}]",
+        "sub_items": "[]",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "completed_at": null,
+        "updated_at": "now()"
+      },
+      {
+        "id": "item-3",
+        "checklist_id": "cl-1",
+        "label": "File",
+        "done": false,
+        "sort_order": 2,
+        "due_date": null,
+        "due_day_of_month": null,
+        "assignee_id": null,
+        "waiting_on": null,
+        "waiting": false,
+        "waiting_for_checklist_id": null,
+        "waiting_ons": "[]",
+        "sub_items": "[]",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "completed_at": null,
+        "updated_at": "now()"
+      },
+      {
+        "id": "item-4",
+        "checklist_id": "cl-2",
+        "label": "Review",
+        "done": false,
+        "sort_order": 0,
+        "due_date": null,
+        "due_day_of_month": null,
+        "assignee_id": null,
+        "waiting_on": null,
+        "waiting": false,
+        "waiting_for_checklist_id": null,
+        "waiting_ons": "[]",
+        "sub_items": "[]",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "completed_at": null,
+        "updated_at": "now()"
+      },
+      {
+        "id": "item-5",
+        "checklist_id": "cl-4",
+        "label": "Gone",
+        "done": true,
+        "sort_order": 0,
+        "due_date": null,
+        "due_day_of_month": null,
+        "assignee_id": null,
+        "waiting_on": null,
+        "waiting": false,
+        "waiting_for_checklist_id": null,
+        "waiting_ons": "[]",
+        "sub_items": "[]",
+        "created_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "completed_at": {
+          "$date": "2026-03-05T16:00:00.000Z"
+        },
+        "updated_at": "now()"
+      }
+    ]
+  }
+}
