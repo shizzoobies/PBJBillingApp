@@ -4,8 +4,8 @@ Written 2026-10-07 morning for Alex's approval at noon. Nothing is built.
 
 ## The ask (Alex, for Brittany)
 
-1. A client can pay every 2, 3, 6 or 12 months and still receive a monthly invoice with
-   everyone else's; a month already paid goes out as a PAID invoice (no pay button) in the
+1. A client can pay quarterly, or on any period Brittany chooses per client, and still
+   receive a monthly invoice with everyone else's; a month already paid goes out as a PAID invoice (no pay button) in the
    same send.
 2. Some clients double-pay by accident; she needs to mark their next month paid, and that
    invoice goes out through the same paid-invoice send.
@@ -79,8 +79,8 @@ subs in v1. **Hourly clients:** no billing period; a manual credit (a deposit) s
 
 ## Billing period (stage 2)
 
-Client fields `billing_cadence_months` (1/2/3/6/12) and `cadence_anchor_month`, subscription
-clients only (added to the client insert in the bulk save - coordinate with the B2 batching
+Client fields `billing_period_months` (any whole number of months, 1 = monthly as today,
+chosen per client - no fixed menu) and `period_anchor_month`, subscription clients only (added to the client insert in the bulk save - coordinate with the B2 batching
 plan, which touches the same insert). The monthly run issues the `prepay` invoice
 (`monthlyRate x N`, naming the months) in the run BEFORE the first covered month; the
 kind-scoped unique index lets it share a month with the monthly invoice. If a covered month's
@@ -103,7 +103,6 @@ A fee change inside a prepaid period bills the difference on the monthly invoice
 1d. Paid at Send + the paid email copy (fixes today's paid re-sends too).
 1e. "Apply as credit" on the Need-a-look row (also unsticks the settling marker).
 2.  Billing period: prepayment invoices + the unpaid-prepayment send guard.
-3.  Optional: move the two annual clients to "every 12 months".
 
 Stage 1 alone solves ask 2 and the paid-send half of ask 1. The manifest is ~100 bytes under
 its cap: trim before each step.
@@ -112,13 +111,14 @@ its cap: trim before each step.
 
 Credit draws automatically and she can remove the line on a draft; prepayment credits are
 derived from the paid invoice; billing periods for subscription clients only; a card
-duplicate's credit defaults to the full amount received (fee included), lowerable; existing
-annual clients untouched until stage 3.
+duplicate's credit defaults to the full amount received (fee included), lowerable. Alex
+(10-07): there are no annual clients to migrate - the two rows on the old `annual` billing
+mode are not treated as such; the old annual mode is left alone and not extended.
 
 ## Questions
 
 - Brittany (posted on the ticket): should the prepayment invoice go out with the run before
-  the first covered month (Q4's with September's)? Should the two annual clients move to
-  "every 12 months"? What should the QuickBooks item be called for prepayments and credits?
+  the first covered month (Q4's with September's)? What should the QuickBooks item be
+  called for prepayments and credits?
 - Alex: sequence stage 1 after the bulk-save batching (B2) or before? Both touch the save
   path; B2 first keeps the client insert change in one place.
