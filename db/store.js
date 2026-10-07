@@ -1369,7 +1369,11 @@ function pickAutopayPatch(patch) {
  * nothing in the workspace payload touches it, and the file backend keeps it in
  * a top-level `accountCredits` array the bulk save carries over untouched.
  */
-const ACCOUNT_CREDIT_SOURCE_KINDS = ['manual', 'overpayment', 'prepayment']
+// No 'prepayment' kind: a prepayment credit is DERIVED from a paid prepay invoice,
+// never stored, and the table's CHECK cannot be changed by `create table if not exists`
+// once production has it. If a later stage needs a stored kind, ALTER then.
+const ACCOUNT_CREDIT_SOURCE_KINDS = ['manual', 'overpayment']
+const ACCOUNT_CREDIT_MAX_CENTS = 100_000_000
 const ACCOUNT_CREDIT_NOTE_MAX = 500
 const ACCOUNT_CREDIT_PERIOD = /^\d{4}-(0[1-9]|1[0-2])$/
 const ACCOUNT_CREDIT_SELECT_COLUMNS = `id, client_id, amount, source_kind, source_ref, for_period,
@@ -1419,7 +1423,14 @@ function mapAccountCreditRow(row) {
   })
 }
 
-/** Throws the sentence for a client that cannot hold a credit. */
+/**
+ * Throws the sentence for a client that cannot hold a credit.
+ *
+ * Open for stage 1b: credits recorded BEFORE a client became a billing sub stay
+ * on the sub's own ledger (nothing moves them to the master), so the sub's
+ * panel, which fetches nothing, does not show them. Decide there whether they
+ * move to the master.
+ */
 function assertClientTakesCredit(client) {
   if (!client) throw new AccountCreditError('That client was not found.')
   const name = client.name || 'That client'
@@ -1435,12 +1446,12 @@ function assertClientTakesCredit(client) {
   }
 }
 
-/** The recorded credit a repeated source names, or a refusal when it is another client's. */
+/** The recorded credit a repeated source names (already a view), or a refusal when it is another client's. */
 function sameSourceCredit(existing, clientId) {
-  if (!existing || existing.clientId !== clientId) {
+  if (existing.clientId !== clientId) {
     throw new AccountCreditError('That payment is already recorded as a credit for a different client.')
   }
-  return accountCreditView(existing)
+  return existing
 }
 
 /**
@@ -7056,7 +7067,7 @@ export class AppDataStore {
           id text primary key,
           client_id text not null,
           amount numeric(12,2) not null check (amount > 0),
-          source_kind text not null check (source_kind in ('manual', 'overpayment', 'prepayment')),
+          source_kind text not null check (source_kind in ('manual', 'overpayment')),
           source_ref text not null,
           for_period text,
           note text not null default '',
@@ -16946,6 +16957,9 @@ export class AppDataStore {
     }
     const cents = accountCreditCents(amount)
     if (!(cents > 0)) throw new AccountCreditError('The amount must be more than $0.00.')
+    if (cents > ACCOUNT_CREDIT_MAX_CENTS) {
+      throw new AccountCreditError('The amount cannot be more than $1,000,000.')
+    }
     const ref = sourceKind === 'manual' ? String(sourceRef || randomUUID()) : String(sourceRef ?? '').trim()
     if (!ref) throw new AccountCreditError('A credit that is not manual has to name where it came from.')
     const period = forPeriod === null || forPeriod === undefined || forPeriod === '' ? null : String(forPeriod)
@@ -16956,6 +16970,17 @@ export class AppDataStore {
     const id = `credit-${randomUUID()}`
 
     if (this.pool) {
+      // A source already recorded is answered with its row BEFORE the client is
+      // looked at: replaying a credit for a client that has since been retired
+      // must still find it, not refuse.
+      const recorded = await this.pool.query(
+        `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits
+          where source_kind = $1 and source_ref = $2`,
+        [sourceKind, ref],
+      )
+      if (recorded.rows.length > 0) {
+        return sameSourceCredit(mapAccountCreditRow(recorded.rows[0]), clientId)
+      }
       const found = await this.pool.query(
         'select id, name, bill_to_client_id, lifecycle_stage from clients where id = $1',
         [clientId],
@@ -16978,24 +17003,25 @@ export class AppDataStore {
         [id, clientId, cents / 100, sourceKind, ref, period, text, createdBy],
       )
       if (inserted.rows.length > 0) return mapAccountCreditRow(inserted.rows[0])
-      const existing = await this.pool.query(
+      // Lost a race with the same source being recorded a moment ago: answer that row.
+      const raced = await this.pool.query(
         `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits
           where source_kind = $1 and source_ref = $2`,
         [sourceKind, ref],
       )
-      return sameSourceCredit(
-        existing.rows[0] ? mapAccountCreditRow(existing.rows[0]) : null,
-        clientId,
-      )
+      if (raced.rows.length === 0) throw new AccountCreditError('That credit could not be recorded. Try again.')
+      return sameSourceCredit(mapAccountCreditRow(raced.rows[0]), clientId)
     }
 
     return mutateLocalData((data) => {
-      assertClientTakesCredit((data.clients ?? []).find((client) => client.id === clientId) ?? null)
       if (!Array.isArray(data.accountCredits)) data.accountCredits = []
       const existing = data.accountCredits.find(
         (row) => row.sourceKind === sourceKind && row.sourceRef === ref,
       )
-      if (existing) return { result: sameSourceCredit(existing, clientId), changed: false }
+      if (existing) {
+        return { result: sameSourceCredit(accountCreditView(existing), clientId), changed: false }
+      }
+      assertClientTakesCredit((data.clients ?? []).find((client) => client.id === clientId) ?? null)
       const row = {
         id,
         clientId,

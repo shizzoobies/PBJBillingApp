@@ -40921,7 +40921,7 @@ describe('credit on account (file backend)', () => {
     await store.addAccountCredit({
       clientId: 'c1',
       amount: 5,
-      sourceKind: 'prepayment',
+      sourceKind: 'manual',
       sourceRef: 'pi_dup_1',
       createdBy: 'u',
     })
@@ -40942,7 +40942,7 @@ describe('credit on account (file backend)', () => {
     ).rejects.toBeInstanceOf(AccountCreditError)
   })
 
-  it.each([[0], [-5], [Number.NaN], ['abc'], [null], [0.004]])('refuses an amount of %j', async (amount) => {
+  it.each([[0], [-5], [Number.NaN], ['abc'], [null], [0.004], [1_000_000.01]])('refuses an amount of %j', async (amount) => {
     await expect(store.addAccountCredit({ clientId: 'c1', amount, createdBy: 'u' })).rejects.toBeInstanceOf(
       AccountCreditError,
     )
@@ -40977,9 +40977,36 @@ describe('credit on account (file backend)', () => {
     )
   })
 
-  it('refuses an unknown source kind, and a non-manual credit with no source ref', async () => {
+  it('a replayed source finds its existing credit even after the client is retired', async () => {
+    const first = await store.addAccountCredit({
+      clientId: 'c1',
+      amount: 80,
+      sourceKind: 'overpayment',
+      sourceRef: 'pi_late_1',
+      createdBy: 'u',
+    })
+    await seedClients([{ id: 'c1', name: 'Acme', lifecycleStage: 'inactive' }])
+    // Retired afterwards: a replay still answers the credit already on file.
+    const again = await store.addAccountCredit({
+      clientId: 'c1',
+      amount: 80,
+      sourceKind: 'overpayment',
+      sourceRef: 'pi_late_1',
+      createdBy: 'u',
+    })
+    expect(again.id).toBe(first.id)
+    // A NEW source for the same retired client is still refused.
+    await expect(
+      store.addAccountCredit({ clientId: 'c1', amount: 5, sourceKind: 'overpayment', sourceRef: 'pi_late_2', createdBy: 'u' }),
+    ).rejects.toThrow(/retired/i)
+  })
+
+  it('refuses an unknown source kind (a prepayment is derived, never stored), and a non-manual credit with no source ref', async () => {
     await expect(
       store.addAccountCredit({ clientId: 'c1', amount: 10, sourceKind: 'gift', sourceRef: 'x', createdBy: 'u' }),
+    ).rejects.toBeInstanceOf(AccountCreditError)
+    await expect(
+      store.addAccountCredit({ clientId: 'c1', amount: 10, sourceKind: 'prepayment', sourceRef: 'x', createdBy: 'u' }),
     ).rejects.toBeInstanceOf(AccountCreditError)
     await expect(
       store.addAccountCredit({ clientId: 'c1', amount: 10, sourceKind: 'overpayment', createdBy: 'u' }),
@@ -41064,7 +41091,7 @@ describe('credit on account (Postgres statements)', () => {
       return { rows: [], rowCount: 0 }
     }
     const pool = { connect: async () => ({ query: answer, release() {} }), query: answer }
-    return { pool, statements, held, matching: (pattern) => statements.filter((s) => pattern.test(s.text)) }
+    return { pool, statements, held, client, matching: (pattern) => statements.filter((s) => pattern.test(s.text)) }
   }
   const pgStore = (fake) => {
     const instance = new AppDataStore()
@@ -41085,9 +41112,8 @@ describe('credit on account (Postgres statements)', () => {
     expect(sql).toMatch(/id text primary key/i)
     expect(sql).toMatch(/client_id text not null/i)
     expect(sql).toMatch(/amount numeric\(12, ?2\) not null check \(amount > 0\)/i)
-    expect(sql).toMatch(
-      /source_kind text not null check \(source_kind in \('manual', ?'overpayment', ?'prepayment'\)\)/i,
-    )
+    expect(sql).toMatch(/source_kind text not null check \(source_kind in \('manual', ?'overpayment'\)\)/i)
+    expect(sql).not.toMatch(/prepayment/i)
     expect(sql).toMatch(/source_ref text not null/i)
     expect(sql).toMatch(/for_period text/i)
     expect(sql).toMatch(/note text not null default ''/i)
@@ -41129,6 +41155,34 @@ describe('credit on account (Postgres statements)', () => {
     })
     expect(replay.id).toBe(first.id)
     expect(fake.held).toHaveLength(1)
+  })
+
+  it('a replayed source finds its existing credit even after the client is retired, without a second view of the row', async () => {
+    const fake = creditPool()
+    const store2 = pgStore(fake)
+    const first = await store2.addAccountCredit({
+      clientId: 'c1',
+      amount: 60,
+      sourceKind: 'overpayment',
+      sourceRef: 'pi_late_1',
+      createdBy: 'u',
+    })
+    fake.client.lifecycle_stage = 'inactive'
+    const clientReadsBefore = fake.matching(/from clients where id/i).length
+    const again = await store2.addAccountCredit({
+      clientId: 'c1',
+      amount: 60,
+      sourceKind: 'overpayment',
+      sourceRef: 'pi_late_1',
+      createdBy: 'u',
+    })
+    expect(again).toEqual(first)
+    // The replay found the row first: no client read, no insert.
+    expect(fake.matching(/from clients where id/i)).toHaveLength(clientReadsBefore)
+    expect(fake.matching(/^insert into account_credits/i)).toHaveLength(1)
+    await expect(
+      store2.addAccountCredit({ clientId: 'c1', amount: 5, sourceKind: 'overpayment', sourceRef: 'pi_late_2', createdBy: 'u' }),
+    ).rejects.toThrow(/retired/i)
   })
 
   it('lists, sums and voids', async () => {

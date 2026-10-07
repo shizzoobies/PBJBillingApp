@@ -602,6 +602,8 @@ export function ClientDetailPage() {
             <AccountCreditPanel
               clientId={client.id}
               billedOnMaster={Boolean(client.billToClientId)}
+              retired={isInactiveClient(client)}
+              clientName={client.name}
               masterName={
                 data.clients.find((entry) => entry.id === client.billToClientId)?.name ?? null
               }

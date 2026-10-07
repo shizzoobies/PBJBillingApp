@@ -2364,7 +2364,7 @@ export class ApiError extends Error {
  * credit. A void credit stays in the ledger with `voidedAt` set and nothing
  * remaining.
  */
-export type AccountCreditSourceKind = 'manual' | 'overpayment' | 'prepayment'
+export type AccountCreditSourceKind = 'manual' | 'overpayment'
 
 export type AccountCredit = {
   id: string

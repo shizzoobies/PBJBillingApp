@@ -79,6 +79,8 @@ describe('POST /api/clients/:id/credits', () => {
     expect(serverSource).toContain('const MAX_CREDIT_NOTE = 500')
     expect(serverSource).toContain('const CREDIT_PERIOD = /^\\d{4}-(0[1-9]|1[0-2])$/')
     expect(text).toMatch(/amount > MAX_CREDIT_AMOUNT/)
+    // An amount under half a cent rounds to $0.00 and is refused up front.
+    expect(text).toContain('Math.round(amount * 100) < 1')
     expect(text).toMatch(/note\.length > MAX_CREDIT_NOTE/)
     expect(text).toContain('CREDIT_PERIOD.test(')
     expect(addBlock).toContain('sendJson(response, 400')
@@ -107,13 +109,17 @@ describe('POST /api/clients/:id/credits', () => {
 })
 
 describe('POST /api/account-credits/:id/void', () => {
-  it('is owner-only and same-origin', () => {
+  it('is owner-only, same-origin and JSON, like its autopay siblings', () => {
     const owner = voidBlock.indexOf("session.user.role !== 'owner'")
     const origin = voidBlock.indexOf('isCrossSiteOrigin(request)')
     expect(owner).toBeGreaterThan(-1)
     expect(owner).toBeLessThan(origin)
     expect(voidBlock.indexOf('voidAccountCredit')).toBeGreaterThan(origin)
     expect(voidBlock).toContain('sendJson(response, 403')
+    const type = voidBlock.indexOf('application/json')
+    expect(type).toBeGreaterThan(origin)
+    expect(type).toBeLessThan(voidBlock.indexOf('voidAccountCredit'))
+    expect(voidBlock).toContain('sendJson(response, 415')
   })
 
   it('answers 404 for no such credit and 409 for an already-void one', () => {
@@ -126,6 +132,9 @@ describe('POST /api/account-credits/:id/void', () => {
     const text = squash(voidBlock)
     expect(text).toContain("'account_credit_voided'")
     expect(text).toContain('voided.amount')
+    // The name is read without a write on the file backend (getClientNameById goes through read()).
+    expect(voidBlock).toContain('getClientById')
+    expect(voidBlock).not.toContain('getClientNameById')
   })
 })
 

@@ -29,11 +29,16 @@ export function AccountCreditPanel({
   clientId,
   billedOnMaster = false,
   masterName = null,
+  retired = false,
+  clientName = null,
 }: {
   clientId: string
   /** This client is a billing sub: its credit lives on the master. */
   billedOnMaster?: boolean
   masterName?: string | null
+  /** A retired client takes no new credit; what is on file still shows. */
+  retired?: boolean
+  clientName?: string | null
 }) {
   if (billedOnMaster) {
     return (
@@ -45,10 +50,10 @@ export function AccountCreditPanel({
       </p>
     )
   }
-  return <AccountCreditLedger key={clientId} clientId={clientId} />
+  return <AccountCreditLedger key={clientId} clientId={clientId} retiredName={retired ? clientName || 'That client' : null} />
 }
 
-function AccountCreditLedger({ clientId }: { clientId: string }) {
+function AccountCreditLedger({ clientId, retiredName }: { clientId: string; retiredName: string | null }) {
   const [state, setState] = useState<{ balance: number; credits: AccountCredit[] } | null>(null)
   const [loadFailed, setLoadFailed] = useState(false)
   const [amount, setAmount] = useState('')
@@ -84,7 +89,7 @@ function AccountCreditLedger({ clientId }: { clientId: string }) {
   const validAmount = amount.trim() !== '' && Number.isFinite(value) && value > 0 && value <= MAX_AMOUNT
 
   const add = async () => {
-    if (!validAmount || busy) return
+    if (!validAmount || busy || retiredName) return
     setBusy(true)
     setError(null)
     try {
@@ -167,7 +172,7 @@ function AccountCreditLedger({ clientId }: { clientId: string }) {
             step="0.01"
             value={amount}
             placeholder="0.00"
-            disabled={busy}
+            disabled={busy || Boolean(retiredName)}
             onChange={(event) => setAmount(event.target.value)}
           />
         </label>
@@ -178,7 +183,7 @@ function AccountCreditLedger({ clientId }: { clientId: string }) {
             value={note}
             maxLength={MAX_NOTE}
             placeholder="Why the client has credit"
-            disabled={busy}
+            disabled={busy || Boolean(retiredName)}
             onChange={(event) => setNote(event.target.value)}
           />
         </label>
@@ -188,11 +193,16 @@ function AccountCreditLedger({ clientId }: { clientId: string }) {
             className="input"
             type="month"
             value={forPeriod}
-            disabled={busy}
+            disabled={busy || Boolean(retiredName)}
             onChange={(event) => setForPeriod(event.target.value)}
           />
         </label>
       </div>
+      {retiredName ? (
+        <p className="account-credit-help" data-testid="account-credit-retired-note">
+          {retiredName} is retired, so credit cannot be added to them. Reactivate them first.
+        </p>
+      ) : null}
       {error ? (
         <p className="invoice-run-error" role="alert">
           {error}
@@ -202,7 +212,7 @@ function AccountCreditLedger({ clientId }: { clientId: string }) {
         <button
           type="button"
           className="secondary-action"
-          disabled={busy || !validAmount}
+          disabled={busy || !validAmount || Boolean(retiredName)}
           title={validAmount ? undefined : 'Enter an amount first'}
           onClick={() => void add()}
         >

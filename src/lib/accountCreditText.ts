@@ -14,11 +14,5 @@ export function accountCreditMonth(period: string): string {
 /** Where a credit came from, in the words the ledger shows. */
 export function accountCreditSourceText(credit: AccountCredit): string {
   if (credit.sourceKind === 'overpayment') return 'Overpayment'
-  if (credit.sourceKind === 'prepayment') {
-    // A prepayment names the month it covers: on the row itself, or as the tail
-    // of its source (prepay:<invoice>:<YYYY-MM>).
-    const covered = credit.forPeriod ?? /(\d{4}-\d{2})$/.exec(credit.sourceRef)?.[1] ?? null
-    return covered ? `Prepayment for ${accountCreditMonth(covered)}` : 'Prepayment'
-  }
   return 'Manual credit'
 }

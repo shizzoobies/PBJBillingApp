@@ -60,13 +60,6 @@ describe('the words for where a credit came from', () => {
   it('names each source', () => {
     expect(accountCreditSourceText(credit())).toBe('Manual credit')
     expect(accountCreditSourceText(credit({ sourceKind: 'overpayment' }))).toBe('Overpayment')
-    expect(accountCreditSourceText(credit({ sourceKind: 'prepayment', forPeriod: '2026-12' }))).toBe(
-      'Prepayment for December 2026',
-    )
-    expect(accountCreditSourceText(credit({ sourceKind: 'prepayment', sourceRef: 'prepay:inv-9:2027-01' }))).toBe(
-      'Prepayment for January 2027',
-    )
-    expect(accountCreditSourceText(credit({ sourceKind: 'prepayment' }))).toBe('Prepayment')
   })
 })
 
@@ -207,6 +200,21 @@ describe('<AccountCreditPanel>', () => {
     expect(screen.queryByRole('button', { name: 'Add credit' })).toBeNull()
   })
 
+  it('on a retired client the form is off with the server’s sentence, and the ledger still shows', async () => {
+    serve([credit({ amount: 90, remaining: 90, note: 'Left on account' })])
+    render(<AccountCreditPanel clientId="c1" retired clientName="Old Co" />)
+    await waitFor(() => expect(screen.getByTestId('account-credit-balance')).toHaveTextContent('$90.00'))
+    expect(screen.getByTestId('account-credit-retired-note')).toHaveTextContent(
+      'Old Co is retired, so credit cannot be added to them. Reactivate them first.',
+    )
+    expect(screen.getByLabelText('Amount')).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Amount'), { target: { value: '10' } })
+    expect(screen.getByRole('button', { name: 'Add credit' })).toBeDisabled()
+    expect(screen.getByRole('table')).toHaveTextContent('Left on account')
+    // Voiding what is on file stays possible.
+    expect(screen.getByRole('button', { name: 'Void' })).toBeEnabled()
+  })
+
   it('is hidden for a billing sub: one line pointing at the master, and nothing fetched', () => {
     render(<AccountCreditPanel clientId="sub" billedOnMaster masterName="KLC Holdings" />)
     expect(screen.getByTestId('account-credit-sub-note')).toHaveTextContent(
@@ -250,5 +258,6 @@ describe('where the panel is mounted', () => {
     const props = page.slice(mount, mount + 400)
     expect(props).toContain('billedOnMaster={Boolean(client.billToClientId)}')
     expect(props).toContain('clientId={client.id}')
+    expect(props).toContain('retired={isInactiveClient(client)}')
   })
 })

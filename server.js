@@ -5222,7 +5222,13 @@ const server = createServer(async (request, response) => {
       }
       const creditBody = (await readJsonBody(request)) ?? {}
       const amount = typeof creditBody.amount === 'string' ? Number(creditBody.amount.trim()) : creditBody.amount
-      if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0 || amount > MAX_CREDIT_AMOUNT) {
+      // Under half a cent rounds to $0.00, which is no credit at all.
+      if (
+        typeof amount !== 'number' ||
+        !Number.isFinite(amount) ||
+        Math.round(amount * 100) < 1 ||
+        amount > MAX_CREDIT_AMOUNT
+      ) {
         sendJson(response, 400, {
           error: 'invalid_amount',
           message: 'Enter an amount above $0.00 and no more than $1,000,000.',
@@ -5282,6 +5288,11 @@ const server = createServer(async (request, response) => {
         sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
+      const voidContentType = String(request.headers['content-type'] || '')
+      if (!voidContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
       let voided
       try {
         voided = await appDataStore.voidAccountCredit(decodeURIComponent(voidCreditMatch[1]), session.user.id)
@@ -5296,11 +5307,12 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'Credit not found' })
         return
       }
-      const voidedClientName = await appDataStore.getClientNameById(voided.clientId)
+      // getClientById reads the file without writing it back (the by-name lookup goes through read()).
+      const voidedClient = await appDataStore.getClientById(voided.clientId)
       await appDataStore.recordActivity(
         session.user.id,
         'account_credit_voided',
-        `${voidedClientName ?? voided.clientId} $${voided.amount.toFixed(2)}`,
+        `${voidedClient?.name ?? voided.clientId} $${voided.amount.toFixed(2)}`,
       )
       sendJson(response, 200, voided)
       return
