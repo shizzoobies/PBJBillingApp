@@ -322,6 +322,11 @@ export function accountCreditAvailableCents(
   credit: AccountCreditLedgerEntry | null | undefined,
   ownInvoiceId?: string | null,
 ): number
+export function invoiceCoveredByCredit(invoice: { total?: number; lineItems?: Array<{ kind?: string; amount?: number }> } | null | undefined): boolean
+export const CREDIT_PAYABLE_STATUSES: Set<string>
+export function invoicePaidByCreditAtSend(invoice: { status?: string; total?: number; lineItems?: Array<{ kind?: string; amount?: number }> } | null | undefined): boolean
+export function invoiceAsPaidByCredit<T extends object>(invoice: T, stamp: string): T & { status: 'paid'; paymentMethod: 'credit'; paidAt: string }
+export function creditPaymentWords(invoice: { lineItems?: Array<{ kind?: string; label?: string }> } | null | undefined): string
 export function accountCreditWantedCents(lines: Array<{ kind?: string; amount?: number }> | null | undefined): number
 export function planAccountCreditDraws(args: {
   lines: Array<{ kind?: string; amount?: number }> | null | undefined

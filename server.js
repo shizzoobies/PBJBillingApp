@@ -117,6 +117,8 @@ import {
 import { applyProposalPatch } from './lib/proposal-pricing.js'
 import {
   cardProcessingFeeLine,
+  invoiceAsPaidByCredit,
+  invoicePaidByCreditAtSend,
   isInBillingPeriod,
   PER_EMPLOYEE_BILLING_START,
 } from './lib/invoice-lines.js'
@@ -2294,8 +2296,14 @@ async function assembleInvoicePreview(request, invoiceId) {
   // The same stamp rule as the send: a first send is built as the record will
   // hold it afterwards; an invoice already sent is built exactly as stored.
   const stamp = new Date().toISOString()
-  const asSent = invoiceAsSent(invoice, { client, stamp })
-  const settled = invoice.status === 'paid' || invoice.status === 'processing'
+  // An invoice a credit covers in full is marked PAID by Send, so the preview is
+  // built from it as paid: the owner sees the paid-in-full email the client gets.
+  const coveredByCredit = invoicePaidByCreditAtSend(invoice)
+  const asSent = invoiceAsSent(coveredByCredit ? invoiceAsPaidByCredit(invoice, stamp) : invoice, {
+    client,
+    stamp,
+  })
+  const settled = invoice.status === 'paid' || invoice.status === 'processing' || coveredByCredit
   const autopaySend = await planAutopaySend(invoice, client)
 
   let payLink = 'none'
@@ -6827,7 +6835,9 @@ const server = createServer(async (request, response) => {
       }
 
       const invoiceId = decodeURIComponent(invoiceSendMatch[1])
-      const invoice = (await appDataStore.listInvoices()).find((entry) => entry.id === invoiceId)
+      // `let`: an invoice a credit covers in full is replaced by its PAID row
+      // below, and everything after reads that one.
+      let invoice = (await appDataStore.listInvoices()).find((entry) => entry.id === invoiceId)
       if (!invoice) {
         sendJson(response, 404, { error: 'Invoice not found' })
         return
@@ -6936,7 +6946,62 @@ const server = createServer(async (request, response) => {
       // invoice, or a 'processing' one whose ACH is still the ~4 days it takes to
       // clear, would otherwise invite the client to pay a second time. Those
       // re-sends go out as a statement.
-      const settled = invoice.status === 'paid' || invoice.status === 'processing'
+      //
+      // An invoice that is $0 BECAUSE a credit line covers it is settled too: it
+      // is marked paid just below, and no link is ever minted for it.
+      const coveredByCredit = invoicePaidByCreditAtSend(invoice)
+      const settled = invoice.status === 'paid' || invoice.status === 'processing' || coveredByCredit
+      // THE SEND MOMENT, decided once and used for everything below: the paid
+      // stamp, the email, the PDF and the stored `sent_at` all carry this one
+      // stamp, so the dates the client reads, a later reprint and the record
+      // cannot disagree.
+      const sendStamp = new Date().toISOString()
+      // PAID AT SEND (stage 1d of docs/plans/credit-on-account-and-billing-
+      // period-2026-10.md). The invoice is marked PAID, payment method 'credit',
+      // BEFORE the documents are built, so the email and the PDF are built from
+      // the paid row and say so: "Paid in full - nothing is owed", no pay link. A
+      // $0 invoice with no credit line, and a partly covered one, are not covered
+      // and go out exactly as before. Done after every refusal above (a send that
+      // is refused stamps nothing), before autopay is planned (a paid invoice is
+      // never charged) and before the sessions it would otherwise mint. A re-send
+      // of an invoice already paid by credit skips it (the store is idempotent
+      // either way). The sessions an earlier send left on it are closed, like Mark
+      // paid does.
+      if (coveredByCredit) {
+        let paidByCredit
+        try {
+          paidByCredit = await appDataStore.markInvoicePaidByCredit(invoice.id, {
+            actorUserId: session.user.id,
+            paidAt: sendStamp,
+          })
+        } catch (error) {
+          if (error instanceof ManualPaymentError) {
+            sendJson(response, 409, { error: 'manual_payment_refused', message: error.message })
+            return
+          }
+          console.error('[invoices] send: could not mark the invoice paid by credit:', error)
+          sendJson(response, 500, {
+            error: 'paid_by_credit_failed',
+            message: 'Could not mark that invoice paid by credit, so nothing was sent. Try again.',
+          })
+          return
+        }
+        if (!paidByCredit) {
+          sendJson(response, 404, { error: 'Invoice not found' })
+          return
+        }
+        await expireInvoiceSessions(
+          [invoice.stripeCheckoutSessionId, invoice.stripeCardSessionId],
+          invoice.id,
+          'paid by credit at send',
+        )
+        invoice = paidByCredit
+        await appDataStore.recordActivity(
+          session.user.id,
+          'invoice_paid_by_credit',
+          `${invoice.number ?? invoice.id}`,
+        )
+      }
       // STRIPE AUTOPAY (featreq-bef42b72), decided BEFORE anything is minted or
       // emailed. `autopaySend.plan` is set only for the FIRST ok send of an
       // invoice whose client is enrolled, with the kill switch on: that email
@@ -7112,14 +7177,11 @@ const server = createServer(async (request, response) => {
       // the builder's default. A settings read that fails is not worth failing a
       // send over — buildInvoiceEmail's default is the fallback.
       const firmSettings = await appDataStore.getFirmSettings().catch(() => null)
-      // THE SEND MOMENT, decided once and used for everything below: the email,
-      // the PDF and the stored `sent_at` all carry this one stamp, so the date
-      // the client reads, a later reprint and the record cannot disagree. A
-      // first send is built as the record will hold it afterwards (its `sentAt`
-      // and, for a first send, the due date it is about to store); a resend is
-      // built exactly as stored. Nothing is stamped here - the store does that
-      // only after the provider accepts the email.
-      const sendStamp = new Date().toISOString()
+      // `sendStamp` (above) is the one moment the email, the PDF and the stored
+      // `sent_at` carry. A first send is built as the record will hold it
+      // afterwards (its `sentAt` and, for a first send, the due date it is about
+      // to store); a resend is built exactly as stored. Nothing is stamped here -
+      // the store does that only after the provider accepts the email.
       const sendInvoice = invoiceAsSent(invoice, { client: sendClient, stamp: sendStamp })
       // The email and the PDF, built together by the code the preview route also
       // uses (featreq-459bdfc2 item 3), so what she previewed is what leaves.
@@ -7656,6 +7718,36 @@ const server = createServer(async (request, response) => {
                 'invoice_marked_sent_not_emailed',
                 `${updated.number ?? updated.id}`,
               )
+              // A credit-covered invoice is also PAID (stage 1d): sent first (the
+              // stamp above needs a reviewed invoice), then paid by credit, the
+              // same stamp Send makes. Its own failure sentence: the sent stamp
+              // stands, and Mark reviewed again re-runs both.
+              if (invoicePaidByCreditAtSend(updated)) {
+                try {
+                  const paidRow = await appDataStore.markInvoicePaidByCredit(updated.id, {
+                    actorUserId: session.user.id,
+                  })
+                  if (paidRow) {
+                    updated = { ...updated, ...paidRow }
+                    await appDataStore.recordActivity(
+                      session.user.id,
+                      'invoice_paid_by_credit',
+                      `${updated.number ?? updated.id}`,
+                    )
+                  }
+                } catch (paidError) {
+                  console.error(
+                    '[invoices] marked sent but could not be marked paid by credit:',
+                    paidError,
+                  )
+                  sendJson(response, 500, {
+                    error: 'not_emailed_paid_failed',
+                    message:
+                      'The invoice was marked reviewed and sent, but could not be marked paid by credit on account. Press Mark reviewed again to finish.',
+                  })
+                  return
+                }
+              }
             }
           } catch (error) {
             console.error('[invoices] marked reviewed but could not be marked sent:', error)

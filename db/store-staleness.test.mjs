@@ -34312,11 +34312,23 @@ describe('file backend: a payment write and a bulk save cannot undo each other',
   // queue-wrapped read followed by a queue-wrapped write is exactly the shape
   // that lets a save land in between - and it behaves identically when nothing
   // happens to race.
-  it.each(['applyInvoicePayment', 'recordInvoiceSent', 'swapInvoiceCheckoutSession', 'markInvoicePaidManually'])(
+  it.each([
+    'applyInvoicePayment',
+    'recordInvoiceSent',
+    'swapInvoiceCheckoutSession',
+    'markInvoicePaidManually',
+    'markInvoicePaidByCredit',
+  ])(
     '%s runs its file branch in one queue slot',
     async (method) => {
       const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
-      const start = source.indexOf(`  async ${method}(`)
+      // Both marks are thin wrappers over ONE writer, which holds the slot.
+      const writer = method.startsWith('markInvoicePaid') ? '_markInvoicePaid' : method
+      if (writer !== method) {
+        const wrapper = source.slice(source.indexOf(`  async ${method}(`))
+        expect(wrapper.slice(0, wrapper.indexOf('\n  async ', 10))).toContain('this._markInvoicePaid(')
+      }
+      const start = source.indexOf(`  async ${writer}(`)
       expect(start).toBeGreaterThan(-1)
       const end = source.indexOf('\n  async ', start + 10)
       const body = source.slice(start, end)
@@ -42821,5 +42833,334 @@ describe('generation draws credit on account (Postgres statements)', () => {
 
     expect(fake.matching(/^ROLLBACK$/i).length).toBeGreaterThan(0)
     expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+  })
+})
+
+/**
+ * Credit on account, stage 1d: an invoice that is $0 BECAUSE a credit line covers
+ * it is PAID, method 'credit', at Send (and at a never-email client's Mark
+ * reviewed). Cardinal rule 1: the FILE half runs for real here, the POSTGRES half
+ * (the statement shape, the locked row, the refusals) through the recording pool
+ * just below.
+ */
+describe('markInvoicePaidByCredit (file backend)', () => {
+  const STAMP = '2026-10-31T23:30:00.000Z'
+  const hours = (amount = 600) => ({ kind: 'hourly', label: 'Billable hours', detail: '', amount })
+
+  function invoiceRow(id, overrides = {}) {
+    return {
+      id,
+      clientId: 'c1',
+      period: '2026-10',
+      number: id.toUpperCase(),
+      kind: 'monthly',
+      status: 'reviewed',
+      lineItems: [hours()],
+      subtotal: 600,
+      total: 600,
+      dueDate: null,
+      blurb: '',
+      scopeFlags: [],
+      sentAt: null,
+      paidAt: null,
+      paymentMethod: null,
+      appliedToInvoiceId: null,
+      createdAt: '2026-10-31T00:00:00.000Z',
+      updatedAt: '2026-10-31T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+  const creditLine = (credit, amount) => ({
+    kind: 'account_credit',
+    label: 'Credit on account',
+    detail: '',
+    amount: -amount,
+    draws: [{ creditId: credit.id, amount }],
+  })
+  /** A reviewed invoice the credit covers in full. */
+  const covered = (id, credit, overrides = {}) =>
+    invoiceRow(id, { lineItems: [hours(), creditLine(credit, 600)], total: 0, ...overrides })
+
+  const seedInvoices = async (rows) => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = rows
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const byId = async (id) => (await store.listInvoices()).find((invoice) => invoice.id === id)
+  let credit
+
+  beforeEach(async () => {
+    await clearInvoiceIntelligence()
+    credit = await store.addAccountCredit({ clientId: 'c1', amount: 600, createdBy: 'u' })
+  })
+
+  it('marks a covered invoice paid: status, method credit, paidAt = the send moment, an audit event', async () => {
+    await seedInvoices([covered('inv-a', credit)])
+
+    const paid = await store.markInvoicePaidByCredit('inv-a', { actorUserId: 'owner-1', paidAt: STAMP })
+
+    expect(paid).toMatchObject({ status: 'paid', paymentMethod: 'credit', paidAt: STAMP, total: 0 })
+    expect(await byId('inv-a')).toMatchObject({ status: 'paid', paymentMethod: 'credit', paidAt: STAMP })
+    const events = await store.listInvoiceReviewEvents({ invoiceId: 'inv-a' })
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ event: 'marked_paid_by_credit', actorUserId: 'owner-1' })
+    expect(events[0].changes).toEqual({ status: { before: 'reviewed', after: 'paid' } })
+  })
+
+  it('stamps now when no moment is given, and ignores one that is not a date', async () => {
+    await seedInvoices([covered('inv-a', credit), covered('inv-b', credit)])
+    const before = Date.now()
+    const a = await store.markInvoicePaidByCredit('inv-a', {})
+    const b = await store.markInvoicePaidByCredit('inv-b', { paidAt: 'not a date' })
+    for (const paid of [a, b]) {
+      expect(Date.parse(paid.paidAt)).toBeGreaterThanOrEqual(before - 1000)
+    }
+  })
+
+  it.each(['draft', 'reviewed', 'sent', 'overdue'])('pays a covered %s invoice', async (status) => {
+    await seedInvoices([covered('inv-a', credit, { status })])
+    expect((await store.markInvoicePaidByCredit('inv-a', { paidAt: STAMP })).status).toBe('paid')
+  })
+
+  it('refuses a $0 invoice with NO credit line (nothing to bill is not "paid") and writes nothing', async () => {
+    await seedInvoices([
+      invoiceRow('inv-zero', { lineItems: [hours(0)], subtotal: 0, total: 0 }),
+      invoiceRow('inv-empty', { lineItems: [], subtotal: 0, total: 0 }),
+    ])
+    for (const id of ['inv-zero', 'inv-empty']) {
+      await expect(store.markInvoicePaidByCredit(id, { paidAt: STAMP })).rejects.toBeInstanceOf(ManualPaymentError)
+      await expect(store.markInvoicePaidByCredit(id, { paidAt: STAMP })).rejects.toThrow(/covers in full/)
+      expect(await byId(id)).toMatchObject({ status: 'reviewed', paymentMethod: null, paidAt: null })
+    }
+    expect(await store.listInvoiceReviewEvents({})).toHaveLength(0)
+  })
+
+  it('refuses a partly covered invoice: it goes out for the remainder', async () => {
+    await seedInvoices([
+      invoiceRow('inv-part', { lineItems: [hours(), creditLine(credit, 250)], total: 350 }),
+    ])
+    await expect(store.markInvoicePaidByCredit('inv-part', { paidAt: STAMP })).rejects.toThrow(/covers in full/)
+    expect((await byId('inv-part')).status).toBe('reviewed')
+  })
+
+  it('refuses void and processing with the manual mark\'s sentences, and a payment that was not a credit', async () => {
+    await seedInvoices([
+      covered('inv-void', credit, { status: 'void' }),
+      covered('inv-proc', credit, { status: 'processing' }),
+      covered('inv-card', credit, { status: 'paid', paymentMethod: 'card', paidAt: '2026-10-01T00:00:00.000Z' }),
+    ])
+    await expect(store.markInvoicePaidByCredit('inv-void', {})).rejects.toThrow(/voided/)
+    await expect(store.markInvoicePaidByCredit('inv-proc', {})).rejects.toThrow(/going through/)
+    await expect(store.markInvoicePaidByCredit('inv-card', {})).rejects.toThrow(/already paid/)
+    expect((await byId('inv-card')).paymentMethod).toBe('card')
+  })
+
+  it('is idempotent: a second call answers the paid invoice unchanged, with no second audit event', async () => {
+    await seedInvoices([covered('inv-a', credit)])
+    const first = await store.markInvoicePaidByCredit('inv-a', { paidAt: STAMP })
+    const second = await store.markInvoicePaidByCredit('inv-a', { paidAt: '2026-11-05T00:00:00.000Z' })
+
+    expect(second.paidAt).toBe(first.paidAt)
+    expect(second.status).toBe('paid')
+    expect(await store.listInvoiceReviewEvents({ invoiceId: 'inv-a' })).toHaveLength(1)
+  })
+
+  it('answers null for an invoice that is not there', async () => {
+    expect(await store.markInvoicePaidByCredit('inv-nope', {})).toBeNull()
+  })
+
+  it('engages the paid lock, and cannot be un-marked: the way back is Void, which returns the credit', async () => {
+    await seedInvoices([covered('inv-a', credit, { status: 'sent', sentAt: '2026-10-31T12:00:00.000Z' })])
+    await store.markInvoicePaidByCredit('inv-a', { paidAt: STAMP })
+    expect(await store.accountCreditBalance('c1')).toBe(0)
+
+    await expect(store.updateInvoice('inv-a', { blurb: 'rewritten' })).rejects.toBeInstanceOf(InvoiceLockedError)
+    await expect(store.unmarkManualInvoicePayment('inv-a', {})).rejects.toBeInstanceOf(ManualPaymentError)
+    await expect(store.unmarkManualInvoicePayment('inv-a', {})).rejects.toThrow(
+      /paid by credit on account.*Void it to return the credit/,
+    )
+    expect(await byId('inv-a')).toMatchObject({ status: 'paid', paymentMethod: 'credit' })
+
+    await store.updateInvoice('inv-a', { status: 'void' })
+    expect((await byId('inv-a')).status).toBe('void')
+    expect(await store.accountCreditBalance('c1')).toBe(600)
+  })
+
+  it('a hand-marked payment can still be un-marked (the refusal is only for credit)', async () => {
+    await seedInvoices([invoiceRow('inv-m', { status: 'sent', sentAt: '2026-10-31T12:00:00.000Z' })])
+    await store.markInvoicePaidManually('inv-m', {})
+    expect((await store.unmarkManualInvoicePayment('inv-m', {})).status).toBe('sent')
+  })
+
+  it('a late Stripe payment for a credit-paid invoice is a second payment: flagged, not applied', async () => {
+    await seedInvoices([covered('inv-a', credit)])
+    await store.markInvoicePaidByCredit('inv-a', { paidAt: STAMP })
+
+    const late = await store.applyInvoicePayment('inv-a', {
+      status: 'paid',
+      paidAt: '2026-11-02T00:00:00.000Z',
+      paymentIntentId: 'pi_old_link',
+      paymentMethod: 'us_bank_account',
+    })
+
+    expect(late.duplicatePayment).toBe(true)
+    expect(late.statusChanged).toBe(false)
+    const stored = await byId('inv-a')
+    expect(stored).toMatchObject({ status: 'paid', paymentMethod: 'credit', paidAt: STAMP })
+    expect(stored.stripePaymentIntentId ?? null).toBeNull()
+  })
+
+  it('the send that follows keeps it paid and records the email; the first send date is kept', async () => {
+    await seedInvoices([covered('inv-a', credit)])
+    await store.markInvoicePaidByCredit('inv-a', { paidAt: STAMP })
+
+    const sent = await store.recordInvoiceSent('inv-a', { to: ['a@b.co'], subject: 'Invoice', stamp: STAMP })
+
+    expect(sent.status).toBe('paid')
+    expect(sent.paymentMethod).toBe('credit')
+    expect(sent.sentAt).toBe(STAMP)
+    expect(sent.emailLog).toHaveLength(1)
+    expect(sent.emailLog[0]).toMatchObject({ ok: true, total: 0 })
+  })
+
+  it('a never-email client: the sent stamp first, then paid, with the not-emailed entry intact', async () => {
+    await seedInvoices([covered('inv-a', credit)])
+
+    await store.recordInvoiceSent('inv-a', { notEmailed: true, subject: 'Marked sent - delivered outside the app' })
+    const paid = await store.markInvoicePaidByCredit('inv-a', { actorUserId: 'owner-1' })
+
+    expect(paid).toMatchObject({ status: 'paid', paymentMethod: 'credit' })
+    expect(paid.sentAt).toBeTruthy()
+    expect(paid.emailLog).toHaveLength(1)
+    expect(paid.emailLog[0].kind).toBe('not-emailed')
+    // The order matters: paid first would make the sent stamp refuse (it needs a reviewed invoice).
+    await seedInvoices([covered('inv-b', credit)])
+    await store.markInvoicePaidByCredit('inv-b', {})
+    expect(await store.recordInvoiceSent('inv-b', { notEmailed: true })).toBeNull()
+  })
+})
+
+describe('markInvoicePaidByCredit (postgres branch)', () => {
+  const creditLine = { kind: 'account_credit', label: 'Credit on account', detail: '', amount: -100, draws: [{ creditId: 'cr-1', amount: 100 }] }
+  const coveredRow = {
+    ...existingInvoice,
+    id: 'inv-1',
+    status: 'reviewed',
+    sent_at: null,
+    paid_at: null,
+    payment_method: null,
+    line_items: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 100 }, creditLine],
+    subtotal: '100.00',
+    total: '0.00',
+  }
+  const LOCKED = /^select[\s\S]*from invoices where id = \$1 for update$/i
+  const control = (fake) =>
+    fake.statements.map((s) => s.text).filter((t) => /^(begin|commit|rollback)$/i.test(t))
+
+  it('begin, the locked select, an UPDATE that sets method credit and the send moment, the audit event, commit', async () => {
+    const fake = fakePostgres({ invoices: [{ ...coveredRow }] })
+
+    await postgresStore(fake).markInvoicePaidByCredit('inv-1', {
+      actorUserId: 'owner-1',
+      paidAt: '2026-10-31T23:30:00.000Z',
+    })
+
+    const all = fake.statements.map((s) => s.text)
+    const beginAt = fake.indexOf(/^begin$/i)
+    expect(LOCKED.test(all[beginAt + 1])).toBe(true)
+    expect(/^update invoices\s+set status = 'paid', payment_method = \$3, paid_at = \$2/i.test(all[beginAt + 2])).toBe(true)
+    expect(fake.statements[beginAt + 2].params).toEqual(['inv-1', '2026-10-31T23:30:00.000Z', 'credit'])
+    expect(/^insert into invoice_review_events/i.test(all[beginAt + 3])).toBe(true)
+    expect(all[beginAt + 4]).toBe('commit')
+    const event = fake.matching(/^insert into invoice_review_events/i)[0]
+    expect(event.params).toContain('marked_paid_by_credit')
+    expect(JSON.parse(event.params[6])).toEqual({ status: { before: 'reviewed', after: 'paid' } })
+  })
+
+  it('the manual mark still writes method manual through the same statement', async () => {
+    const fake = fakePostgres({ invoices: [{ ...coveredRow, status: 'sent' }] })
+    await postgresStore(fake).markInvoicePaidManually('inv-1', { actorUserId: 'owner-1' })
+    const [update] = fake.matching(/^update invoices/i)
+    expect(update.params[2]).toBe('manual')
+    expect(fake.matching(/^insert into invoice_review_events/i)[0].params).toContain('marked_paid_manually')
+  })
+
+  it('refuses a row no credit covers, before any write', async () => {
+    const plain = { ...coveredRow, line_items: [coveredRow.line_items[0]], total: '0.00' }
+    const fake = fakePostgres({ invoices: [plain] })
+
+    await expect(postgresStore(fake).markInvoicePaidByCredit('inv-1', {})).rejects.toBeInstanceOf(ManualPaymentError)
+
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+    expect(fake.matching(/^insert into invoice_review_events/i)).toHaveLength(0)
+  })
+
+  it('decides on the LOCKED row: one that became partly covered while the lock waited is refused', async () => {
+    const fake = fakePostgres({ invoices: [{ ...coveredRow }] })
+    const client = await fake.pool.connect()
+    client.release = vi.fn()
+    const inner = client.query.bind(client)
+    client.query = async (text, params) => {
+      const result = await inner(text, params)
+      return LOCKED.test(String(text).trim())
+        ? { rows: result.rows.map((row) => ({ ...row, total: '40.00' })), rowCount: 1 }
+        : result
+    }
+
+    await expect(postgresStore(fake).markInvoicePaidByCredit('inv-1', {})).rejects.toBeInstanceOf(ManualPaymentError)
+
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+    expect(control(fake)).toEqual(['begin', 'rollback'])
+    expect(client.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('is idempotent on the locked row: already paid by credit rolls back and answers the row, no UPDATE, no event', async () => {
+    const already = { ...coveredRow, status: 'paid', payment_method: 'credit', paid_at: new Date('2026-10-31T23:30:00.000Z') }
+    const fake = fakePostgres({ invoices: [already] })
+    const client = await fake.pool.connect()
+    client.release = vi.fn()
+    const inner = client.query.bind(client)
+    // The pre-lock read still saw 'reviewed'; the lock grants the paid row (a second Send won the race).
+    let reads = 0
+    fake.pool.query = ((original) => async (text, params) => {
+      const result = await original(text, params)
+      if (/from invoices/i.test(String(text)) && !LOCKED.test(String(text).trim()) && reads++ === 0) {
+        return { rows: result.rows.map((row) => ({ ...row, status: 'reviewed', payment_method: null })), rowCount: 1 }
+      }
+      return result
+    })(fake.pool.query.bind(fake.pool))
+    client.query = inner
+
+    const answered = await postgresStore(fake).markInvoicePaidByCredit('inv-1', {})
+
+    expect(answered).toMatchObject({ status: 'paid', paymentMethod: 'credit' })
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+    expect(fake.matching(/^insert into invoice_review_events/i)).toHaveLength(0)
+    expect(client.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('an already-paid-by-credit row seen on the first look answers without opening a transaction', async () => {
+    const already = { ...coveredRow, status: 'paid', payment_method: 'credit' }
+    const fake = fakePostgres({ invoices: [already] })
+
+    const answered = await postgresStore(fake).markInvoicePaidByCredit('inv-1', {})
+
+    expect(answered.status).toBe('paid')
+    expect(fake.matching(/^begin$/i)).toHaveLength(0)
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+  })
+
+  it('a late Stripe payment on a credit-paid row is a second payment: nothing is written', async () => {
+    const already = { ...coveredRow, status: 'paid', payment_method: 'credit', paid_at: new Date('2026-10-31T23:30:00.000Z') }
+    const fake = fakePostgres({ invoices: [already] })
+
+    const late = await postgresStore(fake).applyInvoicePayment('inv-1', {
+      status: 'paid',
+      paymentIntentId: 'pi_old_link',
+      paymentMethod: 'us_bank_account',
+    })
+
+    expect(late.duplicatePayment).toBe(true)
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
   })
 })

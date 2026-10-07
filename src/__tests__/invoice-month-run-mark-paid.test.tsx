@@ -292,4 +292,23 @@ describe('Undo manual payment', () => {
     expect(undoButton()).not.toBeInTheDocument()
     expect(markButton()).not.toBeInTheDocument()
   })
+
+  // Credit on account stage 1d: Send marked a covered invoice paid by credit.
+  // The credit is spent on it, so the way back is Void (which returns the
+  // credit), never an undo; the server refuses it too.
+  it('never appears on an invoice a credit on account paid; Void is still offered', async () => {
+    mockList.mockResolvedValue([
+      makeInvoice({
+        status: 'paid',
+        paymentMethod: 'credit',
+        total: 0,
+        paidAt: '2026-09-01T00:00:00.000Z',
+      }),
+    ])
+    await openEditor(/Paid/)
+    await waitFor(() => expect(screen.getByText(/locked because it has been paid/i)).toBeInTheDocument())
+    expect(undoButton()).not.toBeInTheDocument()
+    expect(markButton()).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Void$/ })).toBeEnabled()
+  })
 })

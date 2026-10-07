@@ -42,8 +42,10 @@ describe('the send route refuses an unanswered covered-date window', () => {
   // guard is added ahead of the Checkout mint — the opt-out refusal
   // (featreq-006f12f6) pushed that mint past 6000. Still well short of
   // `sendInvoiceEmail`, so it stays inside the pre-send half of the route.
-  // Widened again from 8000 for the never-email refusal (Rivercity).
-  const block = () => routeBlock(/This invoice is voided, so it cannot be sent\./, 9000)
+  // Widened again from 8000 for the never-email refusal (Rivercity), and from
+  // 9000 for the paid-at-send stamp (credit on account, stage 1d), which sits
+  // between the refusals and the mint.
+  const block = () => routeBlock(/This invoice is voided, so it cannot be sent\./, 11200)
 
   // The UI disables Send behind review, and review is gated — but this route is
   // reachable directly, and an invoice reviewed BEFORE the question existed
@@ -428,8 +430,9 @@ describe('the invoice responses carry which covered windows can still move', () 
   it('marks the invoice a save, a confirm, a send and a pay link hand back', () => {
     // Widened from 5200 when the sent-invoice session expiry went in ahead of the answer,
     // and again from 6200 for the never-email "reviewed means sent" stamp, and
-    // from 8400 for the credit on account refusal.
-    const patch = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 8800)
+    // from 8400 for the credit on account refusal, and from 8800 for the
+    // never-email invoice's paid-by-credit stamp.
+    const patch = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 10400)
     expect(patch).toContain('invoice: await withCoverageChangeable(updated)')
     const confirm = routeBlock(/const coverageConfirmMatch = normalizedPath\.match\(/, 3400)
     expect(confirm).toContain('invoice: await withCoverageChangeable(confirmed)')

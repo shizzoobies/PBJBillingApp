@@ -103,6 +103,7 @@ import {
   normalizeTimeBreakdownMode,
   planAccountCreditDraws,
   retainerCreditAmount,
+  invoiceCoveredByCredit,
 } from '../lib/invoice-lines.js'
 // THE tag -> flags rule, shared with the panel that stages the decision, so
 // what she saw staged and what lands in `time_entries` cannot differ.
@@ -18261,6 +18262,62 @@ export class AppDataStore {
    * paid by check is the one disaster this feature could cause.
    */
   async markInvoicePaidManually(invoiceId, { actorUserId = null } = {}) {
+    return this._markInvoicePaid(invoiceId, {
+      actorUserId,
+      method: 'manual',
+      event: 'marked_paid_manually',
+    })
+  }
+
+  /**
+   * PAID BY CREDIT AT SEND (stage 1d of docs/plans/credit-on-account-and-
+   * billing-period-2026-10.md): the same transition as a manual mark, with
+   * payment method `credit`, for an invoice that is $0 BECAUSE a credit on
+   * account (or retainer credit) line covers it. The send route calls this
+   * BEFORE it builds the email and the PDF, so the client's copy says "paid";
+   * the never-email Mark reviewed calls it right after its sent stamp.
+   *
+   *   - refused unless the total is zero AND a credit line exists (a genuine
+   *     nothing-to-bill $0 invoice is never called paid), and on void, processing
+   *     and a paid invoice that was NOT paid by credit (the manual mark's
+   *     refusals);
+   *   - IDEMPOTENT: an invoice already paid by credit comes back unchanged, with
+   *     no second audit event, so a re-send or a double click cannot fail;
+   *   - `paidAt` is the send moment the route also stamps the documents with.
+   *
+   * Nothing is added to the QuickBooks export for it: the credit line already IS
+   * the payment (the negative Deferred Revenue line nets the service lines).
+   */
+  async markInvoicePaidByCredit(invoiceId, { actorUserId = null, paidAt = null } = {}) {
+    const paid = await this._markInvoicePaid(invoiceId, {
+      actorUserId,
+      method: 'credit',
+      event: 'marked_paid_by_credit',
+      paidAt,
+      alreadyDone: (invoice) => invoice.status === 'paid' && invoice.paymentMethod === 'credit',
+      refuse: (invoice) => {
+        if (!invoiceCoveredByCredit(invoice)) {
+          throw new ManualPaymentError(
+            'Only an invoice that a credit on account covers in full can be marked paid that way.',
+          )
+        }
+      },
+    })
+    return paid ? normalizeStoredInvoice(paid) : null
+  }
+
+  /** The one writer behind both marks: see `markInvoicePaidManually` for the refusals and the locking. */
+  async _markInvoicePaid(
+    invoiceId,
+    {
+      actorUserId = null,
+      method,
+      event,
+      paidAt: paidAtOption = null,
+      refuse = () => {},
+      alreadyDone = () => false,
+    },
+  ) {
     // The refusals, as a function of the invoice: Postgres runs them again on the
     // row it reads `for update` (below), the file backend on the row it reads.
     const refuseUnlessPayable = (invoice) => {
@@ -18282,16 +18339,21 @@ export class AppDataStore {
     // below refuses again on the row it locks.
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
     if (!current) return null
+    if (alreadyDone(current)) return current
     refuseUnlessPayable(current)
+    refuse(current)
 
-    const paidAt = nowIso()
+    const paidAt =
+      typeof paidAtOption === 'string' && !Number.isNaN(Date.parse(paidAtOption))
+        ? new Date(paidAtOption).toISOString()
+        : nowIso()
     const reviewEvent = {
       id: `invev-${randomUUID().slice(0, 8)}`,
       invoiceId,
       clientId: current.clientId,
       period: current.period,
       actorUserId,
-      event: 'marked_paid_manually',
+      event,
       changes: { status: { before: current.status, after: 'paid' } },
       createdAt: paidAt,
     }
@@ -18317,12 +18379,19 @@ export class AppDataStore {
           return null
         }
         const before = mapInvoiceRow(locked.rows[0])
+        // A second mark that lost the race to the first: the invoice is already
+        // what was asked for.
+        if (alreadyDone(before)) {
+          await dbClient.query('rollback')
+          return before
+        }
         refuseUnlessPayable(before)
+        refuse(before)
         await dbClient.query(
           `update invoices
-              set status = 'paid', payment_method = 'manual', paid_at = $2, updated_at = now()
+              set status = 'paid', payment_method = $3, paid_at = $2, updated_at = now()
             where id = $1`,
-          [invoiceId, paidAt],
+          [invoiceId, paidAt, method],
         )
         // The audit names the status actually replaced, not the one first read.
         await this._insertInvoiceReviewEvent(
@@ -18355,11 +18424,13 @@ export class AppDataStore {
       const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
       if (index === -1) return null
       const before = normalizeStoredInvoice(data.invoices[index])
+      if (alreadyDone(before)) return { next: data.invoices[index], before, unchanged: true }
       refuseUnlessPayable(before)
+      refuse(before)
       const next = {
         ...data.invoices[index],
         status: 'paid',
-        paymentMethod: 'manual',
+        paymentMethod: method,
         paidAt,
         updatedAt: paidAt,
       }
@@ -18368,6 +18439,7 @@ export class AppDataStore {
       return { next, before }
     })
     if (!written) return null
+    if (written.unchanged) return written.next
     // The audit event is its own file (auth-state), so its own queue: written
     // after the slot, and recording the status the slot actually replaced.
     await this._insertInvoiceReviewEvent({
@@ -18459,6 +18531,14 @@ export class AppDataStore {
   async unmarkManualInvoicePayment(invoiceId, { actorUserId = null } = {}) {
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
     if (!current) return null
+    // A credit paid it at Send: the credit is spent on this invoice, so the way
+    // back is Void (which returns the draw), not an undo that would leave the
+    // invoice owed and the credit gone.
+    if (current.status === 'paid' && current.paymentMethod === 'credit') {
+      throw new ManualPaymentError(
+        'This invoice was paid by credit on account, so it cannot be un-marked. Void it to return the credit.',
+      )
+    }
     if (current.status !== 'paid' || current.paymentMethod !== 'manual') {
       throw new ManualPaymentError('Only an invoice marked paid by hand can be un-marked.')
     }
