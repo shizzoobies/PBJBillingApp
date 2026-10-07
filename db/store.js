@@ -90,14 +90,18 @@ import {
   sanitizePeriodLabel,
 } from '../lib/checklist-period-label.js'
 import {
+  ACCOUNT_CREDIT_LABEL,
   MAX_HOURLY_RATE,
   MAX_LINE_HOURS,
   RETAINER_LABEL,
+  accountCreditCents,
+  accountCreditWantedCents,
   invoiceLockMessage,
   invoiceLockRefusal,
   invoiceVoidRefusal,
   normalizeAdhocMode,
   normalizeTimeBreakdownMode,
+  planAccountCreditDraws,
   retainerCreditAmount,
 } from '../lib/invoice-lines.js'
 // THE tag -> flags rule, shared with the panel that stages the decision, so
@@ -1376,20 +1380,31 @@ const ACCOUNT_CREDIT_SOURCE_KINDS = ['manual', 'overpayment']
 const ACCOUNT_CREDIT_MAX_CENTS = 100_000_000
 const ACCOUNT_CREDIT_NOTE_MAX = 500
 const ACCOUNT_CREDIT_PERIOD = /^\d{4}-(0[1-9]|1[0-2])$/
+const ACCOUNT_CREDIT_MAX_DRAWS = 50
+/**
+ * The invoices of a client that carry a credit on account line, void ones left
+ * out: a voided invoice gives its draws back just by not being counted. A jsonb
+ * containment test over one client's invoices (no index needed at this size).
+ */
+const ACCOUNT_CREDIT_DRAWN_SQL = `select id, number, period, status, line_items from invoices
+          where client_id = $1 and status <> 'void'
+            and line_items @> '[{"kind":"account_credit"}]'::jsonb`
+const ACCOUNT_CREDIT_CHANGED_MESSAGE =
+  'The credit on account changed while this was saving, so nothing was changed. Try again.'
 const ACCOUNT_CREDIT_SELECT_COLUMNS = `id, client_id, amount, source_kind, source_ref, for_period,
           note, created_by, created_at, voided_at, voided_by`
 
-/** A dollar amount as whole cents (NaN when it is not a number). Half-cents round up. */
-const accountCreditCents = (value) => Math.round(Number((Number(value) * 100).toPrecision(15)))
-
 /**
- * One credit as the app reads it, on either backend. `draws` is empty and
- * `remaining` is the whole amount until the draw model (stage 1b) fills them:
- * a void credit has nothing left to spend.
+ * One credit as the app reads it, on either backend. `draws` are what non-void
+ * invoices have drawn from it ({ invoiceId, invoiceNumber, period, amount }) and
+ * `remaining` is the amount less those draws, never below zero: a void credit
+ * has nothing left to spend.
  */
-function accountCreditView(row) {
+function accountCreditView(row, draws = []) {
   const amount = Number(row.amount)
   const voidedAt = row.voidedAt ?? null
+  const drawnCents = draws.reduce((sum, draw) => sum + accountCreditCents(draw.amount), 0)
+  const remainingCents = Math.max(0, accountCreditCents(amount) - drawnCents)
   return {
     id: row.id,
     clientId: row.clientId,
@@ -1402,13 +1417,14 @@ function accountCreditView(row) {
     createdAt: row.createdAt ?? null,
     voidedAt,
     voidedBy: row.voidedBy ?? null,
-    draws: [],
-    remaining: voidedAt ? 0 : amount,
+    draws,
+    remaining: voidedAt ? 0 : remainingCents / 100,
   }
 }
 
-function mapAccountCreditRow(row) {
-  return accountCreditView({
+/** A credit row in the app's camelCase shape (either backend's row, before the draws are known). */
+function accountCreditRowOf(row) {
+  return {
     id: row.id,
     clientId: row.client_id,
     amount: row.amount,
@@ -1420,7 +1436,48 @@ function mapAccountCreditRow(row) {
     createdAt: isoOrNull(row.created_at),
     voidedAt: isoOrNull(row.voided_at),
     voidedBy: row.voided_by,
-  })
+  }
+}
+
+function mapAccountCreditRow(row) {
+  return accountCreditView(accountCreditRowOf(row))
+}
+
+/**
+ * A client's credit rows with their draws filled in, from the invoices that
+ * carry credit on account lines. THE DRAWS ARE THE LEDGER: nothing else records
+ * what was spent, so a voided invoice (skipped here) hands its draws back with
+ * nothing to write. `invoices` may include void ones; they are ignored.
+ */
+function accountCreditsWithDraws(credits, invoices) {
+  const byCredit = new Map()
+  for (const invoice of invoices) {
+    if (invoice.status === 'void') continue
+    for (const line of invoice.lineItems ?? []) {
+      if (line?.kind !== 'account_credit' || !Array.isArray(line.draws)) continue
+      for (const draw of line.draws) {
+        const cents = accountCreditCents(draw?.amount)
+        if (typeof draw?.creditId !== 'string' || !(cents > 0)) continue
+        if (!byCredit.has(draw.creditId)) byCredit.set(draw.creditId, [])
+        byCredit.get(draw.creditId).push({
+          invoiceId: invoice.id,
+          invoiceNumber: invoice.number ?? null,
+          period: invoice.period ?? null,
+          amount: cents / 100,
+        })
+      }
+    }
+  }
+  return credits.map((row) => accountCreditView(row, byCredit.get(row.id) ?? []))
+}
+
+/** The sentence for a credit that cannot be voided because invoices draw on it. */
+function accountCreditDrawnMessage(draws) {
+  const list = draws
+    .map((draw) => `${draw.invoiceNumber ?? 'a draft invoice'} ($${draw.amount.toFixed(2)})`)
+    .join(', ')
+  const those = draws.length === 1 ? 'that invoice' : 'those invoices'
+  return `This credit is drawn on ${list}. Remove the credit line from ${those}, or void ${draws.length === 1 ? 'it' : 'them'}, first.`
 }
 
 /**
@@ -1954,6 +2011,11 @@ const INVOICE_LINE_KINDS = new Set([
   // left to recognize.
   'retainer',
   'retainer_credit',
+  // Credit on account drawn on this invoice (stage 1b). Listed for the same
+  // reason as the retainer credit: falling back to 'custom' would turn the
+  // negative line into an ordinary hand-typed one and lose its draws, which are
+  // the ledger.
+  'account_credit',
   // The optional time breakdown. Listed for the same reason as the rest:
   // falling back to 'custom' would turn a $0.00 informational line into an
   // ordinary hand-typed one, and the round trip through the editor would lose
@@ -2706,6 +2768,21 @@ function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly', storedLines = [] }
             : null
         return { ...base, retainerInvoiceId }
       }
+      // A credit on account carries WHICH credits it draws and how much of each.
+      // Those draws are the ledger (a credit's remaining balance is its amount
+      // less the draws on every non-void invoice), so they ride through here
+      // like the retainer's id does, and nothing else does. The server re-sizes
+      // them on every save; this only keeps the well-formed ones.
+      if (kind === 'account_credit') {
+        const draws = (Array.isArray(line?.draws) ? line.draws : [])
+          .map((draw) => ({
+            creditId: typeof draw?.creditId === 'string' ? draw.creditId : '',
+            amount: roundMoney(draw?.amount),
+          }))
+          .filter((draw) => draw.creditId && draw.creditId.length <= 200 && draw.amount > 0)
+          .slice(0, ACCOUNT_CREDIT_MAX_DRAWS)
+        return { ...base, draws }
+      }
 
       // A recurring line with a covered-date window carries the window itself
       // and the expense it belongs to. Dropping these on save would strip an
@@ -2846,7 +2923,7 @@ function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly', storedLines = [] }
  * cheaper because money was collected up front, so the subtotal keeps saying
  * what the month was worth and the total says what is left to pay.
  */
-const SUBTOTAL_EXCLUDED_KINDS = new Set(['adjustment', 'retainer_credit'])
+const SUBTOTAL_EXCLUDED_KINDS = new Set(['adjustment', 'retainer_credit', 'account_credit'])
 
 function recomputeInvoiceMoney(lineItems) {
   return {
@@ -2923,6 +3000,18 @@ function withTotalChanged(invoice, totalChanged, wasSent) {
     enumerable: false,
     configurable: true,
   })
+  return invoice
+}
+
+/**
+ * The sentence that comes back with a saved invoice whose credit on account line
+ * could not be kept. Unlike `withTotalChanged` this one IS meant to reach the page
+ * (the owner has to be told a line she saw is gone), so it is an ordinary field
+ * on the returned object and never stored: the row was written without it.
+ */
+function withAccountCreditNotice(invoice, notice) {
+  if (!invoice || !notice) return invoice
+  invoice.accountCreditNotice = notice
   return invoice
 }
 
@@ -15347,6 +15436,112 @@ export class AppDataStore {
   }
 
   /**
+   * The credit-on-account line on a save (stage 1b), sized here and nowhere else.
+   *
+   * Same job as `_resolveRetainerCredit` for the other credit, with one real
+   * difference: a retainer is one row marked "spent", while an account credit is
+   * spent by the DRAWS on the invoice's own line. So there is no second row to
+   * write; the draws on every non-void invoice are the ledger, and what this
+   * decides is only what THIS invoice's line says.
+   *
+   *   - The amount and draws the caller sent are never believed. A new line (or an
+   *     apply, `fresh`) is drawn from the ledger by `planAccountCreditDraws`: this
+   *     invoice's own month first, then oldest first. A line the invoice already
+   *     carries keeps ITS stored draws and is only shrunk to fit (never more than
+   *     the pre-credit total, never more than any credit has left once the other
+   *     invoices' draws are counted).
+   *   - A line it can no longer honor at all (the credit is gone or void, or used
+   *     up elsewhere) is dropped and said so in `notice`, which the route returns
+   *     with the invoice. A NEW line it cannot honor is refused.
+   *   - The rules that only bite on a new application (draft or reviewed, a
+   *     monthly invoice) are checked then and not on later saves, for the reason
+   *     the retainer's are: the decision was made once.
+   *   - A save that does not touch the lines is not a statement about the credit.
+   *
+   * Mutates the credit line in `next.lineItems` in place. `spends` says the save
+   * writes draws, so the write has to hold the client's credit lock and check the
+   * ledger again under it (Postgres) / inside the queue slot (file).
+   */
+  async _resolveAccountCredit({ id, current, next, patch, fresh = false }) {
+    const none = { spends: false, draws: [], totalCents: 0, notice: null }
+    // A voided invoice holds nothing: its line stays as the record and its draws
+    // go back to the credits just by the invoice not being counted any more.
+    if (next.status === 'void') return none
+    const credits = next.lineItems.filter((line) => line.kind === 'account_credit')
+    if (credits.length === 0) return none
+    if (credits.length > 1) {
+      throw new AccountCreditError('An invoice can carry only one credit on account line.')
+    }
+    const line = credits[0]
+    const stored = current.lineItems.find((entry) => entry.kind === 'account_credit') ?? null
+    if (stored && !fresh && !Array.isArray(patch?.lineItems)) return none
+
+    const isNew = !stored || fresh
+    if (isNew) {
+      if (current.kind !== 'monthly') {
+        throw new AccountCreditError('A credit on account belongs on a monthly invoice.')
+      }
+      if (!RETAINER_CREDITABLE_STATUSES.has(next.status)) {
+        throw new AccountCreditError(
+          'Credit on account can only be applied while the invoice is a draft or reviewed.',
+        )
+      }
+    }
+    const ledger = await this._readAccountCredits(current.clientId)
+    const plan = planAccountCreditDraws({
+      lines: next.lineItems,
+      credits: ledger,
+      invoiceId: id,
+      period: current.period,
+      existing: fresh ? null : stored ? stored.draws : line.draws,
+    })
+    if (plan.totalCents === 0) {
+      if (isNew) {
+        const open = ledger.some((credit) => !credit.voidedAt && credit.remaining > 0)
+        throw new AccountCreditError(
+          accountCreditWantedCents(next.lineItems) === 0
+            ? 'There is nothing on this invoice left to credit.'
+            : !open
+              ? 'This client has no credit on account to apply.'
+              : 'The credit on account named on this invoice is not available.',
+        )
+      }
+      next.lineItems = next.lineItems.filter((entry) => entry.kind !== 'account_credit')
+      return {
+        ...none,
+        notice:
+          'The credit on account on this invoice could not be kept (it was voided or used elsewhere), so it was taken off.',
+      }
+    }
+    Object.assign(line, {
+      label: plan.label,
+      detail: '',
+      amount: -(plan.totalCents / 100),
+      draws: plan.draws,
+    })
+    return { spends: true, draws: plan.draws, totalCents: plan.totalCents, notice: null }
+  }
+
+  /**
+   * The check a spending save makes UNDER the client's credit lock: the ledger as
+   * it is NOW still gives the draws this save is about to write. A different
+   * answer means another save spent or voided a credit between the read that
+   * sized the line and the lock, and this save is refused whole.
+   */
+  _assertAccountCreditHolds({ id, current, next, accountWork, ledger }) {
+    const again = planAccountCreditDraws({
+      lines: next.lineItems,
+      credits: ledger,
+      invoiceId: id,
+      period: current.period,
+      existing: accountWork.draws,
+    })
+    if (again.totalCents !== accountWork.totalCents) {
+      throw new AccountCreditError(ACCOUNT_CREDIT_CHANGED_MESSAGE)
+    }
+  }
+
+  /**
    * Edit one invoice. Only the fields Brittany can change in I2 are accepted:
    * the lines, the blurb, the due date, and the review status.
    *
@@ -15622,6 +15817,15 @@ export class AppDataStore {
     }
 
     const retainerWork = this._resolveRetainerCredit({ id, current, next, patch, all })
+    // After the retainer on purpose: the retainer credit is sized first and the
+    // credit on account takes what that leaves.
+    const accountWork = await this._resolveAccountCredit({
+      id,
+      current,
+      next,
+      patch,
+      fresh: opts.freshAccountCredit === true,
+    })
 
     // A VOIDED invoice un-bills its covered windows — see
     // `_clearCoverageLedgerForPeriod`. Done from the invoice's OWN stored lines
@@ -15638,6 +15842,10 @@ export class AppDataStore {
     // this save changed what they would charge. See `withTotalChanged`.
     const totalChanged = totalsDiffer(current.total, next.total)
     const wasSent = current.status === 'sent'
+    // What the route answers with: the write's own facts, and the sentence when a
+    // credit on account line was dropped (it reaches the page, unlike the facts).
+    const finish = (invoice) =>
+      withAccountCreditNotice(withTotalChanged(invoice, totalChanged, wasSent), accountWork.notice)
 
     // Built BEFORE the write, from the two versions that only exist together
     // here. Null when the save changed nothing at all.
@@ -15669,7 +15877,8 @@ export class AppDataStore {
         coverageToRelease.length === 0 &&
         !reviewEvent &&
         !entryTags &&
-        !voiding
+        !voiding &&
+        !accountWork.spends
       ) {
         // `and status = $8` is the status this save READ. A Stripe webhook can
         // move the invoice to processing/paid between that read and this write;
@@ -15695,16 +15904,29 @@ export class AppDataStore {
           if (await this._invoiceStillExists(this.pool, id)) throw new InvoiceChangedError()
           return null
         }
-        return withTotalChanged(
-          (await this.listInvoices()).find((invoice) => invoice.id === id) ?? null,
-          totalChanged,
-          wasSent,
-        )
+        return finish((await this.listInvoices()).find((invoice) => invoice.id === id) ?? null)
       }
 
       const dbClient = await this.pool.connect()
       try {
         await dbClient.query('BEGIN')
+        // THE CREDIT LOCK, before anything else reads or writes. Two drafts of one
+        // client cannot both spend the same credit: each takes this per-client lock
+        // (held to commit), re-reads the ledger under it and is refused if it no
+        // longer gives the draws this save was sized from. Apply and void take the
+        // same lock. Keyed on the client, so other clients still save in parallel.
+        if (accountWork.spends) {
+          await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [
+            `account_credit:${current.clientId}`,
+          ])
+          this._assertAccountCreditHolds({
+            id,
+            current,
+            next,
+            accountWork,
+            ledger: await this._readAccountCredits(current.clientId, { dbClient }),
+          })
+        }
         // FIRST statement after the BEGIN, so a refused tag rolls back a
         // transaction that has written nothing, and so the rows it checked
         // cannot move before the UPDATE that names them.
@@ -15832,80 +16054,103 @@ export class AppDataStore {
       } finally {
         dbClient.release()
       }
-      return withTotalChanged(
-        (await this.listInvoices()).find((invoice) => invoice.id === id) ?? null,
-        totalChanged,
-        wasSent,
-      )
+      return finish((await this.listInvoices()).find((invoice) => invoice.id === id) ?? null)
     }
 
-    const data = await readJson(localDataPath)
-    if (!Array.isArray(data.invoices)) data.invoices = []
-    const index = data.invoices.findIndex((invoice) => invoice.id === id)
-    if (index === -1) return null
-    // The file backend's `and status = $8`: the row as it is on disk NOW has to
-    // still carry the status this save read, or a payment moved it in between.
-    // Before a single field moves, so nothing is written.
-    if (data.invoices[index].status !== current.status) throw new InvoiceChangedError()
-    // The autopay check again, on the SAME data this save is about to write.
-    if (
-      voiding &&
-      (data.autopayAttempts ?? []).some(
-        (attempt) =>
-          attempt.invoiceId === id && AUTOPAY_ACTIVE_ATTEMPT_STATUSES.has(attempt.status),
-      )
-    ) {
-      throw autopayInFlight()
-    }
-    // Against the SAME data this save is about to write, and before a single
-    // field of it moves — the file backend's version of the in-transaction
-    // check above.
-    if (entryTags) await this._assertEntryTagsWritable(entryTags, current, { data })
-    data.invoices[index] = next
-    // One read-modify-write covers both rows, which is this backend's version of
-    // the transaction above.
-    if (retainerWork.clear) {
-      const held = data.invoices.find((invoice) => invoice.id === retainerWork.clear)
-      if (held && held.appliedToInvoiceId === id) {
-        held.appliedToInvoiceId = null
-        held.updatedAt = nowIso()
+    // The file backend's write, on an already-read workspace. Returns false when
+    // the invoice is gone. A save that SPENDS credit on account runs it inside ONE
+    // data-file queue slot (`mutateLocalData`), so the ledger check and the write
+    // are atomic - the file backend's version of the Postgres credit lock. Every
+    // other save keeps the read, then the write, it always had.
+    const writeLocal = async (data) => {
+      if (!Array.isArray(data.invoices)) data.invoices = []
+      const index = data.invoices.findIndex((invoice) => invoice.id === id)
+      if (index === -1) return false
+      if (accountWork.spends) {
+        this._assertAccountCreditHolds({
+          id,
+          current,
+          next,
+          accountWork,
+          ledger: await this._readAccountCredits(current.clientId, { data }),
+        })
       }
-    }
-    if (retainerWork.apply) {
-      const retainer = data.invoices.find((invoice) => invoice.id === retainerWork.apply)
-      if (!retainer || (retainer.appliedToInvoiceId && retainer.appliedToInvoiceId !== id)) {
-        throw new RetainerCreditError(
-          'That retainer has already been applied to another invoice.',
+      // The file backend's `and status = $8`: the row as it is on disk NOW has to
+      // still carry the status this save read, or a payment moved it in between.
+      // Before a single field moves, so nothing is written.
+      if (data.invoices[index].status !== current.status) throw new InvoiceChangedError()
+      // The autopay check again, on the SAME data this save is about to write.
+      if (
+        voiding &&
+        (data.autopayAttempts ?? []).some(
+          (attempt) =>
+            attempt.invoiceId === id && AUTOPAY_ACTIVE_ATTEMPT_STATUSES.has(attempt.status),
         )
+      ) {
+        throw autopayInFlight()
       }
-      retainer.appliedToInvoiceId = id
-      retainer.updatedAt = nowIso()
-    }
-    // The hours this save re-tagged, inside the SAME read-modify-write — the
-    // file backend's version of the transaction above, and the reason a refused
-    // entry id has to throw before this function reaches here.
-    if (entryTags) {
-      const tagById = new Map()
-      for (const [tag, entryIds] of entryTags) {
-        for (const entryId of entryIds) tagById.set(entryId, tag)
-      }
-      data.timeEntries = (data.timeEntries ?? []).map((entry) => {
-        const tag = tagById.get(entry.id)
-        return tag ? { ...entry, ...entryFlagsForScopeTag(tag) } : entry
-      })
-    }
-    // The windows this void releases, inside the SAME read-modify-write — the
-    // file backend's version of the transaction above.
-    if (coverageToRelease.length > 0) {
-      const releasing = new Set(coverageToRelease)
-      for (const expense of data.recurringReimbursements ?? []) {
-        if (!releasing.has(expense.id)) continue
-        if (expense.coverageHistory && current.period in expense.coverageHistory) {
-          delete expense.coverageHistory[current.period]
+      // Against the SAME data this save is about to write, and before a single
+      // field of it moves — the file backend's version of the in-transaction
+      // check above.
+      if (entryTags) await this._assertEntryTagsWritable(entryTags, current, { data })
+      data.invoices[index] = next
+      // One read-modify-write covers both rows, which is this backend's version of
+      // the transaction above.
+      if (retainerWork.clear) {
+        const held = data.invoices.find((invoice) => invoice.id === retainerWork.clear)
+        if (held && held.appliedToInvoiceId === id) {
+          held.appliedToInvoiceId = null
+          held.updatedAt = nowIso()
         }
       }
+      if (retainerWork.apply) {
+        const retainer = data.invoices.find((invoice) => invoice.id === retainerWork.apply)
+        if (!retainer || (retainer.appliedToInvoiceId && retainer.appliedToInvoiceId !== id)) {
+          throw new RetainerCreditError(
+            'That retainer has already been applied to another invoice.',
+          )
+        }
+        retainer.appliedToInvoiceId = id
+        retainer.updatedAt = nowIso()
+      }
+      // The hours this save re-tagged, inside the SAME read-modify-write — the
+      // file backend's version of the transaction above, and the reason a refused
+      // entry id has to throw before this function reaches here.
+      if (entryTags) {
+        const tagById = new Map()
+        for (const [tag, entryIds] of entryTags) {
+          for (const entryId of entryIds) tagById.set(entryId, tag)
+        }
+        data.timeEntries = (data.timeEntries ?? []).map((entry) => {
+          const tag = tagById.get(entry.id)
+          return tag ? { ...entry, ...entryFlagsForScopeTag(tag) } : entry
+        })
+      }
+      // The windows this void releases, inside the SAME read-modify-write — the
+      // file backend's version of the transaction above.
+      if (coverageToRelease.length > 0) {
+        const releasing = new Set(coverageToRelease)
+        for (const expense of data.recurringReimbursements ?? []) {
+          if (!releasing.has(expense.id)) continue
+          if (expense.coverageHistory && current.period in expense.coverageHistory) {
+            delete expense.coverageHistory[current.period]
+          }
+        }
+      }
+      return true
     }
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    let written
+    if (accountWork.spends) {
+      written = await mutateLocalData(async (data) => {
+        const ok = await writeLocal(data)
+        return { result: ok, changed: ok }
+      })
+    } else {
+      const data = await readJson(localDataPath)
+      written = await writeLocal(data)
+      if (written) await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+    if (!written) return null
     // After the invoice write, not before: an event describing a save that
     // threw would be a record of something that never happened. This backend
     // has no transaction to put them in together, which is the same trade every
@@ -15913,7 +16158,7 @@ export class AppDataStore {
     if (reviewEvent) {
       await this._insertInvoiceReviewEvent(reviewEvent)
     }
-    return withTotalChanged(next, totalChanged, wasSent)
+    return finish(next)
   }
 
   // ---- Proposal questionnaires (featreq-8f139178) ----
@@ -16905,21 +17150,45 @@ export class AppDataStore {
 
   /**
    * A client's credits on account, oldest first, void ones included (flagged by
-   * `voidedAt`). Each carries `draws` and `remaining`: both backends answer
-   * the same shape (`accountCreditView`).
+   * `voidedAt`). Each carries `draws` (what non-void invoices have drawn from it)
+   * and `remaining`: both backends answer the same shape (`accountCreditView`).
    */
   async listAccountCredits(clientId) {
     if (!clientId) return []
+    return this._readAccountCredits(clientId)
+  }
+
+  /**
+   * The credits with their draws, from ONE client's invoices only. Postgres is two
+   * reads (the credits, then the client's non-void invoices that carry a credit
+   * line); `dbClient` runs them on a transaction's own connection and `data` hands
+   * the file backend a workspace it is already holding inside a queue slot.
+   */
+  async _readAccountCredits(clientId, { dbClient = null, data = null } = {}) {
     if (this.pool) {
-      const { rows } = await this.pool.query(
+      const runner = dbClient ?? this.pool
+      const credits = await runner.query(
         `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits
           where client_id = $1 order by created_at, id`,
         [clientId],
       )
-      return rows.map(mapAccountCreditRow)
+      const drawn = await runner.query(ACCOUNT_CREDIT_DRAWN_SQL, [clientId])
+      return accountCreditsWithDraws(
+        credits.rows.map(accountCreditRowOf),
+        drawn.rows.map((row) => ({
+          id: row.id,
+          number: row.number,
+          period: row.period,
+          status: row.status,
+          lineItems: Array.isArray(row.line_items) ? row.line_items : [],
+        })),
+      )
     }
-    const data = await readJson(localDataPath)
-    return (data.accountCredits ?? []).filter((row) => row.clientId === clientId).map(accountCreditView)
+    const workspace = data ?? (await readJson(localDataPath))
+    return accountCreditsWithDraws(
+      (workspace.accountCredits ?? []).filter((row) => row.clientId === clientId),
+      (workspace.invoices ?? []).filter((invoice) => invoice.clientId === clientId),
+    )
   }
 
   /** What a client has left on account: the sum of what remains of every credit that is not void. */
@@ -17043,34 +17312,95 @@ export class AppDataStore {
   /**
    * Void a credit: it stays in the ledger, flagged, and stops counting toward the
    * balance. Null when there is no such credit; AccountCreditError when it is
-   * already void. Stage 1b adds a second refusal here: a credit that an invoice
-   * has drawn from cannot be voided (void the invoice, or remove the line, first).
+   * already void, or when an invoice that is not void has drawn from it (void the
+   * invoice, or remove its credit line, first).
+   *
+   * The draw check runs under the client's credit lock on Postgres (the same one
+   * apply takes) and inside the data-file queue slot on the file backend, so a
+   * void and an apply cannot both succeed against the same credit.
    */
   async voidAccountCredit(id, byUserId = null) {
     if (!id) return null
     if (this.pool) {
-      const updated = await this.pool.query(
-        `update account_credits set voided_at = now(), voided_by = $2
-          where id = $1 and voided_at is null
-          returning ${ACCOUNT_CREDIT_SELECT_COLUMNS}`,
-        [id, byUserId],
-      )
-      if (updated.rows.length > 0) return mapAccountCreditRow(updated.rows[0])
-      const existing = await this.pool.query(
-        `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits where id = $1`,
-        [id],
-      )
-      if (existing.rows.length === 0) return null
-      throw new AccountCreditError('That credit is already void.')
+      return this._withTransaction(async (dbClient) => {
+        const existing = await dbClient.query(
+          `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits where id = $1`,
+          [id],
+        )
+        if (existing.rows.length === 0) return null
+        await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [
+          `account_credit:${existing.rows[0].client_id}`,
+        ])
+        const ledger = await this._readAccountCredits(existing.rows[0].client_id, { dbClient })
+        const credit = ledger.find((entry) => entry.id === id)
+        if (credit?.voidedAt) throw new AccountCreditError('That credit is already void.')
+        if (credit && credit.draws.length > 0) {
+          throw new AccountCreditError(accountCreditDrawnMessage(credit.draws))
+        }
+        const updated = await dbClient.query(
+          `update account_credits set voided_at = now(), voided_by = $2
+            where id = $1 and voided_at is null
+            returning ${ACCOUNT_CREDIT_SELECT_COLUMNS}`,
+          [id, byUserId],
+        )
+        if (updated.rows.length === 0) throw new AccountCreditError('That credit is already void.')
+        return mapAccountCreditRow(updated.rows[0])
+      })
     }
-    return mutateLocalData((data) => {
+    return mutateLocalData(async (data) => {
       const row = (data.accountCredits ?? []).find((entry) => entry.id === id)
       if (!row) return { result: null, changed: false }
       if (row.voidedAt) throw new AccountCreditError('That credit is already void.')
+      const [credit] = await this._readAccountCredits(row.clientId, { data }).then((ledger) =>
+        ledger.filter((entry) => entry.id === id),
+      )
+      if (credit.draws.length > 0) throw new AccountCreditError(accountCreditDrawnMessage(credit.draws))
       row.voidedAt = nowIso()
       row.voidedBy = byUserId
       return { result: accountCreditView(row), changed: true }
     })
+  }
+
+  /**
+   * Draw a client's credit on account onto one invoice, by hand (the owner's
+   * "Apply credit on account"): oldest credit first, the ones meant for the
+   * invoice's own month before that, never more than the invoice's pre-credit
+   * total or the client's balance. Replaces the invoice's credit line when it
+   * already has one. Returns the saved invoice (null when there is none);
+   * AccountCreditError for anything it will not honor.
+   *
+   * It is an ordinary save of the lines (`updateInvoice`), so the lock, the review
+   * record and the Postgres per-client lock that stops two drafts spending the
+   * same credit are the save's own.
+   */
+  async applyAccountCreditToInvoice(id, opts = {}) {
+    const current = (await this.listInvoices()).find((invoice) => invoice.id === id)
+    if (!current) return null
+    const client = await this.getClientById(current.clientId)
+    if (client?.billToClientId) {
+      throw new AccountCreditError(
+        `${client.name || 'That client'} is billed on a master's combined invoice, so credit on account is applied on the master's invoice.`,
+      )
+    }
+    const lines = [
+      ...current.lineItems.filter((line) => line.kind !== 'account_credit'),
+      { kind: 'account_credit', label: ACCOUNT_CREDIT_LABEL, detail: '', amount: 0, draws: [] },
+    ]
+    return this.updateInvoice(id, { lineItems: lines }, { ...opts, freshAccountCredit: true })
+  }
+
+  /** Take the credit-on-account line off an invoice; its draws return to the credits. Null when there is no such invoice. */
+  async removeAccountCreditFromInvoice(id, opts = {}) {
+    const current = (await this.listInvoices()).find((invoice) => invoice.id === id)
+    if (!current) return null
+    if (!current.lineItems.some((line) => line.kind === 'account_credit')) {
+      throw new AccountCreditError('This invoice has no credit on account to remove.')
+    }
+    return this.updateInvoice(
+      id,
+      { lineItems: current.lineItems.filter((line) => line.kind !== 'account_credit') },
+      opts,
+    )
   }
 
   /**

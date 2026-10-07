@@ -451,7 +451,7 @@ function persistedToDisplay(
   periodLabel: string,
 ): DisplayInvoice {
   // `kind` is carried through, not dropped as it was: the client-facing
-  // renderer keeps a `card-fee` and a `retainer_credit` line even in combined
+  // renderer keeps a `card-fee`, a `retainer_credit` and an `account_credit` line even in combined
   // mode — they explain the CHARGE rather than describe the work — and it can
   // only recognize them by kind. Mapping to label/detail/amount alone erased a
   // card fee from the printed sheet while the PDF and the email still showed

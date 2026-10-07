@@ -563,7 +563,8 @@ export type PersistedInvoiceLine = {
   /** `card-fee` is appended by the payment webhook when a client pays by card.
    *  `adhoc` is one entry of out-of-scope time, billed on its own.
    *  `retainer` is the single line of a retainer invoice; `retainer_credit` is
-   *  that money given back on a later invoice, and is always <= 0. */
+   *  that money given back on a later invoice, and is always <= 0.
+   *  `account_credit` is credit on account drawn on this invoice (also <= 0). */
   kind:
     | 'plan'
     | 'hourly'
@@ -575,6 +576,7 @@ export type PersistedInvoiceLine = {
     | 'adhoc'
     | 'retainer'
     | 'retainer_credit'
+    | 'account_credit'
     /** Informational hours detail. $0.00 on every GENERATED one — but the store
      *  does not enforce that, and production has a sent invoice whose whole
      *  total sits on hand-built time_detail rows (INV-2026-08-044). A row with
@@ -665,6 +667,13 @@ export type PersistedInvoiceLine = {
    * having been deleted — to put the money back on account.
    */
   retainerInvoiceId?: string | null
+  /**
+   * `account_credit` lines only: WHICH credits this line draws, and how much of
+   * each. The draws ARE the ledger: a credit's remaining balance is its amount
+   * less the draws on every non-void invoice. The server sizes them on every
+   * apply and save and rewrites whatever it is sent.
+   */
+  draws?: Array<{ creditId: string; amount: number }>
   /**
    * WHICH company's work this line is, on a billing master's merged invoice.
    * Absent/null means the invoice's own client, which is every line on every
@@ -765,6 +774,12 @@ export type PersistedInvoice = {
    * `dirty` does not look at it.
    */
   changedSinceSent?: boolean
+  /**
+   * Said once, on the response to a save, when the invoice's credit on account
+   * line could not be kept (the credit was voided or used elsewhere) and was taken
+   * off. Never stored.
+   */
+  accountCreditNotice?: string
   createdAt: string | null
   updatedAt: string | null
 }
@@ -2359,10 +2374,9 @@ export class ApiError extends Error {
 
 /**
  * One credit on account (featreq-110efd15, stage 1a): money a client has paid
- * ahead or paid twice, held for a future invoice. `draws` and `remaining`
- * are the draw model: empty and the whole amount until invoices can draw on a
- * credit. A void credit stays in the ledger with `voidedAt` set and nothing
- * remaining.
+ * ahead or paid twice, held for a future invoice. `draws` are what non-void
+ * invoices have drawn from it and `remaining` is the amount less those draws.
+ * A void credit stays in the ledger with `voidedAt` set and nothing remaining.
  */
 export type AccountCreditSourceKind = 'manual' | 'overpayment'
 
@@ -2380,8 +2394,16 @@ export type AccountCredit = {
   createdAt: string
   voidedAt: string | null
   voidedBy: string | null
-  draws: { invoiceId: string; amount: number }[]
+  draws: AccountCreditDraw[]
   remaining: number
+}
+
+/** One invoice's draw on a credit: which invoice (and month), and how much. */
+export type AccountCreditDraw = {
+  invoiceId: string
+  invoiceNumber: string | null
+  period: string | null
+  amount: number
 }
 
 /**

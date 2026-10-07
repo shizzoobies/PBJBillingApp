@@ -98,11 +98,35 @@ describe('<AccountCreditPanel>', () => {
     expect(screen.queryByRole('table')).toBeNull()
   })
 
-  it('says plainly that it is a record for now', async () => {
+  it('says where a credit is applied from', async () => {
     serve([])
     render(<AccountCreditPanel clientId="c1" />)
     await waitFor(() => expect(screen.getByTestId('account-credit-balance')).toBeInTheDocument())
-    expect(screen.getByText(/nothing applies it to an invoice yet/i)).toBeInTheDocument()
+    expect(screen.getByText(/press apply credit on account/i)).toBeInTheDocument()
+  })
+
+  it('lists what each credit was drawn on, and what is left', async () => {
+    serve([
+      credit({
+        id: 'credit-drawn',
+        amount: 500,
+        remaining: 150,
+        draws: [
+          { invoiceId: 'inv-1', invoiceNumber: 'INV-2026-10-004', period: '2026-10', amount: 200 },
+          { invoiceId: 'inv-2', invoiceNumber: null, period: '2026-11', amount: 150 },
+        ],
+      }),
+      credit({ id: 'credit-untouched', amount: 80, remaining: 80 }),
+    ])
+    render(<AccountCreditPanel clientId="c1" />)
+    await waitFor(() => expect(screen.getByRole('table')).toBeInTheDocument())
+    expect(screen.getByText('$200.00 on INV-2026-10-004 (October 2026)')).toBeInTheDocument()
+    expect(screen.getByText('$150.00 on a draft invoice (November 2026)')).toBeInTheDocument()
+    const rows = screen.getAllByRole('row')
+    // header, then one row per credit: the drawn one shows $150.00 remaining.
+    expect(within(rows[1]).getByText('$150.00')).toBeInTheDocument()
+    expect(within(rows[2]).getAllByText('—').length).toBeGreaterThan(0)
+    expect(screen.getByTestId('account-credit-balance')).toHaveTextContent('$230.00')
   })
 
   it('adds a credit: amount, reason and the month it is meant for', async () => {

@@ -729,6 +729,37 @@ async function withChangedSinceSent(invoice) {
 }
 
 /**
+ * Answer a REFUSED credit-on-account line change: apply and remove are ordinary
+ * line saves underneath, so they can raise the refusals a save can. Each is a FACT
+ * about the data, not a failure - the owner gets the sentence (409 and a code), not
+ * "please try again". Returns true when it answered; anything else is the caller's
+ * 500. (The invoice PATCH answers the same set inline, below.)
+ */
+function sendCreditLineRefusal(response, error) {
+  // Nothing to apply, not a monthly draft, a credit that changed under the save.
+  if (error instanceof AccountCreditError) {
+    sendJson(response, 409, { error: 'account_credit_refused', message: error.message })
+    return true
+  }
+  // The retainer credit already on the invoice cannot be honored any more.
+  if (error instanceof RetainerCreditError) {
+    sendJson(response, 409, { error: 'retainer_credit_refused', message: error.message })
+    return true
+  }
+  // The invoice was paid, or is being paid, while the tab sat open.
+  if (error instanceof InvoiceLockedError) {
+    sendJson(response, 409, { error: 'invoice_locked', message: error.message })
+    return true
+  }
+  // A payment webhook moved the invoice between this save's read and its write.
+  if (error instanceof InvoiceChangedError) {
+    sendJson(response, 409, { error: 'invoice_changed', message: error.message })
+    return true
+  }
+  return false
+}
+
+/**
  * One invoice, marked for the month run's editor the way the list marks it: a
  * recurring line whose covered dates cannot move (a later month is already
  * billed for that expense) says so. Every response the editor merges back into
@@ -7533,6 +7564,12 @@ const server = createServer(async (request, response) => {
           sendJson(response, 409, { error: 'retainer_credit_refused', message: error.message })
           return
         }
+        // A refused credit on account (nothing to apply, a credit that changed
+        // under the save) is the same kind of fact, with its own code.
+        if (error instanceof AccountCreditError) {
+          sendJson(response, 409, { error: 'account_credit_refused', message: error.message })
+          return
+        }
         // An unanswered "confirm the covered dates" standing in front of review.
         // Same treatment as a refused credit: a sentence, not "try again".
         if (error instanceof CoverageConfirmationError) {
@@ -7654,6 +7691,84 @@ const server = createServer(async (request, response) => {
         )
       }
       sendJson(response, 200, { invoice: await withCoverageChangeable(updated) })
+      return
+    }
+
+    // POST /api/invoices/:id/apply-account-credit and /remove-account-credit —
+    // draw a client's credit on account onto one invoice by hand, or take that
+    // line off again (owner only; stage 1b of docs/plans/credit-on-account-and-
+    // billing-period-2026-10.md).
+    //
+    // Their own endpoints, though both are ordinary line saves underneath: the
+    // server decides WHICH credits and HOW MUCH (the caller names neither), so the
+    // editor cannot ask for more than the ledger holds. Apply is for a draft or
+    // reviewed MONTHLY invoice only, like the retainer credit; the store holds the
+    // per-client lock that keeps two drafts from spending the same credit.
+    const accountCreditLineMatch = normalizedPath.match(
+      /^\/api\/invoices\/([^/]+)\/(apply|remove)-account-credit$/,
+    )
+    if (accountCreditLineMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can change credit on account' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const creditLineContentType = String(request.headers['content-type'] || '')
+      if (!creditLineContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const creditLineInvoiceId = decodeURIComponent(accountCreditLineMatch[1])
+      const applying = accountCreditLineMatch[2] === 'apply'
+      let creditLined
+      try {
+        // The actor comes from the SESSION, for the same reason as the PATCH.
+        creditLined = applying
+          ? await appDataStore.applyAccountCreditToInvoice(creditLineInvoiceId, {
+              actorUserId: session.user.id,
+            })
+          : await appDataStore.removeAccountCreditFromInvoice(creditLineInvoiceId, {
+              actorUserId: session.user.id,
+            })
+      } catch (error) {
+        if (sendCreditLineRefusal(response, error)) return
+        console.error('[invoices] credit on account line failed:', error)
+        sendJson(response, 500, {
+          error: 'account_credit_failed',
+          message: 'Could not change the credit on account - please try again.',
+        })
+        return
+      }
+      if (!creditLined) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      // The line is COMMITTED by now: a failed activity entry must not turn a
+      // saved write into a reported failure.
+      try {
+        await appDataStore.recordActivity(
+          session.user.id,
+          applying ? 'invoice_account_credit_applied' : 'invoice_account_credit_removed',
+          `${creditLined.number ?? creditLined.id}: ${creditLined.total}`,
+        )
+      } catch (error) {
+        console.error('[invoices] credit line saved but its activity entry failed:', error)
+      }
+      // Removing it from a SENT invoice raised the total: close the payment page
+      // that was minted at the old one, as any edit that moves a sent total does.
+      if (creditLined.wasSent && creditLined.totalChanged) {
+        await expireInvoiceSessions(
+          [creditLined.stripeCheckoutSessionId, creditLined.stripeCardSessionId],
+          creditLineInvoiceId,
+          'edit (total changed on a sent invoice)',
+        )
+      }
+      sendJson(response, 200, { invoice: await withCoverageChangeable(creditLined) })
       return
     }
 

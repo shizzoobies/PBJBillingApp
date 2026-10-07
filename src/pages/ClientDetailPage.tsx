@@ -591,7 +591,8 @@ export function ClientDetailPage() {
           </CollapsibleSection>
 
           {/* Money the client has paid ahead or paid twice, held for a future
-              invoice. A record for now: nothing applies it yet. A sub's lives on
+              invoice. The owner draws it onto an invoice from the invoice's editor;
+              the ledger shows what each credit was drawn on. A sub's lives on
               its master, so for a sub this is one line pointing there. */}
           <CollapsibleSection
             id="client-section-account-credit"

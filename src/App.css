@@ -13921,8 +13921,14 @@ details.invoice-run-sent ul,
 }
 
 .account-credit-table td:nth-child(2),
-.account-credit-table td:nth-child(6) {
+.account-credit-table td:nth-child(7) {
   font-variant-numeric: tabular-nums;
+}
+
+.account-credit-draws {
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
 .account-credit-table tr.is-void td {

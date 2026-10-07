@@ -29,15 +29,18 @@ import { flushSync } from 'react-dom'
 import {
   acknowledgeInvoiceAmountMismatchRequest,
   answerInvoiceAiReviewQuestionRequest,
+  applyAccountCreditRequest,
   chargeAutopayAgainRequest,
   checkAutopayAttemptRequest,
   confirmInvoiceCoverageRequest,
   createInvoicePaymentLinkRequest,
   generateInvoicesRequest,
+  listAccountCreditsRequest,
   listInvoiceAiReviewsRequest,
   listInvoicesRequest,
   listUnappliedRetainersRequest,
   markInvoicePaidRequest,
+  removeAccountCreditRequest,
   unmarkInvoicePaidRequest,
   verifyAllInvoicePaymentsRequest,
   verifyInvoicePaymentRequest,
@@ -1421,6 +1424,10 @@ export function InvoiceMonthRun({
       // guess: the server decides, and the offer on the next row has to agree
       // with what it decided.
       setRetainerToken((token) => token + 1)
+      // A credit on account the server could not keep was taken off the saved
+      // invoice. The save remounts the editor, so the sentence goes where it
+      // survives that: the run's banner.
+      if (updated.accountCreditNotice) setError(updated.accountCreditNotice)
       return { ok: true, invoice: updated }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not save that change.'
@@ -2550,6 +2557,9 @@ function InvoiceLineRow({
             busy ||
             (Boolean(onModeChange) && mode !== 'billed') ||
             line.kind === 'retainer_credit' ||
+            // A credit on account is sized by the server from the ledger, so the
+            // box would accept a number and have it replaced on the next save.
+            line.kind === 'account_credit' ||
             // Derived from the hours field beside it — typing here would be
             // overwritten by hours × rate on the next save anyway, so the box
             // says so by not accepting the keystrokes.
@@ -3374,6 +3384,56 @@ function InvoiceEditor({
       : null
 
   /**
+   * CREDIT ON ACCOUNT (stage 1b). Offered beside the retainer credit, never taken
+   * for her: the button appears when the client has a positive balance and the
+   * invoice is a draft or reviewed monthly one with no such line yet. The balance
+   * is read once per editor (a failed read is silent: the button just does not
+   * appear), and pressing the button is the server's act, not the page's: it
+   * picks the credits and the amount, under a per-client lock, and answers with
+   * the saved invoice, which remounts this editor on the new `updatedAt`. That is
+   * why it waits behind unsaved edits (a remount would take them with it).
+   */
+  const accountLine = lines.find((line) => line.kind === 'account_credit') ?? null
+  const accountCreditOffered =
+    invoice.kind === 'monthly' &&
+    RETAINER_CREDITABLE_STATUSES.has(invoice.status) &&
+    !scope.previewMode &&
+    !lockMessage &&
+    !invoice.lineItems.some((line) => line.kind === 'account_credit')
+  const [accountBalance, setAccountBalance] = useState<number | null>(null)
+  const [accountBusy, setAccountBusy] = useState(false)
+  useEffect(() => {
+    if (!accountCreditOffered) return
+    let cancelled = false
+    const load = async () => {
+      try {
+        const { balance } = await listAccountCreditsRequest(invoice.clientId)
+        if (!cancelled) setAccountBalance(balance)
+      } catch {
+        /* the Apply credit on account button simply does not appear */
+      }
+    }
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [accountCreditOffered, invoice.clientId])
+  const changeAccountCredit = async (
+    request: (invoiceId: string) => Promise<PersistedInvoice>,
+    failure: string,
+  ) => {
+    setRetainerError(null)
+    setAccountBusy(true)
+    try {
+      onInvoiceChanged(await request(invoice.id))
+    } catch (error) {
+      sayRefusal(error instanceof Error ? error.message : failure)
+    } finally {
+      if (mountedRef.current) setAccountBusy(false)
+    }
+  }
+
+  /**
    * THE HOURS BLOCK: the invoice's hourly lines under the three role headings
    * the client's copy prints them under, with a row she can fill under each.
    *
@@ -3898,8 +3958,53 @@ function InvoiceEditor({
                 : `Apply retainer credit (${currency.format(Math.abs(offeredCredit.amount))})`}
             </button>
           ) : null}
+          {accountCreditOffered && accountBalance !== null && accountBalance > 0 ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={savingDates || accountBusy || dirty || localTotal <= 0}
+              title={
+                dirty
+                  ? 'Save your changes first, then apply the credit'
+                  : localTotal <= 0
+                    ? 'There is nothing on this invoice left to credit'
+                    : `${currency.format(accountBalance)} on account for this client`
+              }
+              onClick={() =>
+                void changeAccountCredit(applyAccountCreditRequest, 'Could not apply the credit.')
+              }
+            >
+              <Undo2 size={15} />
+              Apply credit on account
+            </button>
+          ) : null}
         </div>
       )}
+      {/* What was drawn, and the way back. Remove is the server's act (it hands
+          the draws back to the credits) so it waits behind unsaved edits like Apply;
+          the trash icon on the line itself still takes it off locally for Save. */}
+      {accountLine ? (
+        <p className="invoice-run-retainer-note" data-testid="account-credit-applied">
+          Credit applied {currency.format(Math.abs(accountLine.amount))}.
+          {lockMessage ? null : (
+            <>
+              {' '}
+              <button
+                type="button"
+                className="link-button"
+                aria-label="Remove credit on account from this invoice"
+                disabled={savingDates || accountBusy || dirty}
+                title={dirty ? 'Save your changes first' : 'Give the credit back to the client\'s account'}
+                onClick={() =>
+                  void changeAccountCredit(removeAccountCreditRequest, 'Could not remove the credit.')
+                }
+              >
+                Remove credit
+              </button>
+            </>
+          )}
+        </p>
+      ) : null}
       {/* The whole retainer does not always fit. Saying so beside the button is
           what stops the remainder looking like a rounding error later. */}
       {offeredCredit && retainer && Math.abs(offeredCredit.amount) < retainer.total ? (

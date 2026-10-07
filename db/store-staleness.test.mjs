@@ -1227,6 +1227,9 @@ function fakePostgres({
   // Stored clients that have time entries or invoices, as the bulk save's
   // history check would select them: { id, name, has_time, has_invoices }.
   clientsWithHistory = [],
+  // account_credits rows (snake_case), or a function answering them on every
+  // read so a test can change the ledger between two reads of one save.
+  accountCreditRows = [],
 } = {}) {
   const statements = []
   // The instance unique index
@@ -1332,6 +1335,39 @@ function fakePostgres({
     if (/md5\(coalesce\(string_agg/i.test(trimmed) && /union all/i.test(trimmed)) {
       if (typeof versionResponses === 'function') return { rows: versionResponses() }
       return { rows: Array.isArray(versionResponses) ? (versionResponses.shift() ?? []) : [] }
+    }
+    // Credit on account (stage 1b). The ledger's two reads and the void, ahead of
+    // the general invoices select for the same reason as the pay-token read: the
+    // draw query's whole point is its predicate (this client's NON-void invoices
+    // that carry an account_credit line), so the fake has to apply it.
+    const compact = trimmed.replace(/\s+/g, ' ')
+    const creditRows = () => (typeof accountCreditRows === 'function' ? accountCreditRows() : accountCreditRows)
+    if (/^select .* from account_credits where client_id = \$1 order by created_at, id$/i.test(compact)) {
+      return { rows: creditRows().filter((row) => row.client_id === params?.[0]) }
+    }
+    if (/^select .* from account_credits where id = \$1$/i.test(compact)) {
+      return { rows: creditRows().filter((row) => row.id === params?.[0]) }
+    }
+    if (
+      /^select id, number, period, status, line_items from invoices where client_id = \$1 and status <> 'void' and line_items @> '\[\{"kind":"account_credit"\}\]'::jsonb$/i.test(
+        compact,
+      )
+    ) {
+      return {
+        rows: invoices.filter(
+          (invoice) =>
+            invoice.client_id === params?.[0] &&
+            invoice.status !== 'void' &&
+            (invoice.line_items ?? []).some((line) => line?.kind === 'account_credit'),
+        ),
+      }
+    }
+    if (/^update account_credits set voided_at = now\(\), voided_by = \$2 where id = \$1 and voided_at is null returning/i.test(compact)) {
+      const row = creditRows().find((entry) => entry.id === params?.[0] && !entry.voided_at)
+      if (!row) return { rows: [], rowCount: 0 }
+      row.voided_at = new Date('2026-10-08T15:00:00Z')
+      row.voided_by = params?.[1]
+      return { rows: [row], rowCount: 1 }
     }
     // `findInvoiceByPayToken`'s narrow read. It has to come BEFORE the general
     // invoices select below, and it has to actually filter: answering every row
@@ -41225,6 +41261,814 @@ describe('credit on account (Postgres statements)', () => {
     const fake = fakePostgres()
     await postgresStore(fake).write(workspace())
     expect(fake.statements.length).toBeGreaterThan(5)
+    expect(fake.matching(/account_credits/i)).toHaveLength(0)
+  })
+})
+
+
+/**
+ * Credit on account, stage 1b (featreq-110efd15): the `account_credit` invoice
+ * line, the draws that ARE the ledger, the manual apply and the per-client lock.
+ * Cardinal rule 1 - both backends - so the FILE half runs for real and the
+ * POSTGRES half runs through the recording pool.
+ */
+describe('credit on account lines (file backend)', () => {
+  const hours = (amount = 600) => ({ kind: 'hourly', label: 'Billable hours', detail: '', amount })
+
+  function invoiceRow(id, overrides = {}) {
+    return {
+      id,
+      clientId: 'c1',
+      period: '2026-10',
+      number: id.toUpperCase(),
+      kind: 'monthly',
+      status: 'draft',
+      lineItems: [hours()],
+      subtotal: 600,
+      total: 600,
+      dueDate: null,
+      blurb: '',
+      scopeFlags: [],
+      sentAt: null,
+      paidAt: null,
+      paymentMethod: null,
+      appliedToInvoiceId: null,
+      createdAt: '2026-10-31T00:00:00.000Z',
+      updatedAt: '2026-10-31T00:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  const creditLine = (credit, amount, over = {}) => ({
+    kind: 'account_credit',
+    label: 'Credit on account',
+    detail: '',
+    amount: -amount,
+    draws: [{ creditId: credit.id, amount }],
+    ...over,
+  })
+
+  async function seedClients(clients = [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }]) {
+    await store.write(workspace({ clients, timeEntries: [] }))
+  }
+  async function editFile(change) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    change(data)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const seedInvoices = (rows) =>
+    editFile((data) => {
+      data.invoices = rows
+    })
+  const addCredit = (amount, over = {}) => store.addAccountCredit({ clientId: 'c1', amount, createdBy: 'u', ...over })
+  const dateCredit = (credit, createdAt) =>
+    editFile((data) => {
+      data.accountCredits.find((row) => row.id === credit.id).createdAt = createdAt
+    })
+  const byId = async (id) => (await store.listInvoices()).find((invoice) => invoice.id === id)
+  const lineOf = (invoice) => invoice.lineItems.find((line) => line.kind === 'account_credit')
+  const drawsOf = async (credit) => (await store.listAccountCredits('c1')).find((row) => row.id === credit.id)
+
+  beforeEach(async () => {
+    await seedClients()
+  })
+
+  it('fills each credit\'s draws from the client\'s NON-void invoices, and remaining from them', async () => {
+    const credit = await addCredit(500)
+    await seedInvoices([
+      invoiceRow('inv-a', { lineItems: [hours(), creditLine(credit, 200)], total: 400 }),
+      invoiceRow('inv-b', { status: 'void', lineItems: [hours(), creditLine(credit, 100)], total: 500 }),
+      invoiceRow('inv-other', { clientId: 'c2', lineItems: [hours(), creditLine(credit, 50)], total: 550 }),
+    ])
+
+    const [listed] = await store.listAccountCredits('c1')
+    expect(listed.draws).toEqual([
+      { invoiceId: 'inv-a', invoiceNumber: 'INV-A', period: '2026-10', amount: 200 },
+    ])
+    expect(listed.remaining).toBe(300)
+    expect(await store.accountCreditBalance('c1')).toBe(300)
+  })
+
+  it('never reports a negative remaining, and a void credit has none', async () => {
+    const credit = await addCredit(100)
+    await seedInvoices([
+      invoiceRow('inv-a', { lineItems: [hours(), creditLine(credit, 80)], total: 520 }),
+      invoiceRow('inv-b', { lineItems: [hours(), creditLine(credit, 80)], total: 520 }),
+    ])
+    expect((await drawsOf(credit)).remaining).toBe(0)
+    expect(await store.accountCreditBalance('c1')).toBe(0)
+  })
+
+  it('a voided invoice returns its draw with nothing to write', async () => {
+    const credit = await addCredit(500)
+    await seedInvoices([invoiceRow('inv-a', { lineItems: [hours(), creditLine(credit, 200)], total: 400 })])
+    expect(await store.accountCreditBalance('c1')).toBe(300)
+
+    await store.updateInvoice('inv-a', { status: 'void' })
+
+    expect(await store.accountCreditBalance('c1')).toBe(500)
+    expect((await drawsOf(credit)).draws).toEqual([])
+    // The line is still the record on the void invoice.
+    expect(lineOf(await byId('inv-a')).draws).toEqual([{ creditId: credit.id, amount: 200 }])
+  })
+
+  describe('voiding a credit that has been drawn on', () => {
+    it('is refused, naming the invoice, and writes nothing', async () => {
+      const credit = await addCredit(500)
+      await seedInvoices([invoiceRow('inv-a', { lineItems: [hours(), creditLine(credit, 200)], total: 400 })])
+
+      await expect(store.voidAccountCredit(credit.id, 'u')).rejects.toBeInstanceOf(AccountCreditError)
+      await expect(store.voidAccountCredit(credit.id, 'u')).rejects.toThrow(/INV-A \(\$200\.00\)/)
+      expect((await drawsOf(credit)).voidedAt).toBeNull()
+    })
+
+    it('goes through once the invoice is void, or the line is removed', async () => {
+      const first = await addCredit(500)
+      const second = await addCredit(500)
+      await seedInvoices([
+        invoiceRow('inv-a', { lineItems: [hours(), creditLine(first, 200)], total: 400 }),
+        invoiceRow('inv-b', { lineItems: [hours(), creditLine(second, 200)], total: 400 }),
+      ])
+
+      await store.updateInvoice('inv-a', { status: 'void' })
+      await store.removeAccountCreditFromInvoice('inv-b', { actorUserId: 'u' })
+
+      expect((await store.voidAccountCredit(first.id, 'u')).voidedAt).toBeTruthy()
+      expect((await store.voidAccountCredit(second.id, 'u')).voidedAt).toBeTruthy()
+    })
+
+    it('still says "already void" for a void credit, before anything about draws', async () => {
+      const credit = await addCredit(100)
+      await store.voidAccountCredit(credit.id, 'u')
+      await expect(store.voidAccountCredit(credit.id, 'u')).rejects.toThrow(/already void/i)
+    })
+  })
+
+  describe('applying credit to an invoice', () => {
+    it('draws the credit meant for the invoice\'s month first, then the oldest, and records the draws', async () => {
+      const old = await addCredit(100)
+      const mid = await addCredit(100)
+      const meant = await addCredit(100, { forPeriod: '2026-10' })
+      await dateCredit(old, '2026-08-01T00:00:00.000Z')
+      await dateCredit(mid, '2026-09-01T00:00:00.000Z')
+      await dateCredit(meant, '2026-09-15T00:00:00.000Z')
+      await seedInvoices([invoiceRow('inv-a', { lineItems: [hours(250)], subtotal: 250, total: 250 })])
+
+      const applied = await store.applyAccountCreditToInvoice('inv-a', { actorUserId: 'u' })
+
+      const line = lineOf(applied)
+      expect(line.draws).toEqual([
+        { creditId: meant.id, amount: 100 },
+        { creditId: old.id, amount: 100 },
+        { creditId: mid.id, amount: 50 },
+      ])
+      expect(line).toMatchObject({ kind: 'account_credit', label: 'Credit on account', amount: -250 })
+      // The subtotal is what the month was worth; the credit sits outside it.
+      expect(applied.subtotal).toBe(250)
+      expect(applied.total).toBe(0)
+      expect(await store.accountCreditBalance('c1')).toBe(50)
+      // Stored, not just returned.
+      expect(lineOf(await byId('inv-a')).draws).toHaveLength(3)
+    })
+
+    it('names the month in the label when the credit drawn was meant for one', async () => {
+      await addCredit(150, { forPeriod: '2026-10' })
+      await seedInvoices([invoiceRow('inv-a')])
+      const applied = await store.applyAccountCreditToInvoice('inv-a')
+      expect(lineOf(applied).label).toBe('Credit on account - meant for October 2026')
+      expect(applied.total).toBe(450)
+    })
+
+    it('takes no more than the invoice is worth, or than the client has', async () => {
+      await addCredit(900)
+      await seedInvoices([invoiceRow('inv-a'), invoiceRow('inv-small', { lineItems: [hours(40)], subtotal: 40, total: 40 })])
+
+      expect((await store.applyAccountCreditToInvoice('inv-a')).total).toBe(0)
+      expect(await store.accountCreditBalance('c1')).toBe(300)
+      // The next draft gets what is left, which is more than it is worth.
+      const small = await store.applyAccountCreditToInvoice('inv-small')
+      expect(lineOf(small).amount).toBe(-40)
+      expect(small.total).toBe(0)
+      expect(await store.accountCreditBalance('c1')).toBe(260)
+    })
+
+    it('replaces the invoice\'s own line when applied again, picking up credit added since', async () => {
+      await addCredit(100)
+      await seedInvoices([invoiceRow('inv-a')])
+      await store.applyAccountCreditToInvoice('inv-a')
+      expect(lineOf(await byId('inv-a')).amount).toBe(-100)
+
+      await addCredit(50)
+      const again = await store.applyAccountCreditToInvoice('inv-a')
+
+      expect(again.lineItems.filter((line) => line.kind === 'account_credit')).toHaveLength(1)
+      expect(lineOf(again).amount).toBe(-150)
+      expect(again.total).toBe(450)
+    })
+
+    it('refuses an invoice that has gone out, a retainer, and an invoice with nothing on it', async () => {
+      await addCredit(100)
+      await seedInvoices([
+        invoiceRow('inv-sent', { status: 'sent', sentAt: '2026-11-01T00:00:00.000Z' }),
+        invoiceRow('inv-ret', {
+          kind: 'retainer',
+          lineItems: [{ kind: 'retainer', label: 'Retainer', detail: '', amount: 500 }],
+          total: 500,
+        }),
+        invoiceRow('inv-empty', { lineItems: [], subtotal: 0, total: 0 }),
+      ])
+
+      await expect(store.applyAccountCreditToInvoice('inv-sent')).rejects.toThrow(/draft or reviewed/i)
+      await expect(store.applyAccountCreditToInvoice('inv-ret')).rejects.toThrow(/monthly invoice/i)
+      await expect(store.applyAccountCreditToInvoice('inv-empty')).rejects.toThrow(/nothing on this invoice left to credit/i)
+      expect(await store.accountCreditBalance('c1')).toBe(100)
+      expect(lineOf(await byId('inv-sent'))).toBeUndefined()
+    })
+
+    it('refuses when the client has no credit, and for an invoice that is not there', async () => {
+      await seedInvoices([invoiceRow('inv-a')])
+      await expect(store.applyAccountCreditToInvoice('inv-a')).rejects.toThrow(/no credit on account to apply/i)
+      expect(await store.applyAccountCreditToInvoice('inv-nope')).toBeNull()
+    })
+
+    it('works for a draft or a reviewed invoice', async () => {
+      await addCredit(100)
+      await seedInvoices([invoiceRow('inv-r', { status: 'reviewed' })])
+      expect((await store.applyAccountCreditToInvoice('inv-r')).total).toBe(500)
+    })
+
+    it('records the apply in the invoice\'s edit record, attributed to the owner', async () => {
+      await addCredit(100)
+      await seedInvoices([invoiceRow('inv-a')])
+      await clearInvoiceIntelligence()
+      await store.applyAccountCreditToInvoice('inv-a', { actorUserId: 'user-owner' })
+      const auth = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const events = (auth.invoiceReviewEvents ?? []).filter((event) => event.invoiceId === 'inv-a')
+      expect(events).toHaveLength(1)
+      expect(events[0].actorUserId).toBe('user-owner')
+    })
+
+    it('a billing master draws its own credit; a sub cannot apply', async () => {
+      await seedClients([
+        { id: 'c1', name: 'Master', billingMode: 'hourly', hourlyRate: 100, isBillingMaster: true },
+        { id: 'sub', name: 'Sub', billingMode: 'hourly', hourlyRate: 100 },
+      ])
+      await addCredit(100)
+      await seedInvoices([invoiceRow('inv-m'), invoiceRow('inv-sub', { clientId: 'sub' })])
+      expect((await store.applyAccountCreditToInvoice('inv-m')).total).toBe(500)
+
+      await editFile((data) => {
+        data.clients.find((client) => client.id === 'sub').billToClientId = 'c1'
+      })
+      await expect(store.applyAccountCreditToInvoice('inv-sub')).rejects.toThrow(/master's combined invoice/i)
+    })
+  })
+
+  describe('two drafts cannot spend the same credit', () => {
+    it('the second apply gets only what is left', async () => {
+      await addCredit(100)
+      await seedInvoices([invoiceRow('inv-a'), invoiceRow('inv-b', { period: '2026-11' })])
+
+      await store.applyAccountCreditToInvoice('inv-a')
+      await expect(store.applyAccountCreditToInvoice('inv-b')).rejects.toThrow(/no credit on account to apply/i)
+      expect(await store.accountCreditBalance('c1')).toBe(0)
+    })
+
+    it('two applies racing for it: exactly one wins, and the ledger never goes below zero', async () => {
+      await addCredit(100)
+      await seedInvoices([invoiceRow('inv-a'), invoiceRow('inv-b', { period: '2026-11' })])
+
+      const results = await Promise.allSettled([
+        store.applyAccountCreditToInvoice('inv-a'),
+        store.applyAccountCreditToInvoice('inv-b'),
+      ])
+
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+      const refused = results.find((result) => result.status === 'rejected')
+      expect(refused.reason).toBeInstanceOf(AccountCreditError)
+      expect(await store.accountCreditBalance('c1')).toBe(0)
+      const drawn = [await byId('inv-a'), await byId('inv-b')].filter(lineOf)
+      expect(drawn).toHaveLength(1)
+    })
+
+    it('two saves racing for the same credit with their own lines: the loser is refused whole', async () => {
+      const credit = await addCredit(100)
+      await seedInvoices([invoiceRow('inv-a'), invoiceRow('inv-b', { period: '2026-11' })])
+      const lines = [hours(), creditLine(credit, 100)]
+
+      const results = await Promise.allSettled([
+        store.updateInvoice('inv-a', { lineItems: lines }),
+        store.updateInvoice('inv-b', { lineItems: lines }),
+      ])
+
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+      expect(results.find((result) => result.status === 'rejected').reason.message).toMatch(
+        /changed while this was saving|no credit on account/i,
+      )
+      expect(await store.accountCreditBalance('c1')).toBe(0)
+    })
+  })
+
+  describe('re-sizing on every save', () => {
+    it('shrinks to the pre-credit total when the lines shrink, and does not grow back', async () => {
+      const credit = await addCredit(300)
+      await seedInvoices([invoiceRow('inv-a')])
+      await store.applyAccountCreditToInvoice('inv-a')
+      expect(lineOf(await byId('inv-a')).amount).toBe(-300)
+
+      const smaller = await store.updateInvoice('inv-a', {
+        lineItems: [hours(100), lineOf(await byId('inv-a'))],
+      })
+      expect(lineOf(smaller)).toMatchObject({ amount: -100, draws: [{ creditId: credit.id, amount: 100 }] })
+      expect(smaller.total).toBe(0)
+      expect(await store.accountCreditBalance('c1')).toBe(200)
+
+      const bigger = await store.updateInvoice('inv-a', {
+        lineItems: [hours(900), lineOf(smaller)],
+      })
+      expect(lineOf(bigger).amount).toBe(-100)
+      expect(bigger.total).toBe(800)
+    })
+
+    it('never believes the amount or the draws it is sent', async () => {
+      const credit = await addCredit(300)
+      await seedInvoices([invoiceRow('inv-a')])
+
+      const saved = await store.updateInvoice('inv-a', {
+        lineItems: [
+          hours(),
+          {
+            kind: 'account_credit',
+            label: 'Whatever I typed',
+            detail: 'x',
+            amount: -9999,
+            draws: [
+              { creditId: credit.id, amount: 9999 },
+              { creditId: 'credit-nope', amount: 5 },
+              { creditId: credit.id, amount: -3 },
+            ],
+          },
+        ],
+      })
+
+      expect(lineOf(saved)).toMatchObject({
+        label: 'Credit on account',
+        detail: '',
+        amount: -300,
+        draws: [{ creditId: credit.id, amount: 300 }],
+      })
+      expect(saved.total).toBe(300)
+    })
+
+    it('draws nothing for a new line that names no credit the client has, and says why', async () => {
+      await addCredit(300, { clientId: 'c1' })
+      await seedInvoices([invoiceRow('inv-a')])
+      await expect(
+        store.updateInvoice('inv-a', {
+          lineItems: [hours(), { kind: 'account_credit', label: 'x', detail: '', amount: -50, draws: [{ creditId: 'credit-nope', amount: 50 }] }],
+        }),
+      ).rejects.toThrow(/not available/i)
+      expect(lineOf(await byId('inv-a'))).toBeUndefined()
+      expect(await store.accountCreditBalance('c1')).toBe(300)
+    })
+
+    it('cannot draw another client\'s credit', async () => {
+      await seedClients([
+        { id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 },
+        { id: 'c2', name: 'Globex', billingMode: 'hourly', hourlyRate: 100 },
+      ])
+      const theirs = await store.addAccountCredit({ clientId: 'c2', amount: 500, createdBy: 'u' })
+      await seedInvoices([invoiceRow('inv-a')])
+      await expect(
+        store.updateInvoice('inv-a', { lineItems: [hours(), creditLine(theirs, 500)] }),
+      ).rejects.toBeInstanceOf(AccountCreditError)
+      expect(await store.accountCreditBalance('c2')).toBe(500)
+    })
+
+    it('drops the line and SAYS SO when its credit is no longer there to draw', async () => {
+      const credit = await addCredit(300)
+      await seedInvoices([invoiceRow('inv-a')])
+      await store.applyAccountCreditToInvoice('inv-a')
+      // Voided behind the invoice's back (the store refuses this through the API).
+      await editFile((data) => {
+        data.accountCredits.find((row) => row.id === credit.id).voidedAt = '2026-11-02T00:00:00.000Z'
+      })
+
+      const saved = await store.updateInvoice('inv-a', { lineItems: [hours(550), lineOf(await byId('inv-a'))] })
+
+      expect(lineOf(saved)).toBeUndefined()
+      expect(saved.total).toBe(550)
+      expect(saved.accountCreditNotice).toMatch(/could not be kept/i)
+      expect(lineOf(await byId('inv-a'))).toBeUndefined()
+      // Said once, on that response; never stored.
+      expect(await byId('inv-a')).not.toHaveProperty('accountCreditNotice')
+    })
+
+    it('a save that does not touch the lines is not a statement about the credit', async () => {
+      const credit = await addCredit(300)
+      await seedInvoices([invoiceRow('inv-a')])
+      await store.applyAccountCreditToInvoice('inv-a')
+      await editFile((data) => {
+        data.accountCredits.find((row) => row.id === credit.id).voidedAt = '2026-11-02T00:00:00.000Z'
+      })
+
+      const reviewed = await store.updateInvoice('inv-a', { status: 'reviewed' })
+
+      expect(reviewed.status).toBe('reviewed')
+      expect(lineOf(reviewed).amount).toBe(-300)
+      expect(reviewed).not.toHaveProperty('accountCreditNotice')
+    })
+
+    it('does not re-litigate the status rule on a line the invoice already carries', async () => {
+      await addCredit(300)
+      await seedInvoices([invoiceRow('inv-a')])
+      await store.applyAccountCreditToInvoice('inv-a')
+      await store.updateInvoice('inv-a', { status: 'reviewed' })
+      await editFile((data) => {
+        data.invoices.find((invoice) => invoice.id === 'inv-a').status = 'sent'
+      })
+      const saved = await store.updateInvoice('inv-a', { lineItems: [hours(200), lineOf(await byId('inv-a'))] })
+      expect(lineOf(saved).amount).toBe(-200)
+    })
+
+    it('refuses an invoice carrying two credit lines', async () => {
+      const credit = await addCredit(300)
+      await seedInvoices([invoiceRow('inv-a')])
+      await expect(
+        store.updateInvoice('inv-a', { lineItems: [hours(), creditLine(credit, 100), creditLine(credit, 100)] }),
+      ).rejects.toThrow(/only one credit on account/i)
+    })
+
+    it('sizes the retainer credit FIRST and takes the credit on account from what that leaves', async () => {
+      const credit = await addCredit(300)
+      await seedInvoices([
+        invoiceRow('inv-ret', {
+          kind: 'retainer',
+          number: 'INV-RET-2026-001',
+          status: 'paid',
+          period: '2026-01',
+          lineItems: [{ kind: 'retainer', label: 'Retainer', detail: '', amount: 500 }],
+          subtotal: 500,
+          total: 500,
+        }),
+        invoiceRow('inv-a'),
+      ])
+
+      const saved = await store.updateInvoice('inv-a', {
+        lineItems: [
+          hours(),
+          { kind: 'retainer_credit', label: 'Retainer applied', detail: '', amount: -1, retainerInvoiceId: 'inv-ret' },
+          creditLine(credit, 300),
+        ],
+      })
+
+      expect(saved.lineItems.find((line) => line.kind === 'retainer_credit').amount).toBe(-500)
+      expect(lineOf(saved).amount).toBe(-100)
+      expect(saved.total).toBe(0)
+    })
+
+    it('keeps a paid invoice\'s draw: it is locked, and the credit stays spent', async () => {
+      const credit = await addCredit(300)
+      await seedInvoices([
+        invoiceRow('inv-paid', { status: 'paid', lineItems: [hours(), creditLine(credit, 300)], total: 300 }),
+      ])
+      await expect(
+        store.updateInvoice('inv-paid', { lineItems: [hours(), creditLine(credit, 300)] }),
+      ).rejects.toBeInstanceOf(InvoiceLockedError)
+      await expect(store.voidAccountCredit(credit.id, 'u')).rejects.toBeInstanceOf(AccountCreditError)
+      expect(await store.accountCreditBalance('c1')).toBe(0)
+    })
+  })
+
+  describe('removing it', () => {
+    it('takes the line off and hands the draws back', async () => {
+      await addCredit(300)
+      await seedInvoices([invoiceRow('inv-a')])
+      await store.applyAccountCreditToInvoice('inv-a')
+      expect(await store.accountCreditBalance('c1')).toBe(0)
+
+      const removed = await store.removeAccountCreditFromInvoice('inv-a', { actorUserId: 'u' })
+
+      expect(lineOf(removed)).toBeUndefined()
+      expect(removed.total).toBe(600)
+      expect(await store.accountCreditBalance('c1')).toBe(300)
+    })
+
+    it('is refused when there is no such line, and answers null for no such invoice', async () => {
+      await seedInvoices([invoiceRow('inv-a')])
+      await expect(store.removeAccountCreditFromInvoice('inv-a')).rejects.toThrow(/no credit on account to remove/i)
+      expect(await store.removeAccountCreditFromInvoice('inv-nope')).toBeNull()
+    })
+
+    it('leaves the other lines exactly as they were', async () => {
+      await addCredit(300)
+      await seedInvoices([invoiceRow('inv-a')])
+      const before = (await byId('inv-a')).lineItems
+      await store.applyAccountCreditToInvoice('inv-a')
+      const after = await store.removeAccountCreditFromInvoice('inv-a')
+      expect(after.lineItems).toEqual(before)
+    })
+  })
+
+  it('a bulk save restores invoices verbatim, draws and all', async () => {
+    const credit = await addCredit(300)
+    await seedInvoices([invoiceRow('inv-a', { lineItems: [hours(), creditLine(credit, 300)], total: 300 })])
+    await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme Renamed', billingMode: 'hourly', hourlyRate: 100 }], timeEntries: [] }))
+    expect(lineOf(await byId('inv-a')).draws).toEqual([{ creditId: credit.id, amount: 300 }])
+    expect(await store.accountCreditBalance('c1')).toBe(0)
+  })
+})
+
+describe('credit on account lines: what the line sanitizer keeps', () => {
+  const baseRow = {
+    id: 'inv-s',
+    clientId: 'c1',
+    period: '2026-10',
+    number: 'INV-S',
+    kind: 'monthly',
+    status: 'draft',
+    lineItems: [{ kind: 'hourly', label: 'Billable hours', detail: '', amount: 600 }],
+    subtotal: 600,
+    total: 600,
+    dueDate: null,
+    blurb: '',
+    scopeFlags: [],
+    appliedToInvoiceId: null,
+    createdAt: '2026-10-31T00:00:00.000Z',
+    updatedAt: '2026-10-31T00:00:00.000Z',
+  }
+  async function seedOne() {
+    await store.write(
+      workspace({ clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }], timeEntries: [] }),
+    )
+    const credit = await store.addAccountCredit({ clientId: 'c1', amount: 1000, createdBy: 'u' })
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [baseRow]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return credit
+  }
+
+  it('keeps the draws of a credit line, as well-formed ids and positive cents, and nothing else of it', async () => {
+    const credit = await seedOne()
+    const saved = await store.updateInvoice('inv-s', {
+      lineItems: [
+        baseRow.lineItems[0],
+        {
+          kind: 'account_credit',
+          label: 'x',
+          amount: -1,
+          retainerInvoiceId: 'inv-ret',
+          sourceClientId: 'c1',
+          draws: [
+            { creditId: credit.id, amount: 20.004, extra: 'dropped' },
+            { creditId: '', amount: 5 },
+            { creditId: 'x'.repeat(201), amount: 5 },
+            { creditId: credit.id, amount: 0 },
+            { creditId: credit.id, amount: 'abc' },
+            null,
+          ],
+        },
+      ],
+    })
+    const line = saved.lineItems.find((entry) => entry.kind === 'account_credit')
+    expect(line.draws).toEqual([{ creditId: credit.id, amount: 20 }])
+    // A credit line is not a retainer credit: the retainer's id does not ride on it.
+    expect(line).not.toHaveProperty('retainerInvoiceId')
+  })
+
+  it('strips draws from every other kind of line, so a stray field never reaches the ledger', async () => {
+    const credit = await seedOne()
+    const saved = await store.updateInvoice('inv-s', {
+      lineItems: [
+        { ...baseRow.lineItems[0], draws: [{ creditId: credit.id, amount: 600 }] },
+        { kind: 'custom', label: 'Hand typed', detail: '', amount: 5, draws: [{ creditId: credit.id, amount: 5 }] },
+      ],
+    })
+    for (const line of saved.lineItems) expect(line).not.toHaveProperty('draws')
+    expect(await store.accountCreditBalance('c1')).toBe(1000)
+  })
+
+  it('keeps at most 50 draws on a line', async () => {
+    const credit = await seedOne()
+    const saved = await store.updateInvoice('inv-s', {
+      lineItems: [
+        baseRow.lineItems[0],
+        {
+          kind: 'account_credit',
+          label: 'x',
+          amount: -1,
+          draws: Array.from({ length: 80 }, () => ({ creditId: credit.id, amount: 1 })),
+        },
+      ],
+    })
+    const line = saved.lineItems.find((entry) => entry.kind === 'account_credit')
+    // 50 survive the sanitizer, and they are all this one credit: one merged draw.
+    expect(line.draws).toEqual([{ creditId: credit.id, amount: 50 }])
+  })
+})
+
+describe('credit on account lines (Postgres statements)', () => {
+  const hoursLine = { kind: 'hourly', label: 'Billable hours', detail: '', amount: 600 }
+  const row = (overrides = {}) => ({
+    id: 'inv-a',
+    client_id: 'c1',
+    period: '2026-10',
+    number: 'INV-A',
+    kind: 'monthly',
+    status: 'draft',
+    line_items: [hoursLine],
+    subtotal: 600,
+    total: 600,
+    ...overrides,
+  })
+  const creditRow = (overrides = {}) => ({
+    id: 'credit-1',
+    client_id: 'c1',
+    amount: '300.00',
+    source_kind: 'manual',
+    source_ref: 'ref-1',
+    for_period: null,
+    note: '',
+    created_by: 'u',
+    created_at: new Date('2026-09-01T00:00:00Z'),
+    voided_at: null,
+    voided_by: null,
+    ...overrides,
+  })
+  const drawLine = (amount, creditId = 'credit-1') => ({
+    kind: 'account_credit',
+    label: 'Credit on account',
+    detail: '',
+    amount: -amount,
+    draws: [{ creditId, amount }],
+  })
+
+  it('reads the draws with ONE targeted select over this client\'s non-void invoices', async () => {
+    const fake = fakePostgres({
+      accountCreditRows: [creditRow()],
+      invoices: [
+        row({ id: 'inv-a', line_items: [hoursLine, drawLine(120)] }),
+        row({ id: 'inv-void', status: 'void', line_items: [hoursLine, drawLine(50)] }),
+        row({ id: 'inv-other', client_id: 'c2', line_items: [hoursLine, drawLine(70)] }),
+        row({ id: 'inv-plain' }),
+      ],
+    })
+    const store2 = postgresStore(fake)
+
+    const [credit] = await store2.listAccountCredits('c1')
+
+    const drawReads = fake.matching(/line_items @>/i)
+    expect(drawReads).toHaveLength(1)
+    expect(drawReads[0].text.replace(/\s+/g, ' ')).toBe(
+      `select id, number, period, status, line_items from invoices where client_id = $1 and status <> 'void' and line_items @> '[{"kind":"account_credit"}]'::jsonb`,
+    )
+    expect(drawReads[0].params).toEqual(['c1'])
+    expect(credit.draws).toEqual([{ invoiceId: 'inv-a', invoiceNumber: 'INV-A', period: '2026-10', amount: 120 }])
+    expect(credit.remaining).toBe(180)
+    expect(await store2.accountCreditBalance('c1')).toBe(180)
+  })
+
+  it('spends under a per-client advisory lock, taken first inside the save\'s own transaction', async () => {
+    const fake = fakePostgres({ accountCreditRows: [creditRow()], invoices: [row()] })
+
+    await postgresStore(fake).updateInvoice('inv-a', { lineItems: [hoursLine, drawLine(300)] })
+
+    const begin = fake.indexOf(/^BEGIN$/i)
+    const lock = fake.indexOf(/^select pg_advisory_xact_lock\(hashtext\(\$1\)\)$/i)
+    const ledger = fake.statements.findIndex((s, i) => i > lock && /line_items @>/i.test(s.text))
+    const update = fake.indexOf(/^update invoices\s+set line_items/i)
+    const commit = fake.indexOf(/^COMMIT$/i)
+    expect(begin).toBeGreaterThan(-1)
+    // The lock is the FIRST statement after BEGIN, the ledger is re-read under it,
+    // and only then does the write happen.
+    expect(lock).toBe(begin + 1)
+    expect(fake.statements[lock].params).toEqual(['account_credit:c1'])
+    expect(ledger).toBeGreaterThan(lock)
+    expect(update).toBeGreaterThan(ledger)
+    expect(commit).toBeGreaterThan(update)
+    expect(JSON.parse(fake.statements[update].params[1])[1]).toMatchObject({
+      kind: 'account_credit',
+      amount: -300,
+      draws: [{ creditId: 'credit-1', amount: 300 }],
+    })
+  })
+
+  it('reads the ledger on the transaction\'s own connection once it holds the lock', async () => {
+    const fake = fakePostgres({ accountCreditRows: [creditRow()], invoices: [row()] })
+    await postgresStore(fake).updateInvoice('inv-a', { lineItems: [hoursLine, drawLine(300)] })
+    // Two ledger reads: one to size the line, one under the lock.
+    expect(fake.matching(/from account_credits\s+where client_id = \$1/i)).toHaveLength(2)
+    expect(fake.matching(/line_items @>/i)).toHaveLength(2)
+  })
+
+  it('refuses the save whole, rolled back with nothing written, when the ledger moved under the lock', async () => {
+    let reads = 0
+    const fake = fakePostgres({
+      invoices: [row()],
+      // The credit is there to size the line, then gone (voided) by the time the
+      // lock is held.
+      accountCreditRows: () => {
+        reads += 1
+        return [creditRow(reads === 1 ? {} : { voided_at: new Date('2026-10-02T00:00:00Z') })]
+      },
+    })
+
+    await expect(
+      postgresStore(fake).updateInvoice('inv-a', { lineItems: [hoursLine, drawLine(300)] }),
+    ).rejects.toThrow(/changed while this was saving/i)
+
+    expect(fake.matching(/^update invoices\s+set line_items/i)).toHaveLength(0)
+    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+    expect(fake.matching(/^ROLLBACK$/i).length).toBeGreaterThan(0)
+  })
+
+  it('takes no lock, and keeps its single-statement path, for a save that spends no credit', async () => {
+    const fake = fakePostgres({ accountCreditRows: [creditRow()], invoices: [row()] })
+    await postgresStore(fake).updateInvoice('inv-a', {})
+    expect(fake.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+    expect(fake.matching(/^BEGIN$/i)).toHaveLength(0)
+    expect(fake.matching(/account_credits/i)).toHaveLength(0)
+
+    const noLine = fakePostgres({ accountCreditRows: [creditRow()], invoices: [row()] })
+    await postgresStore(noLine).updateInvoice('inv-a', { blurb: 'Thanks' })
+    expect(noLine.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+    expect(noLine.matching(/account_credits/i)).toHaveLength(0)
+  })
+
+  it('removing a line takes no lock either: it spends nothing', async () => {
+    const fake = fakePostgres({
+      accountCreditRows: [creditRow()],
+      invoices: [row({ line_items: [hoursLine, drawLine(300)], total: 300 })],
+    })
+    await postgresStore(fake).removeAccountCreditFromInvoice('inv-a', { actorUserId: 'u' })
+    expect(fake.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+    const update = fake.matching(/^update invoices\s+set line_items/i)
+    expect(update).toHaveLength(1)
+    expect(JSON.parse(update[0].params[1])).toEqual([hoursLine])
+  })
+
+  it('drops a line it cannot honor without raising, and the notice rides on the answer', async () => {
+    const fake = fakePostgres({
+      accountCreditRows: [creditRow({ voided_at: new Date('2026-10-02T00:00:00Z') })],
+      invoices: [row({ line_items: [hoursLine, drawLine(300)], total: 300 })],
+    })
+    const saved = await postgresStore(fake).updateInvoice('inv-a', {
+      lineItems: [hoursLine, drawLine(300)],
+    })
+    expect(saved.accountCreditNotice).toMatch(/could not be kept/i)
+    const update = fake.matching(/^update invoices\s+set line_items/i)
+    expect(JSON.parse(update[0].params[1])).toEqual([hoursLine])
+    expect(fake.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+  })
+
+  describe('voiding a credit', () => {
+    it('checks the draws under the same lock, before the update', async () => {
+      const fake = fakePostgres({ accountCreditRows: [creditRow()], invoices: [row()] })
+
+      const voided = await postgresStore(fake).voidAccountCredit('credit-1', 'user-owner')
+
+      const begin = fake.indexOf(/^BEGIN$/i)
+      const lock = fake.indexOf(/pg_advisory_xact_lock/i)
+      const draws = fake.statements.findIndex((s, i) => i > lock && /line_items @>/i.test(s.text))
+      const update = fake.indexOf(/^update account_credits set voided_at/i)
+      expect(lock).toBeGreaterThan(begin)
+      expect(fake.statements[lock].params).toEqual(['account_credit:c1'])
+      expect(draws).toBeGreaterThan(lock)
+      expect(update).toBeGreaterThan(draws)
+      expect(fake.indexOf(/^COMMIT$/i)).toBeGreaterThan(update)
+      expect(voided).toMatchObject({ id: 'credit-1', voidedBy: 'user-owner', remaining: 0 })
+    })
+
+    it('is refused, with nothing updated, while a non-void invoice draws on it', async () => {
+      const fake = fakePostgres({
+        accountCreditRows: [creditRow()],
+        invoices: [row({ line_items: [hoursLine, drawLine(100)] })],
+      })
+      await expect(postgresStore(fake).voidAccountCredit('credit-1', 'u')).rejects.toThrow(/INV-A \(\$100\.00\)/)
+      expect(fake.matching(/^update account_credits/i)).toHaveLength(0)
+      expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
+    })
+
+    it('is allowed once that invoice is void', async () => {
+      const fake = fakePostgres({
+        accountCreditRows: [creditRow()],
+        invoices: [row({ status: 'void', line_items: [hoursLine, drawLine(100)] })],
+      })
+      expect((await postgresStore(fake).voidAccountCredit('credit-1', 'u')).voidedAt).toBeTruthy()
+    })
+
+    it('answers null for no such credit, and says already void for a void one', async () => {
+      const none = fakePostgres({ accountCreditRows: [] })
+      expect(await postgresStore(none).voidAccountCredit('credit-nope', 'u')).toBeNull()
+      const done = fakePostgres({ accountCreditRows: [creditRow({ voided_at: new Date('2026-10-02T00:00:00Z') })] })
+      await expect(postgresStore(done).voidAccountCredit('credit-1', 'u')).rejects.toThrow(/already void/i)
+    })
+  })
+
+  it('a bulk save never reads the draw query: invoices are restored verbatim', async () => {
+    const fake = fakePostgres({ accountCreditRows: [creditRow()], invoices: [row({ line_items: [hoursLine, drawLine(100)] })] })
+    await postgresStore(fake).write(workspace())
+    expect(fake.matching(/line_items @> '\[\{"kind":"account_credit"/i)).toHaveLength(0)
     expect(fake.matching(/account_credits/i)).toHaveLength(0)
   })
 })

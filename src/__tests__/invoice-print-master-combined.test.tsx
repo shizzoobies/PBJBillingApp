@@ -264,6 +264,28 @@ describe('InvoicesPage — the lines a combined document still prints', () => {
     expect(printed()).toContain('-$200.00')
   })
 
+  it('keeps a credit on account, negative, named, and the lines still add to the amount due', async () => {
+    await printStored({
+      ...masterInvoice,
+      lineItems: [
+        ...masterInvoice.lineItems,
+        {
+          kind: 'account_credit',
+          label: 'Credit on account',
+          detail: '',
+          amount: -200,
+          draws: [{ creditId: 'credit-1', amount: 200 }],
+        },
+      ],
+      total: 650,
+    })
+
+    expect(printed()).toContain('Credit on account')
+    expect(printed()).toContain('-$200.00')
+    expect(printed()).toContain('$850.00')
+    expect(printed()).toContain('$650.00')
+  })
+
   // Neither kept line may name a company — that is the condition on keeping
   // them at all.
   it('still names no company', async () => {

@@ -140,8 +140,9 @@ describe('the invoice PATCH route answers a locked invoice with a sentence', () 
   // Long enough to reach the catch-all 500 at the bottom of the same catch —
   // the block grew when the scope re-tag's 409 joined the other three
   // (featreq-8cec48db), and a window that stopped short would report the
-  // fallback as missing rather than as out of order.
-  const block = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 4000)
+  // fallback as missing rather than as out of order. Widened from 4000 when the
+  // credit on account refusal joined them (stage 1b).
+  const block = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 4400)
 
   it('catches the locked error rather than letting it fall to the 500', () => {
     expect(block).toContain('error instanceof InvoiceLockedError')
@@ -426,8 +427,9 @@ describe('the invoice responses carry which covered windows can still move', () 
 
   it('marks the invoice a save, a confirm, a send and a pay link hand back', () => {
     // Widened from 5200 when the sent-invoice session expiry went in ahead of the answer,
-    // and again from 6200 for the never-email "reviewed means sent" stamp.
-    const patch = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 8400)
+    // and again from 6200 for the never-email "reviewed means sent" stamp, and
+    // from 8400 for the credit on account refusal.
+    const patch = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 8800)
     expect(patch).toContain('invoice: await withCoverageChangeable(updated)')
     const confirm = routeBlock(/const coverageConfirmMatch = normalizedPath\.match\(/, 3400)
     expect(confirm).toContain('invoice: await withCoverageChangeable(confirmed)')

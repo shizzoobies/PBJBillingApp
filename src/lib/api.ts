@@ -4913,6 +4913,46 @@ export async function addAccountCreditRequest(
   return (await response.json()) as AccountCredit
 }
 
+/**
+ * Draw the client's credit on account onto one draft or reviewed monthly invoice
+ * (owner only). The server picks the credits and the amount; the answer is the
+ * saved invoice.
+ */
+export async function applyAccountCreditRequest(invoiceId: string) {
+  const response = await apiFetch(
+    `/api/invoices/${encodeURIComponent(invoiceId)}/apply-account-credit`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(response.status, message || `Could not apply the credit (${response.status})`, code)
+  }
+  return ((await response.json()) as { invoice: PersistedInvoice }).invoice
+}
+
+/** Take the credit on account line off an invoice (owner only); its draws go back to the credits. */
+export async function removeAccountCreditRequest(invoiceId: string) {
+  const response = await apiFetch(
+    `/api/invoices/${encodeURIComponent(invoiceId)}/remove-account-credit`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  )
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(response.status, message || `Could not remove the credit (${response.status})`, code)
+  }
+  return ((await response.json()) as { invoice: PersistedInvoice }).invoice
+}
+
 /** Void a credit (owner only): it stays in the ledger, struck through, and stops counting. */
 export async function voidAccountCreditRequest(creditId: string) {
   const response = await apiFetch(`/api/account-credits/${encodeURIComponent(creditId)}/void`, {

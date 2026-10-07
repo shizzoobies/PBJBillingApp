@@ -5,7 +5,11 @@ import {
   voidAccountCreditRequest,
 } from '../lib/api'
 import type { AccountCredit } from '../lib/types'
-import { accountCreditMonth, accountCreditSourceText } from '../lib/accountCreditText'
+import {
+  accountCreditDrawText,
+  accountCreditMonth,
+  accountCreditSourceText,
+} from '../lib/accountCreditText'
 import { autopayDate } from '../lib/autopayText'
 import { currency } from '../lib/utils'
 
@@ -20,10 +24,11 @@ const MAX_NOTE = 500
  * live row.
  *
  * OWNER-ONLY by where it is mounted (the Billing tab is owner-only) and by the
- * endpoints behind it. A RECORD for now: nothing applies a credit to an invoice
- * yet, and nothing here touches one. A company billed on a master's combined
- * invoice has no credit of its own - the master is the one that pays - so for a
- * sub the panel is one line and fetches nothing.
+ * endpoints behind it. The ledger lists what each credit has been drawn on
+ * (stage 1b: the owner applies a credit from the invoice's own editor; nothing
+ * here touches an invoice). A company billed on a master's combined invoice has
+ * no credit of its own - the master is the one that pays - so for a sub the
+ * panel is one line and fetches nothing.
  */
 export function AccountCreditPanel({
   clientId,
@@ -157,8 +162,8 @@ function AccountCreditLedger({ clientId, retiredName }: { clientId: string; reti
         <strong data-testid="account-credit-balance">{currency.format(state.balance)}</strong>
       </div>
       <p className="account-credit-help">
-        Money the client has paid ahead, or paid twice, held for a future invoice. It is a record for
-        now: nothing applies it to an invoice yet.
+        Money the client has paid ahead, or paid twice, held for a future invoice. Apply it from the
+        invoice: open a draft or reviewed invoice and press Apply credit on account.
       </p>
 
       <div className="form-grid two-col">
@@ -232,6 +237,7 @@ function AccountCreditLedger({ clientId, retiredName }: { clientId: string; reti
                 <th scope="col">Source</th>
                 <th scope="col">Meant for</th>
                 <th scope="col">Reason</th>
+                <th scope="col">Used on</th>
                 <th scope="col">Remaining</th>
                 <th scope="col">
                   <span className="visually-hidden">Actions</span>
@@ -248,6 +254,17 @@ function AccountCreditLedger({ clientId, retiredName }: { clientId: string; reti
                     <td>{accountCreditSourceText(credit)}</td>
                     <td>{credit.forPeriod ? accountCreditMonth(credit.forPeriod) : '—'}</td>
                     <td>{credit.note || '—'}</td>
+                    <td>
+                      {credit.draws.length === 0 ? (
+                        '—'
+                      ) : (
+                        <ul className="account-credit-draws">
+                          {credit.draws.map((draw) => (
+                            <li key={draw.invoiceId}>{accountCreditDrawText(draw)}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </td>
                     <td>{isVoid ? '—' : currency.format(credit.remaining)}</td>
                     <td>
                       {isVoid ? (

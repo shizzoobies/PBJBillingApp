@@ -15,6 +15,8 @@ export type InvoiceLineKind =
   | 'retainer'
   /** A paid retainer given back on a later invoice. Always <= 0. */
   | 'retainer_credit'
+  /** Credit on account (a prepayment or an overpayment) drawn on this invoice. Always <= 0. */
+  | 'account_credit'
   /** Informational hours detail. ALWAYS $0.00 — see `timeBreakdownLines`. */
   | 'time_detail'
   /** The card-payment convenience fee, appended when a card payment settles. */
@@ -302,6 +304,42 @@ export function retainerCreditLine(args: {
   detail: string
   amount: number
   retainerInvoiceId: string | null
+}
+
+export const ACCOUNT_CREDIT_LABEL: string
+export function accountCreditCents(value: unknown): number
+export function accountCreditLabel(forPeriods: Array<string | null | undefined> | null | undefined): string
+export type AccountCreditDrawInput = { creditId: string; amount: number }
+export type AccountCreditLedgerEntry = {
+  id: string
+  amount: number
+  forPeriod?: string | null
+  createdAt?: string | null
+  voidedAt?: string | null
+  draws?: Array<{ invoiceId: string; amount: number }>
+}
+export function accountCreditAvailableCents(
+  credit: AccountCreditLedgerEntry | null | undefined,
+  ownInvoiceId?: string | null,
+): number
+export function accountCreditWantedCents(lines: Array<{ kind?: string; amount?: number }> | null | undefined): number
+export function planAccountCreditDraws(args: {
+  lines: Array<{ kind?: string; amount?: number }> | null | undefined
+  credits: AccountCreditLedgerEntry[] | null | undefined
+  invoiceId?: string | null
+  period?: string
+  existing?: AccountCreditDrawInput[] | null
+}): {
+  draws: AccountCreditDrawInput[]
+  totalCents: number
+  label: string
+  line: {
+    kind: 'account_credit'
+    label: string
+    detail: string
+    amount: number
+    draws: AccountCreditDrawInput[]
+  } | null
 }
 
 /** Statuses in which an invoice's content is frozen — see the JS for why. */
