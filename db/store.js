@@ -9442,9 +9442,11 @@ export class AppDataStore {
         // committing, and hand the tab the same version (it is the right one). This
         // is an execution detail of the Postgres branch only - the file backend
         // rewrites one file and has nothing to avoid - and it is what keeps an
-        // autosave of an unchanged workspace from re-stamping `updated_at` on every
-        // row and leaving ~9,000 dead tuples for autovacuum to chew on under these
-        // tables' locks.
+        // autosave of an unchanged workspace from re-stamping `updated_at` (and
+        // moving `created_at` on the invoice restore) on every row. It does NOT
+        // save the inserts' heap, index or WAL work, and an aborted insert is a dead
+        // tuple too, so autovacuum sees the same ~9,000 per save either way; the
+        // locks are held no longer than a commit would (slightly less: no flush).
         //
         // Why the rollback loses nothing: the fingerprint drops only timestamps
         // (`created_at`, `updated_at`) and the columns a bulk save cannot write

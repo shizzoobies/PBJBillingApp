@@ -33,7 +33,7 @@ line is a tab save (the route's own `emp-patrice saved ...` line is).
 | | Per save | Risk | Backends |
 |---|---|---|---|
 | (a) multi-row `VALUES` inserts, chunks of 500, same transaction + lock | 1.5-3 s | low if every value keeps today's parameter conversion and casts | Postgres only; file untouched |
-| (b) skip when fingerprints match | - | cannot work as worded: a save that passes the guard always matches. Workable form: after inserting, if the produced version equals the stored one, `rollback` instead of `commit` (saves no lock time, but stops re-stamping `updated_at` on 9k rows and the dead tuples/WAL that invite autovacuum into the lock tiers) | Postgres only |
+| (b) skip when fingerprints match | - | cannot work as worded: a save that passes the guard always matches. Workable form: after inserting, if the produced version equals the stored one, `rollback` instead of `commit` (saves no lock time and, as built, no dead tuples or WAL either - an aborted insert is still a dead tuple; it stops re-stamping `updated_at` on 9k rows and skips the commit flush. Deciding the no-op BEFORE the deletes would be the stage that saves the vacuum work) | Postgres only |
 | (c) diff-based save (only changed rows) | <1 s | high - a per-column "changed?" rule on top of every preserve rule; the exact shape of the three past data-loss bugs; changes the duplicate-checklist outcome | - |
 | (d) COPY | ~(a) | new dependency + Linux lockfile refresh, no ON CONFLICT/RETURNING, hand-escaped arrays/jsonb | - |
 
