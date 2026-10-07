@@ -24,6 +24,8 @@ export interface AmountMismatchLogEntry {
   reason?: 'duplicate'
   /** A duplicate bank payment that was only started, not settled. */
   settling?: true
+  /** A duplicate paid by card (its processing fee came with it). */
+  card?: true
 }
 
 /** Money that arrived for a VOIDED invoice. Log-only; `amount` is dollars. */
@@ -59,6 +61,8 @@ export interface UnhandledAmountMismatch {
   reason: 'amount' | 'duplicate'
   /** A duplicate bank payment that has only been started (it can still fail). */
   settling: boolean
+  /** A duplicate paid by card (its processing fee came with it). */
+  card: boolean
   /** How many payments on the invoice are waiting; this describes the newest. */
   count: number
 }
@@ -170,6 +174,7 @@ export declare function flagPaymentAmountMismatch(args: {
         receivedCents: number | null
         reason?: 'duplicate'
         settling?: boolean
+        card?: boolean
       },
     ): Promise<unknown>
     /** A settled bank duplicate: its marker stops saying "settling". Optional. */
@@ -204,6 +209,12 @@ export declare function duplicatePaymentLogged(
 export interface PaymentIntentFacts {
   status: string
   amountReceived: number | null
+  /** Cents refunded on the latest charge; null when Stripe did not say. */
+  amountRefunded: number | null
+  /** Null when Stripe did not say. */
+  disputed: boolean | null
+  /** 'card' for a card Checkout, null for a bank one. */
+  channel: string | null
   currency: string | null
   invoiceId: string | null
 }
@@ -212,9 +223,29 @@ export type OverpaymentCreditPlan =
   | { ok: true; cents: number }
   | { ok: false; status: number; code: string; message: string }
 
+/** The amount a card Checkout adds its fee to: the invoice total without any card-fee line. */
+export declare function owedBeforeCardFee(
+  invoice: { total?: number | null; lineItems?: ReadonlyArray<{ kind?: string; amount?: number }> } | null | undefined,
+): number
+
+/** What of a double payment reached the firm: the card fee comes off a card payment. */
+export declare function defaultOverpaymentCredit(args: {
+  receivedCents: number
+  card: boolean
+  invoice: { total?: number | null; lineItems?: ReadonlyArray<{ kind?: string; amount?: number }> } | null | undefined
+}): { creditCents: number; feeCents: number }
+
 /** May this double payment become a credit on account, and for how many cents? */
 export declare function planOverpaymentCredit(args: {
-  invoice: { id: string; emailLog?: ReadonlyArray<unknown> | null } | null | undefined
+  invoice:
+    | {
+        id: string
+        total?: number | null
+        lineItems?: ReadonlyArray<{ kind?: string; amount?: number }>
+        emailLog?: ReadonlyArray<unknown> | null
+      }
+    | null
+    | undefined
   paymentIntentId: unknown
   intent: PaymentIntentFacts | null
   /** Dollars; lower than what was received, or absent for all of it. */

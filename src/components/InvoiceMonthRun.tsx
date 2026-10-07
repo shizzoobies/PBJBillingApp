@@ -62,6 +62,7 @@ import {
 import type { AutopayAttemptSummary } from '../lib/types'
 import { editChangesWhatClientSees } from '../../lib/invoice-sent-change.js'
 import {
+  defaultOverpaymentCredit,
   paymentInProgress,
   unhandledAmountMismatch,
   unhandledCountSentence,
@@ -3007,10 +3008,22 @@ function InvoiceEditor({
   const [applyOpen, setApplyOpen] = useState(false)
   const [applyAmount, setApplyAmount] = useState('')
   const [applyBusy, setApplyBusy] = useState(false)
+  // What the client was charged: the most she may credit.
   const applyReceived =
     amountMismatch?.receivedCents === null || amountMismatch?.receivedCents === undefined
       ? null
       : amountMismatch.receivedCents / 100
+  // A card payment arrived with its processing fee on top; what reached the firm
+  // (the default credit) is the charge less that fee.
+  const applyBreakdown =
+    amountMismatch?.card && amountMismatch.receivedCents != null
+      ? defaultOverpaymentCredit({
+          receivedCents: amountMismatch.receivedCents,
+          card: true,
+          invoice,
+        })
+      : null
+  const applyDefault = applyBreakdown ? applyBreakdown.creditCents / 100 : applyReceived
   const applyAsked = applyAmount.trim() === '' ? null : Number(applyAmount)
   // A credit is whole cents above $0.00 and never more than was received.
   const applyAmountProblem =
@@ -3797,7 +3810,7 @@ function InvoiceEditor({
     try {
       const result = await applyDuplicatePaymentAsCreditRequest(invoice.id, {
         paymentIntentId: amountMismatch.paymentIntentId,
-        ...(applyAsked === null || applyAsked === applyReceived ? {} : { amount: applyAsked }),
+        ...(applyAsked === null || applyAsked === applyDefault ? {} : { amount: applyAsked }),
       })
       onCreditApplied(
         `Added ${currency.format(result.credit.amount)} to ${creditClientName}'s credit on account`,
@@ -4466,7 +4479,7 @@ function InvoiceEditor({
           <button
             type="button"
             className="secondary-action"
-            disabled={handledBusy}
+            disabled={handledBusy || applyBusy}
             onClick={() => void markAmountMismatchHandled()}
           >
             Mark as handled
@@ -4476,23 +4489,27 @@ function InvoiceEditor({
               <button
                 type="button"
                 className="secondary-action"
-                disabled={handledBusy || applyBusy || amountMismatch.settling}
+                disabled={handledBusy || applyBusy}
                 onClick={() => {
-                  setApplyAmount(applyReceived === null ? '' : applyReceived.toFixed(2))
+                  setApplyAmount(applyDefault === null ? '' : applyDefault.toFixed(2))
                   setApplyOpen(true)
                 }}
               >
                 Apply as credit
               </button>
-              {amountMismatch.settling ? <span>Still settling - try once it clears.</span> : null}
             </>
           ) : null}
-          {applyOpen && !amountMismatch.settling ? (
+          {applyOpen ? (
             <div role="group" aria-label="Apply as credit" className="invoice-run-apply-credit">
+              {applyBreakdown && applyReceived !== null && applyDefault !== null ? (
+                <p>
+                  {`Charged ${currency.format(applyReceived)} (includes ${currency.format(applyBreakdown.feeCents / 100)} card fee) - credit ${currency.format(applyDefault)}`}
+                </p>
+              ) : null}
               <p>
-                {applyReceived === null
+                {applyDefault === null
                   ? `Add everything Stripe collected for it to ${creditClientName}'s credit on account.`
-                  : `Add ${currency.format(applyAsked !== null && !applyAmountProblem ? applyAsked : applyReceived)} to ${creditClientName}'s credit on account.`}{' '}
+                  : `Add ${currency.format(applyAsked !== null && !applyAmountProblem ? applyAsked : applyDefault)} to ${creditClientName}'s credit on account.`}{' '}
                 The invoice itself does not change.
               </p>
               <label>
@@ -4515,9 +4532,9 @@ function InvoiceEditor({
                 {applyBusy
                   ? 'Adding…'
                   : applyAsked === null || applyAmountProblem
-                    ? applyReceived === null
+                    ? applyDefault === null
                       ? 'Add to credit'
-                      : `Add ${currency.format(applyReceived)} to credit`
+                      : `Add ${currency.format(applyDefault)} to credit`
                     : `Add ${currency.format(applyAsked)} to credit`}
               </button>
               <button

@@ -43594,3 +43594,52 @@ describe('applyOverpaymentAsCredit and settleDuplicatePaymentMarker (Postgres st
     expect(fake.matching(/^update invoices/i)).toHaveLength(0)
   })
 })
+
+describe('a duplicate marker remembers a card payment (file backend)', () => {
+  async function seedPaid() {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-1',
+        clientId: 'c1',
+        period: '2026-09',
+        number: 'INV-2026-09-001',
+        status: 'paid',
+        lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 1000 }],
+        subtotal: 1000,
+        total: 1000,
+        emailLog: [],
+        createdAt: '2026-09-01T00:00:00.000Z',
+        updatedAt: '2026-09-01T00:00:00.000Z',
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const args = (over = {}) => ({
+    at: '2026-09-10T14:00:00.000Z',
+    paymentIntentId: 'pi_2',
+    expectedCents: 100000,
+    receivedCents: 103018,
+    reason: 'duplicate',
+    ...over,
+  })
+
+  it('writes card: true only on a duplicate paid by card', async () => {
+    await seedPaid()
+    const card = await store.recordInvoiceAmountMismatch('inv-1', args({ card: true }))
+    expect(card.emailLog[0]).toMatchObject({ reason: 'duplicate', card: true })
+    expect(unhandledAmountMismatch(card)).toMatchObject({ card: true })
+
+    const bank = await store.recordInvoiceAmountMismatch('inv-1', args({ paymentIntentId: 'pi_3' }))
+    expect(bank.emailLog[1]).not.toHaveProperty('card')
+    // A different-amount marker never carries it.
+    const amount = await store.recordInvoiceAmountMismatch('inv-1', {
+      at: '2026-09-11T14:00:00.000Z',
+      paymentIntentId: 'pi_4',
+      expectedCents: 100000,
+      receivedCents: 90000,
+      card: true,
+    })
+    expect(amount.emailLog[2]).not.toHaveProperty('card')
+  })
+})

@@ -6964,12 +6964,18 @@ const server = createServer(async (request, response) => {
         return
       }
       if (!result.replayed) {
-        const creditedClient = await appDataStore.getClientById(result.credit.clientId)
-        await appDataStore.recordActivity(
-          session.user.id,
-          'account_credit_added',
-          `${creditedClient?.name ?? 'A client'} $${result.credit.amount.toFixed(2)} (second payment on ${invoice.number ?? invoice.id})`,
-        )
+        // The credit is committed: the activity trail is best effort and must not
+        // turn a done credit into a 500 (a retry would then only replay it).
+        try {
+          const creditedClient = await appDataStore.getClientById(result.credit.clientId)
+          await appDataStore.recordActivity(
+            session.user.id,
+            'account_credit_added',
+            `${creditedClient?.name ?? 'A client'} $${result.credit.amount.toFixed(2)} (second payment on ${invoice.number ?? invoice.id})`,
+          )
+        } catch (error) {
+          console.error('[invoices] apply-credit activity entry failed:', error)
+        }
       }
       sendJson(response, 200, {
         credit: result.credit,

@@ -19249,6 +19249,7 @@ export class AppDataStore {
       receivedCents,
       reason = null,
       settling = false,
+      card = false,
     } = {},
   ) {
     if (!invoiceId) return null
@@ -19274,6 +19275,8 @@ export class AppDataStore {
       ...(duplicate ? { reason: DUPLICATE_PAYMENT_REASON } : {}),
       // A duplicate bank payment that was only STARTED (not settled yet).
       ...(duplicate && settling ? { settling: true } : {}),
+      // A duplicate paid by card: the row shows the card fee from this.
+      ...(duplicate && card ? { card: true } : {}),
     }
     // What "the same marker" means: the intent when there is one, else the pair.
     // A duplicate is a DIFFERENT marker from an amount mismatch on the same

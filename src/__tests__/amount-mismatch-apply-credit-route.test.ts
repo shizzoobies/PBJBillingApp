@@ -96,6 +96,16 @@ describe('POST /api/invoices/:id/amount-mismatch/apply-credit', () => {
     expect(text).toContain('credit: result.credit')
   })
 
+  it('the activity entry after the commit is best effort: its failure cannot undo or fail the credit', () => {
+    const at = handler.indexOf('recordActivity(')
+    const tryAt = handler.lastIndexOf('try {', at)
+    const catchAt = handler.indexOf('} catch (error) {', at)
+    expect(tryAt).toBeGreaterThan(handler.indexOf('applyOverpaymentAsCredit('))
+    expect(catchAt).toBeGreaterThan(at)
+    expect(handler.slice(catchAt, catchAt + 200)).toContain('console.error(')
+    expect(handler.indexOf('getClientById(')).toBeGreaterThan(tryAt)
+  })
+
   it('imports its helpers', () => {
     expect(serverSource).toContain('  duplicatePaymentLogged,')
     expect(serverSource).toContain('  duplicatePaymentWaiting,')

@@ -144,15 +144,110 @@ describe('Apply as credit on a second payment', () => {
     expect(screen.queryByRole('button', { name: 'Apply as credit' })).not.toBeInTheDocument()
   })
 
-  it('is disabled with its reason while the bank payment is still settling', async () => {
+  it("stays enabled while the bank payment looks like it is settling: the server asks Stripe and says so", async () => {
     mockList.mockResolvedValue([makeInvoice({ emailLog: [{ ...duplicate, settling: true }] } as Partial<PersistedInvoice>)])
+    mockApply.mockRejectedValue(new Error('That payment is still settling - try once it clears.'))
     await openEditor()
 
     const button = await screen.findByRole('button', { name: 'Apply as credit' })
-    expect(button).toBeDisabled()
-    expect(screen.getByText('Still settling - try once it clears.')).toBeInTheDocument()
+    expect(button).toBeEnabled()
     fireEvent.click(button)
-    expect(mockApply).not.toHaveBeenCalled()
+    const panel = await screen.findByRole('group', { name: 'Apply as credit' })
+    fireEvent.click(within(panel).getByRole('button', { name: 'Add $412.50 to credit' }))
+
+    expect(await screen.findByText('That payment is still settling - try once it clears.')).toBeInTheDocument()
+    expect(needALookStat()).toHaveTextContent('1')
+  })
+
+  it('Mark as handled is disabled while Apply as credit is running', async () => {
+    mockList.mockResolvedValue([makeInvoice()])
+    let finish: (value: Awaited<ReturnType<typeof applyDuplicatePaymentAsCreditRequest>>) => void = () => {}
+    mockApply.mockReturnValue(new Promise((resolve) => (finish = resolve)))
+    await openEditor()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply as credit' }))
+    const panel = await screen.findByRole('group', { name: 'Apply as credit' })
+    fireEvent.click(within(panel).getByRole('button', { name: 'Add $412.50 to credit' }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as handled' })).toBeDisabled())
+    finish({
+      credit: creditRow(),
+      invoice: makeInvoice({ emailLog: [duplicate, handledEntry], updatedAt: 'later' }),
+      replayed: false,
+    })
+    expect(await screen.findByText("Added $412.50 to Acme's credit on account")).toBeInTheDocument()
+  })
+
+  describe('a card payment: the fee is taken off the default, never off what she may raise it to', () => {
+    // total $1,000.00 + card fee $30.18 = $1,030.18 charged
+    const cardInvoice = () =>
+      makeInvoice({
+        lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 1000 }],
+        subtotal: 1000,
+        total: 1000,
+        emailLog: [{ ...duplicate, expectedCents: 100000, receivedCents: 103018, card: true }],
+      } as unknown as Partial<PersistedInvoice>)
+
+    it('shows the breakdown and defaults to what reached the firm', async () => {
+      mockList.mockResolvedValue([cardInvoice()])
+      await openEditor()
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Apply as credit' }))
+      const panel = await screen.findByRole('group', { name: 'Apply as credit' })
+      expect(
+        within(panel).getByText('Charged $1,030.18 (includes $30.18 card fee) - credit $1,000.00'),
+      ).toBeInTheDocument()
+      expect(within(panel).getByLabelText('Credit amount')).toHaveValue(1000)
+      expect(within(panel).getByText(/Add \$1,000\.00 to Acme's credit on account\./)).toBeInTheDocument()
+    })
+
+    it('sends no amount for the default, and an explicit one when she raises it to the charged amount', async () => {
+      mockList.mockResolvedValue([cardInvoice()])
+      mockApply.mockResolvedValue({
+        credit: creditRow({ amount: 1030.18 }),
+        invoice: makeInvoice({ emailLog: [duplicate, handledEntry], updatedAt: 'later' }),
+        replayed: false,
+      })
+      await openEditor()
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Apply as credit' }))
+      const panel = await screen.findByRole('group', { name: 'Apply as credit' })
+      const amount = within(panel).getByLabelText('Credit amount')
+
+      fireEvent.change(amount, { target: { value: '1030.19' } })
+      expect(within(panel).getByText(/cannot be more than \$1,030\.18/)).toBeInTheDocument()
+
+      fireEvent.change(amount, { target: { value: '1030.18' } })
+      fireEvent.click(within(panel).getByRole('button', { name: 'Add $1,030.18 to credit' }))
+      await waitFor(() =>
+        expect(mockApply).toHaveBeenCalledWith('inv-1', { paymentIntentId: 'pi_2', amount: 1030.18 }),
+      )
+    })
+
+    it('the default click sends no amount (the server works the same figure from Stripe)', async () => {
+      mockList.mockResolvedValue([cardInvoice()])
+      mockApply.mockResolvedValue({
+        credit: creditRow({ amount: 1000 }),
+        invoice: makeInvoice({ emailLog: [duplicate, handledEntry], updatedAt: 'later' }),
+        replayed: false,
+      })
+      await openEditor()
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Apply as credit' }))
+      const panel = await screen.findByRole('group', { name: 'Apply as credit' })
+      fireEvent.click(within(panel).getByRole('button', { name: 'Add $1,000.00 to credit' }))
+      await waitFor(() => expect(mockApply).toHaveBeenCalledWith('inv-1', { paymentIntentId: 'pi_2' }))
+    })
+
+    it('a bank payment shows no breakdown and defaults to the full amount', async () => {
+      mockList.mockResolvedValue([makeInvoice()])
+      await openEditor()
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Apply as credit' }))
+      const panel = await screen.findByRole('group', { name: 'Apply as credit' })
+      expect(within(panel).queryByText(/card fee/)).not.toBeInTheDocument()
+      expect(within(panel).getByLabelText('Credit amount')).toHaveValue(412.5)
+    })
   })
 
   it('asks first, naming the amount and the client the credit goes to, and cancelling sends nothing', async () => {
