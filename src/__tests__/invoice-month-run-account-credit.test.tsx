@@ -407,6 +407,24 @@ describe('InvoiceMonthRun - credit drawn at generation', () => {
     ).toBeInTheDocument()
   })
 
+  it('Void & regenerate says "carried over" when the voided draft already held the credit', async () => {
+    mockList.mockResolvedValue([draftWithCredit(600)])
+    mockRegenerate.mockResolvedValue({
+      period: '2026-10',
+      voided: 1,
+      created: [draftWithCredit(600)],
+      skipped: [],
+    })
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /Void & regenerate/ }))
+
+    expect(
+      await screen.findByText('Voided 1 and rebuilt 1 invoice. Credit on account carried over: $600.00 on 1 invoice.'),
+    ).toBeInTheDocument()
+  })
+
   it('a generated draft is the ordinary credited draft: the credit shows and Remove credit is offered', async () => {
     mockList.mockResolvedValue([draftWithCredit(200)])
     await openEditor()

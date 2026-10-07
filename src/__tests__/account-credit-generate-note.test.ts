@@ -60,6 +60,18 @@ describe('generatedCreditNote', () => {
     expect(generatedCreditNote(created)).toBe(' Credit on account applied: $700.50 across 2 invoices.')
   })
 
+  it('says "carried over" when every client that drew had already held the credit on a voided draft', () => {
+    const created = [invoice('a', [hours, credit(250)], 350)]
+    expect(generatedCreditNote(created, new Set(['client-acme']))).toBe(
+      ' Credit on account carried over: $250.00 on 1 invoice.',
+    )
+    // Some other client got credit it did not hold before: plain "applied".
+    expect(generatedCreditNote(created, new Set(['client-other']))).toBe(
+      ' Credit on account applied: $250.00 on 1 invoice.',
+    )
+    expect(generatedCreditNote(created, new Set())).toBe(' Credit on account applied: $250.00 on 1 invoice.')
+  })
+
   it('adds cents without floating-point drift', () => {
     const created = [invoice('a', [hours, credit(0.1)], 599.9), invoice('b', [hours, credit(0.2)], 599.8)]
     expect(generatedCreditNote(created)).toBe(' Credit on account applied: $0.30 across 2 invoices.')

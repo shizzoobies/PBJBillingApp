@@ -2949,11 +2949,15 @@ function recomputeInvoiceMoney(lineItems) {
  * money recomputed (the line sits outside the subtotal, inside the total). The
  * as-generated snapshot carries the line too, so it reads as generated, not as an
  * edit. Nothing to draw (no balance, nothing owed) returns the record untouched.
+ *
+ * GENERATION ONLY SPENDS CREDIT THAT IS DUE: one with no month, or meant for this
+ * invoice's month or an earlier one. Credit meant for a LATER month is left on
+ * account for that month's run; the owner's manual Apply can still take it.
  */
 function withGeneratedAccountCredit(record, ledger) {
   const plan = planAccountCreditDraws({
     lines: record.lineItems,
-    credits: ledger,
+    credits: ledger.filter((credit) => !credit.forPeriod || credit.forPeriod <= record.period),
     invoiceId: record.id,
     period: record.period,
   })
@@ -19469,6 +19473,8 @@ export class AppDataStore {
    */
   async _insertInvoiceDrawingAccountCredit(record, { dbClient = null } = {}) {
     if (this.pool) {
+      // The lock only holds for the transaction it is taken in.
+      if (!dbClient) throw new Error('Drawing credit on account needs the generation transaction.')
       await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [
         `account_credit:${record.clientId}`,
       ])

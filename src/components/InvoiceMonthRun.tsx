@@ -1274,6 +1274,18 @@ export function InvoiceMonthRun({
         return
       }
 
+      // Clients whose unsent drafts hold credit on account now: the rebuild draws
+      // it again, so for them the note says "carried over", not "applied".
+      const heldCredit = new Set(
+        fresh
+          .filter(
+            (invoice) =>
+              (invoice.status === 'draft' || invoice.status === 'reviewed') &&
+              invoice.lineItems.some((line) => line.kind === 'account_credit'),
+          )
+          .map((invoice) => invoice.clientId),
+      )
+
       const confirmed = window.confirm(
         `Void ${freshDrafts} draft${freshDrafts === 1 ? '' : 's'} and ${freshReviewed} reviewed invoice${
           freshReviewed === 1 ? '' : 's'
@@ -1302,7 +1314,7 @@ export function InvoiceMonthRun({
         `Voided ${result.voided} and rebuilt ${result.created.length} invoice${
           result.created.length === 1 ? '' : 's'
         }.` +
-          generatedCreditNote(result.created) +
+          generatedCreditNote(result.created, heldCredit) +
           (leftAlone - clearing > 0
             ? ` ${leftAlone - clearing} sent or paid invoice${leftAlone - clearing === 1 ? '' : 's'} left alone.`
             : '') +

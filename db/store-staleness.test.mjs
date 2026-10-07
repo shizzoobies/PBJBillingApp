@@ -42412,6 +42412,56 @@ describe('generation draws credit on account (file backend)', () => {
     expect(await store.accountCreditBalance('c2')).toBe(300)
   })
 
+  // The month a credit is meant for is a promise about WHEN it is used: generation
+  // never spends credit meant for a later month (Apply, by hand, still can).
+  it('leaves credit meant for a LATER month alone, draws it when that month is generated', async () => {
+    await seed([flat('c1', 'Acme')])
+    await credit('c1', 600, { forPeriod: '2026-11' })
+
+    const october = (await store.generateInvoicesForPeriod(period)).created[0]
+
+    expect(lineOf(october)).toBeUndefined()
+    expect(october.total).toBe(600)
+    expect(await store.accountCreditBalance('c1')).toBe(600)
+
+    const november = (await store.generateInvoicesForPeriod('2026-11')).created[0]
+
+    expect(lineOf(november)).toMatchObject({
+      amount: -600,
+      label: 'Credit on account - meant for November 2026',
+    })
+    expect(await store.accountCreditBalance('c1')).toBe(0)
+  })
+
+  it('draws credit with no month, or meant for this month or an earlier one, in any month\'s run', async () => {
+    await seed([flat('c1', 'Acme', 300)])
+    const none = await credit('c1', 100)
+    const earlier = await credit('c1', 100, { forPeriod: '2026-09' })
+    const thisMonth = await credit('c1', 100, { forPeriod: period })
+    const later = await credit('c1', 100, { forPeriod: '2026-12' })
+
+    const [invoice] = (await store.generateInvoicesForPeriod(period)).created
+
+    expect(lineOf(invoice).draws.map((draw) => draw.creditId).sort()).toEqual(
+      [none.id, earlier.id, thisMonth.id].sort(),
+    )
+    expect(lineOf(invoice).draws.map((draw) => draw.creditId)).not.toContain(later.id)
+    // This month's own credit first.
+    expect(lineOf(invoice).draws[0].creditId).toBe(thisMonth.id)
+    expect(invoice.total).toBe(0)
+  })
+
+  it('the manual Apply still takes credit meant for a later month, deliberately', async () => {
+    await seed([flat('c1', 'Acme')])
+    const later = await credit('c1', 600, { forPeriod: '2026-11' })
+    const [invoice] = (await store.generateInvoicesForPeriod(period)).created
+    expect(lineOf(invoice)).toBeUndefined()
+
+    const applied = await store.applyAccountCreditToInvoice(invoice.id, { actorUserId: 'u' })
+
+    expect(lineOf(applied).draws).toEqual([{ creditId: later.id, amount: 600 }])
+  })
+
   it('a second run is skipped as already generated and draws nothing more', async () => {
     await seed([flat('c1', 'Acme')])
     await credit('c1', 1000)
@@ -42497,6 +42547,59 @@ describe('generation draws credit on account (file backend)', () => {
     const removed = await store.removeAccountCreditFromInvoice(invoice.id, { actorUserId: 'u' })
     expect(lineOf(removed)).toBeUndefined()
     expect(await store.accountCreditBalance('c1')).toBe(1000)
+  })
+
+  it('refuses a manual apply sized BEFORE a generate drew the credit (the adversarial order, forced)', async () => {
+    await seed([flat('c1', 'Acme')])
+    await credit('c1', 700)
+    await editFile((data) => {
+      data.invoices.push({
+        id: 'inv-prev',
+        clientId: 'c1',
+        period: '2026-09',
+        number: 'INV-PREV',
+        kind: 'monthly',
+        status: 'draft',
+        lineItems: [{ kind: 'plan', label: 'Plan', detail: '', amount: 600 }],
+        subtotal: 600,
+        total: 600,
+        dueDate: null,
+        blurb: '',
+        scopeFlags: [],
+        sentAt: null,
+        paidAt: null,
+        paymentMethod: null,
+        appliedToInvoiceId: null,
+        createdAt: '2026-09-30T00:00:00.000Z',
+        updatedAt: '2026-09-30T00:00:00.000Z',
+      })
+    })
+    // The apply sizes its line from a ledger read made OUTSIDE the queue slot. Right
+    // after that read returns (so the line is already sized from 700 available), a
+    // whole generate runs and draws 600. Then the apply reaches its slot.
+    const read = store._readAccountCredits.bind(store)
+    let armed = true
+    store._readAccountCredits = async (clientId, options = {}) => {
+      const ledger = await read(clientId, options)
+      if (armed && !options.data) {
+        armed = false
+        await store.generateInvoicesForPeriod(period)
+      }
+      return ledger
+    }
+
+    const refused = store.applyAccountCreditToInvoice('inv-prev', { actorUserId: 'u' })
+
+    await expect(refused).rejects.toBeInstanceOf(AccountCreditError)
+    await expect(refused).rejects.toThrow(
+      'The credit on account changed while this was saving, so nothing was changed. Try again.',
+    )
+    expect(armed).toBe(false)
+    // The generate's draw stands; the refused apply wrote nothing.
+    const invoices = await stored()
+    expect(lineOf(invoices.find((invoice) => invoice.id === 'inv-prev'))).toBeUndefined()
+    expect(lineOf(invoices.find((invoice) => invoice.period === period)).amount).toBe(-600)
+    expect(await store.accountCreditBalance('c1')).toBe(100)
   })
 
   it('two drafts cannot spend the same credit when a generate and a manual apply race', async () => {
@@ -42679,6 +42782,33 @@ describe('generation draws credit on account (Postgres statements)', () => {
     expect(locks.map((lock) => lock.params[0])).toEqual(['account_credit:c1'])
     const lines = JSON.parse(inserts(fake)[0].params[6])
     expect(lines.find((line) => line.kind === 'account_credit').draws).toEqual([{ creditId: 'credit-m', amount: 150 }])
+  })
+
+  it('leaves credit meant for a later month undrawn, though the client holds it (lock taken, no line)', async () => {
+    const fake = fakePostgres({ accountCreditRows: [creditRow({ for_period: '2026-11' })] })
+
+    const { created } = await storeFor(fake, clientsFor('c1')).generateInvoicesForPeriod(period)
+
+    expect(created).toHaveLength(1)
+    expect(fake.matching(/pg_advisory_xact_lock/i)).toHaveLength(1)
+    const [write] = inserts(fake)
+    expect(JSON.parse(write.params[6])).toHaveLength(1)
+    expect(write.params[8]).toBe(600)
+
+    // Generated for the month it is meant for, the same credit is drawn.
+    const november = fakePostgres({ accountCreditRows: [creditRow({ for_period: '2026-11' })] })
+    await storeFor(november, clientsFor('c1')).generateInvoicesForPeriod('2026-11')
+    const lines = JSON.parse(inserts(november)[0].params[6])
+    expect(lines[1]).toMatchObject({ kind: 'account_credit', amount: -600 })
+  })
+
+  it('refuses to draw without the transaction\'s connection (the lock must be held)', async () => {
+    const fake = fakePostgres({ accountCreditRows: [creditRow()] })
+    const pg = storeFor(fake, clientsFor('c1'))
+    await expect(
+      pg._insertInvoiceDrawingAccountCredit({ id: 'inv-x', clientId: 'c1', period, lineItems: [planLine] }),
+    ).rejects.toThrow(/transaction/i)
+    expect(fake.statements).toHaveLength(0)
   })
 
   it('rolls the whole generation of that client back when the insert fails, leaving no draw behind', async () => {

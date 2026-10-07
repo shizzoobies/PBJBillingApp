@@ -31,9 +31,14 @@ export function accountCreditSourceText(credit: AccountCredit): string {
  * Read off the credit lines of the invoices the server returned, in whole cents, so
  * the figure she is told is the figure stored. Empty when no new draft drew any.
  */
-export function generatedCreditNote(created: readonly PersistedInvoice[]): string {
+export function generatedCreditNote(
+  created: readonly PersistedInvoice[],
+  /** Clients whose voided drafts already held credit: when every draw is theirs it reads "carried over". */
+  carriedOverClientIds?: ReadonlySet<string>,
+): string {
   let cents = 0
   let invoices = 0
+  let allCarried = true
   for (const invoice of created) {
     const drawn = invoice.lineItems
       .filter((line) => line.kind === 'account_credit')
@@ -41,9 +46,10 @@ export function generatedCreditNote(created: readonly PersistedInvoice[]): strin
     if (drawn > 0) {
       cents += drawn
       invoices += 1
+      if (!carriedOverClientIds?.has(invoice.clientId)) allCarried = false
     }
   }
   if (cents === 0) return ''
   const dollars = (cents / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' })
-  return ` Credit on account applied: ${dollars} ${invoices === 1 ? 'on 1 invoice' : `across ${invoices} invoices`}.`
+  return ` Credit on account ${carriedOverClientIds && allCarried ? 'carried over' : 'applied'}: ${dollars} ${invoices === 1 ? 'on 1 invoice' : `across ${invoices} invoices`}.`
 }
