@@ -25,7 +25,26 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-06, end of night):** `main` = `1530f3f` (+ this handoff), pushed, deployed, `/health`
+**State right now (2026-10-07, afternoon):** `main` = `6ba0e5e` (+ this handoff), deployed, `/health` 200.
+Suite **322 files / 7168 tests**. Alex approved two plans at noon and ordered them: (1) **the bulk-save
+batching is DONE** - five deploys today (`0287a11` measure + password-hash skip, `b8e6c1e` time_entries,
+`a6bbcd2` checklist family, `2b348bd` clients/invoice restore/small tables + one merged clients snapshot,
+`6ba0e5e` no-op rollback), each with an independent review and a rolled-back production parity trial
+(`AP-laneB/tmp/batch-trial.mjs`, git-ignored: temp tables `like X including all`, `except all` on
+`to_jsonb - updated_at` at millisecond precision, old-vs-new samples exact); `lib/insert-rows-batched.js`
+is the helper, `BULK_INSERT_SHAPES` + exported `*BulkRow` builders in db/store.js, golden fixture
+`db/golden/bulk-save-rows.json` pins rows + casts + tails (regenerate with `UPDATE_GOLDEN=1`); users stay
+per-row; the lock and the staleness guard are untouched; NO real autosave has run on the batched code yet -
+read the first `write committed` line (expect a few seconds, per-table breakdown) and watch for
+`no-op save rolled back`. Tracker `featreq-251d1668` Done. (2) **Credit on account** (`featreq-110efd15`,
+plan `docs/plans/credit-on-account-and-billing-period-2026-10.md`, period = ANY months per client, no
+annual migration, everything existing stays as is) - stage 1a is building in `AP-laneC`
+(`feat/credit-on-account`); stages 1b-1e then 2 follow, one deploy each. Brittany's two questions on
+that ticket (prepay invoice the run before the first month? QBO item names?) are open. Also today:
+Brittany's split-time request done (`bee946c`, 186 approved slices across 18 clients), the package-mirror
+send-back (`0a4e5c6`), nudges by package (`7346c1e`), the retainer position section (`1530f3f`).
+
+**Earlier (2026-10-06, end of night):** `main` = `1530f3f` (+ this handoff), pushed, deployed, `/health`
 200, voice re-provisioned. Suite **321 files / 7082 tests**. Manifest **204,901 bytes - 99 under the cap, TRIM
 FIRST.** Two more ships after the package-mirror one: `7346c1e` (2 commits) **To 100% nudges group by package**
 (`featreq-fe428f9f`, Done) with a packages-settled gate so a quick Fix cannot create a checklist the package
