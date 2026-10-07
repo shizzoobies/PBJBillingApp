@@ -43161,6 +43161,436 @@ describe('markInvoicePaidByCredit (postgres branch)', () => {
     })
 
     expect(late.duplicatePayment).toBe(true)
+  })
+})
+
+/**
+ * Credit on account, stage 1e (docs/plans/credit-on-account-and-billing-period-2026-10.md):
+ * "Apply as credit" on a double payment. The credit and the handled entry for THAT
+ * payment land in one step; the settled-bank-duplicate flip rewrites the marker.
+ */
+const DUPLICATE_MARKER = {
+  kind: 'payment',
+  event: 'amount-mismatch',
+  at: '2026-09-10T14:00:00.000Z',
+  paymentIntentId: 'pi_2',
+  expectedCents: 40000,
+  receivedCents: 41250,
+  reason: 'duplicate',
+}
+const OTHER_DUPLICATE_MARKER = { ...DUPLICATE_MARKER, paymentIntentId: 'pi_3', receivedCents: 40000 }
+
+describe('applyOverpaymentAsCredit and settleDuplicatePaymentMarker (file backend)', () => {
+  const invoiceRow = (over = {}) => ({
+    id: 'inv-1',
+    clientId: 'c1',
+    period: '2026-09',
+    number: 'INV-2026-09-001',
+    status: 'paid',
+    lineItems: [{ kind: 'custom', label: 'Bookkeeping', detail: '', amount: 400 }],
+    subtotal: 400,
+    total: 400,
+    dueDate: '2026-10-15',
+    blurb: '',
+    scopeFlags: [],
+    sentAt: '2026-09-01T12:00:00.000Z',
+    paidAt: '2026-09-05T12:00:00.000Z',
+    paymentMethod: 'us_bank_account',
+    stripePaymentIntentId: 'pi_1',
+    emailLog: [DUPLICATE_MARKER],
+    createdAt: '2026-09-01T00:00:00.000Z',
+    updatedAt: '2026-09-01T00:00:00.000Z',
+    ...over,
+  })
+  async function seed({ invoices = [invoiceRow()], clients } = {}) {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = invoices
+    if (clients) data.clients = clients
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const apply = (over = {}) =>
+    store.applyOverpaymentAsCredit('inv-1', { paymentIntentId: 'pi_2', cents: 41250, byUserId: 'owner-1', ...over })
+
+  it('records the credit and marks THAT payment handled in the same step', async () => {
+    await seed()
+    const result = await apply()
+
+    expect(result.replayed).toBe(false)
+    expect(result.credit).toMatchObject({
+      clientId: 'c1',
+      amount: 412.5,
+      sourceKind: 'overpayment',
+      sourceRef: 'pi_2',
+      note: 'Second payment on INV-2026-09-001',
+      createdBy: 'owner-1',
+      voidedAt: null,
+    })
+    const log = result.invoice.emailLog
+    expect(log).toHaveLength(2)
+    expect(log[1]).toMatchObject({
+      kind: 'payment',
+      event: 'amount-mismatch-handled',
+      by: 'owner-1',
+      paymentIntentId: 'pi_2',
+    })
+    expect(unhandledAmountMismatch(result.invoice)).toBeNull()
+    const stored = await persisted()
+    expect(stored.accountCredits).toHaveLength(1)
+    expect(stored.invoices[0].emailLog).toHaveLength(2)
+    expect(await store.accountCreditBalance('c1')).toBe(412.5)
+    // The money is still where it was: status and totals are untouched.
+    expect(stored.invoices[0]).toMatchObject({ status: 'paid', total: 400, stripePaymentIntentId: 'pi_1' })
+  })
+
+  it('handles only the payment it was asked about, not every unhandled marker', async () => {
+    await seed({ invoices: [invoiceRow({ emailLog: [DUPLICATE_MARKER, OTHER_DUPLICATE_MARKER] })] })
+    const result = await apply()
+
+    const open = unhandledAmountMismatch(result.invoice)
+    expect(open).toMatchObject({ paymentIntentId: 'pi_3', count: 1 })
+    expect(result.invoice.emailLog.filter((entry) => entry.event === 'amount-mismatch-handled')).toHaveLength(1)
+  })
+
+  it('is idempotent: a replay answers the existing credit and handles nothing again', async () => {
+    await seed()
+    const first = await apply()
+    const again = await apply({ cents: 100, byUserId: 'owner-2' })
+
+    expect(again.replayed).toBe(true)
+    expect(again.credit.id).toBe(first.credit.id)
+    expect(again.credit.amount).toBe(412.5)
+    expect(again.invoice.emailLog).toHaveLength(2)
+    const stored = await persisted()
+    expect(stored.accountCredits).toHaveLength(1)
+    expect(stored.invoices[0].emailLog.filter((entry) => entry.event === 'amount-mismatch-handled')).toHaveLength(1)
+  })
+
+  it('two clicks at once make one credit and one handled entry', async () => {
+    await seed()
+    const results = await Promise.all([apply(), apply()])
+
+    expect(results.filter((entry) => !entry.replayed)).toHaveLength(1)
+    expect(results[0].credit.id).toBe(results[1].credit.id)
+    const stored = await persisted()
+    expect(stored.accountCredits).toHaveLength(1)
+    expect(stored.invoices[0].emailLog.filter((entry) => entry.event === 'amount-mismatch-handled')).toHaveLength(1)
+  })
+
+  it("an invoice of a billing sub credits the sub's master, which is the client that pays", async () => {
+    await seed({
+      clients: [
+        { id: 'master', name: 'KLC', isBillingMaster: true },
+        { id: 'sub', name: 'Sub Co', billToClientId: 'master' },
+      ],
+      invoices: [invoiceRow({ clientId: 'sub' })],
+    })
+    const result = await apply()
+
+    expect(result.credit.clientId).toBe('master')
+    expect(await store.accountCreditBalance('master')).toBe(412.5)
+    expect(await store.accountCreditBalance('sub')).toBe(0)
+  })
+
+  it('takes a lower amount as given', async () => {
+    await seed()
+    const result = await apply({ cents: 40000 })
+    expect(result.credit.amount).toBe(400)
+  })
+
+  it('refuses a payment that is not waiting (no marker, or already handled) and writes nothing', async () => {
+    await seed()
+    await expect(apply({ paymentIntentId: 'pi_unknown' })).rejects.toBeInstanceOf(AccountCreditError)
+    await expect(apply({ paymentIntentId: 'pi_unknown' })).rejects.toThrow(/not waiting/i)
+
+    await store.acknowledgeInvoiceAmountMismatch('inv-1', { byUserId: 'owner-1' })
+    await expect(apply()).rejects.toThrow(/not waiting/i)
+    expect((await persisted()).accountCredits ?? []).toEqual([])
+  })
+
+  it('a different-amount marker is not a double payment', async () => {
+    await seed({ invoices: [invoiceRow({ emailLog: [{ ...DUPLICATE_MARKER, reason: undefined }] })] })
+    await expect(apply()).rejects.toThrow(/not waiting/i)
+  })
+
+  it('a client that cannot take the credit leaves the marker unhandled (all or nothing)', async () => {
+    await seed({ clients: [{ id: 'c1', name: 'Acme', lifecycleStage: 'inactive' }] })
+    await expect(apply()).rejects.toThrow(/retired/i)
+
+    const stored = await persisted()
+    expect(stored.accountCredits ?? []).toEqual([])
+    expect(stored.invoices[0].emailLog).toHaveLength(1)
+  })
+
+  it('answers null for an invoice that is not there', async () => {
+    await seed()
+    expect(await store.applyOverpaymentAsCredit('nope', { paymentIntentId: 'pi_2', cents: 100 })).toBeNull()
+  })
+
+  it('refuses an amount that is not whole cents above zero', async () => {
+    await seed()
+    for (const cents of [0, -5, 1.5, Number.NaN, undefined]) {
+      await expect(apply({ cents })).rejects.toBeInstanceOf(AccountCreditError)
+    }
+    expect((await persisted()).accountCredits ?? []).toEqual([])
+  })
+
+  it('findOverpaymentCredit answers the credit a payment became, or null', async () => {
+    await seed()
+    expect(await store.findOverpaymentCredit('pi_2')).toBeNull()
+    const { credit } = await apply()
+    expect(await store.findOverpaymentCredit('pi_2')).toMatchObject({ id: credit.id, sourceRef: 'pi_2' })
+    expect(await store.findOverpaymentCredit('')).toBeNull()
+  })
+
+  describe('settleDuplicatePaymentMarker', () => {
+    const settling = { ...DUPLICATE_MARKER, settling: true }
+
+    it('flips a settling duplicate to settled, in place, and touches nothing else', async () => {
+      await seed({ invoices: [invoiceRow({ emailLog: [settling, { ...OTHER_DUPLICATE_MARKER, settling: true }] })] })
+      expect(unhandledAmountMismatch((await persisted()).invoices[0])).toMatchObject({ settling: true })
+
+      const updated = await store.settleDuplicatePaymentMarker('inv-1', 'pi_3')
+      expect(updated.emailLog[1].settling).toBe(false)
+      expect(updated.emailLog[0].settling).toBe(true)
+      expect(updated.emailLog).toHaveLength(2)
+
+      const again = await store.settleDuplicatePaymentMarker('inv-1', 'pi_2')
+      expect(again.emailLog.every((entry) => entry.settling === false)).toBe(true)
+      const stored = (await persisted()).invoices[0]
+      expect(unhandledAmountMismatch(stored)).toMatchObject({ settling: false, count: 2 })
+      expect(stored).toMatchObject({ status: 'paid', total: 400, sentAt: '2026-09-01T12:00:00.000Z' })
+    })
+
+    it('does nothing (null) for a marker that is not settling, not there, or an invoice that is gone', async () => {
+      await seed()
+      expect(await store.settleDuplicatePaymentMarker('inv-1', 'pi_2')).toBeNull()
+      expect(await store.settleDuplicatePaymentMarker('inv-1', 'pi_unknown')).toBeNull()
+      expect(await store.settleDuplicatePaymentMarker('nope', 'pi_2')).toBeNull()
+      expect((await persisted()).invoices[0].emailLog).toEqual([DUPLICATE_MARKER])
+    })
+  })
+})
+
+describe('applyOverpaymentAsCredit and settleDuplicatePaymentMarker (Postgres statements)', () => {
+  /**
+   * A recording pool holding ONE invoice and the credit ledger in memory, with
+   * transaction rollback: what a rolled-back transaction wrote is undone, so the
+   * all-or-nothing claim is checked against the statements, not assumed.
+   */
+  function overpaymentPool({
+    emailLog = [DUPLICATE_MARKER],
+    clients = {
+      c1: { id: 'c1', name: 'Acme', bill_to_client_id: null, lifecycle_stage: 'active' },
+    },
+    invoiceClientId = 'c1',
+    failOnHandledAppend = false,
+  } = {}) {
+    const statements = []
+    let held = []
+    let invoice = { ...existingInvoice, id: 'inv-1', client_id: invoiceClientId, status: 'paid', email_log: emailLog }
+    let snapshot = null
+    const answer = async (text, params) => {
+      const trimmed = text.replace(/\s+/g, ' ').trim()
+      statements.push({ text: trimmed, params })
+      if (/^begin$/i.test(trimmed)) {
+        snapshot = { held: held.map((row) => ({ ...row })), invoice: { ...invoice } }
+        return { rows: [] }
+      }
+      if (/^rollback$/i.test(trimmed)) {
+        if (snapshot) {
+          held = snapshot.held
+          invoice = snapshot.invoice
+        }
+        return { rows: [] }
+      }
+      if (/^commit$/i.test(trimmed)) return { rows: [] }
+      if (/^select .* from invoices where id = \$1( for update)?$/i.test(trimmed)) {
+        return params[0] === invoice.id ? { rows: [invoice], rowCount: 1 } : { rows: [], rowCount: 0 }
+      }
+      if (/^select .* from invoices order by number nulls last, created_at$/i.test(trimmed)) {
+        return { rows: [invoice] }
+      }
+      if (/^select id, name, bill_to_client_id, lifecycle_stage from clients where id = \$1$/i.test(trimmed)) {
+        return { rows: clients[params[0]] ? [clients[params[0]]] : [] }
+      }
+      if (/^insert into account_credits/i.test(trimmed)) {
+        if (held.some((row) => row.source_kind === params[3] && row.source_ref === params[4])) {
+          return { rows: [], rowCount: 0 }
+        }
+        const row = {
+          id: params[0],
+          client_id: params[1],
+          amount: Number(params[2]).toFixed(2),
+          source_kind: params[3],
+          source_ref: params[4],
+          for_period: params[5],
+          note: params[6],
+          created_by: params[7],
+          created_at: new Date('2026-10-07T15:00:00Z'),
+          voided_at: null,
+          voided_by: null,
+        }
+        held.push(row)
+        return { rows: [row], rowCount: 1 }
+      }
+      if (/^select .* from account_credits where source_kind = \$1 and source_ref = \$2$/i.test(trimmed)) {
+        return { rows: held.filter((row) => row.source_kind === params[0] && row.source_ref === params[1]) }
+      }
+      if (/^update invoices set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb/i.test(trimmed)) {
+        if (failOnHandledAppend) throw new Error('connection lost')
+        invoice = { ...invoice, email_log: [...invoice.email_log, ...JSON.parse(params[1])] }
+        return { rows: [{ id: invoice.id }], rowCount: 1 }
+      }
+      if (/^update invoices set email_log = \$2::jsonb, updated_at = now\(\) where id = \$1$/i.test(trimmed)) {
+        invoice = { ...invoice, email_log: JSON.parse(params[1]) }
+        return { rows: [], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+    const pool = { connect: async () => ({ query: answer, release() {} }), query: answer }
+    return {
+      pool,
+      statements,
+      matching: (pattern) => statements.filter((entry) => pattern.test(entry.text)),
+      credits: () => held,
+      invoice: () => invoice,
+    }
+  }
+  const pg = (fake) => {
+    const instance = new AppDataStore()
+    instance.pool = fake.pool
+    instance.mode = 'postgres'
+    return instance
+  }
+  const args = (over = {}) => ({ paymentIntentId: 'pi_2', cents: 41250, byUserId: 'owner-1', ...over })
+
+  it('inserts the credit and appends THAT payment\'s handled entry on ONE connection, in one transaction', async () => {
+    const fake = overpaymentPool({ emailLog: [DUPLICATE_MARKER, OTHER_DUPLICATE_MARKER] })
+    const result = await pg(fake).applyOverpaymentAsCredit('inv-1', args())
+
+    expect(result.credit).toMatchObject({
+      clientId: 'c1',
+      amount: 412.5,
+      sourceKind: 'overpayment',
+      sourceRef: 'pi_2',
+      note: 'Second payment on INV-2026-08-001',
+      createdBy: 'owner-1',
+    })
+    expect(result.replayed).toBe(false)
+    const order = fake.statements.map((entry) => entry.text.split(' ').slice(0, 3).join(' ').toLowerCase())
+    const begin = order.indexOf('begin')
+    const commit = order.indexOf('commit')
+    expect(begin).toBeGreaterThanOrEqual(0)
+    expect(commit).toBeGreaterThan(begin)
+    const inside = fake.statements.slice(begin, commit + 1).map((entry) => entry.text)
+    expect(inside.some((text) => /^insert into account_credits/i.test(text))).toBe(true)
+    expect(inside.some((text) => /^update invoices set email_log/i.test(text))).toBe(true)
+    // The invoice row is locked for the whole step.
+    expect(inside.some((text) => /from invoices where id = \$1 for update$/i.test(text))).toBe(true)
+
+    const [append] = fake.matching(/^update invoices set email_log = coalesce/i)
+    expect(append.text).not.toMatch(/\bstatus\b|\bline_items\b|\btotal\b|\bsent_at\b|stripe_payment_intent_id/)
+    const entries = JSON.parse(append.params[1])
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      kind: 'payment',
+      event: 'amount-mismatch-handled',
+      by: 'owner-1',
+      paymentIntentId: 'pi_2',
+    })
+    expect(unhandledAmountMismatch({ emailLog: fake.invoice().email_log })).toMatchObject({
+      paymentIntentId: 'pi_3',
+    })
+  })
+
+  it('a replay answers the existing credit before it looks at the marker, and appends nothing', async () => {
+    const fake = overpaymentPool()
+    const store2 = pg(fake)
+    const first = await store2.applyOverpaymentAsCredit('inv-1', args())
+    const appendsBefore = fake.matching(/^update invoices set email_log = coalesce/i).length
+
+    const again = await store2.applyOverpaymentAsCredit('inv-1', args({ cents: 100 }))
+    expect(again.replayed).toBe(true)
+    expect(again.credit.id).toBe(first.credit.id)
+    expect(fake.matching(/^update invoices set email_log = coalesce/i)).toHaveLength(appendsBefore)
+    expect(fake.matching(/^insert into account_credits/i)).toHaveLength(1)
+  })
+
+  it("an invoice of a billing sub credits its master", async () => {
+    const fake = overpaymentPool({
+      invoiceClientId: 'sub',
+      clients: {
+        sub: { id: 'sub', name: 'Sub Co', bill_to_client_id: 'master', lifecycle_stage: 'active' },
+        master: { id: 'master', name: 'KLC', bill_to_client_id: null, lifecycle_stage: 'active' },
+      },
+    })
+    const result = await pg(fake).applyOverpaymentAsCredit('inv-1', args())
+    expect(result.credit.clientId).toBe('master')
+  })
+
+  it('refuses a payment not waiting, an amount that is not cents and a missing invoice, writing nothing', async () => {
+    const fake = overpaymentPool()
+    const store2 = pg(fake)
+    await expect(store2.applyOverpaymentAsCredit('inv-1', args({ paymentIntentId: 'pi_zzz' }))).rejects.toThrow(
+      /not waiting/i,
+    )
+    await expect(store2.applyOverpaymentAsCredit('inv-1', args({ cents: 0 }))).rejects.toBeInstanceOf(
+      AccountCreditError,
+    )
+    expect(await store2.applyOverpaymentAsCredit('nope', args())).toBeNull()
+    expect(fake.matching(/^insert into account_credits/i)).toHaveLength(0)
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+    // The not-waiting refusal rolled back (a bad amount never opens a transaction);
+    // only the empty "no such invoice" step committed.
+    expect(fake.matching(/^rollback$/i)).toHaveLength(1)
+  })
+
+  it('a handled-entry write that fails rolls the credit back with it', async () => {
+    const fake = overpaymentPool({ failOnHandledAppend: true })
+    await expect(pg(fake).applyOverpaymentAsCredit('inv-1', args())).rejects.toThrow(/connection lost/)
+
+    expect(fake.matching(/^rollback$/i).length).toBeGreaterThan(0)
+    expect(fake.matching(/^commit$/i)).toHaveLength(0)
+    expect(fake.credits()).toEqual([])
+  })
+
+  it('a retired client refuses and leaves the marker unhandled', async () => {
+    const fake = overpaymentPool({
+      clients: { c1: { id: 'c1', name: 'Acme', bill_to_client_id: null, lifecycle_stage: 'inactive' } },
+    })
+    await expect(pg(fake).applyOverpaymentAsCredit('inv-1', args())).rejects.toThrow(/retired/i)
+    expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+  })
+
+  it('findOverpaymentCredit reads the ledger by source', async () => {
+    const fake = overpaymentPool()
+    const store2 = pg(fake)
+    expect(await store2.findOverpaymentCredit('pi_2')).toBeNull()
+    const { credit } = await store2.applyOverpaymentAsCredit('inv-1', args())
+    expect(await store2.findOverpaymentCredit('pi_2')).toMatchObject({ id: credit.id })
+  })
+
+  it('settleDuplicatePaymentMarker rewrites the one settling entry under a row lock, and only that', async () => {
+    const fake = overpaymentPool({
+      emailLog: [
+        { ...DUPLICATE_MARKER, settling: true },
+        { ...OTHER_DUPLICATE_MARKER, settling: true },
+      ],
+    })
+    const updated = await pg(fake).settleDuplicatePaymentMarker('inv-1', 'pi_2')
+
+    expect(updated).not.toBeNull()
+    expect(fake.invoice().email_log.map((entry) => entry.settling)).toEqual([false, true])
+    expect(fake.statements.some((entry) => /from invoices where id = \$1 for update$/i.test(entry.text))).toBe(true)
+    const [write] = fake.matching(/^update invoices set email_log = \$2::jsonb, updated_at = now\(\) where id = \$1$/i)
+    expect(write.text).not.toMatch(/\bstatus\b|\bline_items\b|\btotal\b/)
+  })
+
+  it('settleDuplicatePaymentMarker writes nothing when no settling marker matches', async () => {
+    const fake = overpaymentPool()
+    expect(await pg(fake).settleDuplicatePaymentMarker('inv-1', 'pi_2')).toBeNull()
+    expect(await pg(fake).settleDuplicatePaymentMarker('nope', 'pi_2')).toBeNull()
     expect(fake.matching(/^update invoices/i)).toHaveLength(0)
   })
 })

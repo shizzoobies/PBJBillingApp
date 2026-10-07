@@ -117,8 +117,10 @@ import { AUTOPAY_ACTIVE_ATTEMPT_STATUSES, emptyAutopay } from '../lib/stripe-aut
 import {
   AMOUNT_MISMATCH_EVENT,
   AMOUNT_MISMATCH_HANDLED_EVENT,
+  DUPLICATE_NOT_WAITING_MESSAGE,
   DUPLICATE_PAYMENT_REASON,
   PAYMENT_ON_VOIDED_EVENT,
+  duplicatePaymentWaiting,
   unhandledAmountMismatches,
 } from '../lib/payment-amount-mismatch.js'
 import { editChangesWhatClientSees, totalsDiffer } from '../lib/invoice-sent-change.js'
@@ -17305,15 +17307,21 @@ export class AppDataStore {
    * belongs to the master, which pays), and a source already recorded for
    * another client.
    */
-  async addAccountCredit({
-    clientId,
-    amount,
-    note = '',
-    forPeriod = null,
-    createdBy = null,
-    sourceKind = 'manual',
-    sourceRef = null,
-  } = {}) {
+  async addAccountCredit(
+    {
+      clientId,
+      amount,
+      note = '',
+      forPeriod = null,
+      createdBy = null,
+      sourceKind = 'manual',
+      sourceRef = null,
+    } = {},
+    // Internal: a caller already inside a transaction (`dbClient`, Postgres) or
+    // already holding the data-file queue slot with the workspace it read
+    // (`workspace`, file backend) runs the write as part of ITS step.
+    { dbClient = null, workspace = null } = {},
+  ) {
     if (!ACCOUNT_CREDIT_SOURCE_KINDS.includes(sourceKind)) {
       throw new AccountCreditError('That is not a kind of credit on account.')
     }
@@ -17332,10 +17340,11 @@ export class AppDataStore {
     const id = `credit-${randomUUID()}`
 
     if (this.pool) {
+      const runner = dbClient ?? this.pool
       // A source already recorded is answered with its row BEFORE the client is
       // looked at: replaying a credit for a client that has since been retired
       // must still find it, not refuse.
-      const recorded = await this.pool.query(
+      const recorded = await runner.query(
         `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits
           where source_kind = $1 and source_ref = $2`,
         [sourceKind, ref],
@@ -17343,7 +17352,7 @@ export class AppDataStore {
       if (recorded.rows.length > 0) {
         return sameSourceCredit(mapAccountCreditRow(recorded.rows[0]), clientId)
       }
-      const found = await this.pool.query(
+      const found = await runner.query(
         'select id, name, bill_to_client_id, lifecycle_stage from clients where id = $1',
         [clientId],
       )
@@ -17356,7 +17365,7 @@ export class AppDataStore {
             }
           : null,
       )
-      const inserted = await this.pool.query(
+      const inserted = await runner.query(
         `insert into account_credits
            (id, client_id, amount, source_kind, source_ref, for_period, note, created_by)
          values ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -17366,7 +17375,7 @@ export class AppDataStore {
       )
       if (inserted.rows.length > 0) return mapAccountCreditRow(inserted.rows[0])
       // Lost a race with the same source being recorded a moment ago: answer that row.
-      const raced = await this.pool.query(
+      const raced = await runner.query(
         `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits
           where source_kind = $1 and source_ref = $2`,
         [sourceKind, ref],
@@ -17375,7 +17384,7 @@ export class AppDataStore {
       return sameSourceCredit(mapAccountCreditRow(raced.rows[0]), clientId)
     }
 
-    return mutateLocalData((data) => {
+    const insertInto = (data) => {
       if (!Array.isArray(data.accountCredits)) data.accountCredits = []
       const existing = data.accountCredits.find(
         (row) => row.sourceKind === sourceKind && row.sourceRef === ref,
@@ -17399,6 +17408,204 @@ export class AppDataStore {
       }
       data.accountCredits.push(row)
       return { result: accountCreditView(row), changed: true }
+    }
+    if (workspace) return insertInto(workspace).result
+    return mutateLocalData(insertInto)
+  }
+
+  /** The credit a double payment became (by its PaymentIntent id), or null. */
+  async findOverpaymentCredit(paymentIntentId) {
+    const ref = String(paymentIntentId ?? '').trim()
+    if (!ref) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits
+          where source_kind = $1 and source_ref = $2`,
+        ['overpayment', ref],
+      )
+      return rows.length > 0 ? mapAccountCreditRow(rows[0]) : null
+    }
+    const data = await readJson(localDataPath)
+    const row = (data.accountCredits ?? []).find(
+      (entry) => entry.sourceKind === 'overpayment' && entry.sourceRef === ref,
+    )
+    return row ? accountCreditView(row) : null
+  }
+
+  /**
+   * "Apply as credit" on a double payment: the second payment on a paid invoice
+   * (an unhandled `reason: 'duplicate'` marker) becomes a credit on the client's
+   * account, and THAT payment's `amount-mismatch-handled` entry is appended, in
+   * ONE step - one transaction on Postgres (the invoice row locked), one queue
+   * slot on the file backend - so there is never a credit with the flag left up,
+   * nor the flag cleared with no credit.
+   *
+   * The credit belongs to the client that pays: an invoice of a billing sub
+   * credits its master. `cents` is whole cents above zero (the caller has
+   * checked it against what Stripe collected). Idempotent on the PaymentIntent:
+   * a replay answers the existing credit with `replayed: true` and handles
+   * nothing again. The invoice status and money are never touched.
+   *
+   * @returns {{ credit, invoice, replayed: boolean } | null} null when there is
+   * no such invoice; AccountCreditError for anything it will not honor (not
+   * waiting any more, a client that is retired or gone, a bad amount).
+   */
+  async applyOverpaymentAsCredit(invoiceId, { paymentIntentId, cents, byUserId = null } = {}) {
+    const intentId = String(paymentIntentId ?? '').trim()
+    if (!Number.isInteger(cents) || cents < 1) {
+      throw new AccountCreditError('The amount must be more than $0.00.')
+    }
+    if (!invoiceId) return null
+    if (!intentId) throw new AccountCreditError('Say which payment to apply as credit.')
+    const handledEntry = () => ({
+      kind: 'payment',
+      event: AMOUNT_MISMATCH_HANDLED_EVENT,
+      at: nowIso(),
+      by: byUserId ? String(byUserId) : null,
+      paymentIntentId: intentId,
+    })
+    const creditFor = (invoice, creditClientId) => ({
+      clientId: creditClientId,
+      amount: cents / 100,
+      note: `Second payment on ${invoice.number ?? 'an invoice'}`,
+      createdBy: byUserId,
+      sourceKind: 'overpayment',
+      sourceRef: intentId,
+    })
+
+    if (this.pool) {
+      const outcome = await this._withTransaction(async (dbClient) => {
+        const locked = await dbClient.query(
+          `select ${INVOICE_SELECT_COLUMNS} from invoices where id = $1 for update`,
+          [invoiceId],
+        )
+        if (locked.rows.length === 0) return null
+        const invoice = mapInvoiceRow(locked.rows[0])
+        // A replay finds its credit BEFORE anything else is asked: the marker is
+        // handled by then and the client may have been retired since.
+        const recorded = await dbClient.query(
+          `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits
+            where source_kind = $1 and source_ref = $2`,
+          ['overpayment', intentId],
+        )
+        if (recorded.rows.length > 0) {
+          return { credit: mapAccountCreditRow(recorded.rows[0]), replayed: true }
+        }
+        if (!duplicatePaymentWaiting(invoice.emailLog, intentId)) {
+          throw new AccountCreditError(DUPLICATE_NOT_WAITING_MESSAGE)
+        }
+        const owner = await dbClient.query(
+          'select id, name, bill_to_client_id, lifecycle_stage from clients where id = $1',
+          [invoice.clientId],
+        )
+        const credit = await this.addAccountCredit(
+          creditFor(invoice, owner.rows[0]?.bill_to_client_id || invoice.clientId),
+          { dbClient },
+        )
+        await dbClient.query(
+          `update invoices
+              set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                  updated_at = now()
+            where id = $1`,
+          [invoiceId, JSON.stringify([handledEntry()])],
+        )
+        return { credit, replayed: false }
+      })
+      if (!outcome) return null
+      const invoice = (await this.listInvoices()).find((entry) => entry.id === invoiceId) ?? null
+      return { ...outcome, invoice }
+    }
+
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      if (!Array.isArray(data.invoices)) data.invoices = []
+      const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+      if (index === -1) return null
+      const stored = normalizeStoredInvoice(data.invoices[index])
+      const recorded = (data.accountCredits ?? []).find(
+        (row) => row.sourceKind === 'overpayment' && row.sourceRef === intentId,
+      )
+      if (recorded) return { credit: accountCreditView(recorded), invoice: stored, replayed: true }
+      if (!duplicatePaymentWaiting(stored.emailLog, intentId)) {
+        throw new AccountCreditError(DUPLICATE_NOT_WAITING_MESSAGE)
+      }
+      const owner = (data.clients ?? []).find((client) => client.id === stored.clientId)
+      // Throws (nothing written yet) when the client cannot take it.
+      const credit = await this.addAccountCredit(
+        creditFor(stored, owner?.billToClientId || stored.clientId),
+        { workspace: data },
+      )
+      data.invoices[index] = {
+        ...stored,
+        emailLog: [...(stored.emailLog ?? []), handledEntry()],
+        updatedAt: nowIso(),
+      }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return { credit, invoice: data.invoices[index], replayed: false }
+    })
+  }
+
+  /**
+   * A bank duplicate that was only STARTED is logged with `settling: true`; when
+   * its money arrives (`payment_intent.succeeded`, which the store's idempotence
+   * would otherwise drop as a repeat) the marker is rewritten `settling: false`
+   * so the row can offer "Apply as credit". Touches only that one entry's flag -
+   * never the status, the money or any other entry.
+   *
+   * @returns the invoice when a marker was flipped, null when none matched (not
+   * settling, not there, or no such invoice).
+   */
+  async settleDuplicatePaymentMarker(invoiceId, paymentIntentId) {
+    const intentId = String(paymentIntentId ?? '').trim()
+    if (!invoiceId || !intentId) return null
+    const flipped = (emailLog) => {
+      let changed = false
+      const next = (Array.isArray(emailLog) ? emailLog : []).map((entry) => {
+        if (
+          entry?.kind === 'payment' &&
+          entry.event === AMOUNT_MISMATCH_EVENT &&
+          entry.reason === DUPLICATE_PAYMENT_REASON &&
+          entry.paymentIntentId === intentId &&
+          entry.settling === true
+        ) {
+          changed = true
+          return { ...entry, settling: false }
+        }
+        return entry
+      })
+      return changed ? next : null
+    }
+
+    if (this.pool) {
+      const done = await this._withTransaction(async (dbClient) => {
+        const locked = await dbClient.query(
+          `select ${INVOICE_SELECT_COLUMNS} from invoices where id = $1 for update`,
+          [invoiceId],
+        )
+        if (locked.rows.length === 0) return false
+        const next = flipped(mapInvoiceRow(locked.rows[0]).emailLog)
+        if (!next) return false
+        await dbClient.query(
+          'update invoices set email_log = $2::jsonb, updated_at = now() where id = $1',
+          [invoiceId, JSON.stringify(next)],
+        )
+        return true
+      })
+      if (!done) return null
+      return (await this.listInvoices()).find((invoice) => invoice.id === invoiceId) ?? null
+    }
+
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      if (!Array.isArray(data.invoices)) data.invoices = []
+      const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
+      if (index === -1) return null
+      const stored = normalizeStoredInvoice(data.invoices[index])
+      const next = flipped(stored.emailLog)
+      if (!next) return null
+      data.invoices[index] = { ...stored, emailLog: next, updatedAt: nowIso() }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return data.invoices[index]
     })
   }
 

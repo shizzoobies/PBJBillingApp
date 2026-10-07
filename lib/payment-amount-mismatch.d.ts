@@ -172,6 +172,8 @@ export declare function flagPaymentAmountMismatch(args: {
         settling?: boolean
       },
     ): Promise<unknown>
+    /** A settled bank duplicate: its marker stops saying "settling". Optional. */
+    settleDuplicatePaymentMarker?(invoiceId: string, paymentIntentId: string): Promise<unknown>
     getClientNameById(clientId: string): Promise<string | null | undefined>
     getTeamMembers(): Promise<Array<{ id: string; role: string }>>
   }
@@ -191,6 +193,33 @@ export declare function flagPaymentAmountMismatch(args: {
   } | null
   appPublicUrl?: string
 }): Promise<void>
+
+/** Is a double payment for this PaymentIntent on the log, handled or not? */
+export declare function duplicatePaymentLogged(
+  emailLog: ReadonlyArray<unknown> | null | undefined,
+  paymentIntentId: string | null | undefined,
+): boolean
+
+/** What Stripe says about a PaymentIntent, as `retrievePaymentIntentFacts` answers it. */
+export interface PaymentIntentFacts {
+  status: string
+  amountReceived: number | null
+  currency: string | null
+  invoiceId: string | null
+}
+
+export type OverpaymentCreditPlan =
+  | { ok: true; cents: number }
+  | { ok: false; status: number; code: string; message: string }
+
+/** May this double payment become a credit on account, and for how many cents? */
+export declare function planOverpaymentCredit(args: {
+  invoice: { id: string; emailLog?: ReadonlyArray<unknown> | null } | null | undefined
+  paymentIntentId: unknown
+  intent: PaymentIntentFacts | null
+  /** Dollars; lower than what was received, or absent for all of it. */
+  requestedAmount?: unknown
+}): OverpaymentCreditPlan
 
 /** A second payment on an already-paid invoice: logged as unhandled, owners told once. */
 export declare const flagDuplicatePayment: typeof flagPaymentAmountMismatch

@@ -30,6 +30,7 @@ import {
   acknowledgeInvoiceAmountMismatchRequest,
   answerInvoiceAiReviewQuestionRequest,
   applyAccountCreditRequest,
+  applyDuplicatePaymentAsCreditRequest,
   chargeAutopayAgainRequest,
   checkAutopayAttemptRequest,
   confirmInvoiceCoverageRequest,
@@ -741,6 +742,13 @@ export function InvoiceMonthRun({
   const noEmail = useCallback(
     (clientId: string) => clients.find((c) => c.id === clientId)?.invoiceNoEmail ?? false,
     [clients],
+  )
+
+  /** Who a credit from this client's invoice goes to: the client that pays (a billing sub's master). */
+  const creditClientName = useCallback(
+    (clientId: string) =>
+      clientName(clients.find((c) => c.id === clientId)?.billToClientId || clientId),
+    [clients, clientName],
   )
 
   /** The note this client keeps for every future invoice, if it keeps one. */
@@ -1723,6 +1731,7 @@ export function InvoiceMonthRun({
                     cardEnabled={cardEnabled(invoice.clientId)}
                     optedOut={optedOut(invoice.clientId)}
                     noEmail={noEmail(invoice.clientId)}
+                    creditClientName={creditClientName(invoice.clientId)}
                     keptNote={keptNote(invoice.clientId)}
                     onKeepNote={(text) => keepClientNote(invoice.clientId, text)}
                     dueOnReceipt={dueOnReceipt(invoice.clientId)}
@@ -1782,6 +1791,7 @@ function InvoiceRow({
   cardEnabled,
   optedOut,
   noEmail,
+  creditClientName,
   keptNote,
   onKeepNote,
   recipients,
@@ -1826,6 +1836,8 @@ function InvoiceRow({
   optedOut: boolean
   /** This client's invoices are generated here but never emailed. */
   noEmail: boolean
+  /** The client a credit from this invoice's double payment goes to (its master when it is a billing sub). */
+  creditClientName: string
   /** The note this client keeps for every future invoice, or null. */
   keptNote: string | null
   /** Keep the editor's note for this client's future invoices. Rejects on refusal. */
@@ -1869,6 +1881,9 @@ function InvoiceRow({
   const [renderedAt] = useState(() => Date.now())
   const [checkBusy, setCheckBusy] = useState(false)
   const [checkMessage, setCheckMessage] = useState<string | null>(null)
+  // What "Apply as credit" did. Held here, not in the editor: the editor remounts
+  // when the invoice comes back changed, and the note has to outlive that.
+  const [creditNote, setCreditNote] = useState<string | null>(null)
   const checkWithStripe = async () => {
     setCheckBusy(true)
     setCheckMessage(null)
@@ -2151,6 +2166,12 @@ function InvoiceRow({
         </div>
       ) : null}
 
+      {creditNote ? (
+        <p className="invoice-run-credit-note" role="status">
+          {creditNote}
+        </p>
+      ) : null}
+
       {/* Keyed on updatedAt so a fresh server version REMOUNTS the editor
           rather than syncing props into state inside an effect. */}
       {open ? (
@@ -2163,6 +2184,8 @@ function InvoiceRow({
           sourceClientName={sourceClientName}
           optedOut={optedOut}
           noEmail={noEmail}
+          creditClientName={creditClientName}
+          onCreditApplied={setCreditNote}
           keptNote={keptNote}
           onKeepNote={onKeepNote}
           recipients={recipients}
@@ -2622,6 +2645,8 @@ function InvoiceEditor({
   sourceClientName,
   optedOut,
   noEmail,
+  creditClientName,
+  onCreditApplied,
   keptNote,
   onKeepNote,
   recipients,
@@ -2655,6 +2680,10 @@ function InvoiceEditor({
    * server turns into "reviewed AND sent") is the last step.
    */
   noEmail: boolean
+  /** The client a double payment's credit goes to (the master when this is a billing sub). */
+  creditClientName: string
+  /** "Apply as credit" landed: the row keeps the note, because this editor is about to reload. */
+  onCreditApplied: (note: string) => void
   /** The note this client keeps for every future invoice, or null. */
   keptNote: string | null
   /** Keep the note for this client's future invoices. Rejects with the refusal. */
@@ -2974,6 +3003,24 @@ function InvoiceEditor({
   // A payment for a different amount than the total, not yet marked handled.
   const amountMismatch = unhandledAmountMismatch(invoice)
   const [handledBusy, setHandledBusy] = useState(false)
+  // "Apply as credit" on a double payment: the confirm step and its amount box.
+  const [applyOpen, setApplyOpen] = useState(false)
+  const [applyAmount, setApplyAmount] = useState('')
+  const [applyBusy, setApplyBusy] = useState(false)
+  const applyReceived =
+    amountMismatch?.receivedCents === null || amountMismatch?.receivedCents === undefined
+      ? null
+      : amountMismatch.receivedCents / 100
+  const applyAsked = applyAmount.trim() === '' ? null : Number(applyAmount)
+  // A credit is whole cents above $0.00 and never more than was received.
+  const applyAmountProblem =
+    applyAsked === null
+      ? null
+      : !Number.isFinite(applyAsked) || Math.round(applyAsked * 100) < 1
+        ? 'Enter an amount above $0.00.'
+        : applyReceived !== null && Math.round(applyAsked * 100) > Math.round(applyReceived * 100)
+          ? `The credit cannot be more than ${currency.format(applyReceived)}, what the client was charged.`
+          : null
 
   /**
    * Ask the server for a hosted Checkout URL. Deliberately does NOT open it —
@@ -3737,6 +3784,32 @@ function InvoiceEditor({
     }
   }
 
+  /**
+   * A second payment becomes a credit on the client's account. The server asks
+   * Stripe what it really was and writes the credit and the handled entry for
+   * THIS payment in one step; no amount sent means everything the client was
+   * charged. The row keeps the note: this editor reloads with the new invoice.
+   */
+  const applyDuplicateAsCredit = async () => {
+    if (!amountMismatch?.paymentIntentId || applyAmountProblem) return
+    setRetainerError(null)
+    setApplyBusy(true)
+    try {
+      const result = await applyDuplicatePaymentAsCreditRequest(invoice.id, {
+        paymentIntentId: amountMismatch.paymentIntentId,
+        ...(applyAsked === null || applyAsked === applyReceived ? {} : { amount: applyAsked }),
+      })
+      onCreditApplied(
+        `Added ${currency.format(result.credit.amount)} to ${creditClientName}'s credit on account`,
+      )
+      onInvoiceChanged(result.invoice)
+    } catch (error) {
+      sayRefusal(error instanceof Error ? error.message : 'Could not apply that as credit.')
+    } finally {
+      if (mountedRef.current) setApplyBusy(false)
+    }
+  }
+
   const unmarkPaid = async () => {
     const confirmed = window.confirm(
       `Undo the manual payment mark on ${invoice.number}?\n\nIt goes back to ${invoice.sentAt ? 'Sent' : 'Reviewed'} and can be edited and collected again.`,
@@ -4398,6 +4471,65 @@ function InvoiceEditor({
           >
             Mark as handled
           </button>
+          {amountMismatch.reason === 'duplicate' && amountMismatch.paymentIntentId ? (
+            <>
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={handledBusy || applyBusy || amountMismatch.settling}
+                onClick={() => {
+                  setApplyAmount(applyReceived === null ? '' : applyReceived.toFixed(2))
+                  setApplyOpen(true)
+                }}
+              >
+                Apply as credit
+              </button>
+              {amountMismatch.settling ? <span>Still settling - try once it clears.</span> : null}
+            </>
+          ) : null}
+          {applyOpen && !amountMismatch.settling ? (
+            <div role="group" aria-label="Apply as credit" className="invoice-run-apply-credit">
+              <p>
+                {applyReceived === null
+                  ? `Add everything Stripe collected for it to ${creditClientName}'s credit on account.`
+                  : `Add ${currency.format(applyAsked !== null && !applyAmountProblem ? applyAsked : applyReceived)} to ${creditClientName}'s credit on account.`}{' '}
+                The invoice itself does not change.
+              </p>
+              <label>
+                Credit amount
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={applyAmount}
+                  onChange={(event) => setApplyAmount(event.target.value)}
+                />
+              </label>
+              {applyAmountProblem ? <p role="alert">{applyAmountProblem}</p> : null}
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={applyBusy || Boolean(applyAmountProblem)}
+                onClick={() => void applyDuplicateAsCredit()}
+              >
+                {applyBusy
+                  ? 'Adding…'
+                  : applyAsked === null || applyAmountProblem
+                    ? applyReceived === null
+                      ? 'Add to credit'
+                      : `Add ${currency.format(applyReceived)} to credit`
+                    : `Add ${currency.format(applyAsked)} to credit`}
+              </button>
+              <button
+                type="button"
+                className="secondary-action"
+                disabled={applyBusy}
+                onClick={() => setApplyOpen(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

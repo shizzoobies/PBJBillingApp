@@ -4726,6 +4726,36 @@ export async function acknowledgeInvoiceAmountMismatchRequest(invoiceId: string)
   return ((await response.json()) as { invoice: PersistedInvoice }).invoice
 }
 
+/**
+ * "Apply as credit" on a double payment: the server asks Stripe what the payment
+ * was, adds it to the paying client's credit on account and marks THAT payment
+ * handled, in one step. No `amount` means everything the client was charged; a
+ * lower one is allowed. Answers the credit row and the updated invoice.
+ */
+export async function applyDuplicatePaymentAsCreditRequest(
+  invoiceId: string,
+  input: { paymentIntentId: string; amount?: number },
+) {
+  const response = await apiFetch(
+    `/api/invoices/${encodeURIComponent(invoiceId)}/amount-mismatch/apply-credit`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    },
+  )
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(response.status, message || `Failed to apply as credit (${response.status})`, code)
+  }
+  return (await response.json()) as {
+    credit: AccountCredit
+    invoice: PersistedInvoice
+    replayed: boolean
+  }
+}
+
 /** What the preview route answers: the email as the client will read it, and the facts around it. */
 export type InvoicePreview = {
   subject: string

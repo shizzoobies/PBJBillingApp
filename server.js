@@ -88,10 +88,13 @@ import { resolveSendRecipients } from './lib/invoice-recipients.js'
 import { invoiceContentChanged, totalsDiffer } from './lib/invoice-sent-change.js'
 import {
   clearDuplicatePaymentOnFailure,
+  duplicatePaymentLogged,
+  duplicatePaymentWaiting,
   flagDuplicatePayment,
   flagPaymentAmountMismatch,
   flagPaymentOnVoidedInvoice,
   invoicePeriodLink,
+  planOverpaymentCredit,
 } from './lib/payment-amount-mismatch.js'
 import {
   isResendWebhookConfigured,
@@ -212,6 +215,7 @@ import {
   createInvoiceCheckoutSession,
   ensureStripeCustomer,
   expireCheckoutSession,
+  retrievePaymentIntentFacts,
   retrievePaymentIntentStatus,
   isStripeConfigured,
   isStripeTestMode,
@@ -6879,6 +6883,99 @@ const server = createServer(async (request, response) => {
         return
       }
       sendJson(response, 200, { invoice: await withCoverageChangeable(updated) })
+      return
+    }
+
+    // POST /api/invoices/:id/amount-mismatch/apply-credit — "Apply as credit" on a
+    // double payment (credit on account, stage 1e). Owner-only, same gates as
+    // Mark as handled. The PaymentIntent is read from STRIPE: it must have
+    // succeeded (a bank payment still settling is refused) and name this invoice;
+    // the credit is everything the client was charged unless a LOWER amount is
+    // asked for. The credit and THAT payment's handled entry are one store step.
+    // Idempotent: a replay answers the existing credit.
+    const applyCreditMatch = normalizedPath.match(
+      /^\/api\/invoices\/([^/]+)\/amount-mismatch\/apply-credit$/,
+    )
+    if (applyCreditMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can apply a payment as credit' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const applyCreditContentType = String(request.headers['content-type'] || '')
+      if (!applyCreditContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const body = (await readJsonBody(request)) ?? {}
+      const invoice = (await appDataStore.listInvoices()).find(
+        (entry) => entry.id === decodeURIComponent(applyCreditMatch[1]),
+      )
+      if (!invoice) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      const paymentIntentId = typeof body.paymentIntentId === 'string' ? body.paymentIntentId.trim() : ''
+      if (duplicatePaymentLogged(invoice.emailLog, paymentIntentId)) {
+        const recorded = await appDataStore.findOverpaymentCredit(paymentIntentId)
+        if (recorded) {
+          sendJson(response, 200, {
+            credit: recorded,
+            invoice: await withCoverageChangeable(invoice),
+            replayed: true,
+          })
+          return
+        }
+      }
+      const intent = duplicatePaymentWaiting(invoice.emailLog, paymentIntentId)
+        ? await retrievePaymentIntentFacts(paymentIntentId)
+        : null
+      const plan = planOverpaymentCredit({
+        invoice,
+        paymentIntentId,
+        intent,
+        requestedAmount: body.amount,
+      })
+      if (!plan.ok) {
+        sendJson(response, plan.status, { error: plan.code, message: plan.message })
+        return
+      }
+      let result
+      try {
+        result = await appDataStore.applyOverpaymentAsCredit(invoice.id, {
+          paymentIntentId,
+          cents: plan.cents,
+          byUserId: session.user.id,
+        })
+      } catch (error) {
+        if (error instanceof AccountCreditError) {
+          sendJson(response, 409, { error: 'credit_refused', message: error.message })
+          return
+        }
+        throw error
+      }
+      if (!result) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      if (!result.replayed) {
+        const creditedClient = await appDataStore.getClientById(result.credit.clientId)
+        await appDataStore.recordActivity(
+          session.user.id,
+          'account_credit_added',
+          `${creditedClient?.name ?? 'A client'} $${result.credit.amount.toFixed(2)} (second payment on ${invoice.number ?? invoice.id})`,
+        )
+      }
+      sendJson(response, 200, {
+        credit: result.credit,
+        invoice: await withCoverageChangeable(result.invoice),
+        replayed: result.replayed,
+      })
       return
     }
 
