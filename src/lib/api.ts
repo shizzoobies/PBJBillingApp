@@ -4663,6 +4663,15 @@ export type InvoiceRecapLine = {
   company: string | null
 }
 
+/** A prepayment line (a later month billed ahead), shown apart from the fees. */
+export type InvoiceRecapPrepaymentLine = {
+  label: string
+  detail: string
+  amount: number
+  /** The later month it covers (YYYY-MM). */
+  period: string | null
+}
+
 export type InvoiceRecapRow = {
   invoiceId: string
   clientId: string
@@ -4673,8 +4682,13 @@ export type InvoiceRecapRow = {
   sentAt: string | null
   paidAt: string | null
   reimbursedTotal: number
+  /** Billed ahead for later months: deferred revenue, not part of `accountingTotal`. */
+  prepaymentTotal: number
+  /** Credit on account drawn on this invoice (zero or negative); shown apart from the fees. */
+  creditTotal: number
   accountingTotal: number
   reimbursedLines: InvoiceRecapLine[]
+  prepaymentLines: InvoiceRecapPrepaymentLine[]
 }
 
 export async function invoiceRecapRequest(period: string) {

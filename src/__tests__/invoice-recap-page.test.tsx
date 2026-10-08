@@ -29,7 +29,10 @@ function row(over: Record<string, unknown> = {}) {
     sentAt: '2026-08-05T00:00:00.000Z',
     paidAt: '2026-08-20T00:00:00.000Z',
     reimbursedTotal: 100,
+    prepaymentTotal: 0,
+    creditTotal: 0,
     accountingTotal: 400,
+    prepaymentLines: [],
     reimbursedLines: [
       {
         label: 'Reimbursement: QBO subscription',
@@ -66,6 +69,72 @@ describe('InvoiceRecapPage', () => {
     expect(screen.getByText('$60.00')).toBeInTheDocument()
     // A billing master's merged line names WHICH company it belongs to.
     expect(screen.getByText(/— Bright Tower/)).toBeInTheDocument()
+  })
+
+  it('shows an anchor invoice\'s prepayments on their own line, apart from the fees (M-9)', async () => {
+    mockRecap.mockResolvedValue({
+      period: '2026-10',
+      rows: [
+        row({
+          total: 5550,
+          reimbursedLines: [],
+          reimbursedTotal: 0,
+          accountingTotal: 1850,
+          prepaymentTotal: 3700,
+          prepaymentLines: [
+            { label: 'Prepayment for November 2026', detail: '', amount: 1850, period: '2026-11' },
+            { label: 'Prepayment for December 2026', detail: '', amount: 1850, period: '2026-12' },
+          ],
+        }),
+      ],
+    })
+    render(<InvoiceRecapPage />)
+    await screen.findByText('Acme')
+    expect(screen.getByText('Prepayments')).toBeInTheDocument()
+    expect(screen.getByText('$3,700.00')).toBeInTheDocument()
+    expect(screen.getByText('$1,850.00', { selector: 'strong' })).toBeInTheDocument()
+    expect(screen.getByText('Prepayment for November 2026')).toBeInTheDocument()
+    expect(screen.getByText('Prepayment for December 2026')).toBeInTheDocument()
+    expect(screen.getByText(/deferred revenue/)).toBeInTheDocument()
+  })
+
+  it('shows a Credit applied figure (negative) apart from the fees (N-4)', async () => {
+    mockRecap.mockResolvedValue({
+      period: '2026-10',
+      rows: [
+        row({
+          total: 700,
+          reimbursedLines: [],
+          reimbursedTotal: 0,
+          accountingTotal: 500,
+          prepaymentTotal: 1000,
+          creditTotal: -800,
+          prepaymentLines: [
+            { label: 'Prepayment for November 2026', detail: '', amount: 500, period: '2026-11' },
+            { label: 'Prepayment for December 2026', detail: '', amount: 500, period: '2026-12' },
+          ],
+        }),
+      ],
+    })
+    render(<InvoiceRecapPage />)
+    await screen.findByText('Acme')
+    expect(screen.getByText('Credit applied')).toBeInTheDocument()
+    expect(screen.getByText('-$800.00')).toBeInTheDocument()
+    expect(screen.getByText('$500.00', { selector: 'strong' })).toBeInTheDocument()
+  })
+
+  it('shows no Credit applied on an invoice without a credit', async () => {
+    mockRecap.mockResolvedValue({ period: '2026-08', rows: [row()] })
+    render(<InvoiceRecapPage />)
+    await screen.findByText('Acme')
+    expect(screen.queryByText('Credit applied')).toBeNull()
+  })
+
+  it('shows no Prepayments column on an invoice without any', async () => {
+    mockRecap.mockResolvedValue({ period: '2026-08', rows: [row()] })
+    render(<InvoiceRecapPage />)
+    await screen.findByText('Acme')
+    expect(screen.queryByText('Prepayments')).toBeNull()
   })
 
   it('says so when a sent invoice carries no reimbursed expenses', async () => {

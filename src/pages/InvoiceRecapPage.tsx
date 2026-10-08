@@ -128,10 +128,22 @@ export function InvoiceRecapPage() {
                   <span>Accounting services</span>
                   <strong>{currency.format(row.accountingTotal)}</strong>
                 </div>
+                {row.prepaymentLines.length > 0 ? (
+                  <div className="invoice-recap-total">
+                    <span>Prepayments</span>
+                    <strong>{currency.format(row.prepaymentTotal)}</strong>
+                  </div>
+                ) : null}
                 <div className="invoice-recap-total">
                   <span>Reimbursed expenses</span>
                   <strong>{currency.format(row.reimbursedTotal)}</strong>
                 </div>
+                {row.creditTotal < 0 ? (
+                  <div className="invoice-recap-total">
+                    <span>Credit applied</span>
+                    <strong>{currency.format(row.creditTotal)}</strong>
+                  </div>
+                ) : null}
               </div>
             </header>
             {row.reimbursedLines.length > 0 ? (
@@ -156,6 +168,24 @@ export function InvoiceRecapPage() {
             ) : (
               <p className="invoice-recap-none">No reimbursed expenses on this invoice.</p>
             )}
+            {row.prepaymentLines.length > 0 ? (
+              <>
+                <p className="invoice-recap-none">
+                  Prepayments are billed ahead for later months: record them as deferred revenue,
+                  not as this month&apos;s accounting fees.
+                </p>
+                <ul className="invoice-recap-lines">
+                  {row.prepaymentLines.map((line, index) => (
+                    <li key={index}>
+                      <span className="invoice-recap-line-label">{line.label}</span>
+                      <span className="invoice-recap-line-amount">
+                        {currency.format(line.amount)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
           </article>
         ))}
       </div>

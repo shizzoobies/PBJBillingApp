@@ -109,6 +109,9 @@ ask the same question through one server body and one page component; `processin
 have no override anywhere. No hold applies to a month already at $0 (M-5). A fresh draw (Apply, and generation) never spends a derived
 prepayment credit meant for a LATER month (R-2); a stored credit meant for a later month stays drawable by hand, and when
 only later months are left Apply is greyed out on the editor and the server answers with a sentence naming those months.
+The deposit recap (M-9) lists an anchor invoice's prepayment lines on their own Prepayments line and out of Accounting services
+and a credit on account drawn on the invoice on its own negative Credit applied figure (accounting + prepayments + reimbursed + credit applied = total,
+so Accounting services stays the fees and never goes negative); a later month paid from its prepayment reads Accounting = its fee, Credit applied = minus the fee, total $0.
 The postgres statements 2B adds (one prepaid select per credit-ledger read, one holders query per
 generation run, one `billing_period_months > 1` read per month-list read) are pinned in
 `db/store-staleness.test.mjs`; its fake answers new SQL with no rows, so those tests wrap the pool.
