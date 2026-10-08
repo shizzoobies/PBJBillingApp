@@ -135,6 +135,7 @@ import {
 } from '../lib/utils'
 import { InvoiceDeliveryBadge } from './InvoiceDeliveryBadge'
 import { PrepaymentHoldNotice } from './PrepaymentHoldNotice'
+import { hasBillingPeriod } from '../../lib/billing-period.js'
 import { canOverridePrepayment, prepaymentHoldOf } from '../lib/prepaymentHold'
 import { customerNetDays } from '../../lib/invoice-draft.js'
 
@@ -1418,22 +1419,32 @@ export function InvoiceMonthRun({
   }
 
   /**
+   * Whether a save of this invoice can change its "Prepayment ..." flag (R-4). The flag
+   * is derived by the list read, and a save, an Apply credit or a review can CREATE a
+   * hold (the credit line taken off after the anchor was paid) as well as clear one, so
+   * the month is re-read for a row that carried a mark AND for any billing-period
+   * client's invoice. Everyone else's saves stay one request.
+   */
+  const holdMayChange = (updated: PersistedInvoice) =>
+    invoices.some((invoice) => invoice.id === updated.id && invoice.unpaidPrepayment) ||
+    hasBillingPeriod(clients.find((client) => client.id === updated.clientId))
+
+  /**
    * Replace one invoice in the list with a server-returned version. Through
    * `markedAfterEdit`, like a line save: a covered-dates change on a SENT
    * invoice rewrites the label the client reads, and the notice has to follow it
    * even when the server's best-effort mark could not be derived.
    */
   const mergeInvoice = (updated: PersistedInvoice) => {
-    // The "Prepayment unpaid" mark is derived by the list read, and a save or an
-    // Apply credit can change it: carry it for the moment, then re-read the month
-    // so it never outlives what the server would now say.
-    const hadMark = invoices.some((invoice) => invoice.id === updated.id && invoice.unpaidPrepayment)
+    // The flag is carried for the moment, then the month is re-read so it never
+    // outlives, or lags behind, what the server would now say.
+    const reread = holdMayChange(updated)
     setInvoices((current) =>
       current.map((invoice) =>
         invoice.id === updated.id ? markedAfterEdit(invoice, updated) : invoice,
       ),
     )
-    if (hadMark) void reloadMonth()
+    if (reread) void reloadMonth()
   }
 
   /**
@@ -1459,15 +1470,15 @@ export function InvoiceMonthRun({
     setError(null)
     try {
       const updated = await updateInvoiceRequest(invoiceId, body)
-      const hadMark = invoices.some((invoice) => invoice.id === updated.id && invoice.unpaidPrepayment)
+      const reread = holdMayChange(updated)
       setInvoices((current) =>
         current.map((invoice) =>
           invoice.id === updated.id ? markedAfterEdit(invoice, updated) : invoice,
         ),
       )
       // The prepayment mark is derived by the list read: re-read so a save never
-      // leaves a stale one (the server still decides at Send).
-      if (hadMark) void reloadMonth()
+      // leaves a stale one, or misses a new one (the server still decides at Send).
+      if (reread) void reloadMonth()
       // A save can have spent a retainer or handed one back. Re-ask rather than
       // guess: the server decides, and the offer on the next row has to agree
       // with what it decided.

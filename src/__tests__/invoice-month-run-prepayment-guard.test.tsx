@@ -27,10 +27,11 @@ vi.mock('../lib/api', () => ({
   updateInvoiceRequest: vi.fn(),
 }))
 
-import { listInvoicesRequest, sendInvoiceRequest } from '../lib/api'
+import { listInvoicesRequest, sendInvoiceRequest, updateInvoiceRequest } from '../lib/api'
 
 const mockList = vi.mocked(listInvoicesRequest)
 const mockSend = vi.mocked(sendInvoiceRequest)
+const mockUpdate = vi.mocked(updateInvoiceRequest)
 
 const MESSAGE =
   'INV-2026-10-001 carries the prepayment for November 2026 and has not been paid yet (it is Sent), so sending this invoice would bill that month again.'
@@ -98,6 +99,7 @@ const sendButton = () => screen.getByRole('button', { name: 'Send' })
 beforeEach(() => {
   mockList.mockReset()
   mockSend.mockReset()
+  mockUpdate.mockReset()
 })
 
 afterEach(() => {
@@ -251,5 +253,58 @@ describe('the server backstop (a list that was stale)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send anyway' }))
     await waitFor(() => expect(mockSend).toHaveBeenCalledTimes(2))
     expect(mockSend).toHaveBeenLastCalledWith('inv-nov', undefined, undefined, { allowUnpaidPrepayment: true })
+  })
+})
+
+describe('the flag follows a save (R-4)', () => {
+  const NOT_APPLIED =
+    "This month was prepaid on October 2026's invoice, but the prepayment has not been applied to this invoice. Apply credit on account, or Void & regenerate, before sending."
+  const heldAfterSave = () =>
+    marked({
+      updatedAt: 'u2',
+      unpaidPrepayment: {
+        message: NOT_APPLIED,
+        reason: 'not_applied',
+        month: '2026-11',
+        anchorInvoiceId: 'inv-oct',
+        anchorInvoiceNumber: 'INV-2026-10-001',
+      },
+    })
+
+  async function saveAnEdit() {
+    fireEvent.change(screen.getAllByLabelText('Amount')[0], { target: { value: '450' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  }
+
+  it('re-reads the month after a save on a billing-period client, so a row the save newly holds is flagged', async () => {
+    await openEditor(makeInvoice())
+    expect(screen.queryByText('Prepayment not applied')).toBeNull()
+    mockUpdate.mockResolvedValueOnce(makeInvoice({ updatedAt: 'u2', lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 450 }] }))
+    mockList.mockResolvedValue([heldAfterSave()])
+    const listCalls = mockList.mock.calls.length
+    await saveAnEdit()
+    expect(await screen.findByText('Prepayment not applied')).toBeInTheDocument()
+    expect(mockList.mock.calls.length).toBeGreaterThan(listCalls)
+  })
+
+  it('does not re-read the month after a save on an ordinary client', async () => {
+    mockList.mockResolvedValue([makeInvoice({ clientId: 'client-plain' })])
+    render(
+      <InvoiceMonthRun
+        clients={[
+          ...clients,
+          { id: 'client-plain', name: 'Plain Co', contact: '', billingMode: 'subscription', monthlyRate: 500, hourlyRate: 0, planIds: [], contactIds: ['contact-ann'] } as unknown as Client,
+        ]}
+        contacts={contacts}
+        onPrint={vi.fn()}
+      />,
+    )
+    fireEvent.click(await screen.findByRole('tab', { name: /^Reviewed/ }))
+    fireEvent.click(await screen.findByText('INV-2026-11-001'))
+    mockUpdate.mockResolvedValueOnce(makeInvoice({ clientId: 'client-plain', updatedAt: 'u2' }))
+    const listCalls = mockList.mock.calls.length
+    await saveAnEdit()
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1))
+    expect(mockList.mock.calls.length).toBe(listCalls)
   })
 })
