@@ -135,3 +135,80 @@ describe('billing masters and their subs (M-3)', () => {
     }
   })
 })
+
+describe('the card warns when a change bills a month twice (M-7)', () => {
+  const WARNING =
+    'Changing this now will bill November 2026 twice; the extra prepayment becomes credit on account.'
+  const running = () => client({ billingPeriodMonths: 3, periodAnchorMonth: '2026-09' })
+
+  it('after moving the start inside a running period, once the saved period shows it', () => {
+    const onCommit = vi.fn()
+    const { rerender } = render(<BillingPeriodSectionBody client={running()} onCommit={onCommit} today="2026-10-07" />)
+    expect(screen.queryByText(WARNING)).toBeNull()
+    fireEvent.change(startingInput(), { target: { value: '2026-10' } })
+    expect(onCommit).toHaveBeenLastCalledWith({ billingPeriodMonths: 3, periodAnchorMonth: '2026-10' })
+    // The page hands the card the saved client back.
+    rerender(
+      <BillingPeriodSectionBody
+        client={client({ billingPeriodMonths: 3, periodAnchorMonth: '2026-10' })}
+        onCommit={onCommit}
+        today="2026-10-07"
+      />,
+    )
+    expect(screen.getByText(WARNING)).toBeVisible()
+  })
+
+  it('goes away when the period is changed again to something that bills nothing twice', () => {
+    const onCommit = vi.fn()
+    const { rerender } = render(<BillingPeriodSectionBody client={running()} onCommit={onCommit} today="2026-10-07" />)
+    fireEvent.change(startingInput(), { target: { value: '2026-10' } })
+    rerender(
+      <BillingPeriodSectionBody
+        client={client({ billingPeriodMonths: 3, periodAnchorMonth: '2026-10' })}
+        onCommit={onCommit}
+        today="2026-10-07"
+      />,
+    )
+    expect(screen.getByText(WARNING)).toBeVisible()
+    setMonths('1')
+    rerender(<BillingPeriodSectionBody client={client({ billingPeriodMonths: 1 })} onCommit={onCommit} today="2026-10-07" />)
+    expect(screen.queryByText(WARNING)).toBeNull()
+  })
+
+  it('says nothing for a first period, a monthly client or a change that bills nothing twice', () => {
+    const onCommit = vi.fn()
+    const { rerender } = render(<BillingPeriodSectionBody client={client()} onCommit={onCommit} today="2026-10-07" />)
+    fireEvent.change(startingInput(), { target: { value: '2026-10' } })
+    setMonths('3')
+    rerender(
+      <BillingPeriodSectionBody
+        client={client({ billingPeriodMonths: 3, periodAnchorMonth: '2026-10' })}
+        onCommit={onCommit}
+        today="2026-10-07"
+      />,
+    )
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+})
+
+describe('the warning compares with the period as the card opened (N-6)', () => {
+  const WARNING =
+    'Changing this now will bill November 2026 twice; the extra prepayment becomes credit on account.'
+
+  it('catches a double bill built in two saved steps: every 2 months, then start October', () => {
+    const onCommit = vi.fn()
+    const at = (c: Partial<Client>) => (
+      <BillingPeriodSectionBody client={client(c)} onCommit={onCommit} today="2026-10-07" />
+    )
+    const { rerender } = render(at({ billingPeriodMonths: 3, periodAnchorMonth: '2026-09' }))
+    setMonths('2')
+    expect(onCommit).toHaveBeenLastCalledWith({ billingPeriodMonths: 2, periodAnchorMonth: '2026-09' })
+    // Step one on its own bills nothing twice.
+    rerender(at({ billingPeriodMonths: 2, periodAnchorMonth: '2026-09' }))
+    expect(screen.queryByRole('status')).toBeNull()
+    fireEvent.change(startingInput(), { target: { value: '2026-10' } })
+    expect(onCommit).toHaveBeenLastCalledWith({ billingPeriodMonths: 2, periodAnchorMonth: '2026-10' })
+    rerender(at({ billingPeriodMonths: 2, periodAnchorMonth: '2026-10' }))
+    expect(screen.getByText(WARNING)).toBeVisible()
+  })
+})

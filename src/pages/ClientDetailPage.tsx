@@ -88,6 +88,7 @@ import {
   billingPeriodSentence,
   normalizeBillingPeriodMonths,
   normalizePeriodAnchorMonth,
+  periodChangeWarning,
   validateBillingPeriod,
 } from '../../lib/billing-period.js'
 import { mailingAddressLines } from '../../lib/mailing-address.js'
@@ -2403,6 +2404,14 @@ export function BillingPeriodSectionBody({
   const savedAnchor = normalizePeriodAnchorMonth(client.periodAnchorMonth) ?? ''
   const [months, setMonths] = useState(savedMonths)
   const [anchor, setAnchor] = useState(savedAnchor)
+  // After a change that bills a month twice (M-7): the sentence, keyed to the pair it was
+  // said about, so it goes away the moment the saved period is anything else.
+  const [warning, setWarning] = useState<{ key: string; text: string } | null>(null)
+  // The period as it was when this card opened for this client (N-6). Each field saves on
+  // its own, so comparing against the LAST SAVED pair would miss a double bill built in
+  // two steps ("every 2", then "start October"); the warning compares against this.
+  const [opened, setOpened] = useState({ id: client.id, months: savedMonths, anchor: savedAnchor })
+  if (opened.id !== client.id) setOpened({ id: client.id, months: savedMonths, anchor: savedAnchor })
   const { state, flash } = useSaveFlash()
   // Another client, or a saved value that changed elsewhere, resets what is on screen
   // (adjusted while rendering, not in an effect).
@@ -2426,6 +2435,12 @@ export function BillingPeriodSectionBody({
     const count = Number(nextMonths)
     const nextSaved = count > 1 ? nextAnchor : ''
     if (String(count) === savedMonths && nextSaved === savedAnchor) return
+    const text = periodChangeWarning({
+      from: { months: opened.months, anchor: opened.anchor },
+      to: { months: count, anchor: nextSaved },
+      today,
+    })
+    setWarning(text ? { key: `${client.id}|${count}|${nextSaved}`, text } : null)
     onCommit({ billingPeriodMonths: count, periodAnchorMonth: count > 1 ? nextAnchor : null })
     if (count === 1) setAnchor('')
     flash()
@@ -2474,6 +2489,11 @@ export function BillingPeriodSectionBody({
           {check.message}
         </p>
       )}
+      {warning && warning.key === savedKey ? (
+        <p className="auth-error full-row" role="status">
+          {warning.text}
+        </p>
+      ) : null}
       {Number(client.monthlyRate) > 0 ? null : (
         <p className="muted-text full-row">
           A billing period needs a monthly rate above $0 to take effect.

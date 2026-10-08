@@ -57,5 +57,8 @@ export declare function unpaidPrepaymentFor(args: {
   anchorInvoice: { id: string; number: string | null; status: string }
   message: string
 } | null
+type PeriodPair = { months: unknown; anchor: unknown }
+export declare function doubleBilledMonths(args: { from: PeriodPair; to: PeriodPair; today: string }): string[]
+export declare function periodChangeWarning(args: { from: PeriodPair; to: PeriodPair; today: string }): string | null
 export declare function nextPrepaymentMonth(client: PeriodClient | null | undefined, fromPeriod: string): string | null
 export declare function billingPeriodSentence(args: { months: unknown; anchor: unknown; today: string }): string

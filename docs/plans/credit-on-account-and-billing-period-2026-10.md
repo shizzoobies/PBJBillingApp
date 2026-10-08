@@ -122,6 +122,11 @@ Voiding an anchor (R-5, decided): the guard reads a LIVE anchor that billed the 
 nothing (no money moved, no credit exists) and the later months bill in full until the anchor is generated again (Void and
 regenerate puts the prepayment lines, and the hold, back). Voiding a PAID anchor that nothing draws on is still allowed, as for
 any paid invoice, and its derived credit goes with it; the void confirm names the months and says so in both cases.
+Changing the period or anchor mid-period (M-7): the rule is not rebuilt. The Billing period card warns after the save when a month
+the old schedule already billed ahead is billed ahead again by an anchor still to come ("will bill <month> twice; the extra
+prepayment becomes credit on account"), worked out from the period as the card opened (each field saves alone) and the firm date alone, assuming every anchor up to last
+month has been invoiced. R-6, the warning for a start month that already has a live invoice without prepayment lines, needs the
+client's invoices, which the client page does not hold (only a count), so it is not built.
 The postgres statements 2B adds (one prepaid select per credit-ledger read, one holders query per
 generation run, one `billing_period_months > 1` read per month-list read) are pinned in
 `db/store-staleness.test.mjs`; its fake answers new SQL with no rows, so those tests wrap the pool.
