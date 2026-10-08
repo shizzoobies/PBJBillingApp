@@ -76,11 +76,11 @@ export declare const MASTER_RECIPIENT_UNSET: { readonly error: string; readonly 
  * itself; a billing master resolves to the ONE sub it names (under the master's
  * name), or is refused.
  */
-export declare function invoiceEmailAddressee(
-  client: object | null | undefined,
+export declare function invoiceEmailAddressee<C extends object>(
+  client: C | null | undefined,
   clients: object[] | null | undefined,
 ): {
-  addressee: (object & { name?: string }) | null
+  addressee: C | null
   refusal: { readonly error: string; readonly message: string } | null
 }
 

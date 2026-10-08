@@ -9,6 +9,7 @@ import {
   ClipboardCheck,
   Clock3,
   FileBarChart,
+  FileSignature,
   FolderKanban,
   Handshake,
   Kanban,
@@ -62,6 +63,14 @@ const PROPOSALS: NavItem = {
   icon: Handshake,
   ownerOnly: true,
 }
+// Letters joined Proposals under Engagements (featreq-5e195707): the one engagement
+// letter, written once with placeholders and sent to chosen clients as a PDF.
+const LETTERS: NavItem = {
+  to: '/letters',
+  label: 'Letters',
+  icon: FileSignature,
+  ownerOnly: true,
+}
 const CLIENTS: NavItem = { to: '/clients', label: 'Clients', icon: Building2 }
 const CLIENT_RECAP: NavItem = {
   to: '/client-recap',
@@ -107,6 +116,7 @@ export const navItems: NavItem[] = [
   BOARD,
   DELAYED,
   PROPOSALS,
+  LETTERS,
   CLIENTS,
   CLIENT_RECAP,
   CONTACTS,
@@ -133,8 +143,8 @@ export const navItems: NavItem[] = [
  */
 export const navSections: NavSection[] = [
   { items: [DASHBOARD] },
-  // The Engagements slot: winning new work, before a client is a client.
-  { items: [PROPOSALS] },
+  // Engagements: winning new work (Proposals) and the letters that confirm it.
+  { label: 'Engagements', items: [PROPOSALS, LETTERS] },
   { label: 'Clients', items: [CLIENTS, CONTACTS, CLIENT_RECAP] },
   { label: 'Billing', items: [INVOICES, INVOICE_RECAP, PLANS] },
   {

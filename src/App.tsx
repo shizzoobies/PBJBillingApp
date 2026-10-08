@@ -175,6 +175,7 @@ import { UpdatesPage } from './pages/UpdatesPage'
 import { ContactsPage } from './pages/ContactsPage'
 import { GanttPage } from './pages/GanttPage'
 import { ProposalEditorPage } from './pages/ProposalEditorPage'
+import { LettersPage } from './pages/LettersPage'
 import { ProposalsPage } from './pages/ProposalsPage'
 import { InvoiceRecapPage } from './pages/InvoiceRecapPage'
 import { InvoicesPage } from './pages/InvoicesPage'
@@ -4364,6 +4365,8 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
   useEffect(() => {
     const ownerOnly = [
       '/time-approvals',
+      '/proposals',
+      '/letters',
       '/client-recap',
       '/reports',
       '/productivity',
@@ -4465,6 +4468,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           element={
             <OwnerOnly ownerMode={ownerMode}>
               <ProposalsPage />
+            </OwnerOnly>
+          }
+        />
+        <Route
+          path="/letters"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <LettersPage />
             </OwnerOnly>
           }
         />
