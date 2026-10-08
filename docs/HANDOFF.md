@@ -25,7 +25,30 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-07, night - READ THIS FIRST):** `main` = `5ee610d` (+ this
+**State right now (2026-10-08, evening - READ THIS FIRST):** `main` = `70576ee` (+ this handoff),
+deployed, `/health` 200, voice re-provisioned. Suite **353 files / 8079 tests**. Manifest **204,983
+bytes - 17 under the cap; TRIM FIRST.** Today: the four Planned items Alex gave in the morning are all
+SHIPPED - the group timer's task box (`72c1b5f` + `3922637`, `featreq-c11c63ea`), the ten billing-period
+leftovers (`b819d6d`..`1aa1ec4`, `featreq-759a281b`), the refund/dispute notice (`07a9979` + `44c56ab`,
+`featreq-cadfcb44`; the Stripe endpoint now sends `charge.refunded`, `charge.dispute.created`,
+`charge.dispute.closed` - Alex added them, confirmed from Stripe's side) - and the NEW feature
+**Letters under Engagements** (`featreq-5e195707`, nine commits `764bb85`..`22dd9d1` + `70576ee`;
+plan `docs/plans/engagement-letters-2026-10.md`): Brittany writes one email + engagement letter with
+`{{placeholders}}`, picks clients, previews, sends as a PDF attachment; two new tables
+`engagement_letters` / `engagement_letter_sends` (the send log is the double-send guard); reply-to is her
+mailbox; NOTHING goes to Alex (his standing rule for client tax documents - enforced by a source test and
+an address-level guard that drops any team member's address). Also new: **`AGENTS.md`** at the repo root
+(the tool-neutral handoff for Codex / any agent) and `scripts/prod/{quiet-check,tracker-list,tracker-read,
+voice-provision}.mjs` + `ship.sh` - the ship ritual's tooling now lives in the repo (`npm run verify &&
+bash scripts/prod/ship.sh <hash>`). Three review rounds per money feature caught real defects each
+time (double-bill on a late-paid prepayment, a won dispute releasing a refunded credit, an hourly
+client's fee from a legacy column) - keep two rounds minimum on money code. The Planned column is
+EMPTY; follow-up tickets filed today: `featreq-e413267a` (Hours by task groups typed tasks),
+`featreq-9c29491a` (letters leftovers). Worktrees `AP-laneB` (feat/letters-followup) and `AP-laneC`
+(feat/letters) are merged and removable (junction LINK first). Run ledger:
+`.superpowers/sdd/new-queue-2026-10-01.md` (git-ignored, this machine).
+
+**Earlier (2026-10-07, night - superseded by the paragraph above):** `main` = `5ee610d` (+ this
 handoff), deployed, `/health` 200, voice re-provisioned. Suite **340 files / 7692 tests**. Manifest
 **204,952 bytes - 48 under the cap; TRIM FIRST.** **CREDIT ON ACCOUNT IS COMPLETE:** stage 2 (the billing
 period, `featreq-110efd15` SHIPPED with a note in Brittany's words) went out today as `69c5463` (2A: client
@@ -875,6 +898,61 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-08 - four Planned items shipped, Letters under Engagements built and shipped, the agent handoff.**
+
+- **Group timer task box (`featreq-c11c63ea`, Shipped):** the "clocked in without a task" report was a GROUP
+  timer holding block (no task box by design); Brittany chose: a task box on the group timer, required at
+  Stop & log like a single entry. `72c1b5f` the rule (server: a group block needs `taskId` or a typed
+  `taskLabel`; a stale pre-deploy page gets "If you don't see a Task box, refresh the page. Your timer is
+  kept."), `3922637` the box (standard task names + free text; every split slice copies it; saved timer
+  migrated). Deployed as a pair. Follow-up `featreq-e413267a`: Hours by task still groups by `taskId`.
+- **Billing-period leftovers (`featreq-759a281b`, Shipped, ten deploys `b819d6d`..`3c61ec8` + `1aa1ec4`):**
+  never-email Mark reviewed and the lower Email view ask the same hold question as the month run; a $0
+  later month is never held; manual Apply never takes a later month's derived prepayment (stored credits
+  stay drawable by hand - by design); the recap shows Prepayments and a "Credit applied" line (retainer
+  and account credit; Accounting services = the fee; a hint says the deposit is the invoice total - this
+  changed how live credited invoices READ on the staff recap, said on the ticket); derived credit from
+  MONTHLY invoices only (`kind = 'monthly'` in both prepaid SQLs); Preview says "Send will ask first";
+  the month run re-derives hold flags after every save; voiding an anchor is decided and said in the
+  confirm (a paid anchor's credit goes with it - record it as credit on account if the client keeps the
+  money); the Billing period card warns when a change bills a month twice (compares with the setting as
+  the card opened; a two-visit change is not caught - noted).
+- **Refund / dispute on applied credit (`featreq-cadfcb44`, Shipped, `07a9979` + `44c56ab`):** the webhook
+  handles `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed` BEFORE the invoice lookup;
+  a log-only `credit-reversal` note on the invoice that carried the second payment (idempotent on the
+  Stripe event id; excluded from the Payment failed tab); owners notified once per event
+  (`invoice_credit_refunded`, Payment problems group) - also for a refund on an ordinary paid invoice
+  ("still reads Paid"); the client-page card shows Refunded / Partly refunded ($x of $y) / Disputed /
+  Dispute closed (status); Void is the one click while unspent; a credit with ANY refund note, or an
+  open / lost dispute, is held for good from automatic draw (`creditReversalHolds`, one place) - a won
+  or `warning_closed` dispute releases only a never-refunded credit; nothing is ever auto-voided. Three
+  review rounds: I1 (failed-tab leak), I2 (retry never notified), I3 (partial refund invited a full
+  void), then R1 (a won dispute released a refunded credit).
+- **Letters under Engagements (`featreq-5e195707`, Shipped):** plan `docs/plans/engagement-letters-2026-10.md`
+  (scope approved by Alex; the two tables approved). `764bb85` placeholder filler (`lib/letter-template.js`:
+  `{{client_name}}`, `{{contact_first_name}}`, `{{contact_name}}`, `{{fee}}` by billing mode,
+  `{{monthly_fee}}`, `{{annual_fee}}`, `{{client_address}}`, `{{year}}`, `{{next_year}}`, `{{today}}`,
+  firm fields, `{{sender_name}}`; `{{hourly_rate}}` RETIRED - hourly clients have no single fee, a
+  letter using `{{fee}}` skips them with a sentence; unknown/retired placeholders refuse the batch);
+  `a458002` `lib/letter-pdf.js` (letterhead + date + addressee + paragraphs) and `lib/letter-documents.js`
+  (email + PDF built once for preview and send); `39bcfcf` `sendInvoiceEmail` gains `letterSendId` and
+  returns `status`, `invoiceEmailAddressee` moved into `lib/invoice-recipients.js`; `88818fa` the tables
+  (plan SQL verbatim, partial unique index `engagement_letter_sends_once_idx` = the double-send guard,
+  both backends, outside the bulk save; rolled-back prod trial passed); `719e8a9` the six owner-only
+  routes + `lib/letter-send.js` (claim BEFORE mail, 429 retry, 600 ms spacing, per-client errors, always
+  200 once the loop starts; the team-address guard; a master lettered under its own name and figures to
+  the receiving company's contacts; a `sending` claim left by a restart = "unfinished", never
+  auto-failed); `046492d` the page + preview modal + Engagements sidebar group; `3e46297` manifest;
+  `22dd9d1` browser-check fixes; `70576ee` hourly_rate retired, any-form team addresses,
+  Email column shows what Send uses. Alex's rule (nothing of this to his mailbox) is pinned by a source
+  test over the server's letter code and the whole lib. Leftovers: `featreq-9c29491a`.
+- **AGENTS.md + repo tooling (`288d663`):** the Codex / any-agent handoff; `scripts/prod/quiet-check.mjs`,
+  `tracker-list.mjs`, `tracker-read.mjs`, `voice-provision.mjs`, `ship.sh` (accepts a worktree commit to
+  fast-forward to, or local main ahead of origin by what is shipped).
+- **Rules that bind, learned today:** `client.hourlyRate` is a legacy column, not a client's price -
+  hourly clients bill at staff role rates; `invoices.updated_at` is not an event time; a test that
+  slices an instant to a UTC date flips after 8 pm Eastern; gate every push on verify's EXIT CODE.
 
 **2026-10-07 (whole day, two sessions) - bulk-save batching, credit on account complete, the clean-up.**
 
