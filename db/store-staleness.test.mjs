@@ -4428,7 +4428,10 @@ describe('recordInvoiceSent past-due line (postgres branch)', () => {
     })
 
     const update = fake.matching(/^update invoices/i)[0]
-    const sendDay = JSON.parse(update.params[1])[0].at.slice(0, 10)
+    // The due date is counted from the firm's day, so the send stamp (an
+    // instant) is read in the firm's zone too; its UTC date is already
+    // tomorrow after 8 pm Eastern, which made this read 44 every evening.
+    const sendDay = firmToday(new Date(JSON.parse(update.params[1])[0].at))
     const gap = Math.round(
       (Date.parse(`${update.params[4]}T00:00:00Z`) - Date.parse(`${sendDay}T00:00:00Z`)) /
         (24 * 60 * 60 * 1000),
