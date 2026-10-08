@@ -505,6 +505,20 @@ describe('sending', () => {
     expect(api.sendLettersRequest).toHaveBeenCalledTimes(1)
   })
 
+  it('starts a fresh results list for a new Send', async () => {
+    mockConfirm(true)
+    await renderPage()
+    fireEvent.click(screen.getByLabelText('Select Acme Books'))
+    fireEvent.click(screen.getByRole('button', { name: 'Send to 1 client' }))
+    await screen.findByText('1 sent, 0 skipped, 0 failed.')
+    fireEvent.click(screen.getByLabelText('Select Acme Books'))
+    fireEvent.click(screen.getByLabelText('Select KLC North'))
+    fireEvent.click(screen.getByRole('button', { name: 'Send to 1 client' }))
+    await screen.findByText(/Sent to c-sub@x.test/)
+    expect(screen.queryByText(/Sent to c-acme@x.test/)).not.toBeInTheDocument()
+    expect(screen.getAllByRole('listitem').filter((item) => item.textContent?.includes('Sent to'))).toHaveLength(1)
+  })
+
   it('refreshes the log after a send so Last sent follows', async () => {
     mockConfirm(true)
     await renderPage()

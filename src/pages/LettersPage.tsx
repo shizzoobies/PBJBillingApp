@@ -330,6 +330,8 @@ export function LettersPage() {
       `Send the engagement letter to ${count} client${count === 1 ? '' : 's'}? Each gets your email with the letter attached as a PDF. Replies go to ${replyTo}.`,
     )
     if (!ok) return
+    // A fresh Send starts a fresh list; the retry buttons below merge into it instead.
+    setResults([])
     await sendBatch(chosen, { resend: false })
   }
 
