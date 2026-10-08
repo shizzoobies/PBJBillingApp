@@ -134,6 +134,8 @@ import {
   type ResolvedInvoiceRecipients,
 } from '../lib/utils'
 import { InvoiceDeliveryBadge } from './InvoiceDeliveryBadge'
+import { PrepaymentHoldNotice } from './PrepaymentHoldNotice'
+import { canOverridePrepayment, prepaymentHoldOf } from '../lib/prepaymentHold'
 import { customerNetDays } from '../../lib/invoice-draft.js'
 
 /**
@@ -287,7 +289,7 @@ function noteScopeHelper(scope: 'invoice' | 'keep', blurb: string, kept: string 
  */
 type PatchResult =
   | { ok: true; invoice: PersistedInvoice }
-  | { ok: false; message: string; retainer: boolean; locked: boolean; code?: string }
+  | { ok: false; message: string; retainer: boolean; locked: boolean; code?: string; reason?: string }
 
 /**
  * The refusals that mean "this invoice moved under you" — a payment landed,
@@ -1515,7 +1517,14 @@ export function InvoiceMonthRun({
       // itself in the slot beside its buttons; the banner above the whole list
       // would repeat the sentence without saying which invoice it is about. The
       // banner stays for month-level actions, which have no editor to speak in.
-      return { ok: false, message, retainer: refusedRetainer, locked, code }
+      return {
+        ok: false,
+        message,
+        retainer: refusedRetainer,
+        locked,
+        code,
+        reason: err instanceof ApiError ? err.reason : undefined,
+      }
     } finally {
       setBusy(false)
     }
@@ -2771,11 +2780,14 @@ function InvoiceEditor({
   // The send guard's question (billing period): this later month's prepayment is not
   // paid, so sending would bill the month again. Held with the addresses of the send
   // it interrupted so "Send anyway" repeats exactly that send.
+  // `review` marks the question put by Mark reviewed on a never-email client (which stamps
+  // the invoice sent): its override repeats the review, not a send.
   const [prepaymentAsk, setPrepaymentAsk] = useState<{
     message: string
     to?: string[]
     extra?: string[]
     canOverride: boolean
+    review?: boolean
   } | null>(null)
   // Open only when there is a choice to make — see `startSend`.
   const [picking, setPicking] = useState(false)
@@ -2972,10 +2984,28 @@ function InvoiceEditor({
    * the run's banner sits above the whole list, and a button that appears to do
    * nothing is the worst answer to a refusal.
    */
-  const reviewOrSayWhy = async () => {
+  const reviewOrSayWhy = async (allowAnyway = false) => {
     setRetainerError(null)
-    const result = await onPatch({ status: 'reviewed' })
-    if (!result.ok) sayPatchRefusal(result)
+    setPrepaymentAsk(null)
+    const result = await onPatch(
+      allowAnyway ? { status: 'reviewed', allowUnpaidPrepayment: true } : { status: 'reviewed' },
+    )
+    if (!result.ok) {
+      // A never-email client's review stamps the invoice sent, so the server asks the same
+      // billing-period question Send does. Usually nothing was written (it asks before the
+      // review), but a save that carried lines too is asked again after the review landed:
+      // either way re-read the month so the row shows the truth, then ask here.
+      if (result.code === 'prepayment_unpaid') {
+        setPrepaymentAsk({
+          message: result.message,
+          canOverride: canOverridePrepayment(result.reason),
+          review: true,
+        })
+        await onInvoiceMoved()
+        return
+      }
+      sayPatchRefusal(result)
+    }
   }
 
   /**
@@ -3131,11 +3161,11 @@ function InvoiceEditor({
       // offered only for the 'unpaid' reason; an anchor whose payment is still clearing
       // ('processing') or that is paid but never drawn by this invoice ('not_applied')
       // has to be settled first, and the row's mark is re-read.
-      if (err instanceof ApiError && err.code === 'prepayment_unpaid') {
+      const hold = prepaymentHoldOf(err)
+      if (hold) {
         setPicking(false)
-        const canOverride = err.reason !== 'not_applied' && err.reason !== 'processing'
-        setPrepaymentAsk({ message: err.message, to, extra, canOverride })
-        if (!canOverride) await onInvoiceMoved()
+        setPrepaymentAsk({ message: hold.message, to, extra, canOverride: hold.canOverride })
+        if (!hold.canOverride) await onInvoiceMoved()
         return
       }
       // A void that landed mid-send: re-read the month first, so the row shows
@@ -4396,24 +4426,18 @@ function InvoiceEditor({
       {/* Billing period: a later month whose prepayment is not paid. It asks; it never
           decides for her. */}
       {prepaymentAsk ? (
-        <div className="invoice-run-error invoice-run-prepayment-ask" role="alert">
-          <p>{prepaymentAsk.message}</p>
-          {prepaymentAsk.canOverride ? (
-            <>
-              <button
-                type="button"
-                className="secondary-action"
-                disabled={sendBusy}
-                onClick={() => void sendInvoice(prepaymentAsk.to, prepaymentAsk.extra, true)}
-              >
-                Send anyway
-              </button>{' '}
-            </>
-          ) : null}
-          <button type="button" className="link-button" onClick={() => setPrepaymentAsk(null)}>
-            {prepaymentAsk.canOverride ? 'Not now' : 'OK'}
-          </button>
-        </div>
+        <PrepaymentHoldNotice
+          message={prepaymentAsk.message}
+          canOverride={prepaymentAsk.canOverride}
+          overrideLabel={prepaymentAsk.review ? 'Mark reviewed anyway' : 'Send anyway'}
+          busy={sendBusy || busy}
+          onOverride={() =>
+            prepaymentAsk.review
+              ? void reviewOrSayWhy(true)
+              : void sendInvoice(prepaymentAsk.to, prepaymentAsk.extra, true)
+          }
+          onDismiss={() => setPrepaymentAsk(null)}
+        />
       ) : null}
 
       {/* The client is holding the earlier version. A STATUS, not an alert: it

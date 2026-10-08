@@ -145,8 +145,9 @@ describe('the invoice PATCH route answers a locked invoice with a sentence', () 
   // (featreq-8cec48db), and a window that stopped short would report the
   // fallback as missing rather than as out of order. Widened from 4000 when the
   // credit on account refusal joined them (stage 1b), and to 4800 for the
-  // unfinished-paid-stamp call (stage 1d) ahead of the save.
-  const block = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 4800)
+  // unfinished-paid-stamp call (stage 1d) ahead of the save, and to 5400 for the
+  // never-email prepayment question ahead of it (billing period, M-1).
+  const block = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 5400)
 
   it('catches the locked error rather than letting it fall to the 500', () => {
     expect(block).toContain('error instanceof InvoiceLockedError')
@@ -189,7 +190,7 @@ describe('the invoice PATCH route answers a locked invoice with a sentence', () 
  * page shows beside the buttons. Same caveat as above: wiring, not behavior.
  */
 describe('the invoice PATCH route refuses a void while a payment is clearing', () => {
-  const block = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 5000)
+  const block = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 5600)
 
   it('answers 409 invoice_payment_processing with the store sentence', () => {
     const at = block.indexOf('error instanceof InvoicePaymentProcessingError')
@@ -433,8 +434,9 @@ describe('the invoice responses carry which covered windows can still move', () 
     // Widened from 5200 when the sent-invoice session expiry went in ahead of the answer,
     // and again from 6200 for the never-email "reviewed means sent" stamp, and
     // from 8400 for the credit on account refusal, and from 8800 for the
-    // never-email invoice's paid-by-credit stamp.
-    const patch = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 10400)
+    // never-email invoice's paid-by-credit stamp, and from 10400 for the never-email
+    // prepayment question (billing period, M-1).
+    const patch = routeBlock(/const invoicePatchMatch = normalizedPath\.match\(/, 11200)
     expect(patch).toContain('invoice: await withCoverageChangeable(updated)')
     const confirm = routeBlock(/const coverageConfirmMatch = normalizedPath\.match\(/, 3400)
     expect(confirm).toContain('invoice: await withCoverageChangeable(confirmed)')

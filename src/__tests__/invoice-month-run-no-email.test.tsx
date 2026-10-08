@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoiceMonthRun } from '../components/InvoiceMonthRun'
-import { type Client, type Contact, type PersistedInvoice } from '../lib/types'
+import { ApiError, type Client, type Contact, type PersistedInvoice } from '../lib/types'
 
 /**
  * "Generate the invoice but never email it" (featreq-21d0bba8 answer 8,
@@ -283,5 +283,57 @@ describe('a never-email invoice left Sent at $0 by a failed paid stamp', () => {
   it('an ordinary client’s sent covered invoice gets no Mark reviewed either', async () => {
     await open(covered(), { clients: [client()], tab: 'sent' })
     expect(editor().queryByRole('button', { name: 'Mark reviewed' })).toBeNull()
+  })
+})
+
+describe('the billing-period hold on Mark reviewed (M-1)', () => {
+  // Mark reviewed stamps a never-email invoice sent, so the server asks the same question
+  // Send does. The page asks in place (nothing was written) and repeats the review on yes.
+  const HOLD =
+    'INV-2026-07-001 carries the prepayment for August 2026 and has not been paid yet (it is Sent), so sending this invoice would bill that month again.'
+  const NOT_APPLIED =
+    "This month was prepaid on July 2026's invoice, but the prepayment has not been applied to this invoice. Apply credit on account, or Void & regenerate, before sending."
+
+  it('asks with the server sentence and a Mark reviewed anyway, which repeats the review with the override', async () => {
+    await open(makeInvoice())
+    mockUpdate.mockRejectedValueOnce(new ApiError(409, HOLD, 'prepayment_unpaid', 'unpaid'))
+    fireEvent.click(editor().getByRole('button', { name: 'Mark reviewed' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(HOLD)
+    expect(mockUpdate.mock.calls[0][1]).toEqual({ status: 'reviewed' })
+
+    mockUpdate.mockResolvedValueOnce(makeInvoice({ status: 'sent', sentAt: '2026-09-01T12:00:00.000Z' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Mark reviewed anyway' }))
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(2))
+    expect(mockUpdate.mock.calls[1][1]).toEqual({ status: 'reviewed', allowUnpaidPrepayment: true })
+  })
+
+  it('re-reads the month after the refusal, so the row shows the truth (the review may already be written)', async () => {
+    await open(makeInvoice())
+    mockUpdate.mockRejectedValueOnce(new ApiError(409, HOLD, 'prepayment_unpaid', 'unpaid'))
+    const reads = mockList.mock.calls.length
+    fireEvent.click(editor().getByRole('button', { name: 'Mark reviewed' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(HOLD)
+    await waitFor(() => expect(mockList.mock.calls.length).toBeGreaterThan(reads))
+    // The question survives the re-read.
+    expect(screen.getByRole('button', { name: 'Mark reviewed anyway' })).toBeInTheDocument()
+  })
+
+  it('Not now closes the question and writes nothing more', async () => {
+    await open(makeInvoice())
+    mockUpdate.mockRejectedValueOnce(new ApiError(409, HOLD, 'prepayment_unpaid', 'unpaid'))
+    fireEvent.click(editor().getByRole('button', { name: 'Mark reviewed' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Not now' }))
+    expect(screen.queryByRole('button', { name: 'Mark reviewed anyway' })).toBeNull()
+    expect(mockUpdate).toHaveBeenCalledTimes(1)
+  })
+
+  it('a hold with no override shows its sentence and OK only', async () => {
+    await open(makeInvoice())
+    mockUpdate.mockRejectedValueOnce(new ApiError(409, NOT_APPLIED, 'prepayment_unpaid', 'not_applied'))
+    fireEvent.click(editor().getByRole('button', { name: 'Mark reviewed' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(NOT_APPLIED)
+    expect(screen.queryByRole('button', { name: 'Mark reviewed anyway' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'OK' })).toBeInTheDocument()
+    expect(mockUpdate).toHaveBeenCalledTimes(1)
   })
 })

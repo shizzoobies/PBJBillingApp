@@ -4492,6 +4492,19 @@ export async function listUnappliedRetainersRequest() {
 }
 
 /**
+ * The billing-period send guard's `reason` ('unpaid' | 'processing' | 'not_applied') off a
+ * refused response, so the page knows whether it may offer the override. Read from a clone:
+ * the caller still reads the body for the sentence and the code.
+ */
+async function prepaymentReasonOf(response: Response): Promise<string | undefined> {
+  return response
+    .clone()
+    .json()
+    .then((body: { reason?: unknown }) => (typeof body?.reason === 'string' ? body.reason : undefined))
+    .catch(() => undefined)
+}
+
+/**
  * Edit one invoice. Totals are NOT sent — the server recomputes them from the
  * lines, so what is stored can never disagree with what is printed.
  */
@@ -4505,6 +4518,12 @@ export async function updateInvoiceRequest(
     blurb?: string
     dueDate?: string
     status?: 'draft' | 'reviewed' | 'void'
+    /**
+     * The owner's "Mark reviewed anyway" after the server refused a never-email client's
+     * review with `prepayment_unpaid` (the review stamps the invoice sent). Never an
+     * invoice field: the route reads it and drops it.
+     */
+    allowUnpaidPrepayment?: boolean
     /**
      * Scope decisions staged in the hours panel beside the invoice
      * (featreq-8cec48db), sent WITH the lines they moved. The server writes
@@ -4521,8 +4540,9 @@ export async function updateInvoiceRequest(
     body: JSON.stringify(patch),
   })
   if (!response.ok) {
+    const reason = await prepaymentReasonOf(response)
     const { message, code } = await safeError(response)
-    throw new ApiError(response.status, message || `Failed to save (${response.status})`, code)
+    throw new ApiError(response.status, message || `Failed to save (${response.status})`, code, reason)
   }
   return ((await response.json()) as { invoice: PersistedInvoice }).invoice
 }
@@ -4819,11 +4839,7 @@ export async function sendInvoiceRequest(
     // The code rides along: `invoice_voided` (a void landed mid-send) makes the
     // month run reload itself so the row shows Void.
     // The prepayment hold's `reason` decides whether the page may offer "Send anyway".
-    const reason = await response
-      .clone()
-      .json()
-      .then((body: { reason?: unknown }) => (typeof body?.reason === 'string' ? body.reason : undefined))
-      .catch(() => undefined)
+    const reason = await prepaymentReasonOf(response)
     const { message, code } = await safeError(response)
     throw new ApiError(
       response.status,

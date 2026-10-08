@@ -52,6 +52,8 @@ import { mailingAddressLines } from '../../lib/mailing-address.js'
 import type { InvoiceLineOut, InvoiceRoleTier } from '../../lib/invoice-lines.js'
 import { InvoiceDeliveryBadge } from '../components/InvoiceDeliveryBadge'
 import { InvoiceRecipientPicker } from '../components/InvoiceRecipientPicker'
+import { PrepaymentHoldNotice } from '../components/PrepaymentHoldNotice'
+import { prepaymentHoldOf } from '../lib/prepaymentHold'
 import {
   fetchRateVersions,
   generateInvoicesRequest,
@@ -633,6 +635,17 @@ export function InvoicesPage({
     emailLog?: InvoiceEmailLogEntry[]
   } | null>(null)
   const [monthRunRefresh, setMonthRunRefresh] = useState(0)
+  // The billing-period send guard's question (this later month's prepayment is unpaid, still
+  // clearing, or not applied to this invoice), with the send it interrupted so "Send anyway"
+  // repeats exactly that send. Stamped with the client+month like `sendResult`.
+  const [prepaymentAsk, setPrepaymentAsk] = useState<{
+    key: string
+    invoiceId: string
+    message: string
+    canOverride: boolean
+    to?: string[]
+    extra?: string[]
+  } | null>(null)
   // The send waiting on her checkbox choices. Only ever set when the client has
   // more than one address on file — a single one goes straight out.
   const [pickingSend, setPickingSend] = useState<{
@@ -641,6 +654,7 @@ export function InvoicesPage({
     details: InvoiceRecipientDetail[]
   } | null>(null)
   const shownSend = sendResult?.key === seedKey ? sendResult : null
+  const shownPrepaymentAsk = prepaymentAsk?.key === seedKey ? prepaymentAsk : null
 
   // Which half of the page is on screen. Deliberately NOT remembered across
   // visits: the month you are in the middle of billing is what this page is
@@ -805,6 +819,7 @@ export function InvoicesPage({
     // Stamped with the invoice on screen when the click happened.
     const fail = (message: string) => setSendResult({ key: seedKey, error: message })
     setSendResult(null)
+    setPrepaymentAsk(null)
     setSendBusy(true)
     try {
       const invoices = await listInvoicesRequest(billingPeriod)
@@ -913,13 +928,21 @@ export function InvoicesPage({
    * reads afterwards names the addresses that actually went out, read back off
    * the server's email log rather than off what was asked for.
    */
-  const performSend = async (invoiceId: string, to?: string[], extra?: string[]) => {
+  const performSend = async (
+    invoiceId: string,
+    to?: string[],
+    extra?: string[],
+    allowUnpaidPrepayment = false,
+  ) => {
     setSendBusy(true)
+    setPrepaymentAsk(null)
     try {
       // `extra` is only passed when the picker added some for this one send.
-      const { invoice: updated } = await (extra && extra.length > 0
-        ? sendInvoiceRequest(invoiceId, to, extra)
-        : sendInvoiceRequest(invoiceId, to))
+      const { invoice: updated } = await (allowUnpaidPrepayment
+        ? sendInvoiceRequest(invoiceId, to, extra, { allowUnpaidPrepayment: true })
+        : extra && extra.length > 0
+          ? sendInvoiceRequest(invoiceId, to, extra)
+          : sendInvoiceRequest(invoiceId, to))
       setPickingSend(null)
       const lastSent = latestInvoiceSend(updated.emailLog)
       setSendResult({
@@ -941,6 +964,15 @@ export function InvoicesPage({
       // to be on the same month as this page.
       setMonthRunRefresh((token) => token + 1)
     } catch (err) {
+      // The billing-period guard's question: ask here, as the month run does, with the same
+      // sentence from the server. A hold with no override also refreshes the month run's row.
+      const hold = prepaymentHoldOf(err)
+      if (hold) {
+        setPickingSend(null)
+        setPrepaymentAsk({ key: seedKey, invoiceId, message: hold.message, canOverride: hold.canOverride, to, extra })
+        if (!hold.canOverride) setMonthRunRefresh((token) => token + 1)
+        return
+      }
       // The invoice moved under the send (voided, or changed by another tab):
       // the month run's row is stale, so it reloads to show what it is now.
       if (err instanceof ApiError && (err.code === 'invoice_voided' || err.code === 'invoice_changed')) {
@@ -1169,6 +1201,23 @@ export function InvoicesPage({
               <p className="invoice-run-error" role="alert">
                 {shownSend.error}
               </p>
+            ) : null}
+            {shownPrepaymentAsk ? (
+              <PrepaymentHoldNotice
+                message={shownPrepaymentAsk.message}
+                canOverride={shownPrepaymentAsk.canOverride}
+                overrideLabel="Send anyway"
+                busy={sendBusy}
+                onOverride={() =>
+                  void performSend(
+                    shownPrepaymentAsk.invoiceId,
+                    shownPrepaymentAsk.to,
+                    shownPrepaymentAsk.extra,
+                    true,
+                  )
+                }
+                onDismiss={() => setPrepaymentAsk(null)}
+              />
             ) : null}
             {shownSend?.note ? (
               <p className="invoice-run-sent">

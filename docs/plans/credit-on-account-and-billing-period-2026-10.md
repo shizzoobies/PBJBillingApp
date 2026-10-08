@@ -103,8 +103,10 @@ As built: 2A puts the prepayment lines for months 2..N on the ANCHOR month's own
 (`lib/billing-period.js`, `withPrepaymentLines`); 2B derives the credits (`prepay:<inv>:<YYYY-MM>`)
 from PAID anchor invoices at read time in both backends, refuses to void an anchor invoice whose
 prepayment credit is already drawn, and holds a send when the anchor's prepayment is unpaid (409
-`prepayment_unpaid`, overridden by `allowUnpaidPrepayment` / "Send anyway" in the month run). The
-lower per-client "Email invoice" view only shows the 409 sentence; the month run is the override.
+`prepayment_unpaid`, overridden by `allowUnpaidPrepayment` / "Send anyway"). The month run, the lower
+per-client "Email invoice" view and Mark reviewed on a never-email client (which stamps the invoice sent) all
+ask the same question through one server body and one page component; `processing` and `not_applied`
+have no override anywhere.
 The postgres statements 2B adds (one prepaid select per credit-ledger read, one holders query per
 generation run, one `billing_period_months > 1` read per month-list read) are pinned in
 `db/store-staleness.test.mjs`; its fake answers new SQL with no rows, so those tests wrap the pool.

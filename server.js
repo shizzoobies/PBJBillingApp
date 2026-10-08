@@ -2304,6 +2304,43 @@ async function markPaidByCreditAndClose(userId, invoice, { paidAt = null } = {})
 }
 
 /**
+ * The 409 body of the billing-period send guard, for every route that would put a
+ * later month out as sent: Send, and Mark reviewed on a never-email client (which
+ * stamps the invoice sent). One place for the shape, so the sentence and the reason
+ * the pages key on cannot drift apart. `allowAnyway` is the request body's
+ * `allowUnpaidPrepayment`, honored only as a strict `true`, and it lifts only the
+ * 'unpaid' hold: 'processing' and 'not_applied' have no override.
+ *
+ * @returns {null | {error: string, reason: string, message: string, anchorInvoiceId: string|null, anchorInvoiceNumber: string|null}}
+ *   null when the hold (or its absence) lets this call through
+ */
+function prepaymentHoldRefusal(hold, allowAnyway) {
+  if (!hold || (hold.reason === 'unpaid' && allowAnyway === true)) return null
+  return {
+    error: 'prepayment_unpaid',
+    reason: hold.reason,
+    message: hold.message,
+    anchorInvoiceId: hold.anchorInvoice?.id ?? null,
+    anchorInvoiceNumber: hold.anchorInvoice?.number ?? null,
+  }
+}
+
+/**
+ * The send guard for Mark reviewed on a never-email client (which stamps the invoice
+ * sent), asked BEFORE the review is written so a refusal changes nothing and the editor
+ * can ask on the spot. Null for any other move or client; reads the invoice as stored.
+ * The body's `allowUnpaidPrepayment` is the owner's yes; the store ignores the key.
+ */
+async function neverEmailReviewRefusal(invoiceId, payload) {
+  if (payload?.status !== 'reviewed') return null
+  const stored = (await appDataStore.listInvoices()).find((entry) => entry.id === invoiceId)
+  if (!stored) return null
+  const holdClient = await appDataStore.getClientById(stored.clientId)
+  if (holdClient?.invoiceNoEmail !== true || holdClient.platformInvoicingOptOut === true) return null
+  return prepaymentHoldRefusal(await appDataStore.unpaidPrepaymentFor(stored), payload.allowUnpaidPrepayment)
+}
+
+/**
  * FINISHING A NEVER-EMAIL PAID STAMP (stage 1d). Mark reviewed on a never-email
  * client's invoice stamps it sent and then paid by credit; when the second step
  * failed, the invoice is left SENT at $0 and unpaid, and the editor offers Mark
@@ -7090,15 +7127,12 @@ const server = createServer(async (request, response) => {
       // 'unpaid' hold (the anchor is not paid yet); the 'not_applied' hold (the anchor
       // IS paid but this invoice does not draw it) has no override: Apply credit on
       // account or Void & regenerate. Nothing else about the send changes.
-      const prepaymentHold = await appDataStore.unpaidPrepaymentFor(invoice)
-      if (prepaymentHold && !(prepaymentHold.reason === 'unpaid' && sendPayload?.allowUnpaidPrepayment === true)) {
-        sendJson(response, 409, {
-          error: 'prepayment_unpaid',
-          reason: prepaymentHold.reason,
-          message: prepaymentHold.message,
-          anchorInvoiceId: prepaymentHold.anchorInvoice?.id ?? null,
-          anchorInvoiceNumber: prepaymentHold.anchorInvoice?.number ?? null,
-        })
+      const prepaymentRefusal = prepaymentHoldRefusal(
+        await appDataStore.unpaidPrepaymentFor(invoice),
+        sendPayload?.allowUnpaidPrepayment,
+      )
+      if (prepaymentRefusal) {
+        sendJson(response, 409, prepaymentRefusal)
         return
       }
 
@@ -7833,6 +7867,13 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // BILLING PERIOD, never-email: Mark reviewed asks Send's question, before any write.
+      const reviewRefusal = await neverEmailReviewRefusal(invoiceId, payload)
+      if (reviewRefusal) {
+        sendJson(response, 409, reviewRefusal)
+        return
+      }
+
       let updated
       try {
         // The actor comes from the SESSION, never from the body. `updateInvoice`
@@ -7929,6 +7970,16 @@ const server = createServer(async (request, response) => {
         }
         if (stampClient?.invoiceNoEmail === true && stampClient.platformInvoicingOptOut !== true) {
           try {
+            // The check above ran on the invoice as stored BEFORE this save; a save that
+            // carried lines as well can change the answer, so ask again on what was written.
+            const stampRefusal = prepaymentHoldRefusal(
+              await appDataStore.unpaidPrepaymentFor(updated),
+              payload.allowUnpaidPrepayment,
+            )
+            if (stampRefusal) {
+              sendJson(response, 409, stampRefusal)
+              return
+            }
             // ONE moment for both stamps (sent, then paid by credit).
             const stampAt = new Date().toISOString()
             const stamped = await appDataStore.recordInvoiceSent(updated.id, {
