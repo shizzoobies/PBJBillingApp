@@ -3572,15 +3572,30 @@ function InvoiceEditor({
     !scope.previewMode &&
     !lockMessage &&
     !invoice.lineItems.some((line) => line.kind === 'account_credit')
+  // What Apply can draw on THIS invoice, and what is prepaid for later months (that month's
+  // own invoice draws it; a manual Apply leaves it - R-2).
   const [accountBalance, setAccountBalance] = useState<number | null>(null)
+  const [accountHeldForLater, setAccountHeldForLater] = useState(0)
   const [accountBusy, setAccountBusy] = useState(false)
   useEffect(() => {
     if (!accountCreditOffered) return
     let cancelled = false
     const load = async () => {
       try {
-        const { balance } = await listAccountCreditsRequest(invoice.clientId)
-        if (!cancelled) setAccountBalance(balance)
+        const { balance, credits } = await listAccountCreditsRequest(invoice.clientId)
+        const later = (credits ?? [])
+          .filter(
+            (credit) =>
+              !credit.voidedAt &&
+              credit.derived === true &&
+              Boolean(credit.forPeriod) &&
+              (credit.forPeriod as string) > invoice.period,
+          )
+          .reduce((sum, credit) => sum + credit.remaining, 0)
+        if (!cancelled) {
+          setAccountHeldForLater(Math.round(later * 100) / 100)
+          setAccountBalance(Math.round((balance - later) * 100) / 100)
+        }
       } catch {
         /* the Apply credit on account button simply does not appear */
       }
@@ -3589,7 +3604,7 @@ function InvoiceEditor({
     return () => {
       cancelled = true
     }
-  }, [accountCreditOffered, invoice.clientId])
+  }, [accountCreditOffered, invoice.clientId, invoice.period])
   const changeAccountCredit = async (
     request: (invoiceId: string) => Promise<PersistedInvoice>,
     failure: string,
@@ -4159,17 +4174,19 @@ function InvoiceEditor({
                 : `Apply retainer credit (${currency.format(Math.abs(offeredCredit.amount))})`}
             </button>
           ) : null}
-          {accountCreditOffered && accountBalance !== null && accountBalance > 0 ? (
+          {accountCreditOffered && accountBalance !== null && (accountBalance > 0 || accountHeldForLater > 0) ? (
             <button
               type="button"
               className="secondary-action"
-              disabled={savingDates || accountBusy || dirty || localTotal <= 0}
+              disabled={savingDates || accountBusy || dirty || localTotal <= 0 || accountBalance <= 0}
               title={
                 dirty
                   ? 'Save your changes first, then apply the credit'
                   : localTotal <= 0
                     ? 'There is nothing on this invoice left to credit'
-                    : `${currency.format(accountBalance)} on account for this client`
+                    : accountBalance <= 0
+                      ? `${currency.format(accountHeldForLater)} on account is prepaid for later months and is applied on those invoices`
+                      : `${currency.format(accountBalance)} on account for this client`
               }
               onClick={() =>
                 void changeAccountCredit(applyAccountCreditRequest, 'Could not apply the credit.')

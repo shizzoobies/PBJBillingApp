@@ -109,6 +109,8 @@ import {
   invoiceVoidRefusal,
   normalizeAdhocMode,
   normalizeTimeBreakdownMode,
+  getBillingPeriodLabel,
+  isLaterMonthPrepayment,
   planAccountCreditDraws,
   retainerCreditAmount,
   invoiceCoveredByCredit,
@@ -15784,13 +15786,19 @@ export class AppDataStore {
     })
     if (plan.totalCents === 0) {
       if (isNew) {
-        const open = ledger.some((credit) => !credit.voidedAt && credit.remaining > 0)
+        const openCredits = ledger.filter((credit) => !credit.voidedAt && credit.remaining > 0)
+        // What is left may all be prepaid for LATER months (R-2): say so, since the
+        // balance on the client page is not zero.
+        const onlyLater = openCredits.length > 0 && openCredits.every((credit) => isLaterMonthPrepayment(credit, current.period))
+        const laterMonths = [...new Set(openCredits.map((credit) => credit.forPeriod))].sort()
         throw new AccountCreditError(
           accountCreditWantedCents(next.lineItems) === 0
             ? 'There is nothing on this invoice left to credit.'
-            : !open
+            : openCredits.length === 0
               ? 'This client has no credit on account to apply.'
-              : 'The credit on account named on this invoice is not available.',
+              : onlyLater
+                ? `The credit on account this client has left is prepaid for ${laterMonths.map(getBillingPeriodLabel).join(', ')}, so it is applied on those months' invoices, not this one.`
+                : 'The credit on account named on this invoice is not available.',
         )
       }
       next.lineItems = next.lineItems.filter((entry) => entry.kind !== 'account_credit')

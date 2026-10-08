@@ -432,3 +432,60 @@ describe('InvoiceMonthRun - credit drawn at generation', () => {
     expect(applyButton()).not.toBeInTheDocument()
   })
 })
+
+describe('InvoiceMonthRun - Apply credit on account and a later month\'s prepayment (R-2)', () => {
+  const credit = (over: Record<string, unknown>) => ({
+    id: 'c',
+    clientId: 'client-acme',
+    amount: 500,
+    sourceKind: 'prepayment',
+    sourceRef: 'x',
+    forPeriod: null,
+    note: '',
+    createdBy: null,
+    createdAt: '2026-10-20T00:00:00.000Z',
+    voidedAt: null,
+    voidedBy: null,
+    draws: [],
+    remaining: 500,
+    ...over,
+  })
+
+  it('shows what this invoice can take, and keeps a later month\'s prepayment out of the figure', async () => {
+    mockBalance.mockResolvedValue({
+      balance: 700,
+      credits: [
+        credit({ id: 'prepay:a:2026-10', forPeriod: '2026-10', derived: true, remaining: 200 }),
+        credit({ id: 'prepay:a:2026-11', forPeriod: '2026-11', derived: true, remaining: 500 }),
+      ],
+    } as never)
+    await openEditor()
+    await waitFor(() => expect(applyButton()).toBeInTheDocument())
+    expect(applyButton()).toHaveAttribute('title', '$200.00 on account for this client')
+    expect(applyButton()).toBeEnabled()
+  })
+
+  it('shows Apply disabled, saying why, when everything left is prepaid for later months', async () => {
+    mockBalance.mockResolvedValue({
+      balance: 500,
+      credits: [credit({ id: 'prepay:a:2026-11', forPeriod: '2026-11', derived: true, remaining: 500 })],
+    } as never)
+    await openEditor()
+    await waitFor(() => expect(applyButton()).toBeInTheDocument())
+    expect(applyButton()).toBeDisabled()
+    expect(applyButton()).toHaveAttribute(
+      'title',
+      '$500.00 on account is prepaid for later months and is applied on those invoices',
+    )
+  })
+
+  it('a stored credit meant for a later month still counts as available', async () => {
+    mockBalance.mockResolvedValue({
+      balance: 300,
+      credits: [credit({ id: 'manual', sourceKind: 'manual', forPeriod: '2026-11', remaining: 300 })],
+    } as never)
+    await openEditor()
+    await waitFor(() => expect(applyButton()).toBeEnabled())
+    expect(applyButton()).toHaveAttribute('title', '$300.00 on account for this client')
+  })
+})

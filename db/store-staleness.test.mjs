@@ -39657,6 +39657,40 @@ describe('the unpaid-prepayment send guard (file backend)', () => {
       expect(await store.unpaidPrepaymentFor(applied)).toBeNull()
     })
 
+    it('R-2: Apply credit draws this month\'s prepayment and leaves the NEXT month\'s for its own invoice', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      const [november] = await generate('2026-11')
+      await markPaidNow(october.id)
+      // November also bills a $200 expense: pre-credit total 700, two prepayments on account (500 each).
+      const withExpense = await store.updateInvoice(november.id, {
+        lineItems: [...november.lineItems, { kind: 'custom', label: 'Expense', detail: '', amount: 200 }],
+      })
+      expect(withExpense.total).toBe(700)
+
+      const applied = await store.applyAccountCreditToInvoice(november.id)
+      const credit = applied.lineItems.find((line) => line.kind === 'account_credit')
+      expect(credit.draws).toEqual([{ creditId: `prepay:${october.id}:2026-11`, amount: 500 }])
+      expect(applied.total).toBe(200)
+      const ledger = await store.listAccountCredits('c1')
+      expect(ledger.find((entry) => entry.id === `prepay:${october.id}:2026-12`).remaining).toBe(500)
+    })
+
+    it('R-2: Apply says so when the only credit left is prepaid for a later month', async () => {
+      await seed([quarterly()])
+      const [october] = await generate('2026-10')
+      const [november] = await generate('2026-11')
+      // The anchor billed December ahead but not November: only December's credit exists.
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const anchor = data.invoices.find((entry) => entry.id === october.id)
+      anchor.lineItems = anchor.lineItems.filter((line) => !(line.kind === 'prepayment' && line.period === '2026-11'))
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+      await markPaidNow(october.id)
+      await expect(store.applyAccountCreditToInvoice(november.id)).rejects.toThrow(
+        "The credit on account this client has left is prepaid for December 2026, so it is applied on those months' invoices, not this one.",
+      )
+    })
+
     it('passes after Void and regenerate (the new draft draws it at generation)', async () => {
       await seed([quarterly()])
       const [october] = await generate('2026-10')

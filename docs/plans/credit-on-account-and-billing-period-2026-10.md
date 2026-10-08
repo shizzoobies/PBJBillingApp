@@ -106,7 +106,9 @@ prepayment credit is already drawn, and holds a send when the anchor's prepaymen
 `prepayment_unpaid`, overridden by `allowUnpaidPrepayment` / "Send anyway"). The month run, the lower
 per-client "Email invoice" view and Mark reviewed on a never-email client (which stamps the invoice sent) all
 ask the same question through one server body and one page component; `processing` and `not_applied`
-have no override anywhere.
+have no override anywhere. No hold applies to a month already at $0 (M-5). A fresh draw (Apply, and generation) never spends a derived
+prepayment credit meant for a LATER month (R-2); a stored credit meant for a later month stays drawable by hand, and when
+only later months are left Apply is greyed out on the editor and the server answers with a sentence naming those months.
 The postgres statements 2B adds (one prepaid select per credit-ledger read, one holders query per
 generation run, one `billing_period_months > 1` read per month-list read) are pinned in
 `db/store-staleness.test.mjs`; its fake answers new SQL with no rows, so those tests wrap the pool.

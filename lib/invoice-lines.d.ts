@@ -321,7 +321,9 @@ export type AccountCreditLedgerEntry = {
   createdAt?: string | null
   voidedAt?: string | null
   draws?: Array<{ invoiceId: string; amount: number }>
+  derived?: boolean
 }
+export function isLaterMonthPrepayment(credit: AccountCreditLedgerEntry | null | undefined, period: string | null | undefined): boolean
 export function accountCreditAvailableCents(
   credit: AccountCreditLedgerEntry | null | undefined,
   ownInvoiceId?: string | null,
