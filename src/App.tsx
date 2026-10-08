@@ -1683,9 +1683,14 @@ function App() {
         startAt: session.startAt,
         endAt: session.endAt,
         sessions: [session],
-        // Not billable until split; no single client or task.
+        // Not billable until split; no single client. The typed task is
+        // REQUIRED (the same rule as a single entry) and every slice the split
+        // creates copies it. There is no checklist to attach across several
+        // clients, so it is always a typed name (the server would refuse a
+        // taskId here: a checklist belongs to one client).
         billable: false,
         taskId: null,
+        taskLabel: timer.taskLabel?.trim() || undefined,
         entryMethod: 'timer',
       })
       setTimer(null)

@@ -36,12 +36,9 @@ const EMPLOYEES = [
 function Harness({
   onStop,
   starts = [],
-  startWith,
 }: {
   onStop?: () => Promise<void>
   starts?: TimerState[]
-  /** Fields the running timer gains after Start, standing in for a later edit. */
-  startWith?: Partial<TimerState>
 }) {
   const [timer, setTimer] = useState<TimerState | null>(null)
   return (
@@ -55,7 +52,7 @@ function Harness({
         employees={EMPLOYEES}
         onStartTimer={(next) => {
           starts.push(next)
-          setTimer({ ...next, ...startWith })
+          setTimer(next)
         }}
         onStopTimer={async () => {
           if (onStop) await onStop()
@@ -174,13 +171,13 @@ describe('The capture form after a log', () => {
   })
 
   it('clears a group block too', async () => {
-    // A group block needs a task before it can be logged; the task box for the
-    // group timer arrives with the next change, so the timer gains one here.
-    render(<Harness startWith={{ taskLabel: 'Payroll' }} />)
+    render(<Harness />)
 
     fireEvent.change(billToSelect(), { target: { value: 'group' } })
     fireEvent.click(screen.getByRole('checkbox', { name: 'Acme Dental' }))
     fireEvent.click(screen.getByRole('checkbox', { name: 'Bright Books' }))
+    // A group block needs a task before it can be logged, like any other entry.
+    fireEvent.change(taskBox(), { target: { value: 'Payroll' } })
     fireEvent.change(detailBox(), { target: { value: 'Quarter-end review across the group.' } })
     fireEvent.click(startButton())
 
@@ -189,6 +186,7 @@ describe('The capture form after a log', () => {
 
     expect(billToSelect()).toHaveValue('single')
     expect(detailBox()).toHaveValue('')
+    expect(taskBox()).toHaveValue('')
     // Back to the single-client form, with no client still ticked behind it —
     // and the single picker sitting on its placeholder.
     expect(screen.queryByRole('checkbox', { name: 'Acme Dental' })).not.toBeInTheDocument()

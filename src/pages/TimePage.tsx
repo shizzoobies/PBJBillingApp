@@ -736,7 +736,11 @@ export function TimeCapture({
   // client / task / notes edits update the running timer instead of the
   // compose-state. Structural choices (employee, admin, group) are locked.
   const isRunning = Boolean(timer)
-  const taskClientId = isRunning ? timer?.clientId ?? '' : effectiveClientId
+  // A group timer spans several clients, so there is no single checklist to pick
+  // from: its task box offers the standard task names and free text only. (A
+  // client left chosen from before switching to "A group" must not leak its
+  // checklists in.)
+  const taskClientId = isRunning ? timer?.clientId ?? '' : groupMode ? '' : effectiveClientId
 
   const eligibleTasks = useMemo(
     () => eligibleChecklistsFor(checklists, taskClientId),
@@ -842,6 +846,10 @@ export function TimeCapture({
         description: description.trim(),
         startedAt: Date.now(),
         taskId: null,
+        // The typed task rides along when it was already filled in; otherwise it
+        // is added while the timer runs. Either way it is demanded at Stop & log
+        // (the slices of the split copy it).
+        taskLabel: taskLabel.trim() || undefined,
         isAdministrative: false,
         // The whole block is out-of-scope work, so every slice the split
         // produces is too — the store carries the flag onto them.
@@ -1080,9 +1088,21 @@ export function TimeCapture({
                 })}
               </div>
             </div>
+            <label className="field full-span">
+              <span>Task</span>
+              <TaskPickField
+                value={shownTaskText}
+                options={taskOptions}
+                datalistId="time-timer-task-options"
+                placeholder="Pick a task or type your own"
+                disabled={inputsDisabled}
+                onTyped={(typed) => void handleTaskTyped(typed)}
+              />
+              {fieldPrompt('task')}
+            </label>
             <p className="field full-span group-split-hint">
               Track normally, then <strong>Split across clients</strong> on the saved entry to
-              divide the time for billing.
+              divide the time for billing. Every client&rsquo;s share keeps this task.
             </p>
           </>
         ) : shownAdmin ? null : (
@@ -3255,6 +3275,8 @@ function TimeEntryRow({
             {entry.date} · {employeeLabel} · {formatHoursMinutes(entry.minutes)} across{' '}
             {memberCount} {memberCount === 1 ? 'client' : 'clients'}
           </small>
+          {/* The task the group timer carried: every split share copies it. */}
+          {taskTitle ? <span className="task-chip">Task: {taskTitle}</span> : null}
           {error ? <small className="auth-error">{error}</small> : null}
         </div>
         <div className="entry-meta">
