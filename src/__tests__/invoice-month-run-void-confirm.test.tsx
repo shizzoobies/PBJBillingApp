@@ -235,3 +235,63 @@ describe('Void & regenerate leaves a clearing payment alone and says so', () => 
     expect(screen.queryByText(/sent or paid invoice/)).not.toBeInTheDocument()
   })
 })
+
+describe('Void on a billing-period anchor invoice says what it does to the later months (R-5)', () => {
+  const prepayment = (label: string, period: string) => ({
+    kind: 'prepayment' as const,
+    label,
+    detail: '',
+    amount: 400,
+    period,
+  })
+  const anchorLines = [
+    { kind: 'custom' as const, label: 'Bookkeeping', detail: '', amount: 400 },
+    prepayment('Prepayment for September 2026', '2026-09'),
+    prepayment('Prepayment for October 2026', '2026-10'),
+  ]
+
+  it('an unsent or unpaid anchor: the later months bill in full until the period is generated again', async () => {
+    mockList.mockResolvedValue([makeInvoice({ status: 'sent', lineItems: anchorLines })])
+    await openEditor(/Sent/)
+    fireEvent.click(voidButton())
+    expect(confirm).toHaveBeenCalledWith(
+      "Void INV-2026-08-001 for Acme? The client already has this invoice by email, and their payment link will stop working. This cannot be undone. It also bills September 2026 and October 2026 ahead, so those months will bill in full until this period's invoice is generated again (months already sent are billed again by it).",
+    )
+  })
+
+  it('a paid anchor: the prepaid credit goes with it', async () => {
+    mockList.mockResolvedValue([
+      makeInvoice({
+        status: 'paid',
+        paidAt: '2026-09-01T00:00:00.000Z',
+        paymentMethod: 'manual',
+        lineItems: anchorLines,
+      }),
+    ])
+    await openEditor(/Paid/)
+    fireEvent.click(voidButton())
+    expect(confirm).toHaveBeenCalledWith(
+      'Void INV-2026-08-001 for Acme? This invoice is PAID. Voiding it does not refund the client and takes it out of your paid totals. This cannot be undone. It also prepaid September 2026 and October 2026 ($800.00): that credit goes with it, and those months will bill in full again. If the client keeps this payment, record $800.00 as credit on account (Client, Billing, Add credit) after voiding.',
+    )
+  })
+
+  it('names a month once when two prepayment lines name it', async () => {
+    mockList.mockResolvedValue([
+      makeInvoice({
+        status: 'sent',
+        lineItems: [...anchorLines, prepayment('Prepayment for October 2026 (late)', '2026-10')],
+      }),
+    ])
+    await openEditor(/Sent/)
+    fireEvent.click(voidButton())
+    expect(confirm.mock.calls[0][0]).toContain('It also bills September 2026 and October 2026 ahead,')
+    expect(confirm.mock.calls[0][0]).not.toMatch(/October 2026.*October 2026/)
+  })
+
+  it('an ordinary invoice says nothing of the kind', async () => {
+    mockList.mockResolvedValue([makeInvoice({ status: 'draft', sentAt: null })])
+    await openEditor(/To review/)
+    fireEvent.click(voidButton())
+    expect(confirm.mock.calls[0][0]).not.toMatch(/ahead|prepaid/)
+  })
+})

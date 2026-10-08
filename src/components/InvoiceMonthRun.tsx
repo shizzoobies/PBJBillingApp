@@ -3886,7 +3886,20 @@ function InvoiceEditor({
         : invoice.status === 'draft' || invoice.status === 'reviewed'
           ? `Void ${who}? It was never sent. Generate the month again if you still need to bill it.`
           : `Void ${who}? The client already has this invoice by email, and their payment link will stop working. This cannot be undone.`
-    if (!window.confirm(sentence)) return
+    // A billing-period anchor invoice also bills later months ahead. Voiding it withdraws
+    // that: the later months bill in full (R-5), and a PAID one takes its prepaid credit with it.
+    const aheadLines = invoice.lineItems.filter((line) => line.kind === 'prepayment' && line.period)
+    const ahead = [...new Set(aheadLines.map((line) => getBillingPeriodLabel(line.period as string)))]
+    const aheadList =
+      ahead.length > 1 ? `${ahead.slice(0, -1).join(', ')} and ${ahead[ahead.length - 1]}` : ahead.join('')
+    const aheadAmount = currency.format(aheadLines.reduce((sum, line) => sum + line.amount, 0))
+    const aheadWarning =
+      invoice.kind !== 'monthly' || ahead.length === 0
+        ? ''
+        : invoice.status === 'paid'
+          ? ` It also prepaid ${aheadList} (${aheadAmount}): that credit goes with it, and those months will bill in full again. If the client keeps this payment, record ${aheadAmount} as credit on account (Client, Billing, Add credit) after voiding.`
+          : ` It also bills ${aheadList} ahead, so those months will bill in full until this period's invoice is generated again (months already sent are billed again by it).`
+    if (!window.confirm(sentence + aheadWarning)) return
     setRetainerError(null)
     const result = await onPatch({ status: 'void' })
     if (!result.ok) sayPatchRefusal(result)

@@ -118,6 +118,10 @@ Preview (M-11) adds one line when Send would stop on the guard ("Send will ask f
 the two holds with no override), read from the same store helper Send uses.
 The month run re-reads the month after a save, Apply or review of any billing-period client's invoice (R-4), not only of a row that
 already carried a flag, so a hold the save creates is flagged at once.
+Voiding an anchor (R-5, decided): the guard reads a LIVE anchor that billed the month ahead, so a voided UNPAID anchor holds
+nothing (no money moved, no credit exists) and the later months bill in full until the anchor is generated again (Void and
+regenerate puts the prepayment lines, and the hold, back). Voiding a PAID anchor that nothing draws on is still allowed, as for
+any paid invoice, and its derived credit goes with it; the void confirm names the months and says so in both cases.
 The postgres statements 2B adds (one prepaid select per credit-ledger read, one holders query per
 generation run, one `billing_period_months > 1` read per month-list read) are pinned in
 `db/store-staleness.test.mjs`; its fake answers new SQL with no rows, so those tests wrap the pool.

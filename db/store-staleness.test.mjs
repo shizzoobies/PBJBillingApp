@@ -39823,6 +39823,37 @@ describe('the unpaid-prepayment send guard (file backend)', () => {
     expect(await store.unpaidPrepaymentFor(november)).toBeNull()
   })
 
+  // R-5, decided: the guard reads a LIVE anchor invoice that billed the month ahead. Voiding an
+  // UNPAID anchor withdraws that bill (nothing was paid, so no money moves and no credit exists),
+  // so the later months bill in full, as they should; Void and regenerate of the anchor puts the
+  // prepayment lines, and with them the hold, back.
+  it('R-5: a voided unpaid anchor holds nothing and the later month bills in full; regenerating the anchor brings the hold back', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    const [november] = await generate('2026-11')
+    await setStatus(october.id, 'sent')
+    expect((await store.unpaidPrepaymentFor(november))?.reason).toBe('unpaid')
+
+    await store.updateInvoice(october.id, { status: 'void' })
+    expect(await store.unpaidPrepaymentFor(november)).toBeNull()
+    const list = await store.listInvoices({ period: '2026-11' })
+    expect(await store.withUnpaidPrepayment(list)).toBe(list)
+    // No credit was ever yielded, and November still carries its whole fee.
+    expect(await store.listAccountCredits('c1')).toEqual([])
+    expect(list.find((invoice) => invoice.id === november.id).total).toBe(500)
+
+    const [again] = await generate('2026-10')
+    expect(again.id).not.toBe(october.id)
+    expect(again.lineItems.filter((line) => line.kind === 'prepayment').map((line) => line.period)).toEqual([
+      '2026-11',
+      '2026-12',
+    ])
+    await setStatus(again.id, 'sent')
+    const hold = await store.unpaidPrepaymentFor(november)
+    expect(hold.reason).toBe('unpaid')
+    expect(hold.anchorInvoice.id).toBe(again.id)
+  })
+
   it('M-5: a month fully covered by a manual credit is not held, whatever the anchor, and a partly covered one still is', async () => {
     await seed([quarterly()])
     const [october] = await generate('2026-10')
