@@ -2528,3 +2528,108 @@ export type AutopayAttemptSummary = {
   error: string | null
   updatedAt: string | null
 }
+
+/* -------------------------------------------------------------------------- */
+/* Letters (featreq-5e195707)                                                 */
+/* -------------------------------------------------------------------------- */
+
+/** One `{{placeholder}}` the app fills in (the list lives in lib/letter-template.js). */
+export type LetterPlaceholderInfo = {
+  key: string
+  label: string
+  description: string
+  /** A blank value stops the letter going to that client. */
+  required: boolean
+}
+
+/** The saved engagement-letter template and what the page needs around it. */
+export type LetterTemplateState = {
+  template: {
+    subject: string
+    emailBody: string
+    letterBody: string
+    updatedAt: string | null
+    updatedBy: string | null
+    updatedByName: string | null
+  }
+  /** Snapshot key of the three boxes: Send refuses when it no longer matches the stored letter. */
+  hash: string
+  placeholders: LetterPlaceholderInfo[]
+  warnings: { unknown: string[] }
+  /** Who letters come from and who replies reach. */
+  sender: { from: string; replyTo: string }
+}
+
+/** What one client would receive, built by the server with the same code as Send. */
+export type LetterPreview = {
+  subject: string
+  html: string
+  text: string
+  to: string[]
+  recipientDetails: Array<{ email: string; source: string }>
+  recipientNote: string | null
+  pdfAvailable: boolean
+  pdfFilename: string
+  /** Required placeholders with no value for this client (Send would skip them). */
+  missing: string[]
+  /** The sentence that says why, and what to do (an hourly client has no single fee), or null. */
+  missingNote: string | null
+  unknown: string[]
+  flags: {
+    neverEmailed: boolean
+    billedOutside: boolean
+    inactive: boolean
+    /** The billing master's name when this client is billed through one. */
+    billingMasterSub: string | null
+  }
+  /** The sentence that would stop Send for this client, or null. */
+  refusal: string | null
+}
+
+/** One row of the send log. */
+export type LetterSendRecord = {
+  id: string
+  letterId: string
+  clientId: string
+  templateHash: string
+  firmDay: string
+  attempt: number
+  status: 'sending' | 'sent' | 'failed'
+  recipients: string[]
+  subject: string
+  providerId: string | null
+  error: string | null
+  delivery: string | null
+  createdBy: string | null
+  createdAt: string | null
+  completedAt: string | null
+}
+
+/** What happened to one client in a Send. */
+export type LetterSendResult = {
+  clientId: string
+  clientName: string | null
+  status: 'sent' | 'skipped' | 'failed'
+  /** Why it was not sent / failed; `already_sent` and `unfinished` are the ones "Send again anyway" answers. */
+  code?:
+    | 'not_found'
+    | 'no_addressee'
+    | 'no_recipients'
+    | 'team_address'
+    | 'missing_placeholder'
+    | 'pdf_failed'
+    | 'already_sent'
+    | 'unfinished'
+    | 'provider'
+    | 'unexpected'
+  message?: string
+  to?: string[]
+  sendId?: string
+}
+
+export type LetterSendResponse = {
+  results: LetterSendResult[]
+  sent: number
+  failed: number
+  skipped: number
+}

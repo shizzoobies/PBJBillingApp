@@ -74,6 +74,7 @@ import {
   INTERNAL_EMAIL_KIND,
   notify,
   sendDigestEmail,
+  formatInvoiceSender,
   sendFeatureRequestEmail,
   sendInvoiceEmail,
   sendLoginLinkEmail,
@@ -107,6 +108,13 @@ import { buildInvoicePdf, invoicePdfFilename } from './lib/invoice-pdf.js'
 import { buildInvoiceDocuments } from './lib/invoice-documents.js'
 import { buildProposalPdf, proposalPdfFilename } from './lib/proposal-pdf.js'
 import { buildProposalEmail } from './lib/proposal-email.js'
+import {
+  LETTER_ID,
+  LETTER_MAX_CLIENTS_PER_SEND,
+  assembleLetterPreview,
+  sendLetterBatch,
+} from './lib/letter-send.js'
+import { letterPlaceholders, letterTemplateHash, templateWarnings } from './lib/letter-template.js'
 import { buildQuestionnaireEmail } from './lib/proposal-questionnaire-email.js'
 import {
   QUESTIONNAIRE_RESPONSE_HEADERS,
@@ -2473,6 +2481,84 @@ async function planAutopaySend(invoice, client) {
     return { plan: null, active: false }
   }
 }
+
+// ---- Engagement letters: helpers (featreq-5e195707) ------------------------
+// docs/plans/engagement-letters-2026-10.md. The owner writes one email and one
+// letter with {{placeholders}}; the routes below preview it per client and send
+// it with the letter as a PDF. Replies go to the invoice mailbox (Brittany's) and
+// the letter goes to the client's addressees only - nothing is copied to anyone.
+// The preview and the send themselves live in lib/letter-send.js, which takes the
+// store and the mail sender as arguments so each rule is tested by running it.
+
+const letterPause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** The From: and Reply-To: a letter goes out with: the same as an invoice. */
+function letterSender(firmSettings) {
+  return {
+    from: formatInvoiceSender(
+      process.env.INVOICE_EMAIL_FROM || process.env.EMAIL_FROM || '',
+      firmSettings?.name || '',
+    ),
+    replyTo: String(process.env.INVOICE_REPLY_TO || process.env.OWNER_EMAIL || '').trim(),
+  }
+}
+
+/** The saved template as the page reads it: the text, its hash, the placeholders and the sender. */
+async function letterTemplateView() {
+  const [template, firmSettings] = await Promise.all([
+    appDataStore.getEngagementLetter(LETTER_ID),
+    appDataStore.getFirmSettings().catch(() => null),
+  ])
+  let updatedByName = null
+  if (template.updatedBy) {
+    try {
+      updatedByName = (await appDataStore.getTeamMember(template.updatedBy))?.name ?? null
+    } catch {
+      updatedByName = null
+    }
+  }
+  return {
+    template: {
+      subject: template.subject,
+      emailBody: template.emailBody,
+      letterBody: template.letterBody,
+      updatedAt: template.updatedAt,
+      updatedBy: template.updatedBy,
+      updatedByName,
+    },
+    hash: letterTemplateHash(template),
+    placeholders: letterPlaceholders,
+    warnings: templateWarnings(template),
+    sender: letterSender(firmSettings),
+  }
+}
+
+/**
+ * Everything a preview or a send reads once: the stored template, the workspace,
+ * the firm, who is sending, and the addresses of the app's user accounts (no
+ * letter goes to a team member's address, the reply-to mailbox excepted). The
+ * team read FAILS CLOSED: if it cannot be made, nothing is previewed or sent.
+ */
+async function loadLetterContext(session) {
+  const [template, data, firmSettings, members] = await Promise.all([
+    appDataStore.getEngagementLetter(LETTER_ID),
+    appDataStore.read(),
+    appDataStore.getFirmSettings().catch(() => null),
+    appDataStore.getTeamMembers(),
+  ])
+  return {
+    template,
+    data,
+    firmSettings,
+    senderName: session.user.name ?? '',
+    now: new Date(),
+    teamEmails: new Set(
+      members.map((member) => String(member.email ?? '').trim().toLowerCase()).filter(Boolean),
+    ),
+    replyTo: letterSender(firmSettings).replyTo,
+  }
+}
+// ---- end of the engagement letter helpers ----------------------------------
 
 /**
  * The page a client reaches from "Turn off automatic payments". A GET only
@@ -11496,6 +11582,283 @@ const server = createServer(async (request, response) => {
       }
       broadcastDataChanged()
       sendJson(response, 200, applied)
+      return
+    }
+
+    // ---- Engagement letters (featreq-5e195707) -----------------------------
+    //
+    // docs/plans/engagement-letters-2026-10.md. Endpoint-managed like proposals:
+    // never in `PUT /api/app-data`, so outside the bulk save and the workspace
+    // fingerprint. Owner-only, same-origin and JSON on every write. A letter goes
+    // to the client's addressees and nowhere else (Alex, 2026-10-08): the send log
+    // is the record, so there is no owner summary and no copy of the document.
+
+    // GET /api/letters/template - the saved template, its hash, the placeholders
+    // and who the letters come from / are answered by.
+    if (normalizedPath === '/api/letters/template' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see letters' })
+        return
+      }
+      sendJson(response, 200, await letterTemplateView(), { 'Cache-Control': 'no-store' })
+      return
+    }
+
+    // PUT /api/letters/template - { subject, emailBody, letterBody }. An unknown
+    // placeholder warns, it does not refuse: Send is what refuses it.
+    if (normalizedPath === '/api/letters/template' && request.method === 'PUT') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can edit letters' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const texts = ['subject', 'emailBody', 'letterBody'].map((key) => payload?.[key])
+      if (texts.some((value) => typeof value !== 'string')) {
+        sendJson(response, 400, {
+          error: 'letter_invalid',
+          message: 'Send the subject, the email and the letter as text.',
+        })
+        return
+      }
+      if (texts[0].trim().length > 200) {
+        sendJson(response, 400, { error: 'letter_invalid', message: 'The subject can be at most 200 characters.' })
+        return
+      }
+      if (texts[1].trim().length > 20000 || texts[2].trim().length > 20000) {
+        sendJson(response, 400, {
+          error: 'letter_invalid',
+          message: 'The email and the letter can each be at most 20,000 characters.',
+        })
+        return
+      }
+      await appDataStore.saveEngagementLetter({
+        id: LETTER_ID,
+        subject: texts[0],
+        emailBody: texts[1],
+        letterBody: texts[2],
+        updatedBy: session.user.id,
+      })
+      try {
+        await appDataStore.recordActivity(session.user.id, 'engagement_letter_saved', 'Engagement letter')
+      } catch (error) {
+        console.error('[letters] could not record the save:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, await letterTemplateView())
+      return
+    }
+
+    // GET /api/letters/preview?clientId= - what this client would receive, from
+    // the STORED template and the same builder as Send. Read-only, uncached.
+    if (normalizedPath === '/api/letters/preview' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can preview a letter' })
+        return
+      }
+      const clientId = requestUrl.searchParams.get('clientId') || ''
+      if (!clientId) {
+        sendJson(response, 400, { error: 'clientId is required' })
+        return
+      }
+      const preview = await assembleLetterPreview(await loadLetterContext(session), clientId)
+      if (preview.notFound) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      sendJson(
+        response,
+        200,
+        {
+          subject: preview.docs.email.subject,
+          html: preview.docs.email.html,
+          text: preview.docs.email.text,
+          to: preview.to,
+          recipientDetails: preview.details,
+          recipientNote: preview.recipientNote,
+          pdfAvailable: Boolean(preview.docs.pdf),
+          pdfFilename: preview.docs.pdfFilename,
+          missing: preview.missing,
+          missingNote: preview.missingNote,
+          unknown: preview.unknown,
+          flags: preview.flags,
+          refusal: preview.refusal,
+        },
+        { 'Cache-Control': 'no-store' },
+      )
+      return
+    }
+
+    // GET /api/letters/preview.pdf?clientId= - the PDF the send would attach,
+    // streamed inline for the preview dialog.
+    if (normalizedPath === '/api/letters/preview.pdf' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can preview a letter' })
+        return
+      }
+      const clientId = requestUrl.searchParams.get('clientId') || ''
+      if (!clientId) {
+        sendJson(response, 400, { error: 'clientId is required' })
+        return
+      }
+      const preview = await assembleLetterPreview(await loadLetterContext(session), clientId)
+      if (preview.notFound) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      if (!preview.docs.pdf) {
+        sendJson(response, 502, {
+          error: 'pdf_failed',
+          message: 'The PDF could not be built, so Send would skip this client.',
+        })
+        return
+      }
+      response.writeHead(200, {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `inline; filename="${preview.docs.pdfFilename}"`,
+        'Cache-Control': 'no-store',
+      })
+      response.end(preview.docs.pdf)
+      return
+    }
+
+    // GET /api/letters/sends - the send log, newest first ("Last sent" on the page
+    // is the latest `sent` row per client).
+    if (normalizedPath === '/api/letters/sends' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see letters' })
+        return
+      }
+      sendJson(
+        response,
+        200,
+        { sends: await appDataStore.listEngagementLetterSends({ letterId: LETTER_ID }) },
+        { 'Cache-Control': 'no-store' },
+      )
+      return
+    }
+
+    // POST /api/letters/send - { clientIds (1..50), templateHash, resendToday? }.
+    // Everything that can refuse the whole batch does so BEFORE the first client;
+    // after that it is one client at a time, a claim row before each provider
+    // call, and the answer is always 200 with a result per client (some mail has
+    // left by then, so the page must be told what happened to each).
+    if (normalizedPath === '/api/letters/send' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can send letters' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const clientIds = [
+        ...new Set(
+          (Array.isArray(payload?.clientIds) ? payload.clientIds : []).filter(
+            (id) => typeof id === 'string' && id.trim(),
+          ),
+        ),
+      ]
+      if (
+        !Array.isArray(payload?.clientIds) ||
+        clientIds.length === 0 ||
+        payload.clientIds.length > LETTER_MAX_CLIENTS_PER_SEND ||
+        clientIds.length !== payload.clientIds.length
+      ) {
+        sendJson(response, 400, {
+          error: 'letter_invalid',
+          message: `Choose between 1 and ${LETTER_MAX_CLIENTS_PER_SEND} clients to send to.`,
+        })
+        return
+      }
+      const context = await loadLetterContext(session)
+      const templateHash = letterTemplateHash(context.template)
+      if (payload.templateHash !== templateHash) {
+        sendJson(response, 409, {
+          error: 'letter_changed',
+          message: 'The letter changed since this page loaded. Nothing was sent. Reload and send again.',
+        })
+        return
+      }
+      const unknownPlaceholders = templateWarnings(context.template).unknown
+      if (unknownPlaceholders.length > 0) {
+        const tokens = unknownPlaceholders.map((key) => `{{${key}}}`)
+        sendJson(response, 409, {
+          error: 'unknown_placeholder',
+          unknown: unknownPlaceholders,
+          message:
+            tokens.length > 1
+              ? `${tokens.join(', ')} are not placeholders the app fills in. Nothing was sent.`
+              : `${tokens[0]} is not a placeholder the app fills in. Nothing was sent.`,
+        })
+        return
+      }
+      if (![context.template.subject, context.template.emailBody, context.template.letterBody].every((text) => text.trim())) {
+        sendJson(response, 409, {
+          error: 'letter_empty',
+          message: 'Write the email and the letter before sending.',
+        })
+        return
+      }
+      if (!process.env.RESEND_API_KEY || !(process.env.INVOICE_EMAIL_FROM || process.env.EMAIL_FROM)) {
+        sendJson(response, 502, {
+          error: 'letter_send_failed',
+          message: 'Email is not configured yet (no sending address set).',
+        })
+        return
+      }
+
+      // One client at a time; a throw while handling one client is that client's failure
+      // (sendLetterBatch catches it), so the answer below is always 200 with every result.
+      const results = await sendLetterBatch(
+        context,
+        clientIds,
+        {
+          templateHash,
+          firmDay: firmToday(context.now),
+          resend: payload.resendToday === true,
+          userId: session.user.id,
+        },
+        { store: appDataStore, sendMail: sendInvoiceEmail, pause: letterPause },
+      )
+      const sent = results.filter((result) => result.status === 'sent').length
+      const failed = results.filter((result) => result.status === 'failed').length
+      const skipped = results.filter((result) => result.status === 'skipped').length
+      try {
+        await appDataStore.recordActivity(
+          session.user.id,
+          'engagement_letters_sent',
+          `${sent} of ${clientIds.length}`,
+        )
+      } catch (error) {
+        console.error('[letters] could not record the send:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { results, sent, failed, skipped })
       return
     }
 

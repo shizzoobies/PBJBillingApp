@@ -28,6 +28,10 @@
   type NotificationEntry,
   type Package,
   type Proposal,
+  type LetterPreview,
+  type LetterSendRecord,
+  type LetterSendResponse,
+  type LetterTemplateState,
   type ProposalChatPatch,
   type ProposalPatch,
   type ProposalProspect,
@@ -5140,4 +5144,75 @@ export async function checkAutopayAttemptRequest(invoiceId: string) {
     message: string | null
     invoice: PersistedInvoice | null
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Letters (featreq-5e195707)                                                 */
+/* -------------------------------------------------------------------------- */
+/*
+ * The engagement letter: one saved template, a per-client preview and a send.
+ * Endpoint-managed and owner-only on the server, like proposals.
+ */
+
+/** The saved template, its hash, the placeholders and the sender. */
+export function fetchLetterTemplate(): Promise<LetterTemplateState> {
+  return proposalRequest<LetterTemplateState>(
+    '/api/letters/template',
+    {},
+    'Failed to load the letter',
+  )
+}
+
+/** Save the template; the answer is the stored state, with its new hash. */
+export function saveLetterTemplate(input: {
+  subject: string
+  emailBody: string
+  letterBody: string
+}): Promise<LetterTemplateState> {
+  return proposalRequest<LetterTemplateState>(
+    '/api/letters/template',
+    proposalJson('PUT', input),
+    'Failed to save the letter',
+  )
+}
+
+/** What one client would receive, from the STORED template. Nothing is sent or saved. */
+export function previewLetterRequest(clientId: string): Promise<LetterPreview> {
+  return proposalRequest<LetterPreview>(
+    `/api/letters/preview?clientId=${encodeURIComponent(clientId)}`,
+    {},
+    'Could not build the preview',
+  )
+}
+
+/** The PDF half of the preview, streamed by the server for an embedded frame. */
+export function letterPreviewPdfUrl(clientId: string) {
+  return `/api/letters/preview.pdf?clientId=${encodeURIComponent(clientId)}`
+}
+
+/** The send log, newest first. */
+export async function listLetterSendsRequest(): Promise<LetterSendRecord[]> {
+  const body = await proposalRequest<{ sends?: LetterSendRecord[] }>(
+    '/api/letters/sends',
+    {},
+    'Failed to load the send log',
+  )
+  return Array.isArray(body.sends) ? body.sends : []
+}
+
+/**
+ * Send the saved letter to up to 50 clients. `templateHash` is the hash the page
+ * loaded: the server refuses (409 `letter_changed`) when the letter has changed since.
+ * `resendToday` is "Send again": it claims a new attempt for a client already sent today.
+ */
+export function sendLettersRequest(input: {
+  clientIds: string[]
+  templateHash: string
+  resendToday?: boolean
+}): Promise<LetterSendResponse> {
+  return proposalRequest<LetterSendResponse>(
+    '/api/letters/send',
+    proposalJson('POST', input),
+    'Failed to send the letter',
+  )
 }
