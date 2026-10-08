@@ -25,7 +25,7 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-07, about 7:40 pm Eastern - READ THIS FIRST):** `main` = `5ee610d` (+ this
+**State right now (2026-10-07, night - READ THIS FIRST):** `main` = `5ee610d` (+ this
 handoff), deployed, `/health` 200, voice re-provisioned. Suite **340 files / 7692 tests**. Manifest
 **204,952 bytes - 48 under the cap; TRIM FIRST.** **CREDIT ON ACCOUNT IS COMPLETE:** stage 2 (the billing
 period, `featreq-110efd15` SHIPPED with a note in Brittany's words) went out today as `69c5463` (2A: client
@@ -44,8 +44,7 @@ block, unsplit - no rule was bypassed; the ticket is Needs input to Brittany wit
 group timer? block Start until a task is picked?) and the trace is `.superpowers/sdd/clockin-trace.md`;
 four real group blocks are unsplit and on no invoice (hers from Sep 9, 43 min across 19 clients, is the
 biggest). `featreq-5e195707` (1099 engagement email) is Needs input to Brittany with three questions. The
-Planned column is EMPTY. Worktrees `AP-laneB`, `AP-laneC`, `AP-laneD` are all merged and removable (each has a
-`node_modules` JUNCTION to the primary tree - remove the LINK, never its target, then `git worktree remove`).
+Planned column is EMPTY. The extra worktrees are GONE and local branches were pruned to `main` + `hold/july-security-p3` (evening clean-up).
 The run ledger is `.superpowers/sdd/new-queue-2026-10-01.md` (git-ignored, this machine).
 
 **Earlier (2026-10-07, late night - stage 2 was parked here; superseded by the paragraph above):** `main` = `1c7d23d` (+ this handoff),
@@ -876,6 +875,62 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-07 (whole day, two sessions) - bulk-save batching, credit on account complete, the clean-up.**
+
+- **Bulk-save batching (`featreq-251d1668`, Done)** - five deploys in the afternoon (`0287a11`
+  measure + password-hash skip, `b8e6c1e` time_entries, `a6bbcd2` the checklist family, `2b348bd`
+  clients / invoice restore / small tables + one merged clients snapshot, `6ba0e5e` no-op rollback).
+  `lib/insert-rows-batched.js` is the helper; `BULK_INSERT_SHAPES` + exported `*BulkRow` builders in
+  `db/store.js`; golden fixture `db/golden/bulk-save-rows.json` pins rows, casts and tails (regenerate
+  with `UPDATE_GOLDEN=1` only for an intended column change). Users stay per-row; the EXCLUSIVE lock and
+  the staleness guard are untouched. MEASURED on real autosaves: 872 / 888 / 962 ms per save (was
+  9.9-12.9 s), one lock attempt. Every stage had a rolled-back production parity trial (temp tables
+  `like X including all`, `except all` on `to_jsonb - updated_at` at millisecond precision).
+- **Credit on account (`featreq-110efd15`, SHIPPED)** - plan
+  `docs/plans/credit-on-account-and-billing-period-2026-10.md`; Alex's rules: period = ANY months per
+  client, no annual migration, everything existing unchanged, off until Brittany sets it. Stages, one
+  deploy each: 1a `1e28562` `account_credits` ledger (kinds manual | overpayment ONLY - the CHECK is in
+  prod; prepayment credits are derived, never stored) + client-page card + manual credit; 1b `549f514`
+  the `account_credit` invoice line with `draws[]`, manual Apply / Remove, the per-client advisory lock
+  `account_credit:<clientId>`, QBO negative Deferred Revenue, and ANY status move out of void refused;
+  1c `840fa4c` auto-draw at generation under the lock inside the generation transaction, only credit
+  meant for that month or earlier; 1d `7497e5b` Paid-at-Send (`markInvoicePaidByCredit`, method
+  `credit`) + the real paid email/PDF copy for EVERY paid invoice + `finishUnfinishedCreditPayment` +
+  502 `invoice_paid_not_sent`; 1e `1c7d23d` Apply as credit on a double payment (refund/dispute-aware
+  via `expand latest_charge`); **2A `69c5463`** client fields `billing_period_months` (1..24, default 1)
+  + `period_anchor_month` (look-first ALTERs; `createClient` 43 -> 45 params; batched clients 47 -> 49
+  columns; golden regenerated), the Billing period card (subscription clients only, not masters/subs),
+  `lib/billing-period.js`, `withPrepaymentLines` adding `prepayment` lines for months 2..N on the ANCHOR
+  month's own invoice at `client.monthlyRate`, the Prepayment section on PDF/email/print, QBO Deferred
+  Revenue; **2B `5ee610d`** derived credits `prepay:<inv>:<YYYY-MM>` from PAID anchor invoices
+  (`derivedPrepaymentCredits`, `ACCOUNT_CREDIT_PREPAID_SQL`), the void guard and the undo-mark-paid guard
+  (refused while a later month draws), and the send guard `unpaidPrepaymentFor` -> 409
+  `prepayment_unpaid` with three reasons: `unpaid` (anchor draft/sent/past due; Send anyway offered),
+  `processing` (bank payment clearing; NO override), `not_applied` (anchor paid but this invoice carries
+  no draw; NO override - Apply credit or Void & regenerate; a $0 invoice is never held). The route
+  re-derives the hold on every send; a stale page cannot get past it. Three money defects were caught
+  by two review rounds and fixed BEFORE the ship (the not_applied double bill, the $0 month held forever,
+  Send anyway during clearing); the rolled-back trial of the two columns through the batched insert
+  passed; 0 clients had a period and 0 invoices had prepayment lines when B went out. Leftover minors:
+  `featreq-759a281b` (read it before touching the guard). Also filed: `featreq-cadfcb44` (refund or
+  dispute on a second payment already turned into credit - needs `charge.refunded` +
+  `charge.dispute.created` on the Stripe endpoint).
+- **Clock-in (`featreq-c11c63ea`, Needs input)** - Allison's "no task" entry was a GROUP timer holding
+  block (three clients), unsplit; the group timer has no task box by design (2026-08-12 rule: timers
+  start instantly, task/client/detail required at Stop & log; a block gets its tasks when split). Zero
+  rule-breaking entries in 90 days. Four real group blocks are unsplit and on no invoice (Brittany's Sep 9
+  block: 43 min, 19 clients). Two questions to her on the ticket; trace in `.superpowers/sdd/clockin-trace.md`.
+- **1099 engagement email (`featreq-5e195707`, Needs input)** - three questions to Brittany (who supplies
+  the wording and the letter, edit each time or saved text, where the client picker lives).
+- **Clean-up (evening):** worktrees `AP-laneB/C/D` removed (junction links first; primary `node_modules`
+  intact) and `git worktree prune` dropped two stale entries of earlier sessions; 53 local branches
+  deleted (49 merged + 4 superseded drafts, each checked first); remote branches untouched. Local
+  branches are `main` and `hold/july-security-p3` only.
+- **Traps this day added:** rolled-back trials must stub BOTH `read()` and `write()` on the store (the
+  lock); `git branch -f main` fails when the primary tree is ON main - use `git merge --ff-only`; two
+  vitest runs in one folder share `tmp/app-data.json` and fail by the hundreds; the manifest sits 48 bytes
+  under the cap - trim first.
 
 **2026-10-06 (end of night) - nudges by package, the retainer position section.**
 
