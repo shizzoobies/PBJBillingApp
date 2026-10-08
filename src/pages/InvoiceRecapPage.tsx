@@ -168,6 +168,11 @@ export function InvoiceRecapPage() {
             ) : (
               <p className="invoice-recap-none">No reimbursed expenses on this invoice.</p>
             )}
+            {row.creditTotal < 0 ? (
+              <p className="invoice-recap-none">
+                Credit applied is money already received; the deposit is the Invoice total.
+              </p>
+            ) : null}
             {row.prepaymentLines.length > 0 ? (
               <>
                 <p className="invoice-recap-none">

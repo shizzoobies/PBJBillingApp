@@ -110,7 +110,7 @@ have no override anywhere. No hold applies to a month already at $0 (M-5). A fre
 prepayment credit meant for a LATER month (R-2); a stored credit meant for a later month stays drawable by hand, and when
 only later months are left Apply is greyed out on the editor and the server answers with a sentence naming those months.
 The deposit recap (M-9) lists an anchor invoice's prepayment lines on their own Prepayments line and out of Accounting services
-and a credit on account drawn on the invoice on its own negative Credit applied figure (accounting + prepayments + reimbursed + credit applied = total,
+and a credit drawn on the invoice (credit on account or a retainer credit) on its own negative Credit applied figure (accounting + prepayments + reimbursed + credit applied = total,
 so Accounting services stays the fees and never goes negative); a later month paid from its prepayment reads Accounting = its fee, Credit applied = minus the fee, total $0.
 Derived credit comes only from PAID MONTHLY invoices (M-10): both prepayment reads (and the file backend) skip a retainer or
 record-only invoice that carries a prepayment line.

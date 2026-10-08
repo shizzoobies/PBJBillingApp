@@ -120,6 +120,9 @@ describe('InvoiceRecapPage', () => {
     await screen.findByText('Acme')
     expect(screen.getByText('Credit applied')).toBeInTheDocument()
     expect(screen.getByText('-$800.00')).toBeInTheDocument()
+    expect(
+      screen.getByText('Credit applied is money already received; the deposit is the Invoice total.'),
+    ).toBeInTheDocument()
     expect(screen.getByText('$500.00', { selector: 'strong' })).toBeInTheDocument()
   })
 
@@ -128,6 +131,7 @@ describe('InvoiceRecapPage', () => {
     render(<InvoiceRecapPage />)
     await screen.findByText('Acme')
     expect(screen.queryByText('Credit applied')).toBeNull()
+    expect(screen.queryByText(/money already received/)).toBeNull()
   })
 
   it('shows no Prepayments column on an invoice without any', async () => {
