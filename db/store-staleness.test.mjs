@@ -44622,6 +44622,137 @@ describe('applyOverpaymentAsCredit and settleDuplicatePaymentMarker (file backen
     expect(await store.findOverpaymentCredit('')).toBeNull()
   })
 
+  it('findOverpaymentCredit still answers a VOIDED credit (flagged), and never a manual one', async () => {
+    await seed()
+    const { credit } = await apply()
+    await store.voidAccountCredit(credit.id, 'owner-1')
+    expect(await store.findOverpaymentCredit('pi_2')).toMatchObject({ id: credit.id, voidedAt: expect.any(String) })
+    const manual = await store.addAccountCredit({ clientId: 'c1', amount: 5, note: 'goodwill' })
+    expect(await store.findOverpaymentCredit(manual.sourceRef)).toBeNull()
+  })
+
+  describe('recordAccountCreditNotice (a refund or dispute on the payment a credit came from)', () => {
+    const notice = (over = {}) => ({
+      kind: 'refund',
+      at: '2026-10-08T12:00:00.000Z',
+      cents: 41250,
+      reason: 'requested_by_customer',
+      eventId: 'evt_1',
+      ...over,
+    })
+
+    it('writes ONE log-only entry on the invoice that carried the payment, and changes nothing else', async () => {
+      await seed()
+      const { credit } = await apply()
+      const before = (await persisted()).invoices[0]
+
+      expect(await store.recordAccountCreditNotice(credit.id, notice())).toMatchObject({ stored: true, duplicate: false })
+
+      const stored = (await persisted()).invoices[0]
+      expect(stored.emailLog).toHaveLength(before.emailLog.length + 1)
+      expect(stored.emailLog.at(-1)).toEqual({
+        kind: 'payment',
+        event: 'credit-reversal',
+        at: '2026-10-08T12:00:00.000Z',
+        paymentIntentId: 'pi_2',
+        creditId: credit.id,
+        noticeKind: 'refund',
+        cents: 41250,
+        reason: 'requested_by_customer',
+        eventId: 'evt_1',
+      })
+      // No state change: the invoice, the flags and the credit are exactly as they were.
+      expect(stored).toMatchObject({ status: 'paid', total: 400, stripePaymentIntentId: 'pi_1' })
+      expect(unhandledAmountMismatch(stored)).toBeNull()
+      expect(await store.accountCreditBalance('c1')).toBe(412.5)
+      expect((await store.findOverpaymentCredit('pi_2')).voidedAt).toBeNull()
+    })
+
+    it('a partial refund records partial and the whole charge; a closed dispute records its status', async () => {
+      await seed()
+      const { credit } = await apply()
+      await store.recordAccountCreditNotice(
+        credit.id,
+        notice({ cents: 20000, eventId: 'evt_p', partial: true, chargeCents: 50000 }),
+      )
+      await store.recordAccountCreditNotice(
+        credit.id,
+        notice({ kind: 'dispute-closed', eventId: 'evt_c', cents: 41250, reason: 'fraudulent', status: 'lost' }),
+      )
+      const log = (await persisted()).invoices[0].emailLog.filter((entry) => entry.event === 'credit-reversal')
+      expect(log[0]).toMatchObject({ noticeKind: 'refund', cents: 20000, partial: true, chargeCents: 50000 })
+      expect(log[0]).not.toHaveProperty('status')
+      expect(log[1]).toMatchObject({ noticeKind: 'dispute-closed', status: 'lost' })
+      expect(log[1]).not.toHaveProperty('partial')
+    })
+
+    it('answers whether the payment was ever REFUNDED: a dispute alone is not, a refund is for good', async () => {
+      await seed()
+      const { credit } = await apply()
+      const dispute = await store.recordAccountCreditNotice(credit.id, notice({ kind: 'dispute', eventId: 'evt_d' }))
+      expect(dispute).toEqual({ stored: true, duplicate: false, refunded: false })
+      const refund = await store.recordAccountCreditNotice(credit.id, notice({ eventId: 'evt_r' }))
+      expect(refund).toEqual({ stored: true, duplicate: false, refunded: true })
+      const closed = await store.recordAccountCreditNotice(
+        credit.id,
+        notice({ kind: 'dispute-closed', status: 'won', eventId: 'evt_w' }),
+      )
+      expect(closed.refunded).toBe(true)
+      // A redelivery of the first dispute still reports the refund that came after it.
+      expect(await store.recordAccountCreditNotice(credit.id, notice({ kind: 'dispute', eventId: 'evt_d' }))).toEqual({
+        stored: false,
+        duplicate: true,
+        refunded: true,
+      })
+    })
+
+    it('is idempotent on the Stripe event id, and a different event is a new notice', async () => {
+      await seed()
+      const { credit } = await apply()
+      await store.recordAccountCreditNotice(credit.id, notice())
+
+      expect(await store.recordAccountCreditNotice(credit.id, notice())).toMatchObject({ stored: false, duplicate: true })
+      const afterRedelivery = (await persisted()).invoices[0].emailLog.filter((entry) => entry.event === 'credit-reversal')
+      expect(afterRedelivery).toHaveLength(1)
+
+      expect(
+        await store.recordAccountCreditNotice(credit.id, notice({ kind: 'dispute', eventId: 'evt_2', reason: 'fraudulent' })),
+      ).toMatchObject({ stored: true, duplicate: false })
+      const log = (await persisted()).invoices[0].emailLog.filter((entry) => entry.event === 'credit-reversal')
+      expect(log.map((entry) => entry.noticeKind)).toEqual(['refund', 'dispute'])
+    })
+
+    it('answers null for a credit that is not there or is not a double payment, and refuses a bad kind', async () => {
+      await seed()
+      const { credit } = await apply()
+      const manual = await store.addAccountCredit({ clientId: 'c1', amount: 5, note: 'goodwill' })
+      expect(await store.recordAccountCreditNotice('nope', notice())).toBeNull()
+      expect(await store.recordAccountCreditNotice(manual.id, notice())).toBeNull()
+      expect(await store.recordAccountCreditNotice(credit.id, notice({ kind: 'chargeback' }))).toBeNull()
+      expect((await persisted()).invoices[0].emailLog.filter((entry) => entry.event === 'credit-reversal')).toEqual([])
+    })
+
+    it('has nowhere to write when no invoice carries the payment any more, and says so', async () => {
+      await seed()
+      const { credit } = await apply()
+      await seed({ invoices: [] })
+      expect(await store.recordAccountCreditNotice(credit.id, notice())).toMatchObject({ stored: false, duplicate: false })
+    })
+
+    it('finds the carrying invoice of a billing sub while the credit belongs to the master', async () => {
+      await seed({
+        clients: [
+          { id: 'master', name: 'KLC', isBillingMaster: true },
+          { id: 'sub', name: 'Sub Co', billToClientId: 'master' },
+        ],
+        invoices: [invoiceRow({ clientId: 'sub' })],
+      })
+      const { credit } = await apply()
+      expect(credit.clientId).toBe('master')
+      expect(await store.recordAccountCreditNotice(credit.id, notice())).toMatchObject({ stored: true, duplicate: false })
+    })
+  })
+
   describe('settleDuplicatePaymentMarker', () => {
     const settling = { ...DUPLICATE_MARKER, settling: true }
 
@@ -44715,6 +44846,16 @@ describe('applyOverpaymentAsCredit and settleDuplicatePaymentMarker (Postgres st
       }
       if (/^select .* from account_credits where source_kind = \$1 and source_ref = \$2$/i.test(trimmed)) {
         return { rows: held.filter((row) => row.source_kind === params[0] && row.source_ref === params[1]) }
+      }
+      if (/^select .* from account_credits where id = \$1$/i.test(trimmed)) {
+        return { rows: held.filter((row) => row.id === params[0]) }
+      }
+      if (/^select id from invoices where email_log @> \$1::jsonb order by created_at, id limit 1$/i.test(trimmed)) {
+        const wanted = JSON.parse(params[0])
+        const carries = wanted.every((want) =>
+          invoice.email_log.some((entry) => Object.entries(want).every(([key, value]) => entry[key] === value)),
+        )
+        return { rows: carries ? [{ id: invoice.id }] : [] }
       }
       if (/^update invoices set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb/i.test(trimmed)) {
         if (failOnHandledAppend) throw new Error('connection lost')
@@ -44848,6 +44989,124 @@ describe('applyOverpaymentAsCredit and settleDuplicatePaymentMarker (Postgres st
     expect(await store2.findOverpaymentCredit('pi_2')).toBeNull()
     const { credit } = await store2.applyOverpaymentAsCredit('inv-1', args())
     expect(await store2.findOverpaymentCredit('pi_2')).toMatchObject({ id: credit.id })
+  })
+
+  describe('recordAccountCreditNotice', () => {
+    const notice = (over = {}) => ({
+      kind: 'dispute',
+      at: '2026-10-08T12:00:00.000Z',
+      cents: 41250,
+      reason: 'fraudulent',
+      eventId: 'evt_1',
+      ...over,
+    })
+
+    it('reads the credit by id, finds the carrying invoice by jsonb containment, and appends ONE entry in SQL', async () => {
+      const fake = overpaymentPool()
+      const store2 = pg(fake)
+      const { credit } = await store2.applyOverpaymentAsCredit('inv-1', args())
+      const before = fake.invoice().email_log.length
+
+      expect(await store2.recordAccountCreditNotice(credit.id, notice())).toMatchObject({ stored: true, duplicate: false })
+
+      const [read] = fake.matching(/^select .* from account_credits where id = \$1$/i)
+      expect(read.params).toEqual([credit.id])
+      const [carrier] = fake.matching(/^select id from invoices where email_log @> \$1::jsonb/i)
+      expect(carrier.text).toBe(
+        'select id from invoices where email_log @> $1::jsonb order by created_at, id limit 1',
+      )
+      expect(JSON.parse(carrier.params[0])).toEqual([
+        { kind: 'payment', event: 'amount-mismatch', paymentIntentId: 'pi_2' },
+      ])
+      const appends = fake.matching(/^update invoices set email_log = coalesce/i)
+      const append = appends.at(-1)
+      expect(append.text).toBe(
+        "update invoices set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb, updated_at = now() where id = $1 and not (coalesce(email_log, '[]'::jsonb) @> $3::jsonb) returning id",
+      )
+      expect(append.text).not.toMatch(/\bstatus\b|\bline_items\b|\btotal\b|\bsent_at\b|stripe_payment_intent_id/)
+      expect(JSON.parse(append.params[1])).toEqual([
+        {
+          kind: 'payment',
+          event: 'credit-reversal',
+          at: '2026-10-08T12:00:00.000Z',
+          paymentIntentId: 'pi_2',
+          creditId: credit.id,
+          noticeKind: 'dispute',
+          cents: 41250,
+          reason: 'fraudulent',
+          eventId: 'evt_1',
+        },
+      ])
+      expect(JSON.parse(append.params[2])).toEqual([
+        { kind: 'payment', event: 'credit-reversal', noticeKind: 'dispute', eventId: 'evt_1' },
+      ])
+      expect(fake.invoice().email_log).toHaveLength(before + 1)
+      // The credit is untouched: nothing voided it.
+      expect(fake.credits()[0].voided_at).toBeNull()
+    })
+
+    it('a partial refund and a closed dispute are written with their extra fields', async () => {
+      const fake = overpaymentPool()
+      const store2 = pg(fake)
+      const { credit } = await store2.applyOverpaymentAsCredit('inv-1', args())
+      await store2.recordAccountCreditNotice(
+        credit.id,
+        notice({ kind: 'refund', cents: 20000, eventId: 'evt_p', partial: true, chargeCents: 50000 }),
+      )
+      await store2.recordAccountCreditNotice(
+        credit.id,
+        notice({ kind: 'dispute-closed', eventId: 'evt_c', status: 'won' }),
+      )
+      const appends = fake.matching(/^update invoices set email_log = coalesce/i).slice(-2)
+      expect(JSON.parse(appends[0].params[1])[0]).toMatchObject({ noticeKind: 'refund', partial: true, chargeCents: 50000 })
+      expect(JSON.parse(appends[1].params[1])[0]).toMatchObject({ noticeKind: 'dispute-closed', status: 'won' })
+      expect(JSON.parse(appends[1].params[2])).toEqual([
+        { kind: 'payment', event: 'credit-reversal', noticeKind: 'dispute-closed', eventId: 'evt_c' },
+      ])
+    })
+
+    it('answers whether the payment was ever refunded, from the invoice log', async () => {
+      const fake = overpaymentPool()
+      const store2 = pg(fake)
+      const { credit } = await store2.applyOverpaymentAsCredit('inv-1', args())
+      expect(await store2.recordAccountCreditNotice(credit.id, notice({ eventId: 'evt_d' }))).toMatchObject({
+        stored: true,
+        refunded: false,
+      })
+      expect(
+        await store2.recordAccountCreditNotice(credit.id, notice({ kind: 'refund', eventId: 'evt_r' })),
+      ).toMatchObject({ stored: true, refunded: true })
+      expect(
+        await store2.recordAccountCreditNotice(credit.id, notice({ kind: 'dispute-closed', status: 'won', eventId: 'evt_w' })),
+      ).toMatchObject({ stored: true, refunded: true })
+    })
+
+    it('a redelivered event writes nothing a second time', async () => {
+      const fake = overpaymentPool()
+      const store2 = pg(fake)
+      const { credit } = await store2.applyOverpaymentAsCredit('inv-1', args())
+      await store2.recordAccountCreditNotice(credit.id, notice())
+      const appends = fake.matching(/^update invoices set email_log = coalesce/i).length
+
+      expect(await store2.recordAccountCreditNotice(credit.id, notice())).toMatchObject({ stored: false, duplicate: true })
+      expect(fake.matching(/^update invoices set email_log = coalesce/i)).toHaveLength(appends)
+    })
+
+    it('answers null for no such credit and writes nothing', async () => {
+      const fake = overpaymentPool()
+      expect(await pg(fake).recordAccountCreditNotice('nope', notice())).toBeNull()
+      expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+    })
+
+    it('has nowhere to write when no invoice carries the payment, and says so', async () => {
+      const fake = overpaymentPool()
+      const store2 = pg(fake)
+      const { credit } = await store2.applyOverpaymentAsCredit('inv-1', args())
+      fake.invoice().email_log.length = 0
+      const appends = fake.matching(/^update invoices/i).length
+      expect(await store2.recordAccountCreditNotice(credit.id, notice())).toMatchObject({ stored: false, duplicate: false })
+      expect(fake.matching(/^update invoices/i)).toHaveLength(appends)
+    })
   })
 
   it('settleDuplicatePaymentMarker rewrites the one settling entry under a row lock, and only that', async () => {

@@ -93,7 +93,9 @@ import {
   flagDuplicatePayment,
   flagPaymentAmountMismatch,
   flagPaymentOnVoidedInvoice,
+  flagPaymentReversal,
   invoicePeriodLink,
+  isPaymentReversalEvent,
   planOverpaymentCredit,
 } from './lib/payment-amount-mismatch.js'
 import {
@@ -5939,6 +5941,27 @@ const server = createServer(async (request, response) => {
             })
           }
           sendJson(response, 200, { received: true, setup: true })
+          return
+        }
+
+        // A REFUND or a DISPUTE on a payment we took (`charge.refunded`,
+        // `charge.dispute.created`) names a charge and its payment intent - no
+        // invoice id - and must never reach the payment path below, which would
+        // read it as money arriving. It is handled here, before the invoice
+        // lookup, by code that only NOTICES: it tells the owners (and leaves a
+        // note on the credit's source invoice when the payment became a credit on
+        // account) and never voids a credit or touches an invoice's status or
+        // money. The event id was ledgered above, so a redelivery is answered
+        // `duplicate` before this; a store failure here falls to the catch, which
+        // takes the event back out of the ledger so Stripe's retry runs it again.
+        if (isPaymentReversalEvent(event)) {
+          const reversal = await flagPaymentReversal({
+            store: appDataStore,
+            notify,
+            event,
+            appPublicUrl: getPublicAppUrl(request),
+          })
+          sendJson(response, 200, { received: true, matched: reversal.matched })
           return
         }
 

@@ -8,6 +8,12 @@ export declare const AMOUNT_MISMATCH_EVENT: 'amount-mismatch'
 export declare const AMOUNT_MISMATCH_HANDLED_EVENT: 'amount-mismatch-handled'
 export declare const PAYMENT_ON_VOIDED_EVENT: 'on-voided'
 export declare const DUPLICATE_PAYMENT_REASON: 'duplicate'
+export declare const CREDIT_REVERSAL_EVENT: 'credit-reversal'
+export declare const PAYMENT_REVERSAL_EVENT_TYPES: readonly [
+  'charge.refunded',
+  'charge.dispute.created',
+  'charge.dispute.closed',
+]
 
 /**
  * The `email_log` entry the webhook appends; `kind: 'payment'`. `reason` is
@@ -36,6 +42,28 @@ export interface PaymentOnVoidedLogEntry {
   paymentIntentId: string | null
   amount: number | null
   detail: string
+}
+
+/**
+ * A refund or dispute on the payment a credit on account came from, written by the
+ * Stripe webhook on the invoice that carried the payment. Log only; `cents` is the
+ * refunded or disputed amount (null when Stripe did not say).
+ */
+export interface CreditReversalLogEntry {
+  kind: 'payment'
+  event: 'credit-reversal'
+  at: string
+  paymentIntentId: string
+  creditId: string
+  noticeKind: 'refund' | 'dispute' | 'dispute-closed'
+  cents: number | null
+  reason: string
+  eventId: string | null
+  /** A refund of less than the charge; `chargeCents` is the whole charge. */
+  partial?: true
+  chargeCents?: number | null
+  /** A closed dispute's result from Stripe (won, lost, ...). */
+  status?: string
 }
 
 /** The entry an owner's "Mark as handled" appends. */
@@ -251,6 +279,104 @@ export declare function planOverpaymentCredit(args: {
   /** Dollars; lower than what was received, or absent for all of it. */
   requestedAmount?: unknown
 }): OverpaymentCreditPlan
+
+/** A Stripe `charge.refunded` or `charge.dispute.created` event. */
+export declare function isPaymentReversalEvent(event: { type?: string } | null | undefined): boolean
+
+export interface PaymentReversal {
+  kind: 'refund' | 'dispute' | 'dispute-closed'
+  paymentIntentId: string | null
+  cents: number | null
+  /** The whole charge in cents (a refund only); null when Stripe did not say. */
+  chargeCents: number | null
+  reason: string
+  /** A closed dispute's result (won, lost, ...); empty otherwise. */
+  status: string
+  /** A refund that has not returned the whole charge. */
+  partial: boolean
+  at: string
+}
+
+export declare function paymentReversalOf(event: unknown): PaymentReversal
+
+/** A dispute outcome that leaves the money where it was: won, or `warning_closed`. */
+export declare function disputeReleased(status: string | null | undefined): boolean
+
+/**
+ * Whether a payment's credit-reversal log entries (one PaymentIntent) hold its credit
+ * on account: any refund holds it for good; otherwise a dispute holds it unless the
+ * latest one closed as won / warning_closed.
+ */
+export declare function creditReversalHolds(entries: ReadonlyArray<unknown> | null | undefined): {
+  refunded: boolean
+  holds: boolean
+}
+
+/** What the owners are told when the payment a credit came from was refunded or disputed. */
+export declare function creditReversalOwnerMessage(args: {
+  clientName: string
+  credit: { amount: number; draws?: ReadonlyArray<{ amount: number }>; voidedAt?: string | null }
+  reversal: Pick<PaymentReversal, 'kind' | 'cents' | 'reason' | 'partial'> &
+    Partial<Pick<PaymentReversal, 'chargeCents' | 'status'>>
+  /** The payment was also REFUNDED: a won dispute no longer returns the credit to normal. */
+  refunded?: boolean
+}): string
+
+/** What the owners are told when an ordinary paid invoice's payment was refunded or disputed. */
+export declare function invoiceReversalOwnerMessage(args: {
+  clientName: string
+  number: string
+  reversal: Pick<PaymentReversal, 'kind' | 'cents' | 'reason' | 'partial'> &
+    Partial<Pick<PaymentReversal, 'chargeCents' | 'status'>>
+}): string
+
+/**
+ * The webhook's step for `charge.refunded` / `charge.dispute.created`: notices
+ * only, never a void. Store reads and the notice write may throw; the owners'
+ * notification never does.
+ */
+export declare function flagPaymentReversal(args: {
+  store: {
+    findOverpaymentCredit(paymentIntentId: string): Promise<{ id: string; clientId: string } | null>
+    listAccountCredits(
+      clientId: string,
+    ): Promise<
+      Array<{
+        id: string
+        clientId: string
+        amount: number
+        draws?: ReadonlyArray<{ amount: number }>
+        voidedAt?: string | null
+      }>
+    >
+    recordAccountCreditNotice(
+      creditId: string,
+      notice: {
+        kind: 'refund' | 'dispute' | 'dispute-closed'
+        at: string
+        cents: number | null
+        reason: string
+        eventId: string | null
+        partial?: boolean
+        chargeCents?: number | null
+        status?: string
+      },
+    ): Promise<{ stored: boolean; duplicate: boolean; refunded: boolean } | null>
+    findInvoiceByStripeRef(ref: {
+      paymentIntentId: string
+    }): Promise<{ id: string; status: string; number?: string | null; clientId: string; period?: string } | null>
+    getClientNameById(clientId: string): Promise<string | null | undefined>
+    getTeamMembers(): Promise<Array<{ id: string; role: string }>>
+  }
+  notify: (
+    store: never,
+    userId: string,
+    kind: string,
+    payload: Record<string, unknown>,
+  ) => Promise<unknown>
+  event: { id?: string; type: string; created?: number; data?: { object?: unknown } }
+  appPublicUrl?: string
+}): Promise<{ matched: boolean; notified: boolean }>
 
 /** A second payment on an already-paid invoice: logged as unhandled, owners told once. */
 export declare const flagDuplicatePayment: typeof flagPaymentAmountMismatch

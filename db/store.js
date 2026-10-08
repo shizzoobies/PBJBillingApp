@@ -127,9 +127,11 @@ import { AUTOPAY_ACTIVE_ATTEMPT_STATUSES, emptyAutopay } from '../lib/stripe-aut
 import {
   AMOUNT_MISMATCH_EVENT,
   AMOUNT_MISMATCH_HANDLED_EVENT,
+  CREDIT_REVERSAL_EVENT,
   DUPLICATE_NOT_WAITING_MESSAGE,
   DUPLICATE_PAYMENT_REASON,
   PAYMENT_ON_VOIDED_EVENT,
+  creditReversalHolds,
   duplicatePaymentWaiting,
   unhandledAmountMismatches,
 } from '../lib/payment-amount-mismatch.js'
@@ -17693,6 +17695,117 @@ export class AppDataStore {
       (entry) => entry.sourceKind === 'overpayment' && entry.sourceRef === ref,
     )
     return row ? accountCreditView(row) : null
+  }
+
+  /**
+   * Note that the payment a credit on account came from was refunded or disputed
+   * in Stripe (the webhook's `charge.refunded` / `charge.dispute.created`).
+   *
+   * NO DDL, so the notice lives where that payment already does: ONE
+   * `credit-reversal` entry (`kind: 'payment'`) on the append-only `email_log` of
+   * the invoice that carried the payment - the one holding the duplicate-payment
+   * marker for the credit's PaymentIntent, which `applyOverpaymentAsCredit` keeps
+   * (as handled) for good. Log only: no status, no money, no flag, and the credit
+   * itself is never touched (voiding it is the owner's click). Idempotent on the
+   * Stripe event id. `kind` is 'refund', 'dispute' or 'dispute-closed' (then
+   * `status` is Stripe's result: won, lost, ...); a refund of less than the charge
+   * is `partial` (of `chargeCents`).
+   *
+   * @returns {{ stored: boolean, duplicate: boolean, refunded: boolean } | null}
+   * null when there is no such credit (or it is not an overpayment one). `stored:
+   * false, duplicate: true` when this event is already on the log. `stored: false,
+   * duplicate: false` when no invoice carries the payment any more: there is
+   * nowhere to write it (the owners are still told). `refunded` is whether ANY
+   * refund note is now on the log for this payment (this one included).
+   */
+  async recordAccountCreditNotice(
+    creditId,
+    {
+      kind,
+      at = null,
+      cents = null,
+      reason = '',
+      eventId = null,
+      partial = false,
+      chargeCents = null,
+      status = '',
+    } = {},
+  ) {
+    if (!creditId || (kind !== 'refund' && kind !== 'dispute' && kind !== 'dispute-closed')) return null
+    const carriesPayment = (entry, ref) =>
+      entry?.kind === 'payment' && entry?.event === AMOUNT_MISMATCH_EVENT && entry?.paymentIntentId === ref
+    let credit
+    let invoiceId = null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${ACCOUNT_CREDIT_SELECT_COLUMNS} from account_credits where id = $1`,
+        [creditId],
+      )
+      if (rows.length === 0) return null
+      credit = mapAccountCreditRow(rows[0])
+      if (credit.sourceKind === 'overpayment') {
+        const carrier = await this.pool.query(
+          `select id from invoices where email_log @> $1::jsonb order by created_at, id limit 1`,
+          [
+            JSON.stringify([
+              { kind: 'payment', event: AMOUNT_MISMATCH_EVENT, paymentIntentId: credit.sourceRef },
+            ]),
+          ],
+        )
+        invoiceId = carrier.rows[0]?.id ?? null
+      }
+    } else {
+      const data = await readJson(localDataPath)
+      const row = (data.accountCredits ?? []).find((entry) => entry.id === creditId)
+      if (!row) return null
+      credit = accountCreditView(row)
+      invoiceId =
+        (data.invoices ?? []).find((invoice) =>
+          (invoice.emailLog ?? []).some((entry) => carriesPayment(entry, credit.sourceRef)),
+        )?.id ?? null
+    }
+    if (credit.sourceKind !== 'overpayment') return null
+    if (!invoiceId) return { stored: false, duplicate: false, refunded: false }
+
+    const stamp =
+      at && !Number.isNaN(new Date(at).getTime()) ? new Date(at).toISOString() : nowIso()
+    const entry = {
+      kind: 'payment',
+      event: CREDIT_REVERSAL_EVENT,
+      at: stamp,
+      paymentIntentId: credit.sourceRef,
+      creditId,
+      noticeKind: kind,
+      cents: Number.isFinite(cents) ? Math.round(cents) : null,
+      reason: String(reason ?? ''),
+      eventId: eventId ? String(eventId) : null,
+      ...(partial === true
+        ? { partial: true, chargeCents: Number.isFinite(chargeCents) ? Math.round(chargeCents) : null }
+        : {}),
+      ...(kind === 'dispute-closed' ? { status: String(status ?? '') } : {}),
+    }
+    const sameMarker = (logged) =>
+      logged?.kind === 'payment' &&
+      logged?.event === CREDIT_REVERSAL_EVENT &&
+      logged?.noticeKind === kind &&
+      (logged?.eventId ?? null) === entry.eventId &&
+      (entry.eventId !== null || logged?.at === stamp)
+    const guard =
+      entry.eventId !== null
+        ? { kind: 'payment', event: CREDIT_REVERSAL_EVENT, noticeKind: kind, eventId: entry.eventId }
+        : { kind: 'payment', event: CREDIT_REVERSAL_EVENT, noticeKind: kind, eventId: null, at: stamp }
+    const written = await this._appendPaymentLogEntry(invoiceId, {
+      entry,
+      guard,
+      sameMarker,
+      label: 'credit-reversal',
+    })
+    const log =
+      (written ?? (await this.listInvoices()).find((invoice) => invoice.id === invoiceId))?.emailLog ?? []
+    const { refunded } = creditReversalHolds(log.filter((logged) => logged?.paymentIntentId === credit.sourceRef))
+    return written
+      ? { stored: true, duplicate: false, refunded }
+      : { stored: false, duplicate: true, refunded }
   }
 
   /**

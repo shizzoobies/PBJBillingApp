@@ -63,6 +63,14 @@ export interface InvoicePaymentOnVoidedLogEntry {
   detail?: string
 }
 
+/** A refund or dispute on the payment a credit on account came from. Not a failed payment. */
+export interface InvoiceCreditReversalLogEntry {
+  kind: 'payment'
+  event: 'credit-reversal'
+  at: string
+  paymentIntentId: string | null
+}
+
 /** The owner was told once that this invoice passed its past-due line. */
 export interface InvoicePastDueLogEntry {
   kind: 'past-due'
@@ -77,6 +85,7 @@ export type InvoiceLogEntry =
   | InvoicePaymentFailureLogEntry
   | InvoiceAmountMismatchLogEntry
   | InvoicePaymentOnVoidedLogEntry
+  | InvoiceCreditReversalLogEntry
   | InvoicePastDueLogEntry
 
 /** Everything these rules read off an invoice, and nothing more. */

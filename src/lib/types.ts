@@ -924,6 +924,28 @@ export interface InvoicePaymentOnVoidedEntry {
   detail?: string
 }
 
+/**
+ * A refund or dispute on the payment a credit on account came from, written by the
+ * Stripe webhook on the invoice that carried the payment. Log only.
+ */
+export interface InvoiceCreditReversalEntry {
+  kind: 'payment'
+  event: 'credit-reversal'
+  at: string
+  paymentIntentId: string
+  creditId: string
+  noticeKind: 'refund' | 'dispute' | 'dispute-closed'
+  /** The refunded or disputed amount in cents; null when Stripe did not say. */
+  cents: number | null
+  reason: string
+  eventId: string | null
+  /** A refund of less than the charge; `chargeCents` is the whole charge. */
+  partial?: true
+  chargeCents?: number | null
+  /** A closed dispute's result from Stripe (won, lost, ...). */
+  status?: string
+}
+
 /** An owner's "Mark as handled" for the mismatch on the same payment. */
 export interface InvoiceAmountMismatchHandledEntry {
   kind: 'payment'
@@ -940,6 +962,7 @@ export type InvoiceEmailLogEntry =
   | InvoiceAmountMismatchEntry
   | InvoiceAmountMismatchHandledEntry
   | InvoicePaymentOnVoidedEntry
+  | InvoiceCreditReversalEntry
 
 /**
  * One thing the rater wants a second look at. `warn` is "this could be wrong";
