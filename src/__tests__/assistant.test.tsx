@@ -70,6 +70,7 @@ describe('capability manifest', () => {
     for (const section of [
       '## Dashboard',
       '## Proposals (owner only)',
+      '## Letters (owner only)',
       '## Time tracking',
       '## Timesheet',
       '## Time Approvals',
