@@ -39377,6 +39377,42 @@ describe('prepayment credits are derived from paid invoices (file backend)', () 
   const generate = async (period) => (await store.generateInvoicesForPeriod(period)).created
   const accountLine = (invoice) => invoice.lineItems.find((line) => line.kind === 'account_credit')
 
+  it('M-10: a PAID retainer (or any non-monthly) invoice carrying a prepayment line yields no credit and makes no holder', async () => {
+    await seed([quarterly({ billingPeriodMonths: 1, periodAnchorMonth: null })])
+    const prepaymentLine = { kind: 'prepayment', label: 'Prepayment for November 2026', detail: '', amount: 500, period: '2026-11' }
+    const heldInvoice = (id, over = {}) => ({
+      id,
+      clientId: 'c1',
+      kind: 'retainer',
+      period: '2026-10',
+      number: `INV-${id}`,
+      status: 'paid',
+      sentAt: PAID_AT,
+      paidAt: PAID_AT,
+      lineItems: [{ kind: 'retainer', label: 'Retainer', detail: '', amount: 500 }, { ...prepaymentLine }],
+      subtotal: 500,
+      total: 1000,
+      createdAt: PAID_AT,
+      ...over,
+    })
+    await editFile((data) => {
+      data.invoices = [heldInvoice('ret-1'), heldInvoice('rec-1', { kind: 'record_only' })]
+    })
+    expect(await store.listAccountCredits('c1')).toEqual([])
+    expect(await store.accountCreditBalance('c1')).toBe(0)
+    expect([...(await store._clientIdsHoldingAccountCredit())]).toEqual([])
+
+    // The very same lines on a MONTHLY invoice (or one with no kind, a legacy row) still yield.
+    await editFile((data) => {
+      data.invoices = [heldInvoice('mon-1', { kind: 'monthly' }), heldInvoice('old-1', { kind: undefined })]
+    })
+    expect((await store.listAccountCredits('c1')).map((credit) => credit.id).sort()).toEqual([
+      'prepay:mon-1:2026-11',
+      'prepay:old-1:2026-11',
+    ])
+    expect([...(await store._clientIdsHoldingAccountCredit())]).toEqual(['c1'])
+  })
+
   it('yields one credit per prepayment line of a PAID invoice, with the ids, amounts and months of the lines', async () => {
     await seed([quarterly()])
     const [october] = await generate('2026-10')
@@ -39909,10 +39945,10 @@ describe('prepayment credits and the send guard (Postgres statements)', () => {
       target.query = async (text, params) => {
         const result = await original(text, params)
         const compact = String(text).replace(/\s+/g, ' ').trim()
-        if (/^select distinct client_id from invoices where status = 'paid' and jsonb_path_exists\(/i.test(compact)) {
+        if (/^select distinct client_id from invoices where status = 'paid' and kind = 'monthly' and jsonb_path_exists\(/i.test(compact)) {
           return { rows: holders }
         }
-        if (/^select id, number, period, status, paid_at, line_items from invoices where client_id = \$1 and status = 'paid' and line_items @>/i.test(compact)) {
+        if (/^select id, number, period, status, paid_at, line_items from invoices where client_id = \$1 and status = 'paid' and kind = 'monthly' and line_items @>/i.test(compact)) {
           return { rows: rows.filter((row) => row.client_id === params?.[0]) }
         }
         if (/from clients where billing_period_months > 1$/i.test(compact)) {
@@ -39974,6 +40010,25 @@ describe('prepayment credits and the send guard (Postgres statements)', () => {
     expect(lines[1]).toMatchObject({ amount: -500, draws: [{ creditId: 'prepay:inv-oct:2026-11', amount: 500 }] })
     expect(write.params[7]).toBe(500)
     expect(write.params[8]).toBe(0)
+  })
+
+  it('M-10: both prepayment reads are restricted to MONTHLY invoices', async () => {
+    const fake = fakePostgres()
+    await answerPrepaid(fake, [paidOctober()])
+    const pg = postgresStore(fake)
+    await pg.listAccountCredits('c1')
+    const compact = (statement) => statement.text.replace(/\s+/g, ' ').trim()
+    const prepaid = fake.matching(/^select id, number, period, status, paid_at, line_items from invoices/i)
+    expect(prepaid).toHaveLength(1)
+    expect(compact(prepaid[0])).toBe(
+      "select id, number, period, status, paid_at, line_items from invoices where client_id = $1 and status = 'paid' and kind = 'monthly' and line_items @> '[{\"kind\":\"prepayment\"}]'::jsonb",
+    )
+    await pg._clientIdsHoldingAccountCredit()
+    const holders = fake.matching(/^select distinct client_id from invoices/i)
+    expect(holders).toHaveLength(1)
+    expect(compact(holders[0])).toBe(
+      "select distinct client_id from invoices where status = 'paid' and kind = 'monthly' and jsonb_path_exists(line_items, '$[*] ? (@.kind == \"prepayment\")')",
+    )
   })
 
   it('a client without such an invoice takes no lock', async () => {

@@ -1416,16 +1416,18 @@ const ACCOUNT_CREDIT_DRAWN_SQL = `select id, number, period, status, line_items 
 const ACCOUNT_CREDIT_HOLDERS_SQL =
   'select distinct client_id from account_credits where voided_at is null'
 /**
- * A client's PAID invoices that carry prepayment lines (billing period, stage 2):
+ * A client's PAID MONTHLY invoices that carry prepayment lines (billing period, stage 2):
  * each yields derived credit, one per covered month. Read beside the stored
- * ledger, under the same credit lock.
+ * ledger, under the same credit lock. Monthly only (M-10): a retainer or any other
+ * kind of invoice that somehow carries a prepayment line never yields credit.
  */
 const ACCOUNT_CREDIT_PREPAID_SQL = `select id, number, period, status, paid_at, line_items from invoices
-          where client_id = $1 and status = 'paid'
+          where client_id = $1 and status = 'paid' and kind = 'monthly'
             and line_items @> '[{"kind":"prepayment"}]'::jsonb`
 /** Which clients have such an invoice at all: read ONCE per generation run beside the stored holders. */
 const ACCOUNT_CREDIT_PREPAID_HOLDERS_SQL = `select distinct client_id from invoices
-          where status = 'paid' and jsonb_path_exists(line_items, '$[*] ? (@.kind == "prepayment")')`
+          where status = 'paid' and kind = 'monthly'
+            and jsonb_path_exists(line_items, '$[*] ? (@.kind == "prepayment")')`
 const ACCOUNT_CREDIT_CHANGED_MESSAGE =
   'The credit on account changed while this was saving, so nothing was changed. Try again.'
 const ACCOUNT_CREDIT_SELECT_COLUMNS = `id, client_id, amount, source_kind, source_ref, for_period,
@@ -1495,6 +1497,9 @@ function derivedPrepaymentCredits(clientId, invoices) {
   const out = []
   for (const invoice of invoices) {
     if (invoice?.status !== 'paid') continue
+    // Monthly invoices only (M-10). A row with no kind is a legacy monthly one; the
+    // Postgres queries already filter, this covers the file backend's raw rows.
+    if ((invoice.kind ?? 'monthly') !== 'monthly') continue
     const cents = new Map()
     for (const line of invoice.lineItems ?? []) {
       if (line?.kind !== 'prepayment' || !ACCOUNT_CREDIT_PERIOD.test(String(line.period ?? ''))) continue
@@ -20045,6 +20050,7 @@ export class AppDataStore {
         .filter(
           (invoice) =>
             invoice.status === 'paid' &&
+            (invoice.kind ?? 'monthly') === 'monthly' &&
             (invoice.lineItems ?? []).some((line) => line?.kind === 'prepayment'),
         )
         .map((invoice) => invoice.clientId),
