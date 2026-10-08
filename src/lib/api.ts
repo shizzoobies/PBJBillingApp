@@ -4806,6 +4806,8 @@ export type InvoicePreview = {
   datesAsIfSentToday: boolean
   /** Send would refuse until the covered dates are confirmed (the same check). */
   coverageUnconfirmed: boolean
+  /** Billing period: Send would stop and ask (the same check and sentence as Send). Null when it would not. */
+  prepaymentHold: { reason: 'unpaid' | 'processing' | 'not_applied'; message: string } | null
   delivery: 'email' | 'never-emailed' | 'opted-out'
 }
 

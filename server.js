@@ -2467,6 +2467,15 @@ async function assembleInvoicePreview(request, invoiceId) {
   // Send refuses an invoice whose covered-date window is unanswered; the
   // preview says so instead, with the same read-only check.
   const coverageUnconfirmed = await appDataStore.invoiceHasUnconfirmedCoverage(invoice)
+  // The billing-period send guard, read-only and from the SAME helper Send and the month
+  // run use: the preview says Send will stop and ask. Looking is not sending, so a read
+  // that fails leaves the preview without the line rather than refusing it.
+  let prepaymentHold = null
+  try {
+    prepaymentHold = await appDataStore.unpaidPrepaymentFor(invoice)
+  } catch (error) {
+    console.error('[invoices] preview could not check the prepayment hold:', error)
+  }
   return {
     invoice,
     client,
@@ -2476,6 +2485,7 @@ async function assembleInvoicePreview(request, invoiceId) {
     payLink,
     datesAsIfSentToday: !invoice.sentAt,
     coverageUnconfirmed,
+    prepaymentHold,
     delivery,
   }
 }
@@ -7606,6 +7616,9 @@ const server = createServer(async (request, response) => {
           payLink: preview.payLink,
           datesAsIfSentToday: preview.datesAsIfSentToday,
           coverageUnconfirmed: preview.coverageUnconfirmed,
+          prepaymentHold: preview.prepaymentHold
+            ? { reason: preview.prepaymentHold.reason, message: preview.prepaymentHold.message }
+            : null,
           delivery: preview.delivery,
         },
         { 'Cache-Control': 'no-store' },

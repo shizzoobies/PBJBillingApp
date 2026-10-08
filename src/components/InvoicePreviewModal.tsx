@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { invoicePreviewPdfUrl, previewInvoiceRequest, type InvoicePreview } from '../lib/api'
+import { previewHoldLine } from '../lib/prepaymentHold'
 
 /**
  * Preview: exactly what the client receives (featreq-459bdfc2 item 3).
@@ -80,6 +81,9 @@ export function InvoicePreviewModal({
     }
     if (preview.coverageUnconfirmed) {
       notes.push('Send would refuse this invoice until its covered dates are confirmed.')
+    }
+    if (preview.prepaymentHold) {
+      notes.push(previewHoldLine(preview.prepaymentHold))
     }
     if (preview.payLink === 'placeholder') {
       notes.push("The Pay button links to this invoice's own payment page, which is created when you send.")

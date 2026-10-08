@@ -72,6 +72,7 @@ const preview = {
   payLink: 'placeholder' as const,
   datesAsIfSentToday: true,
   coverageUnconfirmed: false,
+  prepaymentHold: null,
   delivery: 'email' as const,
 }
 
@@ -146,6 +147,36 @@ describe('Preview: what the client receives', () => {
     await waitFor(() => expect(dialog).toHaveTextContent(/until its covered dates are confirmed/))
     expect(dialog).not.toHaveTextContent(/created when you send/)
     expect(dialog).not.toHaveTextContent(/as if it were sent today/)
+  })
+
+  it('says Send will ask first, with the server sentence, when the prepayment is unpaid (M-11)', async () => {
+    const message =
+      'INV-2026-07-001 carries the prepayment for August 2026 and has not been paid yet (it is Sent), so sending this invoice would bill that month again.'
+    mockPreview.mockResolvedValue({ ...preview, prepaymentHold: { reason: 'unpaid', message } })
+    await openEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }))
+    const dialog = await screen.findByRole('dialog', { name: /Preview of/ })
+    await waitFor(() => expect(dialog).toHaveTextContent(`Send will ask first: ${message}`))
+  })
+
+  it('says Send will stop, not ask, for a hold with no override', async () => {
+    const message =
+      "This month was prepaid on July 2026's invoice and that payment is still clearing. Once it settles, Apply credit on account (or Void & regenerate) and send then."
+    mockPreview.mockResolvedValue({ ...preview, prepaymentHold: { reason: 'processing', message } })
+    await openEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }))
+    const dialog = await screen.findByRole('dialog', { name: /Preview of/ })
+    await waitFor(() => expect(dialog).toHaveTextContent(`Send will stop here: ${message}`))
+    expect(dialog).not.toHaveTextContent('Send will ask first')
+  })
+
+  it('says nothing of the kind when there is no hold', async () => {
+    await openEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }))
+    const dialog = await screen.findByRole('dialog', { name: /Preview of/ })
+    await waitFor(() => expect(dialog).toHaveTextContent('books@acme.com'))
+    expect(dialog).not.toHaveTextContent('Send will ask first')
+    expect(dialog).not.toHaveTextContent('Send will stop here')
   })
 
   it('says when a client is never emailed, and closes', async () => {

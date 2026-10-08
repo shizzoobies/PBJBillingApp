@@ -1,6 +1,16 @@
 import { ApiError } from './types'
 
 /**
+ * The one line Preview shows when Send would stop on the billing-period guard, built
+ * around the server's own sentence. Only the 'unpaid' hold can be sent anyway.
+ */
+export function previewHoldLine(hold: { reason: string; message: string }): string {
+  return hold.reason === 'unpaid'
+    ? `Send will ask first: ${hold.message}`
+    : `Send will stop here: ${hold.message}`
+}
+
+/**
  * The billing-period send guard's question, read off a failed request.
  *
  * The server answers 409 `prepayment_unpaid` when a later month of a billing-period
