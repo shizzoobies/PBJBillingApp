@@ -39753,6 +39753,30 @@ describe('the unpaid-prepayment send guard (file backend)', () => {
     expect(await store.unpaidPrepaymentFor(november)).toBeNull()
   })
 
+  it('M-5: a month fully covered by a manual credit is not held, whatever the anchor, and a partly covered one still is', async () => {
+    await seed([quarterly()])
+    const [october] = await generate('2026-10')
+    await store.addAccountCredit({ clientId: 'c1', amount: 500, createdBy: 'u' })
+    const [november] = await generate('2026-11')
+    expect(november.total).toBe(0)
+    for (const status of ['draft', 'sent', 'processing', 'paid']) {
+      await setStatus(october.id, status)
+      expect(await store.unpaidPrepaymentFor(november)).toBeNull()
+    }
+    await setStatus(october.id, 'sent')
+    const list = await store.listInvoices({ period: '2026-11' })
+    expect(await store.withUnpaidPrepayment(list)).toBe(list)
+
+    // A credit that covers only part leaves the month owing, so the question stands.
+    await seed([quarterly()])
+    const [octoberAgain] = await generate('2026-10')
+    await store.addAccountCredit({ clientId: 'c1', amount: 200, createdBy: 'u' })
+    const [partly] = await generate('2026-11')
+    expect(partly.total).toBe(300)
+    await setStatus(octoberAgain.id, 'sent')
+    expect((await store.unpaidPrepaymentFor(partly))?.reason).toBe('unpaid')
+  })
+
   it('M-4: an anchor set in the past, whose invoice carries no prepayment lines, holds nothing and marks nothing', async () => {
     // September was invoiced monthly before the period existed; the period is then set
     // to start in September. October and November are "later months" of a period whose
@@ -40087,6 +40111,17 @@ describe('prepayment credits and the send guard (Postgres statements)', () => {
     const marked = await pg.withUnpaidPrepayment(await pg.listInvoices({ period: '2026-11' }))
     expect(marked[0].unpaidPrepayment).toMatchObject({ anchorInvoiceNumber: 'INV-2026-10-001', month: '2026-11', reason: 'unpaid' })
     expect(fake.matching(/from clients where billing_period_months > 1$/i)).toHaveLength(1)
+    // M-5: the same month already at a total of 0 (other credit covered it) is neither held nor marked.
+    const zeroFake = fakePostgres({
+      invoices: [octoberRow, { ...novemberRow, total: 0, subtotal: 0 }],
+      filterInvoicesByPeriod: true,
+    })
+    await answerPrepaid(zeroFake, [], { clients: [clientRowSnake] })
+    const zeroPg = postgresStore(zeroFake)
+    const zeroList = await zeroPg.listInvoices({ period: '2026-11' })
+    expect(zeroList[0].total).toBe(0)
+    expect(await zeroPg.unpaidPrepaymentFor(zeroList[0])).toBeNull()
+    expect(await zeroPg.withUnpaidPrepayment(zeroList)).toBe(zeroList)
     // The other half of the I-1 hold: a PAID anchor and a November draft that drew nothing.
     const paidRow = { ...octoberRow, status: 'paid', paid_at: new Date('2026-10-20T15:00:00Z') }
     const paidFake = fakePostgres({ invoices: [paidRow, novemberRow], filterInvoicesByPeriod: true })
