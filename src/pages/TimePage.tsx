@@ -1396,12 +1396,14 @@ export function ManualEntryModal({
       return
     }
     // Client + task + detail are mandatory here too — the same rule the timer's
-    // Stop & log and the server both apply. A group block is exempt from the
-    // task (its slices are per-client) but never from the detail.
+    // Stop & log and the server both apply. Split across clients saves one
+    // per-client SLICE per share (tagged with a shared groupId, no members), so
+    // it is checked in the shape it is sent: exempt from the task, never from
+    // the detail. (An unsplit multi-client TIMER block, by contrast, needs one.)
     const requiredFields = validateTimeEntryRequiredFields({
       isAdministrative,
-      clientId: isAdministrative || groupMode ? '' : effectiveClientId,
-      groupClientIds: groupMode ? groupClientIds : [],
+      clientId: isAdministrative ? '' : groupMode ? groupClientIds[0] : effectiveClientId,
+      groupId: groupMode ? 'split-across-clients' : '',
       taskId: isAdministrative || groupMode ? '' : effectiveTaskId,
       taskLabel: isAdministrative || groupMode ? '' : taskLabel,
       description,

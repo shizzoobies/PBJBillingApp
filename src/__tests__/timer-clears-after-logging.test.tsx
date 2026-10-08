@@ -36,9 +36,12 @@ const EMPLOYEES = [
 function Harness({
   onStop,
   starts = [],
+  startWith,
 }: {
   onStop?: () => Promise<void>
   starts?: TimerState[]
+  /** Fields the running timer gains after Start, standing in for a later edit. */
+  startWith?: Partial<TimerState>
 }) {
   const [timer, setTimer] = useState<TimerState | null>(null)
   return (
@@ -52,7 +55,7 @@ function Harness({
         employees={EMPLOYEES}
         onStartTimer={(next) => {
           starts.push(next)
-          setTimer(next)
+          setTimer({ ...next, ...startWith })
         }}
         onStopTimer={async () => {
           if (onStop) await onStop()
@@ -171,7 +174,9 @@ describe('The capture form after a log', () => {
   })
 
   it('clears a group block too', async () => {
-    render(<Harness />)
+    // A group block needs a task before it can be logged; the task box for the
+    // group timer arrives with the next change, so the timer gains one here.
+    render(<Harness startWith={{ taskLabel: 'Payroll' }} />)
 
     fireEvent.change(billToSelect(), { target: { value: 'group' } })
     fireEvent.click(screen.getByRole('checkbox', { name: 'Acme Dental' }))

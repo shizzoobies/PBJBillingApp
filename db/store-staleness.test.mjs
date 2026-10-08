@@ -507,6 +507,28 @@ describe('splitTimeEntry (file backend)', () => {
     }
   })
 
+  it('gives every slice the typed task a group timer carried (no more "Unassigned")', async () => {
+    await seedHolding({ taskLabel: 'Payroll' })
+
+    const { created } = await store.splitTimeEntry(
+      'hold-1',
+      [
+        { clientId: 'c1', minutes: 24.25 },
+        { clientId: 'c2', minutes: 24.25 },
+      ],
+      'owner-1',
+      'grp-abc',
+      'even',
+    )
+
+    expect(created.map((slice) => [slice.clientId, slice.taskId, slice.taskLabel])).toEqual([
+      ['c1', null, 'Payroll'],
+      ['c2', null, 'Payroll'],
+    ])
+    const stored = (await persisted()).timeEntries.filter((entry) => entry.groupId === 'grp-abc')
+    expect(stored.map((entry) => entry.taskLabel)).toEqual(['Payroll', 'Payroll'])
+  })
+
   it('queues every slice as pending — split allocations are typed time', async () => {
     await seedHolding()
     const { created } = await store.splitTimeEntry(
@@ -3912,6 +3934,37 @@ describe('split shares keep the task and clock in/out (postgres branch)', () => 
     const inserts = insertedRows(fake.statements, 'time_entries')
     expect(inserts.map((row) => row.task_id)).toEqual([null, null])
     expect(inserts.map((row) => row.task_label)).toEqual(['Payroll', 'Payroll'])
+  })
+
+  it('splitTimeEntry of a group holding block gives every slice the typed task', async () => {
+    const fake = fakePostgres({
+      holdingRows: [
+        sourceRow({
+          id: 'hold-task',
+          client_id: null,
+          billable: false,
+          task_id: null,
+          task_label: 'Payroll',
+          group_client_ids: ['c1', 'c2'],
+        }),
+      ],
+    })
+    await postgresStore(fake).splitTimeEntry(
+      'hold-task',
+      [
+        { clientId: 'c1', minutes: 9.5 },
+        { clientId: 'c2', minutes: 9.5 },
+      ],
+      'owner-1',
+      'grp-hold',
+      'even',
+    )
+    expect(fake.matching(/from checklists/i)).toHaveLength(0)
+    const inserts = insertedRows(fake.statements, 'time_entries')
+    expect(inserts.map((row) => row.client_id)).toEqual(['c1', 'c2'])
+    expect(inserts.map((row) => row.task_id)).toEqual([null, null])
+    expect(inserts.map((row) => row.task_label)).toEqual(['Payroll', 'Payroll'])
+    expect(inserts.map((row) => row.group_id)).toEqual(['grp-hold', 'grp-hold'])
   })
 
   it('adjustSplitGroup finds the task on whichever share kept it', async () => {

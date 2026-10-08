@@ -9993,10 +9993,12 @@ const server = createServer(async (request, response) => {
 
         // Client + task + detail are MANDATORY to log time (the firm owner's
         // rule). One shared check with the Time page's inline prompts, so the
-        // 400 and the field-level nudge can never disagree; group blocks and
-        // administrative time carve out what they genuinely don't have. See
-        // `validateTimeEntryRequiredFields`. This is a clean rejection — the UI
-        // shows it under the field, not as a data-loss alarm.
+        // 400 and the field-level nudge can never disagree; administrative time
+        // and a split slice carve out what they genuinely don't have. An unsplit
+        // group holding block needs a task like any other entry (the slices cut
+        // from it copy that task). See `validateTimeEntryRequiredFields`. This
+        // is a clean rejection — the UI shows it under the field, not as a
+        // data-loss alarm.
         const requiredFields = validateTimeEntryRequiredFields({
           isAdministrative,
           clientId,
@@ -10007,7 +10009,15 @@ const server = createServer(async (request, response) => {
           description,
         })
         if (requiredFields.error) {
-          sendJson(response, 400, { error: requiredFields.error })
+          // A page loaded before the group timer got its Task box can still
+          // press Stop & log on a running group timer: its old validator waived
+          // the task, so it sent none. Tell it how to act on the refusal. The
+          // current page blocks before sending, so only a stale page sees this.
+          const staleGroupHint =
+            groupClientIds.length > 0 && requiredFields.missing.includes('task')
+              ? " If you don't see a Task box, refresh the page. Your timer is kept."
+              : ''
+          sendJson(response, 400, { error: requiredFields.error + staleGroupHint })
           return
         }
 

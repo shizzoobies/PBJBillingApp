@@ -83,24 +83,65 @@ describe('validateTimeEntryRequiredFields', () => {
   })
 
   /**
-   * Group blocks: the members ARE the client, and the timer form never offers a
-   * task for a block spanning several clients — tasks are settled when it is
-   * split. So the task is waived and the detail is not.
+   * Group holding blocks (the multi-client timer): the members ARE the client,
+   * and the task is required exactly as for a single-client entry (the owner's
+   * rule, 2026-10-08): the slices cut from the block copy it, so group work
+   * stops showing as "Unassigned" on reports.
    */
-  it('waives the task on an unsplit group holding block, but not the detail', () => {
+  describe('an unsplit group holding block', () => {
     const holding = {
       isAdministrative: false,
       clientId: '',
       groupClientIds: ['client-1', 'client-2'],
       description: 'Quarter-end review across the group.',
     }
-    expect(validateTimeEntryRequiredFields(holding).error).toBeNull()
-    expect(validateTimeEntryRequiredFields({ ...holding, description: '' }).missing).toEqual([
-      'detail',
-    ])
+
+    it('needs a task, with the same sentence a single-client entry gets', () => {
+      const group = validateTimeEntryRequiredFields(holding)
+      expect(group.missing).toEqual(['task'])
+      const single = validateTimeEntryRequiredFields({
+        isAdministrative: false,
+        clientId: 'client-1',
+        description: holding.description,
+      })
+      expect(single.missing).toEqual(['task'])
+      expect(group.error).toBe(single.error)
+    })
+
+    it('is satisfied by a typed task name or a task id', () => {
+      expect(validateTimeEntryRequiredFields({ ...holding, taskLabel: 'Payroll' }).error).toBeNull()
+      expect(validateTimeEntryRequiredFields({ ...holding, taskId: 'task-1' }).error).toBeNull()
+    })
+
+    it('treats a blank typed task as no task', () => {
+      expect(validateTimeEntryRequiredFields({ ...holding, taskLabel: '   ' }).missing).toEqual([
+        'task',
+      ])
+    })
+
+    it('still needs the detail, and names both when both are missing', () => {
+      const result = validateTimeEntryRequiredFields({ ...holding, taskLabel: 'Payroll', description: '' })
+      expect(result.missing).toEqual(['detail'])
+      expect(validateTimeEntryRequiredFields({ ...holding, description: '' }).missing).toEqual([
+        'task',
+        'detail',
+      ])
+    })
+
+    it('is not waived by a hand-built payload that also names a group id', () => {
+      expect(validateTimeEntryRequiredFields({ ...holding, groupId: 'grp-1' }).missing).toEqual([
+        'task',
+      ])
+    })
+
+    it('keeps the administrative exemption: no members, no task, only a note', () => {
+      expect(
+        validateTimeEntryRequiredFields({ isAdministrative: true, groupClientIds: ['client-1'], description: 'Staff meeting' }).error,
+      ).toBeNull()
+    })
   })
 
-  it('waives the task on a slice of an already-split group', () => {
+  it('waives the task on a slice of an already-split group (groupId, no members)', () => {
     const slice = { ...complete, taskId: '', groupId: 'grp-1' }
     expect(validateTimeEntryRequiredFields(slice).error).toBeNull()
     expect(validateTimeEntryRequiredFields({ ...slice, description: '' }).missing).toEqual([
@@ -159,6 +200,67 @@ describe('no auto-generated description survives', () => {
   it('stopping a timer sends only what was typed', () => {
     const source = readFileSync(resolve('src/App.tsx'), 'utf8')
     expect(source).not.toContain('Timed bookkeeping work')
+  })
+})
+
+/**
+ * The route glue is not booted by the tests, so pin it by reading the source:
+ * the create route must hand the validator the group members, the group id and
+ * the typed task — those are what decide whether a group block needs a task.
+ */
+describe('POST /api/time-entries group-task glue', () => {
+  const server = readFileSync(resolve('server.js'), 'utf8').split('\r\n').join('\n')
+  const call = server.slice(
+    server.indexOf('validateTimeEntryRequiredFields({'),
+    server.indexOf('if (requiredFields.error)'),
+  )
+
+  it('passes the members, the group id and both task fields to the shared validator', () => {
+    for (const key of ['groupClientIds', 'groupId', 'taskId', 'taskLabel', 'description']) {
+      expect(call).toContain(key)
+    }
+  })
+
+  it('keeps a typed task on a group holding block (a label is dropped only for admin time or a task id)', () => {
+    expect(server).toContain(
+      "!isAdministrative && !taskId && typeof payload?.taskLabel === 'string'",
+    )
+  })
+
+  it('tells a stale page how to act on the refusal, and only for a group block', () => {
+    // A tab loaded before the Task box existed has a running group timer and no
+    // box to fill: its refusal names the way out. The current page blocks
+    // before sending, so only a stale page ever sees the second sentence.
+    expect(server).toContain(
+      "groupClientIds.length > 0 && requiredFields.missing.includes('task')",
+    )
+    expect(server).toContain(
+      "If you don't see a Task box, refresh the page. Your timer is kept.",
+    )
+    expect(server).toContain('error: requiredFields.error + staleGroupHint')
+  })
+
+  /**
+   * PATCH parity, read from the route itself: an edit never runs the
+   * required-fields check, and it cannot touch a typed task name at all (it
+   * reads `taskId` only; `taskLabel` is a create-time field), so a group
+   * block's task survives every edit just as a single entry's does. The store's
+   * `updateTimeEntry` maps no `taskLabel` column either.
+   */
+  it('leaves PATCH task edits unguarded and cannot clear a typed task', () => {
+    const patchStart = server.indexOf('// ---- Edit (PATCH) ----')
+    const patchRoute = server.slice(patchStart, server.indexOf("request.method === 'DELETE'", patchStart))
+    expect(patchStart).toBeGreaterThan(0)
+    expect(patchRoute).toContain('patch.taskId')
+    expect(patchRoute).not.toContain('validateTimeEntryRequiredFields')
+    expect(patchRoute).not.toContain('taskLabel')
+
+    const store = readFileSync(resolve('db/store.js'), 'utf8').split('\r\n').join('\n')
+    const updateStart = store.indexOf('async updateTimeEntry(')
+    expect(updateStart).toBeGreaterThan(0)
+    const nextMethod = store.indexOf('\n  async ', updateStart + 10)
+    expect(store.slice(updateStart, nextMethod)).not.toContain('taskLabel')
+    expect(validateTimeEntryEdit({ description: 'x' }, { taskId: null }).error).toBeNull()
   })
 })
 

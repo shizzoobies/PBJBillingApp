@@ -144,17 +144,36 @@ describe('Stop & log with a missing field', () => {
   })
 
   /**
-   * A group block spans several clients and the panel offers it no task field at
-   * all — its slices get their tasks when it is split. So the detail is demanded
-   * and the task is not.
+   * A group block needs a task exactly like a single-client entry (the owner's
+   * rule, 2026-10-08): its slices copy the task, so group work is no longer
+   * "Unassigned" on reports. The detail is demanded as before.
    */
-  it('logs a group block with a detail and no task', () => {
+  it('blocks a group block that has a detail but no task', () => {
     const onStopTimer = vi.fn().mockResolvedValue(undefined)
     render(
       <Harness
         timer={runningTimer({
           clientId: '',
           taskLabel: '',
+          groupClientIds: ['client-1', 'client-2'],
+          description: 'Quarter-end review across the group.',
+        })}
+        onStopTimer={onStopTimer}
+      />,
+    )
+
+    fireEvent.click(stopButton())
+    expect(onStopTimer).not.toHaveBeenCalled()
+    expect(screen.getByText('42m')).toBeInTheDocument()
+  })
+
+  it('logs a group block that carries a task and a detail', () => {
+    const onStopTimer = vi.fn().mockResolvedValue(undefined)
+    render(
+      <Harness
+        timer={runningTimer({
+          clientId: '',
+          taskLabel: 'Payroll',
           groupClientIds: ['client-1', 'client-2'],
           description: 'Quarter-end review across the group.',
         })}
