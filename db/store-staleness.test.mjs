@@ -45534,3 +45534,479 @@ describe('a duplicate marker remembers a card payment (file backend)', () => {
     expect(amount.emailLog[2]).not.toHaveProperty('card')
   })
 })
+
+/**
+ * Engagement letters (featreq-5e195707): the saved template and the per-client
+ * send log. Endpoint-managed, no foreign keys, never deleted from; the send log
+ * is also the double-send guard (a claim row is inserted before the provider
+ * call, and a non-failed claim is unique per letter, client, template hash, firm
+ * day and attempt).
+ */
+describe('engagement letters (file backend)', () => {
+  const readAuth = async () => JSON.parse(await readFile(localAuthPath, 'utf8'))
+  const claimArgs = (over = {}) => ({
+    letterId: 'default',
+    clientId: 'c1',
+    templateHash: 'hash-1',
+    firmDay: '2026-10-08',
+    attempt: 1,
+    subject: 'Your 2027 1099s',
+    recipients: ['pat@acme.test'],
+    createdBy: 'user-owner',
+    ...over,
+  })
+
+  beforeEach(async () => {
+    const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    authState.engagementLetters = []
+    authState.engagementLetterSends = []
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  })
+
+  it('answers an empty letter, never null, before one is saved', async () => {
+    expect(await store.getEngagementLetter()).toEqual({
+      id: 'default',
+      name: 'Engagement letter',
+      subject: '',
+      emailBody: '',
+      letterBody: '',
+      updatedBy: null,
+      createdAt: null,
+      updatedAt: null,
+    })
+  })
+
+  it('saves the letter, round-trips it through auth-state, and upserts on the second save', async () => {
+    const first = await store.saveEngagementLetter({
+      subject: '  Your {{next_year}} 1099s  ',
+      emailBody: 'Hi {{contact_first_name}}\n',
+      letterBody: '\nDear {{contact_name}},',
+      updatedBy: 'user-owner',
+    })
+    expect(first).toMatchObject({
+      id: 'default',
+      subject: 'Your {{next_year}} 1099s',
+      emailBody: 'Hi {{contact_first_name}}',
+      letterBody: 'Dear {{contact_name}},',
+      updatedBy: 'user-owner',
+    })
+    expect(Number.isNaN(Date.parse(first.createdAt))).toBe(false)
+    expect(await store.getEngagementLetter()).toEqual(first)
+    expect((await readAuth()).engagementLetters).toHaveLength(1)
+
+    const second = await store.saveEngagementLetter({
+      subject: 'New subject',
+      emailBody: 'e',
+      letterBody: 'l',
+      updatedBy: 'user-two',
+    })
+    expect(second).toMatchObject({ subject: 'New subject', updatedBy: 'user-two', createdAt: first.createdAt })
+    expect((await readAuth()).engagementLetters).toHaveLength(1)
+    expect(await store.getEngagementLetter()).toEqual(second)
+  })
+
+  it('caps the subject at 200 characters and each body at 20,000', async () => {
+    const saved = await store.saveEngagementLetter({
+      subject: 's'.repeat(500),
+      emailBody: 'e'.repeat(30000),
+      letterBody: 'l'.repeat(30000),
+    })
+    expect(saved.subject).toHaveLength(200)
+    expect(saved.emailBody).toHaveLength(20000)
+    expect(saved.letterBody).toHaveLength(20000)
+  })
+
+  it('claims a send once: the second claim for the same key is refused and names the first', async () => {
+    const first = await store.claimEngagementLetterSend(claimArgs())
+    expect(first.claimed).toBe(true)
+    expect(first.send).toMatchObject({
+      letterId: 'default',
+      clientId: 'c1',
+      templateHash: 'hash-1',
+      firmDay: '2026-10-08',
+      attempt: 1,
+      status: 'sending',
+      recipients: ['pat@acme.test'],
+      subject: 'Your 2027 1099s',
+      providerId: null,
+      error: null,
+      createdBy: 'user-owner',
+      completedAt: null,
+    })
+    expect(first.send.id).toMatch(/^els-[0-9a-f]{8}$/)
+
+    const second = await store.claimEngagementLetterSend(claimArgs())
+    expect(second.claimed).toBe(false)
+    expect(second.send.id).toBe(first.send.id)
+    expect((await readAuth()).engagementLetterSends).toHaveLength(1)
+  })
+
+  it('lets exactly one of several simultaneous claims through', async () => {
+    const results = await Promise.all(Array.from({ length: 6 }, () => store.claimEngagementLetterSend(claimArgs())))
+    expect(results.filter((result) => result.claimed)).toHaveLength(1)
+    expect((await readAuth()).engagementLetterSends).toHaveLength(1)
+  })
+
+  it('treats a different client, template, firm day or attempt as a different claim', async () => {
+    await store.claimEngagementLetterSend(claimArgs())
+    for (const over of [
+      { clientId: 'c2' },
+      { templateHash: 'hash-2' },
+      { firmDay: '2026-10-09' },
+      { attempt: 2 },
+      { letterId: 'other' },
+    ]) {
+      expect((await store.claimEngagementLetterSend(claimArgs(over))).claimed, JSON.stringify(over)).toBe(true)
+    }
+  })
+
+  it('completes a claim as sent with the provider id, and will not complete it twice', async () => {
+    const { send } = await store.claimEngagementLetterSend(claimArgs())
+    const done = await store.completeEngagementLetterSend(send.id, { ok: true, providerId: 're_1' })
+    expect(done).toMatchObject({ id: send.id, status: 'sent', providerId: 're_1', error: null })
+    expect(Number.isNaN(Date.parse(done.completedAt))).toBe(false)
+    expect(await store.completeEngagementLetterSend(send.id, { ok: false, error: 'late' })).toBeNull()
+    expect((await store.listEngagementLetterSends())[0].status).toBe('sent')
+    // Still sent: a second claim for the same key is refused.
+    expect((await store.claimEngagementLetterSend(claimArgs())).claimed).toBe(false)
+  })
+
+  it('a failed claim never blocks a retry of the same attempt', async () => {
+    const { send } = await store.claimEngagementLetterSend(claimArgs())
+    const failed = await store.completeEngagementLetterSend(send.id, { ok: false, error: 'Email provider refused the message (422).' })
+    expect(failed).toMatchObject({ status: 'failed', error: 'Email provider refused the message (422).', providerId: null })
+
+    const retry = await store.claimEngagementLetterSend(claimArgs())
+    expect(retry.claimed).toBe(true)
+    expect(retry.send.id).not.toBe(send.id)
+    // ...and while the retry is in flight, a third claim is refused.
+    expect((await store.claimEngagementLetterSend(claimArgs())).claimed).toBe(false)
+    expect(await store.listEngagementLetterSends()).toHaveLength(2)
+  })
+
+  it('"Send again" claims the next attempt: 1 with nothing logged, then one past the highest, failed rows included', async () => {
+    const key = { letterId: 'default', clientId: 'c1', templateHash: 'hash-1', firmDay: '2026-10-08' }
+    expect(await store.nextEngagementLetterAttempt(key)).toBe(1)
+    const first = await store.claimEngagementLetterSend(claimArgs())
+    expect(await store.nextEngagementLetterAttempt(key)).toBe(2)
+    await store.completeEngagementLetterSend(first.send.id, { ok: false, error: 'x' })
+    expect(await store.nextEngagementLetterAttempt(key)).toBe(2)
+    await store.claimEngagementLetterSend(claimArgs({ attempt: 2 }))
+    expect(await store.nextEngagementLetterAttempt(key)).toBe(3)
+    expect(await store.nextEngagementLetterAttempt({ ...key, firmDay: '2026-10-09' })).toBe(1)
+    expect(await store.nextEngagementLetterAttempt({ ...key, clientId: 'c2' })).toBe(1)
+  })
+
+  it('lists sends newest first, optionally for one client', async () => {
+    const a = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c1' }))
+    const b = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c2' }))
+    const c = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c1', attempt: 2 }))
+    expect((await store.listEngagementLetterSends()).map((row) => row.id)).toEqual([c.send.id, b.send.id, a.send.id])
+    expect((await store.listEngagementLetterSends({ clientId: 'c1' })).map((row) => row.id)).toEqual([c.send.id, a.send.id])
+    expect(await store.listEngagementLetterSends({ letterId: 'nope' })).toEqual([])
+  })
+
+  // The route reads the blocking row's status: a row still `sending` (the process died between the
+  // claim and the close) must not be told apart from `sent` by wording alone.
+  it('a refused claim answers the blocking row with its CURRENT status', async () => {
+    const first = await store.claimEngagementLetterSend(claimArgs())
+    const whileSending = await store.claimEngagementLetterSend(claimArgs())
+    expect(whileSending).toMatchObject({ claimed: false, send: { id: first.send.id, status: 'sending' } })
+    expect(whileSending.send.createdAt).toBe(first.send.createdAt)
+
+    await store.completeEngagementLetterSend(first.send.id, { ok: true, providerId: 're_1' })
+    const afterSent = await store.claimEngagementLetterSend(claimArgs())
+    expect(afterSent).toMatchObject({ claimed: false, send: { id: first.send.id, status: 'sent' } })
+  })
+
+  it('lists sends newest first by their own timestamps, however they were inserted', async () => {
+    const a = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c1' }))
+    const b = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c2' }))
+    const c = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c3' }))
+    // Make the insertion order and the time order disagree: b is the newest, c the oldest, and a
+    // and the tie below share one instant.
+    const authState = await readAuth()
+    const stamp = { [a.send.id]: '2026-10-08T12:00:00.000Z', [b.send.id]: '2026-10-08T15:00:00.000Z', [c.send.id]: '2026-10-08T09:00:00.000Z' }
+    for (const row of authState.engagementLetterSends) row.createdAt = stamp[row.id]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    expect((await store.listEngagementLetterSends()).map((row) => row.id)).toEqual([b.send.id, a.send.id, c.send.id])
+    expect((await store.listEngagementLetterSends({ clientId: 'c3' })).map((row) => row.id)).toEqual([c.send.id])
+
+    // Rows stamped in the same millisecond come back latest-inserted first (a production
+    // transaction stamps every row with one now(), so ties are the normal case there).
+    const later = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c1', attempt: 2 }))
+    const tied = await readAuth()
+    for (const row of tied.engagementLetterSends) row.createdAt = '2026-10-08T12:00:00.000Z'
+    await writeFile(localAuthPath, JSON.stringify(tied, null, 2))
+    const order = (await store.listEngagementLetterSends({ clientId: 'c1' })).map((row) => row.id)
+    expect(order).toEqual([later.send.id, a.send.id])
+  })
+
+  it('a bulk save leaves the template and every send intact', async () => {
+    await store.saveEngagementLetter({ subject: 'S', emailBody: 'E', letterBody: 'L', updatedBy: 'u' })
+    const claim = await store.claimEngagementLetterSend(claimArgs())
+    await store.completeEngagementLetterSend(claim.send.id, { ok: true, providerId: 're_1' })
+    const before = {
+      letter: await store.getEngagementLetter(),
+      sends: await store.listEngagementLetterSends(),
+    }
+
+    // The save deletes and re-inserts clients; nothing in the payload names a letter.
+    await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme' }, { id: 'c9', name: 'Somebody Else' }] }))
+    await store.write(workspace())
+
+    expect(await store.getEngagementLetter()).toEqual(before.letter)
+    expect(await store.listEngagementLetterSends()).toEqual(before.sends)
+    expect((await store.claimEngagementLetterSend(claimArgs())).claimed).toBe(false)
+  })
+})
+
+describe('engagement letters (Postgres statements)', () => {
+  /** A recording pool that emulates only the two letter tables, in memory. */
+  function letterPool() {
+    const statements = []
+    const letters = []
+    const sends = []
+    const compact = (text) => text.replace(/\s+/g, ' ').trim()
+    const blocks = (row, p) =>
+      row.status !== 'failed' &&
+      row.letter_id === p[1] &&
+      row.client_id === p[2] &&
+      row.template_hash === p[3] &&
+      row.firm_day === p[4] &&
+      row.attempt === p[5]
+    const answer = async (text, params) => {
+      const trimmed = compact(text)
+      statements.push({ text: trimmed, params })
+      if (/^insert into engagement_letters /i.test(trimmed)) {
+        const at = letters.findIndex((row) => row.id === params[0])
+        const now = new Date('2026-10-08T15:00:00Z')
+        if (at >= 0) {
+          Object.assign(letters[at], {
+            subject: params[1],
+            email_body: params[2],
+            letter_body: params[3],
+            updated_by: params[4],
+            updated_at: now,
+          })
+          return { rows: [{ ...letters[at] }], rowCount: 1 }
+        }
+        const row = {
+          id: params[0],
+          name: 'Engagement letter',
+          subject: params[1],
+          email_body: params[2],
+          letter_body: params[3],
+          updated_by: params[4],
+          created_at: now,
+          updated_at: now,
+        }
+        letters.push(row)
+        return { rows: [{ ...row }], rowCount: 1 }
+      }
+      if (/^select .* from engagement_letters where id = \$1$/i.test(trimmed)) {
+        return { rows: letters.filter((row) => row.id === params[0]).map((row) => ({ ...row })) }
+      }
+      if (/^insert into engagement_letter_sends /i.test(trimmed)) {
+        // The partial unique index: one non-failed row per key.
+        const candidate = {
+          id: params[0],
+          letter_id: params[1],
+          client_id: params[2],
+          template_hash: params[3],
+          firm_day: params[4],
+          attempt: params[5],
+          status: 'sending',
+          recipients: JSON.parse(params[6]),
+          subject: params[7],
+          provider_id: null,
+          error: null,
+          delivery: null,
+          created_by: params[8],
+          created_at: new Date('2026-10-08T15:00:00Z'),
+          completed_at: null,
+        }
+        if (sends.some((row) => blocks(row, [null, candidate.letter_id, candidate.client_id, candidate.template_hash, candidate.firm_day, candidate.attempt]))) {
+          return { rows: [], rowCount: 0 }
+        }
+        sends.push(candidate)
+        return { rows: [{ ...candidate }], rowCount: 1 }
+      }
+      if (/^select .* from engagement_letter_sends where letter_id = \$1 and client_id = \$2 and template_hash = \$3 and firm_day = \$4 and attempt = \$5 and status <> 'failed'$/i.test(trimmed)) {
+        return { rows: sends.filter((row) => blocks(row, [null, ...params])).map((row) => ({ ...row })) }
+      }
+      if (/^update engagement_letter_sends set status = \$2, provider_id = \$3, error = \$4, completed_at = now\(\) where id = \$1 and status = 'sending' returning/i.test(trimmed)) {
+        const row = sends.find((entry) => entry.id === params[0] && entry.status === 'sending')
+        if (!row) return { rows: [], rowCount: 0 }
+        Object.assign(row, { status: params[1], provider_id: params[2], error: params[3], completed_at: new Date('2026-10-08T15:01:00Z') })
+        return { rows: [{ ...row }], rowCount: 1 }
+      }
+      if (/^select coalesce\(max\(attempt\), 0\) \+ 1 as next from engagement_letter_sends/i.test(trimmed)) {
+        const mine = sends.filter(
+          (row) => row.letter_id === params[0] && row.client_id === params[1] && row.template_hash === params[2] && row.firm_day === params[3],
+        )
+        return { rows: [{ next: Math.max(0, ...mine.map((row) => row.attempt)) + 1 }] }
+      }
+      if (/^select .* from engagement_letter_sends where letter_id = \$1/i.test(trimmed)) {
+        const rows = sends.filter((row) => row.letter_id === params[0] && (params.length < 2 || row.client_id === params[1]))
+        return { rows: rows.slice().reverse().map((row) => ({ ...row })) }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+    const pool = { query: answer, connect: async () => ({ query: answer, release() {} }) }
+    const matching = (pattern) => statements.filter((s) => pattern.test(s.text))
+    return { pool, statements, matching, sends, letters }
+  }
+  const letterStore = (fake) => postgresStore(fake)
+
+  it('creates both tables with NO foreign keys, exactly the planned columns, and the planned indexes', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+
+    const [letters] = fake.matching(/create table if not exists engagement_letters\b/i)
+    const [sends] = fake.matching(/create table if not exists engagement_letter_sends\b/i)
+    expect(letters).toBeTruthy()
+    expect(sends).toBeTruthy()
+    for (const table of [letters, sends]) expect(table.text).not.toMatch(/references/i)
+
+    const lettersSql = letters.text
+    expect(lettersSql).toMatch(/id text primary key/i)
+    expect(lettersSql).toMatch(/name text not null default 'Engagement letter'/i)
+    expect(lettersSql).toMatch(/subject text not null default ''/i)
+    expect(lettersSql).toMatch(/email_body text not null default ''/i)
+    expect(lettersSql).toMatch(/letter_body text not null default ''/i)
+    expect(lettersSql).toMatch(/updated_by text,/i)
+    expect(lettersSql).toMatch(/created_at timestamptz not null default now\(\)/i)
+    expect(lettersSql).toMatch(/updated_at timestamptz not null default now\(\)/i)
+
+    const sendsSql = sends.text
+    expect(sendsSql).toMatch(/client_id text not null/i)
+    expect(sendsSql).toMatch(/letter_id text not null/i)
+    expect(sendsSql).toMatch(/template_hash text not null/i)
+    expect(sendsSql).toMatch(/firm_day text not null/i)
+    expect(sendsSql).toMatch(/attempt int not null default 1/i)
+    expect(sendsSql).toMatch(/status text not null default 'sending' check \(status in \('sending', 'sent', 'failed'\)\)/i)
+    expect(sendsSql).toMatch(/recipients jsonb not null default '\[\]'::jsonb/i)
+    expect(sendsSql).toMatch(/provider_id text,/i)
+    expect(sendsSql).toMatch(/delivery text,/i)
+    expect(sendsSql).toMatch(/completed_at timestamptz\s*\)/i)
+
+    const [once] = fake.matching(/create unique index if not exists engagement_letter_sends_once_idx/i)
+    expect(once.text.replace(/\s+/g, ' ').trim()).toBe(
+      'create unique index if not exists engagement_letter_sends_once_idx on engagement_letter_sends (letter_id, client_id, template_hash, firm_day, attempt) where status <> \'failed\'',
+    )
+    const [byClient] = fake.matching(/create index if not exists engagement_letter_sends_client_idx/i)
+    expect(byClient.text.replace(/\s+/g, ' ').trim()).toBe(
+      'create index if not exists engagement_letter_sends_client_idx on engagement_letter_sends (client_id)',
+    )
+    // Next to account_credits, after it.
+    expect(fake.indexOf(/create table if not exists engagement_letters\b/i)).toBeGreaterThan(
+      fake.indexOf(/create index if not exists account_credits_client_id_idx/i),
+    )
+  })
+
+  it('saves as an upsert on the id and answers the mapped row', async () => {
+    const fake = letterPool()
+    const store2 = letterStore(fake)
+    const saved = await store2.saveEngagementLetter({ subject: ' S ', emailBody: 'E', letterBody: 'L', updatedBy: 'u1' })
+    const [upsert] = fake.matching(/^insert into engagement_letters /i)
+    expect(upsert.text).toMatch(/on conflict \(id\) do update set subject = excluded\.subject/i)
+    expect(upsert.params).toEqual(['default', 'S', 'E', 'L', 'u1'])
+    expect(saved).toMatchObject({ id: 'default', subject: 'S', emailBody: 'E', letterBody: 'L', updatedBy: 'u1' })
+    expect(saved.updatedAt).toBe('2026-10-08T15:00:00.000Z')
+    await store2.saveEngagementLetter({ subject: 'S2', emailBody: 'E', letterBody: 'L', updatedBy: 'u2' })
+    expect(fake.letters).toHaveLength(1)
+    expect((await store2.getEngagementLetter()).subject).toBe('S2')
+    expect((await letterStore(letterPool()).getEngagementLetter()).subject).toBe('')
+  })
+
+  it('claims with one insert ... on conflict do nothing returning, and reports claimed:false with the first row', async () => {
+    const fake = letterPool()
+    const store2 = letterStore(fake)
+    const args = { clientId: 'c1', templateHash: 'h1', firmDay: '2026-10-08', attempt: 1, subject: 's', recipients: ['a@b.test'], createdBy: 'u' }
+    const first = await store2.claimEngagementLetterSend(args)
+    expect(first.claimed).toBe(true)
+    const [insert] = fake.matching(/^insert into engagement_letter_sends /i)
+    expect(insert.text).toMatch(/'sending'.* on conflict do nothing returning /i)
+    expect(insert.params[7]).toBe('s')
+    expect(JSON.parse(insert.params[6])).toEqual(['a@b.test'])
+
+    const second = await store2.claimEngagementLetterSend(args)
+    expect(second.claimed).toBe(false)
+    expect(second.send.id).toBe(first.send.id)
+    expect(fake.sends).toHaveLength(1)
+  })
+
+  it('completes only an open claim, and a failed row can be claimed again', async () => {
+    const fake = letterPool()
+    const store2 = letterStore(fake)
+    const args = { clientId: 'c1', templateHash: 'h1', firmDay: '2026-10-08', attempt: 1 }
+    const { send } = await store2.claimEngagementLetterSend(args)
+    const failed = await store2.completeEngagementLetterSend(send.id, { ok: false, error: 'boom' })
+    expect(failed).toMatchObject({ status: 'failed', error: 'boom' })
+    expect(await store2.completeEngagementLetterSend(send.id, { ok: true })).toBeNull()
+    expect((await store2.claimEngagementLetterSend(args)).claimed).toBe(true)
+    const [update] = fake.matching(/^update engagement_letter_sends /i)
+    expect(update.text).toMatch(/where id = \$1 and status = 'sending'/i)
+  })
+
+  it('numbers the next attempt and lists newest first', async () => {
+    const fake = letterPool()
+    const store2 = letterStore(fake)
+    const key = { clientId: 'c1', templateHash: 'h1', firmDay: '2026-10-08' }
+    expect(await store2.nextEngagementLetterAttempt(key)).toBe(1)
+    await store2.claimEngagementLetterSend({ ...key, attempt: 1 })
+    expect(await store2.nextEngagementLetterAttempt(key)).toBe(2)
+    await store2.claimEngagementLetterSend({ ...key, attempt: 2 })
+    const listed = await store2.listEngagementLetterSends({ clientId: 'c1' })
+    expect(listed.map((row) => row.attempt)).toEqual([2, 1])
+    const [select] = fake.matching(/^select .* from engagement_letter_sends where letter_id = \$1 and client_id = \$2 order by created_at desc, id desc$/i)
+    expect(select).toBeTruthy()
+  })
+
+  it('answers a refused claim with the blocking row and its status, sending or sent', async () => {
+    const fake = letterPool()
+    const store2 = letterStore(fake)
+    const args = { clientId: 'c1', templateHash: 'h1', firmDay: '2026-10-08', attempt: 1 }
+    const first = await store2.claimEngagementLetterSend(args)
+    const open = await store2.claimEngagementLetterSend(args)
+    expect(open).toMatchObject({ claimed: false, send: { id: first.send.id, status: 'sending' } })
+    await store2.completeEngagementLetterSend(first.send.id, { ok: true, providerId: 're_1' })
+    const done = await store2.claimEngagementLetterSend(args)
+    expect(done).toMatchObject({ claimed: false, send: { id: first.send.id, status: 'sent' } })
+    // The follow-up read asks for every non-failed row on the key, status included in the columns.
+    const [existing] = fake.matching(/where letter_id = \$1 and client_id = \$2 and template_hash = \$3 and firm_day = \$4 and attempt = \$5 and status <> 'failed'$/i)
+    expect(existing.text).toMatch(/^select id, letter_id, client_id, template_hash, firm_day, attempt, status, recipients/i)
+  })
+
+  it('orders the send log newest first in the statement itself, with and without a client', async () => {
+    const fake = letterPool()
+    const store2 = letterStore(fake)
+    await store2.listEngagementLetterSends()
+    await store2.listEngagementLetterSends({ clientId: 'c1' })
+    const lists = fake.matching(/^select .* from engagement_letter_sends where letter_id = \$1/i)
+    expect(lists.map((s) => s.text.replace(/^select .* from /i, 'select ... from '))).toEqual([
+      'select ... from engagement_letter_sends where letter_id = $1 order by created_at desc, id desc',
+      'select ... from engagement_letter_sends where letter_id = $1 and client_id = $2 order by created_at desc, id desc',
+    ])
+    expect(lists[0].params).toEqual(['default'])
+    expect(lists[1].params).toEqual(['default', 'c1'])
+  })
+
+  it('is never deleted from: not in write(), not in the lock list, not anywhere in the store', async () => {
+    expect(BULK_SAVE_LOCK_TABLES.join(',')).not.toMatch(/engagement_letter/i)
+    const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
+    expect(source).not.toMatch(/delete from engagement_letter/i)
+    expect(source).not.toMatch(/truncate[^\n]*engagement_letter/i)
+    const start = source.indexOf('  async write(data, {')
+    const end = source.indexOf('Fingerprint of everything the bulk save can destroy', start)
+    expect(start).toBeGreaterThan(-1)
+    expect(source.slice(start, end)).not.toMatch(/engagement_letter/i)
+
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace())
+    expect(fake.statements.filter((s) => /engagement_letter/i.test(s.text))).toEqual([])
+  })
+})

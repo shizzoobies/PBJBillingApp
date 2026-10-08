@@ -1443,6 +1443,70 @@ const ACCOUNT_CREDIT_CHANGED_MESSAGE =
 const ACCOUNT_CREDIT_SELECT_COLUMNS = `id, client_id, amount, source_kind, source_ref, for_period,
           note, created_by, created_at, voided_at, voided_by`
 
+// ---- Engagement letters (featreq-5e195707) --------------------------------
+// The saved template and the per-client send log: endpoint-managed, no foreign
+// keys, never deleted from. See the section of methods on AppDataStore.
+const ENGAGEMENT_LETTER_SUBJECT_MAX = 200
+const ENGAGEMENT_LETTER_BODY_MAX = 20000
+const ENGAGEMENT_LETTER_COLUMNS = `id, name, subject, email_body, letter_body, updated_by,
+          created_at, updated_at`
+const ENGAGEMENT_SEND_COLUMNS = `id, letter_id, client_id, template_hash, firm_day, attempt, status,
+          recipients, subject, provider_id, error, delivery, created_by, created_at, completed_at`
+
+function emptyEngagementLetter(id = 'default') {
+  return {
+    id,
+    name: 'Engagement letter',
+    subject: '',
+    emailBody: '',
+    letterBody: '',
+    updatedBy: null,
+    createdAt: null,
+    updatedAt: null,
+  }
+}
+
+function mapEngagementLetterRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    subject: row.subject ?? '',
+    emailBody: row.email_body ?? '',
+    letterBody: row.letter_body ?? '',
+    updatedBy: row.updated_by ?? null,
+    createdAt: isoOrNull(row.created_at),
+    updatedAt: isoOrNull(row.updated_at),
+  }
+}
+
+function mapEngagementSendRow(row) {
+  let recipients = row.recipients
+  if (typeof recipients === 'string') {
+    try {
+      recipients = JSON.parse(recipients)
+    } catch {
+      recipients = []
+    }
+  }
+  return {
+    id: row.id,
+    letterId: row.letter_id,
+    clientId: row.client_id,
+    templateHash: row.template_hash,
+    firmDay: row.firm_day,
+    attempt: Number(row.attempt),
+    status: row.status,
+    recipients: Array.isArray(recipients) ? recipients : [],
+    subject: row.subject ?? '',
+    providerId: row.provider_id ?? null,
+    error: row.error ?? null,
+    delivery: row.delivery ?? null,
+    createdBy: row.created_by ?? null,
+    createdAt: isoOrNull(row.created_at),
+    completedAt: isoOrNull(row.completed_at),
+  }
+}
+
 /**
  * One credit as the app reads it, on either backend. `draws` are what non-void
  * invoices have drawn from it ({ invoiceId, invoiceNumber, period, amount }) and
@@ -7398,6 +7462,52 @@ export class AppDataStore {
       `)
       await this.pool.query(`
         create index if not exists account_credits_client_id_idx on account_credits (client_id)
+      `)
+      // Engagement letters (featreq-5e195707, docs/plans/engagement-letters-2026-10.md).
+      // Two endpoint-managed tables, NO foreign keys, neither in the bulk save's
+      // lock list or fingerprint: a bulk save deletes and re-inserts clients and
+      // can never touch a saved letter or a send. `engagement_letter_sends` is
+      // also the double-send guard: the partial unique index lets one non-failed
+      // claim per (letter, client, template, firm day, attempt) exist, and the
+      // send route INSERTS the claim before the provider call.
+      await this.pool.query(`
+        create table if not exists engagement_letters (
+          id text primary key,                       -- 'default' in v1; more letters later
+          name text not null default 'Engagement letter',
+          subject text not null default '',
+          email_body text not null default '',
+          letter_body text not null default '',
+          updated_by text,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`
+        create table if not exists engagement_letter_sends (
+          id text primary key,
+          letter_id text not null,
+          client_id text not null,                   -- no FK, like account_credits
+          template_hash text not null,
+          firm_day text not null,                    -- 'YYYY-MM-DD' on the firm's calendar
+          attempt int not null default 1,
+          status text not null default 'sending' check (status in ('sending', 'sent', 'failed')),
+          recipients jsonb not null default '[]'::jsonb,
+          subject text not null default '',
+          provider_id text,
+          error text,
+          delivery text,                             -- v1.5: delivered | bounced | complained | delayed
+          created_by text,
+          created_at timestamptz not null default now(),
+          completed_at timestamptz
+        )
+      `)
+      await this.pool.query(`
+        create unique index if not exists engagement_letter_sends_once_idx
+          on engagement_letter_sends (letter_id, client_id, template_hash, firm_day, attempt)
+          where status <> 'failed'
+      `)
+      await this.pool.query(`
+        create index if not exists engagement_letter_sends_client_idx on engagement_letter_sends (client_id)
       `)
       // ---- RATE HISTORY (docs/plans/rate-history-2026-09.md) ----
       //
@@ -25431,6 +25541,236 @@ export class AppDataStore {
     const removed = authState.clientNotes.length < before
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return removed
+  }
+
+  // ---- Engagement letters (featreq-5e195707) ----
+  //
+  // One saved template (the singleton row 'default') and one row per attempt to
+  // send it to a client. Endpoint-managed like client_notes: NOT part of the bulk
+  // /api/app-data write, no foreign keys, never deleted from, so an autosave or a
+  // client re-insert can neither roll a letter back nor forget what was sent.
+  // Stored in auth-state (`engagementLetters` / `engagementLetterSends`) on the
+  // file backend. The send log is also the double-send guard: a claim row is
+  // INSERTED before the provider call and only one non-failed claim per
+  // (letter, client, template hash, firm day, attempt) can exist.
+
+  /**
+   * The ONE read-modify-write on the file backend's engagement letters. Raw fs
+   * calls only, in a single queue slot (`readJson` / `writeFile` enqueue behind
+   * this very slot and would deadlock, and two slots would let a second claim land
+   * between the check and the write). `mutate(authState)` returns
+   * `{ result, changed }`.
+   */
+  async _mutateLetterFile(mutate) {
+    return enqueueFileOperation(localAuthPath, async () => {
+      const authState = existsSync(localAuthPath)
+        ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+        : {}
+      if (!Array.isArray(authState.engagementLetters)) authState.engagementLetters = []
+      if (!Array.isArray(authState.engagementLetterSends)) authState.engagementLetterSends = []
+      const { result, changed } = mutate(authState)
+      if (changed) await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return result
+    })
+  }
+
+  /** The saved letter, or an empty one (never null) when none was saved yet. */
+  async getEngagementLetter(id = 'default') {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select ${ENGAGEMENT_LETTER_COLUMNS} from engagement_letters where id = $1`,
+        [id],
+      )
+      return result.rows.length > 0 ? mapEngagementLetterRow(result.rows[0]) : emptyEngagementLetter(id)
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const list = Array.isArray(authState.engagementLetters) ? authState.engagementLetters : []
+    const found = list.find((row) => row?.id === id)
+    return found ? { ...emptyEngagementLetter(id), ...found } : emptyEngagementLetter(id)
+  }
+
+  /** Save the letter (an upsert). Trimmed; the subject is capped at 200 characters, each body at 20,000. */
+  async saveEngagementLetter({ id = 'default', subject, emailBody, letterBody, updatedBy = null } = {}) {
+    const fields = {
+      subject: String(subject ?? '').trim().slice(0, ENGAGEMENT_LETTER_SUBJECT_MAX),
+      emailBody: String(emailBody ?? '').trim().slice(0, ENGAGEMENT_LETTER_BODY_MAX),
+      letterBody: String(letterBody ?? '').trim().slice(0, ENGAGEMENT_LETTER_BODY_MAX),
+    }
+    if (this.pool) {
+      const result = await this.pool.query(
+        `insert into engagement_letters (id, subject, email_body, letter_body, updated_by)
+         values ($1, $2, $3, $4, $5)
+         on conflict (id) do update set
+           subject = excluded.subject,
+           email_body = excluded.email_body,
+           letter_body = excluded.letter_body,
+           updated_by = excluded.updated_by,
+           updated_at = now()
+         returning ${ENGAGEMENT_LETTER_COLUMNS}`,
+        [id, fields.subject, fields.emailBody, fields.letterBody, updatedBy],
+      )
+      return mapEngagementLetterRow(result.rows[0])
+    }
+    return this._mutateLetterFile((authState) => {
+      const at = authState.engagementLetters.findIndex((row) => row?.id === id)
+      const now = nowIso()
+      const row =
+        at >= 0
+          ? { ...authState.engagementLetters[at], ...fields, updatedBy, updatedAt: now }
+          : { ...emptyEngagementLetter(id), ...fields, updatedBy, createdAt: now, updatedAt: now }
+      if (at >= 0) authState.engagementLetters[at] = row
+      else authState.engagementLetters.push(row)
+      return { result: { ...row }, changed: true }
+    })
+  }
+
+  /** Send-log rows for a letter, newest first; one client's when `clientId` is given. */
+  async listEngagementLetterSends({ letterId = 'default', clientId = null } = {}) {
+    if (this.pool) {
+      const params = [letterId]
+      let where = 'letter_id = $1'
+      if (clientId) {
+        params.push(clientId)
+        where += ' and client_id = $2'
+      }
+      const result = await this.pool.query(
+        `select ${ENGAGEMENT_SEND_COLUMNS} from engagement_letter_sends
+          where ${where} order by created_at desc, id desc`,
+        params,
+      )
+      return result.rows.map(mapEngagementSendRow)
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const list = Array.isArray(authState.engagementLetterSends) ? authState.engagementLetterSends : []
+    return list
+      .filter((row) => row?.letterId === letterId && (!clientId || row.clientId === clientId))
+      .map((row, index) => ({ row, index }))
+      .sort((a, b) => String(b.row.createdAt).localeCompare(String(a.row.createdAt)) || b.index - a.index)
+      .map(({ row }) => ({ ...row, recipients: [...(row.recipients ?? [])] }))
+  }
+
+  /**
+   * The attempt number "Send again" claims: one past the highest attempt already
+   * logged for this letter, client, template and firm day (failed rows count), or 1.
+   */
+  async nextEngagementLetterAttempt({ letterId = 'default', clientId, templateHash, firmDay }) {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select coalesce(max(attempt), 0) + 1 as next from engagement_letter_sends
+          where letter_id = $1 and client_id = $2 and template_hash = $3 and firm_day = $4`,
+        [letterId, clientId, templateHash, firmDay],
+      )
+      return Number(result.rows[0]?.next) || 1
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const list = Array.isArray(authState.engagementLetterSends) ? authState.engagementLetterSends : []
+    const attempts = list
+      .filter(
+        (row) =>
+          row?.letterId === letterId &&
+          row.clientId === clientId &&
+          row.templateHash === templateHash &&
+          row.firmDay === firmDay,
+      )
+      .map((row) => Number(row.attempt) || 0)
+    return Math.max(0, ...attempts) + 1
+  }
+
+  /**
+   * Take the right to send this letter to this client. Inserted BEFORE the
+   * provider call; `{ claimed: false, send }` means a non-failed claim already
+   * exists for the same (letter, client, template, firm day, attempt) - already
+   * sent, or being sent - and `send` is that row. A failed row never blocks a
+   * retry.
+   */
+  async claimEngagementLetterSend({
+    letterId = 'default',
+    clientId,
+    templateHash,
+    firmDay,
+    attempt = 1,
+    subject = '',
+    recipients = [],
+    createdBy = null,
+  }) {
+    const id = `els-${randomUUID().slice(0, 8)}`
+    const list = (Array.isArray(recipients) ? recipients : []).map(String)
+    if (this.pool) {
+      const inserted = await this.pool.query(
+        `insert into engagement_letter_sends
+           (id, letter_id, client_id, template_hash, firm_day, attempt, status, recipients, subject, created_by)
+         values ($1, $2, $3, $4, $5, $6, 'sending', $7::jsonb, $8, $9)
+         on conflict do nothing
+         returning ${ENGAGEMENT_SEND_COLUMNS}`,
+        [id, letterId, clientId, templateHash, firmDay, attempt, JSON.stringify(list), subject, createdBy],
+      )
+      if (inserted.rows.length > 0) return { claimed: true, send: mapEngagementSendRow(inserted.rows[0]) }
+      const existing = await this.pool.query(
+        `select ${ENGAGEMENT_SEND_COLUMNS} from engagement_letter_sends
+          where letter_id = $1 and client_id = $2 and template_hash = $3 and firm_day = $4
+            and attempt = $5 and status <> 'failed'`,
+        [letterId, clientId, templateHash, firmDay, attempt],
+      )
+      return {
+        claimed: false,
+        send: existing.rows.length > 0 ? mapEngagementSendRow(existing.rows[0]) : null,
+      }
+    }
+    return this._mutateLetterFile((authState) => {
+      const blocker = authState.engagementLetterSends.find(
+        (row) =>
+          row?.letterId === letterId &&
+          row.clientId === clientId &&
+          row.templateHash === templateHash &&
+          row.firmDay === firmDay &&
+          row.attempt === attempt &&
+          row.status !== 'failed',
+      )
+      if (blocker) return { result: { claimed: false, send: { ...blocker } }, changed: false }
+      const row = {
+        id,
+        letterId,
+        clientId,
+        templateHash,
+        firmDay,
+        attempt,
+        status: 'sending',
+        recipients: list,
+        subject: String(subject ?? ''),
+        providerId: null,
+        error: null,
+        delivery: null,
+        createdBy,
+        createdAt: nowIso(),
+        completedAt: null,
+      }
+      authState.engagementLetterSends.push(row)
+      return { result: { claimed: true, send: { ...row } }, changed: true }
+    })
+  }
+
+  /** Close a claim: `ok` -> sent (with the provider's id), otherwise failed (with the reason). Null when no open claim has that id. */
+  async completeEngagementLetterSend(id, { ok, providerId = null, error = null } = {}) {
+    const status = ok ? 'sent' : 'failed'
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update engagement_letter_sends
+            set status = $2, provider_id = $3, error = $4, completed_at = now()
+          where id = $1 and status = 'sending'
+          returning ${ENGAGEMENT_SEND_COLUMNS}`,
+        [id, status, providerId, ok ? null : String(error ?? '').slice(0, 1000) || null],
+      )
+      return result.rows.length > 0 ? mapEngagementSendRow(result.rows[0]) : null
+    }
+    return this._mutateLetterFile((authState) => {
+      const row = authState.engagementLetterSends.find((entry) => entry?.id === id && entry.status === 'sending')
+      if (!row) return { result: null, changed: false }
+      row.status = status
+      row.providerId = providerId
+      row.error = ok ? null : String(error ?? '').slice(0, 1000) || null
+      row.completedAt = nowIso()
+      return { result: { ...row }, changed: true }
+    })
   }
 
   // ---- Statement dates box: reference-only per-client account/day list ----
