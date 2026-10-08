@@ -1430,6 +1430,14 @@ const ACCOUNT_CREDIT_PREPAID_SQL = `select id, number, period, status, paid_at, 
 const ACCOUNT_CREDIT_PREPAID_HOLDERS_SQL = `select distinct client_id from invoices
           where status = 'paid' and kind = 'monthly'
             and jsonb_path_exists(line_items, '$[*] ? (@.kind == "prepayment")')`
+/**
+ * The refund / dispute notices the Stripe webhook leaves on invoice logs (kind
+ * `payment`, event `credit-reversal`), read ONLY when a ledger holds a stored
+ * double-payment credit (rare), so every other client's ledger read is unchanged.
+ * A jsonb containment test: only the few invoices that carry a notice come back.
+ */
+const ACCOUNT_CREDIT_REVERSALS_SQL = `select email_log from invoices
+          where email_log @> '[{"kind":"payment","event":"credit-reversal"}]'::jsonb`
 const ACCOUNT_CREDIT_CHANGED_MESSAGE =
   'The credit on account changed while this was saving, so nothing was changed. Try again.'
 const ACCOUNT_CREDIT_SELECT_COLUMNS = `id, client_id, amount, source_kind, source_ref, for_period,
@@ -1485,6 +1493,59 @@ function accountCreditRowOf(row) {
 
 function mapAccountCreditRow(row) {
   return accountCreditView(accountCreditRowOf(row))
+}
+
+/**
+ * A double-payment credit whose payment was refunded or disputed in Stripe carries
+ * `reversal` ({ kind, at, amount, reason, holds, ... }): the NEWEST `credit-reversal`
+ * entry on the logs `entries` for its PaymentIntent. A part-refund adds `partial`
+ * and `chargeAmount` (dollars); a closed dispute is kind 'dispute-closed' with
+ * Stripe's `status`. `holds` is `creditReversalHolds` over ALL the payment's notes:
+ * any refund holds for good (and the card keeps the refund line whatever a later
+ * dispute says); otherwise a dispute holds unless the latest one closed won or
+ * warning_closed. Generation will not draw a credit that holds. Credits with no
+ * notice, and every other kind, come back untouched. Pure.
+ */
+function withReversalNotices(ledger, entries) {
+  const byIntent = new Map()
+  for (const entry of entries) {
+    if (entry?.kind !== 'payment' || entry?.event !== CREDIT_REVERSAL_EVENT || !entry.paymentIntentId) continue
+    const list = byIntent.get(entry.paymentIntentId)
+    if (list) list.push(entry)
+    else byIntent.set(entry.paymentIntentId, [entry])
+  }
+  if (byIntent.size === 0) return ledger
+  const newest = (list) =>
+    list.reduce((best, entry) => (!best || String(entry.at ?? '') >= String(best.at ?? '') ? entry : best), null)
+  return ledger.map((credit) => {
+    const notices = credit.sourceKind === 'overpayment' ? byIntent.get(credit.sourceRef) : null
+    if (!notices) return credit
+    // ANY refund note holds the credit for good (the money went back to the client,
+    // whatever a later dispute says) and the card keeps the refund line; with no
+    // refund the newest note shows and a dispute holds unless it closed won.
+    const { refunded, holds } = creditReversalHolds(notices)
+    const entry = newest(refunded ? notices.filter((logged) => logged.noticeKind === 'refund') : notices)
+    const kind =
+      entry.noticeKind === 'dispute' || entry.noticeKind === 'dispute-closed' ? entry.noticeKind : 'refund'
+    const status = kind === 'dispute-closed' ? String(entry.status ?? '') : ''
+    return {
+      ...credit,
+      reversal: {
+        kind,
+        at: entry.at ?? null,
+        amount: Number.isFinite(entry.cents) ? entry.cents / 100 : null,
+        reason: String(entry.reason ?? ''),
+        ...(entry.partial === true
+          ? {
+              partial: true,
+              chargeAmount: Number.isFinite(entry.chargeCents) ? entry.chargeCents / 100 : null,
+            }
+          : {}),
+        ...(kind === 'dispute-closed' ? { status } : {}),
+        holds,
+      },
+    }
+  })
 }
 
 /**
@@ -3057,11 +3118,17 @@ function recomputeInvoiceMoney(lineItems) {
  * GENERATION ONLY SPENDS CREDIT THAT IS DUE: one with no month, or meant for this
  * invoice's month or an earlier one. Credit meant for a LATER month is left on
  * account for that month's run; the owner's manual Apply can still take it.
+ *
+ * It also never spends a credit whose payment was refunded or disputed in Stripe
+ * (`reversal.holds`): that money may be gone, so the app does not spend it on its
+ * own. Manual Apply is still allowed. A dispute that was won stops holding.
  */
 function withGeneratedAccountCredit(record, ledger) {
   const plan = planAccountCreditDraws({
     lines: record.lineItems,
-    credits: ledger.filter((credit) => !credit.forPeriod || credit.forPeriod <= record.period),
+    credits: ledger.filter(
+      (credit) => (!credit.forPeriod || credit.forPeriod <= record.period) && !credit.reversal?.holds,
+    ),
     invoiceId: record.id,
     period: record.period,
   })
@@ -17517,7 +17584,7 @@ export class AppDataStore {
       )
       const drawn = await runner.query(ACCOUNT_CREDIT_DRAWN_SQL, [clientId])
       const prepaid = await runner.query(ACCOUNT_CREDIT_PREPAID_SQL, [clientId])
-      return accountCreditsWithDraws(
+      const ledger = accountCreditsWithDraws(
         withDerivedCredits(
           credits.rows.map(accountCreditRowOf),
           derivedPrepaymentCredits(
@@ -17539,15 +17606,24 @@ export class AppDataStore {
           lineItems: Array.isArray(row.line_items) ? row.line_items : [],
         })),
       )
+      if (!credits.rows.some((row) => row.source_kind === 'overpayment')) return ledger
+      const notices = await runner.query(ACCOUNT_CREDIT_REVERSALS_SQL)
+      return withReversalNotices(
+        ledger,
+        notices.rows.flatMap((row) => (Array.isArray(row.email_log) ? row.email_log : [])),
+      )
     }
     const workspace = data ?? (await readJson(localDataPath))
     const own = (workspace.invoices ?? []).filter((invoice) => invoice.clientId === clientId)
-    return accountCreditsWithDraws(
-      withDerivedCredits(
-        (workspace.accountCredits ?? []).filter((row) => row.clientId === clientId),
-        derivedPrepaymentCredits(clientId, own),
-      ),
+    const stored = (workspace.accountCredits ?? []).filter((row) => row.clientId === clientId)
+    const ledger = accountCreditsWithDraws(
+      withDerivedCredits(stored, derivedPrepaymentCredits(clientId, own)),
       own,
+    )
+    if (!stored.some((row) => row.sourceKind === 'overpayment')) return ledger
+    return withReversalNotices(
+      ledger,
+      (workspace.invoices ?? []).flatMap((invoice) => (Array.isArray(invoice.emailLog) ? invoice.emailLog : [])),
     )
   }
 

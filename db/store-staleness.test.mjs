@@ -1386,6 +1386,13 @@ function fakePostgres({
     ) {
       return { rows: invoices.filter((invoice) => invoice.period === params?.[0]) }
     }
+    if (/^select email_log from invoices where email_log @> '\[\{"kind":"payment","event":"credit-reversal"\}\]'::jsonb$/i.test(compact)) {
+      return {
+        rows: invoices
+          .filter((invoice) => (invoice.email_log ?? []).some((entry) => entry?.event === 'credit-reversal'))
+          .map((invoice) => ({ email_log: invoice.email_log })),
+      }
+    }
     if (/^select .* from account_credits where id = \$1$/i.test(compact)) {
       return { rows: creditRows().filter((row) => row.id === params?.[0]) }
     }
@@ -43615,6 +43622,119 @@ describe('generation draws credit on account (file backend)', () => {
     expect(lineOf(invoice).label).toBe('Credit on account')
   })
 
+  describe('a credit whose payment was refunded or disputed in Stripe', () => {
+    const note = (over = {}) => ({
+      kind: 'payment',
+      event: 'credit-reversal',
+      at: '2026-10-08T12:00:00.000Z',
+      paymentIntentId: 'pi_held',
+      creditId: 'x',
+      noticeKind: 'refund',
+      cents: 100000,
+      reason: '',
+      eventId: 'evt_1',
+      ...over,
+    })
+    const carrier = (log) => ({
+      id: 'inv-old',
+      clientId: 'c1',
+      kind: 'monthly',
+      period: '2026-09',
+      number: 'INV-2026-09-001',
+      status: 'paid',
+      lineItems: [{ kind: 'plan', label: 'Acme monthly service', detail: '', amount: 600 }],
+      subtotal: 600,
+      total: 600,
+      emailLog: log,
+      createdAt: '2026-09-01T00:00:00.000Z',
+      updatedAt: '2026-09-01T00:00:00.000Z',
+    })
+
+    it('is NOT drawn at generation, while a clean credit beside it is; the held one stays on account', async () => {
+      await seed([flat('c1', 'Acme', 600)])
+      const held = await credit('c1', 1000, { sourceKind: 'overpayment', sourceRef: 'pi_held' })
+      const clean = await credit('c1', 100)
+      await editFile((data) => {
+        data.invoices.push(carrier([note()]))
+      })
+
+      const [invoice] = (await store.generateInvoicesForPeriod(period)).created
+
+      expect(lineOf(invoice).draws).toEqual([{ creditId: clean.id, amount: 100 }])
+      expect(invoice.total).toBe(500)
+      const ledger = await store.listAccountCredits('c1')
+      expect(ledger.find((entry) => entry.id === held.id)).toMatchObject({ draws: [], remaining: 1000 })
+    })
+
+    it('a dispute that was WON releases it: the next run draws it again; a dispute that was LOST keeps it held', async () => {
+      await seed([flat('c1', 'Acme', 600)])
+      const held = await credit('c1', 1000, { sourceKind: 'overpayment', sourceRef: 'pi_held' })
+      await editFile((data) => {
+        data.invoices.push(
+          carrier([
+            note({ noticeKind: 'dispute', reason: 'fraudulent' }),
+            note({ noticeKind: 'dispute-closed', status: 'lost', at: '2026-10-09T08:00:00.000Z', eventId: 'evt_l' }),
+          ]),
+        )
+      })
+      const none = (await store.generateInvoicesForPeriod(period)).created[0]
+      expect(lineOf(none)).toBeUndefined()
+
+      await editFile((data) => {
+        data.invoices
+          .find((invoice) => invoice.id === 'inv-old')
+          .emailLog.push(note({ noticeKind: 'dispute-closed', status: 'won', at: '2026-10-12T08:00:00.000Z', eventId: 'evt_w' }))
+      })
+      const [next] = (await store.generateInvoicesForPeriod('2026-11')).created
+      expect(lineOf(next).draws).toEqual([{ creditId: held.id, amount: 600 }])
+    })
+
+    it('a refund holds it for good: refund, dispute, dispute WON is still not drawn', async () => {
+      await seed([flat('c1', 'Acme', 600)])
+      await credit('c1', 1000, { sourceKind: 'overpayment', sourceRef: 'pi_held' })
+      await editFile((data) => {
+        data.invoices.push(
+          carrier([
+            note({ noticeKind: 'refund', at: '2026-10-08T10:00:00.000Z', eventId: 'e1' }),
+            note({ noticeKind: 'dispute', at: '2026-10-09T10:00:00.000Z', eventId: 'e2' }),
+            note({ noticeKind: 'dispute-closed', status: 'won', at: '2026-10-12T10:00:00.000Z', eventId: 'e3' }),
+          ]),
+        )
+      })
+      const [invoice] = (await store.generateInvoicesForPeriod(period)).created
+      expect(lineOf(invoice)).toBeUndefined()
+      expect(invoice.total).toBe(600)
+    })
+
+    it('an inquiry closed as warning_closed releases it like a won dispute', async () => {
+      await seed([flat('c1', 'Acme', 600)])
+      const held = await credit('c1', 1000, { sourceKind: 'overpayment', sourceRef: 'pi_held' })
+      await editFile((data) => {
+        data.invoices.push(
+          carrier([
+            note({ noticeKind: 'dispute', at: '2026-10-08T10:00:00.000Z', eventId: 'e1' }),
+            note({ noticeKind: 'dispute-closed', status: 'warning_closed', at: '2026-10-09T10:00:00.000Z', eventId: 'e2' }),
+          ]),
+        )
+      })
+      const [invoice] = (await store.generateInvoicesForPeriod(period)).created
+      expect(lineOf(invoice).draws).toEqual([{ creditId: held.id, amount: 600 }])
+    })
+
+    it('manual Apply still takes it', async () => {
+      await seed([flat('c1', 'Acme', 600)])
+      const held = await credit('c1', 1000, { sourceKind: 'overpayment', sourceRef: 'pi_held' })
+      await editFile((data) => {
+        data.invoices.push(carrier([note()]))
+      })
+      const [invoice] = (await store.generateInvoicesForPeriod(period)).created
+      expect(lineOf(invoice)).toBeUndefined()
+
+      const applied = await store.applyAccountCreditToInvoice(invoice.id)
+      expect(lineOf(applied).draws).toEqual([{ creditId: held.id, amount: 600 }])
+    })
+  })
+
   it('says "meant for <Month>" when every credit it draws was recorded for that month', async () => {
     await seed([flat('c1', 'Acme')])
     await credit('c1', 100, { forPeriod: period })
@@ -44073,6 +44193,78 @@ describe('generation draws credit on account (Postgres statements)', () => {
     expect(locks.map((lock) => lock.params[0])).toEqual(['account_credit:c1'])
     const lines = JSON.parse(inserts(fake)[0].params[6])
     expect(lines.find((line) => line.kind === 'account_credit').draws).toEqual([{ creditId: 'credit-m', amount: 150 }])
+  })
+
+  it('does not draw a credit whose payment was refunded or disputed (the notice is read under the lock); a won dispute is drawn', async () => {
+    const note = {
+      kind: 'payment',
+      event: 'credit-reversal',
+      at: '2026-10-08T12:00:00.000Z',
+      paymentIntentId: 'pi_held',
+      creditId: 'credit-1',
+      noticeKind: 'dispute',
+      cents: 100000,
+      reason: 'fraudulent',
+      eventId: 'evt_1',
+    }
+    const carrier = (log) => ({
+      id: 'inv-old',
+      client_id: 'c1',
+      period: '2026-09',
+      number: 'INV-OLD',
+      kind: 'monthly',
+      status: 'paid',
+      line_items: [planLine],
+      subtotal: 600,
+      total: 600,
+      email_log: log,
+    })
+    const rows = [creditRow({ source_kind: 'overpayment', source_ref: 'pi_held' })]
+
+    const held = fakePostgres({ filterInvoicesByPeriod: true, accountCreditRows: rows, invoices: [carrier([note])] })
+    await storeFor(held, clientsFor('c1')).generateInvoicesForPeriod(period)
+    const lock = held.indexOf(/^select pg_advisory_xact_lock\(hashtext\(\$1\)\)$/i)
+    const notices = held.statements.findIndex((s, i) => i > lock && /^select email_log from invoices where email_log @>/i.test(s.text.replace(/\s+/g, ' ')))
+    expect(notices).toBeGreaterThan(lock)
+    expect(JSON.parse(inserts(held)[0].params[6])).toHaveLength(1)
+    expect(inserts(held)[0].params[8]).toBe(600)
+
+    const won = fakePostgres({
+      filterInvoicesByPeriod: true,
+      accountCreditRows: rows,
+      invoices: [carrier([note, { ...note, noticeKind: 'dispute-closed', status: 'won', at: '2026-10-12T08:00:00.000Z', eventId: 'evt_w' }])],
+    })
+    await storeFor(won, clientsFor('c1')).generateInvoicesForPeriod(period)
+    expect(JSON.parse(inserts(won)[0].params[6])[1]).toMatchObject({ kind: 'account_credit', amount: -600 })
+
+    // A refund holds for good: refund, dispute, dispute won is NOT drawn.
+    const refundedThenWon = fakePostgres({
+      filterInvoicesByPeriod: true,
+      accountCreditRows: rows,
+      invoices: [
+        carrier([
+          { ...note, noticeKind: 'refund', at: '2026-10-07T12:00:00.000Z', eventId: 'evt_r' },
+          note,
+          { ...note, noticeKind: 'dispute-closed', status: 'won', at: '2026-10-12T08:00:00.000Z', eventId: 'evt_w' },
+        ]),
+      ],
+    })
+    await storeFor(refundedThenWon, clientsFor('c1')).generateInvoicesForPeriod(period)
+    expect(JSON.parse(inserts(refundedThenWon)[0].params[6])).toHaveLength(1)
+
+    // An inquiry closed without a chargeback releases it.
+    const warningClosed = fakePostgres({
+      filterInvoicesByPeriod: true,
+      accountCreditRows: rows,
+      invoices: [carrier([note, { ...note, noticeKind: 'dispute-closed', status: 'warning_closed', at: '2026-10-12T08:00:00.000Z', eventId: 'evt_w' }])],
+    })
+    await storeFor(warningClosed, clientsFor('c1')).generateInvoicesForPeriod(period)
+    expect(JSON.parse(inserts(warningClosed)[0].params[6])[1]).toMatchObject({ kind: 'account_credit', amount: -600 })
+
+    // A clean double-payment credit (no notice anywhere) is drawn as ever.
+    const clean = fakePostgres({ filterInvoicesByPeriod: true, accountCreditRows: rows, invoices: [] })
+    await storeFor(clean, clientsFor('c1')).generateInvoicesForPeriod(period)
+    expect(JSON.parse(inserts(clean)[0].params[6])[1]).toMatchObject({ kind: 'account_credit', amount: -600 })
   })
 
   it('leaves credit meant for a later month undrawn, though the client holds it (lock taken, no line)', async () => {
@@ -44739,6 +44931,131 @@ describe('applyOverpaymentAsCredit and settleDuplicatePaymentMarker (file backen
       expect(await store.recordAccountCreditNotice(credit.id, notice())).toMatchObject({ stored: false, duplicate: false })
     })
 
+    it('the ledger shows the newest notice on its credit, and nothing on a credit without one', async () => {
+      await seed({ invoices: [invoiceRow({ emailLog: [DUPLICATE_MARKER, OTHER_DUPLICATE_MARKER] })] })
+      const { credit } = await apply()
+      const other = (await store.applyOverpaymentAsCredit('inv-1', { paymentIntentId: 'pi_3', cents: 40000 })).credit
+      expect((await store.listAccountCredits('c1')).map((entry) => entry.reversal)).toEqual([undefined, undefined])
+
+      await store.recordAccountCreditNotice(credit.id, notice({ kind: 'refund', at: '2026-10-08T12:00:00.000Z', cents: 1000, eventId: 'evt_1' }))
+      await store.recordAccountCreditNotice(
+        credit.id,
+        notice({ kind: 'refund', at: '2026-10-09T09:30:00.000Z', cents: 41250, eventId: 'evt_2' }),
+      )
+
+      const ledger = await store.listAccountCredits('c1')
+      expect(ledger.find((entry) => entry.id === credit.id).reversal).toEqual({
+        kind: 'refund',
+        at: '2026-10-09T09:30:00.000Z',
+        amount: 412.5,
+        reason: 'requested_by_customer',
+        holds: true,
+      })
+      expect(ledger.find((entry) => entry.id === other.id)).not.toHaveProperty('reversal')
+      // Nothing about the credit's money moved: still counted, still spendable.
+      expect(await store.accountCreditBalance('c1')).toBe(812.5)
+    })
+
+    it('a notice without an amount reads as null, and a manual credit never carries one', async () => {
+      await seed()
+      const { credit } = await apply()
+      const manual = await store.addAccountCredit({ clientId: 'c1', amount: 5, note: 'goodwill' })
+      await store.recordAccountCreditNotice(credit.id, notice({ cents: null, reason: '' }))
+      const ledger = await store.listAccountCredits('c1')
+      expect(ledger.find((entry) => entry.id === credit.id).reversal).toMatchObject({ kind: 'refund', amount: null, reason: '' })
+      expect(ledger.find((entry) => entry.id === manual.id)).not.toHaveProperty('reversal')
+    })
+
+    it('the ledger shows a part-refund with the whole charge, and keeps showing it through later dispute closes', async () => {
+      await seed()
+      const { credit } = await apply()
+      await store.recordAccountCreditNotice(
+        credit.id,
+        notice({ cents: 20000, eventId: 'evt_p', partial: true, chargeCents: 50000, reason: '' }),
+      )
+      expect((await store.listAccountCredits('c1'))[0].reversal).toEqual({
+        kind: 'refund',
+        at: '2026-10-08T12:00:00.000Z',
+        amount: 200,
+        reason: '',
+        partial: true,
+        chargeAmount: 500,
+        holds: true,
+      })
+
+      for (const [eventId, status, at] of [['evt_l', 'lost', '2026-10-10T08:00:00.000Z'], ['evt_w', 'won', '2026-10-11T08:00:00.000Z']]) {
+        await store.recordAccountCreditNotice(credit.id, notice({ kind: 'dispute-closed', at, eventId, status }))
+        const [row] = await store.listAccountCredits('c1')
+        // The refund stays on the card and the credit stays held, whatever the close says.
+        expect(row.reversal).toMatchObject({ kind: 'refund', partial: true, chargeAmount: 500, holds: true })
+      }
+    })
+
+    it('a refund holds for good: refund, then dispute, then dispute WON is still held and the card keeps the refund line', async () => {
+      await seed()
+      const { credit } = await apply()
+      await store.recordAccountCreditNotice(credit.id, notice({ at: '2026-10-08T10:00:00.000Z', eventId: 'e1', cents: 41250 }))
+      await store.recordAccountCreditNotice(
+        credit.id,
+        notice({ kind: 'dispute', at: '2026-10-09T10:00:00.000Z', eventId: 'e2', reason: 'fraudulent' }),
+      )
+      await store.recordAccountCreditNotice(
+        credit.id,
+        notice({ kind: 'dispute-closed', at: '2026-10-12T10:00:00.000Z', eventId: 'e3', status: 'won' }),
+      )
+      const [row] = await store.listAccountCredits('c1')
+      expect(row.reversal).toEqual({
+        kind: 'refund',
+        at: '2026-10-08T10:00:00.000Z',
+        amount: 412.5,
+        reason: 'requested_by_customer',
+        holds: true,
+      })
+    })
+
+    it('a dispute alone: won releases it, and so does an inquiry closed as warning_closed; lost keeps it', async () => {
+      await seed({ invoices: [invoiceRow({ emailLog: [DUPLICATE_MARKER] })] })
+      const { credit } = await apply()
+      await store.recordAccountCreditNotice(credit.id, notice({ kind: 'dispute', at: '2026-10-09T10:00:00.000Z', eventId: 'd1' }))
+      expect((await store.listAccountCredits('c1'))[0].reversal).toMatchObject({ kind: 'dispute', holds: true })
+
+      await store.recordAccountCreditNotice(
+        credit.id,
+        notice({ kind: 'dispute-closed', at: '2026-10-10T10:00:00.000Z', eventId: 'd2', status: 'lost' }),
+      )
+      expect((await store.listAccountCredits('c1'))[0].reversal).toMatchObject({ status: 'lost', holds: true })
+
+      await store.recordAccountCreditNotice(
+        credit.id,
+        notice({ kind: 'dispute-closed', at: '2026-10-11T10:00:00.000Z', eventId: 'd3', status: 'warning_closed' }),
+      )
+      expect((await store.listAccountCredits('c1'))[0].reversal).toMatchObject({ status: 'warning_closed', holds: false })
+    })
+
+    it('a voided credit keeps its notice in the ledger', async () => {
+      await seed()
+      const { credit } = await apply()
+      await store.recordAccountCreditNotice(credit.id, notice())
+      await store.voidAccountCredit(credit.id, 'owner-1')
+      const [row] = await store.listAccountCredits('c1')
+      expect(row).toMatchObject({ id: credit.id, remaining: 0, reversal: { kind: 'refund' } })
+      expect(row.voidedAt).not.toBeNull()
+    })
+
+    it("the master's ledger shows the notice written on its sub's invoice", async () => {
+      await seed({
+        clients: [
+          { id: 'master', name: 'KLC', isBillingMaster: true },
+          { id: 'sub', name: 'Sub Co', billToClientId: 'master' },
+        ],
+        invoices: [invoiceRow({ clientId: 'sub' })],
+      })
+      const { credit } = await apply()
+      await store.recordAccountCreditNotice(credit.id, notice())
+      const [row] = await store.listAccountCredits('master')
+      expect(row.reversal).toMatchObject({ kind: 'refund', amount: 412.5 })
+    })
+
     it('finds the carrying invoice of a billing sub while the credit belongs to the master', async () => {
       await seed({
         clients: [
@@ -44849,6 +45166,16 @@ describe('applyOverpaymentAsCredit and settleDuplicatePaymentMarker (Postgres st
       }
       if (/^select .* from account_credits where id = \$1$/i.test(trimmed)) {
         return { rows: held.filter((row) => row.id === params[0]) }
+      }
+      if (/^select .* from account_credits where client_id = \$1 order by created_at, id$/i.test(trimmed)) {
+        return { rows: held.filter((row) => row.client_id === params[0]) }
+      }
+      if (/^select email_log from invoices where email_log @> /i.test(trimmed)) {
+        const wanted = JSON.parse(text.match(/'(\[.*\])'::jsonb/)[1])
+        const carries = wanted.every((want) =>
+          invoice.email_log.some((entry) => Object.entries(want).every(([key, value]) => entry[key] === value)),
+        )
+        return { rows: carries ? [{ email_log: invoice.email_log }] : [] }
       }
       if (/^select id from invoices where email_log @> \$1::jsonb order by created_at, id limit 1$/i.test(trimmed)) {
         const wanted = JSON.parse(params[0])
@@ -45096,6 +45423,32 @@ describe('applyOverpaymentAsCredit and settleDuplicatePaymentMarker (Postgres st
       const fake = overpaymentPool()
       expect(await pg(fake).recordAccountCreditNotice('nope', notice())).toBeNull()
       expect(fake.matching(/^update invoices/i)).toHaveLength(0)
+    })
+
+    it('the ledger read asks for the notices (one containment select) only when a double-payment credit is held', async () => {
+      const fake = overpaymentPool()
+      const store2 = pg(fake)
+      expect(await store2.listAccountCredits('c1')).toEqual([])
+      expect(fake.matching(/^select email_log from invoices/i)).toHaveLength(0)
+
+      const { credit } = await store2.applyOverpaymentAsCredit('inv-1', args())
+      const [quiet] = await store2.listAccountCredits('c1')
+      expect(quiet).not.toHaveProperty('reversal')
+      const [ask] = fake.matching(/^select email_log from invoices/i)
+      expect(ask.text).toBe(
+        `select email_log from invoices where email_log @> '[{"kind":"payment","event":"credit-reversal"}]'::jsonb`,
+      )
+
+      await store2.recordAccountCreditNotice(credit.id, notice())
+      const [loud] = await store2.listAccountCredits('c1')
+      expect(loud.reversal).toEqual({
+        kind: 'dispute',
+        at: '2026-10-08T12:00:00.000Z',
+        amount: 412.5,
+        reason: 'fraudulent',
+        holds: true,
+      })
+      expect(loud.remaining).toBe(412.5)
     })
 
     it('has nowhere to write when no invoice carries the payment, and says so', async () => {

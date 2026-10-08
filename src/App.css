@@ -13931,6 +13931,13 @@ details.invoice-run-sent ul,
   padding: 0;
 }
 
+.account-credit-reversal {
+  margin-top: 0.2rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--red);
+}
+
 .account-credit-table tr.is-void td {
   color: var(--muted);
   text-decoration: line-through;

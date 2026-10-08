@@ -27,6 +27,54 @@ export function accountCreditSourceText(credit: AccountCredit): string {
 }
 
 /**
+ * The ledger line for a credit whose payment was refunded or disputed in Stripe:
+ * "Refunded in Stripe on Oct 8, 2026 ($412.50)" / "Disputed in Stripe on ... ($412.50,
+ * reason fraudulent)". `date` is the already-formatted day. Empty for a credit with no notice.
+ */
+export function accountCreditReversalText(credit: AccountCredit, date: string): string {
+  const reversal = credit.reversal
+  if (!reversal) return ''
+  const money = (value: number) => value.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
+  const dollars = reversal.amount === null ? '' : money(reversal.amount)
+  const why = reversal.reason.replace(/_/g, ' ')
+  if (reversal.kind === 'dispute-closed') {
+    return `Dispute closed (${(reversal.status ?? '').replace(/_/g, ' ') || 'no result given'}) on ${date}`
+  }
+  if (reversal.kind === 'dispute') {
+    const detail = [dollars, why ? `reason ${why}` : ''].filter(Boolean).join(', ')
+    return `Disputed in Stripe on ${date}${detail ? ` (${detail})` : ''}`
+  }
+  if (reversal.partial) {
+    const whole = reversal.chargeAmount == null ? '' : ` of ${money(reversal.chargeAmount)}`
+    return `Partly refunded in Stripe on ${date}${dollars ? ` (${dollars}${whole})` : ''}`
+  }
+  return `Refunded in Stripe on ${date}${dollars ? ` (${dollars})` : ''}`
+}
+
+/**
+ * The tooltip on a noticed credit's Void button. A used credit that holds is left
+ * to be sorted out by hand (its Void is disabled); an unspent one says why Void is
+ * on offer, and never claims a part-refunded payment was refunded whole. A won
+ * dispute is a normal credit again (no tooltip).
+ */
+export function accountCreditVoidTitle(credit: AccountCredit): string | undefined {
+  const reversal = credit.reversal
+  if (!reversal) return undefined
+  if (reversal.holds && credit.draws.length > 0) {
+    return `${credit.remaining > 0 ? 'Partly' : 'Fully'} used - sort it out by hand`
+  }
+  if (reversal.kind === 'dispute-closed') {
+    if (!reversal.holds) return undefined
+    return reversal.status === 'lost'
+      ? 'Void this credit - the dispute was lost'
+      : 'Void this credit - the dispute was closed'
+  }
+  if (reversal.kind === 'dispute') return 'Void this credit - its payment was disputed'
+  if (reversal.partial) return 'Void this credit - only part of its payment was refunded'
+  return 'Void this credit - its payment was refunded'
+}
+
+/**
  * What a build says about credit on account (stage 1c): the month run draws it onto
  * each new monthly draft by itself, so the note after Generate, a one-client
  * generate and Void & regenerate adds " Credit on account applied: $X on 1 invoice."

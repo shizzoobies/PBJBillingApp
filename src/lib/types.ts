@@ -2450,10 +2450,35 @@ export type AccountCredit = {
   draws: AccountCreditDraw[]
   remaining: number
   /**
+   * Present on a double-payment credit whose payment was refunded or disputed in
+   * Stripe (the webhook's notice, newest wins). `amount` is dollars, null when
+   * Stripe did not say. It changes nothing by itself: the owner voids the credit.
+   */
+  reversal?: AccountCreditReversal
+  /**
    * True on a prepayment credit: derived from a paid invoice's prepayment lines
    * (billing period), never stored, so it has no Void (void the invoice instead).
    */
   derived?: boolean
+}
+
+export type AccountCreditReversal = {
+  kind: 'refund' | 'dispute' | 'dispute-closed'
+  at: string | null
+  amount: number | null
+  /** Stripe's reason in its words (a dispute's reason, a refund's), possibly empty. */
+  reason: string
+  /** A refund of less than the charge; `chargeAmount` is the whole charge in dollars. */
+  partial?: true
+  chargeAmount?: number | null
+  /** A closed dispute's result from Stripe (won, lost, ...). */
+  status?: string
+  /**
+   * True while the notices hold the credit (any refund, or a dispute not closed as
+   * won / warning_closed): automatic draw at generation skips it. Manual Apply is
+   * still allowed.
+   */
+  holds: boolean
 }
 
 /** One invoice's draw on a credit: which invoice (and month), and how much. */

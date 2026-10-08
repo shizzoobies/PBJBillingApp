@@ -8,7 +8,9 @@ import type { AccountCredit } from '../lib/types'
 import {
   accountCreditDrawText,
   accountCreditMonth,
+  accountCreditReversalText,
   accountCreditSourceText,
+  accountCreditVoidTitle,
 } from '../lib/accountCreditText'
 import { autopayDate } from '../lib/autopayText'
 import { currency } from '../lib/utils'
@@ -251,7 +253,22 @@ function AccountCreditLedger({ clientId, retiredName }: { clientId: string; reti
                   <tr key={credit.id} className={isVoid ? 'is-void' : undefined}>
                     <td>{autopayDate(credit.createdAt)}</td>
                     <td>{currency.format(credit.amount)}</td>
-                    <td>{accountCreditSourceText(credit)}</td>
+                    <td>
+                      {accountCreditSourceText(credit)}
+                      {credit.reversal ? (
+                        <div className="account-credit-reversal" data-testid="account-credit-reversal">
+                          {accountCreditReversalText(credit, autopayDate(credit.reversal.at ?? credit.createdAt))}
+                          {!isVoid && credit.reversal.holds && credit.draws.length > 0
+                            ? ` - ${credit.remaining > 0 ? 'partly used' : 'fully used'} - sort out by hand`
+                            : ''}
+                        </div>
+                      ) : null}
+                      {credit.reversal?.holds && !isVoid ? (
+                        <div className="account-credit-reversal" data-testid="account-credit-hold">
+                          Not applied automatically while this stands.
+                        </div>
+                      ) : null}
+                    </td>
                     <td>{credit.forPeriod ? accountCreditMonth(credit.forPeriod) : '—'}</td>
                     <td>{credit.derived ? '—' : credit.note || '—'}</td>
                     <td>
@@ -276,7 +293,8 @@ function AccountCreditLedger({ clientId, retiredName }: { clientId: string; reti
                         <button
                           type="button"
                           className="link-button"
-                          disabled={busy}
+                          disabled={busy || (Boolean(credit.reversal?.holds) && credit.draws.length > 0)}
+                          title={accountCreditVoidTitle(credit)}
                           onClick={() => void voidCredit(credit)}
                         >
                           Void
