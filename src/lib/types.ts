@@ -2555,9 +2555,14 @@ export type LetterTemplateState = {
   /** Snapshot key of the three boxes: Send refuses when it no longer matches the stored letter. */
   hash: string
   placeholders: LetterPlaceholderInfo[]
-  warnings: { unknown: string[] }
+  warnings: { unknown: string[]; retired: string[] }
   /** Who letters come from and who replies reach. */
   sender: { from: string; replyTo: string }
+  /**
+   * Lower-case addresses of the app's user accounts, the reply-to mailbox left out: Send never
+   * mails them, so the client list does not show them either.
+   */
+  teamAddresses: string[]
 }
 
 /** What one client would receive, built by the server with the same code as Send. */
@@ -2575,6 +2580,8 @@ export type LetterPreview = {
   /** The sentence that says why, and what to do (an hourly client has no single fee), or null. */
   missingNote: string | null
   unknown: string[]
+  /** Placeholders the app no longer fills in (Send refuses a letter that still names one). */
+  retired: string[]
   flags: {
     neverEmailed: boolean
     billedOutside: boolean

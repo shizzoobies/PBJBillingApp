@@ -12,7 +12,8 @@ import {
 import type { SaveFlashState } from '../lib/useSaveFlash'
 import { firmToday } from '../../lib/firm-time.js'
 import { invoiceEmailAddressee, resolveInvoiceRecipients } from '../../lib/invoice-recipients.js'
-import { templateWarnings } from '../../lib/letter-template.js'
+import { retiredSentence, templateWarnings } from '../../lib/letter-template.js'
+import { withoutTeamAddresses } from '../../lib/recipient-addresses.js'
 import {
   ApiError,
   type Client,
@@ -57,6 +58,8 @@ type PickerRow = {
   client: Client
   contactName: string
   to: string[]
+  /** How many of the client's addresses are a team member's: Send never uses them. */
+  teamHidden: number
   /** Why this client cannot be picked, or null when it can. */
   blocked: string | null
   pills: string[]
@@ -155,7 +158,7 @@ export function LettersPage() {
   }, [ownerMode, dataRefreshCount, adopt])
 
   const warnings = useMemo(
-    () => templateWarnings({ subject, emailBody, letterBody }).unknown,
+    () => templateWarnings({ subject, emailBody, letterBody }),
     [subject, emailBody, letterBody],
   )
 
@@ -194,6 +197,10 @@ export function LettersPage() {
   /* ---- the picker -------------------------------------------------------- */
 
   const clients = useMemo(() => data.clients ?? [], [data.clients])
+  // The addresses of the app's user accounts (the reply-to mailbox left out) are never mailed.
+  const teamAddresses = state?.teamAddresses
+  const teamSet = useMemo(() => new Set(teamAddresses ?? []), [teamAddresses])
+  const replyTo = state?.sender.replyTo ?? ''
   const contacts = useMemo(() => data.contacts ?? [], [data.contacts])
   const today = firmToday()
 
@@ -208,7 +215,11 @@ export function LettersPage() {
     }
     return clients.map((client): PickerRow => {
       const { addressee, refusal } = invoiceEmailAddressee(client, clients)
-      const to = refusal ? [] : resolveInvoiceRecipients({ client: addressee, contacts }).to
+      const resolved = refusal ? { to: [], details: [] } : resolveInvoiceRecipients({ client: addressee, contacts })
+      // The same filter Send applies, so the list shows the addresses a letter would use.
+      const usable = withoutTeamAddresses(resolved.details, teamSet, replyTo)
+      const to = usable.map((detail) => detail.email)
+      const teamHidden = resolved.details.length - usable.length
       const linked = (client.contactIds ?? [])
         .map((id) => byId.get(id))
         .find((contact) => contact && !contact.archivedAt && contact.name?.trim())
@@ -225,7 +236,7 @@ export function LettersPage() {
 
       let blocked: string | null = null
       if (refusal) blocked = refusal.message
-      else if (to.length === 0) blocked = 'No email on file'
+      else if (to.length === 0) blocked = teamHidden > 0 ? 'Only a team address on file' : 'No email on file'
 
       const sent = lastSentRow.get(client.id)
       const newest = latest.get(client.id)
@@ -246,12 +257,13 @@ export function LettersPage() {
         client,
         contactName: linked?.name?.trim() || client.contact || '',
         to,
+        teamHidden,
         blocked,
         pills,
         lastSent,
       }
     })
-  }, [clients, contacts, sends, nowMs])
+  }, [clients, contacts, sends, nowMs, teamSet, replyTo])
 
   const shown = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -452,9 +464,14 @@ export function LettersPage() {
         <p className="muted-text">{fieldHint('letterBody')}</p>
         {chips('letterBody')}
 
-        {warnings.length > 0 ? (
+        {warnings.unknown.length > 0 ? (
           <p className="form-error" role="status">
-            {unknownSentence(warnings)}
+            {unknownSentence(warnings.unknown)}
+          </p>
+        ) : null}
+        {warnings.retired.length > 0 ? (
+          <p className="form-error" role="status">
+            {`${retiredSentence(warnings.retired)}.`}
           </p>
         ) : null}
         {saveError ? (
@@ -568,7 +585,16 @@ export function LettersPage() {
                     <strong>{row.client.name}</strong>
                     {row.contactName ? <div className="muted-text">{row.contactName}</div> : null}
                   </td>
-                  <td>{row.to.length > 0 ? row.to.join(', ') : <span className="muted-text">No email on file</span>}</td>
+                  <td>
+                    {row.to.length > 0 ? (
+                      row.to.join(', ')
+                    ) : (
+                      <span className="muted-text">{row.teamHidden > 0 ? 'Only a team address on file' : 'No email on file'}</span>
+                    )}
+                    {row.teamHidden > 0 ? (
+                      <div className="muted-text">{`${row.teamHidden} team address${row.teamHidden === 1 ? '' : 'es'} hidden`}</div>
+                    ) : null}
+                  </td>
                   <td>
                     <div className="button-row">
                       {row.pills.map((pill) => (

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { letterPreviewPdfUrl, previewLetterRequest } from '../lib/api'
 import type { LetterPreview } from '../lib/types'
+import { retiredSentence } from '../../lib/letter-template.js'
 import { PREVIEW_FRAME_PREFIX } from './InvoicePreviewModal'
 
 /**
@@ -67,6 +68,9 @@ export function LetterPreviewModal({
       notes.push(
         `Not a placeholder the app fills in: ${preview.unknown.map((key) => `{{${key}}}`).join(', ')}. Send refuses until it is fixed.`,
       )
+    }
+    if (preview.retired.length > 0) {
+      notes.push(`${retiredSentence(preview.retired)}. Send refuses until it is taken out.`)
     }
     if (preview.flags.neverEmailed) {
       notes.push('This client is set to never have invoices emailed. A letter is not an invoice, so it still goes.')

@@ -238,9 +238,24 @@ describe('the send refuses the whole batch before the first client', () => {
     expect(body).toContain(
       'The letter changed since this page loaded. Nothing was sent. Reload and send again.',
     )
-    expect(body).toContain('is not a placeholder the app fills in. Nothing was sent.')
+    expect(body).toContain('is not a placeholder the app fills in')
+    expect(body).toContain('Nothing was sent.')
     expect(body).toContain('Write the email and the letter before sending.')
     expect(body).toContain('Email is not configured yet (no sending address set).')
+  })
+
+  // {{hourly_rate}} can never resolve; a letter that still names it must not go out with a hole in it.
+  it('refuses an unknown OR retired placeholder the same way, before any client is claimed or mailed', () => {
+    const body = route()
+    expect(body).toContain('const { unknown: unknownPlaceholders, retired: retiredPlaceholderKeys } = templateWarnings(context.template)')
+    expect(body).toContain('if (unknownPlaceholders.length > 0 || retiredPlaceholderKeys.length > 0) {')
+    expect(body).toContain('if (retiredPlaceholderKeys.length > 0) sentences.push(retiredSentence(retiredPlaceholderKeys))')
+    expect(body).toContain("error: 'unknown_placeholder',")
+    expect(body).toContain('message: `${sentences.join(\'. \')}. Nothing was sent.`,')
+    expect(at("error: 'unknown_placeholder'")).toBeLessThan(at('await sendLetterBatch('))
+    expect(at('retired: retiredPlaceholderKeys,')).toBeLessThan(at('await sendLetterBatch('))
+    // The preview carries it so the owner sees it before sending.
+    expect(previewRoutes()).toContain('retired: preview.retired,')
   })
 
   it('takes 1 to 50 clients and refuses a body outside that with a 400 before anything else', () => {
@@ -370,7 +385,14 @@ describe('a letter goes to the client and nowhere else (Alex, 2026-10-08)', () =
     // No catch on that read: if the team cannot be read nothing is previewed or sent.
     expect(body.slice(0, body.indexOf('teamEmails:'))).not.toContain('.catch(() => [])')
     // ...and the builder drops those addresses, the reply-to mailbox excepted.
-    expect(previewAssembly()).toContain('teamEmails.has(key) || key === replyTo')
+    expect(previewAssembly()).toContain('withoutTeamAddresses(resolved.details, context.teamEmails, context.replyTo)')
+  })
+
+  it('hands the page the team addresses, reply-to excepted, so the list shows what Send will use', () => {
+    const view = serverHelpers().slice(serverHelpers().indexOf('async function letterTemplateView('))
+    expect(view).toContain('.getTeamMembers()')
+    expect(view).toContain('.catch(() => [])')
+    expect(view).toContain('teamAddresses: teamAddresses.filter((address) => address !== sender.replyTo.toLowerCase()),')
   })
 
   it('names the sender the way an invoice does', () => {
@@ -383,8 +405,8 @@ describe('the shared pieces are the ones the lib tests cover', () => {
   it('imports the filler, the hash and the documents builder', () => {
     expect(serverSource).toMatch(/import \{[^}]*\bassembleLetterPreview\b[^}]*\bsendLetterBatch\b[^}]*\} from '\.\/lib\/letter-send\.js'/)
     expect(libSource).toContain("import { buildLetterDocuments } from './letter-documents.js'")
-    expect(serverSource).toContain(
-      "import { letterPlaceholders, letterTemplateHash, templateWarnings } from './lib/letter-template.js'",
+    expect(serverSource).toMatch(
+      /import \{\s*letterPlaceholders,\s*letterTemplateHash,\s*retiredSentence,\s*templateWarnings,?\s*\} from '\.\/lib\/letter-template\.js'/,
     )
     expect(serverSource).toMatch(/import \{[^}]*\bformatInvoiceSender\b[^}]*\} from '\.\/lib\/notify\.js'/)
   })

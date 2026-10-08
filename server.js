@@ -114,7 +114,12 @@ import {
   assembleLetterPreview,
   sendLetterBatch,
 } from './lib/letter-send.js'
-import { letterPlaceholders, letterTemplateHash, templateWarnings } from './lib/letter-template.js'
+import {
+  letterPlaceholders,
+  letterTemplateHash,
+  retiredSentence,
+  templateWarnings,
+} from './lib/letter-template.js'
 import { buildQuestionnaireEmail } from './lib/proposal-questionnaire-email.js'
 import {
   QUESTIONNAIRE_RESPONSE_HEADERS,
@@ -2505,10 +2510,15 @@ function letterSender(firmSettings) {
 
 /** The saved template as the page reads it: the text, its hash, the placeholders and the sender. */
 async function letterTemplateView() {
-  const [template, firmSettings] = await Promise.all([
+  const [template, firmSettings, teamAddresses] = await Promise.all([
     appDataStore.getEngagementLetter(LETTER_ID),
     appDataStore.getFirmSettings().catch(() => null),
+    appDataStore
+      .getTeamMembers()
+      .then((members) => members.map((member) => String(member.email ?? '').trim().toLowerCase()).filter(Boolean))
+      .catch(() => []),
   ])
+  const sender = letterSender(firmSettings)
   let updatedByName = null
   if (template.updatedBy) {
     try {
@@ -2529,7 +2539,10 @@ async function letterTemplateView() {
     hash: letterTemplateHash(template),
     placeholders: letterPlaceholders,
     warnings: templateWarnings(template),
-    sender: letterSender(firmSettings),
+    sender,
+    // What Send will never mail, so the client list shows the same addresses Send uses. A failed
+    // read only means the list shows what is on file (Send itself fails closed on the same read).
+    teamAddresses: teamAddresses.filter((address) => address !== sender.replyTo.toLowerCase()),
   }
 }
 
@@ -11694,6 +11707,7 @@ const server = createServer(async (request, response) => {
           missing: preview.missing,
           missingNote: preview.missingNote,
           unknown: preview.unknown,
+          retired: preview.retired,
           flags: preview.flags,
           refusal: preview.refusal,
         },
@@ -11804,16 +11818,25 @@ const server = createServer(async (request, response) => {
         })
         return
       }
-      const unknownPlaceholders = templateWarnings(context.template).unknown
-      if (unknownPlaceholders.length > 0) {
+      // An unknown placeholder (a typo) and a retired one ({{hourly_rate}}) are refused alike: the
+      // letter would go out with a hole in a sentence. Nothing has been claimed or sent yet.
+      const { unknown: unknownPlaceholders, retired: retiredPlaceholderKeys } = templateWarnings(context.template)
+      if (unknownPlaceholders.length > 0 || retiredPlaceholderKeys.length > 0) {
         const tokens = unknownPlaceholders.map((key) => `{{${key}}}`)
+        const sentences = []
+        if (tokens.length > 0) {
+          sentences.push(
+            tokens.length > 1
+              ? `${tokens.join(', ')} are not placeholders the app fills in`
+              : `${tokens[0]} is not a placeholder the app fills in`,
+          )
+        }
+        if (retiredPlaceholderKeys.length > 0) sentences.push(retiredSentence(retiredPlaceholderKeys))
         sendJson(response, 409, {
           error: 'unknown_placeholder',
           unknown: unknownPlaceholders,
-          message:
-            tokens.length > 1
-              ? `${tokens.join(', ')} are not placeholders the app fills in. Nothing was sent.`
-              : `${tokens[0]} is not a placeholder the app fills in. Nothing was sent.`,
+          retired: retiredPlaceholderKeys,
+          message: `${sentences.join('. ')}. Nothing was sent.`,
         })
         return
       }

@@ -36,7 +36,11 @@ const PLACEHOLDERS = [
   { key: 'next_year', label: 'Next year', description: 'The coming year.', required: false },
 ]
 
-function templateState(over: Partial<LetterTemplateState['template']> = {}, hash = 'hash-1'): LetterTemplateState {
+function templateState(
+  over: Partial<LetterTemplateState['template']> = {},
+  hash = 'hash-1',
+  teamAddresses: string[] = [],
+): LetterTemplateState {
   return {
     template: {
       subject: 'Your {{next_year}} 1099s',
@@ -49,8 +53,9 @@ function templateState(over: Partial<LetterTemplateState['template']> = {}, hash
     },
     hash,
     placeholders: PLACEHOLDERS,
-    warnings: { unknown: [] },
+    warnings: { unknown: [], retired: [] },
     sender: { from: 'PB&J Strategic Accounting <billing@pbjsa.com>', replyTo: 'brittany@pbjsa.com' },
+    teamAddresses,
   }
 }
 
@@ -213,6 +218,26 @@ describe('the editor', () => {
     expect(screen.getByLabelText('Subject')).toHaveValue('Your {{next_year}} 1099s')
   })
 
+  it('offers a chip for every placeholder the server lists, and none for the retired hourly_rate', async () => {
+    await renderPage()
+    const group = screen.getByRole('group', { name: 'Insert a placeholder into the email' })
+    expect(within(group).getByRole('button', { name: '{{fee}}' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '{{hourly_rate}}' })).not.toBeInTheDocument()
+  })
+
+  it('warns that {{hourly_rate}} is no longer filled in, with the retired wording, and clears it when taken out', async () => {
+    await renderPage()
+    const letter = screen.getByLabelText('Letter body')
+    fireEvent.change(letter, { target: { value: 'At {{hourly_rate}} an hour.' } })
+    expect(
+      screen.getByText('{{hourly_rate}} is no longer filled in - hourly clients have no single rate; take it out.'),
+    ).toBeInTheDocument()
+    // It is not reported as a typo as well.
+    expect(screen.queryByText(/is not a placeholder the app fills in/)).not.toBeInTheDocument()
+    fireEvent.change(letter, { target: { value: 'At our rates.' } })
+    expect(screen.queryByText(/is no longer filled in/)).not.toBeInTheDocument()
+  })
+
   it('replaces a selected range with the placeholder', async () => {
     await renderPage()
     const subject = screen.getByLabelText('Subject') as HTMLInputElement
@@ -255,6 +280,35 @@ describe('the client picker', () => {
     await renderPage()
     expect(screen.queryByText('Onboarding')).not.toBeInTheDocument()
     expect(screen.getByLabelText('Select Onboarding Co')).toBeEnabled()
+  })
+
+  // Send never mails an app user's address, so the list must not show one as if it would.
+  it('shows only the addresses Send will use, and says how many team addresses are hidden', async () => {
+    api.fetchLetterTemplate = vi.fn(async () => templateState({}, 'hash-1', ['alex@ka-performancefl.com']))
+    setClients([
+      { id: 'c-mix', name: 'Mixed Co', contact: '', email: 'pat@mix.test', contactIds: ['ct-a'], lifecycleStage: 'active' },
+      { id: 'c-only', name: 'Only Team Co', contact: '', email: 'Alex Anderson <Alex@KA-Performancefl.com>', contactIds: [], lifecycleStage: 'active' },
+      { id: 'c-reply', name: 'Reply Co', contact: '', email: 'brittany@pbjsa.com', contactIds: [], lifecycleStage: 'active' },
+    ])
+    contextValue = {
+      ...contextValue,
+      data: { ...contextValue.data, contacts: [{ id: 'ct-a', name: 'Al', email: 'pat2@mix.test, Alex@ka-performancefl.com' }] },
+    } as unknown as AppContextValue
+    await renderPage()
+    const mixed = screen.getByText('Mixed Co').closest('tr') as HTMLElement
+    expect(within(mixed).getByText('pat@mix.test')).toBeInTheDocument()
+    expect(within(mixed).queryByText(/alex@/i)).not.toBeInTheDocument()
+    expect(within(mixed).getByText('1 team address hidden')).toBeInTheDocument()
+    expect(within(mixed).getByLabelText('Select Mixed Co')).toBeEnabled()
+
+    const only = screen.getByText('Only Team Co').closest('tr') as HTMLElement
+    expect(within(only).getByText('Only a team address on file')).toBeInTheDocument()
+    expect(within(only).getByText('1 team address hidden')).toBeInTheDocument()
+    expect(within(only).getByLabelText('Select Only Team Co')).toBeDisabled()
+
+    // The reply-to mailbox is the one user address that may stay.
+    const reply = screen.getByText('Reply Co').closest('tr') as HTMLElement
+    expect(within(reply).getByText('brittany@pbjsa.com')).toBeInTheDocument()
   })
 
   it('shows the primary contact under the name and the addresses a send would use', async () => {
@@ -543,6 +597,7 @@ describe('Preview', () => {
       missing: [],
       missingNote: null,
       unknown: [],
+      retired: [],
       flags: { neverEmailed: false, billedOutside: false, inactive: false, billingMasterSub: null },
       refusal: null,
     }
@@ -568,6 +623,7 @@ describe('LetterPreviewModal', () => {
     missing: [],
     missingNote: null,
     unknown: [],
+    retired: [],
     flags: { neverEmailed: false, billedOutside: false, inactive: false, billingMasterSub: null },
     refusal: null,
   }
@@ -608,6 +664,16 @@ describe('LetterPreviewModal', () => {
     expect(screen.getByText('This client is billed through KLC Holdings.')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: 'PDF attachment' }))
     expect(screen.getByText('There is no PDF to show.')).toBeInTheDocument()
+  })
+
+  it('lists a retired placeholder in the notes, with why and that Send refuses', async () => {
+    api.previewLetterRequest = vi.fn(async () => ({ ...base, retired: ['hourly_rate'] }))
+    render(<LetterPreviewModal clientId="c-acme" clientName="Acme Books" onClose={() => {}} />)
+    expect(
+      await screen.findByText(
+        '{{hourly_rate}} is no longer filled in - hourly clients have no single rate; take it out. Send refuses until it is taken out.',
+      ),
+    ).toBeInTheDocument()
   })
 
   it('shows the error when the preview cannot be built, and closes on Escape and on Close', async () => {
