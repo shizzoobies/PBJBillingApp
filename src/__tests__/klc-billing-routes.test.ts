@@ -41,6 +41,11 @@ const serverSource = readFileSync(
   'utf8',
 )
 
+const recipientsSource = readFileSync(
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../lib/invoice-recipients.js'),
+  'utf8',
+)
+
 /** The body of a route block, from its opening guard to the next route match. */
 function routeBlock(startPattern: RegExp, length = 4000): string {
   const at = serverSource.search(startPattern)
@@ -83,7 +88,17 @@ describe('the store’s billing-master types are imported at all', () => {
 })
 
 describe('who a billing master’s invoice is emailed to', () => {
-  const helper = () => functionSource('function invoiceEmailAddressee(', 1200)
+  const helper = () => {
+    // Lives in lib/invoice-recipients.js so the page and the server share ONE rule.
+    const at = recipientsSource.indexOf('export function invoiceEmailAddressee(')
+    expect(at, 'invoiceEmailAddressee is no longer in lib/invoice-recipients.js').toBeGreaterThan(-1)
+    return recipientsSource.slice(at, at + 1200)
+  }
+
+  it('server.js imports it rather than keeping a copy', () => {
+    expect(serverSource).toContain("import { invoiceEmailAddressee, resolveSendRecipients } from './lib/invoice-recipients.js'")
+    expect(serverSource).not.toContain('function invoiceEmailAddressee(')
+  })
 
   it('an ordinary client answers itself, unchanged', () => {
     expect(helper()).toContain(
@@ -115,8 +130,8 @@ describe('who a billing master’s invoice is emailed to', () => {
   // (`MasterInvoiceRecipientBody`) — this sentence points there, and pointed
   // at Alex before that section shipped.
   it('says the same sentence everywhere, and points at a remedy that exists', () => {
-    expect(serverSource).toMatch(
-      /const MASTER_RECIPIENT_UNSET = Object\.freeze\(\{\s*error: 'master_recipient_unset',\s*message:\s*'This master has no receiving company set for its invoices yet — pick one on its client page, under Billing\.',\s*\}\)/,
+    expect(recipientsSource).toMatch(
+      /export const MASTER_RECIPIENT_UNSET = Object\.freeze\(\{\s*error: 'master_recipient_unset',\s*message:\s*'This master has no receiving company set for its invoices yet — pick one on its client page, under Billing\.',\s*\}\)/,
     )
     expect(serverSource).not.toContain('Settings on the master client')
   })

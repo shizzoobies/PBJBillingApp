@@ -68,6 +68,22 @@ export declare function cleanExtraRecipients(requested: unknown): {
   reason: string | null
 }
 
+/** The refusal for a billing master with no receiving company chosen. */
+export declare const MASTER_RECIPIENT_UNSET: { readonly error: string; readonly message: string }
+
+/**
+ * WHOSE contacts an invoice email is addressed to: an ordinary client answers
+ * itself; a billing master resolves to the ONE sub it names (under the master's
+ * name), or is refused.
+ */
+export declare function invoiceEmailAddressee(
+  client: object | null | undefined,
+  clients: object[] | null | undefined,
+): {
+  addressee: (object & { name?: string }) | null
+  refusal: { readonly error: string; readonly message: string } | null
+}
+
 /** Who a send goes to: the chosen on-file addresses plus the one-time extras. */
 export declare function resolveSendRecipients(args: {
   allowed: string[]

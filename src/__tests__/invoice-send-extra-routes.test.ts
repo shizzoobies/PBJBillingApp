@@ -54,7 +54,7 @@ describe('the send route validates `extra` before anything leaves', () => {
     // The old inline decision is gone: there is one place that makes it.
     expect(sendBlock).not.toContain('chooseInvoiceRecipients(')
     expect(serverSource).toMatch(
-      /import \{ resolveSendRecipients \} from '\.\/lib\/invoice-recipients\.js'/,
+      /import \{ invoiceEmailAddressee, resolveSendRecipients \} from '\.\/lib\/invoice-recipients\.js'/,
     )
   })
 
