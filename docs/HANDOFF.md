@@ -25,7 +25,28 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-08, evening - READ THIS FIRST):** `main` = `70576ee` (+ this handoff),
+**State right now (2026-10-11 - READ THIS FIRST):** `main` = `6a7707c` (+ this handoff), deployed,
+`/health` 200; nothing has shipped since the 2026-10-08 handoff below. Suite **353 files / 8079 tests**;
+manifest **204,983 bytes - 17 under the cap; TRIM FIRST before any manifest edit.** **ONE ITEM IS PLANNED,
+a send-back on Letters (`featreq-5e195707`)** - Brittany used it on 10-10 (one saved letter, "1099 Filing";
+no sends yet) and asked for two things, with a confirmed rework spec on the ticket: (1) **bold** selected
+text in the email body and the letter, shown bold in Preview, in the email the client receives and in the
+PDF; (2) **more than one saved letter** - create a second letter without overwriting the first, each
+persisting, editable on its own, and either choosable to preview and send. The storage already allows it
+(`engagement_letters` has an `id` column; v1 wrote only `default`; `engagement_letter_sends` keys on
+`letter_id`), so (2) is a letters list + an id on the routes (`/api/letters/:id/...`) + the page choosing
+one; (1) needs a small markup rule (for example `**bold**`, or a bold button that inserts it) carried by
+`lib/letter-documents.js` into the email HTML and by `lib/letter-pdf.js` into the PDF (pdfkit bold font
+runs), with the placeholder filler untouched - decide the rule, say it on the ticket, keep the plain-text
+email part readable. Start from `docs/plans/engagement-letters-2026-10.md` and the review notes in
+`.superpowers/sdd/letters-review.md` (this machine). Follow-ups still New: `featreq-9c29491a` (letters
+leftovers), `featreq-e413267a` (Hours by task groups typed tasks), `featreq-4caec5d3` (backups - Alex's
+side). Worktrees `AP-laneB` (feat/letters-followup) and `AP-laneC` (feat/letters) are merged and can be
+removed (junction LINK first, then `git worktree remove`) or reused as lanes. `AGENTS.md` + `scripts/prod/`
+hold the process and the tooling for any agent (Codex watches the GitHub repo). Run ledger:
+`.superpowers/sdd/new-queue-2026-10-01.md` (git-ignored, this machine).
+
+**Earlier (2026-10-08, evening - the day everything below shipped):** `main` = `70576ee` (+ this handoff),
 deployed, `/health` 200, voice re-provisioned. Suite **353 files / 8079 tests**. Manifest **204,983
 bytes - 17 under the cap; TRIM FIRST.** Today: the four Planned items Alex gave in the morning are all
 SHIPPED - the group timer's task box (`72c1b5f` + `3922637`, `featreq-c11c63ea`), the ten billing-period
