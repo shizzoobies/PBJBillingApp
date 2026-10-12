@@ -2917,7 +2917,7 @@ export const PROPOSAL_STATUSES = ['draft', 'sent', 'accepted', 'declined']
 export const PROPOSAL_QUESTIONNAIRE_STATUSES = ['open', 'submitted', 'withdrawn']
 
 /** Every `proposal_questionnaires` column, in the order `mapProposalQuestionnaire` reads them. */
-const PROPOSAL_QUESTIONNAIRE_COLUMNS = `id, token, mode, status, questions, answers, email_log,
+const PROPOSAL_QUESTIONNAIRE_COLUMNS = `id, token, mode, status, questions, answers, partial_answers, email_log,
   proposal_id, sent_to, expires_at, submitted_at, created_by, created_at, updated_at`
 
 /** The invoice sections a recurring reimbursement can print under: the
@@ -6590,6 +6590,7 @@ export class AppDataStore {
             check (status in ('open', 'submitted', 'withdrawn')),
           questions jsonb not null default '{}'::jsonb,
           answers jsonb not null default '{}'::jsonb,
+          partial_answers jsonb not null default '{}'::jsonb,
           email_log jsonb not null default '[]'::jsonb,
           proposal_id text,
           sent_to text,
@@ -6602,6 +6603,11 @@ export class AppDataStore {
       `)
       await this.pool.query(
         `create unique index if not exists proposal_questionnaires_token_key on proposal_questionnaires (token)`,
+      )
+      // A sent questionnaire's step 1, kept while the prospect answers step 2
+      // (Brittany, 2026-10-10). Never the submission itself - that is `answers`.
+      await this.pool.query(
+        `alter table proposal_questionnaires add column if not exists partial_answers jsonb not null default '{}'::jsonb`,
       )
 
       // Reusable contacts (shared across clients). Mirrors the plans/clients
@@ -17012,6 +17018,7 @@ export class AppDataStore {
     }
     const questions = json(row.questions)
     const answers = json(row.answers)
+    const partial = json(row.partial_answers ?? row.partialAnswers)
     const log = json(row.email_log ?? row.emailLog)
     const expiresAt = iso(row.expires_at ?? row.expiresAt)
     return {
@@ -17027,6 +17034,8 @@ export class AppDataStore {
           ? questions
           : { welcome: '', sections: [] },
       answers: answers && typeof answers === 'object' && !Array.isArray(answers) ? answers : {},
+      // A sent questionnaire's step 1 while step 2 is being answered; {} otherwise.
+      partialAnswers: partial && typeof partial === 'object' && !Array.isArray(partial) ? partial : {},
       emailLog: Array.isArray(log) ? log : [],
       proposalId: row.proposal_id ?? row.proposalId ?? null,
       sentTo: row.sent_to ?? row.sentTo ?? null,
@@ -17095,6 +17104,7 @@ export class AppDataStore {
       status: 'open',
       questions: buildQuestionnaire(pricing),
       answers: {},
+      partialAnswers: {},
       emailLog: [],
       proposalId: null,
       sentTo: null,
@@ -17238,6 +17248,51 @@ export class AppDataStore {
   }
 
   /**
+   * Keep step 1 of a SENT questionnaire (About you, the basics, the services, the
+   * software) so step 2 can ask only what the ticked services need. Checked like a
+   * send - every required answer is on step 1, refused with the same sentences -
+   * but it is NOT the send: `answers`, `status` and `submitted_at` are never
+   * touched, so the one submission is still to come. A second save (the prospect
+   * went Back) replaces the first. Only an open, unexpired link, pinned to the
+   * token it arrived with; a call sheet saves through `saveProposalQuestionnaireAnswers`.
+   */
+  async saveProposalQuestionnairePartial(selector, rawAnswers) {
+    const token = typeof selector?.token === 'string' ? selector.token : ''
+    const current = token ? await this.findProposalQuestionnaireByToken(token) : null
+    if (!current || current.mode !== 'link') throw AppDataStore.questionnaireClosedError(null)
+    if (current.status !== 'open' || current.expired) throw AppDataStore.questionnaireClosedError(current)
+
+    const partial = AppDataStore.cleanQuestionnaireAnswersFor(current, rawAnswers)
+    const problems = questionnaireProblems(flattenQuestions(current.questions), partial, { mode: 'link' })
+    if (problems.length > 0) {
+      throw new ProposalQuestionnaireError(problems[0], 'invalid', problems)
+    }
+
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update proposal_questionnaires
+            set partial_answers = $2::jsonb, updated_at = now()
+          where id = $1 and token = $3 and mode = 'link'
+            and status = 'open' and (expires_at is null or expires_at > now())
+          returning ${PROPOSAL_QUESTIONNAIRE_COLUMNS}`,
+        [current.id, JSON.stringify(partial), current.token],
+      )
+      if (rows[0]) return AppDataStore.mapProposalQuestionnaire(rows[0])
+      throw AppDataStore.questionnaireClosedError(await this.getProposalQuestionnaire(current.id))
+    }
+    return this._mutateQuestionnaireFile((list) => {
+      const target = list.find((row) => row && row.id === current.id)
+      const live = AppDataStore.mapProposalQuestionnaire(target)
+      if (!live || live.status !== 'open' || live.expired || live.token !== current.token) {
+        throw AppDataStore.questionnaireClosedError(live)
+      }
+      target.partialAnswers = partial
+      target.updatedAt = nowIso()
+      return { result: AppDataStore.mapProposalQuestionnaire(target), changed: true }
+    })
+  }
+
+  /**
    * Take the answers - ONCE. `selector` is `{ token }` (the public link) or
    * `{ id }` (an owner submitting a call sheet). The claim is one conditional
    * write: `status = 'open'` and not past its date, so two submissions at the
@@ -17296,8 +17351,9 @@ export class AppDataStore {
 
   /**
    * Start the DRAFT proposal from a submitted questionnaire's answers: the
-   * contact block, the counts, the rest in the notes - no service selected, so
-   * nothing is priced until she picks. ONE draft per questionnaire: the link is
+   * contact block, the counts, the rest in the notes, and the service groups they
+   * ticked as lines from the CURRENT catalog (`answersToProposalSeed`), so it
+   * arrives priced. ONE draft per questionnaire: the link is
    * claimed with `proposal_id is null`, and a draft built by a call that lost
    * that race is deleted again (it has no history yet), so the retry button and
    * the submit route can both call this without ever making two.
@@ -17319,11 +17375,12 @@ export class AppDataStore {
       if (existing) return { proposal: existing, created: false }
       dangling = current.proposalId
     }
-    const seed = answersToProposalSeed(flattenQuestions(current.questions), current.answers)
+    const pricing = (await this.getFirmSettings()).proposalPricing
+    const seed = answersToProposalSeed(flattenQuestions(current.questions), current.answers, pricing)
     const proposal = await this.createProposal({
       prospect: seed.prospect,
       inputs: seed.inputs,
-      selections: [],
+      selections: seed.selections,
       createdBy,
     })
 
@@ -17396,7 +17453,9 @@ export class AppDataStore {
   /**
    * A fresh link for a questionnaire that was never answered (expired, withdrawn,
    * or open and lost): a new token and a new thirty days, and the old token
-   * names nothing from this moment. An answered one is a record and is refused.
+   * names nothing from this moment, and a step 1 typed under the old link is
+   * forgotten (the new link may go to someone else). An answered one is a record
+   * and is refused.
    */
   async renewProposalQuestionnaireLink(id) {
     const current = await this.getProposalQuestionnaire(id)
@@ -17412,7 +17471,8 @@ export class AppDataStore {
     if (this.pool) {
       const { rows } = await this.pool.query(
         `update proposal_questionnaires
-            set token = $2, expires_at = $3, status = 'open', updated_at = now()
+            set token = $2, expires_at = $3, status = 'open', partial_answers = '{}'::jsonb,
+                updated_at = now()
           where id = $1 and mode = 'link' and status <> 'submitted'
           returning ${PROPOSAL_QUESTIONNAIRE_COLUMNS}`,
         [id, token, expiresAt],
@@ -17428,6 +17488,7 @@ export class AppDataStore {
       target.token = token
       target.expiresAt = expiresAt
       target.status = 'open'
+      target.partialAnswers = {}
       target.updatedAt = nowIso()
       return { result: AppDataStore.mapProposalQuestionnaire(target), changed: true }
     })

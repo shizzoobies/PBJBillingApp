@@ -128,6 +128,15 @@ describe('the table', () => {
     expect(table).not.toMatch(/references/i)
   })
 
+  // The sent questionnaire's step 1, kept so step 2 can ask what was ticked. A
+  // look-first column add, so a database made before it gains it at start-up.
+  it('holds the half-filled step 1 in its own column, added look-first', () => {
+    expect(table).toContain("partial_answers jsonb not null default '{}'::jsonb")
+    expect(storeSource).toContain(
+      "alter table proposal_questionnaires add column if not exists partial_answers jsonb not null default '{}'::jsonb",
+    )
+  })
+
   it('makes the token unique, so a link names one questionnaire', () => {
     expect(storeSource).toContain(
       'create unique index if not exists proposal_questionnaires_token_key on proposal_questionnaires (token)',

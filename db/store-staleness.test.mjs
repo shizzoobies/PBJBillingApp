@@ -36263,7 +36263,7 @@ describe('proposal questionnaires (file backend)', () => {
     })
   })
 
-  it('starts one DRAFT proposal from the answers: contact block, counts, notes - nothing selected, nothing priced', async () => {
+  it('starts one DRAFT proposal from the answers: contact block, counts, notes, and the ticked services priced', async () => {
     const created = await store.createProposalQuestionnaire({ mode: 'link' })
     await store.submitProposalQuestionnaire({ token: created.token }, LINK_ANSWERS)
     const { proposal, created: made } = await store.startProposalQuestionnaireDraft(created.id)
@@ -36281,9 +36281,120 @@ describe('proposal questionnaires (file backend)', () => {
     })
     expect(proposal.prospect.notes).toContain('Bakery')
     expect(proposal.inputs).toEqual({ transactions: 120 })
+    // "Monthly" was ticked: the Basic tier of each Monthly family, priced on arrival.
+    expect(proposal.selections.map((entry) => entry.serviceId)).toEqual([
+      'monthly-weekly-transactions-basic',
+      'monthly-monthly-transactions-basic',
+    ])
+    expect(proposal.pricingSnapshot.totals.monthly).toBeGreaterThan(0)
+    expect(proposal.prospect.notes).toContain('Monthly')
+    expect((await store.getProposalQuestionnaire(created.id)).proposalId).toBe(proposal.id)
+  })
+
+  it('starts a draft with nothing selected when no service was ticked', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    const { services: _services, ...noServices } = LINK_ANSWERS
+    await store.submitProposalQuestionnaire({ token: created.token }, noServices)
+    const { proposal } = await store.startProposalQuestionnaireDraft(created.id)
     expect(proposal.selections).toEqual([])
     expect(proposal.pricingSnapshot.totals.monthly).toBe(0)
-    expect((await store.getProposalQuestionnaire(created.id)).proposalId).toBe(proposal.id)
+  })
+
+  // The sent questionnaire is two steps on one link (Brittany, 2026-10-10): step 1
+  // is kept on the record so step 2 can ask what the ticked services need - and
+  // keeping it must never use up the one submission.
+  describe('step 1 of a sent questionnaire', () => {
+    const { 'count:transactions': _t, 'count:balanceSheetAccounts': _b, ...STEP_ONE } = LINK_ANSWERS
+
+    it('is saved without using up the submission, and the later send takes both steps', async () => {
+      const created = await store.createProposalQuestionnaire({ mode: 'link' })
+      const saved = await store.saveProposalQuestionnairePartial(
+        { token: created.token },
+        { ...STEP_ONE, services: ['Monthly', 'Payroll'], notAQuestion: 'x' },
+      )
+      expect(saved.partialAnswers).toMatchObject({ company: 'Acme Books', services: ['Monthly', 'Payroll'] })
+      expect(saved.partialAnswers).not.toHaveProperty('notAQuestion')
+      expect(saved.status).toBe('open')
+      expect(saved.answers).toEqual({})
+      expect(saved.submittedAt).toBeNull()
+      const reread = await store.getProposalQuestionnaire(created.id)
+      expect(reread.status).toBe('open')
+      expect(reread.partialAnswers).toEqual(saved.partialAnswers)
+
+      const submitted = await store.submitProposalQuestionnaire(
+        { token: created.token },
+        { ...reread.partialAnswers, 'count:employees': '4' },
+      )
+      expect(submitted.status).toBe('submitted')
+      expect(submitted.answers).toMatchObject({ company: 'Acme Books', 'count:employees': 4 })
+    })
+
+    it('refuses a step 1 missing a required answer, naming each one, and keeps nothing', async () => {
+      const created = await store.createProposalQuestionnaire({ mode: 'link' })
+      await expect(
+        store.saveProposalQuestionnairePartial(
+          { token: created.token },
+          { contactName: 'Pat', email: 'pat@acme.test' },
+        ),
+      ).rejects.toMatchObject({
+        reason: 'invalid',
+        message: 'Please tell us your business name.',
+        problems: expect.arrayContaining(['Please give us a phone number.', 'Please enter your ZIP code.']),
+      })
+      const stored = await store.getProposalQuestionnaire(created.id)
+      expect(stored.partialAnswers).toEqual({})
+      expect(stored.status).toBe('open')
+    })
+
+    it('a second step 1 (after Back) replaces the first', async () => {
+      const created = await store.createProposalQuestionnaire({ mode: 'link' })
+      await store.saveProposalQuestionnairePartial({ token: created.token }, { ...STEP_ONE, services: ['Monthly'] })
+      const again = await store.saveProposalQuestionnairePartial(
+        { token: created.token },
+        { ...STEP_ONE, services: ['Payroll'] },
+      )
+      expect(again.partialAnswers.services).toEqual(['Payroll'])
+    })
+
+    it('is refused on an expired, withdrawn or answered link, and for a token that names nothing', async () => {
+      const expired = await store.createProposalQuestionnaire({ mode: 'link' })
+      await editStoredQuestionnaire(expired.id, (row) => {
+        row.expiresAt = new Date(Date.now() - 1000).toISOString()
+      })
+      await expect(
+        store.saveProposalQuestionnairePartial({ token: expired.token }, STEP_ONE),
+      ).rejects.toMatchObject({ reason: 'expired' })
+      expect((await store.getProposalQuestionnaire(expired.id)).partialAnswers).toEqual({})
+
+      const withdrawn = await store.createProposalQuestionnaire({ mode: 'link' })
+      await store.withdrawProposalQuestionnaire(withdrawn.id)
+      await expect(
+        store.saveProposalQuestionnairePartial({ token: withdrawn.token }, STEP_ONE),
+      ).rejects.toMatchObject({ reason: 'withdrawn' })
+
+      const answered = await store.createProposalQuestionnaire({ mode: 'link' })
+      await store.submitProposalQuestionnaire({ token: answered.token }, LINK_ANSWERS)
+      await expect(
+        store.saveProposalQuestionnairePartial({ token: answered.token }, STEP_ONE),
+      ).rejects.toMatchObject({ reason: 'submitted' })
+      const stillAnswered = await store.getProposalQuestionnaire(answered.id)
+      expect(stillAnswered.status).toBe('submitted')
+      expect(stillAnswered.partialAnswers).toEqual({})
+
+      await expect(
+        store.saveProposalQuestionnairePartial({ token: 'N'.repeat(43) }, STEP_ONE),
+      ).rejects.toMatchObject({ reason: 'missing' })
+      await expect(store.saveProposalQuestionnairePartial({}, STEP_ONE)).rejects.toMatchObject({
+        reason: 'missing',
+      })
+    })
+
+    it('a new link forgets the half-filled step 1, so a re-sent link shows nobody else’s answers', async () => {
+      const created = await store.createProposalQuestionnaire({ mode: 'link' })
+      await store.saveProposalQuestionnairePartial({ token: created.token }, STEP_ONE)
+      const renewed = await store.renewProposalQuestionnaireLink(created.id)
+      expect(renewed.partialAnswers).toEqual({})
+    })
   })
 
   it('makes only one draft however many times, or at once, it is asked', async () => {
@@ -36494,6 +36605,124 @@ describe('proposal questionnaires (postgres branch)', () => {
     const update = fake.statements.find((s) => /^update proposal_questionnaires/i.test(s.text))
     expect(update.text).toMatch(/status <> 'submitted'/)
     expect(update.params[1]).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    // A new link forgets the old link's half-filled step 1.
+    expect(update.text).toMatch(/partial_answers = '\{\}'::jsonb/)
+  })
+
+  /*
+   * The two-step sent questionnaire (Brittany, 2026-10-10). NEW SQL SHAPES, for
+   * the rolled-back production trial:
+   *   - alter table proposal_questionnaires add column if not exists
+   *       partial_answers jsonb not null default '{}'::jsonb
+   *   - the step-1 save: update ... set partial_answers = $2::jsonb where id = $1
+   *       and token = $3 and mode = 'link' and status = 'open' and unexpired
+   *   - the renew UPDATE now also resets partial_answers
+   *   - every select now reads partial_answers (PROPOSAL_QUESTIONNAIRE_COLUMNS)
+   */
+  const STEP_ONE = {
+    company: 'Acme Books',
+    contactName: 'Pat Doe',
+    email: 'pat@acme.test',
+    phone: '615-555-0101',
+    addressLine1: '1 Main St',
+    city: 'Nashville',
+    state: 'TN',
+    postalCode: '37201',
+    whatTheyDo: 'Bakery',
+    entityType: 'LLC',
+    services: ['Payroll'],
+  }
+
+  it('saves step 1 with ONE conditional update that never touches the answers, the status or submitted_at', async () => {
+    const fake = questionnairePool((sql) => {
+      if (/^select .* from proposal_questionnaires where token/is.test(sql)) return [openRow()]
+      if (/^update proposal_questionnaires/i.test(sql)) return [openRow({ partial_answers: STEP_ONE })]
+      return []
+    })
+    const saved = await postgresStore(fake).saveProposalQuestionnairePartial({ token: 'T'.repeat(43) }, STEP_ONE)
+    expect(saved.partialAnswers).toEqual(STEP_ONE)
+    expect(saved.status).toBe('open')
+    const updates = fake.statements.filter((s) => /^update proposal_questionnaires/i.test(s.text))
+    expect(updates).toHaveLength(1)
+    const [update] = updates
+    expect(update.text).toMatch(/set partial_answers = \$2::jsonb, updated_at = now\(\)/)
+    expect(update.text).toMatch(/where id = \$1 and token = \$3 and mode = 'link'/)
+    expect(update.text).toMatch(/status = 'open' and \(expires_at is null or expires_at > now\(\)\)/)
+    const setClause = update.text.slice(0, update.text.indexOf('where'))
+    expect(setClause).not.toMatch(/(?<!partial_)answers =/)
+    expect(setClause).not.toMatch(/submitted_at|status =/)
+    expect(update.params[0]).toBe('pq-1')
+    expect(JSON.parse(update.params[1])).toMatchObject({ company: 'Acme Books', services: ['Payroll'] })
+    expect(update.params[2]).toBe('T'.repeat(43))
+  })
+
+  it('refuses an incomplete step 1 before any write', async () => {
+    const fake = questionnairePool((sql) =>
+      /^select .* from proposal_questionnaires where token/is.test(sql) ? [openRow()] : [],
+    )
+    await expect(
+      postgresStore(fake).saveProposalQuestionnairePartial({ token: 'T'.repeat(43) }, { contactName: 'Pat' }),
+    ).rejects.toMatchObject({ reason: 'invalid' })
+    expect(fake.statements.some((s) => /^update/i.test(s.text))).toBe(false)
+  })
+
+  it('answers a step 1 that lost a race to the send from the row that beat it', async () => {
+    const fake = questionnairePool((sql) => {
+      if (/^select .* from proposal_questionnaires where token/is.test(sql)) return [openRow()]
+      if (/^select .* from proposal_questionnaires where id/is.test(sql)) {
+        return [openRow({ status: 'submitted' })]
+      }
+      return []
+    })
+    await expect(
+      postgresStore(fake).saveProposalQuestionnairePartial({ token: 'T'.repeat(43) }, STEP_ONE),
+    ).rejects.toMatchObject({ reason: 'submitted' })
+  })
+
+  it('refuses an expired or withdrawn link without writing', async () => {
+    for (const row of [
+      openRow({ expires_at: new Date(Date.now() - 1000).toISOString() }),
+      openRow({ status: 'withdrawn' }),
+    ]) {
+      const fake = questionnairePool((sql) =>
+        /^select .* from proposal_questionnaires where token/is.test(sql) ? [row] : [],
+      )
+      await expect(
+        postgresStore(fake).saveProposalQuestionnairePartial({ token: 'T'.repeat(43) }, STEP_ONE),
+      ).rejects.toMatchObject({ reason: row.status === 'withdrawn' ? 'withdrawn' : 'expired' })
+      expect(fake.statements.some((s) => /^update/i.test(s.text))).toBe(false)
+    }
+  })
+
+  it('reads partial_answers on every select and maps it (a missing column reads as nothing saved)', async () => {
+    const fake = questionnairePool((sql) =>
+      /^select .* from proposal_questionnaires where id/is.test(sql)
+        ? [openRow({ partial_answers: JSON.stringify({ company: 'Acme' }) })]
+        : [],
+    )
+    const found = await postgresStore(fake).getProposalQuestionnaire('pq-1')
+    expect(found.partialAnswers).toEqual({ company: 'Acme' })
+    expect(fake.statements[0].text).toMatch(/partial_answers/)
+    const bare = questionnairePool((sql) =>
+      /^select .* from proposal_questionnaires where id/is.test(sql) ? [openRow()] : [],
+    )
+    expect((await postgresStore(bare).getProposalQuestionnaire('pq-1')).partialAnswers).toEqual({})
+  })
+
+  it('starts the draft with the ticked services selected, from the current catalog', async () => {
+    const fake = questionnairePool((sql) => {
+      if (/^select .* from proposal_questionnaires where id/is.test(sql)) {
+        return [openRow({ status: 'submitted', answers: { company: 'Acme', services: ['Payroll'] } })]
+      }
+      if (/^insert into proposals/i.test(sql)) {
+        return [{ id: 'prop-x', status: 'draft', prospect: {}, inputs: {}, selections: [] }]
+      }
+      if (/^update proposal_questionnaires/i.test(sql)) return [{ id: 'pq-1' }]
+      return []
+    })
+    await postgresStore(fake).startProposalQuestionnaireDraft('pq-1')
+    const insert = fake.statements.find((s) => /^insert into proposals/i.test(s.text))
+    expect(JSON.parse(insert.params[4])).toEqual([{ serviceId: 'payroll' }])
   })
 })
 
