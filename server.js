@@ -15344,8 +15344,17 @@ const server = createServer(async (request, response) => {
         updatedChecklist.items.length > 0 &&
         updatedChecklist.items.every((entry) => entry.done) &&
         !updatedChecklist.pushedToChecklistId
+      // This tick finished its stage without spawning one: the case_completed
+      // check below reads every stage of the case.
+      const finishedStageWithoutSpawn =
+        !toggleResult.spawned &&
+        toggledItem?.done &&
+        updatedChecklist.items.every((item) => item.done) &&
+        typeof updatedChecklist.stageIndex === 'number' &&
+        typeof updatedChecklist.stageCount === 'number'
+      // ONE workspace read serves the waiting-cleared notices and the case check.
+      const allData = justCompleted || finishedStageWithoutSpawn ? await appDataStore.read() : null
       if (justCompleted) {
-        const allData = await appDataStore.read()
         const notified = new Set()
         for (const other of allData.checklists ?? []) {
           if (other.id === updatedChecklist.id || other.deletedAt) continue
@@ -15383,16 +15392,6 @@ const server = createServer(async (request, response) => {
         }
       }
 
-      // This tick finished its stage without spawning one: read the case so the
-      // case_completed check below can see every stage of it.
-      const finishedStageWithoutSpawn =
-        !toggleResult.spawned &&
-        toggledItem?.done &&
-        updatedChecklist.items.every((item) => item.done) &&
-        typeof updatedChecklist.stageIndex === 'number' &&
-        typeof updatedChecklist.stageCount === 'number'
-      const caseData = finishedStageWithoutSpawn ? await appDataStore.read() : null
-
       // Phase 3 stage progression activity logging.
       if (toggleResult.spawned) {
         const fromIdx = (updatedChecklist.stageIndex ?? 0) + 1
@@ -15420,11 +15419,20 @@ const server = createServer(async (request, response) => {
             appPublicUrl: getPublicAppUrl(request),
           })
         }
-      } else if (caseData && caseAllDone(caseData, updatedChecklist.caseId || updatedChecklist.id)) {
+      } else if (
+        finishedStageWithoutSpawn &&
+        (updatedChecklist.stageIndex + 1 >= updatedChecklist.stageCount ||
+          toggleResult.spawnReason === 'already_spawned') &&
+        caseAllDone(allData, updatedChecklist.caseId || updatedChecklist.id) &&
+        !(await appDataStore.hasCaseCompletedActivity(updatedChecklist.caseId || updatedChecklist.id))
+      ) {
         // The case is complete only when EVERY stage of it is (caseAllDone): with
         // Open next step now (featreq-8b54d117) the last stage can finish while
         // an earlier one is still waiting - then nothing is said - and it is the
         // earlier stage's finishing tick (already_spawned, no spawn) that ends it.
+        // Said once per case: an untick/retick of a finished case (any stage)
+        // finds the earlier case_completed row and stays quiet (best effort - the
+        // activity log keeps each person's last 200 rows).
         const caseId = updatedChecklist.caseId || updatedChecklist.id
         await appDataStore.recordActivity(
           session.user.id,
@@ -15435,7 +15443,7 @@ const server = createServer(async (request, response) => {
         // Phase 5: notify the case opener (template's stage-1 assignee).
         // Skip if they're the one who just completed it.
         try {
-          const data = caseData
+          const data = allData
           const template = (data.checklistTemplates ?? []).find(
             (t) => t.id === updatedChecklist.templateId,
           )

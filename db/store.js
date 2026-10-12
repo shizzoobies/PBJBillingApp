@@ -4569,8 +4569,10 @@ export class StepIsWaitingError extends Error {
  * Thrown by `openNextStageEarly` (Open next step now, featreq-8b54d117) when the
  * next stage may not be opened from this checklist. `reason` is machine-readable:
  * `not_found`, `skipped`, `pushed`, `onboarding`, `last_stage`, `already_spawned`,
- * `not_ready` (some open step is not waiting), or a `maybeSpawnNextStage` reason
- * (`next_stage_empty`, `no_template`, `template_not_found`, `no_stages`). The
+ * `not_ready` (some open step is not waiting), `date_taken` (Postgres: another
+ * case of the same recipe holds that step on that date), or a
+ * `maybeSpawnNextStage` reason (`next_stage_empty`, `no_template`,
+ * `template_not_found`, `no_stages`). The
  * route turns it into a sentence. Nothing was written.
  */
 export class NextStageRefusedError extends Error {
@@ -21678,7 +21680,19 @@ export class AppDataStore {
       const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
       const refused = openNextStageEarlyRefusal(data, checklist)
       if (refused) throw new NextStageRefusedError(refused)
-      const advance = await this.maybeSpawnNextStage(data, checklist, { allowWaiting: true })
+      let advance
+      try {
+        advance = await this.maybeSpawnNextStage(data, checklist, { allowWaiting: true })
+      } catch (error) {
+        // A 23505 that is NOT this case's next stage (maybeSpawnNextStage already
+        // re-read for that): another case of the same recipe holds that step on
+        // that date. Refused in words, logged with the constraint.
+        if (error?.code !== '23505') throw error
+        console.error(
+          `[stage-advance] open early ${checklist.id} case ${checklist.caseId || checklist.id}: 23505 on ${error.constraint || 'unknown constraint'}`,
+        )
+        throw new NextStageRefusedError('date_taken')
+      }
       if (!advance.spawned) throw new NextStageRefusedError(advance.reason)
       return { checklist, spawned: advance.spawned }
     }
@@ -30870,6 +30884,30 @@ export class AppDataStore {
       .slice()
       .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
       .slice(0, safeLimit)
+  }
+
+  /**
+   * Whether a `case_completed` Activity row already exists for this case (its
+   * target ends " · case <caseId>"), so the toggle says "completed case" once
+   * per case, not on every untick/retick of a finished one. Best effort: the
+   * log keeps each person's last 200 rows. Read-only.
+   */
+  async hasCaseCompletedActivity(caseId) {
+    if (!caseId) return false
+    const suffix = ` · case ${caseId}`
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select 1 from activity_log
+         where action = 'case_completed' and right(target, char_length($1)) = $1
+         limit 1`,
+        [suffix],
+      )
+      return result.rowCount > 0
+    }
+    const authState = await readJson(localAuthPath)
+    return (authState.activityLog ?? []).some(
+      (entry) => entry.action === 'case_completed' && String(entry.target ?? '').endsWith(suffix),
+    )
   }
 
   // ---- Phase 3: template stage mutations ----

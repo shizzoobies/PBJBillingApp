@@ -76,14 +76,41 @@ describe('POST /api/checklists/:id/open-next-stage', () => {
 })
 
 describe('case_completed waits for every stage of the case', () => {
-  it('the toggle reads the case and asks caseAllDone, no longer "the last stage finished"', () => {
+  const completedGate = () => {
     const tail = toggleRouteTail()
-    expect(tail).toContain('const caseData = finishedStageWithoutSpawn ? await appDataStore.read() : null')
+    const start = tail.indexOf('} else if (\n        finishedStageWithoutSpawn &&')
+    expect(start).toBeGreaterThan(-1)
+    return tail.slice(start, tail.indexOf(') {', start))
+  }
+
+  it('the toggle reads the workspace ONCE for the waiting notices and the case check', () => {
+    const tail = toggleRouteTail()
     expect(tail).toContain(
-      '} else if (caseData && caseAllDone(caseData, updatedChecklist.caseId || updatedChecklist.id)) {',
+      'const allData = justCompleted || finishedStageWithoutSpawn ? await appDataStore.read() : null',
     )
-    expect(tail).not.toContain('updatedChecklist.stageIndex + 1 >= updatedChecklist.stageCount')
-    expect(tail.indexOf("'case_completed'")).toBeGreaterThan(tail.indexOf('caseAllDone('))
+    expect(tail.split('appDataStore.read()')).toHaveLength(2)
+    expect(tail).toContain('const data = allData')
+  })
+
+  it('fires only from the final stage, or an earlier stage that finds the next one already open', () => {
+    expect(completedGate()).toContain(
+      '(updatedChecklist.stageIndex + 1 >= updatedChecklist.stageCount ||\n          toggleResult.spawnReason === \'already_spawned\')',
+    )
+  })
+
+  it('needs every stage of the case done (caseAllDone)', () => {
+    expect(completedGate()).toContain('caseAllDone(allData, updatedChecklist.caseId || updatedChecklist.id)')
+  })
+
+  it('says it once per case: an untick/retick of a finished case finds the earlier row', () => {
+    const gate = completedGate()
+    expect(gate).toContain(
+      '!(await appDataStore.hasCaseCompletedActivity(updatedChecklist.caseId || updatedChecklist.id))',
+    )
+    // Checked last, so the lookup runs only when everything else says "complete".
+    expect(gate.indexOf('hasCaseCompletedActivity')).toBeGreaterThan(gate.indexOf('caseAllDone('))
+    const tail = toggleRouteTail()
+    expect(tail.indexOf("'case_completed'")).toBeGreaterThan(tail.indexOf('hasCaseCompletedActivity'))
   })
 })
 

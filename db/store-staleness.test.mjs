@@ -50425,6 +50425,11 @@ describe('open next step now (file backend)', () => {
   }
   const stageRows = async (index) =>
     (await persisted()).checklists.filter((entry) => entry.caseId === 'case-e' && entry.stageIndex === index)
+  const clearActivity = async () => {
+    const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    authState.activityLog = []
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
   const refusal = (promise) => promise.then(
     () => {
       throw new Error('expected a refusal')
@@ -50569,6 +50574,17 @@ describe('open next step now (file backend)', () => {
     expect((await refusal(store.openNextStageEarly('cl-none', 'emp-1'))).reason).toBe('not_found')
   })
 
+  it('hasCaseCompletedActivity finds an earlier "completed case" row by its case suffix only', async () => {
+    await clearActivity()
+    expect(await store.hasCaseCompletedActivity('case-1')).toBe(false)
+    await store.recordActivity('emp-1', 'case_completed', 'Monthly close · case case-12')
+    await store.recordActivity('emp-1', 'case_advanced', 'Monthly close · case case-1 · stage 1 -> stage 2')
+    expect(await store.hasCaseCompletedActivity('case-1')).toBe(false)
+    await store.recordActivity('emp-1', 'case_completed', 'Monthly close · case case-1')
+    expect(await store.hasCaseCompletedActivity('case-1')).toBe(true)
+    expect(await store.hasCaseCompletedActivity('')).toBe(false)
+  })
+
   it('a next stage with no steps refuses next_stage_empty and writes nothing', async () => {
     const template = stagedTemplate()
     template.stages[1] = { ...template.stages[1], items: [] }
@@ -50702,6 +50718,51 @@ describe('open next step now (Postgres)', () => {
     const allDone = { ...stageOne, items: stageOne.items.map((item) => ({ ...item, done: true, waiting: false })) }
     const advance = await pgStore.maybeSpawnNextStage(await pgStore.read(), allDone)
     expect(advance).toEqual({ spawned: null, reason: 'already_spawned' })
+  })
+
+  it('a 23505 that is another case on the same date is refused date_taken and logged with the constraint', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { pgStore } = pgEarlyStore()
+      pgStore.createChecklist = async () => {
+        throw Object.assign(uniqueViolation(), { constraint: 'checklists_instance_unique_v3' })
+      }
+      const error = await pgStore.openNextStageEarly('cl-wait', 'emp-1').catch((caught) => caught)
+      expect(error).toBeInstanceOf(NextStageRefusedError)
+      expect(error.reason).toBe('date_taken')
+      expect(errorSpy.mock.calls.map((call) => String(call[0]))).toContain(
+        '[stage-advance] open early cl-wait case case-e: 23505 on checklists_instance_unique_v3',
+      )
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('any other create failure still propagates', async () => {
+    const { pgStore } = pgEarlyStore()
+    pgStore.createChecklist = async () => {
+      throw new Error('Connection terminated unexpectedly')
+    }
+    const error = await pgStore.openNextStageEarly('cl-wait', 'emp-1').catch((caught) => caught)
+    expect(error).not.toBeInstanceOf(NextStageRefusedError)
+    expect(error.message).toBe('Connection terminated unexpectedly')
+  })
+
+  it('hasCaseCompletedActivity is one read-only suffix query', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    const inner = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      const result = await inner(text, params)
+      if (/from activity_log/i.test(String(text))) return { rows: [{ '?column?': 1 }], rowCount: 1 }
+      return result
+    }
+    expect(await pgStore.hasCaseCompletedActivity('case-e')).toBe(true)
+    expect(fake.statements).toHaveLength(1)
+    expect(fake.statements[0].text).toMatch(
+      /select 1 from activity_log\s+where action = 'case_completed' and right\(target, char_length\(\$1\)\) = \$1\s+limit 1/,
+    )
+    expect(fake.statements[0].params).toEqual([' · case case-e'])
   })
 
   it('without allowWaiting a waiting stage is not_all_done (the tick path is unchanged)', async () => {
