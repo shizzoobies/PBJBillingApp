@@ -199,35 +199,91 @@ describe('the public questionnaire route', () => {
     expect(read).not.toMatch(/appDataStore\.(submit|save|renew|withdraw|append|create|start)/)
   })
 
-  it('refuses a cross-site post, a wrong content type and a big body BEFORE it submits', () => {
+  it('refuses a cross-site post, a wrong content type and a big body BEFORE it keeps or submits', () => {
+    const keep = publicBlock.indexOf('appDataStore.saveProposalQuestionnairePartial(')
     const submit = publicBlock.indexOf('appDataStore.submitProposalQuestionnaire(')
+    expect(keep).toBeGreaterThan(-1)
     for (const guard of [
       'isCrossSiteOrigin(request)',
       "includes('application/x-www-form-urlencoded')",
       'readRawBody(request, MAX_FORM_BODY_BYTES)',
+      "record.status !== 'open' || record.expired",
     ]) {
-      const at = publicBlock.indexOf(guard)
+      const at = publicBlock.lastIndexOf(guard, keep)
       expect(at, guard).toBeGreaterThan(-1)
+      expect(at, guard).toBeLessThan(keep)
       expect(at, guard).toBeLessThan(submit)
     }
     expect(serverSource).toContain('const MAX_FORM_BODY_BYTES = 64 * 1024')
   })
 
+  // Brittany, 2026-10-10: the sent questionnaire asks, on a second step, only
+  // what the ticked services need. Step 1 is KEPT, never sent.
+  describe('the two steps on one link', () => {
+    const stepOne = between(publicBlock, 'if (postedQuestionnaireStep(formBody) === 1) {', '// ---- POST step 2')
+    const stepTwo = between(publicBlock, '// ---- POST step 2', "console.error('[questionnaire] public route failed:'")
+
+    it('a step-1 post keeps the answers and never submits', () => {
+      expect(stepOne).toContain('appDataStore.saveProposalQuestionnairePartial(')
+      expect(stepOne).toContain('{ token: linkToken }')
+      expect(stepOne).toContain('answersFromFormValues(values)')
+      expect(stepOne).not.toContain('submitProposalQuestionnaire')
+      expect(stepOne).not.toContain('finishQuestionnaireSubmission')
+      expect(stepOne).not.toContain('response.writeHead(303')
+    })
+
+    it('a kept step 1 answers with step 2, built from what was kept', () => {
+      const page = stepOne.search(
+        /renderQuestionnairePage\(\{\s*questionnaire: kept\.questions,\s*step: 2,\s*saved: kept\.partialAnswers,?\s*\}\)/,
+      )
+      expect(page).toBeGreaterThan(stepOne.indexOf('appDataStore.saveProposalQuestionnairePartial('))
+    })
+
+    it('a refused step 1 is step 1 again, with every problem and their own input, as a 400', () => {
+      const refusal = between(stepOne, "if (error.reason === 'invalid') {", "if (error.reason === 'submitted')")
+      expect(refusal).toContain('renderQuestionnairePage({')
+      expect(refusal).toContain('questionnaire: record.questions')
+      expect(refusal).not.toContain('step: 2')
+      expect(refusal).toContain('errors: error.problems.length > 0 ? error.problems : [error.message]')
+      expect(refusal).toMatch(/values,\s*\}\),\s*400,/)
+    })
+
+    it('a step-2 post is the one submission: kept step 1 plus step 2, through the unchanged submit', () => {
+      expect(stepTwo).toContain('{ ...formValuesFromAnswers(record.partialAnswers), ...values }')
+      expect(stepTwo).toContain('appDataStore.submitProposalQuestionnaire(')
+      expect(stepTwo).toContain('answersFromFormValues(sent)')
+      expect(stepTwo).not.toContain('saveProposalQuestionnairePartial')
+      expect(stepTwo.indexOf('response.writeHead(303')).toBeGreaterThan(
+        stepTwo.indexOf('appDataStore.submitProposalQuestionnaire('),
+      )
+    })
+
+    it('a GET lands on step 2 when step 1 was kept, unless Back asked for step 1', () => {
+      const read = between(publicBlock, 'if (isRead) {', '// ---- POST ----')
+      expect(read).toContain("requestUrl.searchParams.get('step') !== '1'")
+      expect(read).toContain('step: 2')
+      expect(read).toContain('saved: record.partialAnswers')
+      expect(read).toContain('values: formValuesFromAnswers(record.partialAnswers)')
+    })
+  })
+
   // A send the store refuses (a required answer missing - including one from a page
-  // opened before that answer was required) comes back as the form itself, with
-  // every problem listed and flagged on its field, and what they typed kept.
-  it('answers a refused send with the form, every problem and their own input, as a 400', () => {
-    const refusal = between(publicBlock, "if (error.reason === 'invalid') {", "if (error.reason === 'submitted')")
+  // opened before that answer was required, or a step 1 that was never kept) comes
+  // back as step 1, with every problem listed and flagged on its field, and what
+  // they typed kept.
+  it('answers a refused send with step 1, every problem and their own input, as a 400', () => {
+    const send = publicBlock.slice(publicBlock.indexOf('// ---- POST step 2'))
+    const refusal = between(send, "if (error.reason === 'invalid') {", "if (error.reason === 'submitted')")
     expect(refusal).toContain('renderQuestionnairePage({')
     expect(refusal).toContain('questionnaire: record.questions')
     expect(refusal).toContain('errors: error.problems.length > 0 ? error.problems : [error.message]')
-    expect(refusal).toMatch(/values,\s*\}\),\s*400,/)
+    expect(refusal).toMatch(/values: sent,\s*\}\),\s*400,/)
   })
 
   it('reads the form against the frozen questions and submits by token', () => {
     expect(publicBlock).toContain('readQuestionnaireForm(formBody, record.questions)')
     expect(publicBlock).toContain('{ token: linkToken }')
-    expect(publicBlock).toContain('answersFromFormValues(values)')
+    expect(publicBlock).toContain('answersFromFormValues(sent)')
   })
 
   it('303s to a fixed thank-you page right after the submission, so a refresh cannot post twice', () => {
@@ -277,7 +333,7 @@ describe('the public questionnaire route', () => {
 describe('the owner routes, now with links', () => {
   it('never put the bare token in an answer; the view carries the link of an open link only', () => {
     const view = between(serverSource, 'function questionnaireView(', 'const QUESTIONNAIRE_EMAIL_PATTERN')
-    expect(view).toContain('const { token, ...rest } = record')
+    expect(view).toContain('const { token, partialAnswers: _partialAnswers, ...rest } = record')
     expect(view).not.toMatch(/\btoken,\s*$/m)
     expect(view).toContain("record.mode === 'link' && record.status === 'open' && !record.expired")
     expect(ownerBlock).not.toMatch(/\.token\b/)

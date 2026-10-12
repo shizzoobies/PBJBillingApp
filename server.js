@@ -125,6 +125,8 @@ import { buildQuestionnaireEmail } from './lib/proposal-questionnaire-email.js'
 import {
   QUESTIONNAIRE_RESPONSE_HEADERS,
   answersFromFormValues,
+  formValuesFromAnswers,
+  postedQuestionnaireStep,
   readQuestionnaireForm,
   renderQuestionnaireAlreadyPage,
   renderQuestionnaireClosedPage,
@@ -2001,12 +2003,13 @@ async function recordEngagementDelivery(request, engagementId, deliveryEvent, re
 
 /**
  * A questionnaire as an owner's screen gets it: everything on the record EXCEPT
- * the bare token, plus `link` - the public address, for a link that can still be
- * answered (so Copy link works from the inbox) and null for everything else.
+ * the bare token and a sent questionnaire's half-done step 1 (the prospect's
+ * until they send it), plus `link` - the public address, for a link that can
+ * still be answered (so Copy link works from the inbox) and null for everything else.
  */
 function questionnaireView(record, request) {
   if (!record) return null
-  const { token, ...rest } = record
+  const { token, partialAnswers: _partialAnswers, ...rest } = record
   const open = record.mode === 'link' && record.status === 'open' && !record.expired
   return {
     ...rest,
@@ -4332,10 +4335,17 @@ const server = createServer(async (request, response) => {
     // SPA fallback, which would otherwise answer a questionnaire link with 200 and
     // the app shell.
     //
-    //  - GET/HEAD show the form (only the questions: nothing stored about anyone).
-    //  - POST takes the answers ONCE, then 303s to a thank-you page so a refresh
-    //    cannot post twice. The one-submission rule itself is a conditional write in
-    //    the store; the limits here only keep it from being walked or hammered.
+    //  - Two steps on the one link (Brittany, 2026-10-10): step 1 is about them,
+    //    the services they want and their software; step 2 asks only the counts
+    //    those services need. A step-1 POST is KEPT on the record (never the
+    //    submission) and answers with step 2; a GET lands on step 2 once step 1 is
+    //    kept, and `?step=1` (step 2's Back link) re-fills step 1 from it.
+    //  - GET/HEAD show the form: the questions, and only the prospect's own kept
+    //    step 1 - nothing else stored about anyone.
+    //  - The step-2 POST takes the answers ONCE, then 303s to a thank-you page so a
+    //    refresh cannot post twice. The one-submission rule itself is a conditional
+    //    write in the store; the limits here only keep it from being walked or
+    //    hammered (a step-1 POST counts like any other).
     //  - An unknown token and a malformed one get the same page, shape-checked
     //    before the database is ever asked.
     //  - EVERYTHING is a page: the global handler's catch answers JSON, which a
@@ -4407,7 +4417,28 @@ const server = createServer(async (request, response) => {
             closedPage()
             return
           }
-          sendQuestionnairePage(response, renderQuestionnairePage({ questionnaire: record.questions }))
+          // Step 1 kept: step 2, unless Back asked for step 1 (re-filled from it).
+          if (
+            Object.keys(record.partialAnswers).length > 0 &&
+            requestUrl.searchParams.get('step') !== '1'
+          ) {
+            sendQuestionnairePage(
+              response,
+              renderQuestionnairePage({
+                questionnaire: record.questions,
+                step: 2,
+                saved: record.partialAnswers,
+              }),
+            )
+            return
+          }
+          sendQuestionnairePage(
+            response,
+            renderQuestionnairePage({
+              questionnaire: record.questions,
+              values: formValuesFromAnswers(record.partialAnswers),
+            }),
+          )
           return
         }
 
@@ -4458,22 +4489,72 @@ const server = createServer(async (request, response) => {
         }
 
         const values = readQuestionnaireForm(formBody, record.questions)
+
+        if (postedQuestionnaireStep(formBody) === 1) {
+          // ---- POST step 1: KEPT, not sent - the one submission is still to come.
+          let kept
+          try {
+            kept = await appDataStore.saveProposalQuestionnairePartial(
+              { token: linkToken },
+              answersFromFormValues(values),
+            )
+          } catch (error) {
+            if (!(error instanceof ProposalQuestionnaireError)) throw error
+            if (error.reason === 'invalid') {
+              // Their own input, put back, with what is missing. Nothing kept.
+              sendQuestionnairePage(
+                response,
+                renderQuestionnairePage({
+                  questionnaire: record.questions,
+                  errors: error.problems.length > 0 ? error.problems : [error.message],
+                  values,
+                }),
+                400,
+              )
+              return
+            }
+            if (error.reason === 'submitted') {
+              sendQuestionnairePage(response, renderQuestionnaireAlreadyPage(), 409)
+              return
+            }
+            if (error.reason === 'missing') {
+              sendQuestionnairePage(response, renderQuestionnaireNotFoundPage(), 404)
+              return
+            }
+            sendQuestionnairePage(response, renderQuestionnaireClosedPage(), 410)
+            return
+          }
+          sendQuestionnairePage(
+            response,
+            renderQuestionnairePage({
+              questionnaire: kept.questions,
+              step: 2,
+              saved: kept.partialAnswers,
+            }),
+          )
+          return
+        }
+
+        // ---- POST step 2: the one submission. Step 1 as kept, with step 2 on top
+        // (a one-page form opened before the steps carries everything itself).
+        const sent = { ...formValuesFromAnswers(record.partialAnswers), ...values }
         let submitted
         try {
           submitted = await appDataStore.submitProposalQuestionnaire(
             { token: linkToken },
-            answersFromFormValues(values),
+            answersFromFormValues(sent),
           )
         } catch (error) {
           if (!(error instanceof ProposalQuestionnaireError)) throw error
           if (error.reason === 'invalid') {
-            // Their own input, put back, with what is missing. Nothing stored.
+            // Their own input, put back on step 1 (where every required answer
+            // is), with what is missing. Nothing stored.
             sendQuestionnairePage(
               response,
               renderQuestionnairePage({
                 questionnaire: record.questions,
                 errors: error.problems.length > 0 ? error.problems : [error.message],
-                values,
+                values: sent,
               }),
               400,
             )
