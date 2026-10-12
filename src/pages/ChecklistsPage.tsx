@@ -20,7 +20,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import {
   canAskWaitingOnQuestion,
   canMarkWaitingOnDone,
@@ -52,6 +52,7 @@ import { dismissClientPendingNoteRequest } from '../lib/api'
 import { canAddPendingClientNote } from '../../lib/checklist-write-permission.js'
 import { KEPT_REASON_WORK_STARTED, keptNoticeSentence } from '../../lib/series-step-delete.js'
 import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
+import { useStartFirstNote } from '../hooks/useStartFirstNote'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
 import { PeriodLabelChip } from '../components/PeriodLabelChip'
 import {
@@ -93,7 +94,9 @@ import {
   formatCycleDate,
   inheritDueLabel,
   SPECIFIC_DATE_ON_RECURRING_WARNING,
+  STEP_ONE_APPEARS_LATE_WARNING,
   stageDueDatesForCycle,
+  stepOneAppearsLate,
   startFirstRecipeStep,
 } from '../lib/recipeFirstStep'
 import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
@@ -318,13 +321,39 @@ export function ChecklistsPage() {
 
   const [searchParams, setSearchParams] = useSearchParams()
 
+  // Where this page was opened, and where the app is now. A focus can land
+  // after a save and a server round trip ("Start the first one now"), by
+  // which time the owner may have moved on: react-router keeps the setter
+  // working after unmount, so an unguarded focus would pull them back here.
+  const location = useLocation()
+  const mountedRef = useRef(false)
+  const openedPathnameRef = useRef(location.pathname)
+  const pathnameRef = useRef(location.pathname)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+  useEffect(() => {
+    pathnameRef.current = location.pathname
+  }, [location.pathname])
+
   // Point the in-progress list at a freshly-created/generated checklist. Setting
   // `?focus=<id>` both scrolls to the card and auto-expands its (possibly
-  // collapsed) group, so the user always sees the new checkable task.
+  // collapsed) group, so the user always sees the new checkable task. Built
+  // from the CURRENT params, not ones captured before an await, so it never
+  // restores filters changed in the meantime.
   const focusChecklist = (checklistId: string) => {
-    const next = new URLSearchParams(searchParams)
-    next.set('focus', checklistId)
-    setSearchParams(next, { replace: true })
+    if (!mountedRef.current || pathnameRef.current !== openedPathnameRef.current) return
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current)
+        next.set('focus', checklistId)
+        return next
+      },
+      { replace: true },
+    )
   }
 
   const todayDateOnly = localDateOnly()
@@ -455,7 +484,7 @@ export function ChecklistsPage() {
   // one-time or repeating shape; both paths render the SAME NewTaskForm.
   const [createMode, setCreateMode] = useState<CreateMode>(null)
   // Why "Start the first one now" did not start anything, shown under the form.
-  const [startFirstNote, setStartFirstNote] = useState<string | null>(null)
+  const startFirstNote = useStartFirstNote(data.checklists)
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
@@ -495,9 +524,9 @@ export function ChecklistsPage() {
     template: Omit<ChecklistTemplate, 'id'>,
     startFirstNow: boolean,
   ) => {
-    const { id, saved } = addChecklistTemplate(template)
+    const { id, createdAt, saved } = addChecklistTemplate(template)
     setCreateMode(null)
-    setStartFirstNote(null)
+    startFirstNote.dismiss()
     // "Start the first one now" starts the recipe's REAL Step 1 (its own due
     // date, step fields, Board column, sub-steps), so finishing it hands off to
     // Step 2. It used to make a plain one-off checklist due today, which ended
@@ -505,14 +534,14 @@ export function ChecklistsPage() {
     // (featreq-8b54d117). See src/lib/recipeFirstStep.ts.
     if (!startFirstNow) return
     const result = await startFirstRecipeStep({
-      template,
+      template: { ...template, createdAt },
       templateId: id,
       saved,
       generate: generateChecklistFromTemplate,
     })
     if (!result) return
     if ('started' in result) focusChecklist(result.started.id)
-    else setStartFirstNote(result.note)
+    else startFirstNote.show(id, result.note)
   }
 
   return (
@@ -681,9 +710,12 @@ export function ChecklistsPage() {
             onCreateRepeating={handleCreateRepeating}
           />
         ) : null}
-        {startFirstNote ? (
+        {startFirstNote.text ? (
           <p className="series-scope-text" role="status">
-            {startFirstNote}
+            {startFirstNote.text}{' '}
+            <button type="button" className="link-action" onClick={startFirstNote.dismiss}>
+              Dismiss
+            </button>
           </p>
         ) : null}
 
@@ -5602,6 +5634,7 @@ export function NewTaskForm({
                     dueDayOfMonth={stage.dueDayOfMonth}
                     inheritLabel={inheritDueLabel(index + 1, stage.offsetDays, isSpecificMonths)}
                     cycleDue={handOffCycleDues[index]}
+                    cycleLabel="First cycle"
                     onChange={(next) =>
                       updateExtraStage(stage.id, {
                         dueDate: next.dueDate,
@@ -6630,7 +6663,19 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
   const specificMonths = template.frequency === 'specific-months'
   // Each step's due date this cycle, shown under its due control. A
   // specific-months recipe has no single Next due date to chain from.
-  const cycleDues = specificMonths ? [] : stageDueDatesForCycle(stages, template.nextDueDate)
+  // Shown only for a live repeating recipe: a recipe that is off makes no
+  // cycles, and an onboarding case's later steps date from the day the step
+  // before finished.
+  const showCycleHints = template.active && !template.onboardingForClientId
+  const cycleDues =
+    specificMonths || !showCycleHints ? [] : stageDueDatesForCycle(stages, template.nextDueDate)
+  // The stored Next due has already moved past any cycle in progress, so the
+  // preview is for the NEXT one, named by its Next due date.
+  const cycleLabel = template.nextDueDate
+    ? `Next cycle (Next due ${formatCycleDate(template.nextDueDate)})`
+    : 'Next cycle'
+  // A Step 1 due before the day it appears would be born overdue.
+  const stepOneLate = stepOneAppearsLate(cycleDues[0], template.nextDueDate, template.leadDays)
   // Stage-level drag-and-drop reorders entire stages by their header.
   const [draggingStageId, setDraggingStageId] = useState<string | null>(null)
   const [dropTargetStageId, setDropTargetStageId] = useState<string | null>(null)
@@ -6693,6 +6738,11 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
 
   return (
     <div className="stages-accordion">
+      {stepOneLate ? (
+        <p className="stage-schedule-warning" role="note">
+          {STEP_ONE_APPEARS_LATE_WARNING}
+        </p>
+      ) : null}
       {stages.map((stage, index) => {
         const stageClasses = ['stage-card']
         if (draggingStageId === stage.id) stageClasses.push('dragging')
@@ -6775,6 +6825,8 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
                 dueDayOfMonth={stage.dueDayOfMonth}
                 inheritLabel={inheritDueLabel(index, stage.offsetDays, specificMonths)}
                 cycleDue={cycleDues[index]}
+                cycleLabel={cycleLabel}
+                warnFixedDate={showCycleHints}
                 onChange={(next) =>
                   props.onPatchStage(template.id, stage.id, {
                     dueDate: next.dueDate ?? '',
@@ -6886,8 +6938,11 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
  * step before it, less any legacy `offsetDays`), a day of the month in the
  * cycle, or one fixed calendar date. A fixed date suits no repeating recipe
  * (it never moves, so later cycles keep it), so it is only shown for a step
- * that already has one, with a warning. `cycleDue` is the date the step gets
- * this cycle, chained the way the app assigns it (src/lib/recipeFirstStep.ts).
+ * that already has one, with a warning (unless `warnFixedDate` is off), an
+ * explicit "Remove fixed date", and an input that ignores an emptied value (so
+ * clearing one segment from the keyboard never deletes it). `cycleDue` is the
+ * date the step gets in the cycle `cycleLabel` names, chained the way the app
+ * assigns it (src/lib/recipeFirstStep.ts).
  * Independent *repeat cadence* per stage is intentionally not offered: the
  * template repeats as a whole.
  */
@@ -6896,14 +6951,20 @@ export function StageScheduleControl({
   dueDayOfMonth,
   inheritLabel,
   cycleDue,
+  cycleLabel = 'This cycle',
+  warnFixedDate = true,
   onChange,
 }: {
   dueDate?: string
   dueDayOfMonth?: number
   /** What "no date of its own" means for this step (`inheritDueLabel`). */
   inheritLabel: string
-  /** This step's due date in the current cycle, when it can be worked out. */
+  /** This step's due date in the cycle `cycleLabel` names, when known. */
   cycleDue?: string
+  /** Which cycle `cycleDue` is for, e.g. "First cycle". */
+  cycleLabel?: string
+  /** Warn about a fixed date (off for a recipe that is off or an onboarding case). */
+  warnFixedDate?: boolean
   /**
    * Sets the stage's due spec. Setting one of `dueDate` / `dueDayOfMonth`
    * clears the other; the "no date of its own" choice clears both.
@@ -6966,21 +7027,31 @@ export function StageScheduleControl({
                 className="compact-input stage-schedule-date"
                 type="date"
                 value={dueDate ?? ''}
-                onChange={(event) =>
-                  emit({ dueDate: event.target.value || undefined, dueDayOfMonth: undefined })
-                }
+                onChange={(event) => {
+                  if (!event.target.value) return
+                  emit({ dueDate: event.target.value, dueDayOfMonth: undefined })
+                }}
               />
+              <button
+                type="button"
+                className="link-action"
+                onClick={() => emit({ dueDate: undefined, dueDayOfMonth: undefined })}
+              >
+                Remove fixed date
+              </button>
             </span>
           </label>
         ) : null}
       </div>
-      {mode === 'date' ? (
+      {mode === 'date' && warnFixedDate ? (
         <p className="stage-schedule-warning" role="note">
           {SPECIFIC_DATE_ON_RECURRING_WARNING}
         </p>
       ) : null}
       {cycleDue ? (
-        <p className="stage-schedule-preview">This cycle: due {formatCycleDate(cycleDue)}</p>
+        <p className="stage-schedule-preview">
+          {cycleLabel}: due {formatCycleDate(cycleDue)}
+        </p>
       ) : null}
     </div>
   )

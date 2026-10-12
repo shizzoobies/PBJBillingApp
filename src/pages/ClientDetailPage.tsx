@@ -61,6 +61,7 @@ import {
 import { applyPackageConfirmText, packagesCoveringPlans } from '../lib/packages'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
+import { useStartFirstNote } from '../hooks/useStartFirstNote'
 import { pendingNoteCount as pendingNoteCountOf, useClientPendingNotes } from '../hooks/useClientPendingNotes'
 import { ClientStatementsPanel } from '../components/ClientStatementsPanel'
 import { useSaveFlash } from '../lib/useSaveFlash'
@@ -2925,7 +2926,7 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
   const [query, setQuery] = useState('')
   const [adding, setAdding] = useState(false)
   // Why "Start the first one now" did not start anything.
-  const [startFirstNote, setStartFirstNote] = useState<string | null>(null)
+  const startFirstNote = useStartFirstNote(data.checklists)
   const [picking, setPicking] = useState(false)
 
   // Every client-bound recurring template targeting this client. Standard
@@ -2972,18 +2973,18 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
     template: Omit<ChecklistTemplate, 'id'>,
     startFirstNow: boolean,
   ) => {
-    const { id, saved } = addChecklistTemplate(template)
+    const { id, createdAt, saved } = addChecklistTemplate(template)
     setAdding(false)
-    setStartFirstNote(null)
+    startFirstNote.dismiss()
     // The recipe's REAL Step 1, never a one-off copy (featreq-8b54d117).
     if (!startFirstNow) return
     const result = await startFirstRecipeStep({
-      template,
+      template: { ...template, createdAt },
       templateId: id,
       saved,
       generate: generateChecklistFromTemplate,
     })
-    if (result && 'note' in result) setStartFirstNote(result.note)
+    if (result && 'note' in result) startFirstNote.show(id, result.note)
   }
 
   // A retired client's existing recipes stay listed below (they are history,
@@ -3034,9 +3035,12 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
           onCreateRepeating={handleCreateRepeating}
         />
       ) : null}
-      {startFirstNote ? (
+      {startFirstNote.text ? (
         <p className="series-scope-text" role="status">
-          {startFirstNote}
+          {startFirstNote.text}{' '}
+          <button type="button" className="link-action" onClick={startFirstNote.dismiss}>
+            Dismiss
+          </button>
         </p>
       ) : null}
 

@@ -974,7 +974,10 @@ function App() {
         const remoteData = ensureRecurringChecklists(
           await fetchAppData(controller.signal, previewAs),
         ).data
-        // Freshly loaded server state is authoritative and clean.
+        // Freshly loaded server state is authoritative and clean. Any edit a
+        // caller was waiting to see saved has just been replaced, so it never
+        // will be: tell them now.
+        saveWaitersRef.current = settleWorkspaceSaveWaiters(saveWaitersRef.current, null)
         dirtyRef.current = false
         setData(remoteData)
         setServerPersistenceEnabled(true)
@@ -1123,6 +1126,21 @@ function App() {
     }, 250)
     return () => window.clearTimeout(timeoutId)
   }, [data, serverPersistenceEnabled, previewUserId, sessionUser, saveNow])
+
+  // A save waiter must never be left hanging: once this tab stops saving
+  // (persistence off) or the signed-in user changes, nothing it waits for
+  // will land, so it hears `false` (src/lib/workspaceSaveWaiters.ts).
+  useEffect(() => {
+    if (!serverPersistenceEnabled) {
+      saveWaitersRef.current = settleWorkspaceSaveWaiters(saveWaitersRef.current, null)
+    }
+  }, [serverPersistenceEnabled])
+  useEffect(
+    () => () => {
+      saveWaitersRef.current = settleWorkspaceSaveWaiters(saveWaitersRef.current, null)
+    },
+    [sessionUser],
+  )
 
   // Sticky-error retry: a failed bulk PUT keeps the workspace dirty and the
   // indicator on "error". Retry on a timer until it succeeds (or the user makes
@@ -2661,11 +2679,22 @@ function App() {
 
   const addChecklistTemplate = (template: Omit<ChecklistTemplate, 'id'>) => {
     const id = makeId('template')
+    // Stamped here, not left for the server: this recipe is materialized by
+    // the BROWSER's copy of the materializer the moment it lands in local
+    // state, and the autosave then makes whatever it spawned real. Without
+    // a stamp the browser has no floor, spawns the back history, and the
+    // server sees the instances as already existing
+    // (lib/checklist-start-floor.js). A caller that supplies its own stamp
+    // — the plan-checklist clone, which dates the copy deliberately — keeps
+    // it.
+    const added: ChecklistTemplate = { createdAt: new Date().toISOString(), ...template, id }
     // `saved` settles when a save carrying this recipe lands: "Start the first
     // one now" needs the server to know the recipe before it can start it.
-    // Preview is read-only and an offline tab never saves, so nothing to wait for.
-    const saved =
-      previewActiveRef.current || !serverPersistenceEnabled
+    // Preview is read-only (null: nothing to wait for or report); an offline
+    // tab never saves (false).
+    const saved = previewActiveRef.current
+      ? null
+      : !serverPersistenceEnabled
         ? Promise.resolve(false)
         : new Promise<boolean>((settle) => {
             saveWaitersRef.current = [
@@ -2679,20 +2708,9 @@ function App() {
           })
     updateWorkspaceData((current) => ({
       ...current,
-      checklistTemplates: [
-        ...current.checklistTemplates,
-        // Stamped here, not left for the server: this recipe is materialized by
-        // the BROWSER's copy of the materializer the moment it lands in local
-        // state, and the autosave then makes whatever it spawned real. Without
-        // a stamp the browser has no floor, spawns the back history, and the
-        // server sees the instances as already existing
-        // (lib/checklist-start-floor.js). A caller that supplies its own stamp
-        // — the plan-checklist clone, which dates the copy deliberately — keeps
-        // it.
-        { createdAt: new Date().toISOString(), ...template, id },
-      ],
+      checklistTemplates: [...current.checklistTemplates, added],
     }))
-    return { id, saved }
+    return { id, createdAt: added.createdAt, saved }
   }
 
   const updateChecklistTemplate = (

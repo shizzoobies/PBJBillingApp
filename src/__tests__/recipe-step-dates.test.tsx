@@ -16,6 +16,7 @@ import {
   inheritDueLabel,
   SPECIFIC_DATE_ON_RECURRING_WARNING,
   stageDueDatesForCycle,
+  stepOneAppearsLate,
 } from '../lib/recipeFirstStep'
 import type { AppContextValue } from '../AppContext'
 import type { Client, Employee, TemplateStage } from '../lib/types'
@@ -71,6 +72,21 @@ describe('inheritDueLabel', () => {
   })
 })
 
+describe('stepOneAppearsLate', () => {
+  it('flags a Step 1 due before the day it appears', () => {
+    // Next due Oct 31, shown 5 days before (Oct 26), Step 1 due the 10th.
+    expect(stepOneAppearsLate('2026-10-10', '2026-10-31', 5)).toBe(true)
+  })
+  it('passes a Step 1 due on or after the day it appears', () => {
+    // Brittany's quarterly: Next due Jan 31, shown 30 days before (Jan 1), due the 5th.
+    expect(stepOneAppearsLate('2027-01-05', '2027-01-31', 30)).toBe(false)
+    expect(stepOneAppearsLate('2026-10-26', '2026-10-31', 5)).toBe(false)
+  })
+  it('says nothing without a date to compare', () => {
+    expect(stepOneAppearsLate(undefined, '2026-10-31', 5)).toBe(false)
+  })
+})
+
 describe('formatCycleDate', () => {
   it('reads the date as a calendar day', () => {
     expect(formatCycleDate('2026-10-10')).toBe('Oct 10, 2026')
@@ -92,17 +108,39 @@ describe('StageScheduleControl', () => {
     expect(screen.queryByText('No specific due date')).toBeNull()
   })
 
-  it('keeps a fixed date a step already has, with a warning', () => {
+  it('keeps a fixed date a step already has, with a warning and a way to remove it', () => {
+    const onChange = vi.fn()
     render(
       <StageScheduleControl
         dueDate="2026-11-03"
         inheritLabel="Same day as the step before"
         cycleDue="2026-11-03"
-        onChange={() => {}}
+        cycleLabel="Next cycle (Next due Nov 30, 2026)"
+        onChange={onChange}
       />,
     )
     expect(screen.getByText('Specific date')).toBeTruthy()
     expect(screen.getByText(SPECIFIC_DATE_ON_RECURRING_WARNING)).toBeTruthy()
+    expect(screen.getByText('Next cycle (Next due Nov 30, 2026): due Nov 3, 2026')).toBeTruthy()
+
+    // Clearing a segment from the keyboard empties the input: ignored.
+    fireEvent.change(screen.getByDisplayValue('2026-11-03'), { target: { value: '' } })
+    expect(onChange).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByText('Remove fixed date'))
+    expect(onChange).toHaveBeenCalledWith({ dueDate: undefined, dueDayOfMonth: undefined })
+  })
+
+  it('drops the fixed-date warning when asked (a recipe that is off, an onboarding case)', () => {
+    render(
+      <StageScheduleControl
+        dueDate="2026-11-03"
+        inheritLabel="Same day as the step before"
+        warnFixedDate={false}
+        onChange={() => {}}
+      />,
+    )
+    expect(screen.queryByText(SPECIFIC_DATE_ON_RECURRING_WARNING)).toBeNull()
   })
 })
 
@@ -123,10 +161,10 @@ describe('the new repeating task form previews each hand-off step\'s date', () =
     fireEvent.change(screen.getByLabelText('Due'), { target: { value: '2026-10-31' } })
     fireEvent.click(screen.getByText('+ Add a hand-off step'))
     expect(screen.getByText('Same day as the step before')).toBeTruthy()
-    expect(screen.getByText('This cycle: due Oct 31, 2026')).toBeTruthy()
+    expect(screen.getByText('First cycle: due Oct 31, 2026')).toBeTruthy()
 
     fireEvent.click(screen.getByText('Day of the month'))
     fireEvent.change(screen.getByDisplayValue('1'), { target: { value: '15' } })
-    expect(screen.getByText('This cycle: due Oct 15, 2026')).toBeTruthy()
+    expect(screen.getByText('First cycle: due Oct 15, 2026')).toBeTruthy()
   })
 })

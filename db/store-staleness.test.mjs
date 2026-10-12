@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 
 import {
   AccountCreditError,
@@ -50,11 +50,13 @@ import {
   mapClientRow,
   mapInvoiceRow,
   mapRecurringReimbursementRow,
+  materializeRecurringChecklists,
   sanitizeAppData,
   sanitizeClientBillingLinks,
   sanitizeInvoiceLines,
   statementAccountsVersion,
 } from './store.js'
+import { firstCycleForNewRecipe } from '../src/lib/recipeFirstStep.ts'
 import {
   BULK_SAVE_SLICES,
   BULK_SAVE_TABLES,
@@ -10287,6 +10289,39 @@ describe('generateChecklistFromTemplate starts a recipe\'s real Step 1 (file bac
     expect(returned.id).toBe('check-browser1')
     const after = await store.read()
     expect(after.checklists.filter((c) => c.templateId === 'tpl-first-step')).toHaveLength(1)
+  })
+
+  it('a Next due typed two cycles back starts Step 1 on the floored cycle, the one the schedule runs', async () => {
+    // Set up on March 10th with a Next due of January 15th: January and
+    // February are two cycles before the recipe existed, so both materializers
+    // start at March 15th. The page asks for that same cycle. The clock is
+    // frozen on the set-up day because the store stamps a new recipe's
+    // createdAt itself.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2099-03-10T15:00:00.000Z'))
+    onTestFinished(() => vi.useRealTimers())
+    const recipe = {
+      ...twoStepRecipe,
+      id: 'tpl-floored',
+      nextDueDate: '2099-01-15',
+      createdAt: '2099-03-10',
+      stages: twoStepRecipe.stages.map((stage, index) =>
+        index === 0 ? { ...stage, dueDayOfMonth: undefined } : stage,
+      ),
+    }
+    const cycle = firstCycleForNewRecipe(recipe)
+    expect(cycle).toBe('2099-03-15')
+    await store.write(workspace({ checklistTemplates: [recipe] }))
+    const created = await store.generateChecklistFromTemplate('tpl-floored', { dueDate: cycle })
+    expect(created.dueDate).toBe('2099-03-15')
+
+    // When the schedule reaches that cycle it finds this Step 1 and makes no
+    // other: no January or February Step 1, and no second March one.
+    const { data } = materializeRecurringChecklists(await store.read(), { today: '2099-03-15' })
+    const stepOnes = data.checklists.filter(
+      (c) => c.templateId === 'tpl-floored' && c.stageIndex === 0,
+    )
+    expect(stepOnes.map((c) => c.id)).toEqual([created.id])
   })
 })
 

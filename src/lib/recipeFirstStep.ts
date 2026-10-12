@@ -12,7 +12,8 @@
  * (`generateChecklistFromTemplate`, which is idempotent: it hands back the one
  * that already exists for that cycle), once the new recipe has been saved.
  */
-import { resolveStageDueDate } from './utils'
+import { flooredCycleStart, templateStartFloor } from '../../lib/checklist-start-floor.js'
+import { addDays, advanceChecklistFrequency, resolveStageDueDate } from './utils'
 import type { Checklist, ChecklistTemplate, TemplateStage } from './types'
 
 /**
@@ -32,38 +33,68 @@ export function startFirstStepBlocker(template: Pick<ChecklistTemplate, 'stages'
 export const START_FIRST_NOT_SAVED =
   'The recipe was not saved yet, so its first checklist was not started. Once it saves, use Generate a task now on the recipe.'
 
+/** How long to wait for the new recipe's save before giving up on starting it. */
+export const START_FIRST_SAVE_TIMEOUT_MS = 40_000
+
 export type StartFirstStepResult = { started: Checklist } | { note: string } | null
+
+/**
+ * The cycle a new recipe's first Step 1 belongs to: the Next due date as the
+ * owner typed it, floored the way both materializers floor it
+ * (`flooredCycleStart`, lib/checklist-start-floor.js). A date two or more
+ * cycles before the recipe was made is walked forward to the first cycle the
+ * schedule will actually run; one overdue cycle is kept, as there.
+ *
+ * NOT the recipe's stored Next due: the browser's materializer may already
+ * have made this cycle's Step 1 and moved the recipe on to the next cycle, and
+ * asking for that would start the NEXT cycle. With this date the server finds
+ * the existing Step 1 and returns it.
+ */
+export function firstCycleForNewRecipe(
+  template: Pick<ChecklistTemplate, 'nextDueDate' | 'frequency' | 'createdAt'>,
+): string {
+  if (!template.nextDueDate) return ''
+  return flooredCycleStart(
+    template.nextDueDate,
+    template.frequency,
+    templateStartFloor({ createdAt: template.createdAt }),
+    advanceChecklistFrequency,
+  )
+}
 
 /**
  * Start a new recipe's real Step 1. `saved` settles once the workspace save
  * that carries the new recipe has landed (the generate endpoint 404s on a
- * recipe the server has not seen). The cycle date sent is the recipe's OWN
- * Next due as entered: the browser's materializer may already have made this
- * cycle's Step 1 and moved the recipe on to the next cycle, and asking for
- * "the recipe's next due date" after that would start the NEXT cycle. With the
- * entered date the server finds the existing Step 1 and returns it.
- *
- * Returns null when the app declined quietly (preview mode).
+ * recipe the server has not seen); it is null in preview, which is read-only,
+ * and then nothing happens and nothing is said. A save that has not landed
+ * within `saveTimeoutMs` is reported like one that failed.
  */
 export async function startFirstRecipeStep({
   template,
   templateId,
   saved,
   generate,
+  saveTimeoutMs = START_FIRST_SAVE_TIMEOUT_MS,
 }: {
-  template: Pick<ChecklistTemplate, 'stages' | 'nextDueDate'>
+  template: Pick<ChecklistTemplate, 'stages' | 'nextDueDate' | 'frequency' | 'createdAt'>
   templateId: string
-  saved: Promise<boolean>
+  saved: Promise<boolean> | null
   generate: (templateId: string, payload: { dueDate?: string }) => Promise<Checklist | null>
+  saveTimeoutMs?: number
 }): Promise<StartFirstStepResult> {
+  if (saved === null) return null
   const blocker = startFirstStepBlocker(template)
   if (blocker) return { note: blocker }
-  if (!(await saved)) return { note: START_FIRST_NOT_SAVED }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), saveTimeoutMs)
+  })
+  const landed = await Promise.race([saved, timedOut])
+  clearTimeout(timer)
+  if (!landed) return { note: START_FIRST_NOT_SAVED }
   try {
-    const created = await generate(
-      templateId,
-      template.nextDueDate ? { dueDate: template.nextDueDate } : {},
-    )
+    const cycle = firstCycleForNewRecipe(template)
+    const created = await generate(templateId, cycle ? { dueDate: cycle } : {})
     return created ? { started: created } : null
   } catch (error) {
     const reason = error instanceof Error && error.message ? ` (${error.message})` : ''
@@ -137,3 +168,22 @@ export function inheritDueLabel(index: number, offsetDays: number, specificMonth
  */
 export const SPECIFIC_DATE_ON_RECURRING_WARNING =
   'A specific date only fits one cycle. This recipe repeats, and every later cycle would keep this same date, so choose one of the options above instead.'
+
+/** Shown when a recipe's Step 1 is due before the day it would appear. */
+export const STEP_ONE_APPEARS_LATE_WARNING =
+  "Step 1 will appear after it is already due - raise Show before Next due or move Step 1's day."
+
+/**
+ * Would Step 1 be born overdue? It appears "Show before Next due" days before
+ * the Next due date (the materializers' rule, lead days capped at 120), so a
+ * Step 1 due earlier than that day is already late when it shows up.
+ */
+export function stepOneAppearsLate(
+  stepOneDue: string | undefined,
+  nextDueDate: string,
+  leadDays: number | undefined,
+): boolean {
+  if (!stepOneDue || !nextDueDate) return false
+  const lead = typeof leadDays === 'number' && leadDays > 0 ? Math.min(Math.floor(leadDays), 120) : 0
+  return stepOneDue < addDays(nextDueDate, -lead)
+}
