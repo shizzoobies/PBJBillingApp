@@ -624,6 +624,8 @@ export const BULK_INSERT_SHAPES = {
       'position',
       'viewer_ids',
       'editor_ids',
+      // The step's own Board column (featreq-3e81b386); null = the recipe's.
+      'category_id',
     ],
     literals: { updated_at: 'now()' },
   },
@@ -777,6 +779,7 @@ export function checklistTemplateBulkRows(template, preservedCreatedAt) {
       stageIdx,
       Array.isArray(stage.viewerIds) ? stage.viewerIds : [],
       Array.isArray(stage.editorIds) ? stage.editorIds : [],
+      stage.categoryId || null,
     ])
     for (const [index, item] of (stage.items ?? []).entries()) {
       items.push([
@@ -2292,6 +2295,11 @@ function ensureTemplateStages(template) {
       // survived this normalizer), so the due date reverted to "none".
       ...(typeof stage.dueDayOfMonth === 'number' && stage.dueDayOfMonth >= 1
         ? { dueDayOfMonth: stage.dueDayOfMonth }
+        : {}),
+      // The step's own Board column (featreq-3e81b386) - same trap: a field
+      // this list leaves out never reaches the save. Absent = the recipe's.
+      ...(typeof stage.categoryId === 'string' && stage.categoryId
+        ? { categoryId: stage.categoryId }
         : {}),
       viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
       editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
@@ -7558,6 +7566,16 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_template_stages add column if not exists due_day_of_month int`,
       )
+      // A step's own Board column (featreq-3e81b386). Null = the recipe's
+      // checklist_templates.category_id; no foreign key, like that column.
+      // Look-first, so a boot with the column in place takes no lock.
+      const stageCategoryColumn = await this.pool.query(
+        `select 1 from information_schema.columns
+          where table_schema = current_schema() and table_name = 'checklist_template_stages' and column_name = 'category_id'`,
+      )
+      if ((stageCategoryColumn.rows?.length ?? 0) === 0) {
+        await this.pool.query(`alter table checklist_template_stages add column if not exists category_id text`)
+      }
       await this.pool.query(`alter table checklists add column if not exists case_id text`)
       await this.pool.query(`alter table checklists add column if not exists stage_id text`)
       await this.pool.query(`alter table checklists add column if not exists stage_index int`)
@@ -9111,7 +9129,8 @@ export class AppDataStore {
             order by template_id asc, sort_order asc, id asc
           `),
           this.pool.query(`
-            select id, template_id, name, assignee_id, offset_days, due_date, due_day_of_month, position, viewer_ids, editor_ids
+            select id, template_id, name, assignee_id, offset_days, due_date, due_day_of_month, position, viewer_ids, editor_ids,
+                   category_id
             from checklist_template_stages
             order by template_id asc, position asc, id asc
           `),
@@ -9204,6 +9223,10 @@ export class AppDataStore {
         }
         if (typeof row.due_day_of_month === 'number') {
           stage.dueDayOfMonth = row.due_day_of_month
+        }
+        // The step's own Board column; absent = the recipe's.
+        if (row.category_id) {
+          stage.categoryId = row.category_id
         }
         const list = stagesByTemplate.get(row.template_id) ?? []
         list.push(stage)
@@ -31021,6 +31044,16 @@ export class AppDataStore {
           delete next.dueDate
         }
       }
+      // The step's own Board column (featreq-3e81b386). A non-empty string
+      // sets it; an empty string / null clears it, so the step uses the
+      // recipe's column again.
+      if (patch && Object.prototype.hasOwnProperty.call(patch, 'categoryId')) {
+        if (typeof patch.categoryId === 'string' && patch.categoryId.trim()) {
+          next.categoryId = patch.categoryId.trim()
+        } else {
+          delete next.categoryId
+        }
+      }
       if (Array.isArray(patch?.viewerIds)) {
         next.viewerIds = [...new Set(patch.viewerIds.filter((id) => typeof id === 'string'))]
       }
@@ -31084,6 +31117,10 @@ export class AppDataStore {
       offsetDays: Number.isFinite(Number(stage?.offsetDays)) ? Number(stage.offsetDays) : 0,
       ...(typeof stage?.dueDate === 'string' && stage.dueDate.trim()
         ? { dueDate: stage.dueDate.trim() }
+        : {}),
+      // The step's own Board column; absent = the recipe's.
+      ...(typeof stage?.categoryId === 'string' && stage.categoryId.trim()
+        ? { categoryId: stage.categoryId.trim() }
         : {}),
       viewerIds: Array.isArray(stage?.viewerIds) ? [...stage.viewerIds] : [],
       editorIds: Array.isArray(stage?.editorIds) ? [...stage.editorIds] : [],

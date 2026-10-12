@@ -1408,6 +1408,12 @@ export type TemplateStage = {
    * month, clamped to that month's length. Wins over `offsetDays`.
    */
   dueDayOfMonth?: number
+  /**
+   * This step's own Board column (a ServiceCategory id). Absent / null = the
+   * recipe's `categoryId`. A task copies it when the step is generated, so
+   * changing it later does not move tasks that already exist (featreq-3e81b386).
+   */
+  categoryId?: string | null
   viewerIds: string[]
   editorIds: string[]
   items: ChecklistTemplateItem[]

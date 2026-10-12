@@ -253,6 +253,10 @@ create index if not exists checklist_template_stages_template_idx on checklist_t
 -- this stage uses it directly instead of the offset_days calculation.
 alter table checklist_template_stages add column if not exists due_date date;
 
+-- A step's own Board column (featreq-3e81b386). Null = the recipe's
+-- checklist_templates.category_id. No foreign key, like the recipe column.
+alter table checklist_template_stages add column if not exists category_id text;
+
 alter table checklists add column if not exists case_id text;
 alter table checklists add column if not exists stage_id text;
 alter table checklists add column if not exists stage_index int;

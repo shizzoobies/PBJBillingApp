@@ -1037,6 +1037,10 @@ export function ensureTemplateStages(template: ChecklistTemplate): ChecklistTemp
       ...(typeof stage.dueDayOfMonth === 'number' && stage.dueDayOfMonth >= 1
         ? { dueDayOfMonth: stage.dueDayOfMonth }
         : {}),
+      // The step's own Board column (featreq-3e81b386); absent = the recipe's.
+      ...(typeof stage.categoryId === 'string' && stage.categoryId
+        ? { categoryId: stage.categoryId }
+        : {}),
       viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
       editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
       items: Array.isArray(stage.items) ? stage.items.map((item) => ({ ...item })) : [],

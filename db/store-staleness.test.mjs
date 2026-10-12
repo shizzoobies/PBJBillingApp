@@ -41454,6 +41454,8 @@ describe('bulk save golden parity (postgres branch)', () => {
             offsetDays: 3,
             dueDate: '2026-03-31',
             dueDayOfMonth: 31,
+            // The step's own Board column (featreq-3e81b386).
+            categoryId: 'cat-2',
             viewerIds: [],
             editorIds: ['emp-1'],
             items: [{ id: 'tpl-1-item-3', label: 'Sign off' }],
@@ -51308,5 +51310,154 @@ describe('open next step now (Postgres)', () => {
     const advance = await pgStore.maybeSpawnNextStage(await pgStore.read(), stageOne)
     expect(advance).toEqual({ spawned: null, reason: 'not_all_done' })
     expect(created).toBe(0)
+  })
+})
+
+/**
+ * Board column per step (featreq-3e81b386): "Can we change it to where the
+ * board setting is under each step and not the checklist as a whole?"
+ *
+ * Each step of a recipe may name its own Board column (`stage.categoryId`,
+ * column `checklist_template_stages.category_id`); a step without one uses the
+ * recipe's (`template.categoryId`). These pin that the field survives every
+ * path a stage travels: the bulk save, read(), the materializer pass, the
+ * stage patch route and the standard-template create - on both backends.
+ */
+describe('board column per step: the stage field persists (both backends)', () => {
+  const stagedTemplate = (overrides = {}) => ({
+    id: 'tpl-col',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2099-01-31',
+    active: true,
+    viewerIds: [],
+    editorIds: [],
+    categoryId: 'cat-recipe',
+    stages: [
+      { id: 'st-1', name: 'Prepare', assigneeId: 'emp-1', offsetDays: 0, viewerIds: [], editorIds: [], items: [{ id: 'ti-1', label: 'Reconcile' }] },
+      { id: 'st-2', name: 'Review', assigneeId: 'emp-1', offsetDays: 0, categoryId: 'cat-review', viewerIds: [], editorIds: [], items: [{ id: 'ti-2', label: 'Sign off' }] },
+    ],
+    ...overrides,
+  })
+
+  it('file backend: a bulk save and read() keep each step own column, and a step without one stays without', async () => {
+    await store.write(workspace({ checklistTemplates: [stagedTemplate()] }))
+    const data = await store.read()
+    const template = data.checklistTemplates.find((entry) => entry.id === 'tpl-col')
+    expect(template.stages[1].categoryId).toBe('cat-review')
+    expect(template.stages[0]).not.toHaveProperty('categoryId')
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(persisted.checklistTemplates[0].stages[1].categoryId).toBe('cat-review')
+  })
+
+  it('file backend: the materializer write-back keeps the step column', async () => {
+    // Due today, so read() materializes and writes the workspace back
+    // through ensureTemplateStages - the normalizer that once dropped dueDayOfMonth.
+    await store.write(workspace({ checklistTemplates: [stagedTemplate({ nextDueDate: firmToday() })] }))
+    await store.read()
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(persisted.checklists.length).toBeGreaterThan(0)
+    expect(persisted.checklistTemplates[0].stages[1].categoryId).toBe('cat-review')
+  })
+
+  it('file backend: the stage patch sets a step column, and an empty value clears it back to the recipe', async () => {
+    await store.write(workspace({ checklistTemplates: [stagedTemplate()] }))
+    const set = await store.patchTemplateStage('tpl-col', 'st-1', { categoryId: 'cat-prep' })
+    expect(set.stages[0].categoryId).toBe('cat-prep')
+    let data = await store.read()
+    expect(data.checklistTemplates[0].stages[0].categoryId).toBe('cat-prep')
+
+    const cleared = await store.patchTemplateStage('tpl-col', 'st-2', { categoryId: null })
+    expect(cleared.stages[1]).not.toHaveProperty('categoryId')
+    await store.patchTemplateStage('tpl-col', 'st-1', { categoryId: '' })
+    data = await store.read()
+    expect(data.checklistTemplates[0].stages[0]).not.toHaveProperty('categoryId')
+    expect(data.checklistTemplates[0].stages[1]).not.toHaveProperty('categoryId')
+    // A patch that does not mention the field leaves it alone.
+    await store.patchTemplateStage('tpl-col', 'st-1', { categoryId: 'cat-prep' })
+    await store.patchTemplateStage('tpl-col', 'st-1', { name: 'Prep' })
+    data = await store.read()
+    expect(data.checklistTemplates[0].stages[0]).toMatchObject({ name: 'Prep', categoryId: 'cat-prep' })
+  })
+
+  it('file backend: a standard template is created with its steps columns', async () => {
+    const created = await store.createStandardTemplate({
+      title: 'Standard close',
+      categoryId: 'cat-recipe',
+      stages: [
+        { name: 'Prepare', items: [{ label: 'Reconcile' }] },
+        { name: 'Review', categoryId: 'cat-review', items: [{ label: 'Sign off' }] },
+      ],
+    })
+    expect(created.stages[0]).not.toHaveProperty('categoryId')
+    expect(created.stages[1].categoryId).toBe('cat-review')
+  })
+
+  it('postgres: the bulk save writes category_id on each stage row, null for a step without one', async () => {
+    expect(BULK_INSERT_SHAPES.checklist_template_stages.columns).toContain('category_id')
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace({ checklistTemplates: [stagedTemplate()] }))
+    const rows = insertedRows(fake.statements, 'checklist_template_stages')
+    expect(rows.map((row) => [row.id, row.category_id])).toEqual([
+      ['st-1', null],
+      ['st-2', 'cat-review'],
+    ])
+  })
+
+  it('postgres: read() selects the stage column and maps it, omitting it when null', async () => {
+    const templateRow = {
+      id: 'tpl-col',
+      title: 'Monthly close',
+      client_id: 'c1',
+      assignee_id: 'emp-1',
+      frequency: 'monthly',
+      next_due_date: new Date('2099-01-31T00:00:00Z'),
+      active: false,
+      is_standard: false,
+      category_id: 'cat-recipe',
+      skip_allowed: false,
+      onboarding_for_client_id: null,
+      source_template_id: null,
+      viewer_ids: [],
+      editor_ids: [],
+      scheduled_months: null,
+      due_day_of_month: null,
+      monthly_due_days: null,
+      repeat_annually: true,
+      schedule_year: null,
+      lead_days: null,
+    }
+    const stageRow = (id, position, categoryId) => ({
+      id,
+      template_id: 'tpl-col',
+      name: id,
+      assignee_id: 'emp-1',
+      offset_days: 0,
+      due_date: null,
+      due_day_of_month: null,
+      position,
+      viewer_ids: [],
+      editor_ids: [],
+      category_id: categoryId,
+    })
+    const fake = fakePostgres({
+      templateRows: [templateRow],
+      templateStageRows: [stageRow('st-1', 0, null), stageRow('st-2', 1, 'cat-review')],
+    })
+    const data = await postgresStore(fake).read()
+    const [select] = fake.matching(/\boffset_days\b[\s\S]*from checklist_template_stages\b/i)
+    expect(select.text).toMatch(/\bcategory_id\b/)
+    const template = data.checklistTemplates.find((entry) => entry.id === 'tpl-col')
+    expect(template.stages[0]).not.toHaveProperty('categoryId')
+    expect(template.stages[1].categoryId).toBe('cat-review')
+  })
+
+  it('the column is added look-first at boot and in schema.sql, with no foreign key', async () => {
+    const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
+    expect(source).toContain('alter table checklist_template_stages add column if not exists category_id text')
+    const schema = await readFile(path.join(projectRoot, 'db', 'schema.sql'), 'utf8')
+    expect(schema).toContain('alter table checklist_template_stages add column if not exists category_id text;')
   })
 })

@@ -649,6 +649,7 @@
           "emp-2"
         ],
         "editor_ids": [],
+        "category_id": null,
         "updated_at": "now()"
       },
       {
@@ -664,6 +665,7 @@
         "editor_ids": [
           "emp-1"
         ],
+        "category_id": "cat-2",
         "updated_at": "now()"
       },
       {
@@ -677,6 +679,7 @@
         "position": 0,
         "viewer_ids": [],
         "editor_ids": [],
+        "category_id": null,
         "updated_at": "now()"
       }
     ],
@@ -1331,6 +1334,7 @@
         "position": "",
         "viewer_ids": "",
         "editor_ids": "",
+        "category_id": "",
         "updated_at": "<now()>"
       },
       "tails": [
