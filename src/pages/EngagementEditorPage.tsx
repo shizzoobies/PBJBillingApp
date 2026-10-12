@@ -34,6 +34,7 @@ import {
   ApiError,
   type Engagement,
   type EngagementPreview,
+  type EngagementSignResult,
   type EngagementView,
   type Package,
 } from '../lib/types'
@@ -162,6 +163,8 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const [signedOn, setSignedOn] = useState(() => firmToday())
   const [signNote, setSignNote] = useState('')
   const [inPerson, setInPerson] = useState(false)
+  // What the last Mark as signed did (the client, checklists, retainer, skips).
+  const [signSummary, setSignSummary] = useState<EngagementSignResult | null>(null)
 
   const subjectRef = useRef<HTMLInputElement>(null)
   const emailBodyRef = useRef<HTMLTextAreaElement>(null)
@@ -405,18 +408,20 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const sign = async () => {
     if (!canSign || !/^\d{4}-\d{2}-\d{2}$/.test(signedOn)) return
     const ok = window.confirm(
-      `Mark the engagement letter for ${partyName} as signed on ${engagementDayLabel(signedOn)}? A signed letter can no longer be edited, sent or voided.`,
+      `Mark the engagement letter for ${partyName} as signed on ${engagementDayLabel(signedOn)}? ${signingSentence(engagement)}A signed letter can no longer be edited, sent or voided.`,
     )
     if (!ok) return
     setBusy('sign')
     setActionError('')
     setNotice('')
+    setSignSummary(null)
     try {
-      await signEngagementRequest(engagementId, {
+      const result = await signEngagementRequest(engagementId, {
         signedOn,
         ...(signNote.trim() ? { note: signNote.trim() } : {}),
         ...(engagement.status === 'draft' ? { allowUnsent: true } : {}),
       })
+      setSignSummary(result)
       setNotice(`Marked signed on ${engagementDayLabel(signedOn)}.`)
       await refresh({ overwrite: true })
     } catch (err) {
@@ -609,6 +614,14 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
               <p className="muted-text" role="status">
                 {notice}
               </p>
+            ) : null}
+            {signSummary ? (
+              <SigningSummary
+                result={signSummary}
+                partyName={partyName}
+                planName={(planId) => (data.plans ?? []).find((plan) => plan.id === planId)?.name ?? 'a plan'}
+                retainerAmount={engagement.retainerAmount}
+              />
             ) : null}
             {blockedReason ? <p className="muted-text">{blockedReason}</p> : null}
 
@@ -898,6 +911,97 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         />
       ) : null}
     </section>
+  )
+}
+
+/** "A", "A and B", "A, B and C". */
+function listWords(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? ''
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`
+}
+
+/**
+ * What Mark as signed will do, for its confirm (engagements stage 3), ending in a
+ * space when there is anything to say: a letter with no client creates one; a
+ * letter to a client brings it the fee, plans, software and retainer.
+ */
+function signingSentence(engagement: Engagement): string {
+  const figures = engagement.figures ?? {}
+  const monthly = Number(figures.totals?.monthly ?? 0)
+  const software = (figures.lines ?? []).filter(
+    (line) => line?.group === 'Software' && !line.flag && Number(line.amount) > 0,
+  )
+  const retainer = Number(engagement.retainerAmount ?? 0)
+  const brings = [
+    ...(engagement.packageId || (engagement.planIds ?? []).length > 0
+      ? ['the plans and package, with their checklists']
+      : []),
+    ...(software.length > 0 ? ['the software as monthly expenses'] : []),
+    ...(retainer > 0 ? [`a draft retainer invoice of ${formatProposalMoney(retainer)} to review`] : []),
+  ]
+  if (!engagement.clientId) {
+    return `This creates ${engagementPartyName(engagement)} as a client in Onboarding, with its contact${
+      brings.length > 0 ? `, ${listWords(brings)}` : ''
+    }. `
+  }
+  const existing = [...(monthly > 0 ? ['the monthly fee'] : []), ...brings]
+  return existing.length > 0 ? `This brings ${listWords(existing)} to the client. ` : ''
+}
+
+/** The summary under Send and sign after Mark as signed: what it did, what it skipped, and links. */
+function SigningSummary({
+  result,
+  partyName,
+  planName,
+  retainerAmount,
+}: {
+  result: EngagementSignResult
+  partyName: string
+  planName: (planId: string) => string
+  retainerAmount: number | null
+}) {
+  const checklists = result.clonedTemplateIds.length
+  return (
+    <div className="engagement-sign-summary" role="status" aria-label="What signing did">
+      <p>
+        {result.createdClient
+          ? `${partyName} is now a client, in Onboarding, with its contact.`
+          : 'Signing was applied to the client.'}
+      </p>
+      <ul>
+        {result.monthlyRate !== null ? (
+          <li>{`Monthly fee set to ${formatProposalMoney(result.monthlyRate)}.`}</li>
+        ) : null}
+        {result.addedPlanIds.length > 0 ? (
+          <li>{`Plans added: ${result.addedPlanIds.map(planName).join(', ')}.`}</li>
+        ) : null}
+        {checklists > 0 ? (
+          <li>{`${checklists} recurring checklist${checklists === 1 ? '' : 's'} copied from the plans and package.`}</li>
+        ) : null}
+        {result.softwareAdded.length > 0 ? (
+          <li>{`Software added as monthly expenses: ${result.softwareAdded.join(', ')}.`}</li>
+        ) : null}
+        {result.retainerInvoiceId ? (
+          <li>{`Retainer invoice of ${formatProposalMoney(Number(retainerAmount ?? 0))} drafted - it is in To review in the month run.`}</li>
+        ) : null}
+        {result.skipped.map((entry) => (
+          <li key={`${entry.what}-${entry.why}`}>{`Skipped - ${entry.what}: ${entry.why}`}</li>
+        ))}
+      </ul>
+      <div className="button-row">
+        <Link className="secondary-action" to={`/clients/${result.clientId}`}>
+          Open the client
+        </Link>
+        {result.retainerInvoiceId ? (
+          <Link
+            className="secondary-action"
+            to={result.retainerPeriod ? `/invoices?period=${result.retainerPeriod}` : '/invoices'}
+          >
+            Open the retainer
+          </Link>
+        ) : null}
+      </div>
+    </div>
   )
 }
 

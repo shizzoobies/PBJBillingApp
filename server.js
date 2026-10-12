@@ -8067,8 +8067,10 @@ const server = createServer(async (request, response) => {
     }
 
     // POST /api/invoices/retainer — issue a retainer invoice for one client
-    // (owner only). Manual by design: nothing in this app knows an engagement
-    // letter came back signed, so this button IS the signing event.
+    // (owner only). Since engagements stage 3, marking an engagement letter
+    // signed (POST /api/engagements/:id/sign) IS the signing event and drafts the
+    // retainer itself; this manual button remains for a client with no engagement
+    // in the app (or a second retainer).
     if (normalizedPath === '/api/invoices/retainer' && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) return
@@ -12163,7 +12165,11 @@ const server = createServer(async (request, response) => {
     }
 
     // POST /api/engagements/:id/sign - { signedOn: 'YYYY-MM-DD', note?, allowUnsent? }.
-    // Stage 2: the signature only (stage 3 creates the client here).
+    // Stage 3: signing is the moment the client side happens - the store creates
+    // the client and contact for a prospect, applies the fee, plans, package, plan
+    // checklists and software, and drafts the retainer. Answers { engagement,
+    // clientId, createdClient, clonedTemplateIds, retainerInvoiceId, retainerPeriod,
+    // monthlyRate, addedPlanIds, softwareAdded, skipped }.
     const engagementSignMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/sign$/)
     if (engagementSignMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
@@ -12192,29 +12198,41 @@ const server = createServer(async (request, response) => {
         })
         return
       }
-      let signed
+      let result
       try {
-        signed = await appDataStore.signEngagement(engagementSignMatch[1], {
+        result = await appDataStore.signEngagement(engagementSignMatch[1], {
           signedOn: payload.signedOn,
           note: payload.note ?? '',
           userId: session.user.id,
           allowUnsent: payload.allowUnsent === true,
         })
       } catch (error) {
+        // A refusal after the store created a client (a lost race, a package
+        // write failing) still changed the workspace: tell the other tabs first,
+        // even for an error rethrown below as a 500.
+        if (error.createdClientId) broadcastDataChanged()
+        if (error instanceof BillingMasterError || error instanceof PackageApplyError) {
+          sendJson(response, 409, { error: 'engagement_refused', reason: 'client_refused', message: error.message })
+          return
+        }
         sendEngagementRefusal(response, error)
         return
       }
-      if (!signed) {
+      if (!result) {
         sendJson(response, 404, { error: 'Engagement not found' })
         return
       }
       try {
-        await appDataStore.recordActivity(session.user.id, 'engagement_signed', engagementActivityTarget(signed))
+        await appDataStore.recordActivity(
+          session.user.id,
+          'engagement_signed',
+          engagementActivityTarget(result.engagement),
+        )
       } catch (error) {
         console.error('[engagements] could not record the signature:', error)
       }
       broadcastDataChanged()
-      sendJson(response, 200, { engagement: signed })
+      sendJson(response, 200, result)
       return
     }
 

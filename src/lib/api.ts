@@ -38,6 +38,7 @@
   type EngagementPreview,
   type EngagementSection,
   type EngagementSendResult,
+  type EngagementSignResult,
   type EngagementStatus,
   type EngagementView,
   type ProposalChatPatch,
@@ -5402,17 +5403,20 @@ export function sendEngagementRequest(
   )
 }
 
-/** Mark as signed on a firm day; `allowUnsent` = she handed it over in person. */
+/**
+ * Mark as signed on a firm day; `allowUnsent` = she handed it over in person. The
+ * answer says what signing did: the client created or used, the checklists, the
+ * retainer drafted, and what was skipped.
+ */
 export async function signEngagementRequest(
   id: string,
   input: { signedOn: string; note?: string; allowUnsent?: boolean },
-): Promise<Engagement> {
-  const body = await engagementRequest<{ engagement: Engagement }>(
+): Promise<EngagementSignResult> {
+  return engagementRequest<EngagementSignResult>(
     engagementPath(id, 'sign'),
     proposalJson('POST', input),
     'Failed to mark the engagement as signed',
   )
-  return body.engagement
 }
 
 /** Void a draft or sent engagement (it stays in the list). */

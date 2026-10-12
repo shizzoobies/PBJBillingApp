@@ -2726,6 +2726,8 @@ export type EngagementFigureLine = {
   hours: number | null
   formula?: string
   count?: number | null
+  /** 'retired', 'needs-count'...: a flagged line bills nothing (and adds no software at signing). */
+  flag?: string | null
 }
 
 /** The proposal's figures, frozen on the engagement. Older rows may lack keys. */
@@ -2792,6 +2794,25 @@ export type Engagement = {
   createdBy: string | null
   createdAt: string | null
   updatedAt: string | null
+}
+
+/**
+ * What marking an engagement signed did (engagements stage 3): the signed engagement,
+ * the client it created or used, the plan checklists copied, the retainer drafted
+ * (id and month, or null), the monthly fee set on an existing client (null when
+ * unchanged), the plans and software added, and what was skipped and why.
+ */
+export type EngagementSignResult = {
+  engagement: Engagement
+  clientId: string
+  createdClient: boolean
+  clonedTemplateIds: string[]
+  retainerInvoiceId: string | null
+  retainerPeriod: string | null
+  monthlyRate: number | null
+  addedPlanIds: string[]
+  softwareAdded: string[]
+  skipped: { what: string; why: string }[]
 }
 
 /** One engagement as the editor reads it (GET / PATCH / reassemble answer). */

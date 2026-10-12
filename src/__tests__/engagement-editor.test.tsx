@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import type { AppContextValue } from '../AppContext'
 import { EngagementEditorPage } from '../pages/EngagementEditorPage'
 import { firmToday } from '../../lib/firm-time.js'
-import { ApiError, type Engagement, type EngagementView } from '../lib/types'
+import { ApiError, type Engagement, type EngagementSignResult, type EngagementView } from '../lib/types'
 
 /**
  * The engagement editor (docs/plans/engagements-2026-10.md, stage 2C): what it loads,
@@ -94,6 +94,23 @@ function view(over: Partial<Engagement> = {}, hash = 'hash-1'): EngagementView {
   }
 }
 
+/** What Mark as signed answers (engagements stage 3): a client created, nothing else by default. */
+function signResult(over: Partial<EngagementSignResult> = {}): EngagementSignResult {
+  return {
+    engagement: engagement({ status: 'signed', clientId: 'client-new', signedAt: '2026-10-09T16:00:00.000Z' }),
+    clientId: 'client-new',
+    createdClient: true,
+    clonedTemplateIds: [],
+    retainerInvoiceId: null,
+    retainerPeriod: null,
+    monthlyRate: null,
+    addedPlanIds: [],
+    softwareAdded: [],
+    skipped: [],
+    ...over,
+  }
+}
+
 function mockConfirm(answer: boolean) {
   const confirm = vi.fn((message?: string) => (void message, answer))
   window.confirm = confirm
@@ -147,7 +164,7 @@ beforeEach(() => {
     ok: true,
     error: null,
   }))
-  api.signEngagementRequest = vi.fn(async () => engagement({ status: 'signed' }))
+  api.signEngagementRequest = vi.fn(async () => signResult())
   api.voidEngagementRequest = vi.fn(async () => engagement({ status: 'void' }))
   api.listPackagesRequest = vi.fn(async () => [
     { id: 'pkg-1', name: 'Full service', description: '', planIds: [], templateIds: [], createdAt: '', updatedAt: null },
@@ -448,6 +465,115 @@ describe('Mark as signed', () => {
     await waitFor(() =>
       expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-1', { signedOn: '2026-10-09', note: 'Came back by email' }),
     )
+  })
+
+  // Engagements stage 3: the confirm says what signing will do, by whether there is a client yet.
+  it('the confirm says a letter with no client creates one, with what it brings', async () => {
+    const confirm = mockConfirm(false)
+    api.getEngagementRequest = vi.fn(async () =>
+      view({
+        status: 'sent',
+        sentAt: '2026-10-11T16:00:00.000Z',
+        planIds: ['plan-1'],
+        figures: {
+          ...engagement().figures,
+          lines: [
+            ...(engagement().figures.lines ?? []),
+            { serviceId: 'software-qbo-plus', group: 'Software', name: 'QBO Plus', amount: 98, cadence: null, role: null, hours: null },
+          ],
+        },
+      }),
+    )
+    await renderEditor()
+    fireEvent.change(screen.getByLabelText('Signed on'), { target: { value: '2026-10-09' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    expect(confirm.mock.calls[0][0]).toBe(
+      'Mark the engagement letter for Acme Books as signed on Oct 9, 2026? This creates Acme Books as a client in Onboarding, with its contact, the plans and package, with their checklists, the software as monthly expenses and a draft retainer invoice of $630.00 to review. A signed letter can no longer be edited, sent or voided.',
+    )
+    expect(api.signEngagementRequest).not.toHaveBeenCalled()
+  })
+
+  it('the confirm for a letter to an existing client names the fee it brings', async () => {
+    const confirm = mockConfirm(false)
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z', clientId: 'c1', retainerAmount: null }),
+    )
+    await renderEditor()
+    fireEvent.change(screen.getByLabelText('Signed on'), { target: { value: '2026-10-09' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    expect(confirm.mock.calls[0][0]).toBe(
+      'Mark the engagement letter for Acme Books as signed on Oct 9, 2026? This brings the monthly fee to the client. A signed letter can no longer be edited, sent or voided.',
+    )
+  })
+
+  it('shows what signing did, with links to the client and the retainer', async () => {
+    mockConfirm(true)
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z' }))
+    api.signEngagementRequest = vi.fn(async () =>
+      signResult({
+        clonedTemplateIds: ['tpl-close', 'tpl-payroll'],
+        addedPlanIds: ['plan-1', 'plan-2'],
+        softwareAdded: ['QBO Plus'],
+        retainerInvoiceId: 'inv-ret1',
+        retainerPeriod: '2026-10',
+        skipped: [{ what: 'Software: QB Time Elite', why: 'Acme Books already has a recurring expense named "QB Time Elite", so it was not added again.' }],
+      }),
+    )
+    await renderEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    const summary = await screen.findByRole('status', { name: 'What signing did' })
+    expect(within(summary).getByText('Acme Books is now a client, in Onboarding, with its contact.')).toBeTruthy()
+    expect(within(summary).getByText('Plans added: Monthly Bookkeeping, Payroll.')).toBeTruthy()
+    expect(within(summary).getByText('2 recurring checklists copied from the plans and package.')).toBeTruthy()
+    expect(within(summary).getByText('Software added as monthly expenses: QBO Plus.')).toBeTruthy()
+    expect(
+      within(summary).getByText('Retainer invoice of $630.00 drafted - it is in To review in the month run.'),
+    ).toBeTruthy()
+    expect(within(summary).getByText(/^Skipped - Software: QB Time Elite: /)).toBeTruthy()
+    expect(within(summary).getByRole('link', { name: 'Open the client' }).getAttribute('href')).toBe('/clients/client-new')
+    expect(within(summary).getByRole('link', { name: 'Open the retainer' }).getAttribute('href')).toBe(
+      '/invoices?period=2026-10',
+    )
+  })
+
+  it('a signing with no retainer offers no retainer link, and says an opted-out skip', async () => {
+    mockConfirm(true)
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z', clientId: 'c1' }))
+    api.signEngagementRequest = vi.fn(async () =>
+      signResult({
+        createdClient: false,
+        clientId: 'c1',
+        monthlyRate: 630,
+        skipped: [{ what: 'Retainer', why: 'Acme is invoiced outside the app, so no retainer invoice was drafted.' }],
+      }),
+    )
+    await renderEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    const summary = await screen.findByRole('status', { name: 'What signing did' })
+    expect(within(summary).getByText('Signing was applied to the client.')).toBeTruthy()
+    expect(within(summary).getByText('Monthly fee set to $630.00.')).toBeTruthy()
+    expect(
+      within(summary).getByText('Skipped - Retainer: Acme is invoiced outside the app, so no retainer invoice was drafted.'),
+    ).toBeTruthy()
+    expect(within(summary).queryByRole('link', { name: 'Open the retainer' })).toBeNull()
+    expect(within(summary).getByRole('link', { name: 'Open the client' }).getAttribute('href')).toBe('/clients/c1')
+  })
+
+  it('shows the notice Accept handed over, and says the client comes at signing', async () => {
+    render(
+      <MemoryRouter
+        initialEntries={[{ pathname: '/engagements/eng-1', state: { notice: 'Marked Won. Acme Books becomes a client when this letter is marked signed.' } }]}
+      >
+        <Routes>
+          <Route path="/engagements/:engagementId" element={<EngagementEditorPage />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    await screen.findByDisplayValue('Engagement letter - {{client_name}}')
+    expect(screen.getByText('Marked Won. Acme Books becomes a client when this letter is marked signed.')).toBeTruthy()
+    expect(
+      screen.getByText('Kept on the engagement for when it is signed. Acme Books becomes a client only then.'),
+    ).toBeTruthy()
   })
 
   it('a signed letter is read-only: no Save, Send, Sign or Void', async () => {

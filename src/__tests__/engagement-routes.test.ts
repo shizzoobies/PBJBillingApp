@@ -166,6 +166,24 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
     expect(view).toContain('sender: letterSender(firmSettings),')
   })
 
+  // Engagements stage 3: signing creates the client, so a refusal after that still
+  // tells the other tabs (before any mapping), a client-side refusal is a 409, and the
+  // route answers the store's whole result (client, checklists, retainer, skips).
+  it('sign broadcasts a created client before any refusal, maps client refusals to 409, and answers the result whole', () => {
+    const block = routeBlock(ROUTES[8].pattern, 3000)
+    const broadcastAt = block.indexOf('if (error.createdClientId) broadcastDataChanged()')
+    const masterAt = block.indexOf('error instanceof BillingMasterError || error instanceof PackageApplyError')
+    const refusalAt = block.indexOf('sendEngagementRefusal(response, error)')
+    expect(broadcastAt).toBeGreaterThan(-1)
+    expect(masterAt).toBeGreaterThan(broadcastAt)
+    expect(refusalAt).toBeGreaterThan(masterAt)
+    expect(block).toContain("sendJson(response, 409, { error: 'engagement_refused', reason: 'client_refused', message: error.message })")
+    expect(block).toContain('sendJson(response, 200, result)')
+    expect(block).toContain('engagementActivityTarget(result.engagement)')
+    expect(block).not.toContain('appDataStore.createClient(')
+    expect(block).not.toContain('createRetainerInvoice(')
+  })
+
   it('sign and void record what happened', () => {
     expect(routeBlock(ROUTES[8].pattern, 3000)).toContain("'engagement_signed'")
     expect(routeBlock(ROUTES[8].pattern, 3000)).toContain('allowUnsent: payload.allowUnsent === true')

@@ -1687,6 +1687,16 @@ function mapEngagementSectionRow(row) {
   }
 }
 
+/** A calendar day ('YYYY-MM-DD') in words: "October 9, 2026" (the retainer line's note). */
+function engagementDayWords(day) {
+  return new Date(`${day}T12:00:00.000Z`).toLocaleDateString('en-US', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone: 'UTC',
+  })
+}
+
 /**
  * The instant of noon on a firm calendar day ('YYYY-MM-DD'), so a signed date
  * reads as that same day in every US zone and on the firm's own clock.
@@ -13058,12 +13068,20 @@ export class AppDataStore {
    * concurrent Accepts links its client — the other gets zero rows back and
    * knows to undo what it created. Returns the proposal, or null when the
    * link did not take (already linked, or no longer draft/sent).
+   *
+   * `won: true` is signing's link (engagements stage 3): the proposal is Won by
+   * then, so the compare-and-set takes only an ACCEPTED proposal with no client
+   * yet - exactly one signed letter ever links its prospect's proposal.
    */
-  async linkProposalClient(id, clientId) {
+  async linkProposalClient(id, clientId, { won = false } = {}) {
     if (!id || !clientId) return null
     if (this.pool) {
       const { rows } = await this.pool.query(
-        `update proposals set client_id = $2, updated_at = now()
+        won
+          ? `update proposals set client_id = $2, updated_at = now()
+          where id = $1 and client_id is null and status = 'accepted'
+          returning ${PROPOSAL_COLUMNS}`
+          : `update proposals set client_id = $2, updated_at = now()
           where id = $1 and client_id is null and status in ('draft', 'sent')
           returning ${PROPOSAL_COLUMNS}`,
         [id, clientId],
@@ -13075,7 +13093,8 @@ export class AppDataStore {
       (row) => row && row.id === id,
     )
     if (!target) return null
-    if (target.clientId || (target.status !== 'draft' && target.status !== 'sent')) return null
+    const open = won ? target.status === 'accepted' : target.status === 'draft' || target.status === 'sent'
+    if (target.clientId || !open) return null
     target.clientId = clientId
     target.updatedAt = nowIso()
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
@@ -13083,17 +13102,19 @@ export class AppDataStore {
   }
 
   /**
-   * Retire a client an Accept created, then lost the race to link (see
-   * `linkProposalClient`) — there is no safe generic client-delete path (a
-   * client can pick up history the instant it exists), so the loser's client
-   * is marked retired rather than removed, with a note saying why, the same
-   * shape `addClientNote` gives every other note.
+   * Retire a client that marking an engagement signed created and then could not
+   * keep: it lost the race to claim the engagement, or the proposal behind it was
+   * already linked (see `signEngagement`). There is no safe generic client-delete
+   * path (a client can pick up history the instant it exists), so the loser's
+   * client is marked retired rather than removed, with a note saying why, the
+   * same shape `addClientNote` gives every other note - as Accept did before
+   * engagements stage 3 moved client creation to signing.
    */
-  async _retireOrphanedAcceptClient(clientId, proposalId) {
+  async _retireOrphanedSignClient(clientId, engagementId) {
     await this.setClientLifecycleStage(clientId, 'inactive')
     await this.addClientNote(clientId, {
       authorName: 'System',
-      body: `Retired automatically: created by an Accept on proposal ${proposalId} that lost a race to link this proposal to a client.`,
+      body: `Retired automatically: created by marking engagement letter ${engagementId} signed, which lost a race to another signing of the same letter or proposal.`,
     })
   }
 
@@ -13415,6 +13436,102 @@ export class AppDataStore {
       await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
       return AppDataStore.mapProposal(target)
     })
+  }
+
+  /**
+   * The SOFTWARE lines of an engagement's figures (featreq-a69a3cc0) that become
+   * monthly recurring expenses on the client: group Software, a price above $0
+   * (Bill Pay Basic bills nothing and adds nothing), no flag.
+   */
+  static _softwareExpenseLines(lines) {
+    return (Array.isArray(lines) ? lines : []).filter(
+      (line) => line?.group === 'Software' && Number(line.amount) > 0 && !line.flag && String(line.name ?? '').trim(),
+    )
+  }
+
+  /**
+   * The software rows signing adds, lifted from what Accept used to do: each line
+   * as a monthly recurring expense - description = the plan's name, the line's
+   * amount, Software category, starting the first day of the firm's current
+   * month, covered dates off. A line whose description the client already
+   * carries (any category, case-insensitive) is skipped, so a retry adds each
+   * line once. Postgres only: written through `dbClient`, the caller's
+   * transaction. Returns `{ added: [description], skipped: [description] }`;
+   * throws when a row is refused, so the caller's transaction rolls back.
+   */
+  async _addSoftwareExpenseRows(dbClient, clientId, lines) {
+    const wanted = AppDataStore._softwareExpenseLines(lines)
+    const added = []
+    const skipped = []
+    if (wanted.length === 0) return { added, skipped }
+    const startDate = `${firmToday().slice(0, 7)}-01`
+    const { rows } = await dbClient.query(`select description from recurring_reimbursements where client_id = $1`, [
+      clientId,
+    ])
+    const have = new Set(rows.map((row) => String(row.description ?? '').trim().toLowerCase()))
+    for (const line of wanted) {
+      const description = String(line.name).trim()
+      if (have.has(description.toLowerCase())) {
+        skipped.push(description)
+        continue
+      }
+      const row = await this.addRecurringReimbursement({
+        clientId,
+        description,
+        amount: line.amount,
+        frequency: 'monthly',
+        startDate,
+        category: 'software',
+        dbClient,
+      })
+      if (!row) throw new EngagementStateError(`The software line "${description}" could not be added to the client.`, 'status')
+      have.add(description.toLowerCase())
+      added.push(description)
+    }
+    return { added, skipped }
+  }
+
+  /**
+   * The file backend's half of `_addSoftwareExpenseRows`: the same rows pushed
+   * onto `data` (the workspace file, already read by the caller inside its queue
+   * slot). Returns `{ added, skipped }` like the Postgres half.
+   */
+  static _addSoftwareExpenseRowsToData(data, clientId, lines) {
+    const wanted = AppDataStore._softwareExpenseLines(lines)
+    const added = []
+    const skipped = []
+    if (wanted.length === 0) return { added, skipped }
+    if (!Array.isArray(data.clients) || !data.clients.some((entry) => entry?.id === clientId)) {
+      throw new EngagementStateError('The client for this letter no longer exists.', 'status')
+    }
+    const startDate = `${firmToday().slice(0, 7)}-01`
+    if (!Array.isArray(data.recurringReimbursements)) data.recurringReimbursements = []
+    const have = new Set(
+      data.recurringReimbursements
+        .filter((entry) => entry.clientId === clientId)
+        .map((entry) => String(entry.description ?? '').trim().toLowerCase()),
+    )
+    for (const line of wanted) {
+      const description = String(line.name).trim()
+      if (have.has(description.toLowerCase())) {
+        skipped.push(description)
+        continue
+      }
+      data.recurringReimbursements.push(
+        normalizeRecurringReimbursement({
+          id: `recur-${randomUUID().slice(0, 8)}`,
+          clientId,
+          description,
+          amount: line.amount,
+          frequency: 'monthly',
+          startDate,
+          category: 'software',
+        }),
+      )
+      have.add(description.toLowerCase())
+      added.push(description)
+    }
+    return { added, skipped }
   }
 
   /**
@@ -15440,10 +15557,10 @@ export class AppDataStore {
   /**
    * Issue a RETAINER invoice for one client — the front end of an engagement.
    *
-   * Deliberately a manual act. There is no engagement-signing event in this app,
-   * so nothing here can know the letter came back signed; the owner does, and
-   * she presses the button. That is the whole trigger, and it is why this is not
-   * wired into the month run.
+   * Two triggers, both deliberate acts: marking an engagement letter signed
+   * (`signEngagement`, engagements stage 3) drafts one for the letter's retainer
+   * amount, and the client page's Retainer button issues one by hand for a
+   * client with no engagement in the app. Never wired into the month run.
    *
    * What comes out is an ordinary DRAFT invoice with `kind: 'retainer'` and one
    * line. From there it lives on the existing rails without a special case:
@@ -26853,11 +26970,49 @@ export class AppDataStore {
   }
 
   /**
-   * Mark a SENT engagement signed - or a draft one, with `allowUnsent: true`,
-   * for a letter she handed over in person. `signedOn` is the firm day it was
+   * Mark a SENT engagement signed - or a draft one, with `allowUnsent: true`, for
+   * a letter she handed over in person - and do what signing means (engagements
+   * stage 3, docs/plans/engagements-2026-10.md). `signedOn` is the firm day it was
    * signed ('YYYY-MM-DD', not in the future), stored as that day's firm noon.
-   * Stage 2: the signature only, no side effects (stage 3 creates the client in
-   * this same call). Returns the engagement, or null when there is none.
+   *
+   * Branches on the engagement's CLIENT, never its kind. With no client yet (a
+   * prospect's Original drafted since stage 3) signing CREATES the client and its
+   * contact from the party and the figures. With one (an upsell; an Original
+   * drafted in stage 2, when Accept still created the client; an amendment)
+   * nothing is created and only what makes sense for an existing client runs.
+   * In this order:
+   *   1. prospect only: the client + contact (`createClient`: the party's name,
+   *      contact, email, phone and address; Onboarding; Monthly at the monthly
+   *      total, or Annual at the annual total when the figures have only annual
+   *      fees; payment terms; estimated hours by role, one decimal). Then the
+   *      engagement is claimed for it (compare-and-set on client_id) and the
+   *      proposal linked (compare-and-set on an accepted, unlinked proposal); a
+   *      lost race retires the new client and refuses.
+   *   2. an existing client billed monthly takes the letter's monthly fee;
+   *   3. the engagement's plans are unioned in, then its package applied;
+   *   4. every plan now on the client brings its standard checklists, each
+   *      blueprint once (`_copyPlanChecklistBundles`);
+   *   5. the software lines become monthly Software expenses AND the status flips
+   *      to signed, as ONE unit (`_signEngagementWithSoftware`);
+   *   6. a DRAFT retainer invoice for the retainer amount (it lands in "To review"
+   *      in the month run), unless the client is invoiced outside the app;
+   *   7. activity client_created and retainer_invoice_issued (package_applied is
+   *      the package path's; the route records engagement_signed).
+   * The onboarding case is NOT opened: the new client simply arrives in Onboarding.
+   *
+   * Not one transaction overall: `createClient`, `applyPackageToClient` and
+   * `copyTemplateToClient` each own theirs (the last two through the workspace
+   * save). What keeps a half-finished signing safe: every check that can refuse
+   * runs before the first write; every step before the flip is safe to repeat
+   * (the same fee, a union, a skip-if-copied, a skip-if-present); and a retry
+   * finds the engagement already claimed by the client it created, so it takes
+   * the existing-client path and never creates a second client. The retainer
+   * comes after the flip, so it is issued at most once. A failure after a client
+   * was created carries `createdClientId`, so the route still tells other tabs.
+   *
+   * @returns {Promise<null | {engagement, clientId, createdClient, clonedTemplateIds,
+   *   retainerInvoiceId, retainerPeriod, monthlyRate, addedPlanIds, softwareAdded,
+   *   skipped: {what: string, why: string}[]}>} null when there is no such engagement.
    */
   async signEngagement(id, { signedOn, note = '', userId = null, allowUnsent = false } = {}) {
     const current = await this.getEngagement(id)
@@ -26865,35 +27020,409 @@ export class AppDataStore {
     if (!isRealDay(signedOn)) throw new EngagementStateError('Choose the day the letter was signed.', 'invalid')
     if (signedOn > firmToday()) throw new EngagementStateError('The signed date cannot be in the future.', 'invalid')
     const allowed = allowUnsent === true ? ['sent', 'draft'] : ['sent']
-    const refusal = (status) =>
-      status === 'draft'
-        ? new EngagementStateError(
-            'This letter has not been sent. Send it first, or mark it as signed in person.',
-            'status',
-          )
-        : AppDataStore._engagementStatusRefusal(status, 'signed')
-    if (!allowed.includes(current.status)) throw refusal(current.status)
+    if (!allowed.includes(current.status)) throw AppDataStore._engagementSignRefusal(current.status)
     const signedAt = firmNoonInstant(signedOn)
     const signedNote = String(note ?? '').trim().slice(0, ENGAGEMENT_NOTE_MAX) || null
+    const refuse = (message, reason) => new EngagementStateError(message, reason)
+
+    // ---- every check that can refuse, before the first write ----
+    const figures = current.figures && typeof current.figures === 'object' ? current.figures : {}
+    const totals = figures.totals && typeof figures.totals === 'object' ? figures.totals : {}
+    const monthly = Number(totals.monthly) > 0 ? Math.round(Number(totals.monthly) * 100) / 100 : 0
+    const annual = Number(totals.annual) > 0 ? Math.round(Number(totals.annual) * 100) / 100 : 0
+    let client = null
+    if (current.clientId) {
+      client = await this.getClientById(current.clientId)
+      if (!client) {
+        throw refuse('The client on this letter no longer exists, so it cannot be marked signed.', 'client_missing')
+      }
+      if (client.isBillingMaster === true) {
+        throw refuse(
+          `${client.name || 'That client'} is a billing master - it holds no fee, plans, checklists or software of its own. Use one of its sub clients instead.`,
+          'billing_master',
+        )
+      }
+      if ((client.lifecycleStage ?? 'active') === 'inactive') {
+        throw refuse(
+          `${client.name || 'That client'} is retired, so the letter can't bring plans, checklists, software or a retainer to them. Reactivate them first, then mark it signed.`,
+          'client_retired',
+        )
+      }
+    } else if (!(current.party?.company || current.party?.contactName)) {
+      throw refuse('Give the party a company or contact name first - it becomes the client when the letter is signed.', 'no_name')
+    }
+    let pkg = null
+    if (current.packageId) {
+      pkg = (await this.listPackages()).find((row) => row.id === current.packageId) ?? null
+      if (!pkg) {
+        throw refuse(
+          'The package on this letter no longer exists. Choose another in Signing details (or none), save, then mark it signed.',
+          'package_missing',
+        )
+      }
+    }
+    const firm = current.clientId ? null : await this.getFirmSettings()
+
+    // ---- 1. the client and its contact (a prospect only) ----
+    let clientId = current.clientId
+    let createdClient = false
+    if (!clientId) {
+      const party = current.party
+      const hours = figures.hoursByRole && typeof figures.hoursByRole === 'object' ? figures.hoursByRole : {}
+      // Estimated monthly hours by role, one decimal; a role with none is left
+      // blank (no key at all), not 0. The proposal's controller is the client's CFO.
+      const estimates = {}
+      for (const [role, key] of [
+        ['bookkeeper', 'estimatedBookkeeperHours'],
+        ['accountant', 'estimatedAccountantHours'],
+        ['controller', 'estimatedCfoHours'],
+      ]) {
+        const tenth = Math.round((Number(hours[role]) || 0) * 10) / 10
+        if (tenth > 0) estimates[key] = tenth
+      }
+      const annualOnly = monthly === 0 && annual > 0
+      const created = await this.createClient({
+        name: party.company || party.contactName,
+        contact: party.contactName,
+        contactName: party.contactName,
+        email: party.email,
+        phone: party.phone,
+        addressLine1: party.addressLine1,
+        addressLine2: party.addressLine2,
+        city: party.city,
+        state: party.state,
+        postalCode: party.postalCode,
+        lifecycleStage: 'onboarding',
+        ...(annualOnly
+          ? { billingMode: 'annual', annualRate: annual, annualBillingMonth: Number(firmToday().slice(5, 7)) }
+          : { billingMode: 'subscription', monthlyRate: monthly }),
+        paymentTerms: String(figures.paymentTerms || firm?.clientDefaults?.paymentTerms || ''),
+        ...estimates,
+        ...(party.contactName
+          ? { newPrimaryContact: { name: party.contactName, title: party.title, email: party.email, phone: party.phone } }
+          : {}),
+      })
+      if (!created) throw refuse('The client could not be created.', 'status')
+      clientId = created.id
+      createdClient = true
+      client = created
+    }
+
+    // Everything from here on runs AFTER a client may already exist: any failure
+    // carries its id (`??=` never overwrites one an inner throw attached).
+    try {
+      const skipped = []
+      if (createdClient) {
+        const claimed = await this._claimEngagementClient(id, clientId, allowed)
+        if (!claimed) {
+          // Lost the race: another signing of this same letter claimed it with its
+          // own client first, or the letter was voided meanwhile. The client just
+          // made has no history yet - retire it, and say what actually happened.
+          await this._retireOrphanedSignClient(clientId, id)
+          const latest = await this.getEngagement(id)
+          throw refuse(
+            !latest
+              ? 'This engagement no longer exists.'
+              : latest.status === 'signed'
+                ? 'Someone else already marked this letter signed.'
+                : latest.status === 'void'
+                  ? 'This letter was voided while you were marking it signed.'
+                  : 'Someone else is already marking this letter signed.',
+            'status',
+          )
+        }
+        if (current.proposalId) {
+          const linked = await this.linkProposalClient(current.proposalId, clientId, { won: true })
+          if (!linked) {
+            await this._releaseEngagementClient(id, clientId)
+            await this._retireOrphanedSignClient(clientId, id)
+            throw refuse(
+              'The proposal behind this letter is already linked to a client, so no new client was kept. Open the proposal to check which.',
+              'proposal_linked',
+            )
+          }
+        }
+        await this._recordSigningActivity(userId, 'client_created', client.name || '')
+      }
+
+      // ---- 2. an existing client billed monthly takes the letter's fee ----
+      let monthlyRate = null
+      if (!createdClient && monthly > 0) {
+        if ((client.billingMode ?? 'hourly') === 'subscription') {
+          if (Number(client.monthlyRate ?? 0) !== monthly) {
+            await this.setClientMonthlyRate(clientId, monthly)
+            monthlyRate = monthly
+          }
+        } else {
+          skipped.push({
+            what: 'Monthly fee',
+            why: `${client.name || 'The client'} is billed ${client.billingMode === 'annual' ? 'annually' : 'hourly'}, so the letter's monthly fee was not put on them.`,
+          })
+        }
+      }
+
+      // ---- 3. plans, then the package ----
+      const workspace = await this.read()
+      const row = (workspace.clients ?? []).find((entry) => entry.id === clientId)
+      const known = new Set((workspace.plans ?? []).map((plan) => plan.id))
+      const existing = Array.isArray(row?.planIds) ? row.planIds : []
+      const addedPlanIds = (current.planIds ?? []).filter((planId) => known.has(planId) && !existing.includes(planId))
+      if ((current.planIds ?? []).some((planId) => !known.has(planId))) {
+        skipped.push({ what: 'Plans', why: 'A plan on the letter no longer exists, so it was left out.' })
+      }
+      if (addedPlanIds.length > 0) await this._setClientPlanIds(clientId, [...existing, ...addedPlanIds])
+      const clonedTemplateIds = []
+      if (pkg) {
+        const applied = await this.applyPackageToClient(clientId, pkg.id, { actorUserId: userId })
+        if (applied) {
+          for (const planId of applied.addedPlanIds) if (!addedPlanIds.includes(planId)) addedPlanIds.push(planId)
+          clonedTemplateIds.push(...applied.clonedTemplateIds)
+        }
+      }
+
+      // ---- 4. each plan's standard checklists ----
+      for (const templateId of await this._copyPlanChecklistBundles(clientId)) {
+        if (!clonedTemplateIds.includes(templateId)) clonedTemplateIds.push(templateId)
+      }
+
+      // ---- 5. the software rows and the flip, as one unit ----
+      const { engagement, software } = await this._signEngagementWithSoftware(
+        id,
+        clientId,
+        allowed,
+        { signedAt, userId, signedNote },
+        figures.lines,
+      )
+      for (const description of software.skipped) {
+        skipped.push({
+          what: `Software: ${description}`,
+          why: `${client.name || 'The client'} already has a recurring expense named "${description}", so it was not added again.`,
+        })
+      }
+
+      // ---- 6. the retainer, after the flip, so at most once ----
+      let retainerInvoiceId = null
+      let retainerPeriod = null
+      const retainerAmount = Number(current.retainerAmount) || 0
+      if (retainerAmount > 0) {
+        const latestClient = (await this.getClientById(clientId)) ?? client
+        if (latestClient.platformInvoicingOptOut === true) {
+          skipped.push({
+            what: 'Retainer',
+            why: `${latestClient.name || 'The client'} is invoiced outside the app, so no retainer invoice was drafted.`,
+          })
+        } else {
+          let retainer = null
+          try {
+            retainer = await this.createRetainerInvoice({
+              clientId,
+              amount: retainerAmount,
+              note: `Retainer - engagement letter signed ${engagementDayWords(signedOn)}`,
+              actorUserId: userId,
+            })
+          } catch (error) {
+            console.error('[engagements] signing could not draft the retainer for', id, error)
+          }
+          if (retainer) {
+            retainerInvoiceId = retainer.id
+            retainerPeriod = retainer.period
+            // The same entry the retainer button records.
+            await this._recordSigningActivity(
+              userId,
+              'retainer_invoice_issued',
+              `${retainer.number ?? retainer.id}: ${retainer.total}`,
+            )
+          } else {
+            skipped.push({
+              what: 'Retainer',
+              why: "The retainer invoice could not be drafted. Issue it from the client's Billing tab.",
+            })
+          }
+        }
+      }
+
+      return {
+        engagement,
+        clientId,
+        createdClient,
+        clonedTemplateIds,
+        retainerInvoiceId,
+        retainerPeriod,
+        monthlyRate,
+        addedPlanIds,
+        softwareAdded: software.added,
+        skipped,
+      }
+    } catch (error) {
+      if (createdClient) error.createdClientId ??= clientId
+      throw error
+    }
+  }
+
+  /** The refusal for signing a letter in a status that cannot be signed. */
+  static _engagementSignRefusal(status) {
+    return status === 'draft'
+      ? new EngagementStateError('This letter has not been sent. Send it first, or mark it as signed in person.', 'status')
+      : AppDataStore._engagementStatusRefusal(status, 'signed')
+  }
+
+  /** An activity line signing records; a failure is logged, never a failed signing. */
+  async _recordSigningActivity(userId, action, target) {
+    if (!userId) return
+    try {
+      await this.recordActivity(userId, action, target)
+    } catch (error) {
+      console.error('[engagements] could not record', action, error)
+    }
+  }
+
+  /**
+   * Claim an unsigned engagement for the client signing just created: a
+   * compare-and-set that takes only while `client_id` is still empty and the
+   * status is one signing allows, so of two signings at once exactly one keeps
+   * its client. Returns true when it took.
+   */
+  async _claimEngagementClient(id, clientId, allowed) {
     if (this.pool) {
       const { rows } = await this.pool.query(
-        `update engagements
-            set status = 'signed', signed_at = $2, signed_by = $3, signed_note = $4, updated_at = now()
-          where id = $1 and status = any($5::text[])
-          returning ${ENGAGEMENT_COLUMNS}`,
-        [id, signedAt, userId, signedNote, allowed],
+        `update engagements set client_id = $2, updated_at = now()
+          where id = $1 and client_id is null and status = any($3::text[])
+          returning id`,
+        [id, clientId, allowed],
       )
-      if (rows[0]) return mapEngagementRow(rows[0])
-      const latest = await this.getEngagement(id)
-      if (!latest) return null
-      throw refusal(latest.status)
+      return Boolean(rows[0])
     }
     return this._mutateEngagementFile((authState) => {
       const row = authState.engagements.find((entry) => entry?.id === id)
-      if (!row) return { result: null, changed: false }
-      if (!allowed.includes(row.status)) throw refusal(row.status)
-      Object.assign(row, { status: 'signed', signedAt, signedBy: userId, signedNote, updatedAt: nowIso() })
-      return { result: mapEngagementRow(row), changed: true }
+      if (!row || row.clientId || !allowed.includes(row.status)) return { result: false, changed: false }
+      row.clientId = clientId
+      row.updatedAt = nowIso()
+      return { result: true, changed: true }
+    })
+  }
+
+  /** Undo a claim whose proposal link then failed (the client is being retired). */
+  async _releaseEngagementClient(id, clientId) {
+    if (this.pool) {
+      await this.pool.query(
+        `update engagements set client_id = null, updated_at = now()
+          where id = $1 and client_id = $2 and status in ('draft', 'sent')`,
+        [id, clientId],
+      )
+      return
+    }
+    await this._mutateEngagementFile((authState) => {
+      const row = authState.engagements.find((entry) => entry?.id === id)
+      if (!row || row.clientId !== clientId || !ENGAGEMENT_EDITABLE_STATUSES.includes(row.status)) {
+        return { result: null, changed: false }
+      }
+      row.clientId = null
+      row.updatedAt = nowIso()
+      return { result: null, changed: true }
+    })
+  }
+
+  /**
+   * "Plans when created should be matched to a standard checklist" (Brittany,
+   * 2026-10-10): for every plan on the client, copy each of the plan's bundled
+   * checklists (`plan.templateIds`) the client does not already have, through
+   * `copyTemplateToClient` - the package path's copy. "Already has" is the client
+   * page's own rule (`clientHasPlanTemplate`): a copy stamped from that blueprint,
+   * or a checklist of the same title, so a hand-made "Monthly Close" is never
+   * doubled. Whoever a copy hands work to can see the client, as with a package.
+   * Returns the blueprint ids copied (none twice, and none on a re-run).
+   */
+  async _copyPlanChecklistBundles(clientId) {
+    const data = await this.read()
+    const client = (data.clients ?? []).find((row) => row.id === clientId)
+    if (!client) return []
+    const planIds = Array.isArray(client.planIds) ? client.planIds : []
+    const plansById = new Map((data.plans ?? []).map((plan) => [plan.id, plan]))
+    const templates = data.checklistTemplates ?? []
+    const mine = templates.filter((template) => template.clientId === clientId)
+    const copiedFrom = new Set(mine.map((template) => template.sourceTemplateId).filter(Boolean))
+    const titleKey = (template) => String(template?.title ?? '').trim().toLowerCase()
+    const titles = new Set(mine.map(titleKey))
+    const cloned = []
+    for (const planId of planIds) {
+      const plan = plansById.get(planId)
+      for (const templateId of Array.isArray(plan?.templateIds) ? plan.templateIds : []) {
+        const source = templates.find((template) => template.id === templateId)
+        // A blueprint deleted since the plan was set up is simply not there to copy.
+        if (!source || copiedFrom.has(templateId) || titles.has(titleKey(source))) continue
+        const copy = await this.copyTemplateToClient(templateId, { clientId })
+        if (!copy) continue
+        cloned.push(templateId)
+        copiedFrom.add(templateId)
+        titles.add(titleKey(source))
+        if (copy.assigneeId) await this.grantClientVisibility(clientId, copy.assigneeId)
+        for (const stage of copy.stages ?? []) {
+          if (stage.assigneeId) await this.grantClientVisibility(clientId, stage.assigneeId)
+        }
+      }
+    }
+    return cloned
+  }
+
+  /**
+   * Signing's final step: the software lines as monthly recurring expenses AND
+   * the flip to signed, as ONE unit - both happen or neither does, and a second
+   * signing is refused rather than half-applied (what Accept's
+   * `_acceptWithSoftware` did before the software moved here).
+   *
+   * Postgres: one transaction. The compare-and-set flip runs first - it takes
+   * the row lock, and only while the status is one signing allows and the row
+   * is claimed by THIS client - then the rows go in through the SAME connection.
+   * Two signings at once: the loser waits on the lock, finds the letter signed,
+   * and is refused with nothing written. The file backend does the same in one
+   * queue slot of the workspace file, putting the rows back if the flip refuses.
+   * Returns { engagement, software: { added, skipped } }.
+   */
+  async _signEngagementWithSoftware(id, clientId, allowed, { signedAt, userId, signedNote }, lines) {
+    const refusal = (status, rowClientId) =>
+      status && allowed.includes(status) && rowClientId !== clientId
+        ? new EngagementStateError('Someone else is already marking this letter signed.', 'status')
+        : AppDataStore._engagementSignRefusal(status)
+    if (this.pool) {
+      return this._withTransaction(async (dbClient) => {
+        const { rows } = await dbClient.query(
+          `update engagements
+              set status = 'signed', signed_at = $2, signed_by = $3, signed_note = $4, updated_at = now()
+            where id = $1 and status = any($5::text[]) and client_id = $6
+            returning ${ENGAGEMENT_COLUMNS}`,
+          [id, signedAt, userId, signedNote, allowed, clientId],
+        )
+        if (!rows[0]) {
+          const latest = await dbClient.query(`select status, client_id from engagements where id = $1`, [id])
+          throw refusal(latest.rows?.[0]?.status ?? null, latest.rows?.[0]?.client_id ?? null)
+        }
+        const software = await this._addSoftwareExpenseRows(dbClient, clientId, lines)
+        return { engagement: mapEngagementRow(rows[0]), software }
+      })
+    }
+    // Raw fs calls only on the data file in here: `readJson` / `writeFile` would
+    // enqueue behind this very slot. The engagement's own file is entered through
+    // ITS queue, a different one, so this cannot deadlock.
+    return enqueueFileOperation(localDataPath, async () => {
+      const original = await readFile(localDataPath, 'utf8')
+      const data = JSON.parse(original)
+      const software = AppDataStore._addSoftwareExpenseRowsToData(data, clientId, lines)
+      if (software.added.length > 0) await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      try {
+        const engagement = await this._mutateEngagementFile((authState) => {
+          const row = authState.engagements.find((entry) => entry?.id === id)
+          if (!row || !allowed.includes(row.status) || (row.clientId ?? null) !== clientId) {
+            throw refusal(row?.status ?? null, row?.clientId ?? null)
+          }
+          Object.assign(row, { status: 'signed', signedAt, signedBy: userId, signedNote, updatedAt: nowIso() })
+          return { result: mapEngagementRow(row), changed: true }
+        })
+        return { engagement, software }
+      } catch (error) {
+        // Refused: the rows written a moment ago never happened.
+        if (software.added.length > 0) await fsWriteFile(localDataPath, original)
+        throw error
+      }
     })
   }
 
