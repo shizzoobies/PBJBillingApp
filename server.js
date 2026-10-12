@@ -18028,7 +18028,9 @@ const server = createServer(async (request, response) => {
       // the request stream is drained consistently with other POSTs.
       await readJsonBody(request)
       const clientId = decodeURIComponent(startOnboardingMatch[1])
-      const result = await appDataStore.startOnboarding(clientId)
+      // A client with no team yet: the case is the clicking owner's (Postgres
+      // refuses a template or checklist with no assignee; featreq-13450031).
+      const result = await appDataStore.startOnboarding(clientId, { fallbackAssigneeId: session.user.id })
       if (!result) {
         sendJson(response, 409, {
           error: 'Client not found, or onboarding already started',

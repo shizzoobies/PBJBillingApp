@@ -21677,12 +21677,17 @@ export class AppDataStore {
    * the client to 'proposal'. Reuses the standard template + generate paths
    * (no parallel creation path). Returns { template, checklist, client } or
    * null when the client is missing or already has an onboarding case.
+   * `fallbackAssigneeId` (the route: the owner who clicked) assigns the case
+   * when the client has no team yet - Postgres refuses a template or checklist
+   * with no assignee (featreq-13450031).
    * Owner-only — caller enforces auth.
    */
-  async startOnboarding(clientId) {
+  async startOnboarding(clientId, { fallbackAssigneeId = '' } = {}) {
     // Only the read-modify-write is redone on a stale read. What follows it
     // (the Stage-1 checklist, the re-read) runs once, after the case exists.
-    const opened = await this._retryOnStaleWorkspace(() => this._openOnboardingCase(clientId))
+    const opened = await this._retryOnStaleWorkspace(() =>
+      this._openOnboardingCase(clientId, { fallbackAssigneeId }),
+    )
     if (!opened) return null
     const { template, today } = opened
 
@@ -21791,8 +21796,8 @@ export class AppDataStore {
    * Signing a prospect's letter opens their onboarding case AT THE ONBOARDING STAGE
    * (Brittany, 2026-10-12, featreq-b2142264): the same three-stage one-shot case
    * `startOnboarding` opens, but the Proposal stage is recorded done - its checklist
-   * is born with every step ticked, completed at the signing instant `signedAt` and
-   * due the signed day - and the Onboarding stage is the live checklist, due the
+   * is born with every step ticked, completed at the signing instant `signedAt` (or
+   * now, if that noon is still ahead) and due the signed day - and the Onboarding stage is the live checklist, due the
    * firm's today. The client is NOT moved (it was created in Onboarding; plain
    * `startOnboarding` would move it back to Proposal). Writes, in order: the case's
    * template (one workspace save under its version, redone on a stale read), the
@@ -21826,7 +21831,10 @@ export class AppDataStore {
     const { template, today } = opened
     const stages = template.stages
     const caseId = `case-${randomUUID().slice(0, 8)}`
-    // Stage 0 (Proposal): done - signing the letter IS its last step.
+    // Stage 0 (Proposal): done - signing the letter IS its last step. Completed at
+    // the signing instant (the signed day's firm noon), never later than now: a
+    // morning signing must not stamp the future.
+    const completedAt = new Date(Math.min(Date.parse(signedAt), Date.now())).toISOString()
     await this.createChecklist(
       buildChecklistFromStage({
         template,
@@ -21837,7 +21845,7 @@ export class AppDataStore {
         dueDate: signedOn,
         completed: true,
       }),
-      { completedAt: signedAt },
+      { completedAt },
     )
     // Stage 1 (Onboarding): the live checklist.
     const live = await this.createChecklist(

@@ -140,12 +140,15 @@ export function SigningSummary({
   clientName,
   planName,
   retainerAmount,
+  showClientLink = true,
 }: {
   result: EngagementSignResult
   partyName: string
   clientName: string
   planName: (planId: string) => string
   retainerAmount: number | null
+  /** Off on the client's own page (the card's dialog): she is already there. */
+  showClientLink?: boolean
 }) {
   const checklists = result.clonedTemplateIds.length
   const onboardingChecklistId = result.onboardingChecklistId ?? null
@@ -192,9 +195,11 @@ export function SigningSummary({
         ))}
       </ul>
       <div className="button-row">
-        <Link className="secondary-action" to={`/clients/${result.clientId}`}>
-          Open the client
-        </Link>
+        {showClientLink ? (
+          <Link className="secondary-action" to={`/clients/${result.clientId}`}>
+            Open the client
+          </Link>
+        ) : null}
         {onboardingChecklistId ? (
           <Link className="secondary-action" to={`/checklists?focus=${encodeURIComponent(onboardingChecklistId)}`}>
             Open the onboarding checklist
@@ -287,6 +292,7 @@ export function SignEngagementDialog({
             clientName={clientName}
             planName={planName}
             retainerAmount={engagement.retainerAmount}
+            showClientLink={false}
           />
           <div className="button-row">
             <button type="button" className="secondary-action" onClick={onClose}>

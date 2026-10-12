@@ -581,7 +581,7 @@ describe('Mark as signed', () => {
     fireEvent.change(screen.getByLabelText('Signed on'), { target: { value: '2026-10-09' } })
     fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
     expect(confirm.mock.calls[0][0]).toBe(
-      'Mark the engagement letter for Acme Books as signed on Oct 9, 2026? This creates Acme Books as a client in Onboarding, with its contact, the plans and package, with their checklists, the software as monthly expenses and a draft retainer invoice of $630.00 to review. A signed letter can no longer be edited, sent or voided.',
+      'Mark the engagement letter for Acme Books as signed on Oct 9, 2026? This creates Acme Books as a client in Onboarding, with its contact, the plans and package, with their checklists, the software as monthly expenses and a draft retainer invoice of $630.00 to review, and opens its onboarding checklist at the Onboarding stage. A signed letter can no longer be edited, sent or voided.',
     )
     expect(api.signEngagementRequest).not.toHaveBeenCalled()
   })

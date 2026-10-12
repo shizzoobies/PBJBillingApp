@@ -234,7 +234,8 @@ describe('ClientEngagementsCard: Mark as signed', () => {
     )
     const summary = await within(dialog).findByRole('status', { name: 'What signing did' })
     expect(within(summary).getByText('Finished signing for Acme.')).toBeTruthy()
-    expect(within(summary).getByRole('link', { name: 'Open the client' })).toHaveAttribute('href', '/clients/c-acme')
+    // She is on the client's page already: no "Open the client" here (the editor keeps it).
+    expect(within(summary).queryByRole('link', { name: 'Open the client' })).toBeNull()
     // The card reads its list again.
     await waitFor(() => expect(api.listEngagementsRequest.mock.calls.length).toBeGreaterThan(reads))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }))

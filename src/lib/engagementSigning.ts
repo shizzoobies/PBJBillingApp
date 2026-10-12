@@ -35,7 +35,7 @@ export function signingSentence(engagement: Engagement, feeLine: string | null =
   if (!engagement.clientId) {
     return `This creates ${engagementPartyName(engagement)} as a client in Onboarding, with its contact${
       brings.length > 0 ? `, ${listWords(brings)}` : ''
-    }. `
+    }, and opens its onboarding checklist at the Onboarding stage. `
   }
   // The fee as she chose it, with amounts, for a monthly client; else the bare words.
   const existing = [...(monthly > 0 && !feeLine ? ['the monthly fee'] : []), ...brings]

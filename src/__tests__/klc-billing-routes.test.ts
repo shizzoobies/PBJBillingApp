@@ -239,6 +239,12 @@ describe('a sub can see the invoice its work was billed ON', () => {
     expect(at, 'the billed-on route is below the /api/ catch-all').toBeLessThan(guardAt)
   })
 
+  // featreq-13450031: a client with no team yet - the onboarding case is the clicking
+  // owner's (Postgres refuses a template or checklist with no assignee).
+  it('Start onboarding hands the store the clicking owner as the fallback assignee', () => {
+    expect(serverSource).toContain('appDataStore.startOnboarding(clientId, { fallbackAssigneeId: session.user.id })')
+  })
+
   // `/api/clients/:id/billed-on-invoices` and `/api/clients/:id/start-onboarding`
   // are both `:id`-shaped; a matcher swallowing the other would be silent.
   it('does not shadow, and is not shadowed by, the other /api/clients/:id routes', () => {

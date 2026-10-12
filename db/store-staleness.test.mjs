@@ -48014,6 +48014,36 @@ describe('signing an engagement creates the client (file backend)', () => {
       expect(checklists).toEqual([])
     })
 
+    it('a signing whose firm noon is still ahead stamps the Proposal steps now, never the future', async () => {
+      const before = new Date().toISOString()
+      const opened = await store._openOnboardingCaseAtSigning('c1', {
+        signedOn: firmToday(),
+        signedAt: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
+        assigneeId: 'emp-patrice',
+      })
+      const after = new Date().toISOString()
+      expect(opened.opened).toBe(true)
+      const [proposalStage] = (await caseOf('c1')).checklists
+      for (const item of proposalStage.items) {
+        expect(item.done).toBe(true)
+        expect(item.completedAt >= before && item.completedAt <= after).toBe(true)
+      }
+    })
+
+    // featreq-13450031: Start onboarding had the same blank-assignee hole on Postgres.
+    it('Start onboarding on a client with no team assigns the case to the owner who clicked; a team keeps its first member', async () => {
+      const started = await store.startOnboarding('c1', { fallbackAssigneeId: 'emp-patrice' })
+      expect(started.template.assigneeId).toBe('emp-patrice')
+      expect(started.template.stages.map((stage) => stage.assigneeId)).toEqual(['emp-patrice', 'emp-patrice', 'emp-patrice'])
+      expect(started.checklist.assigneeId).toBe('emp-patrice')
+      expect(started.client.lifecycleStage).toBe('proposal')
+
+      await setup([{ id: 'c2', name: 'Teamed', billingMode: 'subscription', monthlyRate: 400, assignedBookkeeperIds: ['emp-1'] }])
+      const teamed = await store.startOnboarding('c2', { fallbackAssigneeId: 'emp-patrice' })
+      expect(teamed.template.assigneeId).toBe('emp-1')
+      expect(teamed.checklist.assigneeId).toBe('emp-1')
+    })
+
     it('a case that cannot be opened is a skipped line, never a refusal', async () => {
       vi.spyOn(console, 'error').mockImplementation(() => {})
       vi.spyOn(store, '_openOnboardingCaseAtSigning').mockRejectedValueOnce(new Error('disk full'))
