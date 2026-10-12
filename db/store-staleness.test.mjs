@@ -22908,6 +22908,8 @@ describe('a recipe copied onto a client keeps its whole setup', () => {
         assigneeId: 'emp-2',
         offsetDays: 5,
         dueDayOfMonth: 25,
+        // The step's own Board column (featreq-3e81b386) travels with the copy.
+        categoryId: 'cat-review',
         viewerIds: [],
         editorIds: [],
         items: [{ id: 'bp-q-item-2', label: 'Owner review' }],
@@ -22935,6 +22937,8 @@ describe('a recipe copied onto a client keeps its whole setup', () => {
       ['Prepare', 15, 0],
       ['Review', 25, 5],
     ])
+    // Each step's own Board column; Step 1 has none and uses the recipe's.
+    expect(copy.stages.map((stage) => stage.categoryId ?? null)).toEqual([null, 'cat-review'])
     const [step] = copy.stages[0].items
     expect(step.label).toBe('Reconcile bank')
     expect(step.dueDayOfMonth).toBe(10)
@@ -23016,6 +23020,7 @@ describe('a recipe copied onto a client keeps its whole setup', () => {
         position,
         viewer_ids: [],
         editor_ids: [],
+        category_id: stage.categoryId ?? null,
       })),
       templateItemRows: source.stages.flatMap((stage) =>
         stage.items.map((item, index) => ({
@@ -23055,6 +23060,7 @@ describe('a recipe copied onto a client keeps its whole setup', () => {
       stageIds.includes(row.id),
     )
     expect(stageRows.map((row) => row.due_day_of_month)).toEqual([15, 25])
+    expect(stageRows.map((row) => row.category_id)).toEqual([null, 'cat-review'])
     const itemRow = insertedRows(fake.statements, 'checklist_template_items').find(
       (row) => row.id === copies[0].stages[0].items[0].id,
     )
