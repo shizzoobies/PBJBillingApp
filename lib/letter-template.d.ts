@@ -3,12 +3,16 @@
  * SAME placeholders the server fills in.
  */
 
+/** Where a placeholder can be used: 'both' (Letters and engagement letters) or 'engagement' only. */
+export type PlaceholderScope = 'both' | 'engagement'
+
 export type LetterPlaceholder = {
   key: string
   label: string
   description: string
   /** A blank value stops the letter going to that client. */
   required: boolean
+  scope: PlaceholderScope
 }
 
 export type LetterTemplateText = {
@@ -21,6 +25,17 @@ export type LetterValues = Record<string, string>
 
 export declare const letterPlaceholders: ReadonlyArray<LetterPlaceholder>
 
+/** The engagement-only keys (scope 'engagement'); re-exported as ENGAGEMENT_PLACEHOLDERS by lib/engagement-values.js. */
+export declare const engagementPlaceholders: ReadonlyArray<LetterPlaceholder>
+
+/** 'letter' = the Letters page's list (the 'both' keys); 'engagement' = both + engagement-only. */
+export declare function placeholdersFor(scope: 'letter' | 'engagement'): ReadonlyArray<LetterPlaceholder>
+
+/** The letters' money format: "$1,234.50", or '' for zero, negative or missing. */
+export declare function letterMoney(amount: unknown): string
+
+type PlaceholderList = ReadonlyArray<Pick<LetterPlaceholder, 'key' | 'required'>>
+
 export declare function letterValues(args: {
   client: object | null | undefined
   contacts?: object[]
@@ -32,9 +47,15 @@ export declare function letterValues(args: {
 export declare function fillTemplate(
   text: string | null | undefined,
   values: LetterValues,
+  /** The keys the text may use; the Letters list when omitted. */
+  placeholders?: PlaceholderList | null,
 ): { text: string; missing: string[]; unknown: string[]; retired: string[] }
 
-export declare function templateWarnings(template: LetterTemplateText | null | undefined): {
+export declare function templateWarnings(
+  template: LetterTemplateText | null | undefined,
+  /** The keys the text may use; the Letters list when omitted. */
+  placeholders?: PlaceholderList | null,
+): {
   unknown: string[]
   retired: string[]
 }
