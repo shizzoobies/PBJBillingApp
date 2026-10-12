@@ -47455,11 +47455,11 @@ describe('signing an engagement creates the client (file backend)', () => {
       proposal: { clientId: 'c1', selections: [...selections, ...softwareSelections] },
     })
     // Voided between the checks and the flip: the flip refuses inside the workspace slot.
-    const realCopy = store.copyTemplatesToClient.bind(store)
-    vi.spyOn(store, 'copyTemplatesToClient').mockImplementationOnce(async (clientId, ids) => {
-      const copied = await realCopy(clientId, ids)
+    const realLink = store.linkProposalClient.bind(store)
+    vi.spyOn(store, 'linkProposalClient').mockImplementationOnce(async (...args) => {
+      const linked = await realLink(...args)
       await store.voidEngagement(engagement.id, {})
-      return copied
+      return linked
     })
     const err = await sign(engagement.id).catch((caught) => caught)
     expect(err).toBeInstanceOf(EngagementStateError)
@@ -47527,12 +47527,12 @@ describe('signing an engagement creates the client (file backend)', () => {
     expect(copies.map((template) => template.sourceTemplateId).sort()).toEqual(['bp-close', 'bp-payroll'])
   })
 
-  it('copyTemplateToClient with skipIfCopied re-checks the data it re-read: a second copy is never made', async () => {
-    const first = await store.copyTemplateToClient('bp-close', { clientId: 'c1', skipIfCopied: true })
-    expect(first.sourceTemplateId).toBe('bp-close')
-    expect(await store.copyTemplateToClient('bp-close', { clientId: 'c1', skipIfCopied: true })).toBeNull()
-    // Without the opt-in, the old behavior: another copy.
-    expect(await store.copyTemplateToClient('bp-close', { clientId: 'c1' })).toBeTruthy()
+  it('copyTemplatesToClient re-reads on every attempt: a blueprint already on the client is skipped, not copied again', async () => {
+    const first = await store.copyTemplatesToClient('c1', ['bp-close', 'bp-close'])
+    expect(first.copies.map((copy) => copy.sourceTemplateId)).toEqual(['bp-close'])
+    const second = await store.copyTemplatesToClient('c1', ['bp-close', 'bp-payroll'])
+    expect(second.copies.map((copy) => copy.sourceTemplateId)).toEqual(['bp-payroll'])
+    expect(second.skippedTemplateIds).toEqual(['bp-close'])
   })
 
   it('an existing client copies the checklists of the plans THIS signing added, never one she deleted from a plan it had', async () => {
@@ -47622,11 +47622,11 @@ describe('signing an engagement creates the client (file backend)', () => {
 
   it('a prospect letter voided mid-signing: the client it created is released, unlinked, retired, and the refusal says so', async () => {
     const { proposal, engagement } = await wonEngagement()
-    const realCopy = store.copyTemplatesToClient.bind(store)
-    vi.spyOn(store, 'copyTemplatesToClient').mockImplementationOnce(async (clientId, ids) => {
-      const copied = await realCopy(clientId, ids)
+    const realLink = store.linkProposalClient.bind(store)
+    vi.spyOn(store, 'linkProposalClient').mockImplementationOnce(async (...args) => {
+      const linked = await realLink(...args)
       await store.voidEngagement(engagement.id, {})
-      return copied
+      return linked
     })
     const err = await sign(engagement.id).catch((caught) => caught)
     expect(err).toBeInstanceOf(EngagementStateError)
@@ -47635,6 +47635,103 @@ describe('signing an engagement creates the client (file backend)', () => {
     expect((await store.read()).clients.find((row) => row.id === err.createdClientId)?.lifecycleStage).toBe('inactive')
     expect(await store.getEngagement(engagement.id)).toMatchObject({ status: 'void', clientId: null })
     expect((await store.getProposal(proposal.id)).clientId).toBeNull()
+  })
+
+  // ---- review round 2 ----
+
+  it('a second signing between the claim and the flip signs for the SAME client: the first does not retire it', async () => {
+    const { proposal, engagement } = await wonEngagement()
+    const realFlip = store._signEngagementWithSoftware.bind(store)
+    let second = null
+    vi.spyOn(store, '_signEngagementWithSoftware').mockImplementationOnce(async (...args) => {
+      // Another tab (or a retry) sees the claimed client and finishes the signing first.
+      second = await sign(engagement.id)
+      return realFlip(...args)
+    })
+    const err = await sign(engagement.id).catch((caught) => caught)
+    expect(err).toBeInstanceOf(EngagementStateError)
+    expect(err.message).toBe('This letter was marked signed meanwhile (in another tab or by a retry). Nothing more was done.')
+    expect(second).toMatchObject({ createdClient: false, clientId: err.createdClientId })
+    const client = (await store.read()).clients.find((row) => row.id === err.createdClientId)
+    expect(client.lifecycleStage).toBe('onboarding')
+    expect(await store.getEngagement(engagement.id)).toMatchObject({ status: 'signed', clientId: err.createdClientId })
+    expect((await store.getProposal(proposal.id)).clientId).toBe(err.createdClientId)
+    expect(await clientsNamed('Acme Books')).toHaveLength(1)
+  })
+
+  it('a second signing that links the proposal first: the first still links (same client) and nothing is retired or stuck', async () => {
+    const { proposal, engagement } = await wonEngagement()
+    const realLink = store.linkProposalClient.bind(store)
+    let second = null
+    vi.spyOn(store, 'linkProposalClient').mockImplementationOnce(async (...args) => {
+      // Between the first signing's claim and its link, a second one runs to the end.
+      second = await sign(engagement.id)
+      return realLink(...args)
+    })
+    const err = await sign(engagement.id).catch((caught) => caught)
+    expect(second.createdClient).toBe(false)
+    expect(err.message).toBe('This letter was marked signed meanwhile (in another tab or by a retry). Nothing more was done.')
+    expect((await store.read()).clients.find((row) => row.id === second.clientId).lifecycleStage).toBe('onboarding')
+    expect((await store.getProposal(proposal.id)).clientId).toBe(second.clientId)
+    expect((await store.getEngagement(engagement.id)).status).toBe('signed')
+  })
+
+  it('the won link is idempotent for the same client and refuses another, naming the client it is linked to', async () => {
+    const { proposal, engagement } = await wonEngagement()
+    expect((await store.linkProposalClient(proposal.id, 'c1', { won: true })).clientId).toBe('c1')
+    expect((await store.linkProposalClient(proposal.id, 'c1', { won: true })).clientId).toBe('c1')
+    expect(await store.linkProposalClient(proposal.id, 'c-other', { won: true })).toBeNull()
+    const err = await sign(engagement.id).catch((caught) => caught)
+    expect(err.reason).toBe('proposal_linked')
+    expect(err.message).toBe(
+      'The proposal behind this letter is already linked to Acme, so no new client was kept. Open the proposal to check.',
+    )
+    expect((await store.read()).clients.find((row) => row.id === err.createdClientId)?.lifecycleStage).toBe('inactive')
+  })
+
+  it('an edit between the checks and the flip refuses (changed_since_sent) and signs nothing', async () => {
+    const { engagement } = await wonEngagement({ proposal: { clientId: 'c1' } })
+    const realLink = store.linkProposalClient.bind(store)
+    vi.spyOn(store, 'linkProposalClient').mockImplementationOnce(async (...args) => {
+      await store.updateEngagement(engagement.id, { letterBody: 'Edited mid-signing.' })
+      return realLink(...args)
+    })
+    const err = await sign(engagement.id).catch((caught) => caught)
+    expect(err.reason).toBe('changed_since_sent')
+    expect((await store.getEngagement(engagement.id)).status).toBe('sent')
+    expect((await store.read()).clients.find((row) => row.id === 'c1').monthlyRate).toBe(400)
+  })
+
+  it('after the flip nothing refuses: a checklist copy that fails, or a retainer that fails, is a skipped entry', async () => {
+    const { engagement } = await wonEngagement({ accept: { planIds: ['plan-books'] } })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(store, 'copyTemplatesToClient').mockRejectedValueOnce(new Error('workspace busy'))
+    vi.spyOn(store, 'createRetainerInvoice').mockRejectedValueOnce(new Error('numbering failed'))
+    const result = await sign(engagement.id)
+    expect(result.engagement.status).toBe('signed')
+    expect(result.skipped.map((entry) => entry.what)).toEqual(['Plans and checklists', 'Retainer'])
+    expect(result.retainerInvoiceId).toBeNull()
+  })
+
+  it("a fully applied old retainer does not block a new one; 'add' falls back to the legacy custom fee", async () => {
+    await setup([{ id: 'c1', name: 'Acme', billingMode: 'subscription', customMonthlyFee: 500 }])
+    const old = await store.createRetainerInvoice({ clientId: 'c1', amount: 900 })
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices.push({ id: 'inv-took', clientId: 'c1', period: '2026-09', kind: 'monthly', status: 'paid', lineItems: [], total: 0 })
+    data.invoices.find((invoice) => invoice.id === old.id).appliedToInvoiceId = 'inv-took'
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    const { engagement } = await wonEngagement({ proposal: { clientId: 'c1' } })
+    await store.updateEngagement(engagement.id, { retainerAmount: 300 })
+    const result = await sign(engagement.id)
+    expect(result.retainerInvoiceId).toMatch(/^inv-/)
+    expect(result.monthlyRate).toBe(1130)
+  })
+
+  it('Accept refuses an upsell to a retired client even with no package chosen', async () => {
+    await setup([{ id: 'retired-1', name: 'Old Co', lifecycleStage: 'inactive' }])
+    const upsell = await store.createProposal({ clientId: 'retired-1', inputs: { transactions: 120 }, selections })
+    await expect(store.acceptProposal(upsell.id, {})).rejects.toBeInstanceOf(PackageApplyError)
+    expect((await store.getProposal(upsell.id)).status).toBe('draft')
   })
 
   it('a lost claim retires the client it created, with a note, and the refusal carries its id', async () => {
@@ -47878,7 +47975,9 @@ describe('engagements (Postgres statements)', () => {
       }
       if (/^update engagements set status = 'signed'/i.test(trimmed)) {
         const row = find()
-        if (!row || !params[4].includes(row.status) || row.client_id !== params[5]) return { rows: [] }
+        if (!row || !params[4].includes(row.status) || row.client_id !== params[5] || row.template_hash !== params[6]) {
+          return { rows: [] }
+        }
         Object.assign(row, { status: 'signed', signed_at: params[1], signed_by: params[2], signed_note: params[3] })
         return { rows: [{ ...row }] }
       }
@@ -48134,8 +48233,8 @@ describe('engagements (Postgres statements)', () => {
     })
     vi.restoreAllMocks()
     const [sign] = fake.matching(/^update engagements set status = 'signed'/i)
-    expect(sign.text).toMatch(/where id = \$1 and status = any\(\$5::text\[\]\) and client_id = \$6 returning /i)
-    expect(sign.params).toEqual([draft.id, '2026-10-09T16:00:00.000Z', 'u1', null, ['sent', 'draft'], 'c1'])
+    expect(sign.text).toMatch(/where id = \$1 and status = any\(\$5::text\[\]\) and client_id = \$6 and template_hash = \$7 returning /i)
+    expect(sign.params).toEqual([draft.id, '2026-10-09T16:00:00.000Z', 'u1', null, ['sent', 'draft'], 'c1', draft.templateHash])
     expect(signed.status).toBe('signed')
 
     const other = await pgStore.createEngagementFromProposal(proposal({ id: 'prop-2' }), {})
@@ -48252,7 +48351,7 @@ describe('engagements (Postgres statements)', () => {
           if (answered.rows[0]) undo?.push(() => Object.assign(row, before))
           return answered
         }
-        if (/^update proposals set client_id = \$2, updated_at = now\(\) where id = \$1 and client_id is null and status = 'accepted'/i.test(t)) {
+        if (/^update proposals set client_id = \$2, updated_at = now\(\) where id = \$1 and status = 'accepted' and \(client_id is null or client_id = \$2\)/i.test(t)) {
           log(t, params)
           return proposalLinked
             ? { rows: [], rowCount: 0 }
@@ -48280,7 +48379,7 @@ describe('engagements (Postgres statements)', () => {
         if (/^update clients set monthly_rate = /i.test(t)) {
           log(t, params)
           const before = fee
-          fee = /coalesce\(monthly_rate, 0\) \+ \$2/i.test(t) ? fee + Number(params[1]) : Number(params[1])
+          fee = /coalesce\(monthly_rate, custom_monthly_fee, 0\) \+ \$2/i.test(t) ? fee + Number(params[1]) : Number(params[1])
           undo?.push(() => {
             fee = before
           })
@@ -48345,10 +48444,10 @@ describe('engagements (Postgres statements)', () => {
         /where id = \$1 and client_id is null and status = any\(\$3::text\[\]\) returning id$/i,
       )
       expect(fake.statements[claimAt].params).toEqual([draft.id, result.clientId, ['sent', 'draft']])
-      expect(fake.statements[linkAt].text).toMatch(/where id = \$1 and client_id is null and status = 'accepted'/i)
+      expect(fake.statements[linkAt].text).toMatch(/where id = \$1 and status = 'accepted' and \(client_id is null or client_id = \$2\)/i)
       expect(fake.statements[linkAt].params).toEqual(['prop-1', result.clientId])
-      expect(fake.statements[flipAt].text).toMatch(/where id = \$1 and status = any\(\$5::text\[\]\) and client_id = \$6 returning /i)
-      expect(fake.statements[flipAt].params.at(-1)).toBe(result.clientId)
+      expect(fake.statements[flipAt].text).toMatch(/where id = \$1 and status = any\(\$5::text\[\]\) and client_id = \$6 and template_hash = \$7 returning /i)
+      expect(fake.statements[flipAt].params.slice(-2)).toEqual([result.clientId, draft.templateHash])
 
       // The client row: Onboarding, Monthly at the total, hours by role (controller -> CFO).
       const [inserted] = insertedRows(fake.statements, 'clients')
@@ -48382,13 +48481,13 @@ describe('engagements (Postgres statements)', () => {
       expect(indexOf(fake, /^insert into contacts\b/i)).toBe(-1)
       expect(indexOf(fake, /^update engagements set client_id/i)).toBe(-1)
       // The Won proposal is linked by compare-and-set (a no-op when it already is).
-      expect(fake.statements[indexOf(fake, /^update proposals set client_id/i)].text).toMatch(/client_id is null and status = 'accepted'/)
+      expect(fake.statements[indexOf(fake, /^update proposals set client_id/i)].text).toMatch(/status = 'accepted' and \(client_id is null or client_id = \$2\)/)
       // The fee is added INSIDE the one transaction, after the flip, before COMMIT.
       const flipAt = indexOf(fake, /^update engagements set status = 'signed'/i)
       const feeAt = indexOf(fake, /^update clients set monthly_rate = /i)
       const commitAt = fake.statements.findIndex((statement, index) => index > feeAt && /^COMMIT$/i.test(statement.text))
       expect(fake.statements[feeAt].text).toBe(
-        'update clients set monthly_rate = coalesce(monthly_rate, 0) + $2, updated_at = now() where id = $1 returning monthly_rate',
+        'update clients set monthly_rate = coalesce(monthly_rate, custom_monthly_fee, 0) + $2, updated_at = now() where id = $1 returning monthly_rate',
       )
       expect(fake.statements[feeAt].params).toEqual(['c1', 630])
       expect(feeAt).toBeGreaterThan(flipAt)
@@ -48439,7 +48538,7 @@ describe('engagements (Postgres statements)', () => {
       const releaseAt = indexOf(fake, /^update engagements set client_id = null/i)
       const unlinkAt = indexOf(fake, /^update proposals set client_id = null/i)
       const retireAt = indexOf(fake, /^update clients set lifecycle_stage = \$2/i)
-      expect(fake.statements[releaseAt].text).toMatch(/where id = \$1 and client_id = \$2 and status <> 'signed'$/)
+      expect(fake.statements[releaseAt].text).toMatch(/where id = \$1 and client_id = \$2 and status <> 'signed' returning id$/)
       expect(fake.statements[unlinkAt].text).toBe('update proposals set client_id = null, updated_at = now() where id = $1 and client_id = $2')
       expect(fake.statements[unlinkAt].params).toEqual(['prop-1', inserted.id])
       expect(retireAt).toBeGreaterThan(unlinkAt)
@@ -48473,7 +48572,7 @@ describe('engagements (Postgres statements)', () => {
       expect(err.reason).toBe('proposal_linked')
       const releaseAt = indexOf(fake, /^update engagements set client_id = null/i)
       expect(releaseAt).toBeGreaterThan(indexOf(fake, /^update proposals set client_id/i))
-      expect(fake.statements[releaseAt].text).toMatch(/where id = \$1 and client_id = \$2 and status <> 'signed'$/i)
+      expect(fake.statements[releaseAt].text).toMatch(/where id = \$1 and client_id = \$2 and status <> 'signed' returning id$/i)
       expect(fake.engagements[0].client_id).toBeNull()
       expect(indexOf(fake, /^update engagements set status = 'signed'/i)).toBe(-1)
     })

@@ -1417,7 +1417,7 @@ describe('Accept and Decline', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
     expect(confirm).toHaveBeenCalledTimes(1)
     expect(confirm).toHaveBeenCalledWith(
-      `Accept this proposal for Existing Co, with the plan Monthly Bookkeeping? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed: then their monthly fee becomes $630.00 and the plan is added.`,
+      `Accept this proposal for Existing Co, with the plan Monthly Bookkeeping? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed: then the letter's $630.00 is added to their monthly fee (you can choose replace or keep on the letter) and the plan is added.`,
     )
     await waitFor(() =>
       expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
@@ -1468,7 +1468,7 @@ describe('Accept and Decline', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
     expect(confirm).toHaveBeenNthCalledWith(
       1,
-      `Accept this proposal for Existing Co? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed: then their monthly fee becomes $630.00.`,
+      `Accept this proposal for Existing Co? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed: then the letter's $630.00 is added to their monthly fee (you can choose replace or keep on the letter).`,
     )
     await waitFor(() => expect(api.acceptProposalRequest).toHaveBeenCalled())
     expect(api.acceptProposalRequest.mock.calls[0][1]).not.toHaveProperty('planIds')
@@ -1914,7 +1914,7 @@ describe('Software on the proposal editor', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
       expect(confirm).toHaveBeenCalledTimes(1)
       expect(confirm).toHaveBeenCalledWith(
-        `Accept this proposal for Existing Co? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed: then their monthly fee becomes $630.00 and QBO Plus is added as monthly Software expenses billed at cost.`,
+        `Accept this proposal for Existing Co? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed: then the letter's $630.00 is added to their monthly fee (you can choose replace or keep on the letter) and QBO Plus is added as monthly Software expenses billed at cost.`,
       )
       await waitFor(() =>
         expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
@@ -1936,7 +1936,7 @@ describe('Software on the proposal editor', () => {
       renderEditor()
       fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
       expect(confirm).toHaveBeenCalledWith(
-        `Accept this proposal for Existing Co? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed: then their monthly fee becomes $630.00.`,
+        `Accept this proposal for Existing Co? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed: then the letter's $630.00 is added to their monthly fee (you can choose replace or keep on the letter).`,
       )
       await waitFor(() =>
         expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),

@@ -557,7 +557,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     const clientName = client?.name ?? 'this client'
     // What signing will change for an existing client, named now so nothing surprises her later.
     const changes = [
-      ...(client?.billingMode === 'subscription' && monthlyTotal > 0 ? [`their monthly fee becomes ${monthly}`] : []),
+      ...(client?.billingMode === 'subscription' && monthlyTotal > 0 ? [`the letter's ${monthly} is added to their monthly fee (you can choose replace or keep on the letter)`] : []),
       ...(chosenPlans.length > 0 ? [`the plan${chosenPlans.length === 1 ? ' is' : 's are'} added`] : []),
       ...(softwareNames.length > 0
         ? [`${softwareList} ${softwareNames.length === 1 ? 'is' : 'are'} added as monthly Software expenses billed at cost`]
