@@ -122,7 +122,12 @@ function buildProjectedChecklist(
     stageId: stage.id,
     stageIndex: 0,
     stageCount,
-    ...(template.categoryId !== undefined ? { categoryId: template.categoryId } : {}),
+    // Step 1's own board column, else the recipe's - as the materializer copies it.
+    ...(stage.categoryId
+      ? { categoryId: stage.categoryId }
+      : template.categoryId !== undefined
+        ? { categoryId: template.categoryId }
+        : {}),
     items,
     projected: true,
   }

@@ -7,6 +7,7 @@ import {
   isChecklistComplete,
   weekRange,
   UNCATEGORIZED_ID,
+  buildStageCategoryMap,
   buildTemplateCategoryMap,
   resolveChecklistCategoryId,
 } from '../lib/activeBoard'
@@ -429,5 +430,43 @@ describe('resolveChecklistCategoryId', () => {
   })
   it('returns null for a one-off checklist with no template', () => {
     expect(resolveChecklistCategoryId({ categoryId: null }, templates)).toBeNull()
+  })
+
+  // featreq-3e81b386: the column is set per step, with the recipe's as default.
+  describe('with per-step columns', () => {
+    const recipes = [
+      {
+        id: 'tpl-1',
+        categoryId: 'mb',
+        stages: [
+          { id: 's1', categoryId: null },
+          { id: 's2', categoryId: 'review' },
+        ],
+      },
+    ]
+    const templateMap = buildTemplateCategoryMap(recipes)
+    const stageMap = buildStageCategoryMap(recipes)
+
+    it('the instance own category still wins over its step', () => {
+      expect(
+        resolveChecklistCategoryId({ categoryId: 'st', templateId: 'tpl-1', stageId: 's2' }, templateMap, stageMap),
+      ).toBe('st')
+    })
+    it('then the step category', () => {
+      expect(
+        resolveChecklistCategoryId({ categoryId: null, templateId: 'tpl-1', stageId: 's2' }, templateMap, stageMap),
+      ).toBe('review')
+    })
+    it('then the template, for a step with no category of its own or an unknown step', () => {
+      expect(
+        resolveChecklistCategoryId({ categoryId: null, templateId: 'tpl-1', stageId: 's1' }, templateMap, stageMap),
+      ).toBe('mb')
+      expect(
+        resolveChecklistCategoryId({ categoryId: null, templateId: 'tpl-1', stageId: 'gone' }, templateMap, stageMap),
+      ).toBe('mb')
+    })
+    it('the stage map only holds steps that name a column', () => {
+      expect([...(stageMap.get('tpl-1') ?? new Map()).entries()]).toEqual([['s2', 'review']])
+    })
   })
 })

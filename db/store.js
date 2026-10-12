@@ -4194,8 +4194,10 @@ function buildChecklistFromStage({
     stageId: stage.id,
     stageIndex,
     stageCount,
-    // Inherit the template's board column so generated instances sort correctly.
-    categoryId: template.categoryId ?? null,
+    // The board column: this step's own (featreq-3e81b386), else the recipe's.
+    // Copied once, at generation - a column set on the step later does not
+    // move a task that already exists (the Board reads the task's own first).
+    categoryId: stage.categoryId || (template.categoryId ?? null),
     // "and then the next would spring forward" — derived from THIS instance's
     // due date, so next cycle's instance names the next period without any
     // counter to keep in step. Null when the template does not carry one.
@@ -30738,6 +30740,8 @@ export class AppDataStore {
         `update checklist_templates set category_id = null where category_id = $1`,
         [id],
       )
+      // A step that named this column goes back to its recipe's.
+      await this.pool.query(`update checklist_template_stages set category_id = null where category_id = $1`, [id])
       await this.pool.query(`update checklists set category_id = null where category_id = $1`, [id])
       return (result.rowCount ?? 0) > 0
     }
@@ -30759,6 +30763,15 @@ export class AppDataStore {
         for (const entry of list) {
           if (entry && entry.categoryId === id) {
             entry.categoryId = null
+            touched = true
+          }
+        }
+      }
+      // A step that named this column goes back to its recipe's.
+      for (const template of Array.isArray(data.checklistTemplates) ? data.checklistTemplates : []) {
+        for (const stage of Array.isArray(template?.stages) ? template.stages : []) {
+          if (stage && stage.categoryId === id) {
+            delete stage.categoryId
             touched = true
           }
         }

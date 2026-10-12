@@ -1151,8 +1151,9 @@ function buildChecklistFromStage(
     // Inherit the template's board column, exactly like the server materializer
     // (db/store.js buildChecklistFromStage) does. Omitting it was why instances
     // generated in the browser landed in "Uncategorized" on the Active board
-    // even when their template had a category.
-    categoryId: template.categoryId ?? null,
+    // even when their template had a category. The step's own column wins
+    // over the recipe's (featreq-3e81b386).
+    categoryId: stage.categoryId || (template.categoryId ?? null),
     items: stage.items.map((item) => {
       const itemDue = resolveNodeDueDate(item, cycleYear, cycleMonth)
       return {

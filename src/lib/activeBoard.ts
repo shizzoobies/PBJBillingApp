@@ -17,7 +17,7 @@
 
 import { isWaitingOnOpen, type WaitingOnLike } from '../../lib/waiting-on-state.js'
 import { isChecklistItemDone, stepIsWaiting } from './utils'
-import type { Checklist, ChecklistTemplate, ServiceCategory } from './types'
+import type { Checklist, ChecklistTemplate, ServiceCategory, TemplateStage } from './types'
 
 export type PeriodType = 'week' | 'month' | 'quarter'
 
@@ -58,29 +58,58 @@ export const UNCATEGORIZED_NAME = 'Uncategorized'
  *
  * Precedence:
  *   1. the instance's own `categoryId` when explicitly set — a checklist the
- *      user dragged to another column must never be pulled back by its template;
- *   2. otherwise the owning template's current `categoryId`;
- *   3. otherwise Uncategorized.
+ *      user dragged to another column must never be pulled back by its template
+ *      (and a task generated before its step had a column keeps the one it got);
+ *   2. otherwise its step's current `categoryId` (`checklist.stageId` against
+ *      the template's stages; featreq-3e81b386, the column is set per step);
+ *   3. otherwise the owning template's current `categoryId`;
+ *   4. otherwise Uncategorized.
  *
  * A category id that no longer exists (deleted column) falls through to
  * Uncategorized at the call site, exactly as before.
  */
 export function resolveChecklistCategoryId(
-  checklist: Pick<Checklist, 'categoryId' | 'templateId'>,
+  checklist: Pick<Checklist, 'categoryId' | 'templateId'> & { stageId?: string },
   templateCategoryById: Map<string, string | null | undefined>,
+  stageCategoryByTemplate: StageCategoryMap = new Map(),
 ): string | null {
   if (checklist.categoryId) return checklist.categoryId
   if (checklist.templateId) {
+    const stageCategory = checklist.stageId
+      ? stageCategoryByTemplate.get(checklist.templateId)?.get(checklist.stageId)
+      : undefined
+    if (stageCategory) return stageCategory
     return templateCategoryById.get(checklist.templateId) ?? null
   }
   return null
 }
 
+/** The template shape the Board's column lookups read. */
+export type BoardTemplate = Pick<ChecklistTemplate, 'id' | 'categoryId'> & {
+  stages?: readonly Pick<TemplateStage, 'id' | 'categoryId'>[]
+}
+
+/** `templateId -> stageId -> categoryId`, only for steps that name a column. */
+export type StageCategoryMap = Map<string, Map<string, string>>
+
 /** `templateId -> categoryId` lookup for {@link resolveChecklistCategoryId}. */
 export function buildTemplateCategoryMap(
-  templates: readonly Pick<ChecklistTemplate, 'id' | 'categoryId'>[] = [],
+  templates: readonly BoardTemplate[] = [],
 ): Map<string, string | null | undefined> {
   return new Map(templates.map((template) => [template.id, template.categoryId]))
+}
+
+/** The per-step half of the lookup for {@link resolveChecklistCategoryId}. */
+export function buildStageCategoryMap(templates: readonly BoardTemplate[] = []): StageCategoryMap {
+  const byTemplate: StageCategoryMap = new Map()
+  for (const template of templates) {
+    const stages = new Map<string, string>()
+    for (const stage of template.stages ?? []) {
+      if (stage?.categoryId) stages.set(stage.id, stage.categoryId)
+    }
+    if (stages.size > 0) byTemplate.set(template.id, stages)
+  }
+  return byTemplate
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -217,9 +246,10 @@ export function buildActiveBoard({
   /**
    * The workspace's checklist templates — used only to recover the board column
    * for instances generated before their template was categorized. Optional so
-   * existing callers/tests keep working (they just get no fallback).
+   * existing callers/tests keep working (they just get no fallback). Their
+   * steps' columns come first (a task with none goes to its step's column).
    */
-  templates?: Pick<ChecklistTemplate, 'id' | 'categoryId'>[]
+  templates?: BoardTemplate[]
   periodType?: PeriodType
   /**
    * Explicit horizon end ('YYYY-MM-DD') for the shared Report-period control.
@@ -252,11 +282,12 @@ export function buildActiveBoard({
   }
 
   const templateCategoryById = buildTemplateCategoryMap(templates)
+  const stageCategoryByTemplate = buildStageCategoryMap(templates)
 
   for (const checklist of checklists) {
     if (isChecklistComplete(checklist)) continue // completed → drops off
     if (effectiveDue(checklist) > range.end) continue // beyond the horizon
-    const rawId = resolveChecklistCategoryId(checklist, templateCategoryById)
+    const rawId = resolveChecklistCategoryId(checklist, templateCategoryById, stageCategoryByTemplate)
     const columnId = rawId && knownIds.has(rawId) ? rawId : UNCATEGORIZED_ID
     const clientsForColumn = ensure(columnId)
     const list = clientsForColumn.get(checklist.clientId) ?? []

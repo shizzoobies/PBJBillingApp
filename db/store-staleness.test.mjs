@@ -51461,3 +51461,187 @@ describe('board column per step: the stage field persists (both backends)', () =
     expect(schema).toContain('alter table checklist_template_stages add column if not exists category_id text;')
   })
 })
+
+/**
+ * Board column per step, part 2: a task generated for a step copies the step's
+ * column, falling back to the recipe's; deleting a column clears it on steps.
+ * A task's own column still wins on the Board, so tasks that already exist do
+ * not move when a step's column is set later.
+ */
+describe('board column per step: tasks copy the step column (both backends)', () => {
+  const twoStepTemplate = (overrides = {}) => ({
+    id: 'tpl-steps',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: firmToday(),
+    active: true,
+    viewerIds: [],
+    editorIds: [],
+    categoryId: 'cat-recipe',
+    stages: [
+      { id: 'st-1', name: 'Prepare', assigneeId: 'emp-1', offsetDays: 0, categoryId: 'cat-prep', viewerIds: [], editorIds: [], items: [{ id: 'ti-1', label: 'Reconcile' }] },
+      { id: 'st-2', name: 'Review', assigneeId: 'emp-1', offsetDays: 0, categoryId: 'cat-review', viewerIds: [], editorIds: [], items: [{ id: 'ti-2', label: 'Sign off' }] },
+      { id: 'st-3', name: 'Send', assigneeId: 'emp-1', offsetDays: 0, viewerIds: [], editorIds: [], items: [{ id: 'ti-3', label: 'Send' }] },
+    ],
+    ...overrides,
+  })
+  const doneStage = (stageIndex, stageId) => ({
+    id: `cl-${stageIndex}`,
+    templateId: 'tpl-steps',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    dueDate: '2026-10-31',
+    caseId: 'case-1',
+    stageId,
+    stageIndex,
+    stageCount: 3,
+    categoryId: 'cat-whatever-it-was',
+    items: [{ id: 'i', label: 'x', done: true }],
+  })
+
+  it('file backend: the materializer files Step 1 under Step 1 column', async () => {
+    await store.write(workspace({ checklistTemplates: [twoStepTemplate()] }))
+    const data = await store.read()
+    const spawned = data.checklists.filter((entry) => entry.templateId === 'tpl-steps')
+    expect(spawned.length).toBeGreaterThan(0)
+    for (const checklist of spawned) expect(checklist.categoryId).toBe('cat-prep')
+  })
+
+  it('file backend: a Step 1 without its own column still takes the recipe column', async () => {
+    const template = twoStepTemplate()
+    delete template.stages[0].categoryId
+    await store.write(workspace({ checklistTemplates: [template] }))
+    const data = await store.read()
+    const spawned = data.checklists.filter((entry) => entry.templateId === 'tpl-steps')
+    expect(spawned.length).toBeGreaterThan(0)
+    for (const checklist of spawned) expect(checklist.categoryId).toBe('cat-recipe')
+  })
+
+  it('the next step lands in its own column, and a step without one in the recipe column', async () => {
+    const data = { checklists: [], checklistTemplates: [twoStepTemplate()] }
+    const second = await store.maybeSpawnNextStage(data, doneStage(0, 'st-1'), { fileMode: true })
+    expect(second.spawned).toMatchObject({ stageIndex: 1, stageId: 'st-2', categoryId: 'cat-review' })
+    const third = await store.maybeSpawnNextStage(data, doneStage(1, 'st-2'), { fileMode: true })
+    expect(third.spawned).toMatchObject({ stageIndex: 2, stageId: 'st-3', categoryId: 'cat-recipe' })
+  })
+
+  it('postgres: a spawned next step is created with its step column', async () => {
+    const pgStore = postgresStore(fakePostgres())
+    const created = []
+    pgStore.createChecklist = async (checklist) => {
+      created.push(checklist)
+      return checklist
+    }
+    pgStore.grantClientVisibility = async () => {}
+    const data = { checklists: [], checklistTemplates: [twoStepTemplate()] }
+    await pgStore.maybeSpawnNextStage(data, doneStage(0, 'st-1'))
+    expect(created).toHaveLength(1)
+    expect(created[0]).toMatchObject({ stageId: 'st-2', categoryId: 'cat-review' })
+  })
+
+  it('postgres: the materializer writes Step 1 column on the generated checklist row', async () => {
+    const templateRow = {
+      id: 'tpl-steps',
+      title: 'Monthly close',
+      client_id: 'c1',
+      assignee_id: 'emp-1',
+      frequency: 'monthly',
+      next_due_date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+      active: true,
+      is_standard: false,
+      category_id: 'cat-recipe',
+      skip_allowed: false,
+      onboarding_for_client_id: null,
+      source_template_id: null,
+      viewer_ids: [],
+      editor_ids: [],
+      scheduled_months: null,
+      due_day_of_month: null,
+      monthly_due_days: null,
+      repeat_annually: true,
+      schedule_year: null,
+      lead_days: null,
+    }
+    const fake = fakePostgres({
+      clientRows: [
+        {
+          id: 'c1',
+          name: 'Acme',
+          contact: 'Pat',
+          billing_mode: 'hourly',
+          hourly_rate: 0,
+          plan_id: null,
+          plan_ids: [],
+          contact_ids: [],
+          assigned_bookkeeper_ids: [],
+          lifecycle_stage: 'active',
+        },
+      ],
+      templateRows: [templateRow],
+      templateStageRows: [
+        {
+          id: 'st-1',
+          template_id: 'tpl-steps',
+          name: 'Prepare',
+          assignee_id: 'emp-1',
+          offset_days: 0,
+          due_date: null,
+          due_day_of_month: null,
+          position: 0,
+          viewer_ids: [],
+          editor_ids: [],
+          category_id: 'cat-prep',
+        },
+      ],
+      templateItemRows: [
+        {
+          id: 'ti-1',
+          template_id: 'tpl-steps',
+          label: 'Reconcile',
+          sort_order: 0,
+          due_date: null,
+          due_day_of_month: null,
+          assignee_id: null,
+          stage_id: 'st-1',
+          sub_items: [],
+        },
+      ],
+    })
+    await postgresStore(fake).read()
+    const rows = insertedRows(fake.statements, 'checklists').filter((row) => row.template_id === 'tpl-steps')
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) expect(row.category_id).toBe('cat-prep')
+    // ...and the template write-back keeps the step's column.
+    const stages = insertedRows(fake.statements, 'checklist_template_stages')
+    expect(stages.map((row) => row.category_id)).toEqual(['cat-prep'])
+  })
+
+  it('file backend: deleting a Board column clears it from steps too', async () => {
+    const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    authState.serviceCategories = [
+      { id: 'cat-review', name: 'Review', sortOrder: 0 },
+      { id: 'cat-prep', name: 'Prep', sortOrder: 1 },
+    ]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await store.write(workspace({ checklistTemplates: [twoStepTemplate({ nextDueDate: '2099-01-31' })] }))
+
+    expect(await store.deleteServiceCategory('cat-review')).toBe(true)
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    const stages = persisted.checklistTemplates[0].stages
+    expect(stages[1].categoryId ?? null).toBeNull()
+    // Another step's column, and the recipe's, are untouched.
+    expect(stages[0].categoryId).toBe('cat-prep')
+    expect(persisted.checklistTemplates[0].categoryId).toBe('cat-recipe')
+  })
+
+  it('postgres: deleting a Board column nulls it on steps too', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).deleteServiceCategory('cat-review')
+    const [clear] = fake.matching(/^update checklist_template_stages set category_id = null where category_id = \$1$/i)
+    expect(clear).toBeDefined()
+    expect(clear.params).toEqual(['cat-review'])
+  })
+})
