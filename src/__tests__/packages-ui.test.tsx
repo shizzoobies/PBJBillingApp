@@ -5,7 +5,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PackageLibrary, PlansPage } from '../pages/PlansPage'
-import { ApplyPackageField } from '../pages/ClientDetailPage'
+import { ApplyPackageField, PlanServicesField } from '../pages/ClientDetailPage'
 import { applyPackageConfirmText, defaultPackageTemplateIds } from '../lib/packages'
 import type { AppContextValue } from '../AppContext'
 import {
@@ -456,6 +456,78 @@ describe('"+ Add package" on a client', () => {
     expect(retiredBox.textContent).toBe('')
 
     expect(listPackagesRequest).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * "If I add a plan in addition to a package the checklist for that plan should
+ * populate" (featreq-8bdc5ec5): adding a plan chip offers to set up its
+ * checklists the client does not have yet, through the browser clone.
+ */
+describe('adding a plan chip offers its checklists', () => {
+  const ACME: Client = { id: 'c1', name: 'Acme', planIds: ['plan-books'] } as Client
+  let addChecklistTemplate = vi.fn()
+  const onCommit = vi.fn()
+
+  beforeEach(() => {
+    addChecklistTemplate = vi.fn()
+    onCommit.mockReset()
+    setContext({
+      clients: [ACME],
+      checklistTemplates: [...TEMPLATES, clientCopy('tpl-c1-close', 'bp-close')],
+    })
+    contextValue = { ...contextValue, addChecklistTemplate } as AppContextValue
+  })
+
+  const addPayroll = async () => {
+    render(<PlanServicesField client={ACME} plans={PLANS} onCommit={onCommit} />)
+    fireEvent.click(screen.getByRole('button', { name: '+ Add plan / service' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Payroll' }))
+  }
+
+  it('saves the plan, then names the missing checklists and sets them up on yes', async () => {
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    await addPayroll()
+
+    expect(onCommit).toHaveBeenCalledWith({ planIds: ['plan-books', 'plan-payroll'] })
+    // Payroll bundles Payroll run and Monthly close; Monthly close is already
+    // on the client, so only Payroll run is offered.
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(String((confirm.mock.calls[0] as unknown[])[0])).toBe(
+      'Also set up these checklists for Acme: Payroll run?',
+    )
+    expect(addChecklistTemplate).toHaveBeenCalledTimes(1)
+    expect(addChecklistTemplate.mock.calls[0][0]).toMatchObject({
+      clientId: 'c1',
+      sourceTemplateId: 'bp-payroll',
+      title: 'Payroll run',
+      active: true,
+    })
+  })
+
+  it('keeps the plan and adds no checklist when declined', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => false))
+    await addPayroll()
+    expect(onCommit).toHaveBeenCalledWith({ planIds: ['plan-books', 'plan-payroll'] })
+    expect(addChecklistTemplate).not.toHaveBeenCalled()
+  })
+
+  it('asks nothing when the added plan has nothing missing', async () => {
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    setContext({
+      clients: [ACME],
+      checklistTemplates: [
+        ...TEMPLATES,
+        clientCopy('tpl-c1-close', 'bp-close'),
+        { ...clientCopy('tpl-c1-payroll', 'bp-payroll'), title: 'Payroll run' } as ChecklistTemplate,
+      ],
+    })
+    contextValue = { ...contextValue, addChecklistTemplate } as AppContextValue
+    await addPayroll()
+    expect(confirm).not.toHaveBeenCalled()
+    expect(addChecklistTemplate).not.toHaveBeenCalled()
   })
 })
 

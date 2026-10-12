@@ -175,19 +175,41 @@ describe('Plan checklists grouped by package', () => {
     expect(within(rows[1] as HTMLElement).getByText('Not set up')).toBeTruthy()
   })
 
-  it("mirrors the package exactly: a covered plan's checklist the package leaves out is not listed", async () => {
-    // 1969 Beach: the package's set is two checklists; the Client Meeting plan
-    // bundles a third (T3) the package leaves out. The panel lists the package's
-    // own two and nothing from the covered plans' bundles.
+  it("mirrors the package exactly, and gives a covered plan's leftover checklist its own group with Set up", async () => {
+    // 1969 Beach: the package's set is two checklists; Plan E (covered) bundles
+    // a third (T3) the package leaves out. The package group still lists exactly
+    // its own two; T3 is no longer invisible - Plan E gets a group for it
+    // (featreq-8bdc5ec5).
     listPackagesRequest = vi.fn(async () => [pkg('P2', 'Quarterly Accounting', ['A', 'B', 'E'], ['T1', 'T2'])])
     const { container } = renderPanel(['A', 'B', 'E'])
 
     await screen.findByText('Quarterly Accounting')
-    expect(groupHeadings(container)).toEqual(['Quarterly Accounting'])
-    expect(container.querySelectorAll('.plan-checklists-row')).toHaveLength(2)
+    expect(groupHeadings(container)).toEqual(['Quarterly Accounting', 'Plan E'])
+    const [packageGroup, planGroup] = Array.from(container.querySelectorAll('.plan-checklists-group'))
+    expect(within(packageGroup as HTMLElement).getAllByRole('listitem')).toHaveLength(2)
+    expect(within(planGroup as HTMLElement).getByText('Sales tax filing')).toBeTruthy()
+    expect(within(planGroup as HTMLElement).getByText('Not set up')).toBeTruthy()
     expect(screen.getAllByText('Monthly close')).toHaveLength(1)
     expect(screen.getAllByText('Quarterly review')).toHaveLength(1)
-    expect(screen.queryByText('Sales tax filing')).toBeNull()
+
+    fireEvent.click(within(planGroup as HTMLElement).getByRole('button', { name: /Set up plan checklists \(1\)/ }))
+    expect(addChecklistTemplate).toHaveBeenCalledTimes(1)
+    expect(addChecklistTemplate.mock.calls[0][0]).toMatchObject({
+      clientId: 'c1',
+      sourceTemplateId: 'T3',
+      title: 'Sales tax filing',
+    })
+  })
+
+  it('gives a covered plan with nothing left over no group at all', async () => {
+    // Plans A-D are covered by the package and every checklist they bundle is in
+    // the package's set (Plan D bundles none): one group, no "listed above" lines.
+    const { container } = renderPanel(['A', 'B', 'C', 'D'])
+
+    await screen.findByText('Quarterly Accounting')
+    expect(groupHeadings(container)).toEqual(['Quarterly Accounting'])
+    expect(screen.queryByText('Its checklists are listed above.')).toBeNull()
+    expect(screen.queryByText(/No checklists are bundled/)).toBeNull()
   })
 
   it('shows a checklist once when a package and an uncovered plan both carry it', async () => {
@@ -233,9 +255,11 @@ describe('Plan checklists grouped by package', () => {
     const { container } = renderPanel(['A', 'B', 'C'])
 
     await screen.findByText('Alpha')
-    expect(groupHeadings(container)).toEqual(['Alpha', 'Beta'])
+    // Plan B (covered) bundles Quarterly review, which neither package lists:
+    // it gets its own group for that leftover (featreq-8bdc5ec5).
+    expect(groupHeadings(container)).toEqual(['Alpha', 'Beta', 'Plan B'])
     expect(screen.getAllByText('Monthly close')).toHaveLength(1)
-    expect(screen.queryByText('Quarterly review')).toBeNull()
+    expect(screen.getAllByText('Quarterly review')).toHaveLength(1)
     expect(screen.getByText('Its checklists are listed above.')).toBeTruthy()
     expect(screen.queryByText(/No checklists are bundled/)).toBeNull()
   })

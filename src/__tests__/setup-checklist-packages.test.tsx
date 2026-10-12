@@ -103,8 +103,10 @@ describe('SetupChecklistPage plan checklist nudges', () => {
     openClients()
     expect(screen.getByText('Set up Quarterly Accounting package checklists for Acme')).toBeTruthy()
     expect(screen.queryByText(/Set up Accounting checklists/)).toBeNull()
-    expect(screen.queryByText(/Set up Quarterly checklists/)).toBeNull()
-    expect(screen.queryByText('Client Meeting')).toBeNull()
+    // The covered Quarterly plan bundles Client Meeting, which the package's
+    // set leaves out: it nudges for that one on its own (featreq-8bdc5ec5).
+    expect(screen.getByText('Set up Quarterly checklists for Acme')).toBeTruthy()
+    expect(screen.getAllByText('Client Meeting')).toHaveLength(1)
   })
 
   it('falls back to one nudge per plan when the packages fetch fails', async () => {

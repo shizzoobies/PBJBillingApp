@@ -1172,16 +1172,58 @@ function BillingSectionBody({
       ) : null}
       <HourlyRatesField client={client} />
       <EstimatedRoleHours client={client} onCommit={onCommit} />
-      <ChipField
-        label="Plans / services"
-        selectedIds={client.planIds ?? []}
-        options={plans.map((plan) => ({ id: plan.id, label: plan.name }))}
-        onCommit={(nextIds) => onCommit({ planIds: nextIds })}
-        addLabel="+ Add plan / service"
-        emptyHelper="No plans/services selected yet."
-      />
+      <PlanServicesField client={client} plans={plans} onCommit={onCommit} />
       <ApplyPackageField client={client} />
     </div>
+  )
+}
+
+/**
+ * The "Plans / services" chips. Adding a plan offers to set up its checklists
+ * the client does not have yet ("If I add a plan in addition to a package the
+ * checklist for that plan should populate" - featreq-8bdc5ec5). The plan is
+ * saved first, whatever the answer; on yes each missing blueprint is cloned
+ * through the browser clone, so the bulk save writes it on both backends. Not
+ * offered on a billing master (it holds no work) or a retired client.
+ */
+export function PlanServicesField({
+  client,
+  plans,
+  onCommit,
+}: {
+  client: Client
+  plans: SubscriptionPlan[]
+  onCommit: (patch: Partial<Client>) => void
+}) {
+  const { data, ownerMode, addChecklistTemplate } = useAppContext()
+  const commit = (nextIds: string[]) => {
+    const before = client.planIds ?? []
+    onCommit({ planIds: nextIds })
+    const added = nextIds.filter((id) => !before.includes(id))
+    if (!ownerMode || added.length === 0) return
+    if (client.isBillingMaster === true || isInactiveClient(client)) return
+    const missing = missingPlanTemplatesForClient(
+      { templateIds: defaultPackageTemplateIds(added, plans) },
+      data.checklistTemplates,
+      client.id,
+      data.checklistTemplates,
+    )
+    if (missing.length === 0) return
+    const titles = missing.map((template) => template.title).join(', ')
+    if (!window.confirm(`Also set up these checklists for ${client.name}: ${titles}?`)) return
+    for (const template of missing) {
+      addChecklistTemplate(cloneTemplateForClient(template, client.id))
+    }
+  }
+  return (
+    <ChipField
+      label="Plans / services"
+      selectedIds={client.planIds ?? []}
+      options={plans.map((plan) => ({ id: plan.id, label: plan.name }))}
+      onCommit={commit}
+      addLabel="+ Add plan / service"
+      emptyHelper="No plans/services selected yet."
+    />
   )
 }
 
@@ -2122,9 +2164,11 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
   )
 
   // What each group lists. A package group mirrors the package exactly: only
-  // its own checklist set, nothing a covered plan bundles beyond it
-  // (featreq-3ce2d75d). A covered plan still gets no group of its own. A
-  // checklist shows in the first group that lists it, never twice across groups.
+  // its own checklist set (featreq-3ce2d75d). A plan the package covers gets a
+  // group of its own only for what it bundles BEYOND that set - a "Client
+  // Meeting" the package leaves out was otherwise invisible, with no Set up and
+  // no nudge (featreq-8bdc5ec5); a covered plan with nothing left over gets no
+  // group. A checklist shows in the first group that lists it, never twice.
   const groups = useMemo(() => {
     const shown = new Set<string>()
     const take = (ids: readonly string[]) => {
@@ -2153,9 +2197,9 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
       })
     }
     for (const plan of clientPlans) {
-      if (covered.has(plan.id)) continue
       const own = planTemplates(plan, data.checklistTemplates).map((template) => template.id)
       const templateIds = take(own)
+      if (covered.has(plan.id) && templateIds.length === 0) continue
       result.push({
         key: plan.id,
         name: plan.name,
