@@ -47249,8 +47249,13 @@ describe('signing an engagement creates the client (file backend)', () => {
     const { engagement } = await wonEngagement({ accept: { planIds: ['plan-books', 'plan-payroll'] } })
     const result = await sign(engagement.id)
     expect([...result.clonedTemplateIds].sort()).toEqual(['bp-close', 'bp-payroll'])
+    // Not the client's onboarding case (featreq-b2142264: signing opens that too): copies only.
     const copies = () =>
-      store.read().then((data) => data.checklistTemplates.filter((template) => template.clientId === result.clientId))
+      store
+        .read()
+        .then((data) =>
+          data.checklistTemplates.filter((template) => template.clientId === result.clientId && !template.onboardingForClientId),
+        )
     const first = await copies()
     expect(first.map((template) => template.sourceTemplateId).sort()).toEqual(['bp-close', 'bp-payroll'])
     expect(first.every((template) => template.isStandard !== true)).toBe(true)
@@ -47850,6 +47855,177 @@ describe('signing an engagement creates the client (file backend)', () => {
     const nameless = await wonEngagement()
     await patchStored(nameless.engagement.id, { party: { ...nameless.engagement.party, company: '', contactName: '' } })
     await expectRefused(nameless.engagement.id, 'no_name')
+  })
+
+  // featreq-b2142264 (Brittany, 2026-10-12): signing a prospect's letter also opens
+  // their onboarding case - at the Onboarding stage, the Proposal stage recorded done.
+  describe("the new client's onboarding case", () => {
+    const PROPOSAL_STEPS = ['Send proposal / engagement letter', 'Confirm scope & pricing', 'Client signs engagement']
+    const ONBOARDING_STEPS = ['Collect access to books / bank feeds', 'Set up client in systems', 'Gather prior financials']
+    const daysBefore = (day, count) => {
+      const date = new Date(`${day}T12:00:00Z`)
+      date.setUTCDate(date.getUTCDate() - count)
+      return date.toISOString().slice(0, 10)
+    }
+    const caseOf = async (clientId) => {
+      const data = await store.read()
+      return {
+        data,
+        templates: data.checklistTemplates.filter((template) => template.onboardingForClientId === clientId),
+        checklists: data.checklists
+          .filter((checklist) => checklist.onboardingForClientId === clientId)
+          .sort((a, b) => a.stageIndex - b.stageIndex),
+      }
+    }
+
+    it('opens at the Onboarding stage: Proposal born done at the signing instant, Onboarding live, the client stays in Onboarding', async () => {
+      const before = (await readAuth()).activityLog?.length ?? 0
+      const { engagement } = await wonEngagement()
+      const signedOn = daysBefore(firmToday(), 3)
+      const result = await sign(engagement.id, { signedOn })
+      expect(result.createdClient).toBe(true)
+      expect(result.onboardingCaseId).toMatch(/^case-[0-9a-f]{8}$/)
+
+      const { data, templates, checklists } = await caseOf(result.clientId)
+      expect(templates).toHaveLength(1)
+      expect(templates[0]).toMatchObject({
+        title: 'Onboarding · Acme Books',
+        clientId: result.clientId,
+        active: false,
+        isStandard: false,
+        onboardingForClientId: result.clientId,
+      })
+      expect(templates[0].stages.map((stage) => stage.name)).toEqual(['Proposal', 'Onboarding', 'Client'])
+      // A new client has no team: the case is the signing owner's (Postgres refuses none).
+      expect(templates[0].assigneeId).toBe('emp-patrice')
+      expect(templates[0].stages.map((stage) => stage.assigneeId)).toEqual(['emp-patrice', 'emp-patrice', 'emp-patrice'])
+
+      expect(checklists.map((row) => [row.caseId, row.stageIndex, row.stageCount, row.templateId])).toEqual([
+        [result.onboardingCaseId, 0, 3, templates[0].id],
+        [result.onboardingCaseId, 1, 3, templates[0].id],
+      ])
+      expect(checklists.map((row) => row.assigneeId)).toEqual(['emp-patrice', 'emp-patrice'])
+      const [proposalStage, onboardingStage] = checklists
+      // Stage 0: every step done, completed at the signing instant, due the signed day.
+      expect(proposalStage.dueDate).toBe(signedOn)
+      expect(proposalStage.items.map((item) => item.label)).toEqual(PROPOSAL_STEPS)
+      for (const item of proposalStage.items) {
+        expect(item).toMatchObject({ done: true, completedAt: result.engagement.signedAt })
+      }
+      // Stage 1: the live checklist, due today in the firm's day; the summary links it.
+      expect(onboardingStage.id).toBe(result.onboardingChecklistId)
+      expect(onboardingStage.dueDate).toBe(firmToday())
+      expect(onboardingStage.items.map((item) => item.label)).toEqual(ONBOARDING_STEPS)
+      expect(onboardingStage.items.every((item) => item.done === false && !item.completedAt)).toBe(true)
+
+      // Plain startOnboarding would have moved the client back to Proposal; signing does not.
+      expect(data.clients.find((row) => row.id === result.clientId).lifecycleStage).toBe('onboarding')
+      const added = ((await readAuth()).activityLog ?? []).slice(before)
+      expect(added.find((entry) => entry.action === 'onboarding_started')).toMatchObject({ target: 'Acme Books' })
+      expect(result.skipped.map((entry) => entry.what)).not.toContain('Onboarding checklist')
+    })
+
+    it('the live stage advances like any onboarding case: done -> Client stage, client Active', async () => {
+      const { engagement } = await wonEngagement()
+      const result = await sign(engagement.id)
+      let live = (await caseOf(result.clientId)).checklists[1]
+      for (const item of live.items) {
+        await store.toggleChecklistItem(live.id, item.id, undefined, undefined, { closeWaitsBy: 'emp-patrice' })
+      }
+      const { data, checklists } = await caseOf(result.clientId)
+      expect(checklists.map((row) => row.stageIndex)).toEqual([0, 1, 2])
+      live = checklists[2]
+      expect(live.items.map((item) => item.label)).toEqual(['Kickoff call complete', 'First close / deliverable scheduled', 'Mark client active'])
+      expect(data.clients.find((row) => row.id === result.clientId).lifecycleStage).toBe('active')
+    })
+
+    it('never opens a second case: not on a second sign attempt, not on a re-run, not from Start onboarding', async () => {
+      const { engagement } = await wonEngagement()
+      const result = await sign(engagement.id)
+      const first = await caseOf(result.clientId)
+      expect(first.checklists).toHaveLength(2)
+
+      // A second Mark as signed is refused (signed already) and opens nothing.
+      const again = await sign(engagement.id).catch((caught) => caught)
+      expect(again).toBeInstanceOf(EngagementStateError)
+      // The step itself, re-run for the same client: the open case is named, nothing added.
+      const rerun = await store._openOnboardingCaseAtSigning(result.clientId, {
+        signedOn: firmToday(),
+        signedAt: result.engagement.signedAt,
+      })
+      expect(rerun).toEqual({ caseId: result.onboardingCaseId, checklistId: result.onboardingChecklistId, opened: false })
+      // ...and the client page's Start onboarding finds the case there too.
+      expect(await store.startOnboarding(result.clientId)).toBeNull()
+
+      const after = await caseOf(result.clientId)
+      expect(after.templates).toHaveLength(1)
+      expect(after.checklists.map((row) => row.id)).toEqual(first.checklists.map((row) => row.id))
+      expect(after.data.clients.find((row) => row.id === result.clientId).lifecycleStage).toBe('onboarding')
+    })
+
+    it('a client that already has an onboarding case gets no second one; the answer names it and says so', async () => {
+      const { engagement } = await wonEngagement()
+      // The client the signing creates already holds a case (a second sign path racing this one).
+      const realCreate = store.createClient.bind(store)
+      let opened = null
+      vi.spyOn(store, 'createClient').mockImplementationOnce(async (input) => {
+        const created = await realCreate(input)
+        opened = await store._openOnboardingCaseAtSigning(created.id, {
+          signedOn: firmToday(),
+          signedAt: new Date().toISOString(),
+          assigneeId: 'emp-patrice',
+        })
+        return created
+      })
+      const result = await sign(engagement.id)
+      expect(opened.opened).toBe(true)
+      expect(result.onboardingCaseId).toBe(opened.caseId)
+      expect(result.onboardingChecklistId).toBe(opened.checklistId)
+      expect(result.skipped).toContainEqual({
+        what: 'Onboarding checklist',
+        why: 'Acme Books already has an onboarding checklist, so another was not opened.',
+      })
+      const { templates, checklists } = await caseOf(result.clientId)
+      expect(templates).toHaveLength(1)
+      expect(checklists).toHaveLength(2)
+    })
+
+    it("an existing client's signing opens nothing and leaves its stage", async () => {
+      const { engagement } = await wonEngagement({ proposal: { clientId: 'c1' } })
+      const result = await sign(engagement.id)
+      expect(result.createdClient).toBe(false)
+      expect(result.onboardingCaseId).toBeNull()
+      expect(result.onboardingChecklistId).toBeNull()
+      const { data, templates, checklists } = await caseOf('c1')
+      expect(templates).toEqual([])
+      expect(checklists).toEqual([])
+      expect(data.clients.find((row) => row.id === 'c1').lifecycleStage ?? 'active').toBe('active')
+    })
+
+    it('with nobody to assign it to (no team, no signer) nothing is written and a skipped line says so', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const { engagement } = await wonEngagement()
+      const result = await store.signEngagement(engagement.id, { signedOn: firmToday() })
+      expect(result.engagement.status).toBe('signed')
+      expect(result.onboardingCaseId).toBeNull()
+      expect(result.skipped.map((entry) => entry.what)).toContain('Onboarding checklist')
+      const { templates, checklists } = await caseOf(result.clientId)
+      expect(templates).toEqual([])
+      expect(checklists).toEqual([])
+    })
+
+    it('a case that cannot be opened is a skipped line, never a refusal', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      vi.spyOn(store, '_openOnboardingCaseAtSigning').mockRejectedValueOnce(new Error('disk full'))
+      const { engagement } = await wonEngagement()
+      const result = await sign(engagement.id)
+      expect(result.engagement.status).toBe('signed')
+      expect(result.onboardingCaseId).toBeNull()
+      expect(result.skipped).toContainEqual({
+        what: 'Onboarding checklist',
+        why: 'The letter is signed and Acme Books is in Onboarding, but the onboarding checklist could not be opened. Add the onboarding steps on the Checklists page.',
+      })
+    })
   })
 })
 
@@ -48470,6 +48646,99 @@ describe('engagements (Postgres statements)', () => {
       ])
     })
 
+    // featreq-b2142264: a prospect's signing opens its onboarding case after everything
+    // else - the template in one workspace save, then the Proposal checklist (born done,
+    // completed at the signing instant) and the Onboarding checklist, each with its steps
+    // in its own transaction. The client's stage is never written.
+    it("a prospect: after the retainer, the onboarding case's template, then the done Proposal checklist, then the live Onboarding one", async () => {
+      const fake = signingPool()
+      const pgStore = signingStore(fake)
+      const draft = await pgStore.createEngagementFromProposal(wonProposal(), { createdBy: 'emp-patrice' })
+      fake.statements.length = 0
+      // The workspace the case is written into: the client signing just inserted.
+      // Never the real read()/write() (a trial on production must stub both).
+      const workspaceClient = () => {
+        const [row] = insertedRows(fake.statements, 'clients')
+        return { id: row.id, name: row.name, lifecycleStage: row.lifecycle_stage, assignedBookkeeperIds: [] }
+      }
+      pgStore.read = async () => ({ clients: [workspaceClient()], plans: [], checklistTemplates: [], checklists: [] })
+      pgStore.readWithVersion = async () => ({
+        data: { clients: [workspaceClient()], plans: [], checklistTemplates: [], checklists: [] },
+        version: 'v-1',
+      })
+      let written = null
+      pgStore.write = async (data, options) => {
+        written = { data, options }
+        fake.statements.push({ text: 'write', params: [options?.expectedVersion ?? null] })
+      }
+
+      const result = await pgStore.signEngagement(draft.id, { signedOn: '2026-10-09', allowUnsent: true, userId: 'u1' })
+      expect(result.createdClient).toBe(true)
+      expect(result.onboardingCaseId).toMatch(/^case-[0-9a-f]{8}$/)
+      expect(result.skipped.map((entry) => entry.what)).not.toContain('Onboarding checklist')
+
+      // In order, after the flip's COMMIT and the retainer: the save, then each checklist.
+      const flipAt = indexOf(fake, /^update engagements set status = 'signed'/i)
+      const retainerAt = indexOf(fake, /^createRetainerInvoice$/)
+      const writeAt = indexOf(fake, /^write$/)
+      const checklistInserts = fake.statements
+        .map((statement, index) => (/^insert into checklists\b/i.test(statement.text) ? index : -1))
+        .filter((index) => index >= 0)
+      const itemInserts = fake.statements
+        .map((statement, index) => (/^insert into checklist_items\b/i.test(statement.text) ? index : -1))
+        .filter((index) => index >= 0)
+      expect(retainerAt).toBeGreaterThan(flipAt)
+      expect(writeAt).toBeGreaterThan(retainerAt)
+      expect(checklistInserts).toHaveLength(2)
+      expect(itemInserts).toHaveLength(6)
+      expect(checklistInserts[0]).toBeGreaterThan(writeAt)
+      expect(itemInserts.slice(0, 3).every((at) => at > checklistInserts[0] && at < checklistInserts[1])).toBe(true)
+      expect(itemInserts.slice(3).every((at) => at > checklistInserts[1])).toBe(true)
+      // Each checklist and its steps in one transaction.
+      for (const at of checklistInserts) expect(fake.statements[at - 1].text).toMatch(/^begin$/i)
+      expect(fake.statements[itemInserts[2] + 1].text).toMatch(/^commit$/i)
+      expect(fake.statements[itemInserts[5] + 1].text).toMatch(/^commit$/i)
+
+      // The save: the template added under the version read, the client left as it is.
+      expect(fake.statements[writeAt].params).toEqual(['v-1'])
+      const [template] = written.data.checklistTemplates
+      expect(template).toMatchObject({
+        title: 'Onboarding · Acme Books',
+        clientId: result.clientId,
+        active: false,
+        onboardingForClientId: result.clientId,
+      })
+      expect(written.data.clients.find((row) => row.id === result.clientId).lifecycleStage).toBe('onboarding')
+      // assignee_id is NOT NULL and references users: a new client has no team, so the case is the signer's.
+      expect(template.assigneeId).toBe('u1')
+      expect(indexOf(fake, /^update clients set lifecycle_stage/i)).toBe(-1)
+
+      // The two checklists: one case, stages 0 and 1 of 3, the Proposal one due the signed day.
+      const checklists = insertedRows(fake.statements, 'checklists')
+      expect(
+        checklists.map((row) => [row.case_id, row.stage_index, row.stage_count, row.template_id, row.onboarding_for_client_id]),
+      ).toEqual([
+        [result.onboardingCaseId, 0, 3, template.id, result.clientId],
+        [result.onboardingCaseId, 1, 3, template.id, result.clientId],
+      ])
+      expect(checklists.map((row) => row.assignee_id)).toEqual(['u1', 'u1'])
+      expect(checklists[0].due_date).toBe('2026-10-09')
+      expect(checklists[1].due_date).toBe(firmToday())
+      expect(checklists[1].id).toBe(result.onboardingChecklistId)
+      // The steps: the Proposal ones done, completed at the signing instant; the Onboarding ones open.
+      const items = insertedRows(fake.statements, 'checklist_items')
+      expect(items.slice(0, 3).map((row) => [row.label, row.done, new Date(row.completed_at).toISOString()])).toEqual([
+        ['Send proposal / engagement letter', true, '2026-10-09T16:00:00.000Z'],
+        ['Confirm scope & pricing', true, '2026-10-09T16:00:00.000Z'],
+        ['Client signs engagement', true, '2026-10-09T16:00:00.000Z'],
+      ])
+      expect(items.slice(3).map((row) => [row.label, row.done, row.completed_at])).toEqual([
+        ['Collect access to books / bank feeds', false, null],
+        ['Set up client in systems', false, null],
+        ['Gather prior financials', false, null],
+      ])
+    })
+
     it('an existing client: no client insert, the fee by one targeted update, then the one transaction', async () => {
       const fake = signingPool()
       const client = { id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 400, lifecycleStage: 'active' }
@@ -48482,6 +48751,9 @@ describe('engagements (Postgres statements)', () => {
       expect(indexOf(fake, /^insert into clients\b/i)).toBe(-1)
       expect(indexOf(fake, /^insert into contacts\b/i)).toBe(-1)
       expect(indexOf(fake, /^update engagements set client_id/i)).toBe(-1)
+      // An existing client gets no onboarding case (featreq-b2142264).
+      expect(result.onboardingCaseId).toBeNull()
+      expect(indexOf(fake, /^insert into checklists\b/i)).toBe(-1)
       // The Won proposal is linked by compare-and-set (a no-op when it already is).
       expect(fake.statements[indexOf(fake, /^update proposals set client_id/i)].text).toMatch(/status = 'accepted' and \(client_id is null or client_id = \$2\)/)
       // The fee is added INSIDE the one transaction, after the flip, before COMMIT.

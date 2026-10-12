@@ -12227,9 +12227,11 @@ const server = createServer(async (request, response) => {
     // POST /api/engagements/:id/sign - { signedOn: 'YYYY-MM-DD', note?, allowUnsent?, confirmChanged? }.
     // Stage 3: signing is the moment the client side happens - the store creates
     // the client and contact for a prospect, applies the fee, plans, package, plan
-    // checklists and software, and drafts the retainer. Answers { engagement,
+    // checklists and software, drafts the retainer, and opens a new client's
+    // onboarding checklist at the Onboarding stage. Answers { engagement,
     // clientId, createdClient, clonedTemplateIds, retainerInvoiceId, retainerPeriod,
-    // monthlyRate, addedPlanIds, softwareAdded, skipped }.
+    // monthlyRate, addedPlanIds, softwareAdded, onboardingCaseId,
+    // onboardingChecklistId, skipped }.
     const engagementSignMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/sign$/)
     if (engagementSignMatch && request.method === 'POST') {
       const session = await requireSession(request, response)

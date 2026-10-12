@@ -21124,8 +21124,14 @@ export class AppDataStore {
     return record
   }
 
-  async createChecklist(checklist) {
+  /**
+   * `completedAt` (an ISO instant, store callers only - never a request body) stamps
+   * every step that arrives done as completed THEN instead of now: signing records
+   * the onboarding case's Proposal stage as completed at the signing instant.
+   */
+  async createChecklist(checklist, { completedAt = null } = {}) {
     await this._refuseBillingMasterWrite(checklist?.clientId, 'tasks')
+    const completedStamp = completedAt ? new Date(completedAt).toISOString() : null
     const nextChecklist = {
       ...checklist,
       id: checklist.id ?? `check-${randomUUID().slice(0, 8)}`,
@@ -21140,15 +21146,17 @@ export class AppDataStore {
         : {}),
       items: checklist.items.map((item, index) => {
         const subItems = normalizeSubItems(item.subItems, { withDone: true })
+        // `done` is derived for items with sub-items (recursing sub-sub-items).
+        const done = subItems.length > 0 ? rollUpItemDone({ ...item, subItems }) : Boolean(item.done)
         return {
           ...item,
           id: item.id ?? `item-${randomUUID().slice(0, 8)}`,
-          // `done` is derived for items with sub-items (recursing sub-sub-items).
-          done: subItems.length > 0 ? rollUpItemDone({ ...item, subItems }) : Boolean(item.done),
+          done,
           sortOrder: index,
           dueDate: item.dueDate ?? null,
           assigneeId: item.assigneeId ?? null,
           subItems,
+          ...(completedStamp && done ? { completedAt: completedStamp } : {}),
         }
       }),
     }
@@ -21211,8 +21219,9 @@ export class AppDataStore {
               JSON.stringify(Array.isArray(item.subItems) ? item.subItems : []),
               // Brand-new rows: a step that arrives already ticked was completed
               // now. Materialized template steps always arrive open, so this is
-              // null on every ordinary create.
-              preservedItemCompletion(item.done, undefined),
+              // null on every ordinary create. A caller's `completedAt` (signing's
+              // Proposal stage) says when instead - the file backend stores the same.
+              completedStamp && item.done ? new Date(completedStamp) : preservedItemCompletion(item.done, undefined),
             ],
           )
         }
@@ -21691,9 +21700,12 @@ export class AppDataStore {
    * its version, adds the onboarding template and moves the client to
    * 'proposal', and writes under that version (StaleWorkspaceError if anything
    * moved). Returns { template, today }, or null when the client is missing or
-   * already has an onboarding case.
+   * already has an onboarding case. `lifecycleStage: null` leaves the client's
+   * stage as it is (signing opens the case at Onboarding, where the client already is).
+   * `fallbackAssigneeId` assigns the case when the client has no team yet (signing:
+   * the owner who signed - Postgres refuses a template or checklist with no assignee).
    */
-  async _openOnboardingCase(clientId) {
+  async _openOnboardingCase(clientId, { lifecycleStage = 'proposal', fallbackAssigneeId = '' } = {}) {
     const { data, version } = await this.readWithVersion()
     const client = (data.clients ?? []).find((c) => c.id === clientId)
     if (!client) return null
@@ -21703,7 +21715,7 @@ export class AppDataStore {
     )
     if (existing) return null
 
-    const assigneeId = (client.assignedBookkeeperIds ?? [])[0] || ''
+    const assigneeId = (client.assignedBookkeeperIds ?? [])[0] || fallbackAssigneeId || ''
     // The firm's day, not the server's: from 8 pm Eastern the UTC date is
     // already tomorrow, and the case would open due the day after it started.
     const today = firmToday()
@@ -21755,12 +21767,91 @@ export class AppDataStore {
     const nextData = {
       ...data,
       checklistTemplates: [...(data.checklistTemplates ?? []), template],
-      clients: (data.clients ?? []).map((c) =>
-        c.id === clientId ? { ...c, lifecycleStage: 'proposal' } : c,
-      ),
+      clients: lifecycleStage
+        ? (data.clients ?? []).map((c) => (c.id === clientId ? { ...c, lifecycleStage } : c))
+        : data.clients,
     }
     await this.write(nextData, { expectedVersion: version })
     return { template, today }
+  }
+
+  /**
+   * The onboarding case a client already has, as the link to it: the live (not
+   * deleted) checklist of the furthest stage with `onboardingForClientId` = the
+   * client. Returns { caseId, checklistId } or null.
+   */
+  static _liveOnboardingCase(checklists, clientId) {
+    const open = (checklists ?? [])
+      .filter((checklist) => checklist && checklist.onboardingForClientId === clientId && !checklist.deletedAt)
+      .sort((a, b) => (Number(b.stageIndex) || 0) - (Number(a.stageIndex) || 0))[0]
+    return open ? { caseId: open.caseId || open.id, checklistId: open.id } : null
+  }
+
+  /**
+   * Signing a prospect's letter opens their onboarding case AT THE ONBOARDING STAGE
+   * (Brittany, 2026-10-12, featreq-b2142264): the same three-stage one-shot case
+   * `startOnboarding` opens, but the Proposal stage is recorded done - its checklist
+   * is born with every step ticked, completed at the signing instant `signedAt` and
+   * due the signed day - and the Onboarding stage is the live checklist, due the
+   * firm's today. The client is NOT moved (it was created in Onboarding; plain
+   * `startOnboarding` would move it back to Proposal). Writes, in order: the case's
+   * template (one workspace save under its version, redone on a stale read), the
+   * Proposal checklist and its steps, the Onboarding checklist and its steps.
+   *
+   * Idempotent: a client that already has a live onboarding checklist (or an
+   * onboarding template) gets no second case; the answer then names the one there
+   * with `opened: false`. Returns { caseId, checklistId, opened } - `checklistId`
+   * is the live stage's checklist - or null when nothing could be found or opened.
+   *
+   * Assigned to the client's first team member, else `assigneeId` (signing: the
+   * owner who marked it signed - a new client has no team). With neither it throws
+   * before writing anything: Postgres refuses a template or checklist with no
+   * assignee, and the file backend refuses the same so the two never differ.
+   */
+  async _openOnboardingCaseAtSigning(clientId, { signedOn, signedAt, assigneeId = null }) {
+    const data = await this.read()
+    const existing = AppDataStore._liveOnboardingCase(data.checklists, clientId)
+    if (existing) return { ...existing, opened: false }
+    const client = (data.clients ?? []).find((row) => row.id === clientId)
+    if (client && !((client.assignedBookkeeperIds ?? [])[0] || assigneeId)) {
+      throw new Error('nobody to assign the onboarding checklist to')
+    }
+    const opened = await this._retryOnStaleWorkspace(() =>
+      this._openOnboardingCase(clientId, { lifecycleStage: null, fallbackAssigneeId: assigneeId || '' }),
+    )
+    if (!opened) {
+      const there = AppDataStore._liveOnboardingCase((await this.read()).checklists, clientId)
+      return there ? { ...there, opened: false } : null
+    }
+    const { template, today } = opened
+    const stages = template.stages
+    const caseId = `case-${randomUUID().slice(0, 8)}`
+    // Stage 0 (Proposal): done - signing the letter IS its last step.
+    await this.createChecklist(
+      buildChecklistFromStage({
+        template,
+        stage: stages[0],
+        stageIndex: 0,
+        stageCount: stages.length,
+        caseId,
+        dueDate: signedOn,
+        completed: true,
+      }),
+      { completedAt: signedAt },
+    )
+    // Stage 1 (Onboarding): the live checklist.
+    const live = await this.createChecklist(
+      buildChecklistFromStage({
+        template,
+        stage: stages[1],
+        stageIndex: 1,
+        stageCount: stages.length,
+        caseId,
+        dueDate: resolveStageDueDate(stages[1], today),
+      }),
+    )
+    await this.grantClientVisibility(clientId, live.assigneeId)
+    return { caseId, checklistId: live.id, opened: true }
   }
 
   async setChecklistViewers(checklistId, viewerIds, editorIds) {
@@ -27503,9 +27594,12 @@ export class AppDataStore {
    *      workspace save (`copyTemplatesToClient`), then a DRAFT retainer invoice
    *      for the retainer amount unless the client is invoiced outside the app or
    *      already holds a live retainer.
-   *   4. activity client_created, package_applied, retainer_invoice_issued (the
-   *      route records engagement_signed).
-   * The onboarding case is NOT opened: the new client simply arrives in Onboarding.
+   *   4. prospect only, after the retainer and never a refusal: the new client's
+   *      onboarding case opened AT THE ONBOARDING STAGE (`_openOnboardingCaseAtSigning`:
+   *      the Proposal stage recorded done at the signing instant, the Onboarding
+   *      stage live, the client left in Onboarding; featreq-b2142264).
+   *   5. activity client_created, package_applied, retainer_invoice_issued,
+   *      onboarding_started (the route records engagement_signed).
    *
    * A SUPERSEDING letter (stage 4) replaces the client's current engagement: its
    * predecessor flips to 'superseded' inside the unit of step 2 (a compare-and-set on
@@ -27529,8 +27623,10 @@ export class AppDataStore {
    *
    * @returns {Promise<null | {engagement, clientId, createdClient, clonedTemplateIds,
    *   retainerInvoiceId, retainerPeriod, monthlyRate, addedPlanIds, removedPlanIds,
-   *   supersededId, softwareAdded,
+   *   supersededId, softwareAdded, onboardingCaseId, onboardingChecklistId,
    *   skipped: {what: string, why: string}[]}>} null when there is no such engagement.
+   *   `onboardingCaseId` / `onboardingChecklistId` (its live Onboarding-stage
+   *   checklist) are null unless signing created the client and its case is open.
    */
   async signEngagement(
     id,
@@ -27938,6 +28034,35 @@ export class AppDataStore {
         }
       }
 
+      // ---- after the flip: a NEW client's onboarding checklist, at Onboarding - never a refusal ----
+      // (featreq-b2142264) The Proposal stage is recorded done, the Onboarding stage is
+      // live, and the client stays in Onboarding. An existing client gets nothing here.
+      let onboardingCaseId = null
+      let onboardingChecklistId = null
+      if (createdClient) {
+        try {
+          // Assigned to the owner who signed it (a new client has no team yet).
+          const onboarding = await this._openOnboardingCaseAtSigning(clientId, { signedOn, signedAt, assigneeId: userId })
+          if (!onboarding) throw new Error('the onboarding case was not opened')
+          onboardingCaseId = onboarding.caseId
+          onboardingChecklistId = onboarding.checklistId
+          if (onboarding.opened) {
+            await this._recordSigningActivity(userId, 'onboarding_started', client.name || '')
+          } else {
+            skipped.push({
+              what: 'Onboarding checklist',
+              why: `${clientName()} already has an onboarding checklist, so another was not opened.`,
+            })
+          }
+        } catch (error) {
+          console.error('[engagements] signing could not open the onboarding checklist for', id, error)
+          skipped.push({
+            what: 'Onboarding checklist',
+            why: `The letter is signed and ${clientName()} is in Onboarding, but the onboarding checklist could not be opened. Add the onboarding steps on the Checklists page.`,
+          })
+        }
+      }
+
       return {
         engagement,
         clientId,
@@ -27950,6 +28075,8 @@ export class AppDataStore {
         removedPlanIds,
         supersededId,
         softwareAdded: software.added,
+        onboardingCaseId,
+        onboardingChecklistId,
         skipped,
       }
     } catch (error) {

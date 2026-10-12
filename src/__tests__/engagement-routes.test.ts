@@ -189,6 +189,25 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
     expect(block).toContain('confirmChanged: payload.confirmChanged === true')
   })
 
+  // featreq-b2142264: signing a prospect's letter opens its onboarding case; the route
+  // answers the store's result whole, so the case id and its live checklist reach the
+  // page (the summary's "Open the onboarding checklist" link).
+  it("sign answers the new client's onboarding case: the store's result carries it and the route sends it whole", () => {
+    const comment = between('// POST /api/engagements/:id/sign', 'const engagementSignMatch')
+    expect(comment).toContain('onboardingCaseId')
+    expect(comment).toContain('onboardingChecklistId')
+    expect(routeBlock(ROUTES[8].pattern, 4000)).toContain('sendJson(response, 200, result)')
+    const storeSource = readFileSync(path.resolve(here, '../../db/store.js'), 'utf8')
+    const signBody = storeSource.slice(
+      storeSource.indexOf('  async signEngagement('),
+      storeSource.indexOf('  static _engagementIsPureRecord('),
+    )
+    const returned = signBody.slice(signBody.lastIndexOf('      return {'))
+    expect(returned).toContain('onboardingCaseId,')
+    expect(returned).toContain('onboardingChecklistId,')
+    expect(signBody).toContain('await this._openOnboardingCaseAtSigning(clientId, { signedOn, signedAt, assigneeId: userId })')
+  })
+
   it('sign and void record what happened', () => {
     expect(routeBlock(ROUTES[8].pattern, 3000)).toContain("'engagement_signed'")
     expect(routeBlock(ROUTES[8].pattern, 3000)).toContain('allowUnsent: payload.allowUnsent === true')
