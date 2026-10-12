@@ -5404,13 +5404,14 @@ export function sendEngagementRequest(
 }
 
 /**
- * Mark as signed on a firm day; `allowUnsent` = she handed it over in person. The
- * answer says what signing did: the client created or used, the checklists, the
- * retainer drafted, and what was skipped.
+ * Mark as signed on a firm day; `allowUnsent` = she handed it over in person;
+ * `confirmChanged` = "signed as edited" (a sent letter changed since it went out).
+ * The answer says what signing did: the client created or used, the checklists,
+ * the retainer drafted, and what was skipped.
  */
 export async function signEngagementRequest(
   id: string,
-  input: { signedOn: string; note?: string; allowUnsent?: boolean },
+  input: { signedOn: string; note?: string; allowUnsent?: boolean; confirmChanged?: boolean },
 ): Promise<EngagementSignResult> {
   return engagementRequest<EngagementSignResult>(
     engagementPath(id, 'sign'),

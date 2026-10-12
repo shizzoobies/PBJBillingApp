@@ -41,7 +41,7 @@ import {
 import { proposalOutcomeAction, proposalOutcomeWords } from '../lib/proposal-outcomes.js'
 import { DEFAULT_ENGAGEMENT_SECTIONS, EMAIL_SECTION_KEY, sanitizeEngagementSections } from '../lib/engagement-sections.js'
 import { assembleEngagement } from '../lib/engagement-assemble.js'
-import { engagementHash } from '../lib/engagement-hash.js'
+import { engagementChangedSinceSent, engagementHash } from '../lib/engagement-hash.js'
 import { resolveInvoiceRecipients } from '../lib/invoice-recipients.js'
 import {
   QUESTIONNAIRE_EXPIRY_DAYS,
@@ -26875,6 +26875,9 @@ export class AppDataStore {
             ok: entry.ok === true,
             subject: String(entry.subject ?? '').slice(0, 200),
             error: entry.error ? String(entry.error).slice(0, 300) : null,
+            // The hash of the letter this send carried (engagementHash), so signing can
+            // tell a letter changed after it went out (`engagementChangedSinceSent`).
+            hash: typeof entry.hash === 'string' && /^[0-9a-f]{64}$/.test(entry.hash) ? entry.hash : null,
           }
         : {
             event: String(entry.event ?? '').trim().slice(0, 40),
@@ -26886,11 +26889,15 @@ export class AppDataStore {
   /**
    * Log one send attempt. A send that left (`ok`) moves a draft to sent and
    * stamps `sent_at` the first time only; a failed one is logged and changes
-   * nothing else. A re-send of a sent letter is just another entry. Returns the
-   * engagement, or null when there is none.
+   * nothing else. A re-send of a sent letter is just another entry. `hash` is
+   * the engagementHash of the letter sent (the sent-hash guard at signing).
+   * Returns the engagement, or null when there is none.
    */
-  async markEngagementSent(id, { to = [], providerId = null, ok = false, error = null, at = null, subject = '' } = {}) {
-    const entry = AppDataStore._engagementLogEntry({ to, providerId, ok, error, at, subject }, 'send')
+  async markEngagementSent(
+    id,
+    { to = [], providerId = null, ok = false, error = null, at = null, subject = '', hash = null } = {},
+  ) {
+    const entry = AppDataStore._engagementLogEntry({ to, providerId, ok, error, at, subject, hash }, 'send')
     if (this.pool) {
       const { rows } = await this.pool.query(
         `update engagements
@@ -26973,7 +26980,9 @@ export class AppDataStore {
    * Mark a SENT engagement signed - or a draft one, with `allowUnsent: true`, for
    * a letter she handed over in person - and do what signing means (engagements
    * stage 3, docs/plans/engagements-2026-10.md). `signedOn` is the firm day it was
-   * signed ('YYYY-MM-DD', not in the future), stored as that day's firm noon.
+   * signed ('YYYY-MM-DD', not in the future), stored as that day's firm noon. A
+   * sent letter changed since it last went out is refused ('changed_since_sent')
+   * unless `confirmChanged: true` (she ticked "signed as edited").
    *
    * Branches on the engagement's CLIENT, never its kind. With no client yet (a
    * prospect's Original drafted since stage 3) signing CREATES the client and its
@@ -27014,13 +27023,25 @@ export class AppDataStore {
    *   retainerInvoiceId, retainerPeriod, monthlyRate, addedPlanIds, softwareAdded,
    *   skipped: {what: string, why: string}[]}>} null when there is no such engagement.
    */
-  async signEngagement(id, { signedOn, note = '', userId = null, allowUnsent = false } = {}) {
+  async signEngagement(
+    id,
+    { signedOn, note = '', userId = null, allowUnsent = false, confirmChanged = false } = {},
+  ) {
     const current = await this.getEngagement(id)
     if (!current) return null
     if (!isRealDay(signedOn)) throw new EngagementStateError('Choose the day the letter was signed.', 'invalid')
     if (signedOn > firmToday()) throw new EngagementStateError('The signed date cannot be in the future.', 'invalid')
     const allowed = allowUnsent === true ? ['sent', 'draft'] : ['sent']
     if (!allowed.includes(current.status)) throw AppDataStore._engagementSignRefusal(current.status)
+    // The sent-hash guard: what came back signed is the letter that went out. A sent
+    // letter edited since its last send is refused unless she confirms she is
+    // signing the edited version (`confirmChanged`) - or she sends it again first.
+    if (current.status === 'sent' && confirmChanged !== true && engagementChangedSinceSent(current)) {
+      throw new EngagementStateError(
+        "The letter changed since it was sent - send it again, or tick 'signed as edited' to sign this version",
+        'changed_since_sent',
+      )
+    }
     const signedAt = firmNoonInstant(signedOn)
     const signedNote = String(note ?? '').trim().slice(0, ENGAGEMENT_NOTE_MAX) || null
     const refuse = (message, reason) => new EngagementStateError(message, reason)

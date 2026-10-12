@@ -2756,6 +2756,8 @@ export type EngagementEmailLogEntry =
       ok: boolean
       subject?: string
       error: string | null
+      /** The hash of the letter this send carried (null on sends logged before stage 3). */
+      hash?: string | null
     }
   | {
       kind: 'delivery'
@@ -2823,6 +2825,11 @@ export type EngagementView = {
   /** Opaque snapshot key: Send refuses (409 engagement_changed) when it no longer matches. */
   hash: string
   sender: { from: string; replyTo: string }
+  /**
+   * A sent letter edited since it last went out: Mark as signed is refused (409
+   * engagement_refused, reason changed_since_sent) unless she ticks "signed as edited".
+   */
+  changedSinceSent?: boolean
 }
 
 /** What the editor may change on a draft or sent engagement. */

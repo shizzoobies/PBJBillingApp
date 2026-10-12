@@ -164,6 +164,7 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
     expect(view).toContain('warnings: engagementWarnings(engagement),')
     expect(view).toContain('hash: engagementHash(engagement),')
     expect(view).toContain('sender: letterSender(firmSettings),')
+    expect(view).toContain("changedSinceSent: engagement.status === 'sent' && engagementChangedSinceSent(engagement),")
   })
 
   // Engagements stage 3: signing creates the client, so a refusal after that still
@@ -182,6 +183,8 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
     expect(block).toContain('engagementActivityTarget(result.engagement)')
     expect(block).not.toContain('appDataStore.createClient(')
     expect(block).not.toContain('createRetainerInvoice(')
+    // The sent-hash guard: "signed as edited" is the only way past a changed letter.
+    expect(block).toContain('confirmChanged: payload.confirmChanged === true')
   })
 
   it('sign and void record what happened', () => {

@@ -163,6 +163,8 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const [signedOn, setSignedOn] = useState(() => firmToday())
   const [signNote, setSignNote] = useState('')
   const [inPerson, setInPerson] = useState(false)
+  // "Signed as edited": sign a sent letter that changed after it went out.
+  const [signedAsEdited, setSignedAsEdited] = useState(false)
   // What the last Mark as signed did (the client, checklists, retainer, skips).
   const [signSummary, setSignSummary] = useState<EngagementSignResult | null>(null)
 
@@ -404,7 +406,11 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
     }
   }
 
-  const canSign = engagement.status === 'sent' || (engagement.status === 'draft' && inPerson)
+  // The sent-hash guard: a sent letter edited since it went out signs only "as edited".
+  const changedSinceSent = engagement.status === 'sent' && view.changedSinceSent === true
+  const canSign =
+    (engagement.status === 'sent' && (!changedSinceSent || signedAsEdited)) ||
+    (engagement.status === 'draft' && inPerson)
   const sign = async () => {
     if (!canSign || !/^\d{4}-\d{2}-\d{2}$/.test(signedOn)) return
     const ok = window.confirm(
@@ -420,12 +426,18 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         signedOn,
         ...(signNote.trim() ? { note: signNote.trim() } : {}),
         ...(engagement.status === 'draft' ? { allowUnsent: true } : {}),
+        ...(changedSinceSent && signedAsEdited ? { confirmChanged: true } : {}),
       })
       setSignSummary(result)
       setNotice(`Marked signed on ${engagementDayLabel(signedOn)}.`)
       await refresh({ overwrite: true })
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : 'Could not mark the engagement as signed.')
+      // The letter changed since it was sent (in another tab, say): show the stored
+      // one, so the "signed as edited" choice appears.
+      if (err instanceof ApiError && err.reason === 'changed_since_sent') {
+        await refresh({ overwrite: !dirtyRef.current })
+      }
     } finally {
       setBusy('')
     }
@@ -696,6 +708,22 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                     <span>This letter was signed in person (it was never sent from here)</span>
                   </label>
                 ) : null}
+                {changedSinceSent ? (
+                  <>
+                    <p className="form-error" role="status">
+                      The letter changed since it was sent. Send it again, or tick &quot;Signed as edited&quot; if they
+                      signed this version.
+                    </p>
+                    <label className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={signedAsEdited}
+                        onChange={(event) => setSignedAsEdited(event.target.checked)}
+                      />
+                      <span>Signed as edited (they signed this version, not the one sent)</span>
+                    </label>
+                  </>
+                ) : null}
                 <div className="button-row">
                   <button
                     type="button"
@@ -709,7 +737,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                     Void
                   </button>
                 </div>
-                {!canSign ? (
+                {!canSign && !changedSinceSent ? (
                   <p className="muted-text">Send the letter first, or tick &quot;signed in person&quot;.</p>
                 ) : null}
               </>

@@ -47431,6 +47431,50 @@ describe('signing an engagement creates the client (file backend)', () => {
     expect(await expensesOf(err.createdClientId)).toHaveLength(2)
   })
 
+  // The sent-hash guard (stage 2 review): what is signed is the letter that went out.
+  it('a letter changed since it was sent is refused before any write, then signs "as edited"', async () => {
+    const { engagement } = await wonEngagement({ send: false })
+    const sent = await store.markEngagementSent(engagement.id, {
+      to: ['pat@acme.test'],
+      ok: true,
+      providerId: 're_guard',
+      hash: engagementHash(engagement),
+    })
+    expect(sent.emailLog.at(-1)).toMatchObject({ kind: 'send', ok: true, hash: engagementHash(engagement) })
+    await store.updateEngagement(engagement.id, { letterBody: 'Edited after it went out.' })
+
+    const err = await sign(engagement.id).catch((caught) => caught)
+    expect(err).toBeInstanceOf(EngagementStateError)
+    expect(err.reason).toBe('changed_since_sent')
+    expect(err.message).toBe(
+      "The letter changed since it was sent - send it again, or tick 'signed as edited' to sign this version",
+    )
+    expect(await clientsNamed('Acme Books')).toHaveLength(0)
+    expect((await store.getEngagement(engagement.id)).status).toBe('sent')
+
+    const result = await sign(engagement.id, { confirmChanged: true })
+    expect(result.engagement.status).toBe('signed')
+    expect(await clientsNamed('Acme Books')).toHaveLength(1)
+  })
+
+  it('a re-send of the edited letter clears the guard; an unreadable hash is not stored', async () => {
+    const { engagement } = await wonEngagement({ send: false })
+    await store.markEngagementSent(engagement.id, { to: ['pat@acme.test'], ok: true, providerId: 're_1', hash: engagementHash(engagement) })
+    const edited = await store.updateEngagement(engagement.id, { letterBody: 'Edited after it went out.' })
+    const resent = await store.markEngagementSent(engagement.id, {
+      to: ['pat@acme.test'],
+      ok: true,
+      providerId: 're_2',
+      hash: engagementHash(edited),
+    })
+    expect(resent.emailLog.map((entry) => entry.hash)).toEqual([engagementHash(engagement), engagementHash(edited)])
+    expect((await sign(engagement.id)).engagement.status).toBe('signed')
+
+    const other = await wonEngagement({ send: false })
+    const junk = await store.markEngagementSent(other.engagement.id, { to: ['pat@acme.test'], ok: true, hash: 'not-a-hash' })
+    expect(junk.emailLog.at(-1).hash).toBeNull()
+  })
+
   it('refuses before any write: a package that is gone, a billing master, a retired client, a nameless party', async () => {
     await setup([
       { id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 400 },
@@ -48111,6 +48155,23 @@ describe('engagements (Postgres statements)', () => {
       expect(fake.statements[releaseAt].text).toMatch(/where id = \$1 and client_id = \$2 and status in \('draft', 'sent'\)$/i)
       expect(fake.engagements[0].client_id).toBeNull()
       expect(indexOf(fake, /^update engagements set status = 'signed'/i)).toBe(-1)
+    })
+
+    it('the sent-hash guard: the send logs its hash in the row, and a changed letter is refused before any write', async () => {
+      const fake = signingPool()
+      const pgStore = signingStore(fake)
+      const draft = await pgStore.createEngagementFromProposal(wonProposal(), {})
+      await pgStore.markEngagementSent(draft.id, { to: ['pat@acme.test'], ok: true, providerId: 're_1', hash: engagementHash(draft) })
+      const [logged] = fake.matching(/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb, status = case/i)
+      expect(JSON.parse(logged.params[1])[0]).toMatchObject({ kind: 'send', ok: true, hash: engagementHash(draft) })
+      await pgStore.updateEngagement(draft.id, { letterBody: 'Edited after it went out.' })
+      const before = fake.statements.length
+      const err = await pgStore.signEngagement(draft.id, { signedOn: '2026-10-09' }).catch((caught) => caught)
+      expect(err.reason).toBe('changed_since_sent')
+      expect(fake.statements.slice(before).filter((statement) => /^(insert|update|delete|begin)\b/i.test(statement.text))).toEqual([])
+
+      const signed = await pgStore.signEngagement(draft.id, { signedOn: '2026-10-09', confirmChanged: true })
+      expect(signed.engagement.status).toBe('signed')
     })
 
     it('a flip the compare-and-set refuses rolls back and inserts no software row', async () => {

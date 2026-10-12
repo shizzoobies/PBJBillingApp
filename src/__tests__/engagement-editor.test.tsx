@@ -576,6 +576,60 @@ describe('Mark as signed', () => {
     ).toBeTruthy()
   })
 
+  // The sent-hash guard: a sent letter edited since it went out signs only "as edited".
+  it('a letter changed since it was sent warns, and signs only once "Signed as edited" is ticked', async () => {
+    mockConfirm(true)
+    api.getEngagementRequest = vi.fn(async () => ({
+      ...view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z' }),
+      changedSinceSent: true,
+    }))
+    await renderEditor()
+    expect(
+      screen.getByText('The letter changed since it was sent. Send it again, or tick "Signed as edited" if they signed this version.'),
+    ).toBeTruthy()
+    const signButton = screen.getByRole('button', { name: 'Mark as signed' })
+    expect(signButton).toBeDisabled()
+    fireEvent.click(screen.getByRole('checkbox', { name: /Signed as edited/ }))
+    expect(signButton).toBeEnabled()
+    fireEvent.click(signButton)
+    await waitFor(() =>
+      expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-1', { signedOn: firmToday(), confirmChanged: true }),
+    )
+  })
+
+  it('an unchanged sent letter shows no warning and sends no confirmChanged', async () => {
+    mockConfirm(true)
+    api.getEngagementRequest = vi.fn(async () => ({
+      ...view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z' }),
+      changedSinceSent: false,
+    }))
+    await renderEditor()
+    expect(screen.queryByRole('checkbox', { name: /Signed as edited/ })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    await waitFor(() => expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-1', { signedOn: firmToday() }))
+  })
+
+  it('a changed_since_sent refusal shows the sentence and reloads, so the choice appears', async () => {
+    mockConfirm(true)
+    let reads = 0
+    api.getEngagementRequest = vi.fn(async () => ({
+      ...view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z' }),
+      changedSinceSent: reads++ > 0,
+    }))
+    api.signEngagementRequest = vi.fn(async () => {
+      throw new ApiError(
+        409,
+        "The letter changed since it was sent - send it again, or tick 'signed as edited' to sign this version",
+        'engagement_refused',
+        'changed_since_sent',
+      )
+    })
+    await renderEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    expect(await screen.findByText(/The letter changed since it was sent - send it again/)).toBeTruthy()
+    expect(await screen.findByRole('checkbox', { name: /Signed as edited/ })).toBeTruthy()
+  })
+
   it('a signed letter is read-only: no Save, Send, Sign or Void', async () => {
     api.getEngagementRequest = vi.fn(async () =>
       view({ status: 'signed', sentAt: '2026-10-08T16:00:00.000Z', signedAt: '2026-10-09T16:00:00.000Z' }),
