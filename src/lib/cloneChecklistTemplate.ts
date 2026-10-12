@@ -1,4 +1,5 @@
 import { firstCycleOnOrAfter } from '../../lib/checklist-start-floor.js'
+import { copiedTemplateSettings, copiedTemplateStages } from '../../lib/checklist-template-copy.js'
 import type { ChecklistTemplate } from './types'
 import { advanceChecklistFrequency, ensureTemplateStages, localDateOnly, makeId } from './utils'
 
@@ -17,7 +18,9 @@ import { advanceChecklistFrequency, ensureTemplateStages, localDateOnly, makeId 
  *
  * The field list is EXPLICIT on purpose. A spread makes every future template
  * field a copied field by default, decided by whoever adds it and reviewed by
- * nobody; listing them means a new field has to be looked at once, here.
+ * nobody; listing them means a new field has to be looked at once - in
+ * lib/checklist-template-copy.js, which the server's copy (`_clientTemplateCopy`
+ * in db/store.js) shares, so the two copy paths carry the same fields.
  *
  * Deliberately NOT carried:
  *   - `id` (the caller supplies one — fresh ids at every level, so the bulk
@@ -39,19 +42,9 @@ export function cloneChecklistTemplate(
   options: CloneChecklistTemplateOptions,
 ): Omit<ChecklistTemplate, 'id'> {
   const migrated = ensureTemplateStages(source)
-  const cloneItems = (items: ChecklistTemplate['stages'][number]['items']) =>
-    (items ?? []).map((item) => ({
-      ...item,
-      id: makeId('template-item'),
-      subItems: (item.subItems ?? []).map((sub) => ({
-        ...sub,
-        id: makeId('template-subitem'),
-      })),
-    }))
   return {
     title: options.title ?? source.title,
     clientId: options.clientId,
-    assigneeId: source.assigneeId || '',
     frequency: source.frequency,
     // The start floor, the half that stops a copy back-filling history: the
     // copy begins at its first cycle on or after today. A source's
@@ -71,31 +64,12 @@ export function cloneChecklistTemplate(
     active: options.active,
     isStandard: false,
     sourceTemplateId: source.id,
-    categoryId: source.categoryId ?? null,
-    leadDays: source.leadDays,
-    scheduledMonths: source.scheduledMonths ? [...source.scheduledMonths] : undefined,
-    dueDayOfMonth: source.dueDayOfMonth,
-    monthlyDueDays: source.monthlyDueDays ? { ...source.monthlyDueDays } : undefined,
-    repeatAnnually: source.repeatAnnually,
-    scheduleYear: source.scheduleYear,
-    skipAllowed: source.skipAllowed,
-    // The period-label settings travel with the copy — a copy of a recipe that
-    // labels "July 2026" is meant to label its own cycles too. The anchor comes
-    // along so the derived windows keep the source's phase; the label math
-    // steps from it by the recurrence, exactly as it does on the source.
-    periodLabelEnabled: source.periodLabelEnabled,
-    periodCoverageStart: source.periodCoverageStart ?? null,
-    periodCoverageEnd: source.periodCoverageEnd ?? null,
-    periodCoverageAnchorDue: source.periodCoverageAnchorDue ?? null,
-    viewerIds: Array.isArray(source.viewerIds) ? [...source.viewerIds] : [],
-    editorIds: Array.isArray(source.editorIds) ? [...source.editorIds] : [],
-    stages: (migrated.stages ?? []).map((stage) => ({
-      ...stage,
-      id: makeId('stage'),
-      viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
-      editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
-      items: cloneItems(stage.items),
-    })),
+    // Everything else a copy keeps - the schedule, the Board column, the skip and
+    // period-label settings, access, and the stages/steps/sub-steps with fresh
+    // ids - comes from the ONE list the server's copy uses too
+    // (lib/checklist-template-copy.js), so the two paths cannot drift again.
+    ...copiedTemplateSettings(source),
+    stages: copiedTemplateStages(migrated.stages, makeId),
   }
 }
 

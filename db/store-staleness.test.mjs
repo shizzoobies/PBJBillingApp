@@ -101,6 +101,7 @@ import {
 } from '../lib/series-step-delete.js'
 import { templateStartFloor } from '../lib/checklist-start-floor.js'
 import { dateOnlyInZone, firmToday } from '../lib/firm-time.js'
+import { cloneChecklistTemplate } from '../src/lib/cloneChecklistTemplate.ts'
 import {
   reconcileAutopayAttempt,
   recordAutopayAttemptEvent,
@@ -22550,7 +22551,9 @@ describe('packages (file backend)', () => {
       templateIds: ['bp-close', 'bp-vanished'],
     })
     const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
-    expect(result.clonedTemplateIds).toEqual(['bp-close'])
+    // bp-payroll comes from the Payroll plan the apply ADDED (its bundle), not
+    // from the package's own set.
+    expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-payroll'])
     expect(result.skippedTemplateIds).toEqual([])
   })
 
@@ -22576,6 +22579,74 @@ describe('packages (file backend)', () => {
     const pkg = await makePackage()
     expect(await store.applyPackageToClient('c1', 'pkg-nope')).toBeNull()
     expect(await store.applyPackageToClient('client-nope', pkg.id)).toBeNull()
+  })
+
+  /**
+   * featreq-8bdc5ec5 / featreq-2b067744: a plan the apply ADDS brings its own
+   * bundled checklists along, even ones the package's set leaves out - the same
+   * rule signing an engagement uses. A plan the client already had is left alone.
+   */
+  describe("the added plans' bundled checklists", () => {
+    const withReview = () =>
+      roster({
+        plans: [
+          { id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: ['bp-close', 'bp-review'] },
+          { id: 'plan-payroll', name: 'Payroll', notes: '', templateIds: ['bp-payroll', 'bp-meeting'] },
+        ],
+        checklistTemplates: [
+          blueprint('bp-close', 'Monthly close'),
+          blueprint('bp-payroll', 'Payroll run'),
+          blueprint('bp-review', 'Reconciliations with Review'),
+          blueprint('bp-meeting', 'Client Meeting'),
+        ],
+      })
+
+    it("copies an added plan's checklist the package does not list, and not a kept plan's", async () => {
+      await store.write(withReview())
+      const pkg = await store.createPackage({
+        name: 'Quarterly Accounting',
+        planIds: ['plan-books', 'plan-payroll'],
+        templateIds: ['bp-close', 'bp-payroll'],
+      })
+      const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+
+      expect(result.addedPlanIds).toEqual(['plan-payroll'])
+      // The package's two, then the ADDED plan's leftover (Client Meeting). The
+      // review checklist belongs to Bookkeeping, which the client already had.
+      expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-payroll', 'bp-meeting'])
+      const copies = (await store.read()).checklistTemplates.filter((t) => t.clientId === 'c1')
+      expect(copies.map((t) => t.sourceTemplateId).sort()).toEqual(['bp-close', 'bp-meeting', 'bp-payroll'])
+    })
+
+    it('skips a hand-made checklist that was linked (stamped) to the blueprint', async () => {
+      // Her own checklist, under her own title, linked to the Payroll blueprint.
+      const base = withReview()
+      await store.write({
+        ...base,
+        checklistTemplates: [
+          ...base.checklistTemplates,
+          {
+            ...blueprint('tpl-hers', 'Quarterly Payroll Run with Review'),
+            clientId: 'c1',
+            isStandard: false,
+            active: true,
+            sourceTemplateId: 'bp-payroll',
+          },
+        ],
+      })
+      const pkg = await store.createPackage({
+        name: 'Quarterly Accounting',
+        planIds: ['plan-books', 'plan-payroll'],
+        templateIds: ['bp-close', 'bp-payroll'],
+      })
+      const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+      expect(result.skippedTemplateIds).toEqual(['bp-payroll'])
+      expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-meeting'])
+      const payrollCopies = (await store.read()).checklistTemplates.filter(
+        (t) => t.clientId === 'c1' && t.sourceTemplateId === 'bp-payroll',
+      )
+      expect(payrollCopies.map((t) => t.id)).toEqual(['tpl-hers'])
+    })
   })
 
   /**
@@ -22635,6 +22706,320 @@ describe('packages (file backend)', () => {
     it('creates nothing for a package that is not there', async () => {
       expect(await store.createSuggestedPackageChecklists('pkg-nope', [proposal()])).toBeNull()
     })
+  })
+})
+
+/**
+ * THE SERVER COPY CARRIES WHAT THE BROWSER CLONE CARRIES (featreq-8bdc5ec5).
+ *
+ * `_clientTemplateCopy` (Apply a package, signing, the To 100% fix, the
+ * assistant) listed its own fields and dropped the schedule: production copies
+ * of a specific-months blueprint made 2026-10-10 have no months and never run.
+ * Both paths now share lib/checklist-template-copy.js; these pin the result on
+ * both backends and pin the two paths against each other.
+ */
+describe('a recipe copied onto a client keeps its whole setup', () => {
+  const fullBlueprint = () => ({
+    id: 'bp-quarterly',
+    title: 'Reconciliations with Review',
+    clientId: '',
+    assigneeId: 'emp-1',
+    frequency: 'specific-months',
+    nextDueDate: '',
+    active: false,
+    isStandard: true,
+    categoryId: 'cat-recon',
+    leadDays: 7,
+    scheduledMonths: [3, 6, 9, 12],
+    dueDayOfMonth: 20,
+    monthlyDueDays: { 3: 31, 6: 30 },
+    repeatAnnually: false,
+    scheduleYear: 2026,
+    skipAllowed: true,
+    periodLabelEnabled: true,
+    periodCoverageStart: '2026-01-01',
+    periodCoverageEnd: '2026-03-31',
+    periodCoverageAnchorDue: '2026-04-20',
+    viewerIds: ['emp-3'],
+    editorIds: ['emp-4'],
+    stages: [
+      {
+        id: 'bp-q-stage-1',
+        name: 'Prepare',
+        assigneeId: 'emp-1',
+        offsetDays: 0,
+        dueDayOfMonth: 15,
+        viewerIds: [],
+        editorIds: [],
+        items: [
+          {
+            id: 'bp-q-item-1',
+            label: 'Reconcile bank',
+            dueDayOfMonth: 10,
+            assigneeId: 'emp-2',
+            subItems: [{ id: 'bp-q-sub-1', title: 'Checking' }],
+          },
+        ],
+      },
+      {
+        id: 'bp-q-stage-2',
+        name: 'Review',
+        assigneeId: 'emp-2',
+        offsetDays: 5,
+        dueDayOfMonth: 25,
+        viewerIds: [],
+        editorIds: [],
+        items: [{ id: 'bp-q-item-2', label: 'Owner review' }],
+      },
+    ],
+  })
+
+  const expectWholeSetup = (copy) => {
+    expect(copy.sourceTemplateId).toBe('bp-quarterly')
+    expect(copy.clientId).toBe('c1')
+    expect(copy.frequency).toBe('specific-months')
+    expect(copy.scheduledMonths).toEqual([3, 6, 9, 12])
+    expect(copy.dueDayOfMonth).toBe(20)
+    expect(copy.monthlyDueDays).toEqual({ 3: 31, 6: 30 })
+    expect(copy.repeatAnnually).toBe(false)
+    expect(copy.scheduleYear).toBe(2026)
+    expect(copy.leadDays).toBe(7)
+    expect(copy.categoryId).toBe('cat-recon')
+    expect(copy.skipAllowed).toBe(true)
+    expect(copy.periodLabelEnabled).toBe(true)
+    expect(copy.periodCoverageStart).toBe('2026-01-01')
+    expect(copy.periodCoverageEnd).toBe('2026-03-31')
+    expect(copy.periodCoverageAnchorDue).toBe('2026-04-20')
+    expect(copy.stages.map((stage) => [stage.name, stage.dueDayOfMonth, stage.offsetDays])).toEqual([
+      ['Prepare', 15, 0],
+      ['Review', 25, 5],
+    ])
+    const [step] = copy.stages[0].items
+    expect(step.label).toBe('Reconcile bank')
+    expect(step.dueDayOfMonth).toBe(10)
+    expect(step.assigneeId).toBe('emp-2')
+    expect(step.subItems.map((sub) => sub.title)).toEqual(['Checking'])
+    // Fresh ids at every level, so the bulk save inserts rather than collides.
+    expect(copy.stages[0].id).not.toBe('bp-q-stage-1')
+    expect(step.id).not.toBe('bp-q-item-1')
+    expect(step.subItems[0].id).not.toBe('bp-q-sub-1')
+  }
+
+  it('file backend: copyTemplatesToClient keeps months, due days, lead days, column, skip/period settings and sub-steps', async () => {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', planIds: [] }],
+        timeEntries: [],
+        checklistTemplates: [fullBlueprint()],
+      }),
+    )
+    const { copies } = await store.copyTemplatesToClient('c1', ['bp-quarterly'])
+    expect(copies).toHaveLength(1)
+    const stored = (await store.read()).checklistTemplates.find((t) => t.id === copies[0].id)
+    expectWholeSetup(stored)
+  })
+
+  it('postgres: the copy insert carries the same setup', async () => {
+    const source = fullBlueprint()
+    const fake = fakePostgres({
+      clientRows: [
+        {
+          id: 'c1',
+          name: 'Acme',
+          contact: 'Pat',
+          billing_mode: 'hourly',
+          hourly_rate: 0,
+          plan_id: null,
+          plan_ids: [],
+          contact_ids: [],
+          assigned_bookkeeper_ids: [],
+          lifecycle_stage: 'active',
+        },
+      ],
+      templateRows: [
+        {
+          id: source.id,
+          title: source.title,
+          client_id: null,
+          assignee_id: 'emp-1',
+          frequency: 'specific-months',
+          next_due_date: null,
+          active: false,
+          is_standard: true,
+          category_id: 'cat-recon',
+          skip_allowed: true,
+          period_label_enabled: true,
+          period_coverage_start: new Date('2026-01-01T00:00:00.000Z'),
+          period_coverage_end: new Date('2026-03-31T00:00:00.000Z'),
+          period_coverage_anchor_due: new Date('2026-04-20T00:00:00.000Z'),
+          onboarding_for_client_id: null,
+          source_template_id: null,
+          viewer_ids: ['emp-3'],
+          editor_ids: ['emp-4'],
+          scheduled_months: [3, 6, 9, 12],
+          due_day_of_month: 20,
+          monthly_due_days: { 3: 31, 6: 30 },
+          repeat_annually: false,
+          schedule_year: 2026,
+          lead_days: 7,
+        },
+      ],
+      templateStageRows: source.stages.map((stage, position) => ({
+        id: stage.id,
+        template_id: source.id,
+        name: stage.name,
+        assignee_id: stage.assigneeId,
+        offset_days: stage.offsetDays,
+        due_date: null,
+        due_day_of_month: stage.dueDayOfMonth,
+        position,
+        viewer_ids: [],
+        editor_ids: [],
+      })),
+      templateItemRows: source.stages.flatMap((stage) =>
+        stage.items.map((item, index) => ({
+          id: item.id,
+          template_id: source.id,
+          label: item.label,
+          sort_order: index,
+          due_date: null,
+          due_day_of_month: item.dueDayOfMonth ?? null,
+          assignee_id: item.assigneeId ?? null,
+          stage_id: stage.id,
+          sub_items: item.subItems ?? [],
+        })),
+      ),
+    })
+
+    const { copies } = await postgresStore(fake).copyTemplatesToClient('c1', ['bp-quarterly'])
+    expect(copies).toHaveLength(1)
+    expectWholeSetup(copies[0])
+
+    const copyRow = insertedRows(fake.statements, 'checklist_templates').find((row) => row.id === copies[0].id)
+    expect(copyRow).toMatchObject({
+      client_id: 'c1',
+      source_template_id: 'bp-quarterly',
+      scheduled_months: [3, 6, 9, 12],
+      due_day_of_month: 20,
+      repeat_annually: false,
+      schedule_year: 2026,
+      lead_days: 7,
+      category_id: 'cat-recon',
+      skip_allowed: true,
+      period_label_enabled: true,
+    })
+    expect(JSON.parse(copyRow.monthly_due_days)).toEqual({ 3: 31, 6: 30 })
+    const stageIds = copies[0].stages.map((stage) => stage.id)
+    const stageRows = insertedRows(fake.statements, 'checklist_template_stages').filter((row) =>
+      stageIds.includes(row.id),
+    )
+    expect(stageRows.map((row) => row.due_day_of_month)).toEqual([15, 25])
+    const itemRow = insertedRows(fake.statements, 'checklist_template_items').find(
+      (row) => row.id === copies[0].stages[0].items[0].id,
+    )
+    expect(itemRow.due_day_of_month).toBe(10)
+    expect(JSON.parse(itemRow.sub_items).map((sub) => sub.title)).toEqual(['Checking'])
+  })
+
+  it('the server copy and the browser clone carry the same fields with the same values', () => {
+    const source = fullBlueprint()
+    const browser = cloneChecklistTemplate(source, { clientId: 'c1', active: true })
+    const server = new AppDataStore()._clientTemplateCopy(source, source.id, { clientId: 'c1' })
+
+    // Ids are fresh on both sides; the dates are each side's own "today".
+    const stripIds = (value) =>
+      JSON.parse(
+        JSON.stringify(value, (key, inner) => (key === 'id' ? undefined : inner)),
+      )
+    const comparable = (copy) => {
+      const rest = { ...copy }
+      delete rest.nextDueDate
+      delete rest.createdAt
+      return stripIds(rest)
+    }
+    expect(Object.keys(server).filter((key) => key !== 'id').sort()).toEqual(Object.keys(browser).sort())
+    expect(comparable(server)).toEqual(comparable(browser))
+  })
+})
+
+/**
+ * The Postgres half of "an added plan brings its checklists" (featreq-8bdc5ec5):
+ * the apply's copy save inserts the package's checklists AND the added plan's
+ * bundle, and the plan write stays the targeted `update clients`.
+ */
+describe("applying a package copies the added plans' bundles (postgres)", () => {
+  it("inserts a copy of the added plan's bundled checklist the package leaves out", async () => {
+    const templateRow = (id, title) => ({
+      id,
+      title,
+      client_id: null,
+      assignee_id: 'emp-1',
+      frequency: 'monthly',
+      next_due_date: new Date('2026-01-31T00:00:00.000Z'),
+      active: false,
+      is_standard: true,
+      category_id: null,
+      skip_allowed: false,
+      onboarding_for_client_id: null,
+      source_template_id: null,
+      viewer_ids: [],
+      editor_ids: [],
+      scheduled_months: null,
+      due_day_of_month: null,
+      monthly_due_days: null,
+      repeat_annually: true,
+      schedule_year: null,
+      lead_days: null,
+    })
+    const fake = fakePostgres({
+      clientRows: [
+        {
+          id: 'c1',
+          name: 'Acme',
+          contact: 'Pat',
+          billing_mode: 'subscription',
+          hourly_rate: 0,
+          plan_id: 'plan-books',
+          plan_ids: ['plan-books'],
+          contact_ids: [],
+          assigned_bookkeeper_ids: [],
+          lifecycle_stage: 'active',
+        },
+      ],
+      templateRows: [
+        templateRow('bp-close', 'Monthly close'),
+        templateRow('bp-payroll', 'Payroll run'),
+        templateRow('bp-review', 'Reconciliations with Review'),
+        templateRow('bp-meeting', 'Client Meeting'),
+      ],
+    })
+    const pgStore = postgresStore(fake)
+    // Plans and packages have their own reads; this test is about the copy save.
+    const plans = [
+      { id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: ['bp-close', 'bp-review'] },
+      { id: 'plan-payroll', name: 'Payroll', notes: '', templateIds: ['bp-payroll', 'bp-meeting'] },
+    ]
+    const readWorkspace = pgStore._readPostgresWorkspace.bind(pgStore)
+    pgStore._readPostgresWorkspace = async (...args) => ({ ...(await readWorkspace(...args)), plans })
+    pgStore.listPackages = async () => [
+      {
+        id: 'pkg-qa',
+        name: 'Quarterly Accounting',
+        planIds: ['plan-books', 'plan-payroll'],
+        templateIds: ['bp-close', 'bp-payroll'],
+      },
+    ]
+
+    const result = await pgStore.applyPackageToClient('c1', 'pkg-qa', { actorUserId: 'emp-1' })
+
+    expect(result.addedPlanIds).toEqual(['plan-payroll'])
+    expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-payroll', 'bp-meeting'])
+    const [planWrite] = fake.matching(/^update clients set plan_ids = \$2, plan_id = \$3/i)
+    expect(planWrite.params).toEqual(['c1', ['plan-books', 'plan-payroll'], 'plan-books'])
+    const copyRows = insertedRows(fake.statements, 'checklist_templates').filter((row) => row.client_id === 'c1')
+    expect(copyRows.map((row) => row.source_template_id)).toEqual(['bp-close', 'bp-payroll', 'bp-meeting'])
+    // The kept plan's own bundle (Bookkeeping's review) is not copied.
+    expect(copyRows.some((row) => row.source_template_id === 'bp-review')).toBe(false)
   })
 })
 

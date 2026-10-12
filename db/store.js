@@ -17,6 +17,7 @@ import {
   newTemplateCreatedAt,
   templateStartFloor,
 } from '../lib/checklist-start-floor.js'
+import { copiedTemplateSettings, copiedTemplateStages } from '../lib/checklist-template-copy.js'
 import { dateOnlyInZone, firmTimeZone, firmToday } from '../lib/firm-time.js'
 import {
   CHECKLIST_INSTANCE_UNIQUE_INDEX,
@@ -13836,8 +13837,14 @@ export class AppDataStore {
     // stamped from it, or the same title), all in ONE workspace save, decided
     // against the data re-read inside it - so two applies at once copy once. A
     // blueprint deleted since the package was configured is simply not there to
-    // copy - the FK-free array idiom again.
-    const { copies, skippedTemplateIds } = await this.copyTemplatesToClient(clientId, pkg.templateIds)
+    // copy - the FK-free array idiom again. The set is the package's own plus
+    // each plan this apply ADDED (its bundled checklists) - the rule signing an
+    // engagement uses, so a plan's checklist the package does not list still
+    // populates (featreq-8bdc5ec5). A plan the client already had is left alone.
+    const { copies, skippedTemplateIds } = await this.copyTemplatesToClient(clientId, [
+      ...pkg.templateIds,
+      ...AppDataStore._planBundleTemplateIds(data.plans, addedPlanIds),
+    ])
     await this._grantTemplateCopiesVisibility(clientId, copies)
     const clonedTemplateIds = copies.map((copy) => copy.sourceTemplateId)
 
@@ -31125,23 +31132,16 @@ export class AppDataStore {
       // and "is this blueprint already set up here?" had only the title to go
       // on. Applying a PACKAGE twice is decided on this stamp.
       sourceTemplateId,
-      viewerIds: Array.isArray(source.viewerIds) ? [...source.viewerIds] : [],
-      editorIds: Array.isArray(source.editorIds) ? [...source.editorIds] : [],
-      stages: (migrated.stages ?? []).map((stage) => ({
-        id: `stage-${randomUUID().slice(0, 8)}`,
-        name: stage.name,
-        assigneeId: stage.assigneeId || source.assigneeId || '',
-        offsetDays: Number(stage.offsetDays) || 0,
-        ...(stage.dueDate ? { dueDate: stage.dueDate } : {}),
-        viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
-        editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
-        items: (stage.items ?? []).map((item) => ({
-          id: `template-item-${randomUUID().slice(0, 8)}`,
-          label: item.label,
-          ...(item.dueDate ? { dueDate: item.dueDate } : {}),
-          ...(item.assigneeId ? { assigneeId: item.assigneeId } : {}),
-        })),
-      })),
+      // Everything else comes from the ONE list the browser clone uses too
+      // (lib/checklist-template-copy.js). This copy used to list its own
+      // fields and dropped the schedule - a specific-months blueprint copied
+      // here landed with no months and never ran - plus the due day, lead
+      // days, Board column, skip and period-label settings, sub-steps and
+      // step due days.
+      ...copiedTemplateSettings(source),
+      stages: copiedTemplateStages(migrated.stages, (prefix) => `${prefix}-${randomUUID().slice(0, 8)}`).map(
+        (stage) => ({ ...stage, assigneeId: stage.assigneeId || source.assigneeId || '' }),
+      ),
     }
 
     return copy

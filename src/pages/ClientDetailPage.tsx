@@ -58,7 +58,11 @@ import {
   setClientInvoiceNote,
   setClientHourlyRatePeriod,
 } from '../lib/api'
-import { applyPackageConfirmText, packagesCoveringPlans } from '../lib/packages'
+import {
+  applyPackageConfirmText,
+  defaultPackageTemplateIds,
+  packagesCoveringPlans,
+} from '../lib/packages'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
 import { pendingNoteCount as pendingNoteCountOf, useClientPendingNotes } from '../hooks/useClientPendingNotes'
@@ -1423,26 +1427,32 @@ export function ApplyPackageField({ client }: { client: Client }) {
 
   if (hidden) return null
 
-  // The preview matches the server's skip rule exactly — a client template
-  // stamped with this blueprint's id — so the dialog cannot promise a checklist
-  // the apply then skips.
-  const alreadyFromBlueprint = new Set(
-    data.checklistTemplates
-      .filter((template) => template.clientId === client.id && template.sourceTemplateId)
-      .map((template) => template.sourceTemplateId as string),
-  )
-
   const apply = async (pkg: Package) => {
-    const addedPlanNames = pkg.planIds
+    const addedPlans = pkg.planIds
       .filter((planId) => !(client.planIds ?? []).includes(planId))
-      .map((planId) => data.plans.find((plan) => plan.id === planId)?.name)
-      .filter((name): name is string => Boolean(name))
-    const attached = pkg.templateIds
-      .map((id) => data.checklistTemplates.find((template) => template.id === id))
-      .filter((template): template is ChecklistTemplate => Boolean(template))
-    const newChecklistTitles = attached
-      .filter((template) => !alreadyFromBlueprint.has(template.id))
-      .map((template) => template.title)
+      .map((planId) => data.plans.find((plan) => plan.id === planId))
+      .filter((plan): plan is SubscriptionPlan => Boolean(plan))
+    const addedPlanNames = addedPlans.map((plan) => plan.name)
+    // The server's set: the package's own checklists plus each ADDED plan's
+    // bundle (the rule signing uses), and its skip rule - a client checklist
+    // stamped from the blueprint OR with the same title - so the dialog cannot
+    // promise a checklist the apply then skips.
+    const wanted = {
+      templateIds: [
+        ...pkg.templateIds,
+        ...defaultPackageTemplateIds(
+          addedPlans.map((plan) => plan.id),
+          data.plans,
+        ),
+      ],
+    }
+    const attached = planTemplates(wanted, data.checklistTemplates)
+    const newChecklistTitles = missingPlanTemplatesForClient(
+      wanted,
+      data.checklistTemplates,
+      client.id,
+      data.checklistTemplates,
+    ).map((template) => template.title)
     const skippedCount = attached.length - newChecklistTitles.length
 
     const confirmed = window.confirm(

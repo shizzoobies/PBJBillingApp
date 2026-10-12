@@ -404,6 +404,37 @@ describe('"+ Add package" on a client', () => {
     expect(await screen.findByText(/Applied "Full service"/)).toBeTruthy()
   })
 
+  it("lists the added plan's own checklists the package leaves out, and counts a same-title checklist as skipped", async () => {
+    // Payroll (the plan the apply adds) bundles a Client Meeting the package
+    // does not list - the server copies it too, so the dialog names it. Monthly
+    // close is on the client under the same title but NOT stamped: the server
+    // skips it (stamp or title), so the preview must too.
+    const plans: SubscriptionPlan[] = [
+      PLANS[0],
+      { id: 'plan-payroll', name: 'Payroll', notes: '', templateIds: ['bp-payroll', 'bp-meeting'] },
+    ]
+    setContext({
+      plans,
+      clients: [ACME],
+      checklistTemplates: [
+        ...TEMPLATES,
+        blueprint('bp-meeting', 'Client Meeting'),
+        { ...clientCopy('tpl-hers', 'unused'), sourceTemplateId: undefined } as ChecklistTemplate,
+      ],
+    })
+    const confirm = vi.fn(() => false)
+    vi.stubGlobal('confirm', confirm)
+    render(<ApplyPackageField client={ACME} />)
+    await waitFor(() => expect(listPackagesRequest).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('button', { name: '+ Add package' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Full service' }))
+
+    const sentence = String((confirm.mock.calls[0] as unknown[] | undefined)?.[0] ?? '')
+    expect(sentence).toContain('Creates 2 checklists for this client: Payroll run, Client Meeting')
+    expect(sentence).toContain('(1 already exists and will be skipped)')
+  })
+
   it('does nothing at all when the confirm is declined', async () => {
     vi.stubGlobal('confirm', vi.fn(() => false))
     render(<ApplyPackageField client={ACME} />)
