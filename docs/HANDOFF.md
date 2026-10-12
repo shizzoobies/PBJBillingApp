@@ -25,7 +25,25 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-12, 06:10Z - READ THIS FIRST):** `main` = `3f0391d` (+ this handoff), deployed,
+**State right now (2026-10-12, 17:15Z - READ THIS FIRST):** `main` = `6cb77b8` (+ this handoff), deployed,
+`/health` 200, voice re-provisioned. Since the 06:10Z paragraph below: **the Bright Tower stall** - Brittany texted
+that "Quarterly Reconciliations with Review" step 2 of 5 never appeared. Diagnosis (read-only): two cases
+(Bright Tower 10-01, XAct 10-05) were all-done at stage 1 with no stage-2 row; both first stages had been generated
+EMPTY and got their steps through "Add task - this and all future" minutes before the ticks; the advance silently
+did not happen and left no trace (the tick's activity row is written after the spawn; the assignee's activity log
+is trimmed to 200 rows; production logs do not reach back). It did NOT reproduce locally. **Approved prod write
+(Alex, 17:40Z):** one step on each was unticked + re-ticked through `store.toggleChecklistItem`; the advance ran
+and created `check-2ba016f4` / `check-34c75dc3` (stage 2 of 5, due 10-15, assignee emp-41def8a0); snapshot + undo
+in `docs/prod-snapshots/2026-10-12-stage2-retick.json`; NOT done by the script: the SSE broadcast and the
+task_assigned email to the reviewer. **Hardening shipped `6cb77b8`** (reviewed): `maybeSpawnNextStage` returns
+`{spawned, reason}` with `[stage-advance] skipped/FAILED` log lines; the spawn and the lifecycle sync are wrapped so
+a committed tick never 500s; the route records the tick first, then `case_advance_failed` / `case_advance_skipped`;
+the 200 carries `stageAdvanceFailed` and the page says "Saved. The next stage could not be created ... untick and
+tick again". Filed for Brittany as shipped `featreq-69129d69`; leftovers (Postgres double-spawn race, raw error text
+to staff, file-backend master parity, root cause still unknown) on `featreq-05e1610d`. If it recurs, read the
+`[stage-advance]` log lines and the Activity rows FIRST. Lanes: primary tree only (lane G removed after this ship).
+
+**Earlier (2026-10-12, 06:10Z):** `main` = `3f0391d` (+ this handoff), deployed,
 `/health` 200, voice re-provisioned. **EVERY STAGE OF BRITTANY'S 2026-10-10 WORKFLOW EMAIL IS LIVE.** After the
 04:05Z paragraph below: **`3f0391d` STAGE 4** (filed shipped `featreq-afecfd28`): every Letters send also records a
 sent Amendment on the client (`engagements.letter_send_id` + partial unique index, look-first boot DDL, verified
