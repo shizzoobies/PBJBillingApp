@@ -189,12 +189,28 @@ describe('sending a proposal', () => {
       pattern: /proposalSendMatch && request\.method === 'POST'/,
       write: true,
       // The stale-letter-figures guard (Important 1, final fix wave) pushes
-      // `broadcastDataChanged()` past the shared 3000-char default.
-      broadcastLength: 3600,
+      // `broadcastDataChanged()` past the shared 3000-char default; the unpriced
+      // lines confirm (2026-10-11) pushed it 3600 -> 4400.
+      broadcastLength: 4400,
     },
   ])
 
-  const block = () => routeBlock(/proposalSendMatch && request\.method === 'POST'/, 4600)
+  // Widened 4600 -> 5400 for the unpriced-lines confirm (2026-10-11).
+  const block = () => routeBlock(/proposalSendMatch && request\.method === 'POST'/, 5400)
+
+  // A questionnaire draft can carry a line whose count is only asked on a call:
+  // $0, so the quote would leave it out. She confirms before it goes.
+  it('asks before sending a quote with a line not yet priced: a 409 naming the lines, unless confirmed', () => {
+    const text = block()
+    expect(text).toContain('unpricedProposalLines(proposal.pricingSnapshot)')
+    expect(text).toContain("error: 'unpriced_lines'")
+    expect(text).toContain('unpriced: unpricedLines.map((line) => line.name)')
+    expect(text).toContain('payload?.confirmUnpriced !== true')
+    expect(text).toContain('not yet priced and will be left out of the quote - send anyway?')
+    const guardAt = text.indexOf('unpricedProposalLines(')
+    expect(guardAt).toBeLessThan(text.indexOf('buildProposalPdf('))
+    expect(guardAt).toBeLessThan(text.indexOf('sendInvoiceEmail('))
+  })
 
   it('builds the PDF before anything is sent', () => {
     const text = block()

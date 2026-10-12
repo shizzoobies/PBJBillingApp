@@ -13262,6 +13262,19 @@ const server = createServer(async (request, response) => {
         })
         return
       }
+      // A line not yet priced (a count only asked on a call, a rate at zero) is
+      // left out of the quote the prospect gets; she confirms before it goes.
+      // `confirmUnpriced: true` is how the UI sends anyway.
+      const unpricedLines = unpricedProposalLines(proposal.pricingSnapshot)
+      if (unpricedLines.length > 0 && payload?.confirmUnpriced !== true) {
+        const count = unpricedLines.length
+        sendJson(response, 409, {
+          error: 'unpriced_lines',
+          unpriced: unpricedLines.map((line) => line.name),
+          message: `${count} ${count === 1 ? 'line is' : 'lines are'} not yet priced and will be left out of the quote - send anyway?`,
+        })
+        return
+      }
       const firmSettings = await appDataStore.getFirmSettings()
       // The PDF IS the proposal, so it is built before anything is sent: a
       // render failure sends nothing rather than an email with no proposal.

@@ -70,7 +70,7 @@ export declare function questionnaireProblems(
 ): string[]
 export declare const GROUP_INPUTS: Readonly<Record<string, readonly string[]>>
 export declare const GROUP_STARTER_POLICY: Readonly<
-  Record<string, { all?: boolean; prefer?: Readonly<Record<string, string>> }>
+  Record<string, { all?: boolean; preferId?: string; prefer?: Readonly<Record<string, string>> }>
 >
 export declare function questionnaireStepOne(
   questionnaire: Questionnaire | null | undefined,

@@ -391,17 +391,31 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
    * Send the letter (Important 1, final fix wave). A `stale_letter_figures`
    * 409 means the estimate changed since this letter was drafted — the
    * message names the figures; a yes on the confirm resends with
-   * `confirmStaleFigures: true` so the same send is not asked twice.
+   * `confirmStaleFigures: true` so the same send is not asked twice. An
+   * `unpriced_lines` 409 (a line not yet priced would be left out of the
+   * quote) is asked the same way and resent with `confirmUnpriced: true`;
+   * each question is asked at most once per send.
    */
   const sendLetter = (to: string) =>
     enqueue(async () => {
-      try {
-        return await sendProposalRequest(proposalId, to)
-      } catch (err) {
-        if (err instanceof ApiError && err.code === 'stale_letter_figures' && window.confirm(err.message)) {
-          return await sendProposalRequest(proposalId, to, { confirmStaleFigures: true })
+      const confirmed: { confirmStaleFigures?: boolean; confirmUnpriced?: boolean } = {}
+      for (;;) {
+        try {
+          return Object.keys(confirmed).length === 0
+            ? await sendProposalRequest(proposalId, to)
+            : await sendProposalRequest(proposalId, to, { ...confirmed })
+        } catch (err) {
+          if (!(err instanceof ApiError)) throw err
+          if (err.code === 'stale_letter_figures' && !confirmed.confirmStaleFigures && window.confirm(err.message)) {
+            confirmed.confirmStaleFigures = true
+            continue
+          }
+          if (err.code === 'unpriced_lines' && !confirmed.confirmUnpriced && window.confirm(err.message)) {
+            confirmed.confirmUnpriced = true
+            continue
+          }
+          throw err
         }
-        throw err
       }
     })
 

@@ -1039,16 +1039,22 @@ export function draftProposalLetterRequest(id: string): Promise<Proposal> {
  * `confirmStaleFigures` resends after she has seen the 409 the server sends
  * when the letter quotes a figure the (possibly-edited-since) estimate no
  * longer has (Important 1, final fix wave) — an `ApiError` with
- * `code === 'stale_letter_figures'` carries that sentence.
+ * `code === 'stale_letter_figures'` carries that sentence. `confirmUnpriced`
+ * resends after the 409 `unpriced_lines` (a line not yet priced would be
+ * left out of the quote).
  */
 export function sendProposalRequest(
   id: string,
   to: string,
-  opts: { confirmStaleFigures?: boolean } = {},
+  opts: { confirmStaleFigures?: boolean; confirmUnpriced?: boolean } = {},
 ): Promise<Proposal> {
   return proposalRequest<Proposal>(
     proposalPath(id, 'send'),
-    proposalJson('POST', { to, ...(opts.confirmStaleFigures ? { confirmStaleFigures: true } : {}) }),
+    proposalJson('POST', {
+      to,
+      ...(opts.confirmStaleFigures ? { confirmStaleFigures: true } : {}),
+      ...(opts.confirmUnpriced ? { confirmUnpriced: true } : {}),
+    }),
     'The proposal could not be sent',
   )
 }

@@ -1070,6 +1070,60 @@ describe('Send to prospect', () => {
     expect(await screen.findByText('Sent', { selector: '.status-pill' })).toBeTruthy()
   })
 
+  // 2026-10-11: a quote with a line not yet priced (a count only asked on a call)
+  // is confirmed before it goes - and both questions can come on one send.
+  it('on an unpriced-lines 409, confirms with the server sentence and resends with confirmUnpriced: true', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    vi.stubGlobal('prompt', vi.fn(() => 'pat@acme.test'))
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    const staleError = new ApiError(
+      409,
+      'The letter quotes figures the estimate no longer has: $500.00. Regenerate the letter, or send anyway.',
+      'stale_letter_figures',
+    )
+    const unpricedError = new ApiError(
+      409,
+      '1 line is not yet priced and will be left out of the quote - send anyway?',
+      'unpriced_lines',
+    )
+    api.sendProposalRequest = vi
+      .fn()
+      .mockRejectedValueOnce(staleError)
+      .mockRejectedValueOnce(unpricedError)
+      .mockResolvedValueOnce({ ...WITH_LETTER, status: 'sent' })
+    renderEditor('/proposals/prop-1?tab=letter')
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith(unpricedError.message))
+    await waitFor(() =>
+      expect(api.sendProposalRequest).toHaveBeenNthCalledWith(3, 'prop-1', 'pat@acme.test', {
+        confirmStaleFigures: true,
+        confirmUnpriced: true,
+      }),
+    )
+    expect(api.sendProposalRequest).toHaveBeenNthCalledWith(1, 'prop-1', 'pat@acme.test')
+    expect(api.sendProposalRequest).toHaveBeenNthCalledWith(2, 'prop-1', 'pat@acme.test', {
+      confirmStaleFigures: true,
+    })
+    expect(await screen.findByText('Sent', { selector: '.status-pill' })).toBeTruthy()
+  })
+
+  it('does not send when she cancels the unpriced-lines confirm, and shows the sentence', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    vi.stubGlobal('prompt', vi.fn(() => 'pat@acme.test'))
+    vi.stubGlobal('confirm', vi.fn(() => false))
+    const unpricedError = new ApiError(
+      409,
+      '2 lines are not yet priced and will be left out of the quote - send anyway?',
+      'unpriced_lines',
+    )
+    api.sendProposalRequest = vi.fn().mockRejectedValueOnce(unpricedError)
+    renderEditor('/proposals/prop-1?tab=letter')
+    fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
+    expect(await screen.findByText(unpricedError.message)).toBeTruthy()
+    expect(api.sendProposalRequest).toHaveBeenCalledTimes(1)
+  })
+
   it('does not resend, and shows the sentence, when she cancels the stale-figures confirm', async () => {
     api.getProposalRequest = vi.fn(async () => WITH_LETTER)
     vi.stubGlobal('prompt', vi.fn(() => 'pat@acme.test'))
