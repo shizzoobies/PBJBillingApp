@@ -7,7 +7,12 @@ import { EstimateTab } from '../components/proposals/EstimateTab'
 import { LetterTab } from '../components/proposals/LetterTab'
 import { workableClients } from '../lib/clientLifecycle'
 import { refusedEngagementId } from '../lib/engagements'
-import { defaultProposalPricing, formatProposalMoney } from '../../lib/proposal-pricing.js'
+import {
+  PROPOSAL_NOT_PRICED_MESSAGE,
+  defaultProposalPricing,
+  formatProposalMoney,
+  unpricedProposalLines,
+} from '../../lib/proposal-pricing.js'
 import {
   acceptProposalRequest,
   copyProposalRequest,
@@ -466,6 +471,12 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   // accept would never actually change.
   const accept = () => {
     if (!proposal) return
+    // A line not yet priced (a count only asked on a call, a rate at zero) would
+    // make the client's fee a partial total: price it first (the server refuses too).
+    if (unpricedProposalLines(proposal.pricingSnapshot).length > 0) {
+      setError(PROPOSAL_NOT_PRICED_MESSAGE)
+      return
+    }
     const monthly = formatProposalMoney(proposal.pricingSnapshot?.totals.monthly ?? 0)
     const chosenPackage = packageId || null
     // Ticked plans, in the order the firm lists them; ids that no longer exist drop out.

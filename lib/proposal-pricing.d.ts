@@ -192,6 +192,10 @@ export declare function softwareLocksOf(lines: readonly Partial<PricedLine>[] | 
 export declare function isNoChargeLine(
   line: Pick<PricedLine, 'amount' | 'flag'> & { group?: string | null } | null | undefined,
 ): boolean
+export declare const PROPOSAL_NOT_PRICED_MESSAGE: string
+export declare function unpricedProposalLines<
+  L extends Pick<PricedLine, 'amount' | 'flag'> & { group?: string | null },
+>(snapshot: { lines?: readonly L[] | null } | null | undefined): L[]
 
 /** Owner-edited catalog in, a safe catalog out; anything not an object is the seed. */
 export declare function sanitizeProposalPricing(raw: unknown): ProposalPricing

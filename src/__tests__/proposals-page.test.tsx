@@ -136,6 +136,24 @@ const WITH_RECONCILIATIONS: Proposal = {
   },
 }
 
+/** A second line whose count is only asked on a call: $0, no flag - not yet priced. */
+const PARTLY_PRICED: Proposal = {
+  ...WITH_RECONCILIATIONS,
+  pricingSnapshot: {
+    ...WITH_RECONCILIATIONS.pricingSnapshot!,
+    lines: [
+      WITH_RECONCILIATIONS.pricingSnapshot!.lines[0],
+      {
+        ...WITH_RECONCILIATIONS.pricingSnapshot!.lines[1],
+        amount: 0,
+        computedAmount: 0,
+        formula: '0 balance sheet accounts x 0.25 x $75/hr = $0.00',
+      },
+    ],
+    totals: { monthly: 630, annual: 0, oneTime: 0, cleanup: 0 },
+  },
+}
+
 /** The Basic tier retired out from under a proposal that already selected it (review I2). */
 const RETIRED_TIER_PRICING = {
   ...defaultProposalPricing(),
@@ -1222,6 +1240,30 @@ describe('Accept and Decline', () => {
     expect(screen.getByRole('link', { name: 'Open the client' }).getAttribute('href')).toBe(
       '/clients/client-new',
     )
+  })
+
+  // A questionnaire draft's starter line can need a count only asked on a call: it
+  // prices at $0, and the client's fee would be a partial total.
+  it('refuses Accept while a line is not yet priced, and says why on the Estimate tab', async () => {
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    api.getProposalRequest = vi.fn(async () => PARTLY_PRICED)
+    renderEditor()
+    expect(
+      await screen.findByText('Partly priced: 1 line is not yet priced and left out of these totals.'),
+    ).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+    expect(
+      await screen.findByText('Some lines are not yet priced - price them on the Estimate tab first.'),
+    ).toBeTruthy()
+    expect(confirm).not.toHaveBeenCalled()
+    expect(api.acceptProposalRequest).not.toHaveBeenCalled()
+  })
+
+  it('a fully priced proposal shows no partly-priced note', async () => {
+    renderEditor()
+    await screen.findByRole('button', { name: 'Accept' })
+    expect(screen.queryByText(/Partly priced|Not yet priced: no line/)).toBeNull()
   })
 
   it('does nothing when the Accept confirm is canceled', async () => {

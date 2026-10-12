@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
-import { defaultProposalPricing, formatProposalMoney } from '../../lib/proposal-pricing.js'
+import { defaultProposalPricing } from '../../lib/proposal-pricing.js'
 import { QuestionnaireInbox } from '../components/proposals/QuestionnaireInbox'
 import { QuestionnaireSheet } from '../components/proposals/QuestionnaireSheet'
 import { ProposalRatesBanner } from '../components/proposals/RatesBanner'
@@ -18,7 +18,7 @@ import {
   type QuestionnaireDraftResult,
   type QuestionnaireLinkResult,
 } from '../lib/api'
-import { PROPOSAL_STATUS_LABELS, proposalDate, proposalTitle } from '../lib/proposals'
+import { PROPOSAL_STATUS_LABELS, proposalDate, proposalPriceLabel, proposalTitle } from '../lib/proposals'
 import {
   ApiError,
   type Proposal,
@@ -427,11 +427,9 @@ export function ProposalsPage() {
                     </td>
                     <td>
                       {
-                        // A draft with nothing selected is not a $0.00 price, it is
-                        // no price yet (the 2026-10-02 incident read it as a quote).
-                        proposal.selections.length === 0
-                          ? 'Not yet priced'
-                          : formatProposalMoney(proposal.pricingSnapshot?.totals.monthly ?? 0)
+                        // Nothing priced is no price yet, and some lines unpriced is
+                        // a partial total - never read as the quote (2026-10-02).
+                        proposalPriceLabel(proposal)
                       }
                     </td>
                     <td>{proposalDate(proposal.updatedAt ?? proposal.createdAt)}</td>

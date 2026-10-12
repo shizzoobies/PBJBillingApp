@@ -276,7 +276,19 @@ describe('accepting and declining', () => {
     },
   ])
 
-  const accept = () => routeBlock(/proposalAcceptMatch && request\.method === 'POST'/, 2400)
+  // Window widened 2400 -> 3000 (and 3200 -> 3800 below) for the not-priced
+  // guard added ahead of the store call (questionnaire steps review, 2026-10-11).
+  const accept = () => routeBlock(/proposalAcceptMatch && request\.method === 'POST'/, 3000)
+
+  // A questionnaire draft's starter line can need a count only asked on a call:
+  // it prices at $0, and accepting would bill the client a partial total.
+  it('refuses with a 409 not_priced while any line is not yet priced, BEFORE the store accepts', () => {
+    const text = accept()
+    const guard = text.indexOf('unpricedProposalLines(toAccept.pricingSnapshot).length > 0')
+    expect(guard).toBeGreaterThan(-1)
+    expect(text).toContain("sendJson(response, 409, { error: 'not_priced', message: PROPOSAL_NOT_PRICED_MESSAGE })")
+    expect(guard).toBeLessThan(text.indexOf('appDataStore.acceptProposal('))
+  })
 
   it('Accept goes through the store, which alone decides whether a client is created', () => {
     const text = accept()
@@ -290,7 +302,7 @@ describe('accepting and declining', () => {
   // `engagementId` with the rest; the route answers the store's result as-is so the
   // page can open the engagement.
   it('answers the store result whole, engagementId included', () => {
-    const text = routeBlock(/proposalAcceptMatch && request\.method === 'POST'/, 3200)
+    const text = routeBlock(/proposalAcceptMatch && request\.method === 'POST'/, 3800)
     expect(text).toContain('result = await appDataStore.acceptProposal(')
     expect(text).toContain('sendJson(response, 200, result)')
   })

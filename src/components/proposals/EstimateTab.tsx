@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { formatProposalMoney, isNoChargeLine } from '../../../lib/proposal-pricing.js'
+import { formatProposalMoney, isNoChargeLine, unpricedProposalLines } from '../../../lib/proposal-pricing.js'
 import { SavingNumberInput, SavingTextarea, SavingTextInput } from '../SectionKit'
 import { QuestionnaireAnswersPanel } from './QuestionnaireInbox'
 import { ProposalRatesBanner } from './RatesBanner'
@@ -313,6 +313,19 @@ export function EstimateTab({
         ) : (
           <p className="muted-text">Pick services above and fill in the counts to price them.</p>
         )}
+        {(() => {
+          // The totals below leave out every line not yet priced - say so, so a
+          // partial sum is never read as the quote.
+          const unpriced = unpricedProposalLines(snapshot).length
+          if (!snapshot || unpriced === 0) return null
+          return (
+            <p className="muted-text proposal-totals-note" role="status">
+              {unpriced === snapshot.lines.length
+                ? 'Not yet priced: no line has a price yet.'
+                : `Partly priced: ${unpriced} ${unpriced === 1 ? 'line is' : 'lines are'} not yet priced and left out of these totals.`}
+            </p>
+          )
+        })()}
         <dl className="proposal-totals">
           {PROPOSAL_TOTAL_LABELS.filter(
             ([key]) => key !== 'software' || snapshot?.lines.some((line) => line.group === 'Software'),

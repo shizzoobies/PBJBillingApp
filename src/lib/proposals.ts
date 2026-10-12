@@ -1,5 +1,11 @@
 import { dollarFiguresInCents } from '../../lib/money-figures.js'
-import { PROPOSAL_ROLES, proposalSelectionDefaults, roundCents } from '../../lib/proposal-pricing.js'
+import {
+  PROPOSAL_ROLES,
+  formatProposalMoney,
+  proposalSelectionDefaults,
+  roundCents,
+  unpricedProposalLines,
+} from '../../lib/proposal-pricing.js'
 import type {
   Proposal,
   ProposalChatPatch,
@@ -68,6 +74,22 @@ export function proposalTitle(proposal: Pick<Proposal, 'prospect'>): string {
   return (
     proposal.prospect.company.trim() || proposal.prospect.contactName.trim() || 'Untitled prospect'
   )
+}
+
+/**
+ * A proposal's monthly figure as the Proposals list shows it. A draft with
+ * nothing priced is "Not yet priced", never $0.00 (the 2026-10-02 incident read
+ * one as a quote); one with SOME lines not yet priced (a questionnaire draft's
+ * starter line that needs a count only asked on a call) is "Partly priced -
+ * $X", the priced lines' total, so a partial sum is never read as the quote.
+ */
+export function proposalPriceLabel(proposal: Pick<Proposal, 'selections' | 'pricingSnapshot'>): string {
+  const lines = proposal.pricingSnapshot?.lines ?? []
+  if (proposal.selections.length === 0 || lines.length === 0) return 'Not yet priced'
+  const unpriced = unpricedProposalLines(proposal.pricingSnapshot).length
+  if (unpriced === lines.length) return 'Not yet priced'
+  const monthly = formatProposalMoney(proposal.pricingSnapshot?.totals.monthly ?? 0)
+  return unpriced > 0 ? `Partly priced - ${monthly}` : monthly
 }
 
 /** "Sep 23, 2026" from an ISO timestamp; '' for anything else. */

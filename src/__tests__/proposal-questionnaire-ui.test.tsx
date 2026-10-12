@@ -84,7 +84,61 @@ const PRICED: Proposal = {
   id: 'prop-priced',
   prospect: { ...DRAFT.prospect, company: 'Priced Co' },
   selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
-  pricingSnapshot: { ...DRAFT.pricingSnapshot!, totals: { monthly: 630, annual: 0, oneTime: 0, cleanup: 0 } },
+  pricingSnapshot: {
+    ...DRAFT.pricingSnapshot!,
+    lines: [
+      {
+        serviceId: 'monthly-weekly-transactions-basic',
+        group: 'Monthly',
+        name: 'Weekly transactions',
+        tier: 'Basic',
+        cadence: null,
+        amount: 630,
+        computedAmount: 630,
+        formula: '120 transactions x 0.07 x $75/hr = $630.00',
+        flag: null,
+      },
+    ],
+    totals: { monthly: 630, annual: 0, oneTime: 0, cleanup: 0 },
+  },
+}
+
+/** A questionnaire draft whose second starter line needs a count only asked on a call. */
+const PARTLY: Proposal = {
+  ...PRICED,
+  id: 'prop-partly',
+  prospect: { ...DRAFT.prospect, company: 'Partly Co' },
+  selections: [...PRICED.selections, { serviceId: 'reconciliations' }],
+  pricingSnapshot: {
+    ...PRICED.pricingSnapshot!,
+    lines: [
+      ...PRICED.pricingSnapshot!.lines,
+      {
+        serviceId: 'reconciliations',
+        group: 'Reconciliations',
+        name: 'Reconciliations',
+        tier: null,
+        cadence: null,
+        amount: 0,
+        computedAmount: 0,
+        formula: '0 balance sheet accounts x 0.25 x $75/hr = $0.00',
+        flag: null,
+      },
+    ],
+  },
+}
+
+/** Every line needs a count only asked on a call. */
+const UNPRICED: Proposal = {
+  ...PARTLY,
+  id: 'prop-unpriced',
+  prospect: { ...DRAFT.prospect, company: 'Unpriced Co' },
+  selections: [{ serviceId: 'reconciliations' }],
+  pricingSnapshot: {
+    ...PARTLY.pricingSnapshot!,
+    lines: PARTLY.pricingSnapshot!.lines.slice(1),
+    totals: { monthly: 0, annual: 0, oneTime: 0, cleanup: 0 },
+  },
 }
 
 function questionnaire(overrides: Partial<ProposalQuestionnaire> = {}): ProposalQuestionnaire {
@@ -112,7 +166,7 @@ beforeEach(() => {
     ownerMode: true,
     data: { clients: [] },
   } as unknown as AppContextValue
-  api.listProposalsRequest = vi.fn(async () => [DRAFT, PRICED])
+  api.listProposalsRequest = vi.fn(async () => [DRAFT, PRICED, PARTLY, UNPRICED])
   api.createProposalRequest = vi.fn()
   api.getProposalRequest = vi.fn(async () => DRAFT)
   api.fetchFirmSettings = vi.fn(async () => ({ name: 'PB&J', proposalPricing: pricing }))
@@ -152,6 +206,18 @@ describe('the Proposals list', () => {
     expect(within(row).queryByText('$0.00')).not.toBeInTheDocument()
     const priced = screen.getByRole('link', { name: 'Priced Co' }).closest('tr')!
     expect(within(priced).getByText('$630.00')).toBeInTheDocument()
+  })
+
+  // A questionnaire draft starts with lines; one needing a count only asked on a
+  // call prices at $0 - the list must never show the rest as the quote.
+  it('says "Partly priced - $X" when some lines are not yet priced, and "Not yet priced" when none are', async () => {
+    renderList()
+    const partly = (await screen.findByRole('link', { name: 'Partly Co' })).closest('tr')!
+    expect(within(partly).getByText('Partly priced - $630.00')).toBeInTheDocument()
+    expect(within(partly).queryByText('$630.00')).not.toBeInTheDocument()
+    const unpriced = screen.getByRole('link', { name: 'Unpriced Co' }).closest('tr')!
+    expect(within(unpriced).getByText('Not yet priced')).toBeInTheDocument()
+    expect(within(unpriced).queryByText('$0.00')).not.toBeInTheDocument()
   })
 })
 

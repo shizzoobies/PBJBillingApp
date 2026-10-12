@@ -135,7 +135,11 @@ import {
   renderQuestionnaireStatusPage,
   renderQuestionnaireThanksPage,
 } from './lib/proposal-questionnaire-page.js'
-import { applyProposalPatch } from './lib/proposal-pricing.js'
+import {
+  PROPOSAL_NOT_PRICED_MESSAGE,
+  applyProposalPatch,
+  unpricedProposalLines,
+} from './lib/proposal-pricing.js'
 import { proposalOutcomeWords } from './lib/proposal-outcomes.js'
 import {
   assembleEngagementPreview,
@@ -13382,6 +13386,13 @@ const server = createServer(async (request, response) => {
         return
       }
       const payload = (await readJsonBody(request)) ?? {}
+      // A line not yet priced (a count only asked on a call, a role rate at zero)
+      // would make the client's fee a partial total: refused until it is priced.
+      const toAccept = await appDataStore.getProposal(proposalAcceptMatch[1])
+      if (toAccept && unpricedProposalLines(toAccept.pricingSnapshot).length > 0) {
+        sendJson(response, 409, { error: 'not_priced', message: PROPOSAL_NOT_PRICED_MESSAGE })
+        return
+      }
       let result
       try {
         result = await appDataStore.acceptProposal(proposalAcceptMatch[1], {
