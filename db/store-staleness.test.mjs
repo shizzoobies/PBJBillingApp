@@ -10193,6 +10193,104 @@ describe('generateChecklistFromTemplate runs the pending-notes attach pass (file
 })
 
 /**
+ * featreq-8b54d117: "Start the first one now" asks this endpoint for the new
+ * recipe's REAL Step 1, passing the Next due date the owner entered. FILE
+ * backend. Far-future dates keep the read-time materializer out of the way.
+ */
+describe('generateChecklistFromTemplate starts a recipe\'s real Step 1 (file backend)', () => {
+  const twoStepRecipe = {
+    id: 'tpl-first-step',
+    title: 'Reconciliations with Review',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2099-01-31',
+    active: true,
+    isStandard: false,
+    categoryId: 'cat-recs',
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      {
+        id: 'stage-a',
+        name: 'Step 1',
+        assigneeId: 'emp-1',
+        offsetDays: 0,
+        dueDayOfMonth: 10,
+        viewerIds: [],
+        editorIds: [],
+        items: [
+          {
+            id: 'ti-1',
+            label: 'Reconcile bank',
+            subItems: [{ id: 'si-1', title: 'Checking', done: false }],
+          },
+        ],
+      },
+      {
+        id: 'stage-b',
+        name: 'Review',
+        assigneeId: 'emp-1',
+        offsetDays: 0,
+        viewerIds: [],
+        editorIds: [],
+        items: [{ id: 'ti-2', label: 'Review recs' }],
+      },
+    ],
+  }
+
+  it('makes Step 1 of the case: its own due date, step fields, Board column and sub-steps', async () => {
+    await store.write(workspace({ checklistTemplates: [twoStepRecipe] }))
+    const created = await store.generateChecklistFromTemplate('tpl-first-step', {
+      dueDate: '2099-01-31',
+    })
+    expect(created).toMatchObject({
+      templateId: 'tpl-first-step',
+      stageId: 'stage-a',
+      stageIndex: 0,
+      stageCount: 2,
+      dueDate: '2099-01-10',
+      categoryId: 'cat-recs',
+    })
+    expect(created.caseId).toMatch(/^case-/)
+    expect(created.items[0].subItems.map((sub) => sub.title)).toEqual(['Checking'])
+  })
+
+  it('hands back the Step 1 that already exists when the recipe has moved on to the next cycle', async () => {
+    // What the browser's materializer leaves behind once the new recipe is
+    // saved: this cycle's Step 1, and the recipe advanced to the next cycle.
+    const existing = {
+      id: 'check-browser1',
+      title: 'Reconciliations with Review',
+      clientId: 'c1',
+      assigneeId: 'emp-1',
+      templateId: 'tpl-first-step',
+      caseId: 'case-browser1',
+      stageId: 'stage-a',
+      stageIndex: 0,
+      stageCount: 2,
+      dueDate: '2099-01-10',
+      frequency: 'monthly',
+      viewerIds: [],
+      editorIds: [],
+      items: [{ id: 'ci-1', label: 'Reconcile bank', done: false }],
+    }
+    await store.write(
+      workspace({
+        checklistTemplates: [{ ...twoStepRecipe, nextDueDate: '2099-02-28' }],
+        checklists: [existing],
+      }),
+    )
+    const returned = await store.generateChecklistFromTemplate('tpl-first-step', {
+      dueDate: '2099-01-31',
+    })
+    expect(returned.id).toBe('check-browser1')
+    const after = await store.read()
+    expect(after.checklists.filter((c) => c.templateId === 'tpl-first-step')).toHaveLength(1)
+  })
+})
+
+/**
  * Quiet skip — the FILE backend, end to end.
  *
  * Cardinal rule 1: `db/store.js` has two backends and any persisted change must

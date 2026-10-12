@@ -217,7 +217,15 @@ export type AppContextValue = {
     viewerIds: string[],
     editorIds: string[],
   ) => Promise<void>
-  addChecklistTemplate: (template: Omit<ChecklistTemplate, 'id'>) => void
+  /**
+   * Adds a recipe locally (the autosave persists it). Returns its new id and
+   * `saved`, which settles true once a save carrying it has landed, or false
+   * when it cannot be saved (preview, signed out, a stale tab).
+   */
+  addChecklistTemplate: (template: Omit<ChecklistTemplate, 'id'>) => {
+    id: string
+    saved: Promise<boolean>
+  }
   updateChecklistTemplate: (
     templateId: string,
     updater: (template: ChecklistTemplate) => ChecklistTemplate,

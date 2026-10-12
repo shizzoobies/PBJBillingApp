@@ -89,6 +89,7 @@ import type {
   WaitingOn,
 } from '../lib/types'
 import { pruneEmptyOutlineItems } from '../lib/checklistTree'
+import { startFirstRecipeStep } from '../lib/recipeFirstStep'
 import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
 import { completedTaskRows } from '../lib/completedTasks'
 import { filterInProgressChecklists, waitingStepCount } from '../lib/inProgressFilter'
@@ -447,6 +448,8 @@ export function ChecklistsPage() {
   // The unified "+ New" dropdown. Mode controls whether the create form is in
   // one-time or repeating shape; both paths render the SAME NewTaskForm.
   const [createMode, setCreateMode] = useState<CreateMode>(null)
+  // Why "Start the first one now" did not start anything, shown under the form.
+  const [startFirstNote, setStartFirstNote] = useState<string | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
@@ -486,34 +489,24 @@ export function ChecklistsPage() {
     template: Omit<ChecklistTemplate, 'id'>,
     startFirstNow: boolean,
   ) => {
-    addChecklistTemplate(template)
-    // "Start the first one now": independently of the future recurrence
-    // schedule, immediately create a checkable Stage-1 instance dated today or
-    // the template's first due date (whichever is sooner) so the user has
-    // something to check off right away. This goes through the dedicated
-    // /api/checklists endpoint, so it doesn't depend on the template having
-    // been persisted server-side yet.
-    if (startFirstNow) {
-      const stageOne = template.stages[0]
-      if (stageOne && stageOne.items.length > 0) {
-        const today = localDateOnly()
-        const firstDue = template.nextDueDate < today ? template.nextDueDate : today
-        try {
-          const created = await createChecklist({
-            title: template.title,
-            clientId: template.clientId,
-            assigneeId: stageOne.assigneeId || template.assigneeId,
-            dueDate: firstDue,
-            items: stageOne.items.map((item) => ({ label: item.label })),
-          })
-          if (created) focusChecklist(created.id)
-        } catch {
-          // Template still created; the instance can be generated later via
-          // "Generate a task now".
-        }
-      }
-    }
+    const { id, saved } = addChecklistTemplate(template)
     setCreateMode(null)
+    setStartFirstNote(null)
+    // "Start the first one now" starts the recipe's REAL Step 1 (its own due
+    // date, step fields, Board column, sub-steps), so finishing it hands off to
+    // Step 2. It used to make a plain one-off checklist due today, which ended
+    // at the last step and was later joined by the recipe's own Step 1
+    // (featreq-8b54d117). See src/lib/recipeFirstStep.ts.
+    if (!startFirstNow) return
+    const result = await startFirstRecipeStep({
+      template,
+      templateId: id,
+      saved,
+      generate: generateChecklistFromTemplate,
+    })
+    if (!result) return
+    if ('started' in result) focusChecklist(result.started.id)
+    else setStartFirstNote(result.note)
   }
 
   return (
@@ -681,6 +674,11 @@ export function ChecklistsPage() {
             onCreateOneTime={handleCreateOneTime}
             onCreateRepeating={handleCreateRepeating}
           />
+        ) : null}
+        {startFirstNote ? (
+          <p className="series-scope-text" role="status">
+            {startFirstNote}
+          </p>
         ) : null}
 
         {activeArea !== 'progress' ? null : (
