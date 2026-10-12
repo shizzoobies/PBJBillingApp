@@ -17352,7 +17352,7 @@ export class AppDataStore {
   /**
    * Start the DRAFT proposal from a submitted questionnaire's answers: the
    * contact block, the counts, the rest in the notes, and the service groups they
-   * ticked as lines from the CURRENT catalog (`answersToProposalSeed`), so it
+   * ticked as starter lines from the CURRENT catalog (`answersToProposalSeed`), so it
    * arrives priced. ONE draft per questionnaire: the link is
    * claimed with `proposal_id is null`, and a draft built by a call that lost
    * that race is deleted again (it has no history yet), so the retry button and

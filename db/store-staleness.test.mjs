@@ -36281,10 +36281,9 @@ describe('proposal questionnaires (file backend)', () => {
     })
     expect(proposal.prospect.notes).toContain('Bakery')
     expect(proposal.inputs).toEqual({ transactions: 120 })
-    // "Monthly" was ticked: the Basic tier of each Monthly family, priced on arrival.
+    // "Monthly" was ticked: ONE starter line (its first, at the Basic tier), priced on arrival.
     expect(proposal.selections.map((entry) => entry.serviceId)).toEqual([
       'monthly-weekly-transactions-basic',
-      'monthly-monthly-transactions-basic',
     ])
     expect(proposal.pricingSnapshot.totals.monthly).toBeGreaterThan(0)
     expect(proposal.prospect.notes).toContain('Monthly')
