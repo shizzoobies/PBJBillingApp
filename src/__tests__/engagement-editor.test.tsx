@@ -176,14 +176,21 @@ describe('loading', () => {
     expect(screen.getByLabelText('Retainer amount')).toHaveValue('630')
     expect(screen.getByText(/The default is one month's fee, \$630.00/)).toBeTruthy()
     expect(screen.getByText('$1,200.00')).toBeTruthy()
-    expect(screen.getByText(/Estimated monthly hours: Bookkeeper \(B\) 6.0, Accountant \(A\) 1.5/)).toBeTruthy()
+    const hours = screen.getByLabelText('Estimated monthly hours')
+    expect(within(hours).getByText('Bookkeeper 6.0')).toBeTruthy()
+    expect(within(hours).getByText('Accountant 1.5')).toBeTruthy()
+    expect(within(hours).queryByText(/Controller/)).toBeNull()
     // The sections the letter was assembled from, by their library titles.
     const used = await screen.findByRole('list', { name: 'Sections used' })
     await waitFor(() => expect(within(used).getByText('Introduction')).toBeTruthy())
   })
 
-  it('offers a chip for every placeholder the engagement GET lists, engagement-only ones included', async () => {
+  it('offers a chip for every placeholder the engagement GET lists, engagement-only ones included, behind a toggle', async () => {
     await renderEditor()
+    expect(screen.queryByRole('group', { name: 'Insert a placeholder into the letter' })).toBeNull()
+    const toggle = screen.getByRole('button', { name: 'Placeholders for the letter (3)' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(toggle)
     const group = screen.getByRole('group', { name: 'Insert a placeholder into the letter' })
     expect(within(group).getAllByRole('button').map((button) => button.textContent)).toEqual([
       '{{client_name}}',
@@ -473,7 +480,7 @@ describe('Void', () => {
 })
 
 describe('Activity', () => {
-  it('lists the sends, the delivery events and the stamps, newest first', async () => {
+  it('lists the drafted stamp, the sends and the delivery events, oldest first', async () => {
     api.getEngagementRequest = vi.fn(async () =>
       view({
         status: 'sent',
@@ -486,10 +493,66 @@ describe('Activity', () => {
     )
     await renderEditor()
     const items = within(screen.getByRole('list', { name: 'Activity' })).getAllByRole('listitem')
-    expect(items.map((item) => item.textContent?.replace(/^.*?(AM|PM) /, ''))).toEqual([
-      'Delivered (pat@acme.test)',
-      'Sent to pat@acme.test',
+    expect(items.map((item) => item.lastElementChild?.textContent)).toEqual([
       'Drafted from the proposal',
+      'Sent to pat@acme.test',
+      'Delivered (pat@acme.test)',
     ])
+  })
+})
+
+// QA round, 2026-10-11.
+describe('after QA', () => {
+  it('a signed letter shows one signed line with its day and who signed it off, and no chips', async () => {
+    contextValue = {
+      ...contextValue,
+      data: { ...(contextValue.data as object), employees: [{ id: 'emp-patrice', name: 'Brittany', role: 'Owner' }] },
+    } as unknown as AppContextValue
+    api.getEngagementRequest = vi.fn(async () =>
+      view({
+        status: 'signed',
+        createdAt: '2026-10-07T15:00:00.000Z',
+        sentAt: '2026-10-08T16:00:00.000Z',
+        signedAt: '2026-10-09T16:00:00.000Z',
+        signedBy: 'emp-patrice',
+        signedNote: 'Came back by email',
+        emailLog: [{ kind: 'send', at: '2026-10-08T16:00:00.000Z', providerId: 're_1', to: ['pat@acme.test'], ok: true, error: null }],
+      }),
+    )
+    await renderEditor()
+    const items = within(screen.getByRole('list', { name: 'Activity' })).getAllByRole('listitem')
+    expect(items.map((item) => item.lastElementChild?.textContent)).toEqual([
+      'Drafted from the proposal',
+      'Sent to pat@acme.test',
+      'Marked signed for Oct 9, 2026 by Brittany: Came back by email',
+    ])
+    // The signing line shows its day, never a time.
+    expect(items[2].firstElementChild?.textContent).toBe('Oct 9, 2026')
+    expect(screen.queryByText(/^Signed on /)).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Placeholders for/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Bold in the letter' })).toBeNull()
+  })
+
+  it('says why Mark as signed is off on a draft', async () => {
+    await renderEditor()
+    expect(screen.getByText('Send the letter first, or tick "signed in person".')).toBeTruthy()
+    fireEvent.click(screen.getByRole('checkbox', { name: /signed in person/ }))
+    expect(screen.queryByText('Send the letter first, or tick "signed in person".')).toBeNull()
+  })
+
+  it('saves text without the package when the package did not change (a deleted one never blocks)', async () => {
+    api.getEngagementRequest = vi.fn(async () => view({ packageId: 'pkg-gone' }))
+    await renderEditor()
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'New subject' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(api.updateEngagementRequest).toHaveBeenCalled())
+    expect(api.updateEngagementRequest.mock.calls[0][1]).not.toHaveProperty('packageId')
+  })
+
+  it('keeps Save in the header beside the status pills', async () => {
+    await renderEditor()
+    const header = screen.getByRole('heading', { level: 1, name: 'Acme Books' }).closest('header') as HTMLElement
+    expect(within(header).getByRole('button', { name: 'Save' })).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: 'Save' })).toHaveLength(1)
   })
 })

@@ -127,6 +127,7 @@ describe('Engagement sections in Settings', () => {
 
   it('offers the engagement placeholders and warns on one the app does not fill in', async () => {
     await renderSection()
+    fireEvent.click(screen.getByRole('button', { name: /^Placeholders for the text of Payroll \(\d+\)$/ }))
     const chips = screen.getByRole('group', { name: 'Insert a placeholder into the text of Payroll' })
     const keys = within(chips).getAllByRole('button').map((button) => button.textContent)
     expect(keys).toContain('{{client_name}}')
@@ -145,5 +146,33 @@ describe('Engagement sections in Settings', () => {
     fireEvent.change(screen.getByLabelText('Title of Payroll'), { target: { value: 'Payroll!' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save all' }))
     expect(await screen.findByText('A section title is too long.')).toBeTruthy()
+  })
+})
+
+// QA round, 2026-10-11.
+describe('Engagement sections after QA', () => {
+  it('the cover email cannot be switched off', async () => {
+    await renderSection()
+    expect(screen.queryByRole('checkbox', { name: 'Use Email' })).toBeNull()
+    expect(screen.getByRole('checkbox', { name: 'Use Payroll' })).toBeTruthy()
+  })
+
+  it('Always turns the group and service pickers off', async () => {
+    await renderSection()
+    const payroll = screen.getByRole('group', { name: 'When Payroll goes in' })
+    fireEvent.click(within(payroll).getByRole('checkbox', { name: 'Always' }))
+    expect(within(payroll).getByRole('checkbox', { name: 'Payroll' })).toBeDisabled()
+    expect(within(payroll).getByLabelText('Add a service line to Payroll')).toBeDisabled()
+  })
+
+  it('shows a section keyed on a service line by that line', async () => {
+    api.listEngagementSectionsRequest = vi.fn(async () => [
+      ...LIBRARY,
+      section({ key: 'consulting', title: 'Advisory and consulting', body: 'We meet.', trigger: { serviceIds: ['client-call'] }, sortOrder: 4 }),
+    ])
+    await renderSection()
+    const lines = screen.getByRole('list', { name: 'Service lines Advisory and consulting follows' })
+    expect(within(lines).getByText(/Additional reports: Client call/)).toBeTruthy()
+    expect(screen.queryByText('Nothing is ticked, so this section never goes into a letter.')).toBeNull()
   })
 })

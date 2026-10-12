@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
-import { BoldBar, PlaceholderChips } from '../components/letters/LetterEditorKit'
+import { BoldBar, PlaceholderChipsToggle } from '../components/letters/LetterEditorKit'
 import { DocumentPreviewModal } from '../components/letters/DocumentPreviewModal'
 import { insertPlaceholder, isBoldShortcut, toggleBold, unknownPlaceholderSentence } from '../components/letters/letterEditing'
 import { SaveBadge } from '../components/SectionKit'
@@ -21,10 +21,10 @@ import {
   ENGAGEMENT_KIND_LABELS,
   ENGAGEMENT_STATUS_LABELS,
   engagementDayLabel,
+  engagementInstantLabel,
   engagementPartyName,
   engagementSendRefusalSentence,
 } from '../lib/engagements'
-import { PROPOSAL_ROLE_LABELS } from '../lib/proposals'
 import type { SaveFlashState } from '../lib/useSaveFlash'
 import { skippedEngagementLines } from '../../lib/engagement-values.js'
 import { firmToday } from '../../lib/firm-time.js'
@@ -66,10 +66,14 @@ const DELIVERY_LABELS: Record<string, string> = {
   clicked: 'Link clicked',
 }
 
-type ActivityRow = { at: string; text: string }
+/** One Activity line; `dayOnly` = show the day, not the time (signing is stored at the firm's noon). */
+type ActivityRow = { at: string; text: string; dayOnly?: boolean }
 
-/** The Activity list: the email log plus the drafted / sent / signed / voided stamps, newest first. */
-function activityRows(engagement: Engagement): ActivityRow[] {
+/** Hours by role as the figures name them (the hours_cfo placeholder is "Controller / CFO hours"). */
+const HOURS_LABELS = { bookkeeper: 'Bookkeeper', accountant: 'Accountant', controller: 'Controller / CFO' } as const
+
+/** The Activity list: the email log plus the drafted / sent / signed / voided stamps, oldest first. */
+function activityRows(engagement: Engagement, nameOf: (userId: string | null) => string): ActivityRow[] {
   const rows: ActivityRow[] = []
   if (engagement.createdAt) {
     rows.push({ at: engagement.createdAt, text: engagement.proposalId ? 'Drafted from the proposal' : 'Drafted' })
@@ -92,13 +96,17 @@ function activityRows(engagement: Engagement): ActivityRow[] {
     rows.push({ at: engagement.sentAt, text: 'Sent' })
   }
   if (engagement.signedAt) {
+    const who = nameOf(engagement.signedBy)
     rows.push({
       at: engagement.signedAt,
-      text: `Marked signed${engagement.signedNote ? `: ${engagement.signedNote}` : ''}`,
+      dayOnly: true,
+      text: `Marked signed for ${engagementInstantLabel(engagement.signedAt)}${who ? ` by ${who}` : ''}${
+        engagement.signedNote ? `: ${engagement.signedNote}` : ''
+      }`,
     })
   }
   if (engagement.voidedAt) rows.push({ at: engagement.voidedAt, text: 'Voided' })
-  return rows.sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+  return rows.sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
 }
 
 const stamp = (instant: string) => {
@@ -305,14 +313,14 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const setters = { subject: setSubject, emailBody: setEmailBody, letterBody: setLetterBody }
   const refs = { subject: subjectRef, emailBody: emailBodyRef, letterBody: letterBodyRef }
   const fieldWord = (field: Field) => (field === 'subject' ? 'subject' : field === 'emailBody' ? 'email' : 'letter')
-  const chips = (field: Field) => (
-    <PlaceholderChips
-      placeholders={placeholders}
-      fieldWord={fieldWord(field)}
-      disabled={!editable}
-      onInsert={(key) => insertPlaceholder(() => refs[field].current, values[field], key, setters[field])}
-    />
-  )
+  const chips = (field: Field) =>
+    editable ? (
+      <PlaceholderChipsToggle
+        placeholders={placeholders}
+        fieldWord={fieldWord(field)}
+        onInsert={(key) => insertPlaceholder(() => refs[field].current, values[field], key, setters[field])}
+      />
+    ) : null
   const bold = (field: BodyField) => toggleBold(() => refs[field].current, values[field], setters[field])
 
   const save = async () => {
@@ -321,12 +329,14 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
     setSaveError('')
     setNotice('')
     try {
+      // The package only when she changed it: a package deleted since must not block a text edit.
+      const packageChanged = packageId !== (engagement.packageId ?? '')
       const next = await updateEngagementRequest(engagementId, {
         subject,
         emailBody,
         letterBody,
         retainerAmount: parsedRetainer,
-        packageId: packageId || null,
+        ...(packageChanged ? { packageId: packageId || null } : {}),
         planIds,
       })
       adopt(next, { overwrite: true })
@@ -435,21 +445,26 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
 
   const blockedReason = dirty ? 'Save the engagement to preview or send it.' : ''
   const previewTo = sendTo.trim() && sendTo.trim() !== partyEmail ? sendTo.trim() : undefined
-  const activity = activityRows(engagement)
+  const activity = activityRows(
+    engagement,
+    (userId) => (userId ? ((data.employees ?? []).find((employee) => employee.id === userId)?.name ?? '') : ''),
+  )
   const chosenPlans = (data.plans ?? []).filter((plan) => planIds.includes(plan.id))
   const hoursRows = (['bookkeeper', 'accountant', 'controller'] as const)
     .map((role) => ({ role, value: Number(hours[role] ?? 0) }))
     .filter((row) => row.value > 0)
 
   return (
-    <section className="content-grid engagement-editor">
-      <header className="client-detail-header">
+    <section className="engagement-editor">
+      <header className="client-detail-header engagement-editor-header">
         <div>
           <p className="section-kicker">
-            <Link to="/engagements">Engagements</Link>
+            <Link className="engagement-breadcrumb" to="/engagements">
+              Engagements
+            </Link>
           </p>
           <h1>{partyName}</h1>
-          <div className="button-row">
+          <div className="engagement-header-meta">
             <span className="status-pill">{ENGAGEMENT_KIND_LABELS[engagement.kind] ?? engagement.kind}</span>
             <span className="status-pill">{ENGAGEMENT_STATUS_LABELS[engagement.status] ?? engagement.status}</span>
             {engagement.proposalId ? (
@@ -458,6 +473,22 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
             {engagement.clientId ? <Link to={`/clients/${engagement.clientId}`}>Client</Link> : null}
           </div>
         </div>
+        <div className="engagement-header-actions">
+          {editable ? (
+            <button
+              type="button"
+              className="primary-action"
+              disabled={!dirty || saveState === 'saving' || parsedRetainer === undefined}
+              onClick={() => void save()}
+            >
+              Save
+            </button>
+          ) : null}
+          <SaveBadge state={saveState} />
+          {engagement.updatedAt ? (
+            <span className="muted-text">{`Last saved ${stamp(engagement.updatedAt)}`}</span>
+          ) : null}
+        </div>
       </header>
 
       {loadError ? (
@@ -465,368 +496,383 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
           {loadError}
         </p>
       ) : null}
-
-      <div className="panel letters-editor">
-        <h3>The letter</h3>
-        {!editable ? (
-          <p className="muted-text">
-            {`This engagement is ${ENGAGEMENT_STATUS_LABELS[engagement.status].toLowerCase()}, so it can no longer be edited.`}
-          </p>
-        ) : null}
-        <label className="field">
-          <span>Subject</span>
-          <input
-            ref={subjectRef}
-            className="input"
-            type="text"
-            maxLength={200}
-            disabled={!editable}
-            value={subject}
-            onChange={(event) => setSubject(event.target.value)}
-          />
-        </label>
-        {chips('subject')}
-
-        <div className="field">
-          <label htmlFor="engagement-email-body">
-            <span>Email body</span>
-          </label>
-          <BoldBar fieldWord="email" disabled={!editable} onBold={() => bold('emailBody')} />
-          <textarea
-            id="engagement-email-body"
-            ref={emailBodyRef}
-            className="input"
-            rows={8}
-            maxLength={20000}
-            disabled={!editable}
-            value={emailBody}
-            onChange={(event) => setEmailBody(event.target.value)}
-            onKeyDown={(event) => {
-              if (isBoldShortcut(event)) {
-                event.preventDefault()
-                bold('emailBody')
-              }
-            }}
-          />
-        </div>
-        <p className="muted-text">This is the email. The letter rides along as a PDF.</p>
-        {chips('emailBody')}
-
-        <div className="field">
-          <label htmlFor="engagement-letter-body">
-            <span>Letter body</span>
-          </label>
-          <BoldBar fieldWord="letter" disabled={!editable} onBold={() => bold('letterBody')} />
-          <textarea
-            id="engagement-letter-body"
-            ref={letterBodyRef}
-            className="input"
-            rows={24}
-            maxLength={20000}
-            disabled={!editable}
-            value={letterBody}
-            onChange={(event) => setLetterBody(event.target.value)}
-            onKeyDown={(event) => {
-              if (isBoldShortcut(event)) {
-                event.preventDefault()
-                bold('letterBody')
-              }
-            }}
-          />
-        </div>
-        <p className="muted-text">
-          Blank lines start a new paragraph. The firm letterhead, the date and the party&apos;s address are added above
-          it. For bold, select words and press B (or Ctrl+B): they are wrapped in **double asterisks** and come out bold
-          in the email and the PDF.
+      {saveError ? (
+        <p className="form-error" role="alert">
+          {saveError}
         </p>
-        {chips('letterBody')}
+      ) : null}
 
-        {warnings.unknown.length > 0 ? (
-          <p className="form-error" role="status">
-            {unknownPlaceholderSentence(warnings.unknown)}
-          </p>
-        ) : null}
-        {warnings.retired.length > 0 ? (
-          <p className="form-error" role="status">
-            {`${retiredSentence(warnings.retired)}.`}
-          </p>
-        ) : null}
-      </div>
-
-      <div className="panel">
-        <h3>Signing details</h3>
-        <p className="muted-text">Kept on the engagement for when it is signed.</p>
-        <label className="field">
-          <span>Retainer amount</span>
-          <input
-            className="input"
-            type="text"
-            inputMode="decimal"
-            aria-label="Retainer amount"
-            placeholder="None"
-            disabled={!editable}
-            value={retainer}
-            onChange={(event) => setRetainer(event.target.value)}
-          />
-        </label>
-        <p className="muted-text">
-          {monthly > 0
-            ? `The default is one month's fee, ${formatProposalMoney(monthly)}. Blank means no retainer.`
-            : 'Blank means no retainer.'}
-        </p>
-        {parsedRetainer === undefined ? (
-          <p className="form-error" role="alert">
-            Type the retainer as an amount, like 630 or 630.00, or leave it blank for none.
-          </p>
-        ) : null}
-        <label className="field">
-          <span>Package</span>
-          <select
-            className="input"
-            aria-label="Package"
-            disabled={!editable}
-            value={packageId}
-            onChange={(event) => setPackageId(event.target.value)}
-          >
-            <option value="">No package</option>
-            {packages.map((entry) => (
-              <option key={entry.id} value={entry.id}>
-                {entry.name}
-              </option>
-            ))}
-            {packageId && !packages.some((entry) => entry.id === packageId) ? (
-              <option value={packageId}>A package that no longer exists</option>
+      <div className="engagement-layout">
+        <div className="engagement-main">
+          <div className="panel letters-editor">
+            <h3>The letter</h3>
+            {!editable ? (
+              <p className="muted-text">
+                {`This engagement is ${ENGAGEMENT_STATUS_LABELS[engagement.status].toLowerCase()}, so it can no longer be edited.`}
+              </p>
             ) : null}
-          </select>
-        </label>
-        <div className="new-task-menu" ref={plansMenuRef}>
-          <button
-            type="button"
-            className="secondary-action"
-            aria-expanded={plansOpen}
-            disabled={!editable}
-            onClick={() => setPlansOpen((open) => !open)}
-          >
-            {planIds.length > 0 ? `Plans · ${planIds.length}` : 'Plans'}
-          </button>
-          {plansOpen ? (
-            <div className="new-task-menu-popover plans-menu-popover" role="group" aria-label="Plans on this engagement">
-              {(data.plans ?? []).length === 0 ? (
-                <p className="muted-text">No plans yet.</p>
-              ) : (
-                (data.plans ?? []).map((plan) => (
-                  <label key={plan.id} className="check-row">
+            <label className="field">
+              <span>Subject</span>
+              <input
+                ref={subjectRef}
+                className="input"
+                type="text"
+                maxLength={200}
+                disabled={!editable}
+                value={subject}
+                onChange={(event) => setSubject(event.target.value)}
+              />
+            </label>
+            {chips('subject')}
+
+            <div className="field">
+              <label htmlFor="engagement-email-body">
+                <span>Email body</span>
+              </label>
+              {editable ? <BoldBar fieldWord="email" disabled={false} onBold={() => bold('emailBody')} /> : null}
+              <textarea
+                id="engagement-email-body"
+                ref={emailBodyRef}
+                className="input"
+                rows={8}
+                maxLength={20000}
+                disabled={!editable}
+                value={emailBody}
+                onChange={(event) => setEmailBody(event.target.value)}
+                onKeyDown={(event) => {
+                  if (isBoldShortcut(event)) {
+                    event.preventDefault()
+                    bold('emailBody')
+                  }
+                }}
+              />
+            </div>
+            <p className="muted-text">This is the email. The letter rides along as a PDF.</p>
+            {chips('emailBody')}
+
+            <div className="field">
+              <label htmlFor="engagement-letter-body">
+                <span>Letter body</span>
+              </label>
+              {editable ? <BoldBar fieldWord="letter" disabled={false} onBold={() => bold('letterBody')} /> : null}
+              <textarea
+                id="engagement-letter-body"
+                ref={letterBodyRef}
+                className="input"
+                rows={24}
+                maxLength={20000}
+                disabled={!editable}
+                value={letterBody}
+                onChange={(event) => setLetterBody(event.target.value)}
+                onKeyDown={(event) => {
+                  if (isBoldShortcut(event)) {
+                    event.preventDefault()
+                    bold('letterBody')
+                  }
+                }}
+              />
+            </div>
+            <p className="muted-text">
+              Blank lines start a new paragraph. The firm letterhead, the date and the party&apos;s address are added
+              above it. For bold, select words and press B (or Ctrl+B): they are wrapped in **double asterisks** and come
+              out bold in the email and the PDF.
+            </p>
+            {chips('letterBody')}
+
+            {warnings.unknown.length > 0 ? (
+              <p className="form-error" role="status">
+                {unknownPlaceholderSentence(warnings.unknown)}
+              </p>
+            ) : null}
+            {warnings.retired.length > 0 ? (
+              <p className="form-error" role="status">
+                {`${retiredSentence(warnings.retired)}.`}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="panel">
+            <h3>Send and sign</h3>
+            {actionError ? (
+              <p className="form-error" role="alert">
+                {actionError}
+              </p>
+            ) : null}
+            {notice ? (
+              <p className="muted-text" role="status">
+                {notice}
+              </p>
+            ) : null}
+            {blockedReason ? <p className="muted-text">{blockedReason}</p> : null}
+
+            {editable ? (
+              <>
+                <label className="field">
+                  <span>Send to</span>
+                  <input
+                    className="input"
+                    type="email"
+                    aria-label="Send to"
+                    value={sendTo}
+                    onChange={(event) => setTypedTo(event.target.value)}
+                  />
+                </label>
+                <p className="muted-text">
+                  {sendTo.trim() && sendTo.trim() !== partyEmail
+                    ? `For this send only: the party's address on file is ${partyEmail || 'blank'}.`
+                    : `The party's address. Replies go to ${replyTo}; nothing is copied to anyone else.`}
+                </p>
+                <div className="button-row">
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    disabled={dirty}
+                    title={blockedReason || undefined}
+                    onClick={() => setPreviewOpen(true)}
+                  >
+                    Preview
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-action"
+                    disabled={dirty || busy !== '' || !sendTo.trim()}
+                    onClick={() => void send()}
+                  >
+                    {busy === 'send' ? 'Sending...' : engagement.status === 'sent' ? 'Send again' : 'Send'}
+                  </button>
+                </div>
+
+                <h3>Mark as signed</h3>
+                <div className="form-grid two-col">
+                  <label className="field">
+                    <span>Signed on</span>
+                    <input
+                      className="input"
+                      type="date"
+                      aria-label="Signed on"
+                      value={signedOn}
+                      onChange={(event) => setSignedOn(event.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Note (optional)</span>
+                    <textarea
+                      className="input"
+                      rows={2}
+                      maxLength={2000}
+                      aria-label="Signing note"
+                      value={signNote}
+                      onChange={(event) => setSignNote(event.target.value)}
+                    />
+                  </label>
+                </div>
+                {engagement.status === 'draft' ? (
+                  <label className="check-row">
                     <input
                       type="checkbox"
-                      checked={planIds.includes(plan.id)}
-                      onChange={(event) =>
-                        setPlanIds((ids) =>
-                          event.target.checked ? [...ids, plan.id] : ids.filter((id) => id !== plan.id),
-                        )
-                      }
+                      checked={inPerson}
+                      onChange={(event) => setInPerson(event.target.checked)}
                     />
-                    <span>{plan.name}</span>
+                    <span>This letter was signed in person (it was never sent from here)</span>
                   </label>
-                ))
-              )}
-            </div>
-          ) : null}
+                ) : null}
+                <div className="button-row">
+                  <button
+                    type="button"
+                    className="primary-action"
+                    disabled={!canSign || busy !== ''}
+                    onClick={() => void sign()}
+                  >
+                    Mark as signed
+                  </button>
+                  <button type="button" className="ghost-action" disabled={busy !== ''} onClick={() => void voidIt()}>
+                    Void
+                  </button>
+                </div>
+                {!canSign ? (
+                  <p className="muted-text">Send the letter first, or tick &quot;signed in person&quot;.</p>
+                ) : null}
+              </>
+            ) : (
+              <>
+                <p className="muted-text">
+                  {`This engagement is ${ENGAGEMENT_STATUS_LABELS[engagement.status].toLowerCase()}. Preview shows the letter as it was.`}
+                </p>
+                <button type="button" className="secondary-action" onClick={() => setPreviewOpen(true)}>
+                  Preview
+                </button>
+              </>
+            )}
+          </div>
         </div>
-        {chosenPlans.length > 0 ? (
-          <p className="muted-text">{`Plans: ${chosenPlans.map((plan) => plan.name).join(', ')}`}</p>
-        ) : null}
 
-        {saveError ? (
-          <p className="form-error" role="alert">
-            {saveError}
-          </p>
-        ) : null}
-        <div className="button-row">
-          <button
-            type="button"
-            className="primary-action"
-            disabled={!editable || !dirty || saveState === 'saving' || parsedRetainer === undefined}
-            onClick={() => void save()}
-          >
-            Save
-          </button>
-          <SaveBadge state={saveState} />
-          {engagement.updatedAt ? (
-            <span className="muted-text">{`Last saved ${stamp(engagement.updatedAt)}`}</span>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="panel">
-        <h3>From the proposal</h3>
-        <dl className="engagement-figures">
-          <dt>Monthly</dt>
-          <dd>{formatProposalMoney(monthly)}</dd>
-          <dt>Annual</dt>
-          <dd>{formatProposalMoney(Number(totals.annual ?? 0))}</dd>
-          <dt>One-time</dt>
-          <dd>{formatProposalMoney(Number(totals.oneTime ?? 0))}</dd>
-          <dt>Clean-up</dt>
-          <dd>{formatProposalMoney(Number(totals.cleanup ?? 0))}</dd>
-        </dl>
-        {hoursRows.length > 0 ? (
-          <p className="muted-text">
-            {`Estimated monthly hours: ${hoursRows
-              .map((row) => `${PROPOSAL_ROLE_LABELS[row.role]} ${row.value.toFixed(1)}`)
-              .join(', ')}`}
-          </p>
-        ) : (
-          <p className="muted-text">No estimated hours on the proposal.</p>
-        )}
-        {skipped.length > 0 ? (
-          <p className="muted-text">
-            {`Not in the letter: ${skipped.map((line) => `${line.name} (${line.reason})`).join(', ')}`}
-          </p>
-        ) : null}
-
-        <h3>Sections</h3>
-        {engagement.sectionKeys.length > 0 ? (
-          <ul className="engagement-sections-used" aria-label="Sections used">
-            {engagement.sectionKeys.map((key) => (
-              <li key={key}>{sectionTitles[key] || key}</li>
-            ))}
-          </ul>
-        ) : (
-          <p className="muted-text">No sections recorded.</p>
-        )}
-        {engagement.status === 'draft' ? (
-          <button
-            type="button"
-            className="secondary-action"
-            disabled={busy !== ''}
-            onClick={() => void reassemble()}
-          >
-            Re-assemble from the proposal
-          </button>
-        ) : null}
-      </div>
-
-      <div className="panel">
-        <h3>Send and sign</h3>
-        {actionError ? (
-          <p className="form-error" role="alert">
-            {actionError}
-          </p>
-        ) : null}
-        {notice ? (
-          <p className="muted-text" role="status">
-            {notice}
-          </p>
-        ) : null}
-        {blockedReason ? <p className="muted-text">{blockedReason}</p> : null}
-
-        {editable ? (
-          <>
+        <aside className="engagement-rail">
+          <div className="panel">
+            <h3>Signing details</h3>
+            <p className="muted-text">Kept on the engagement for when it is signed.</p>
             <label className="field">
-              <span>Send to</span>
+              <span>Retainer amount</span>
               <input
                 className="input"
-                type="email"
-                aria-label="Send to"
-                value={sendTo}
-                onChange={(event) => setTypedTo(event.target.value)}
+                type="text"
+                inputMode="decimal"
+                aria-label="Retainer amount"
+                placeholder="None"
+                disabled={!editable}
+                value={retainer}
+                onChange={(event) => setRetainer(event.target.value)}
               />
             </label>
             <p className="muted-text">
-              {sendTo.trim() && sendTo.trim() !== partyEmail
-                ? `For this send only: the party's address on file is ${partyEmail || 'blank'}.`
-                : `The party's address. Replies go to ${replyTo}; nothing is copied to anyone else.`}
+              {monthly > 0
+                ? `The default is one month's fee, ${formatProposalMoney(monthly)}. Blank means no retainer.`
+                : 'Blank means no retainer.'}
             </p>
-            <div className="button-row">
+            {parsedRetainer === undefined ? (
+              <p className="form-error" role="alert">
+                Type the retainer as an amount, like 630 or 630.00, or leave it blank for none.
+              </p>
+            ) : null}
+            <label className="field">
+              <span>Package</span>
+              <select
+                className="input"
+                aria-label="Package"
+                disabled={!editable}
+                value={packageId}
+                onChange={(event) => setPackageId(event.target.value)}
+              >
+                <option value="">No package</option>
+                {packages.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.name}
+                  </option>
+                ))}
+                {packageId && !packages.some((entry) => entry.id === packageId) ? (
+                  <option value={packageId}>A package that no longer exists</option>
+                ) : null}
+              </select>
+            </label>
+            <div className="new-task-menu" ref={plansMenuRef}>
               <button
                 type="button"
                 className="secondary-action"
-                disabled={dirty}
-                title={blockedReason || undefined}
-                onClick={() => setPreviewOpen(true)}
+                aria-expanded={plansOpen}
+                disabled={!editable}
+                onClick={() => setPlansOpen((open) => !open)}
               >
-                Preview
+                {planIds.length > 0 ? `Plans · ${planIds.length}` : 'Plans'}
               </button>
-              <button
-                type="button"
-                className="primary-action"
-                disabled={dirty || busy !== '' || !sendTo.trim()}
-                onClick={() => void send()}
-              >
-                {busy === 'send' ? 'Sending...' : engagement.status === 'sent' ? 'Send again' : 'Send'}
-              </button>
+              {plansOpen ? (
+                <div
+                  className="new-task-menu-popover plans-menu-popover"
+                  role="group"
+                  aria-label="Plans on this engagement"
+                >
+                  {(data.plans ?? []).length === 0 ? (
+                    <p className="muted-text">No plans yet.</p>
+                  ) : (
+                    (data.plans ?? []).map((plan) => (
+                      <label key={plan.id} className="check-row">
+                        <input
+                          type="checkbox"
+                          checked={planIds.includes(plan.id)}
+                          onChange={(event) =>
+                            setPlanIds((ids) =>
+                              event.target.checked ? [...ids, plan.id] : ids.filter((id) => id !== plan.id),
+                            )
+                          }
+                        />
+                        <span>{plan.name}</span>
+                      </label>
+                    ))
+                  )}
+                </div>
+              ) : null}
             </div>
-
-            <h3>Mark as signed</h3>
-            <label className="field">
-              <span>Signed on</span>
-              <input
-                className="input"
-                type="date"
-                aria-label="Signed on"
-                value={signedOn}
-                onChange={(event) => setSignedOn(event.target.value)}
-              />
-            </label>
-            <label className="field">
-              <span>Note (optional)</span>
-              <textarea
-                className="input"
-                rows={2}
-                maxLength={2000}
-                aria-label="Signing note"
-                value={signNote}
-                onChange={(event) => setSignNote(event.target.value)}
-              />
-            </label>
-            {engagement.status === 'draft' ? (
-              <label className="check-row">
-                <input type="checkbox" checked={inPerson} onChange={(event) => setInPerson(event.target.checked)} />
-                <span>This letter was signed in person (it was never sent from here)</span>
-              </label>
+            {chosenPlans.length > 0 ? (
+              <p className="muted-text">{`Plans: ${chosenPlans.map((plan) => plan.name).join(', ')}`}</p>
             ) : null}
-            <div className="button-row">
+          </div>
+
+          <div className="panel">
+            <h3>From the proposal</h3>
+            <dl className="engagement-figures">
+              <div>
+                <dt>Monthly</dt>
+                <dd>{formatProposalMoney(monthly)}</dd>
+              </div>
+              <div>
+                <dt>Annual</dt>
+                <dd>{formatProposalMoney(Number(totals.annual ?? 0))}</dd>
+              </div>
+              <div>
+                <dt>One-time</dt>
+                <dd>{formatProposalMoney(Number(totals.oneTime ?? 0))}</dd>
+              </div>
+              <div>
+                <dt>Clean-up</dt>
+                <dd>{formatProposalMoney(Number(totals.cleanup ?? 0))}</dd>
+              </div>
+            </dl>
+            {hoursRows.length > 0 ? (
+              <p className="engagement-hours" aria-label="Estimated monthly hours">
+                <span className="muted-text">Estimated monthly hours:</span>
+                {hoursRows.map((row) => (
+                  <span key={row.role} className="engagement-hours-item">
+                    {`${HOURS_LABELS[row.role]} ${row.value.toFixed(1)}`}
+                  </span>
+                ))}
+              </p>
+            ) : (
+              <p className="muted-text">No estimated hours on the proposal.</p>
+            )}
+            {skipped.length > 0 ? (
+              <p className="muted-text">
+                {`Not in the letter: ${skipped.map((line) => `${line.name} (${line.reason})`).join(', ')}`}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="panel">
+            <h3>Sections</h3>
+            {engagement.sectionKeys.length > 0 ? (
+              <ol className="engagement-sections-used" aria-label="Sections used">
+                {engagement.sectionKeys.map((key) => (
+                  <li key={key}>{sectionTitles[key] || key}</li>
+                ))}
+              </ol>
+            ) : (
+              <p className="muted-text">No sections recorded.</p>
+            )}
+            {engagement.status === 'draft' ? (
               <button
                 type="button"
-                className="primary-action"
-                disabled={!canSign || busy !== ''}
-                title={canSign ? undefined : 'Send the letter first, or tick "signed in person".'}
-                onClick={() => void sign()}
+                className="secondary-action"
+                disabled={busy !== ''}
+                onClick={() => void reassemble()}
               >
-                Mark as signed
+                Re-assemble from the proposal
               </button>
-              <button type="button" className="ghost-action" disabled={busy !== ''} onClick={() => void voidIt()}>
-                Void
-              </button>
-            </div>
-          </>
-        ) : (
-          <>
-            <p className="muted-text">
-              {engagement.status === 'signed'
-                ? `Signed on ${engagement.signedAt ? stamp(engagement.signedAt).replace(/,? \d+:\d+.*$/, '') : 'a day not recorded'}.`
-                : `This engagement is ${ENGAGEMENT_STATUS_LABELS[engagement.status].toLowerCase()}.`}
-            </p>
-            <button type="button" className="secondary-action" onClick={() => setPreviewOpen(true)}>
-              Preview
-            </button>
-          </>
-        )}
-      </div>
+            ) : null}
+          </div>
 
-      <div className="panel">
-        <h3>Activity</h3>
-        {activity.length === 0 ? (
-          <p className="muted-text">Nothing yet.</p>
-        ) : (
-          <ul className="engagement-activity" aria-label="Activity">
-            {activity.map((row, index) => (
-              <li key={`${row.at}-${index}`}>
-                <span className="muted-text">{stamp(row.at)}</span> {row.text}
-              </li>
-            ))}
-          </ul>
-        )}
+          <div className="panel">
+            <h3>Activity</h3>
+            {activity.length === 0 ? (
+              <p className="muted-text">Nothing yet.</p>
+            ) : (
+              <ul className="engagement-activity" aria-label="Activity">
+                {activity.map((row, index) => (
+                  <li key={`${row.at}-${index}`}>
+                    <span className="engagement-activity-when">{row.dayOnly ? engagementInstantLabel(row.at) : stamp(row.at)}</span>
+                    <span>{row.text}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </aside>
       </div>
 
       {previewOpen ? (

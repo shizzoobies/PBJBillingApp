@@ -25497,6 +25497,12 @@ describe('accepting a proposal (file backend)', () => {
       action: 'proposal_accepted',
     })
     expect(result.createdClient).toBe(true)
+    // The engagement Accept drafted is logged as the recovery route logs one (round-2 review L11).
+    expect(result.engagementId).toEqual(expect.any(String))
+    expect(added.find((entry) => entry.action === 'engagement_created')).toMatchObject({
+      action: 'engagement_created',
+      target: `Acme Books · ${result.engagementId}`,
+    })
   })
 
   it('carries createdClientId on ANY failure after the client is created, not just the lost-link race', async () => {
@@ -46353,6 +46359,7 @@ import { EngagementStateError } from './store.js'
 import { DEFAULT_ENGAGEMENT_SECTIONS } from '../lib/engagement-sections.js'
 import { assembleEngagement } from '../lib/engagement-assemble.js'
 import { engagementHash } from '../lib/engagement-hash.js'
+import { engagementValues, skippedEngagementLines } from '../lib/engagement-values.js'
 
 async function clearEngagements() {
   const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
@@ -46475,10 +46482,59 @@ describe('engagements (file backend)', () => {
     expect(off.find((section) => section.key === 'new_terms')?.active).toBe(false)
     expect(off.find((section) => section.key === 'payroll')?.active).toBe(true)
 
-    // Deactivating everything is not "empty": nothing is re-seeded over it.
-    const none = await store.saveEngagementSections([])
-    expect(none.every((section) => section.active === false)).toBe(true)
-    expect((await store.listEngagementSections()).every((section) => section.active === false)).toBe(true)
+    // Every section switched off (the email aside) is not "empty": nothing is re-seeded over it.
+    const none = await store.saveEngagementSections(off.map((section) => ({ ...section, active: false })))
+    expect(none.filter((section) => section.active).map((section) => section.key)).toEqual(['email'])
+    expect((await store.listEngagementSections()).filter((section) => section.active).map((section) => section.key)).toEqual([
+      'email',
+    ])
+  })
+
+  // Round-2 review M3: the cover email is never switched off, and an empty list is refused.
+  it('keeps the email section in use whatever the list says, and refuses an empty list', async () => {
+    const library = await store.listEngagementSections()
+    const withoutEmail = await store.saveEngagementSections(library.filter((section) => section.key !== 'email'))
+    expect(withoutEmail.find((section) => section.key === 'email')?.active).toBe(true)
+    const emailOff = await store.saveEngagementSections(
+      library.map((section) => (section.key === 'email' ? { ...section, active: false } : section)),
+    )
+    expect(emailOff.find((section) => section.key === 'email')?.active).toBe(true)
+
+    const before = await readAuth()
+    const error = await store.saveEngagementSections([]).catch((caught) => caught)
+    expect(error).toBeInstanceOf(EngagementStateError)
+    expect(error.reason).toBe('invalid')
+    expect((await readAuth()).engagementSections).toEqual(before.engagementSections)
+  })
+
+  // Round-2 review M1: the figures keep each line's count and flag, so the letter says the
+  // months she typed (not the proposal's input) and "Not in the letter" names a retired line.
+  it("keeps each line's count and flag: a typed clean-up quantity fills the months, a retired line is named", async () => {
+    const proposal = await store.createProposal({
+      prospect: { company: 'Acme Books', contactName: 'Pat Doe', email: 'pat@acme.test' },
+      inputs: { transactions: 120, cleanupMonths: 3 },
+      selections: [
+        { serviceId: 'monthly-weekly-transactions-basic' },
+        { serviceId: 'cleanup-transactions-basic', quantity: 6 },
+      ],
+    })
+    const retired = {
+      ...proposal,
+      pricingSnapshot: {
+        ...proposal.pricingSnapshot,
+        lines: [
+          ...proposal.pricingSnapshot.lines,
+          { serviceId: 'gone-service', group: 'Reports', name: 'Old report', amount: 0, cadence: null, formula: '', flag: 'retired' },
+        ],
+      },
+    }
+    const engagement = await store.createEngagementFromProposal(retired, {})
+    const cleanup = engagement.figures.lines.find((line) => line.serviceId === 'cleanup-transactions-basic')
+    expect(cleanup).toMatchObject({ count: 6, flag: null })
+    const values = engagementValues({ engagement, snapshot: engagement.figures, party: engagement.party })
+    expect(values.cleanup_months_phrase).toBe(' for the past 6 months')
+    expect(engagement.figures.lines.find((line) => line.serviceId === 'gone-service')?.flag).toBe('retired')
+    expect(skippedEngagementLines(engagement.figures).map((line) => line.name)).toContain('Old report')
   })
 
   it('refuses a library it cannot take whole, and writes nothing', async () => {
@@ -46535,7 +46591,7 @@ describe('engagements (file backend)', () => {
     expect(engagement.figures.totals.monthly).toBe(proposal.pricingSnapshot.totals.monthly)
     expect(engagement.figures.lines).toHaveLength(proposal.pricingSnapshot.lines.length)
     const [line] = engagement.figures.lines
-    expect(Object.keys(line).sort()).toEqual(['amount', 'cadence', 'formula', 'group', 'hours', 'name', 'role', 'serviceId'])
+    expect(Object.keys(line).sort()).toEqual(['amount', 'cadence', 'count', 'flag', 'formula', 'group', 'hours', 'name', 'role', 'serviceId'])
     expect(line).toMatchObject({ serviceId: 'monthly-weekly-transactions-basic', amount: 630 })
     expect(Object.keys(engagement.figures.hoursByRole).sort()).toEqual(['accountant', 'bookkeeper', 'controller'])
     // Hours by role sit beside the money totals, as in the pricing snapshot.
@@ -46576,6 +46632,19 @@ describe('engagements (file backend)', () => {
       city: 'Nashville',
     })
     expect(engagement.figures.paymentTerms).toBe('Net 15')
+  })
+
+  // Round-2 review L1: an upsell's party email is the address an invoice would go to first.
+  it('takes an upsell party email from the client contacts an invoice would use first', async () => {
+    const data = await store.read()
+    data.contacts = [
+      { id: 'ct-1', name: 'Robin Ray', email: 'robin.personal@mail.test', companyEmails: [{ clientId: 'c1', email: 'books@acme.test' }], linkedContactIds: [] },
+    ]
+    data.clients = data.clients.map((client) => (client.id === 'c1' ? { ...client, contactIds: ['ct-1'] } : client))
+    await store.write(data)
+    const upsell = await store.createProposal({ clientId: 'c1', inputs: { transactions: 120 }, selections: [] })
+    const engagement = await store.createEngagementFromProposal(upsell, {})
+    expect(engagement.party.email).toBe('books@acme.test')
   })
 
   it('a proposal with no monthly fee drafts no retainer; an empty snapshot is not a refusal', async () => {
@@ -47163,7 +47232,7 @@ describe('engagements (Postgres statements)', () => {
     )
     const [deactivate] = fake.matching(/^update engagement_sections /i)
     expect(deactivate.text).toBe(
-      'update engagement_sections set active = false, updated_at = now() where active and not (key = any($1::text[]))',
+      "update engagement_sections set active = false, updated_at = now() where active and key <> 'email' and not (key = any($1::text[]))",
     )
     expect(deactivate.params[0]).not.toContain('payroll')
     expect(texts.indexOf(deactivate.text)).toBeLessThan(texts.findIndex((text) => /^commit$/i.test(text)))

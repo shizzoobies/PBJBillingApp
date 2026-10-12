@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { LetterPlaceholderInfo } from '../../lib/types'
 
 /** The placeholder chips and the B button every letter editor shares (helpers in ./letterEditing). */
@@ -29,6 +30,36 @@ export function PlaceholderChips({
           {`{{${placeholder.key}}}`}
         </button>
       ))}
+    </div>
+  )
+}
+
+/**
+ * The chips folded behind a small "Placeholders (N)" toggle, closed by default: the
+ * engagement list is long, and three boxes of it at once buried the letter.
+ */
+export function PlaceholderChipsToggle({
+  placeholders,
+  fieldWord,
+  onInsert,
+}: {
+  placeholders: ReadonlyArray<LetterPlaceholderInfo>
+  fieldWord: string
+  onInsert: (key: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="letters-chips-toggle">
+      <button
+        type="button"
+        className="ghost-action letters-chips-button"
+        aria-expanded={open}
+        aria-label={`Placeholders for the ${fieldWord} (${placeholders.length})`}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {`Placeholders (${placeholders.length})`}
+      </button>
+      {open ? <PlaceholderChips placeholders={placeholders} fieldWord={fieldWord} onInsert={onInsert} /> : null}
     </div>
   )
 }

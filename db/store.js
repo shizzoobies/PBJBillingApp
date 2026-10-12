@@ -39,9 +39,10 @@ import {
   softwareLocksOf,
 } from '../lib/proposal-pricing.js'
 import { proposalOutcomeAction, proposalOutcomeWords } from '../lib/proposal-outcomes.js'
-import { DEFAULT_ENGAGEMENT_SECTIONS, sanitizeEngagementSections } from '../lib/engagement-sections.js'
+import { DEFAULT_ENGAGEMENT_SECTIONS, EMAIL_SECTION_KEY, sanitizeEngagementSections } from '../lib/engagement-sections.js'
 import { assembleEngagement } from '../lib/engagement-assemble.js'
 import { engagementHash } from '../lib/engagement-hash.js'
+import { resolveInvoiceRecipients } from '../lib/invoice-recipients.js'
 import {
   QUESTIONNAIRE_EXPIRY_DAYS,
   answersToProposalSeed,
@@ -13462,14 +13463,27 @@ export class AppDataStore {
       // prospect for a new client (the proposal as it was before Accept linked
       // it) and the client for an upsell; the row carries the client either way.
       let engagementId = null
+      let engagement = null
       try {
-        const engagement = await this.createEngagementFromProposal(
+        engagement = await this.createEngagementFromProposal(
           { ...proposal, clientId: linkedClientId },
           { kind: 'original', createdBy: actorUserId, clientId },
         )
         engagementId = engagement?.id ?? null
       } catch (error) {
         console.error('[engagements] Accept could not draft the engagement for', id, error)
+      }
+      // The same entry the recovery route (POST /api/proposals/:id/engagement) records.
+      if (engagementId && actorUserId) {
+        try {
+          await this.recordActivity(
+            actorUserId,
+            'engagement_created',
+            `${engagement.party?.company || engagement.party?.contactName || 'Engagement'} · ${engagementId}`,
+          )
+        } catch (error) {
+          console.error('[engagements] could not record the draft for', id, error)
+        }
       }
       return { proposal: accepted, clientId, createdClient, packageApplied: Boolean(packageResult), engagementId }
     } catch (e) {
@@ -26300,7 +26314,12 @@ export class AppDataStore {
     if (!Array.isArray(list)) {
       throw new EngagementStateError('Send the sections as a list.', 'invalid')
     }
-    const wanted = list.filter((entry) => entry?.active !== false)
+    // An empty list is a lost page, not a decision: switching every section off is
+    // refused. The cover email (key 'email') is never switched off - every letter needs it.
+    if (list.length === 0) {
+      throw new EngagementStateError('There are no sections in that list. Nothing was saved.', 'invalid')
+    }
+    const wanted = list.filter((entry) => entry?.active !== false || entry?.key === EMAIL_SECTION_KEY)
     const tooLong = wanted.find(
       (entry) =>
         (typeof entry?.title === 'string' && entry.title.trim().length > 120) ||
@@ -26345,7 +26364,7 @@ export class AppDataStore {
         }
         await dbClient.query(
           `update engagement_sections set active = false, updated_at = now()
-            where active and not (key = any($1::text[]))`,
+            where active and key <> 'email' and not (key = any($1::text[]))`,
           [keys],
         )
       })
@@ -26374,7 +26393,7 @@ export class AppDataStore {
         }
       }
       for (const row of authState.engagementSections) {
-        if (row && row.active !== false && !keys.includes(row.key)) {
+        if (row && row.active !== false && row.key !== EMAIL_SECTION_KEY && !keys.includes(row.key)) {
           row.active = false
           row.updatedAt = now
         }
@@ -26496,6 +26515,10 @@ export class AppDataStore {
           // The priced formula text names the counts a line was priced with (clean-up
           // months, sales-tax states), which the letter's placeholders print.
           formula: String(line.formula ?? ''),
+          // The count a line was priced with (a typed clean-up quantity, the states) and its
+          // flag ('retired', 'needs-count'...): the placeholders and "Not in the letter" read them.
+          count: typeof line.count === 'number' ? line.count : typeof priced?.count === 'number' ? priced.count : null,
+          flag: line.flag ?? null,
         }
       })
     // Hours by role sit BESIDE the money totals (lib/proposal-pricing.js). The stored
@@ -26513,12 +26536,23 @@ export class AppDataStore {
     }
   }
 
-  /** The party of a letter to an existing client: its name, contact, email, phone and address. */
-  static _engagementPartyFromClient(client) {
+  /**
+   * The party of a letter to an existing client: its name, contact, email, phone and
+   * address. The email is the first address an invoice to the client would go to
+   * (its linked contacts' addresses, then the client record's) - `contacts` are the
+   * client's linked contacts - falling back to the client record's.
+   */
+  static _engagementPartyFromClient(client, contacts = []) {
+    let email = client.email
+    try {
+      email = resolveInvoiceRecipients({ client, contacts }).to[0] || client.email
+    } catch {
+      // a contact list it cannot read leaves the client record's address
+    }
     return cleanEngagementParty({
       company: client.name,
       contactName: client.contactName || client.contact,
-      email: client.email,
+      email,
       phone: client.phone,
       addressLine1: client.addressLine1,
       addressLine2: client.addressLine2,
@@ -26526,6 +26560,35 @@ export class AppDataStore {
       state: client.state,
       postalCode: client.postalCode,
     })
+  }
+
+  /**
+   * The contacts linked to a client (for the party's email), read without `read()` - a
+   * draft must never trigger the materializer's write-back. A failed read is no contacts.
+   */
+  async _engagementClientContacts(client) {
+    const ids = Array.isArray(client?.contactIds) ? client.contactIds.filter(Boolean) : []
+    if (ids.length === 0) return []
+    try {
+      if (this.pool) {
+        const { rows } = await this.pool.query(
+          'select id, name, email, company_emails, archived_at from contacts where id = any($1::text[])',
+          [ids],
+        )
+        return rows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          email: row.email,
+          companyEmails: parseCompanyEmails(row.company_emails),
+          archivedAt: row.archived_at ?? null,
+        }))
+      }
+      const data = await readJson(localDataPath)
+      return (data.contacts ?? []).filter((contact) => ids.includes(contact?.id))
+    } catch (error) {
+      console.error('[engagements] could not read the client contacts:', error?.message || error)
+      return []
+    }
   }
 
   /**
@@ -26546,7 +26609,7 @@ export class AppDataStore {
     const firm = await this.getFirmSettings()
     const linked = proposal.clientId ? await this.getClientById(proposal.clientId) : null
     const party = linked
-      ? AppDataStore._engagementPartyFromClient(linked)
+      ? AppDataStore._engagementPartyFromClient(linked, await this._engagementClientContacts(linked))
       : cleanEngagementParty(proposal.prospect)
     const figures = this._engagementFigures(proposal, firm, linked)
     const assembled = assembleEngagement({

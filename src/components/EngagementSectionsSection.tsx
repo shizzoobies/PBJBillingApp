@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { CollapsibleSection, SaveBadge } from './SectionKit'
-import { BoldBar, PlaceholderChips } from './letters/LetterEditorKit'
+import { BoldBar, PlaceholderChipsToggle } from './letters/LetterEditorKit'
 import { insertPlaceholder, isBoldShortcut, toggleBold, unknownPlaceholderSentence } from './letters/letterEditing'
 import { listEngagementSectionsRequest, saveEngagementSectionsRequest } from '../lib/api'
 import type { SaveFlashState } from '../lib/useSaveFlash'
@@ -210,15 +210,18 @@ export function EngagementSectionsSection({ pricing }: { pricing: ProposalPricin
               >
                 Down
               </button>
-              <label className="check-row">
-                <input
-                  type="checkbox"
-                  aria-label={`Use ${label}`}
-                  checked={row.active}
-                  onChange={(event) => update(row.uid, { active: event.target.checked })}
-                />
-                <span>In use</span>
-              </label>
+              {isEmail ? null : (
+                // The cover email is always in use: every letter needs one (the server keeps it on too).
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    aria-label={`Use ${label}`}
+                    checked={row.active}
+                    onChange={(event) => update(row.uid, { active: event.target.checked })}
+                  />
+                  <span>In use</span>
+                </label>
+              )}
             </div>
             <div className="form-grid two-col">
               <label className="field">
@@ -301,14 +304,16 @@ export function EngagementSectionsSection({ pricing }: { pricing: ProposalPricin
                   </select>
                 </label>
                 {row.trigger.serviceIds.length > 0 ? (
-                  <div className="button-row">
+                  <div className="button-row" role="list" aria-label={`Service lines ${label} follows`}>
+                    <span className="muted-text">Service lines:</span>
                     {row.trigger.serviceIds.map((id) => (
-                      <span key={id} className="status-pill">
+                      <span key={id} className="status-pill" role="listitem">
                         {serviceLabel(id)}{' '}
                         <button
                           type="button"
                           className="ghost-action"
                           aria-label={`Remove ${serviceLabel(id)} from ${label}`}
+                          disabled={row.trigger.always}
                           onClick={() =>
                             setTrigger(row.uid, { serviceIds: row.trigger.serviceIds.filter((entry) => entry !== id) })
                           }
@@ -349,7 +354,7 @@ export function EngagementSectionsSection({ pricing }: { pricing: ProposalPricin
                 }}
               />
             </div>
-            <PlaceholderChips
+            <PlaceholderChipsToggle
               placeholders={ENGAGEMENT_PLACEHOLDERS}
               fieldWord={`text of ${label}`}
               onInsert={(key) => insertPlaceholder(box, row.body, key, setBody)}

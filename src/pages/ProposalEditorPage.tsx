@@ -79,6 +79,8 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   // worth a look (a chosen package that could not be applied), held apart
   // from `error` so it never renders in the alarm styling.
   const [notice, setNotice] = useState('')
+  // The engagement Accept drafted, linked from the notice when there is one to read first.
+  const [noticeEngagementId, setNoticeEngagementId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [packages, setPackages] = useState<Package[]>([])
   const [packageId, setPackageId] = useState('')
@@ -438,9 +440,16 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     }
   }
 
-  /** After Accept: straight to the engagement letter it drafted, when it drafted one. */
-  const openDraftedEngagement = (engagementId: string | null | undefined) => {
-    if (engagementId) navigate(`/engagements/${engagementId}`)
+  /**
+   * After Accept: straight to the engagement letter it drafted - unless there is a
+   * notice to read first (the package could not be applied), which then carries an
+   * "Open the engagement" link instead.
+   */
+  const afterAccept = (chosenPackage: string | null, result: { packageApplied: boolean; engagementId?: string | null }) => {
+    const message = noticeFromAccept(chosenPackage, result.packageApplied)
+    setNotice(message)
+    setNoticeEngagementId(message ? (result.engagementId ?? null) : null)
+    if (!message && result.engagementId) navigate(`/engagements/${result.engagementId}`)
   }
 
   /** A toast/notice on the accepted result — the package could not be applied. */
@@ -495,8 +504,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           packageId: chosenPackage,
           ...(planIds.length > 0 ? { planIds } : {}),
         })
-        setNotice(noticeFromAccept(chosenPackage, result.packageApplied))
-        openDraftedEngagement(result.engagementId)
+        afterAccept(chosenPackage, result)
         return result.proposal
       })
       return
@@ -523,8 +531,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
         ...(planIds.length > 0 ? { planIds } : {}),
         ...(addSoftware === null ? {} : { addSoftware }),
       })
-      setNotice(noticeFromAccept(chosenPackage, result.packageApplied))
-      openDraftedEngagement(result.engagementId)
+      afterAccept(chosenPackage, result)
       return result.proposal
     })
   }
@@ -667,7 +674,17 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           {error}
         </p>
       ) : null}
-      {notice ? <p className="empty-state">{notice}</p> : null}
+      {notice ? (
+        <p className="empty-state">
+          {notice}
+          {noticeEngagementId ? (
+            <>
+              {' '}
+              <Link to={`/engagements/${noticeEngagementId}`}>Open the engagement</Link>
+            </>
+          ) : null}
+        </p>
+      ) : null}
 
       <div className="task-area-tabs" role="tablist" aria-label="Proposal sections">
         {PROPOSAL_TABS.map((entry) => (

@@ -1888,6 +1888,25 @@ describe('the engagement a Won proposal drafts', () => {
     expect(await screen.findByText('Engagement editor')).toBeTruthy()
   })
 
+  it('when the package could not be applied, stays to show that and links the engagement instead', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    api.acceptProposalRequest = vi.fn(async () => ({
+      proposal: WON,
+      clientId: 'client-new',
+      createdClient: true,
+      packageApplied: false,
+      engagementId: 'eng-7',
+    }))
+    renderEditorWithEngagements()
+    await waitFor(() => expect(api.listPackagesRequest).toHaveBeenCalled())
+    fireEvent.change(await screen.findByLabelText('Package to apply on accept'), { target: { value: 'pkg-1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+    expect(await screen.findByText(/the package could not be applied/)).toBeTruthy()
+    const links = screen.getAllByRole('link', { name: 'Open the engagement' })
+    expect(links.some((link) => link.getAttribute('href') === '/engagements/eng-7')).toBe(true)
+    expect(screen.queryByText('Engagement editor')).toBeNull()
+  })
+
   it('stays on the proposal when Accept drafted none', async () => {
     vi.stubGlobal('confirm', vi.fn(() => true))
     renderEditorWithEngagements()
