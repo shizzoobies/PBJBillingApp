@@ -35956,6 +35956,7 @@ const LINK_ANSWERS = {
   state: 'TN',
   postalCode: '37201',
   whatTheyDo: 'Bakery',
+  entityType: 'LLC',
   'count:transactions': '120',
   'count:balanceSheetAccounts': '14',
   services: ['Monthly'],
@@ -36045,15 +36046,48 @@ describe('proposal questionnaires (file backend)', () => {
 
   it('refuses a link with no email, and the mistake does not use up the submission', async () => {
     const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    const { email: _email, ...noEmail } = LINK_ANSWERS
     await expect(
-      store.submitProposalQuestionnaire({ token: created.token }, { contactName: 'Pat' }),
-    ).rejects.toMatchObject({ reason: 'invalid' })
+      store.submitProposalQuestionnaire({ token: created.token }, noEmail),
+    ).rejects.toMatchObject({
+      reason: 'invalid',
+      problems: ['Please give us an email address we can reach you at.'],
+    })
     expect((await store.getProposalQuestionnaire(created.id)).status).toBe('open')
-    const ok = await store.submitProposalQuestionnaire(
-      { token: created.token },
-      { contactName: 'Pat', email: 'pat@acme.test' },
-    )
+    const ok = await store.submitProposalQuestionnaire({ token: created.token }, LINK_ANSWERS)
     expect(ok.status).toBe('submitted')
+  })
+
+  // Brittany, 2026-10-10: a link also needs the business, phone, street address,
+  // city, state, ZIP, what the business does and how it is set up.
+  it('refuses a link that only has a name and an email, naming every missing answer', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    await expect(
+      store.submitProposalQuestionnaire(
+        { token: created.token },
+        { contactName: 'Pat', email: 'pat@acme.test', addressLine2: 'Suite 4' },
+      ),
+    ).rejects.toMatchObject({
+      reason: 'invalid',
+      message: 'Please tell us your business name.',
+      problems: [
+        'Please tell us your business name.',
+        'Please give us a phone number.',
+        'Please enter your street address.',
+        'Please enter your city.',
+        'Please enter your state.',
+        'Please enter your ZIP code.',
+        'Please tell us what your business does.',
+        'Please choose how your business is set up.',
+      ],
+    })
+    expect((await store.getProposalQuestionnaire(created.id)).status).toBe('open')
+  })
+
+  it('still lets a call sheet be submitted with only a business name', async () => {
+    const sheet = await store.createProposalQuestionnaire({ mode: 'call' })
+    const submitted = await store.submitProposalQuestionnaire({ id: sheet.id }, { company: 'Acme' })
+    expect(submitted.status).toBe('submitted')
   })
 
   it('refuses an expired link, with the reason', async () => {
@@ -36312,7 +36346,7 @@ describe('proposal questionnaires (postgres branch)', () => {
     })
     await postgresStore(fake).submitProposalQuestionnaire(
       { token: 'T'.repeat(43) },
-      { contactName: 'Pat', email: 'pat@acme.test' },
+      LINK_ANSWERS,
     )
     const updates = fake.statements.filter((s) => /^update proposal_questionnaires/i.test(s.text))
     expect(updates).toHaveLength(1)
@@ -36333,7 +36367,7 @@ describe('proposal questionnaires (postgres branch)', () => {
     await expect(
       postgresStore(fake).submitProposalQuestionnaire(
         { token: 'T'.repeat(43) },
-        { contactName: 'Pat', email: 'pat@acme.test' },
+        LINK_ANSWERS,
       ),
     ).rejects.toMatchObject({ reason: 'submitted' })
   })
