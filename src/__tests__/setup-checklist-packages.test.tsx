@@ -128,6 +128,7 @@ describe('the plan checklists fix dialog offers Link existing', () => {
     // One package nudge holding both checklists.
     mockPackages.mockResolvedValue([{ ...PACKAGE, templateIds: ['t1', 't3'] }])
     const updateChecklistTemplate = vi.fn()
+    const addChecklistTemplate = vi.fn()
     const base = contextValue
     const hers = {
       ...template('h1', 'Monthly Close'),
@@ -139,6 +140,7 @@ describe('the plan checklists fix dialog offers Link existing', () => {
         ...base,
         data: { ...base.data, checklistTemplates },
         updateChecklistTemplate,
+        addChecklistTemplate,
       } as unknown as AppContextValue
     }
     withTemplates([...base.data.checklistTemplates, hers])
@@ -165,7 +167,27 @@ describe('the plan checklists fix dialog offers Link existing', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Set them up' }))
     })
-    const apply = vi.mocked(contextValue.applyTemplateToClient)
-    expect(apply.mock.calls.map((call) => call[0])).toEqual(['t3'])
+    // Cloned in the browser, in the same bulk save as the link - never the
+    // server copy endpoint, which would land the pending link stale.
+    expect(vi.mocked(contextValue.applyTemplateToClient)).not.toHaveBeenCalled()
+    expect(addChecklistTemplate).toHaveBeenCalledTimes(1)
+    expect(addChecklistTemplate.mock.calls[0][0]).toMatchObject({
+      clientId: 'client-1',
+      sourceTemplateId: 't3',
+      title: 'Client Meeting',
+      active: true,
+    })
+  })
+  it('waits for a pending save before setting anything up', async () => {
+    mockPackages.mockResolvedValue([{ ...PACKAGE, templateIds: ['t1', 't3'] }])
+    contextValue = { ...contextValue, workspaceSaving: true, addChecklistTemplate: vi.fn() } as unknown as AppContextValue
+    renderPage()
+    await act(async () => {})
+    openClients()
+    fireEvent.click(screen.getAllByRole('button', { name: 'Fix' })[0])
+
+    expect(screen.getByText('Saving…')).toBeTruthy()
+    const setUp = screen.getByRole('button', { name: 'Set them up' }) as HTMLButtonElement
+    expect(setUp.disabled).toBe(true)
   })
 })

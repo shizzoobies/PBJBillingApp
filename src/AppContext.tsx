@@ -643,6 +643,14 @@ export type AppContextValue = {
   handleLogout: () => Promise<void>
   dataSyncState: 'loading' | 'saving' | 'synced' | 'offline' | 'error'
   /**
+   * The tab holds workspace edits the bulk save has not landed yet (in flight,
+   * or still in the autosave's quiet period). A control that writes on the
+   * SERVER from the workspace (Apply a package) waits for this to clear, or it
+   * reads without those edits and the pending save then lands stale.
+   * Optional so test contexts that omit it read as "nothing pending".
+   */
+  workspaceSaving?: boolean
+  /**
    * How many times the live-sync ping has made this tab refetch the workspace.
    * Endpoint-managed data that lives outside `data` (pending notes) refetches
    * on this, not on the `data` reference - which also changes on every local

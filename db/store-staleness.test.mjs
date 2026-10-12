@@ -22922,9 +22922,25 @@ describe('a recipe copied onto a client keeps its whole setup', () => {
   })
 
   it('the server copy and the browser clone carry the same fields with the same values', () => {
-    const source = fullBlueprint()
+    // An onboarding link on the source must never travel: a copy driving a
+    // client's lifecycle would advance the wrong case.
+    const source = { ...fullBlueprint(), onboardingForClientId: 'c9' }
     const browser = cloneChecklistTemplate(source, { clientId: 'c1', active: true })
     const server = new AppDataStore()._clientTemplateCopy(source, source.id, { clientId: 'c1' })
+
+    const localToday = (() => {
+      const now = new Date()
+      return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    })()
+    for (const [copy, today] of [
+      [server, firmToday()],
+      [browser, localToday],
+    ]) {
+      expect('onboardingForClientId' in copy).toBe(false)
+      expect(copy.isStandard).toBe(false)
+      expect(copy.active).toBe(true)
+      expect(copy.nextDueDate >= today).toBe(true)
+    }
 
     // Ids are fresh on both sides; the dates are each side's own "today".
     const stripIds = (value) =>

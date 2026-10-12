@@ -1,7 +1,11 @@
 import { useState } from 'react'
 import { Link2 } from 'lucide-react'
 import type { ChecklistTemplate } from '../lib/types'
-import { linkCandidatesForPlanTemplate, unstampedClientChecklists } from '../lib/utils'
+import {
+  getChecklistFrequencyLabel,
+  linkableClientChecklists,
+  linkCandidatesForPlanTemplate,
+} from '../lib/utils'
 
 /**
  * "Link existing" on a Not set up plan checklist (featreq-2b067744).
@@ -13,10 +17,19 @@ import { linkCandidatesForPlanTemplate, unstampedClientChecklists } from '../lib
  * link stamps her checklist's `sourceTemplateId` with the blueprint, which the
  * Set up / Apply / nudge rules already honor.
  *
- * Suggested checklists (same title once a leading cadence word is dropped) get
- * one-press buttons; any other unstamped checklist of the client can be chosen
- * from the list. Nothing renders when the client has no unstamped checklist.
+ * Suggested checklists (same title once a leading cadence word is dropped, the
+ * cadence agreeing with the checklist's schedule, switched on) get one-press
+ * buttons; any other linkable checklist of the client can be chosen from the
+ * list, each labeled with how often it repeats and "(off)" when switched off.
+ * Nothing renders when the client has no linkable checklist.
  */
+
+/** "<title> · <how often>", plus "(off)" for a switched-off recipe. */
+function candidateLabel(template: ChecklistTemplate): string {
+  const off = template.active === false ? ' (off)' : ''
+  return `${template.title} · ${getChecklistFrequencyLabel(template.frequency)}${off}`
+}
+
 export function LinkExistingChecklist({
   blueprint,
   clientId,
@@ -29,11 +42,13 @@ export function LinkExistingChecklist({
   onLink: (clientTemplateId: string) => void
 }) {
   const [choice, setChoice] = useState('')
-  const all = unstampedClientChecklists(clientId, templates)
+  const all = linkableClientChecklists(clientId, templates)
   if (all.length === 0) return null
   const suggested = linkCandidatesForPlanTemplate(blueprint, clientId, templates)
   const suggestedIds = new Set(suggested.map((template) => template.id))
   const others = all.filter((template) => !suggestedIds.has(template.id))
+  // A pick that has since left the list (linked elsewhere, deleted) reads as no pick.
+  const chosen = others.some((template) => template.id === choice) ? choice : ''
   return (
     <span className="plan-checklist-link">
       {suggested.map((template) => (
@@ -44,7 +59,7 @@ export function LinkExistingChecklist({
           aria-label={`Link ${template.title} as ${blueprint.title}`}
           onClick={() => onLink(template.id)}
         >
-          <Link2 size={12} /> Link &ldquo;{template.title}&rdquo;
+          <Link2 size={12} /> Link &ldquo;{candidateLabel(template)}&rdquo;
         </button>
       ))}
       {others.length > 0 ? (
@@ -52,7 +67,7 @@ export function LinkExistingChecklist({
           <select
             className="plan-checklist-link-select"
             aria-label={`Choose a checklist to link as ${blueprint.title}`}
-            value={choice}
+            value={chosen}
             onChange={(event) => setChoice(event.target.value)}
           >
             <option value="">
@@ -60,18 +75,18 @@ export function LinkExistingChecklist({
             </option>
             {others.map((template) => (
               <option key={template.id} value={template.id}>
-                {template.title}
+                {candidateLabel(template)}
               </option>
             ))}
           </select>
           <button
             type="button"
             className="link-button"
-            disabled={!choice}
+            disabled={!chosen}
             aria-label={`Link the chosen checklist as ${blueprint.title}`}
             onClick={() => {
-              if (!choice) return
-              onLink(choice)
+              // Only a checklist that is STILL linkable; otherwise just reset.
+              if (chosen) onLink(chosen)
               setChoice('')
             }}
           >

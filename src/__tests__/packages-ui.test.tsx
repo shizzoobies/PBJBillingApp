@@ -435,6 +435,38 @@ describe('"+ Add package" on a client', () => {
     expect(sentence).toContain('(1 already exists and will be skipped)')
   })
 
+  it('waits while this tab still has edits on their way to the server', async () => {
+    contextValue = { ...contextValue, workspaceSaving: true } as AppContextValue
+    render(<ApplyPackageField client={ACME} />)
+    await waitFor(() => expect(listPackagesRequest).toHaveBeenCalled())
+
+    const pill = screen.getByRole('button', { name: '+ Add package' }) as HTMLButtonElement
+    expect(pill.disabled).toBe(true)
+    expect(screen.getByText(/Saving… packages can be applied once your changes are saved\./)).toBeTruthy()
+    expect(applyPackageRequest).not.toHaveBeenCalled()
+  })
+
+  it('counts two checklists with one title once, as the server copies them once', async () => {
+    setContext({
+      plans: [PLANS[0], { id: 'plan-payroll', name: 'Payroll', notes: '', templateIds: ['bp-payroll', 'bp-payroll-2'] }],
+      clients: [ACME],
+      checklistTemplates: [
+        ...TEMPLATES,
+        blueprint('bp-payroll-2', 'Payroll run'),
+        clientCopy('tpl-c1-close', 'bp-close'),
+      ],
+    })
+    const confirm = vi.fn(() => false)
+    vi.stubGlobal('confirm', confirm)
+    render(<ApplyPackageField client={ACME} />)
+    await waitFor(() => expect(listPackagesRequest).toHaveBeenCalled())
+    fireEvent.click(screen.getByRole('button', { name: '+ Add package' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Full service' }))
+
+    const sentence = String((confirm.mock.calls[0] as unknown[] | undefined)?.[0] ?? '')
+    expect(sentence).toContain('Creates 1 checklist for this client: Payroll run (2 already exist and will be skipped)')
+  })
+
   it('does nothing at all when the confirm is declined', async () => {
     vi.stubGlobal('confirm', vi.fn(() => false))
     render(<ApplyPackageField client={ACME} />)
@@ -528,6 +560,28 @@ describe('adding a plan chip offers its checklists', () => {
     await addPayroll()
     expect(confirm).not.toHaveBeenCalled()
     expect(addChecklistTemplate).not.toHaveBeenCalled()
+  })
+
+  it('offers and clones one checklist per title', async () => {
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    setContext({
+      clients: [ACME],
+      checklistTemplates: [...TEMPLATES, blueprint('bp-payroll-2', 'Payroll run'), clientCopy('tpl-c1-close', 'bp-close')],
+    })
+    contextValue = { ...contextValue, addChecklistTemplate } as AppContextValue
+    render(
+      <PlanServicesField
+        client={ACME}
+        plans={[PLANS[0], { id: 'plan-payroll', name: 'Payroll', notes: '', templateIds: ['bp-payroll', 'bp-payroll-2'] }]}
+        onCommit={onCommit}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '+ Add plan / service' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Payroll' }))
+
+    expect(String((confirm.mock.calls[0] as unknown[])[0])).toBe('Also set up these checklists for Acme: Payroll run?')
+    expect(addChecklistTemplate).toHaveBeenCalledTimes(1)
   })
 })
 

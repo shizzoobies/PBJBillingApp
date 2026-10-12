@@ -25,7 +25,13 @@ import {
   restoreSetupIssueRequest,
 } from '../lib/api'
 import type { Package } from '../lib/types'
-import { getAssignedTeamIds, missingPlanTemplatesForClient, planTemplates } from '../lib/utils'
+import { cloneChecklistTemplate } from '../lib/cloneChecklistTemplate'
+import {
+  getAssignedTeamIds,
+  missingPlanTemplatesForClient,
+  planTemplates,
+  uniqueByTitle,
+} from '../lib/utils'
 
 const SEVERITY_LABEL: Record<SetupSeverity, string> = {
   high: 'Needs attention',
@@ -346,7 +352,8 @@ export function SetupChecklistPage() {
  * item disappears from the list the moment it's filled in.
  */
 function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => void }) {
-  const { data, updateClient, applyTemplateToClient, updateChecklistTemplate } = useAppContext()
+  const { data, updateClient, addChecklistTemplate, updateChecklistTemplate, workspaceSaving } =
+    useAppContext()
   const fix = issue.fix!
   const client =
     'clientId' in fix ? data.clients.find((c) => c.id === fix.clientId) : undefined
@@ -356,6 +363,8 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
     fix.kind === 'planChecklists'
       ? planTemplates({ templateIds: fix.templateIds }, data.checklistTemplates)
       : []
+  // Links made here travel in the bulk save; the dialog waits for it to land.
+  const waitingForSave = fix.kind === 'planChecklists' && workspaceSaving === true
   const stillMissingIds = new Set(
     fix.kind === 'planChecklists'
       ? missingPlanTemplatesForClient(
@@ -421,11 +430,14 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
         // assigned staff can actually see the client.
         updateClient(fix.clientId, { assignedBookkeeperIds: teamIds })
       } else if (fix.kind === 'planChecklists') {
-        // Only what is STILL missing: a checklist linked in this dialog (Link
-        // existing) is already set up and must not be cloned next to hers.
-        for (const templateId of fix.templateIds) {
-          if (!stillMissingIds.has(templateId)) continue
-          await applyTemplateToClient(templateId, { clientId: fix.clientId })
+        // Only what is STILL missing - a checklist linked in this dialog (Link
+        // existing) is already set up - one copy per title, cloned in the
+        // browser like the client page's Set up: the copies ride the SAME bulk
+        // save as any link made here. A server copy (the old path) moved the
+        // workspace under that pending save, which then landed stale and lost
+        // the link.
+        for (const blueprint of uniqueByTitle(fixBlueprints.filter((b) => stillMissingIds.has(b.id)))) {
+          addChecklistTemplate(cloneChecklistTemplate(blueprint, { clientId: fix.clientId, active: true }))
         }
       }
       onClose()
@@ -522,10 +534,16 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
           </div>
         ) : null}
 
+        {waitingForSave ? <p className="muted-text">Saving…</p> : null}
         {error ? <p className="auth-error">{error}</p> : null}
 
         <div className="button-row">
-          <button type="button" className="primary-action" disabled={busy} onClick={() => void save()}>
+          <button
+            type="button"
+            className="primary-action"
+            disabled={busy || waitingForSave}
+            onClick={() => void save()}
+          >
             {busy
               ? 'Saving…'
               : fix.kind === 'planChecklists'

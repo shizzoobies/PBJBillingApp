@@ -31090,6 +31090,13 @@ export class AppDataStore {
         ? firstDueDate
         : ''
     const copy = {
+      // Everything a copy keeps comes from the ONE list the browser clone uses
+      // too (lib/checklist-template-copy.js). This copy used to list its own
+      // fields and dropped the schedule - a specific-months blueprint copied
+      // here landed with no months and never ran - plus the due day, lead
+      // days, Board column, skip and period-label settings, sub-steps and step
+      // due days. FIRST, so the copy's own identity below always wins.
+      ...copiedTemplateSettings(source),
       id: `template-${randomUUID().slice(0, 8)}`,
       title: source.title,
       clientId,
@@ -31132,13 +31139,6 @@ export class AppDataStore {
       // and "is this blueprint already set up here?" had only the title to go
       // on. Applying a PACKAGE twice is decided on this stamp.
       sourceTemplateId,
-      // Everything else comes from the ONE list the browser clone uses too
-      // (lib/checklist-template-copy.js). This copy used to list its own
-      // fields and dropped the schedule - a specific-months blueprint copied
-      // here landed with no months and never ran - plus the due day, lead
-      // days, Board column, skip and period-label settings, sub-steps and
-      // step due days.
-      ...copiedTemplateSettings(source),
       stages: copiedTemplateStages(migrated.stages, (prefix) => `${prefix}-${randomUUID().slice(0, 8)}`).map(
         (stage) => ({ ...stage, assigneeId: stage.assigneeId || source.assigneeId || '' }),
       ),

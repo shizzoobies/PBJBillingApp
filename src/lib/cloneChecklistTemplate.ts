@@ -43,6 +43,11 @@ export function cloneChecklistTemplate(
 ): Omit<ChecklistTemplate, 'id'> {
   const migrated = ensureTemplateStages(source)
   return {
+    // Everything a copy keeps - the schedule, the Board column, the skip and
+    // period-label settings, access - comes from the ONE list the server's copy
+    // uses too (lib/checklist-template-copy.js), so the two paths cannot drift.
+    // FIRST, so the copy's own identity below can never be overridden by it.
+    ...copiedTemplateSettings(source),
     title: options.title ?? source.title,
     clientId: options.clientId,
     frequency: source.frequency,
@@ -64,11 +69,7 @@ export function cloneChecklistTemplate(
     active: options.active,
     isStandard: false,
     sourceTemplateId: source.id,
-    // Everything else a copy keeps - the schedule, the Board column, the skip and
-    // period-label settings, access, and the stages/steps/sub-steps with fresh
-    // ids - comes from the ONE list the server's copy uses too
-    // (lib/checklist-template-copy.js), so the two paths cannot drift again.
-    ...copiedTemplateSettings(source),
+    // Stages, steps and sub-steps with fresh ids, from the same module.
     stages: copiedTemplateStages(migrated.stages, makeId),
   }
 }

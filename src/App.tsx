@@ -318,6 +318,11 @@ function App() {
   const [authState, setAuthState] = useState<AuthState>('loading')
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(null)
   const [dataSyncState, setDataSyncState] = useState<DataSyncState>('loading')
+  // True from a local workspace edit until the bulk save that carries it has
+  // landed - including the autosave's quiet period, when `dataSyncState` still
+  // reads 'synced'. A server-side write started in that window (Apply a
+  // package) would read without the edit and move the fingerprint under it.
+  const [unsavedWorkspaceEdits, setUnsavedWorkspaceEdits] = useState(false)
   // Bumped each time the live-sync ping makes this tab refetch the workspace,
   // so endpoint-managed data (pending notes) that lives OUTSIDE `data` can
   // refetch on exactly the same signal rather than on every `data` change.
@@ -1123,6 +1128,11 @@ function App() {
     return () => window.clearTimeout(retryId)
   }, [dataSyncState, serverPersistenceEnabled, saveNow])
 
+  // The edits are on the server once the save loop has drained to 'synced'.
+  useEffect(() => {
+    if (dataSyncState === 'synced' && !dirtyRef.current) setUnsavedWorkspaceEdits(false)
+  }, [dataSyncState])
+
   useEffect(() => {
     if (!timer) {
       return
@@ -1263,6 +1273,7 @@ function App() {
     // server, so mark the workspace dirty; it stays dirty until a PUT confirms
     // it, immune to React batching with any concurrent API-backed mutation.
     dirtyRef.current = true
+    setUnsavedWorkspaceEdits(true)
     // Mark the moment of this edit so a real-time refetch (SSE) defers rather
     // than overwriting an in-flight, not-yet-saved change.
     lastWorkspaceEditRef.current = new Date().getTime()
@@ -4328,6 +4339,7 @@ function App() {
     printInvoice,
     handleLogout,
     dataSyncState,
+    workspaceSaving: dataSyncState === 'saving' || unsavedWorkspaceEdits,
     dataRefreshCount,
     syncMessage,
     firmSettings,

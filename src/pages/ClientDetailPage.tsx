@@ -123,6 +123,7 @@ import {
   isSafeImageSrc,
   localDateOnly,
   missingPlanTemplatesForClient,
+  uniqueByTitle,
   MONTH_NAMES,
   normalizeBillingMonth,
   planTemplates,
@@ -1203,11 +1204,15 @@ export function PlanServicesField({
     const added = nextIds.filter((id) => !before.includes(id))
     if (!ownerMode || added.length === 0) return
     if (client.isBillingMaster === true || isInactiveClient(client)) return
-    const missing = missingPlanTemplatesForClient(
-      { templateIds: defaultPackageTemplateIds(added, plans) },
-      data.checklistTemplates,
-      client.id,
-      data.checklistTemplates,
+    // One copy per title: two blueprints both called "Monthly Close" would
+    // otherwise both be cloned next to each other.
+    const missing = uniqueByTitle(
+      missingPlanTemplatesForClient(
+        { templateIds: defaultPackageTemplateIds(added, plans) },
+        data.checklistTemplates,
+        client.id,
+        data.checklistTemplates,
+      ),
     )
     if (missing.length === 0) return
     const titles = missing.map((template) => template.title).join(', ')
@@ -1442,7 +1447,12 @@ export function HourlyRatesField({ client }: { client: Client }) {
  * the workspace snapshot.
  */
 export function ApplyPackageField({ client }: { client: Client }) {
-  const { data, ownerMode } = useAppContext()
+  const { data, ownerMode, workspaceSaving } = useAppContext()
+  // Apply writes on the server from what the server holds. While this tab still
+  // has edits on their way there (a Link existing, a new plan), it waits: an
+  // apply in that window would not see them and would move the workspace under
+  // the pending save, which then lands stale and is lost.
+  const waitingForSave = workspaceSaving === true
   const [packages, setPackages] = useState<Package[]>([])
   const [menuOpen, setMenuOpen] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -1471,6 +1481,7 @@ export function ApplyPackageField({ client }: { client: Client }) {
   if (hidden) return null
 
   const apply = async (pkg: Package) => {
+    if (waitingForSave) return
     const addedPlans = pkg.planIds
       .filter((planId) => !(client.planIds ?? []).includes(planId))
       .map((planId) => data.plans.find((plan) => plan.id === planId))
@@ -1490,11 +1501,10 @@ export function ApplyPackageField({ client }: { client: Client }) {
       ],
     }
     const attached = planTemplates(wanted, data.checklistTemplates)
-    const newChecklistTitles = missingPlanTemplatesForClient(
-      wanted,
-      data.checklistTemplates,
-      client.id,
-      data.checklistTemplates,
+    // Two blueprints with one title make one copy (the server skips the second
+    // as same-titled), so the preview counts them once.
+    const newChecklistTitles = uniqueByTitle(
+      missingPlanTemplatesForClient(wanted, data.checklistTemplates, client.id, data.checklistTemplates),
     ).map((template) => template.title)
     const skippedCount = attached.length - newChecklistTitles.length
 
@@ -1547,7 +1557,7 @@ export function ApplyPackageField({ client }: { client: Client }) {
             <button
               type="button"
               className="add-person-pill"
-              disabled={busy}
+              disabled={busy || waitingForSave}
               onClick={() => setMenuOpen((open) => !open)}
             >
               + Add package
@@ -1565,7 +1575,7 @@ export function ApplyPackageField({ client }: { client: Client }) {
                       key={pkg.id}
                       type="button"
                       role="menuitem"
-                      disabled={busy}
+                      disabled={busy || waitingForSave}
                       onClick={() => void apply(pkg)}
                     >
                       {pkg.name}
@@ -1577,6 +1587,7 @@ export function ApplyPackageField({ client }: { client: Client }) {
           </div>
         </div>
       </div>
+      {waitingForSave ? <p className="muted-text">Saving… packages can be applied once your changes are saved.</p> : null}
       {outcome ? <p className="muted-text">{outcome}</p> : null}
       {error ? <p className="field-error">{error}</p> : null}
     </div>

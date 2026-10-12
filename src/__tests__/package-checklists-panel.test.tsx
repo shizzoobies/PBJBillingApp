@@ -376,7 +376,7 @@ describe('Link existing on a Not set up row', () => {
     const select = screen.getByRole('combobox', { name: 'Choose a checklist to link as Reconciliations with Review' })
     const options = within(select).getAllByRole('option').map((option) => option.textContent)
     // The suggested one has its own button; the others are in the list.
-    expect(options).toEqual(['Choose another…', 'Payroll odds and ends'])
+    expect(options).toEqual(['Choose another…', 'Payroll odds and ends · Quarterly'])
 
     fireEvent.change(select, { target: { value: 'h2' } })
     fireEvent.click(screen.getByRole('button', { name: 'Link the chosen checklist as Reconciliations with Review' }))
@@ -390,6 +390,33 @@ describe('Link existing on a Not set up row', () => {
 
     expect(screen.queryAllByRole('button', { name: /^Link (?!the chosen).* as Monthly Reconciliations$/ })).toEqual([])
     const select = screen.getByRole('combobox', { name: 'Choose a checklist to link as Monthly Reconciliations' })
-    expect(within(select).getByRole('option', { name: 'Monthly Reconciliations with Review' })).toBeTruthy()
+    expect(within(select).getByRole('option', { name: 'Monthly Reconciliations with Review · Quarterly' })).toBeTruthy()
+  })
+  it('labels every choice with how often it repeats, and a switched-off one "(off)" - never a one-press suggestion', async () => {
+    renderPanel(['D'], [...linkTemplates(), hers('h4', 'Annual Reconciliations with Review', { frequency: 'annually', active: false })])
+    await screen.findByText('Quarterly Accounting')
+
+    expect(screen.queryByRole('button', { name: 'Link Annual Reconciliations with Review as Reconciliations with Review' })).toBeNull()
+    const select = screen.getByRole('combobox', { name: 'Choose a checklist to link as Reconciliations with Review' })
+    expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'Choose another…',
+      'Annual Reconciliations with Review · Annually (off)',
+      'Payroll odds and ends · Quarterly',
+    ])
+  })
+
+  it('does not link a pick that has left the list since it was chosen', async () => {
+    const templates = [...linkTemplates(), hers('h5', 'Bank feeds')]
+    const { rerenderTemplates } = renderPanel(['D'], templates)
+    await screen.findByText('Quarterly Accounting')
+
+    const select = screen.getByRole('combobox', { name: 'Choose a checklist to link as Reconciliations with Review' })
+    fireEvent.change(select, { target: { value: 'h2' } })
+    // Meanwhile h2 was linked to another blueprint (a stamp on a live blueprint).
+    rerenderTemplates(templates.map((t) => (t.id === 'h2' ? { ...t, sourceTemplateId: 'T1' } : t)))
+    const link = screen.getByRole('button', { name: 'Link the chosen checklist as Reconciliations with Review' })
+    expect((link as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(link)
+    expect(updateChecklistTemplate).not.toHaveBeenCalled()
   })
 })
