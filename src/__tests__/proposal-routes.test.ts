@@ -317,6 +317,20 @@ describe('accepting and declining', () => {
     expect(text).toContain("appDataStore.setProposalStatus(current.id, 'declined', {")
   })
 
+  it('Close as lost: a missing or non-string note is no note, never a 400 (engagements stage 1)', () => {
+    const text = routeBlock(/proposalDeclineMatch && request\.method === 'POST'/, 2400)
+    expect(text).toContain("note: typeof payload?.note === 'string' ? payload.note : '',")
+    expect(text).not.toMatch(/note_required|note is required/i)
+    expect(text).toContain('This proposal is already ${proposalOutcomeWords(current.status)}.')
+  })
+
+  it('a decided proposal is named Won or closed as lost in every refusal, never accepted/declined', () => {
+    // The words live in lib/proposal-outcomes.js, shared with db/store.js.
+    expect(serverSource).toContain("import { proposalOutcomeWords } from './lib/proposal-outcomes.js'")
+    expect(serverSource).not.toMatch(/This proposal is (already )?\$\{(proposal|current)\.status\}/)
+    expect(serverSource).not.toContain('Only owners can decline proposals')
+  })
+
   it('Decline maps a refused status write to a 409 with the sentence, like accept and letter', () => {
     const text = routeBlock(/proposalDeclineMatch && request\.method === 'POST'/, 2400)
     expect(text).toContain('error instanceof ProposalStateError')

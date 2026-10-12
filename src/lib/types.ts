@@ -2551,9 +2551,29 @@ export type LetterPlaceholderInfo = {
   required: boolean
 }
 
-/** The saved engagement-letter template and what the page needs around it. */
+/** One saved letter as the Letters page lists it. */
+export type LetterSummary = {
+  id: string
+  name: string
+  subject: string
+  updatedAt: string | null
+  /** Rows in the send log naming this letter (failed ones included): above 0, it cannot be deleted. */
+  sendCount: number
+}
+
+/** The saved letters and what the page needs around them. */
+export type LetterListState = {
+  letters: LetterSummary[]
+  placeholders: LetterPlaceholderInfo[]
+  sender: { from: string; replyTo: string }
+  teamAddresses: string[]
+}
+
+/** One saved engagement letter and what the page needs around it. */
 export type LetterTemplateState = {
   template: {
+    id: string
+    name: string
     subject: string
     emailBody: string
     letterBody: string

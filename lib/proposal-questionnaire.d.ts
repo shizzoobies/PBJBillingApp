@@ -56,6 +56,13 @@ export declare function cleanQuestionnaireAnswers(
   raw: unknown,
   options?: { includeCallOnly?: boolean; lenient?: boolean },
 ): Record<string, string | number | string[]>
+export declare const QUESTIONNAIRE_LINK_REQUIRED: ReadonlyArray<readonly [string, string]>
+export declare function isRequiredOnLink(id: string): boolean
+export declare function questionnaireMissingAnswers(
+  questions: QuestionnaireQuestion[],
+  answers: Record<string, unknown>,
+  options?: { mode?: 'link' | 'call' },
+): Array<{ id: string; message: string }>
 export declare function questionnaireProblems(
   questions: QuestionnaireQuestion[],
   answers: Record<string, unknown>,

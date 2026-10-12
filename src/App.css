@@ -13975,6 +13975,59 @@ details.invoice-run-sent ul,
   border-color: var(--line-strong);
 }
 
+/* The saved letters: one pill per letter, the chosen one filled. */
+.letters-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.letters-list-item {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 6px 12px;
+}
+
+.letters-list-item[aria-pressed='true'] {
+  background: var(--plum);
+  border-color: var(--plum);
+  color: #fff;
+}
+
+.letters-name-form {
+  align-items: flex-end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+/* The B button above each body. */
+.letters-format {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 6px;
+}
+
+.letters-format button {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 700;
+  min-width: 32px;
+  padding: 3px 9px;
+}
+
+.letters-format button:hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+
 .letters-results {
   display: grid;
   gap: 6px;

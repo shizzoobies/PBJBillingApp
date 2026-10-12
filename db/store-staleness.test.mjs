@@ -24586,6 +24586,45 @@ describe('proposals (file backend)', () => {
     ).rejects.toBeInstanceOf(ProposalStateError)
   })
 
+  it('Close as lost takes an optional note: blank or missing closes it with no note (engagements stage 1)', async () => {
+    for (const options of [{ note: '' }, { note: '   ' }, {}]) {
+      const created = await store.createProposal({})
+      const closed = await store.setProposalStatus(created.id, 'declined', options)
+      expect(closed.status).toBe('declined')
+      expect(closed.declinedAt).toBeTruthy()
+      expect(closed.declineNote).toBeNull()
+    }
+  })
+
+  it('every refusal on a decided proposal says Won or closed as lost, never accepted/declined (engagements stage 1)', async () => {
+    const lost = await store.createProposal({ prospect: { company: 'Acme Books' } })
+    await store.setProposalStatus(lost.id, 'declined')
+    const messages = []
+    const capture = async (promise) => {
+      const err = await promise.catch((e) => e)
+      expect(err).toBeInstanceOf(ProposalStateError)
+      messages.push(err.message)
+    }
+    await capture(store.updateProposal(lost.id, { inputs: { transactions: 1 } }))
+    await capture(store.setProposalLetter(lost.id, { subject: 'x', sections: [], text: 'x' }))
+    await capture(store.appendProposalMessages(lost.id, [{ role: 'user', text: 'hi', at: '2026-10-11T12:00:00.000Z' }]))
+    await capture(store.acceptProposal(lost.id, {}))
+    await capture(store.setProposalStatus(lost.id, 'accepted'))
+    expect(messages).toEqual([
+      'This proposal is closed as lost — copy it to a new proposal to change anything.',
+      'This proposal is closed as lost — copy it to a new proposal to change anything.',
+      'This proposal is closed as lost — copy it to keep working on it.',
+      'This proposal is already closed as lost.',
+      "This proposal is already closed as lost — it can't be marked Won again.",
+    ])
+
+    const sent = await store.createProposal({})
+    await store.setProposalStatus(sent.id, 'sent')
+    await capture(store.deleteProposal(sent.id))
+    expect(messages.at(-1)).toBe('Only a draft can be deleted — close a sent proposal as lost instead.')
+    for (const message of messages) expect(message).not.toMatch(/accepted|declined|decline /)
+  })
+
   it('copies into a new draft that points back at the original', async () => {
     const source = await store.createProposal({
       prospect: { company: 'Acme Books' },
@@ -25080,6 +25119,12 @@ describe('proposals (postgres branch)', () => {
     )
   })
 
+  it('a blank Close as lost note is sent as null, not an empty string (engagements stage 1)', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ status: 'sent' }))
+    await postgresStore(fake).setProposalStatus('prop-1', 'declined', { note: '  ' })
+    expect(fake.matching(/^update proposals/i)[0].params[2]).toBeNull()
+  })
+
   it('updateProposal, setProposalStatus and deleteProposal all answer not-found with null/false', async () => {
     const fake = fakeProposalPostgres(null)
     const missing = postgresStore(fake)
@@ -25415,7 +25460,7 @@ describe('accepting a proposal (file backend)', () => {
     const proposal = await prospectProposal()
     // The final step (the accepted flip and its software rows) refusing.
     vi.spyOn(store, '_acceptWithSoftware').mockRejectedValueOnce(
-      new ProposalStateError('This proposal is already declined.'),
+      new ProposalStateError('This proposal is already closed as lost.'),
     )
     const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
     expect(err).toBeInstanceOf(ProposalStateError)
@@ -25429,7 +25474,7 @@ describe('accepting a proposal (file backend)', () => {
     vi.spyOn(store, 'linkProposalClient').mockResolvedValueOnce(null)
     const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
     expect(err).toBeInstanceOf(ProposalStateError)
-    expect(err.message).toBe('Someone else already accepted this proposal.')
+    expect(err.message).toBe('Someone else already marked this proposal Won.')
     expect(typeof err.createdClientId).toBe('string')
     const client = (await store.read()).clients.find((row) => row.id === err.createdClientId)
     expect(client?.lifecycleStage).toBe('inactive')
@@ -25447,7 +25492,7 @@ describe('accepting a proposal (file backend)', () => {
     })
     const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
     expect(err).toBeInstanceOf(ProposalStateError)
-    expect(err.message).toBe('This proposal was declined while you were accepting it.')
+    expect(err.message).toBe('This proposal was closed as lost while you were accepting it.')
     expect(typeof err.createdClientId).toBe('string')
   })
 
@@ -25663,7 +25708,7 @@ describe('accepting a proposal: the lost-link race retires the orphan (postgres 
       .acceptProposal('prop-1', { actorUserId: 'emp-patrice' })
       .catch((e) => e)
     expect(err).toBeInstanceOf(ProposalStateError)
-    expect(err.message).toBe('Someone else already accepted this proposal.')
+    expect(err.message).toBe('Someone else already marked this proposal Won.')
 
     const insertClientAt = fake.indexOf(/^insert into clients\b/i)
     const lifecycleAt = fake.indexOf(/^update clients set lifecycle_stage = \$2/i)
@@ -35956,6 +36001,7 @@ const LINK_ANSWERS = {
   state: 'TN',
   postalCode: '37201',
   whatTheyDo: 'Bakery',
+  entityType: 'LLC',
   'count:transactions': '120',
   'count:balanceSheetAccounts': '14',
   services: ['Monthly'],
@@ -36045,15 +36091,48 @@ describe('proposal questionnaires (file backend)', () => {
 
   it('refuses a link with no email, and the mistake does not use up the submission', async () => {
     const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    const { email: _email, ...noEmail } = LINK_ANSWERS
     await expect(
-      store.submitProposalQuestionnaire({ token: created.token }, { contactName: 'Pat' }),
-    ).rejects.toMatchObject({ reason: 'invalid' })
+      store.submitProposalQuestionnaire({ token: created.token }, noEmail),
+    ).rejects.toMatchObject({
+      reason: 'invalid',
+      problems: ['Please give us an email address we can reach you at.'],
+    })
     expect((await store.getProposalQuestionnaire(created.id)).status).toBe('open')
-    const ok = await store.submitProposalQuestionnaire(
-      { token: created.token },
-      { contactName: 'Pat', email: 'pat@acme.test' },
-    )
+    const ok = await store.submitProposalQuestionnaire({ token: created.token }, LINK_ANSWERS)
     expect(ok.status).toBe('submitted')
+  })
+
+  // Brittany, 2026-10-10: a link also needs the business, phone, street address,
+  // city, state, ZIP, what the business does and how it is set up.
+  it('refuses a link that only has a name and an email, naming every missing answer', async () => {
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    await expect(
+      store.submitProposalQuestionnaire(
+        { token: created.token },
+        { contactName: 'Pat', email: 'pat@acme.test', addressLine2: 'Suite 4' },
+      ),
+    ).rejects.toMatchObject({
+      reason: 'invalid',
+      message: 'Please tell us your business name.',
+      problems: [
+        'Please tell us your business name.',
+        'Please give us a phone number.',
+        'Please enter your street address.',
+        'Please enter your city.',
+        'Please enter your state.',
+        'Please enter your ZIP code.',
+        'Please tell us what your business does.',
+        'Please choose how your business is set up.',
+      ],
+    })
+    expect((await store.getProposalQuestionnaire(created.id)).status).toBe('open')
+  })
+
+  it('still lets a call sheet be submitted with only a business name', async () => {
+    const sheet = await store.createProposalQuestionnaire({ mode: 'call' })
+    const submitted = await store.submitProposalQuestionnaire({ id: sheet.id }, { company: 'Acme' })
+    expect(submitted.status).toBe('submitted')
   })
 
   it('refuses an expired link, with the reason', async () => {
@@ -36312,7 +36391,7 @@ describe('proposal questionnaires (postgres branch)', () => {
     })
     await postgresStore(fake).submitProposalQuestionnaire(
       { token: 'T'.repeat(43) },
-      { contactName: 'Pat', email: 'pat@acme.test' },
+      LINK_ANSWERS,
     )
     const updates = fake.statements.filter((s) => /^update proposal_questionnaires/i.test(s.text))
     expect(updates).toHaveLength(1)
@@ -36333,7 +36412,7 @@ describe('proposal questionnaires (postgres branch)', () => {
     await expect(
       postgresStore(fake).submitProposalQuestionnaire(
         { token: 'T'.repeat(43) },
-        { contactName: 'Pat', email: 'pat@acme.test' },
+        LINK_ANSWERS,
       ),
     ).rejects.toMatchObject({ reason: 'submitted' })
   })
@@ -45563,50 +45642,77 @@ describe('engagement letters (file backend)', () => {
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
   })
 
-  it('answers an empty letter, never null, before one is saved', async () => {
-    expect(await store.getEngagementLetter()).toEqual({
+  /** The v1 singleton as it sits in auth-state today: id 'default', the column-default name. */
+  const seedLegacyLetter = async (over = {}) => {
+    const authState = await readAuth()
+    authState.engagementLetters.push({
       id: 'default',
       name: 'Engagement letter',
-      subject: '',
-      emailBody: '',
-      letterBody: '',
-      updatedBy: null,
-      createdAt: null,
-      updatedAt: null,
+      subject: '1099 Filing',
+      emailBody: 'Hi {{contact_first_name}}',
+      letterBody: 'Dear {{contact_name}},',
+      updatedBy: 'user-owner',
+      createdAt: '2026-10-08T15:00:00.000Z',
+      updatedAt: '2026-10-08T15:00:00.000Z',
+      ...over,
     })
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+
+  it('answers null for a letter that does not exist, and an empty list before any is saved', async () => {
+    expect(await store.getEngagementLetter()).toBeNull()
+    expect(await store.getEngagementLetter('letter-nope')).toBeNull()
+    expect(await store.listEngagementLetters()).toEqual([])
   })
 
-  it('saves the letter, round-trips it through auth-state, and upserts on the second save', async () => {
-    const first = await store.saveEngagementLetter({
+  it('creates a letter with a generated id and its name, and round-trips it through auth-state', async () => {
+    const created = await store.createEngagementLetter({
+      name: '  Engagement 2027  ',
       subject: '  Your {{next_year}} 1099s  ',
       emailBody: 'Hi {{contact_first_name}}\n',
       letterBody: '\nDear {{contact_name}},',
-      updatedBy: 'user-owner',
+      createdBy: 'user-owner',
     })
-    expect(first).toMatchObject({
-      id: 'default',
+    expect(created).toMatchObject({
+      name: 'Engagement 2027',
       subject: 'Your {{next_year}} 1099s',
       emailBody: 'Hi {{contact_first_name}}',
       letterBody: 'Dear {{contact_name}},',
       updatedBy: 'user-owner',
     })
-    expect(Number.isNaN(Date.parse(first.createdAt))).toBe(false)
-    expect(await store.getEngagementLetter()).toEqual(first)
-    expect((await readAuth()).engagementLetters).toHaveLength(1)
+    expect(created.id).toMatch(/^letter-[0-9a-f]{8}$/)
+    expect(Number.isNaN(Date.parse(created.createdAt))).toBe(false)
+    expect(await store.getEngagementLetter(created.id)).toEqual(created)
+    expect(await store.listEngagementLetters()).toEqual([{ ...created, sendCount: 0 }])
+    // A blank name is never stored blank, and a long one is capped.
+    expect((await store.createEngagementLetter({ name: '   ' })).name).toBe('New letter')
+    expect((await store.createEngagementLetter({ name: 'n'.repeat(200) })).name).toHaveLength(80)
+  })
 
-    const second = await store.saveEngagementLetter({
-      subject: 'New subject',
+  it('saves one letter of several, and never brings back a letter that is gone', async () => {
+    const a = await store.createEngagementLetter({ name: 'A', subject: 'a' })
+    const b = await store.createEngagementLetter({ name: 'B', subject: 'b' })
+    const saved = await store.saveEngagementLetter({
+      id: b.id,
+      subject: ' New subject ',
       emailBody: 'e',
       letterBody: 'l',
       updatedBy: 'user-two',
     })
-    expect(second).toMatchObject({ subject: 'New subject', updatedBy: 'user-two', createdAt: first.createdAt })
-    expect((await readAuth()).engagementLetters).toHaveLength(1)
-    expect(await store.getEngagementLetter()).toEqual(second)
+    expect(saved).toMatchObject({ id: b.id, name: 'B', subject: 'New subject', updatedBy: 'user-two', createdAt: b.createdAt })
+    expect(await store.getEngagementLetter(a.id)).toEqual(a)
+    expect(await store.getEngagementLetter(b.id)).toEqual(saved)
+    expect((await readAuth()).engagementLetters).toHaveLength(2)
+
+    expect(await store.saveEngagementLetter({ id: 'letter-gone', subject: 's', emailBody: 'e', letterBody: 'l' })).toBeNull()
+    expect((await readAuth()).engagementLetters).toHaveLength(2)
   })
 
   it('caps the subject at 200 characters and each body at 20,000', async () => {
+    const { id } = await store.createEngagementLetter({ name: 'Caps', emailBody: 'x'.repeat(30000) })
+    expect((await store.getEngagementLetter(id)).emailBody).toHaveLength(20000)
     const saved = await store.saveEngagementLetter({
+      id,
       subject: 's'.repeat(500),
       emailBody: 'e'.repeat(30000),
       letterBody: 'l'.repeat(30000),
@@ -45614,6 +45720,73 @@ describe('engagement letters (file backend)', () => {
     expect(saved.subject).toHaveLength(200)
     expect(saved.emailBody).toHaveLength(20000)
     expect(saved.letterBody).toHaveLength(20000)
+  })
+
+  it('lists the v1 letter under its subject until it is renamed, and keeps its id and text', async () => {
+    await seedLegacyLetter()
+    const before = await store.getEngagementLetter('default')
+    expect(before).toMatchObject({ id: 'default', name: '1099 Filing', subject: '1099 Filing', letterBody: 'Dear {{contact_name}},' })
+    // Nothing was written to name it.
+    expect((await readAuth()).engagementLetters[0].name).toBe('Engagement letter')
+
+    // Her first save writes that name down, from the OLD subject: a new subject never renames it.
+    const saved = await store.saveEngagementLetter({ id: 'default', subject: 'Your 2027 1099s', emailBody: 'e', letterBody: 'l' })
+    expect(saved).toMatchObject({ name: '1099 Filing', subject: 'Your 2027 1099s' })
+    expect((await readAuth()).engagementLetters[0].name).toBe('1099 Filing')
+
+    const renamed = await store.renameEngagementLetter('default', '  1099 letter  ')
+    expect(renamed).toMatchObject({ id: 'default', name: '1099 letter', subject: 'Your 2027 1099s', updatedAt: saved.updatedAt })
+    expect((await store.getEngagementLetter('default')).name).toBe('1099 letter')
+  })
+
+  // That name reads as "not named yet" on the v1 letter, so it could never stick.
+  it('refuses to rename the v1 letter to "Engagement letter" in any case, and lets another letter take it', async () => {
+    await seedLegacyLetter({ name: '1099 Filing' })
+    for (const name of ['Engagement letter', '  engagement LETTER ']) {
+      expect(await store.renameEngagementLetter('default', name)).toBeNull()
+    }
+    expect((await readAuth()).engagementLetters[0].name).toBe('1099 Filing')
+    const other = await store.createEngagementLetter({ name: 'Other' })
+    expect((await store.renameEngagementLetter(other.id, 'Engagement letter')).name).toBe('Engagement letter')
+  })
+
+  it('names a v1 letter with a blank subject "Letter 1"', async () => {
+    await seedLegacyLetter({ subject: '' })
+    expect((await store.getEngagementLetter('default')).name).toBe('Letter 1')
+  })
+
+  it('lists letters oldest first, each with how many sends name it', async () => {
+    await seedLegacyLetter()
+    const newer = await store.createEngagementLetter({ name: 'Newer' })
+    await store.claimEngagementLetterSend(claimArgs())
+    await store.claimEngagementLetterSend(claimArgs({ clientId: 'c2' }))
+    const listed = await store.listEngagementLetters()
+    expect(listed.map((letter) => [letter.id, letter.name, letter.sendCount])).toEqual([
+      ['default', '1099 Filing', 2],
+      [newer.id, 'Newer', 0],
+    ])
+  })
+
+  it('renames nothing for a blank name or a letter that is gone', async () => {
+    const { id } = await store.createEngagementLetter({ name: 'Keep' })
+    expect(await store.renameEngagementLetter(id, '   ')).toBeNull()
+    expect(await store.renameEngagementLetter('letter-gone', 'X')).toBeNull()
+    expect((await store.getEngagementLetter(id)).name).toBe('Keep')
+  })
+
+  it('deletes a letter that was never sent, and keeps one any send names, failed ones included', async () => {
+    const unsent = await store.createEngagementLetter({ name: 'Draft' })
+    const sent = await store.createEngagementLetter({ name: 'Sent' })
+    const claim = await store.claimEngagementLetterSend(claimArgs({ letterId: sent.id }))
+    await store.completeEngagementLetterSend(claim.send.id, { ok: false, error: 'refused' })
+
+    expect(await store.deleteEngagementLetter(sent.id)).toEqual({ deleted: false, reason: 'has_sends', sendCount: 1 })
+    expect(await store.getEngagementLetter(sent.id)).not.toBeNull()
+    expect(await store.deleteEngagementLetter(unsent.id)).toEqual({ deleted: true })
+    expect(await store.getEngagementLetter(unsent.id)).toBeNull()
+    expect(await store.deleteEngagementLetter(unsent.id)).toEqual({ deleted: false, reason: 'not_found', sendCount: 0 })
+    // The send log is never touched by a delete.
+    expect(await store.listEngagementLetterSends({ letterId: sent.id })).toHaveLength(1)
   })
 
   it('claims a send once: the second claim for the same key is refused and names the first', async () => {
@@ -45742,12 +45915,13 @@ describe('engagement letters (file backend)', () => {
     expect(order).toEqual([later.send.id, a.send.id])
   })
 
-  it('a bulk save leaves the template and every send intact', async () => {
-    await store.saveEngagementLetter({ subject: 'S', emailBody: 'E', letterBody: 'L', updatedBy: 'u' })
+  it('a bulk save leaves the letters and every send intact', async () => {
+    await seedLegacyLetter()
+    await store.createEngagementLetter({ name: 'Second', subject: 'S', emailBody: 'E', letterBody: 'L', createdBy: 'u' })
     const claim = await store.claimEngagementLetterSend(claimArgs())
     await store.completeEngagementLetterSend(claim.send.id, { ok: true, providerId: 're_1' })
     const before = {
-      letter: await store.getEngagementLetter(),
+      letters: await store.listEngagementLetters(),
       sends: await store.listEngagementLetterSends(),
     }
 
@@ -45755,7 +45929,7 @@ describe('engagement letters (file backend)', () => {
     await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme' }, { id: 'c9', name: 'Somebody Else' }] }))
     await store.write(workspace())
 
-    expect(await store.getEngagementLetter()).toEqual(before.letter)
+    expect(await store.listEngagementLetters()).toEqual(before.letters)
     expect(await store.listEngagementLetterSends()).toEqual(before.sends)
     expect((await store.claimEngagementLetterSend(claimArgs())).claimed).toBe(false)
   })
@@ -45778,31 +45952,66 @@ describe('engagement letters (Postgres statements)', () => {
     const answer = async (text, params) => {
       const trimmed = compact(text)
       statements.push({ text: trimmed, params })
-      if (/^insert into engagement_letters /i.test(trimmed)) {
-        const at = letters.findIndex((row) => row.id === params[0])
-        const now = new Date('2026-10-08T15:00:00Z')
-        if (at >= 0) {
-          Object.assign(letters[at], {
-            subject: params[1],
-            email_body: params[2],
-            letter_body: params[3],
-            updated_by: params[4],
-            updated_at: now,
-          })
-          return { rows: [{ ...letters[at] }], rowCount: 1 }
-        }
+      if (/^insert into engagement_letters \(id, name, subject, email_body, letter_body, updated_by\) values \(\$1, \$2, \$3, \$4, \$5, \$6\) returning /i.test(trimmed)) {
+        const now = new Date(Date.UTC(2026, 9, 8, 15, letters.length))
         const row = {
           id: params[0],
-          name: 'Engagement letter',
-          subject: params[1],
-          email_body: params[2],
-          letter_body: params[3],
-          updated_by: params[4],
+          name: params[1],
+          subject: params[2],
+          email_body: params[3],
+          letter_body: params[4],
+          updated_by: params[5],
           created_at: now,
           updated_at: now,
         }
         letters.push(row)
         return { rows: [{ ...row }], rowCount: 1 }
+      }
+      if (/^update engagement_letters set subject = \$2, email_body = \$3, letter_body = \$4, updated_by = \$5, updated_at = now\(\), name = case when id = 'default' and btrim\(name\) in \('', 'Engagement letter'\) then coalesce\(nullif\(left\(btrim\(subject\), 80\), ''\), 'Letter 1'\) else name end where id = \$1 returning /i.test(trimmed)) {
+        const row = letters.find((entry) => entry.id === params[0])
+        if (!row) return { rows: [], rowCount: 0 }
+        // The CASE reads the row as it was before the update.
+        if (row.id === 'default' && ['', 'Engagement letter'].includes(row.name.trim())) {
+          row.name = row.subject.trim().slice(0, 80) || 'Letter 1'
+        }
+        Object.assign(row, {
+          subject: params[1],
+          email_body: params[2],
+          letter_body: params[3],
+          updated_by: params[4],
+          updated_at: new Date('2026-10-09T15:00:00Z'),
+        })
+        return { rows: [{ ...row }], rowCount: 1 }
+      }
+      if (/^update engagement_letters set name = \$2 where id = \$1 returning /i.test(trimmed)) {
+        const row = letters.find((entry) => entry.id === params[0])
+        if (!row) return { rows: [], rowCount: 0 }
+        row.name = params[1]
+        return { rows: [{ ...row }], rowCount: 1 }
+      }
+      if (/^delete from engagement_letters where id = \$1 and not exists \(select 1 from engagement_letter_sends where letter_id = \$1\) returning id$/i.test(trimmed)) {
+        const at = letters.findIndex((entry) => entry.id === params[0])
+        if (at < 0 || sends.some((send) => send.letter_id === params[0])) return { rows: [], rowCount: 0 }
+        letters.splice(at, 1)
+        return { rows: [{ id: params[0] }], rowCount: 1 }
+      }
+      if (/^select \(select count\(\*\)::int from engagement_letters where id = \$1\) as letters, \(select count\(\*\)::int from engagement_letter_sends where letter_id = \$1\) as sends$/i.test(trimmed)) {
+        return {
+          rows: [
+            {
+              letters: letters.filter((entry) => entry.id === params[0]).length,
+              sends: sends.filter((send) => send.letter_id === params[0]).length,
+            },
+          ],
+        }
+      }
+      if (/^select .* from engagement_letters order by created_at asc, id asc$/i.test(trimmed)) {
+        return { rows: letters.map((row) => ({ ...row })) }
+      }
+      if (/^select letter_id, count\(\*\)::int as sends from engagement_letter_sends group by letter_id$/i.test(trimmed)) {
+        const counts = new Map()
+        for (const send of sends) counts.set(send.letter_id, (counts.get(send.letter_id) ?? 0) + 1)
+        return { rows: [...counts].map(([letter_id, count]) => ({ letter_id, sends: count })) }
       }
       if (/^select .* from engagement_letters where id = \$1$/i.test(trimmed)) {
         return { rows: letters.filter((row) => row.id === params[0]).map((row) => ({ ...row })) }
@@ -45907,19 +46116,95 @@ describe('engagement letters (Postgres statements)', () => {
     )
   })
 
-  it('saves as an upsert on the id and answers the mapped row', async () => {
+  it('creates a named letter with one insert, saves with an update on the id, and never upserts', async () => {
     const fake = letterPool()
     const store2 = letterStore(fake)
-    const saved = await store2.saveEngagementLetter({ subject: ' S ', emailBody: 'E', letterBody: 'L', updatedBy: 'u1' })
-    const [upsert] = fake.matching(/^insert into engagement_letters /i)
-    expect(upsert.text).toMatch(/on conflict \(id\) do update set subject = excluded\.subject/i)
-    expect(upsert.params).toEqual(['default', 'S', 'E', 'L', 'u1'])
-    expect(saved).toMatchObject({ id: 'default', subject: 'S', emailBody: 'E', letterBody: 'L', updatedBy: 'u1' })
-    expect(saved.updatedAt).toBe('2026-10-08T15:00:00.000Z')
-    await store2.saveEngagementLetter({ subject: 'S2', emailBody: 'E', letterBody: 'L', updatedBy: 'u2' })
+    const created = await store2.createEngagementLetter({ name: ' Engagement 2027 ', subject: ' S ', createdBy: 'u1' })
+    const [insert] = fake.matching(/^insert into engagement_letters /i)
+    expect(insert.text).not.toMatch(/on conflict/i)
+    expect(insert.params).toEqual([created.id, 'Engagement 2027', 'S', '', '', 'u1'])
+    expect(created.id).toMatch(/^letter-[0-9a-f]{8}$/)
+    expect(created).toMatchObject({ name: 'Engagement 2027', subject: 'S', emailBody: '', letterBody: '' })
+
+    const saved = await store2.saveEngagementLetter({ id: created.id, subject: ' S2 ', emailBody: 'E', letterBody: 'L', updatedBy: 'u2' })
+    const [update] = fake.matching(/^update engagement_letters set subject/i)
+    expect(update.params).toEqual([created.id, 'S2', 'E', 'L', 'u2'])
+    expect(saved).toMatchObject({ id: created.id, name: 'Engagement 2027', subject: 'S2', emailBody: 'E', letterBody: 'L', updatedBy: 'u2' })
+    expect(saved.updatedAt).toBe('2026-10-09T15:00:00.000Z')
     expect(fake.letters).toHaveLength(1)
-    expect((await store2.getEngagementLetter()).subject).toBe('S2')
-    expect((await letterStore(letterPool()).getEngagementLetter()).subject).toBe('')
+    expect((await store2.getEngagementLetter(created.id)).subject).toBe('S2')
+
+    // A letter that is gone stays gone.
+    expect(await store2.saveEngagementLetter({ id: 'letter-gone', subject: 's', emailBody: 'e', letterBody: 'l' })).toBeNull()
+    expect(fake.letters).toHaveLength(1)
+    expect(await store2.getEngagementLetter('letter-gone')).toBeNull()
+  })
+
+  it('lists the v1 letter under its subject, renames it, and counts the sends per letter', async () => {
+    const fake = letterPool()
+    const store2 = letterStore(fake)
+    fake.letters.push({
+      id: 'default',
+      name: 'Engagement letter',
+      subject: '1099 Filing',
+      email_body: 'e',
+      letter_body: 'l',
+      updated_by: 'u',
+      created_at: new Date('2026-10-08T12:00:00Z'),
+      updated_at: new Date('2026-10-08T12:00:00Z'),
+    })
+    const other = await store2.createEngagementLetter({ name: 'Other' })
+    await store2.claimEngagementLetterSend({ letterId: 'default', clientId: 'c1', templateHash: 'h', firmDay: '2026-10-08' })
+    const listed = await store2.listEngagementLetters()
+    expect(listed.map((letter) => [letter.id, letter.name, letter.sendCount])).toEqual([
+      ['default', '1099 Filing', 1],
+      [other.id, 'Other', 0],
+    ])
+    expect(fake.letters[0].name).toBe('Engagement letter')
+
+    const renamed = await store2.renameEngagementLetter('default', ' 1099 letter ')
+    expect(renamed).toMatchObject({ id: 'default', name: '1099 letter', subject: '1099 Filing' })
+    expect(fake.matching(/^update engagement_letters set name = \$2 where id = \$1/i)[0].params).toEqual(['default', '1099 letter'])
+    expect(await store2.renameEngagementLetter('letter-gone', 'x')).toBeNull()
+    // The column-default name is refused for the v1 letter without a statement.
+    const updates = fake.matching(/^update engagement_letters set name/i).length
+    expect(await store2.renameEngagementLetter('default', ' ENGAGEMENT letter ')).toBeNull()
+    expect(fake.matching(/^update engagement_letters set name/i)).toHaveLength(updates)
+    expect(fake.letters[0].name).toBe('1099 letter')
+  })
+
+  it('a save of the still-unnamed v1 letter writes down the name it was listed under, from the OLD subject', async () => {
+    const fake = letterPool()
+    const store2 = letterStore(fake)
+    fake.letters.push({
+      id: 'default',
+      name: 'Engagement letter',
+      subject: '1099 Filing',
+      email_body: 'e',
+      letter_body: 'l',
+      updated_by: 'u',
+      created_at: new Date('2026-10-08T12:00:00Z'),
+      updated_at: new Date('2026-10-08T12:00:00Z'),
+    })
+    const saved = await store2.saveEngagementLetter({ id: 'default', subject: 'Your 2027 1099s', emailBody: 'e', letterBody: 'l' })
+    expect(saved).toMatchObject({ name: '1099 Filing', subject: 'Your 2027 1099s' })
+    expect(fake.letters[0].name).toBe('1099 Filing')
+    // A named letter is never renamed by a save.
+    const other = await store2.createEngagementLetter({ name: 'Other', subject: 'x' })
+    expect((await store2.saveEngagementLetter({ id: other.id, subject: 'y', emailBody: '', letterBody: '' })).name).toBe('Other')
+  })
+
+  it('deletes in one statement only when no send names the letter, and says why not', async () => {
+    const fake = letterPool()
+    const store2 = letterStore(fake)
+    const sent = await store2.createEngagementLetter({ name: 'Sent' })
+    const draft = await store2.createEngagementLetter({ name: 'Draft' })
+    await store2.claimEngagementLetterSend({ letterId: sent.id, clientId: 'c1', templateHash: 'h', firmDay: '2026-10-08' })
+    expect(await store2.deleteEngagementLetter(sent.id)).toEqual({ deleted: false, reason: 'has_sends', sendCount: 1 })
+    expect(await store2.deleteEngagementLetter(draft.id)).toEqual({ deleted: true })
+    expect(await store2.deleteEngagementLetter(draft.id)).toEqual({ deleted: false, reason: 'not_found', sendCount: 0 })
+    expect(fake.letters.map((row) => row.id)).toEqual([sent.id])
+    expect(fake.matching(/^delete from engagement_letter_sends/i)).toEqual([])
   })
 
   it('claims with one insert ... on conflict do nothing returning, and reports claimed:false with the first row', async () => {
@@ -45995,10 +46280,16 @@ describe('engagement letters (Postgres statements)', () => {
     expect(lists[1].params).toEqual(['default', 'c1'])
   })
 
-  it('is never deleted from: not in write(), not in the lock list, not anywhere in the store', async () => {
+  it('never deletes a send, and deletes a letter only in the one guarded statement; not in write() or the lock list', async () => {
     expect(BULK_SAVE_LOCK_TABLES.join(',')).not.toMatch(/engagement_letter/i)
     const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
-    expect(source).not.toMatch(/delete from engagement_letter/i)
+    expect(source).not.toMatch(/delete from engagement_letter_sends/i)
+    // The only delete of a letter refuses one that any send names, in the same statement.
+    const deletes = [...source.matchAll(/delete from engagement_letters\b[\s\S]{0,160}/gi)].map((match) => match[0])
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0].replace(/\s+/g, ' ')).toContain(
+      'where id = $1 and not exists (select 1 from engagement_letter_sends where letter_id = $1)',
+    )
     expect(source).not.toMatch(/truncate[^\n]*engagement_letter/i)
     const start = source.indexOf('  async write(data, {')
     const end = source.indexOf('Fingerprint of everything the bulk save can destroy', start)

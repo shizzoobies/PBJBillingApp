@@ -1864,6 +1864,12 @@ export function describeActivityAction(action: string): string {
       return 'used a backup code'
     case 'totp_reset_by_admin':
       return 'reset two-factor for'
+    // Proposal outcomes read Won and Closed/Lost (engagements stage 1); the
+    // stored action strings keep their old names.
+    case 'proposal_accepted':
+      return 'marked a proposal Won:'
+    case 'proposal_declined':
+      return 'closed a proposal as lost:'
     default:
       return action.replace(/_/g, ' ')
   }

@@ -370,6 +370,17 @@ describe('the Proposals list', () => {
     expect(screen.getByText('Beta Farms')).toBeTruthy()
   })
 
+  it('reads the outcomes as Won and Closed/Lost in the filter and the status pill', async () => {
+    renderList()
+    expect(await screen.findByText('Beta Farms')).toBeTruthy()
+    const filter = screen.getByLabelText('Status filter') as HTMLSelectElement
+    const options = Array.from(filter.options).map((option) => option.textContent)
+    expect(options).toEqual(expect.arrayContaining(['Draft', 'Sent', 'Won', 'Closed/Lost']))
+    expect(options).not.toContain('Accepted')
+    expect(options).not.toContain('Declined')
+    expect(screen.getByText('Closed/Lost', { selector: '.status-pill' })).toBeTruthy()
+  })
+
   it('searches company, contact and email', async () => {
     renderList()
     await screen.findByText('Acme Books')
@@ -1198,12 +1209,12 @@ describe('Accept and Decline', () => {
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
     expect(confirm).toHaveBeenCalledWith(
-      'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00. Nothing about any invoice changes.',
+      'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00. Nothing about any invoice changes, and this proposal is marked Won.',
     )
     await waitFor(() =>
       expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
     )
-    expect(await screen.findByText('Accepted', { selector: '.status-pill' })).toBeTruthy()
+    expect(await screen.findByText('Won', { selector: '.status-pill' })).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Open the client' }).getAttribute('href')).toBe(
       '/clients/client-new',
     )
@@ -1246,7 +1257,7 @@ describe('Accept and Decline', () => {
     expect(confirm).toHaveBeenCalledWith(
       'Accept this proposal? This adds Acme Books as a client in Onboarding, ' +
         'billed monthly at $630.00, with the plans Monthly Bookkeeping and Payroll. ' +
-        'Nothing about any invoice changes.',
+        'Nothing about any invoice changes, and this proposal is marked Won.',
     )
     await waitFor(() =>
       expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
@@ -1285,7 +1296,7 @@ describe('Accept and Decline', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
     expect(confirm).toHaveBeenNthCalledWith(
       1,
-      'Accept this proposal for Existing Co, with the plan Monthly Bookkeeping?',
+      'Accept this proposal for Existing Co, with the plan Monthly Bookkeeping? This proposal is marked Won.',
     )
     await waitFor(() =>
       expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
@@ -1326,7 +1337,7 @@ describe('Accept and Decline', () => {
     expect(confirm).toHaveBeenCalledWith(
       'Accept this proposal? This adds Acme Books as a client in Onboarding, ' +
         'billed monthly at $630.00, with the plan Payroll, Tax. ' +
-        'Nothing about any invoice changes.',
+        'Nothing about any invoice changes, and this proposal is marked Won.',
     )
   })
 
@@ -1339,7 +1350,7 @@ describe('Accept and Decline', () => {
     vi.stubGlobal('confirm', confirm)
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
-    expect(confirm).toHaveBeenNthCalledWith(1, 'Accept this proposal for Existing Co?')
+    expect(confirm).toHaveBeenNthCalledWith(1, 'Accept this proposal for Existing Co? This proposal is marked Won.')
     await waitFor(() => expect(api.acceptProposalRequest).toHaveBeenCalled())
     expect(api.acceptProposalRequest.mock.calls[0][1]).not.toHaveProperty('planIds')
   })
@@ -1350,7 +1361,7 @@ describe('Accept and Decline', () => {
     vi.stubGlobal('confirm', confirm)
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
-    expect(confirm).toHaveBeenNthCalledWith(1, 'Accept this proposal for Existing Co?')
+    expect(confirm).toHaveBeenNthCalledWith(1, 'Accept this proposal for Existing Co? This proposal is marked Won.')
     expect(confirm).toHaveBeenNthCalledWith(
       2,
       'Also change Existing Co’s monthly fee to $630.00? Cancel keeps their current fee.',
@@ -1413,18 +1424,40 @@ describe('Accept and Decline', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
     expect(
       await screen.findByText(
-        "Accepted, but the package could not be applied — add it from the client's page.",
+        "Marked Won, but the package could not be applied — add it from the client's page.",
       ),
     ).toBeTruthy()
   })
 
-  it('Decline asks for a note and saves it', async () => {
-    vi.stubGlobal('prompt', vi.fn(() => 'Went with a friend'))
+  it('Close as lost asks for an optional note and saves it', async () => {
+    const prompt = vi.fn(() => 'Went with a friend')
+    vi.stubGlobal('prompt', prompt)
     renderEditor()
-    fireEvent.click(await screen.findByRole('button', { name: 'Decline' }))
+    expect(await screen.findByRole('button', { name: 'Close as lost' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Decline' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Close as lost' }))
+    expect(prompt).toHaveBeenCalledWith(
+      'Close this proposal as lost? Add a note if you like (optional — saved on the proposal).',
+      '',
+    )
     await waitFor(() =>
       expect(api.declineProposalRequest).toHaveBeenCalledWith('prop-1', 'Went with a friend'),
     )
+    expect(await screen.findByText('Closed/Lost', { selector: '.status-pill' })).toBeTruthy()
+  })
+
+  it('Close as lost with the note left blank closes it with an empty note', async () => {
+    vi.stubGlobal('prompt', vi.fn(() => '   '))
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Close as lost' }))
+    await waitFor(() => expect(api.declineProposalRequest).toHaveBeenCalledWith('prop-1', ''))
+  })
+
+  it('canceling the Close as lost prompt closes nothing', async () => {
+    vi.stubGlobal('prompt', vi.fn(() => null))
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Close as lost' }))
+    expect(api.declineProposalRequest).not.toHaveBeenCalled()
   })
 })
 
@@ -1732,7 +1765,7 @@ describe('Software on the proposal editor', () => {
       renderEditor()
       fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
       expect(confirm).toHaveBeenCalledWith(
-        'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00, and adds QBO Plus as monthly Software expenses billed at cost. Nothing about any invoice changes.',
+        'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00, and adds QBO Plus as monthly Software expenses billed at cost. Nothing about any invoice changes, and this proposal is marked Won.',
       )
       await waitFor(() =>
         expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
@@ -1753,7 +1786,7 @@ describe('Software on the proposal editor', () => {
       fireEvent.click(screen.getByRole('checkbox', { name: 'Payroll' }))
       fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
       expect(confirm).toHaveBeenCalledWith(
-        'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00, with the plans Monthly Bookkeeping and Payroll, and adds QBO Plus as monthly Software expenses billed at cost. Nothing about any invoice changes.',
+        'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00, with the plans Monthly Bookkeeping and Payroll, and adds QBO Plus as monthly Software expenses billed at cost. Nothing about any invoice changes, and this proposal is marked Won.',
       )
     })
 

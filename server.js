@@ -35,6 +35,7 @@ import {
   WaitRefusedError,
   WorkspaceBusyError,
   WorkspaceChangedError,
+  isReservedEngagementLetterName,
 } from './db/store.js'
 import {
   allocateGroupMinutes,
@@ -109,7 +110,6 @@ import { buildInvoiceDocuments } from './lib/invoice-documents.js'
 import { buildProposalPdf, proposalPdfFilename } from './lib/proposal-pdf.js'
 import { buildProposalEmail } from './lib/proposal-email.js'
 import {
-  LETTER_ID,
   LETTER_MAX_CLIENTS_PER_SEND,
   assembleLetterPreview,
   sendLetterBatch,
@@ -133,6 +133,7 @@ import {
   renderQuestionnaireThanksPage,
 } from './lib/proposal-questionnaire-page.js'
 import { applyProposalPatch } from './lib/proposal-pricing.js'
+import { proposalOutcomeWords } from './lib/proposal-outcomes.js'
 import {
   cardProcessingFeeLine,
   invoiceAsPaidByCredit,
@@ -2488,9 +2489,9 @@ async function planAutopaySend(invoice, client) {
 }
 
 // ---- Engagement letters: helpers (featreq-5e195707) ------------------------
-// docs/plans/engagement-letters-2026-10.md. The owner writes one email and one
-// letter with {{placeholders}}; the routes below preview it per client and send
-// it with the letter as a PDF. Replies go to the invoice mailbox (Brittany's) and
+// docs/plans/engagement-letters-2026-10.md. The owner keeps a list of letters,
+// each an email and a letter with {{placeholders}} and **bold**; the routes below
+// preview the chosen one per client and send it with the letter as a PDF. Replies go to the invoice mailbox (Brittany's) and
 // the letter goes to the client's addressees only - nothing is copied to anyone.
 // The preview and the send themselves live in lib/letter-send.js, which takes the
 // store and the mail sender as arguments so each rule is tested by running it.
@@ -2508,10 +2509,16 @@ function letterSender(firmSettings) {
   }
 }
 
-/** The saved template as the page reads it: the text, its hash, the placeholders and the sender. */
-async function letterTemplateView() {
-  const [template, firmSettings, teamAddresses] = await Promise.all([
-    appDataStore.getEngagementLetter(LETTER_ID),
+/** A letter's name, as typed: 1 to 80 characters once trimmed. Null when it is not one. */
+function cleanLetterName(value) {
+  if (typeof value !== 'string') return null
+  const name = value.trim()
+  return name && name.length <= 80 ? name : null
+}
+
+/** What every letter view carries around the letters: the placeholders and who letters come from. */
+async function letterFrameView() {
+  const [firmSettings, teamAddresses] = await Promise.all([
     appDataStore.getFirmSettings().catch(() => null),
     appDataStore
       .getTeamMembers()
@@ -2519,6 +2526,37 @@ async function letterTemplateView() {
       .catch(() => []),
   ])
   const sender = letterSender(firmSettings)
+  return {
+    placeholders: letterPlaceholders,
+    sender,
+    // What Send will never mail, so the client list shows the same addresses Send uses. A failed
+    // read only means the list shows what is on file (Send itself fails closed on the same read).
+    teamAddresses: teamAddresses.filter((address) => address !== sender.replyTo.toLowerCase()),
+  }
+}
+
+/** The saved letters as the page lists them: id, name, subject, last saved and how often each was sent. */
+async function letterListView() {
+  const [letters, frame] = await Promise.all([appDataStore.listEngagementLetters(), letterFrameView()])
+  return {
+    letters: letters.map((letter) => ({
+      id: letter.id,
+      name: letter.name,
+      subject: letter.subject,
+      updatedAt: letter.updatedAt,
+      sendCount: letter.sendCount,
+    })),
+    ...frame,
+  }
+}
+
+/**
+ * One saved letter as the page edits it: the text, its hash, the placeholders and
+ * the sender. Null when there is no letter with that id.
+ */
+async function letterTemplateView(letterId) {
+  const [template, frame] = await Promise.all([appDataStore.getEngagementLetter(letterId), letterFrameView()])
+  if (!template) return null
   let updatedByName = null
   if (template.updatedBy) {
     try {
@@ -2529,6 +2567,8 @@ async function letterTemplateView() {
   }
   return {
     template: {
+      id: template.id,
+      name: template.name,
       subject: template.subject,
       emailBody: template.emailBody,
       letterBody: template.letterBody,
@@ -2537,24 +2577,21 @@ async function letterTemplateView() {
       updatedByName,
     },
     hash: letterTemplateHash(template),
-    placeholders: letterPlaceholders,
     warnings: templateWarnings(template),
-    sender,
-    // What Send will never mail, so the client list shows the same addresses Send uses. A failed
-    // read only means the list shows what is on file (Send itself fails closed on the same read).
-    teamAddresses: teamAddresses.filter((address) => address !== sender.replyTo.toLowerCase()),
+    ...frame,
   }
 }
 
 /**
- * Everything a preview or a send reads once: the stored template, the workspace,
- * the firm, who is sending, and the addresses of the app's user accounts (no
- * letter goes to a team member's address, the reply-to mailbox excepted). The
- * team read FAILS CLOSED: if it cannot be made, nothing is previewed or sent.
+ * Everything a preview or a send reads once: the stored letter (`template`, null
+ * when there is no letter with that id), the workspace, the firm, who is sending,
+ * and the addresses of the app's user accounts (no letter goes to a team member's
+ * address, the reply-to mailbox excepted). The team read FAILS CLOSED: if it
+ * cannot be made, nothing is previewed or sent.
  */
-async function loadLetterContext(session) {
+async function loadLetterContext(session, letterId) {
   const [template, data, firmSettings, members] = await Promise.all([
-    appDataStore.getEngagementLetter(LETTER_ID),
+    appDataStore.getEngagementLetter(letterId),
     appDataStore.read(),
     appDataStore.getFirmSettings().catch(() => null),
     appDataStore.getTeamMembers(),
@@ -11606,22 +11643,93 @@ const server = createServer(async (request, response) => {
     // to the client's addressees and nowhere else (Alex, 2026-10-08): the send log
     // is the record, so there is no owner summary and no copy of the document.
 
-    // GET /api/letters/template - the saved template, its hash, the placeholders
-    // and who the letters come from / are answered by.
-    if (normalizedPath === '/api/letters/template' && request.method === 'GET') {
+    // GET /api/letters - the saved letters (id, name, subject, last saved, how
+    // often each was sent), the placeholders and who letters come from.
+    if (normalizedPath === '/api/letters' && request.method === 'GET') {
       const session = await requireSession(request, response)
       if (!session) return
       if (session.user.role !== 'owner') {
         sendJson(response, 403, { error: 'Only owners can see letters' })
         return
       }
-      sendJson(response, 200, await letterTemplateView(), { 'Cache-Control': 'no-store' })
+      sendJson(response, 200, await letterListView(), { 'Cache-Control': 'no-store' })
       return
     }
 
-    // PUT /api/letters/template - { subject, emailBody, letterBody }. An unknown
+    // POST /api/letters - { name }: a new, blank letter. Names are unique, ignoring case,
+    // so the list and the Send button can never name two letters alike.
+    if (normalizedPath === '/api/letters' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can add letters' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const name = cleanLetterName(payload?.name)
+      if (!name) {
+        sendJson(response, 400, { error: 'letter_invalid', message: 'Give the letter a name of up to 80 characters.' })
+        return
+      }
+      const existing = await appDataStore.listEngagementLetters()
+      if (existing.some((letter) => letter.name.trim().toLowerCase() === name.toLowerCase())) {
+        sendJson(response, 409, { error: 'letter_name_taken', message: `There is already a letter named "${name}".` })
+        return
+      }
+      const created = await appDataStore.createEngagementLetter({ name, createdBy: session.user.id })
+      try {
+        await appDataStore.recordActivity(session.user.id, 'engagement_letter_created', created.name)
+      } catch (error) {
+        console.error('[letters] could not record the new letter:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 201, await letterTemplateView(created.id))
+      return
+    }
+
+    // /api/letters/:id - one letter: GET reads it, PUT saves its three boxes, PATCH
+    // renames it, DELETE removes it when it was never sent. The v1 letter's id
+    // ('default') is one of these ids like any other.
+    // The one-letter page's paths (before the list of letters). A tab still showing that page
+    // after a deploy is told to reload: "template" or "send" is never read as a letter id.
+    const legacyLetterMatch = normalizedPath.match(/^\/api\/letters\/(template|preview|preview\.pdf|sends|send)$/)
+    if (legacyLetterMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      sendJson(response, 404, { error: 'app_updated', message: 'The app was updated - reload the page.' })
+      return
+    }
+
+    const letterMatch = normalizedPath.match(/^\/api\/letters\/([A-Za-z0-9_-]+)$/)
+
+    // GET /api/letters/:id - the saved letter, its hash, the placeholders and the sender.
+    if (letterMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see letters' })
+        return
+      }
+      const view = await letterTemplateView(letterMatch[1])
+      if (!view) {
+        sendJson(response, 404, { error: 'letter_not_found', message: 'This letter is no longer on file.' })
+        return
+      }
+      sendJson(response, 200, view, { 'Cache-Control': 'no-store' })
+      return
+    }
+
+    // PUT /api/letters/:id - { subject, emailBody, letterBody }. An unknown
     // placeholder warns, it does not refuse: Send is what refuses it.
-    if (normalizedPath === '/api/letters/template' && request.method === 'PUT') {
+    if (letterMatch && request.method === 'PUT') {
       const session = await requireSession(request, response)
       if (!session) return
       if (session.user.role !== 'owner') {
@@ -11656,26 +11764,123 @@ const server = createServer(async (request, response) => {
         })
         return
       }
-      await appDataStore.saveEngagementLetter({
-        id: LETTER_ID,
+      const saved = await appDataStore.saveEngagementLetter({
+        id: letterMatch[1],
         subject: texts[0],
         emailBody: texts[1],
         letterBody: texts[2],
         updatedBy: session.user.id,
       })
+      if (!saved) {
+        sendJson(response, 404, {
+          error: 'letter_not_found',
+          message: 'This letter was deleted, so nothing was saved. Copy your text, then add a new letter.',
+        })
+        return
+      }
       try {
-        await appDataStore.recordActivity(session.user.id, 'engagement_letter_saved', 'Engagement letter')
+        await appDataStore.recordActivity(session.user.id, 'engagement_letter_saved', saved.name)
       } catch (error) {
         console.error('[letters] could not record the save:', error)
       }
       broadcastDataChanged()
-      sendJson(response, 200, await letterTemplateView())
+      sendJson(response, 200, await letterTemplateView(saved.id))
       return
     }
 
-    // GET /api/letters/preview?clientId= - what this client would receive, from
-    // the STORED template and the same builder as Send. Read-only, uncached.
-    if (normalizedPath === '/api/letters/preview' && request.method === 'GET') {
+    // PATCH /api/letters/:id - { name }: rename. The text, the hash and the send
+    // history are untouched, so a rename never blocks a Send.
+    if (letterMatch && request.method === 'PATCH') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can rename letters' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const name = cleanLetterName(payload?.name)
+      if (!name) {
+        sendJson(response, 400, { error: 'letter_invalid', message: 'Give the letter a name of up to 80 characters.' })
+        return
+      }
+      // The original letter reads its column-default name as "not named yet", so that name
+      // would never stick to it (it would show the subject again).
+      if (isReservedEngagementLetterName(letterMatch[1], name)) {
+        sendJson(response, 400, { error: 'letter_invalid', message: 'Pick another name for this letter.' })
+        return
+      }
+      const existing = await appDataStore.listEngagementLetters()
+      if (
+        existing.some(
+          (letter) => letter.id !== letterMatch[1] && letter.name.trim().toLowerCase() === name.toLowerCase(),
+        )
+      ) {
+        sendJson(response, 409, { error: 'letter_name_taken', message: `There is already a letter named "${name}".` })
+        return
+      }
+      const renamed = await appDataStore.renameEngagementLetter(letterMatch[1], name)
+      if (!renamed) {
+        sendJson(response, 404, { error: 'letter_not_found', message: 'This letter is no longer on file.' })
+        return
+      }
+      try {
+        await appDataStore.recordActivity(session.user.id, 'engagement_letter_renamed', renamed.name)
+      } catch (error) {
+        console.error('[letters] could not record the rename:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, await letterTemplateView(renamed.id))
+      return
+    }
+
+    // DELETE /api/letters/:id - only a letter that was never sent: the send log keeps
+    // naming the letter it sent, so a sent letter stays (rename it instead).
+    if (letterMatch && request.method === 'DELETE') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can delete letters' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const letter = await appDataStore.getEngagementLetter(letterMatch[1])
+      const outcome = await appDataStore.deleteEngagementLetter(letterMatch[1])
+      if (!outcome.deleted && outcome.reason === 'has_sends') {
+        sendJson(response, 409, {
+          error: 'letter_has_sends',
+          message: `"${letter?.name ?? 'This letter'}" has been sent (${outcome.sendCount} send${outcome.sendCount === 1 ? '' : 's'} on record), so it stays: its send history points at it. Rename it instead if it is no longer used.`,
+        })
+        return
+      }
+      if (!outcome.deleted) {
+        sendJson(response, 404, { error: 'letter_not_found', message: 'This letter is no longer on file.' })
+        return
+      }
+      try {
+        await appDataStore.recordActivity(session.user.id, 'engagement_letter_deleted', letter?.name ?? letterMatch[1])
+      } catch (error) {
+        console.error('[letters] could not record the delete:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { ok: true })
+      return
+    }
+
+    // GET /api/letters/:id/preview?clientId= - what this client would receive, from
+    // the STORED letter and the same builder as Send. Read-only, uncached.
+    const letterPreviewMatch = normalizedPath.match(/^\/api\/letters\/([A-Za-z0-9_-]+)\/preview$/)
+    if (letterPreviewMatch && request.method === 'GET') {
       const session = await requireSession(request, response)
       if (!session) return
       if (session.user.role !== 'owner') {
@@ -11687,7 +11892,12 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: 'clientId is required' })
         return
       }
-      const preview = await assembleLetterPreview(await loadLetterContext(session), clientId)
+      const context = await loadLetterContext(session, letterPreviewMatch[1])
+      if (!context.template) {
+        sendJson(response, 404, { error: 'letter_not_found', message: 'This letter is no longer on file.' })
+        return
+      }
+      const preview = await assembleLetterPreview(context, clientId)
       if (preview.notFound) {
         sendJson(response, 404, { error: 'Client not found' })
         return
@@ -11716,9 +11926,10 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // GET /api/letters/preview.pdf?clientId= - the PDF the send would attach,
+    // GET /api/letters/:id/preview.pdf?clientId= - the PDF the send would attach,
     // streamed inline for the preview dialog.
-    if (normalizedPath === '/api/letters/preview.pdf' && request.method === 'GET') {
+    const letterPreviewPdfMatch = normalizedPath.match(/^\/api\/letters\/([A-Za-z0-9_-]+)\/preview\.pdf$/)
+    if (letterPreviewPdfMatch && request.method === 'GET') {
       const session = await requireSession(request, response)
       if (!session) return
       if (session.user.role !== 'owner') {
@@ -11730,7 +11941,12 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: 'clientId is required' })
         return
       }
-      const preview = await assembleLetterPreview(await loadLetterContext(session), clientId)
+      const context = await loadLetterContext(session, letterPreviewPdfMatch[1])
+      if (!context.template) {
+        sendJson(response, 404, { error: 'letter_not_found', message: 'This letter is no longer on file.' })
+        return
+      }
+      const preview = await assembleLetterPreview(context, clientId)
       if (preview.notFound) {
         sendJson(response, 404, { error: 'Client not found' })
         return
@@ -11751,9 +11967,10 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // GET /api/letters/sends - the send log, newest first ("Last sent" on the page
-    // is the latest `sent` row per client).
-    if (normalizedPath === '/api/letters/sends' && request.method === 'GET') {
+    // GET /api/letters/:id/sends - this letter's send log, newest first ("Last sent"
+    // on the page is the latest `sent` row per client, for the chosen letter).
+    const letterSendsMatch = normalizedPath.match(/^\/api\/letters\/([A-Za-z0-9_-]+)\/sends$/)
+    if (letterSendsMatch && request.method === 'GET') {
       const session = await requireSession(request, response)
       if (!session) return
       if (session.user.role !== 'owner') {
@@ -11763,18 +11980,20 @@ const server = createServer(async (request, response) => {
       sendJson(
         response,
         200,
-        { sends: await appDataStore.listEngagementLetterSends({ letterId: LETTER_ID }) },
+        { sends: await appDataStore.listEngagementLetterSends({ letterId: letterSendsMatch[1] }) },
         { 'Cache-Control': 'no-store' },
       )
       return
     }
 
-    // POST /api/letters/send - { clientIds (1..50), templateHash, resendToday? }.
-    // Everything that can refuse the whole batch does so BEFORE the first client;
-    // after that it is one client at a time, a claim row before each provider
-    // call, and the answer is always 200 with a result per client (some mail has
-    // left by then, so the page must be told what happened to each).
-    if (normalizedPath === '/api/letters/send' && request.method === 'POST') {
+    // POST /api/letters/:id/send - { clientIds (1..50), templateHash, resendToday? }.
+    // Sends THIS letter; the send log is keyed by its id, so "already sent today"
+    // is per letter. Everything that can refuse the whole batch does so BEFORE the
+    // first client; after that it is one client at a time, a claim row before each
+    // provider call, and the answer is always 200 with a result per client (some
+    // mail has left by then, so the page must be told what happened to each).
+    const letterSendMatch = normalizedPath.match(/^\/api\/letters\/([A-Za-z0-9_-]+)\/send$/)
+    if (letterSendMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) return
       if (session.user.role !== 'owner') {
@@ -11809,7 +12028,14 @@ const server = createServer(async (request, response) => {
         })
         return
       }
-      const context = await loadLetterContext(session)
+      const context = await loadLetterContext(session, letterSendMatch[1])
+      if (!context.template) {
+        sendJson(response, 404, {
+          error: 'letter_not_found',
+          message: 'This letter is no longer on file. Nothing was sent.',
+        })
+        return
+      }
       const templateHash = letterTemplateHash(context.template)
       if (payload.templateHash !== templateHash) {
         sendJson(response, 409, {
@@ -11875,7 +12101,7 @@ const server = createServer(async (request, response) => {
         await appDataStore.recordActivity(
           session.user.id,
           'engagement_letters_sent',
-          `${sent} of ${clientIds.length}`,
+          `${context.template.name}: ${sent} of ${clientIds.length}`,
         )
       } catch (error) {
         console.error('[letters] could not record the send:', error)
@@ -12278,7 +12504,7 @@ const server = createServer(async (request, response) => {
       if (proposal.status === 'accepted' || proposal.status === 'declined') {
         sendJson(response, 409, {
           error: 'proposal_refused',
-          message: `This proposal is ${proposal.status} — copy it to write a new letter.`,
+          message: `This proposal is ${proposalOutcomeWords(proposal.status)} — copy it to write a new letter.`,
         })
         return
       }
@@ -12388,7 +12614,7 @@ const server = createServer(async (request, response) => {
       if (proposal.status === 'accepted' || proposal.status === 'declined') {
         sendJson(response, 409, {
           error: 'proposal_refused',
-          message: `This proposal is ${proposal.status} — copy it to send a new one.`,
+          message: `This proposal is ${proposalOutcomeWords(proposal.status)} — copy it to send a new one.`,
         })
         return
       }
@@ -12516,14 +12742,17 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // POST /api/proposals/:id/decline — { note } (spec §5.5). A declined
-    // proposal stays on the list and is reopened as a copy.
+    // POST /api/proposals/:id/decline — { note? } (spec §5.5). The button reads
+    // "Close as lost" and the status shows as Closed/Lost (engagements stage 1;
+    // stored as `declined`). The note is optional: missing, empty or blank all
+    // close it with no note; the store caps it at 2000. A closed proposal stays
+    // on the list and is reopened as a copy.
     const proposalDeclineMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/decline$/)
     if (proposalDeclineMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
       if (!session) return
       if (session.user.role !== 'owner') {
-        sendJson(response, 403, { error: 'Only owners can decline proposals' })
+        sendJson(response, 403, { error: 'Only owners can close proposals as lost' })
         return
       }
       if (isCrossSiteOrigin(request)) {
@@ -12543,7 +12772,7 @@ const server = createServer(async (request, response) => {
       if (current.status === 'accepted' || current.status === 'declined') {
         sendJson(response, 409, {
           error: 'proposal_refused',
-          message: `This proposal is already ${current.status}.`,
+          message: `This proposal is already ${proposalOutcomeWords(current.status)}.`,
         })
         return
       }
@@ -12603,7 +12832,7 @@ const server = createServer(async (request, response) => {
       if (proposal.status === 'accepted' || proposal.status === 'declined') {
         sendJson(response, 409, {
           error: 'proposal_refused',
-          message: `This proposal is ${proposal.status} — copy it to keep working on it.`,
+          message: `This proposal is ${proposalOutcomeWords(proposal.status)} — copy it to keep working on it.`,
         })
         return
       }
@@ -12633,7 +12862,7 @@ const server = createServer(async (request, response) => {
       if (proposal.status === 'accepted' || proposal.status === 'declined') {
         sendJson(response, 409, {
           error: 'proposal_refused',
-          message: `This proposal is ${proposal.status} — copy it to keep working on it.`,
+          message: `This proposal is ${proposalOutcomeWords(proposal.status)} — copy it to keep working on it.`,
         })
         return
       }

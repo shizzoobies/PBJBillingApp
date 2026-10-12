@@ -204,6 +204,17 @@ describe('the public questionnaire route', () => {
     expect(serverSource).toContain('const MAX_FORM_BODY_BYTES = 64 * 1024')
   })
 
+  // A send the store refuses (a required answer missing - including one from a page
+  // opened before that answer was required) comes back as the form itself, with
+  // every problem listed and flagged on its field, and what they typed kept.
+  it('answers a refused send with the form, every problem and their own input, as a 400', () => {
+    const refusal = between(publicBlock, "if (error.reason === 'invalid') {", "if (error.reason === 'submitted')")
+    expect(refusal).toContain('renderQuestionnairePage({')
+    expect(refusal).toContain('questionnaire: record.questions')
+    expect(refusal).toContain('errors: error.problems.length > 0 ? error.problems : [error.message]')
+    expect(refusal).toMatch(/values,\s*\}\),\s*400,/)
+  })
+
   it('reads the form against the frozen questions and submits by token', () => {
     expect(publicBlock).toContain('readQuestionnaireForm(formBody, record.questions)')
     expect(publicBlock).toContain('{ token: linkToken }')

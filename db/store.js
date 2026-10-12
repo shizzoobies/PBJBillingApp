@@ -37,6 +37,7 @@ import {
   sanitizeProposalPricing,
   softwareLocksOf,
 } from '../lib/proposal-pricing.js'
+import { proposalOutcomeAction, proposalOutcomeWords } from '../lib/proposal-outcomes.js'
 import {
   QUESTIONNAIRE_EXPIRY_DAYS,
   answersToProposalSeed,
@@ -1444,32 +1445,62 @@ const ACCOUNT_CREDIT_SELECT_COLUMNS = `id, client_id, amount, source_kind, sourc
           note, created_by, created_at, voided_at, voided_by`
 
 // ---- Engagement letters (featreq-5e195707) --------------------------------
-// The saved template and the per-client send log: endpoint-managed, no foreign
-// keys, never deleted from. See the section of methods on AppDataStore.
+// The saved letters and the per-client send log: endpoint-managed, no foreign
+// keys. A send row is never deleted; a letter can be deleted only while it has
+// no send rows. See the section of methods on AppDataStore.
+const ENGAGEMENT_LETTER_NAME_MAX = 80
 const ENGAGEMENT_LETTER_SUBJECT_MAX = 200
 const ENGAGEMENT_LETTER_BODY_MAX = 20000
 const ENGAGEMENT_LETTER_COLUMNS = `id, name, subject, email_body, letter_body, updated_by,
           created_at, updated_at`
 const ENGAGEMENT_SEND_COLUMNS = `id, letter_id, client_id, template_hash, firm_day, attempt, status,
           recipients, subject, provider_id, error, delivery, created_by, created_at, completed_at`
+/**
+ * The column default, and the name every letter saved before letters had names
+ * carries (v1 never wrote `name`: there was one letter, 'default').
+ */
+const LEGACY_ENGAGEMENT_LETTER_NAME = 'Engagement letter'
 
-function emptyEngagementLetter(id = 'default') {
+/**
+ * The name a letter is listed under. The v1 letter ('default') still carries the
+ * column default, which says nothing about it, so until it is renamed it is listed
+ * under its subject as typed (her "1099 Filing" letter), or "Letter 1" when the
+ * subject is blank. Read-time on purpose: nothing is written to name it.
+ */
+function engagementLetterName(id, name, subject) {
+  const stored = String(name ?? '').trim()
+  if (id === 'default' && (!stored || stored === LEGACY_ENGAGEMENT_LETTER_NAME)) {
+    return String(subject ?? '').trim().slice(0, ENGAGEMENT_LETTER_NAME_MAX) || 'Letter 1'
+  }
+  return stored || LEGACY_ENGAGEMENT_LETTER_NAME
+}
+
+/**
+ * True for the one name the v1 letter cannot take: the column default, which
+ * `engagementLetterName` reads as "not named yet" (trimmed, any case).
+ */
+export function isReservedEngagementLetterName(id, name) {
+  return id === 'default' && String(name ?? '').trim().toLowerCase() === LEGACY_ENGAGEMENT_LETTER_NAME.toLowerCase()
+}
+
+/** A letter row from the file backend, in the shape the Postgres mapper answers. */
+function fileEngagementLetter(row) {
   return {
-    id,
-    name: 'Engagement letter',
-    subject: '',
-    emailBody: '',
-    letterBody: '',
-    updatedBy: null,
-    createdAt: null,
-    updatedAt: null,
+    id: row.id,
+    name: engagementLetterName(row.id, row.name, row.subject),
+    subject: row.subject ?? '',
+    emailBody: row.emailBody ?? '',
+    letterBody: row.letterBody ?? '',
+    updatedBy: row.updatedBy ?? null,
+    createdAt: row.createdAt ?? null,
+    updatedAt: row.updatedAt ?? null,
   }
 }
 
 function mapEngagementLetterRow(row) {
   return {
     id: row.id,
-    name: row.name,
+    name: engagementLetterName(row.id, row.name, row.subject),
     subject: row.subject ?? '',
     emailBody: row.email_body ?? '',
     letterBody: row.letter_body ?? '',
@@ -12499,7 +12530,7 @@ export class AppDataStore {
     if (!current) return null
     if (current.status === 'accepted' || current.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(current.status)} — copy it to a new proposal to change anything.`,
       )
     }
     const has = (key) => Object.prototype.hasOwnProperty.call(patch ?? {}, key)
@@ -12507,7 +12538,7 @@ export class AppDataStore {
     const isExplicitReprice = !recognizedFields.some((key) => has(key))
     if (isExplicitReprice && current.status !== 'draft') {
       throw new ProposalStateError(
-        `Only a draft can be repriced — this proposal is ${current.status}.`,
+        `Only a draft can be repriced — this proposal is ${proposalOutcomeWords(current.status)}.`,
       )
     }
     const shouldReprice = has('inputs') || has('selections') || isExplicitReprice
@@ -12600,7 +12631,7 @@ export class AppDataStore {
       // concurrent write moved it to accepted/declined, or (for a `clientId`
       // patch) linked a different client, in between.
       throw new ProposalStateError(
-        `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(current.status)} — copy it to a new proposal to change anything.`,
       )
     }
 
@@ -12615,17 +12646,17 @@ export class AppDataStore {
     // write can land in — same convention `setProposalLetter` uses.
     if (target.status === 'accepted' || target.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is ${target.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(target.status)} — copy it to a new proposal to change anything.`,
       )
     }
     if (isExplicitReprice && target.status !== 'draft') {
       throw new ProposalStateError(
-        `Only a draft can be repriced — this proposal is ${target.status}.`,
+        `Only a draft can be repriced — this proposal is ${proposalOutcomeWords(target.status)}.`,
       )
     }
     if (has('clientId') && (target.clientId ?? null) !== (current.clientId ?? null)) {
       throw new ProposalStateError(
-        `This proposal is ${target.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(target.status)} — copy it to a new proposal to change anything.`,
       )
     }
     Object.assign(target, next, { pricingSnapshot, updatedAt })
@@ -12651,7 +12682,7 @@ export class AppDataStore {
     const current = await this.getProposal(id)
     if (!current) return false
     if (current.status !== 'draft') {
-      throw new ProposalStateError('Only a draft can be deleted — decline a sent proposal instead.')
+      throw new ProposalStateError('Only a draft can be deleted — close a sent proposal as lost instead.')
     }
     if (this.pool) {
       const result = await this.pool.query(
@@ -12729,16 +12760,18 @@ export class AppDataStore {
     // accepted/declined, to any status, ever. Copy is how she starts again.
     if (current.status === 'accepted' || current.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is already ${current.status} — it can't be ${status} again.`,
+        `This proposal is already ${proposalOutcomeWords(current.status)} — it can't be ${proposalOutcomeAction(status)} again.`,
       )
     }
     const isDecision = status === 'accepted' || status === 'declined'
     if (isDecision && current.status !== 'draft' && current.status !== 'sent') {
       throw new ProposalStateError(
-        `This proposal is already ${current.status} — it can't be ${status} again.`,
+        `This proposal is already ${proposalOutcomeWords(current.status)} — it can't be ${proposalOutcomeAction(status)} again.`,
       )
     }
-    const cleanNote = typeof note === 'string' ? note.trim().slice(0, 2000) : null
+    // Close as lost takes an optional note: a blank one is no note (null), so
+    // both backends store the same thing and an earlier note is never blanked.
+    const cleanNote = typeof note === 'string' ? note.trim().slice(0, 2000) || null : null
     const linkClient = cleanProposalId(clientId)
     if (this.pool) {
       const { rows } = await this.pool.query(PROPOSAL_STATUS_UPDATE_SQL, [
@@ -12751,7 +12784,7 @@ export class AppDataStore {
       // We just confirmed this id exists and was in a state that allows this
       // transition; zero rows here means a concurrent write raced us to it.
       throw new ProposalStateError(
-        `This proposal is already ${current.status} — it can't be ${status} again.`,
+        `This proposal is already ${proposalOutcomeWords(current.status)} — it can't be ${proposalOutcomeAction(status)} again.`,
       )
     }
     const authState = await readJson(localAuthPath)
@@ -12926,7 +12959,7 @@ export class AppDataStore {
     if (!current) return null
     if (current.status === 'accepted' || current.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(current.status)} — copy it to a new proposal to change anything.`,
       )
     }
     const clean = {
@@ -12949,7 +12982,7 @@ export class AppDataStore {
       // Zero rows for an id we just confirmed exists and was writable: a
       // concurrent accept/decline moved it in between.
       throw new ProposalStateError(
-        `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(current.status)} — copy it to a new proposal to change anything.`,
       )
     }
     const authState = await readJson(localAuthPath)
@@ -12959,7 +12992,7 @@ export class AppDataStore {
     if (!target) return null
     if (target.status === 'accepted' || target.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is ${target.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(target.status)} — copy it to a new proposal to change anything.`,
       )
     }
     const now = nowIso()
@@ -13053,7 +13086,7 @@ export class AppDataStore {
     const proposal = await this.getProposal(id)
     if (!proposal) return null
     if (proposal.status === 'accepted' || proposal.status === 'declined') {
-      throw new ProposalStateError(`This proposal is already ${proposal.status}.`)
+      throw new ProposalStateError(`This proposal is already ${proposalOutcomeWords(proposal.status)}.`)
     }
 
     // Everything that can refuse runs BEFORE any write. `proposals.client_id`
@@ -13144,8 +13177,8 @@ export class AppDataStore {
           const message = !latest
             ? 'This proposal no longer exists.'
             : latest.status === 'declined'
-              ? 'This proposal was declined while you were accepting it.'
-              : 'Someone else already accepted this proposal.'
+              ? 'This proposal was closed as lost while you were accepting it.'
+              : 'Someone else already marked this proposal Won.'
           throw new ProposalStateError(message)
         }
       } else if (updateMonthlyRate === true) {
@@ -13224,7 +13257,7 @@ export class AppDataStore {
     const alreadyDecided = (status) =>
       new ProposalStateError(
         status
-          ? `This proposal is already ${status} — it can't be accepted again.`
+          ? `This proposal is already ${proposalOutcomeWords(status)} — it can't be marked Won again.`
           : 'This proposal no longer exists.',
       )
     const linkClient = cleanProposalId(clientId)
@@ -13367,7 +13400,7 @@ export class AppDataStore {
     if (!current) return null
     if (current.status === 'accepted' || current.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is ${current.status} — copy it to keep working on it.`,
+        `This proposal is ${proposalOutcomeWords(current.status)} — copy it to keep working on it.`,
       )
     }
     if (this.pool) {
@@ -13388,7 +13421,7 @@ export class AppDataStore {
       // Zero rows for an id we just confirmed exists and was open: a
       // concurrent accept/decline moved it in between.
       throw new ProposalStateError(
-        `This proposal is ${current.status} — copy it to keep working on it.`,
+        `This proposal is ${proposalOutcomeWords(current.status)} — copy it to keep working on it.`,
       )
     }
     const authState = await readJson(localAuthPath)
@@ -13398,7 +13431,7 @@ export class AppDataStore {
     if (!target) return null
     if (target.status === 'accepted' || target.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is ${target.status} — copy it to keep working on it.`,
+        `This proposal is ${proposalOutcomeWords(target.status)} — copy it to keep working on it.`,
       )
     }
     target.messages = [...(Array.isArray(target.messages) ? target.messages : []), ...clean].slice(
@@ -25548,14 +25581,16 @@ export class AppDataStore {
 
   // ---- Engagement letters (featreq-5e195707) ----
   //
-  // One saved template (the singleton row 'default') and one row per attempt to
-  // send it to a client. Endpoint-managed like client_notes: NOT part of the bulk
-  // /api/app-data write, no foreign keys, never deleted from, so an autosave or a
-  // client re-insert can neither roll a letter back nor forget what was sent.
-  // Stored in auth-state (`engagementLetters` / `engagementLetterSends`) on the
-  // file backend. The send log is also the double-send guard: a claim row is
-  // INSERTED before the provider call and only one non-failed claim per
-  // (letter, client, template hash, firm day, attempt) can exist.
+  // The saved letters (a list since the 2026-10-10 send-back; the v1 singleton
+  // 'default' is one of them) and one row per attempt to send one to a client.
+  // Endpoint-managed like client_notes: NOT part of the bulk /api/app-data write
+  // and no foreign keys, so an autosave or a client re-insert can neither roll a
+  // letter back nor forget what was sent. A send row is never deleted, and a
+  // letter is deleted only while no send row names it. Stored in auth-state
+  // (`engagementLetters` / `engagementLetterSends`) on the file backend. The send
+  // log is also the double-send guard: a claim row is INSERTED before the provider
+  // call and only one non-failed claim per (letter, client, template hash, firm
+  // day, attempt) can exist.
 
   /**
    * The ONE read-modify-write on the file backend's engagement letters. Raw fs
@@ -25577,22 +25612,93 @@ export class AppDataStore {
     })
   }
 
-  /** The saved letter, or an empty one (never null) when none was saved yet. */
+  /**
+   * Every saved letter, oldest first, each with `sendCount` (its rows in the send
+   * log, failed ones included - what decides whether it can be deleted).
+   */
+  async listEngagementLetters() {
+    if (this.pool) {
+      const letters = await this.pool.query(
+        `select ${ENGAGEMENT_LETTER_COLUMNS} from engagement_letters order by created_at asc, id asc`,
+      )
+      const counts = await this.pool.query(
+        `select letter_id, count(*)::int as sends from engagement_letter_sends group by letter_id`,
+      )
+      const byLetter = new Map(counts.rows.map((row) => [row.letter_id, Number(row.sends) || 0]))
+      return letters.rows.map((row) => ({
+        ...mapEngagementLetterRow(row),
+        sendCount: byLetter.get(row.id) ?? 0,
+      }))
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const list = Array.isArray(authState.engagementLetters) ? authState.engagementLetters : []
+    const sends = Array.isArray(authState.engagementLetterSends) ? authState.engagementLetterSends : []
+    return list
+      .filter((row) => row?.id)
+      .map((row, index) => ({ row, index }))
+      .sort(
+        (a, b) =>
+          String(a.row.createdAt ?? '').localeCompare(String(b.row.createdAt ?? '')) || a.index - b.index,
+      )
+      .map(({ row }) => ({
+        ...fileEngagementLetter(row),
+        sendCount: sends.filter((send) => send?.letterId === row.id).length,
+      }))
+  }
+
+  /** One saved letter, or null when there is no letter with that id. */
   async getEngagementLetter(id = 'default') {
     if (this.pool) {
       const result = await this.pool.query(
         `select ${ENGAGEMENT_LETTER_COLUMNS} from engagement_letters where id = $1`,
         [id],
       )
-      return result.rows.length > 0 ? mapEngagementLetterRow(result.rows[0]) : emptyEngagementLetter(id)
+      return result.rows.length > 0 ? mapEngagementLetterRow(result.rows[0]) : null
     }
     const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
     const list = Array.isArray(authState.engagementLetters) ? authState.engagementLetters : []
     const found = list.find((row) => row?.id === id)
-    return found ? { ...emptyEngagementLetter(id), ...found } : emptyEngagementLetter(id)
+    return found ? fileEngagementLetter(found) : null
   }
 
-  /** Save the letter (an upsert). Trimmed; the subject is capped at 200 characters, each body at 20,000. */
+  /**
+   * A new letter, named, with its three boxes (blank unless given). The id is
+   * generated (`letter-xxxxxxxx`); the name is trimmed and capped at 80 characters.
+   */
+  async createEngagementLetter({ name, subject = '', emailBody = '', letterBody = '', createdBy = null } = {}) {
+    const id = `letter-${randomUUID().slice(0, 8)}`
+    const fields = {
+      name: String(name ?? '').trim().slice(0, ENGAGEMENT_LETTER_NAME_MAX) || 'New letter',
+      subject: String(subject ?? '').trim().slice(0, ENGAGEMENT_LETTER_SUBJECT_MAX),
+      emailBody: String(emailBody ?? '').trim().slice(0, ENGAGEMENT_LETTER_BODY_MAX),
+      letterBody: String(letterBody ?? '').trim().slice(0, ENGAGEMENT_LETTER_BODY_MAX),
+    }
+    if (this.pool) {
+      const result = await this.pool.query(
+        `insert into engagement_letters (id, name, subject, email_body, letter_body, updated_by)
+         values ($1, $2, $3, $4, $5, $6)
+         returning ${ENGAGEMENT_LETTER_COLUMNS}`,
+        [id, fields.name, fields.subject, fields.emailBody, fields.letterBody, createdBy],
+      )
+      return mapEngagementLetterRow(result.rows[0])
+    }
+    return this._mutateLetterFile((authState) => {
+      const now = nowIso()
+      const row = { id, ...fields, updatedBy: createdBy, createdAt: now, updatedAt: now }
+      authState.engagementLetters.push(row)
+      return { result: fileEngagementLetter(row), changed: true }
+    })
+  }
+
+  /**
+   * Save a letter's three boxes. Trimmed; the subject is capped at 200 characters,
+   * each body at 20,000. Null when there is no letter with that id (deleted in
+   * another tab): a save never brings a deleted letter back.
+   *
+   * The v1 letter, still unnamed, keeps the name it is listed under: the first save
+   * stores the name read from its OLD subject, so editing the subject never renames
+   * it (`engagementLetterName`, written down at her own save).
+   */
   async saveEngagementLetter({ id = 'default', subject, emailBody, letterBody, updatedBy = null } = {}) {
     const fields = {
       subject: String(subject ?? '').trim().slice(0, ENGAGEMENT_LETTER_SUBJECT_MAX),
@@ -25600,30 +25706,92 @@ export class AppDataStore {
       letterBody: String(letterBody ?? '').trim().slice(0, ENGAGEMENT_LETTER_BODY_MAX),
     }
     if (this.pool) {
+      // `subject` and `name` on the right-hand side are the row's values BEFORE this update.
       const result = await this.pool.query(
-        `insert into engagement_letters (id, subject, email_body, letter_body, updated_by)
-         values ($1, $2, $3, $4, $5)
-         on conflict (id) do update set
-           subject = excluded.subject,
-           email_body = excluded.email_body,
-           letter_body = excluded.letter_body,
-           updated_by = excluded.updated_by,
-           updated_at = now()
-         returning ${ENGAGEMENT_LETTER_COLUMNS}`,
+        `update engagement_letters
+            set subject = $2, email_body = $3, letter_body = $4, updated_by = $5, updated_at = now(),
+                name = case
+                  when id = 'default' and btrim(name) in ('', '${LEGACY_ENGAGEMENT_LETTER_NAME}')
+                    then coalesce(nullif(left(btrim(subject), ${ENGAGEMENT_LETTER_NAME_MAX}), ''), 'Letter 1')
+                  else name
+                end
+          where id = $1
+          returning ${ENGAGEMENT_LETTER_COLUMNS}`,
         [id, fields.subject, fields.emailBody, fields.letterBody, updatedBy],
       )
-      return mapEngagementLetterRow(result.rows[0])
+      return result.rows.length > 0 ? mapEngagementLetterRow(result.rows[0]) : null
     }
     return this._mutateLetterFile((authState) => {
       const at = authState.engagementLetters.findIndex((row) => row?.id === id)
-      const now = nowIso()
-      const row =
-        at >= 0
-          ? { ...authState.engagementLetters[at], ...fields, updatedBy, updatedAt: now }
-          : { ...emptyEngagementLetter(id), ...fields, updatedBy, createdAt: now, updatedAt: now }
-      if (at >= 0) authState.engagementLetters[at] = row
-      else authState.engagementLetters.push(row)
-      return { result: { ...row }, changed: true }
+      if (at < 0) return { result: null, changed: false }
+      const before = authState.engagementLetters[at]
+      const name = engagementLetterName(before.id, before.name, before.subject)
+      const row = { ...before, ...fields, name, updatedBy, updatedAt: nowIso() }
+      authState.engagementLetters[at] = row
+      return { result: fileEngagementLetter(row), changed: true }
+    })
+  }
+
+  /**
+   * Rename a letter (trimmed, capped at 80 characters). Its text, its "last saved"
+   * stamp and its send history are untouched. Null when there is no such letter.
+   */
+  async renameEngagementLetter(id, name) {
+    const clean = String(name ?? '').trim().slice(0, ENGAGEMENT_LETTER_NAME_MAX)
+    if (!clean) return null
+    // The v1 letter carrying the column default reads as unnamed (`engagementLetterName`),
+    // so that name could never stick to it: refused, nothing written (the route says why).
+    if (isReservedEngagementLetterName(id, clean)) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update engagement_letters set name = $2 where id = $1 returning ${ENGAGEMENT_LETTER_COLUMNS}`,
+        [id, clean],
+      )
+      return result.rows.length > 0 ? mapEngagementLetterRow(result.rows[0]) : null
+    }
+    return this._mutateLetterFile((authState) => {
+      const at = authState.engagementLetters.findIndex((row) => row?.id === id)
+      if (at < 0) return { result: null, changed: false }
+      const row = { ...authState.engagementLetters[at], name: clean }
+      authState.engagementLetters[at] = row
+      return { result: fileEngagementLetter(row), changed: true }
+    })
+  }
+
+  /**
+   * Delete a letter that has never been sent. A letter with ANY row in the send log
+   * (failed attempts included) is kept, so the log never names a letter that is
+   * gone: `{ deleted: false, reason: 'has_sends', sendCount }`. In Postgres the
+   * check and the delete are one statement.
+   *
+   * @returns {Promise<{deleted: true} | {deleted: false, reason: 'not_found' | 'has_sends', sendCount: number}>}
+   */
+  async deleteEngagementLetter(id) {
+    if (this.pool) {
+      const removed = await this.pool.query(
+        `delete from engagement_letters
+          where id = $1
+            and not exists (select 1 from engagement_letter_sends where letter_id = $1)
+          returning id`,
+        [id],
+      )
+      if (removed.rows.length > 0) return { deleted: true }
+      const why = await this.pool.query(
+        `select (select count(*)::int from engagement_letters where id = $1) as letters,
+                (select count(*)::int from engagement_letter_sends where letter_id = $1) as sends`,
+        [id],
+      )
+      const letters = Number(why.rows[0]?.letters) || 0
+      const sendCount = Number(why.rows[0]?.sends) || 0
+      return { deleted: false, reason: letters > 0 ? 'has_sends' : 'not_found', sendCount }
+    }
+    return this._mutateLetterFile((authState) => {
+      const at = authState.engagementLetters.findIndex((row) => row?.id === id)
+      const sendCount = authState.engagementLetterSends.filter((send) => send?.letterId === id).length
+      if (at < 0) return { result: { deleted: false, reason: 'not_found', sendCount }, changed: false }
+      if (sendCount > 0) return { result: { deleted: false, reason: 'has_sends', sendCount }, changed: false }
+      authState.engagementLetters.splice(at, 1)
+      return { result: { deleted: true }, changed: true }
     })
   }
 

@@ -16,10 +16,12 @@ import { PREVIEW_FRAME_PREFIX } from './InvoicePreviewModal'
  * what is missing for this client, and what would make Send skip them.
  */
 export function LetterPreviewModal({
+  letterId,
   clientId,
   clientName,
   onClose,
 }: {
+  letterId: string
   clientId: string
   clientName: string
   onClose: () => void
@@ -30,7 +32,7 @@ export function LetterPreviewModal({
 
   useEffect(() => {
     let cancelled = false
-    previewLetterRequest(clientId)
+    previewLetterRequest(letterId, clientId)
       .then((result) => {
         if (!cancelled) setPreview(result)
       })
@@ -41,7 +43,7 @@ export function LetterPreviewModal({
     return () => {
       cancelled = true
     }
-  }, [clientId])
+  }, [letterId, clientId])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -159,7 +161,7 @@ export function LetterPreviewModal({
                 <iframe
                   className="invoice-preview-frame"
                   title="PDF preview"
-                  src={letterPreviewPdfUrl(clientId)}
+                  src={letterPreviewPdfUrl(letterId, clientId)}
                 />
               ) : (
                 <p className="empty-state">There is no PDF to show.</p>
