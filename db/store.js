@@ -13272,7 +13272,7 @@ export class AppDataStore {
    * below), so the route still tells other tabs a client now exists even
    * though this call itself refuses.
    *
-   * @returns {{ proposal, clientId, createdClient, packageApplied } | null}
+   * @returns {{ proposal, clientId, createdClient, packageApplied, engagementId } | null}
    */
   async acceptProposal(
     id,
@@ -13421,7 +13421,24 @@ export class AppDataStore {
           `${proposal.prospect.company || proposal.prospect.contactName || 'Proposal'} · ${proposal.id}`,
         )
       }
-      return { proposal: accepted, clientId, createdClient, packageApplied: Boolean(packageResult) }
+      // The Won proposal's engagement letter (docs/plans/engagements-2026-10.md,
+      // stage 2), drafted only AFTER everything above has landed. The proposal
+      // is accepted and the client exists by now, neither of which can be
+      // undone, so a failure here is logged and answered as no engagement
+      // (`engagementId: null`) rather than as a failed Accept. The party is the
+      // prospect for a new client (the proposal as it was before Accept linked
+      // it) and the client for an upsell; the row carries the client either way.
+      let engagementId = null
+      try {
+        const engagement = await this.createEngagementFromProposal(
+          { ...proposal, clientId: linkedClientId },
+          { kind: 'original', createdBy: actorUserId, clientId },
+        )
+        engagementId = engagement?.id ?? null
+      } catch (error) {
+        console.error('[engagements] Accept could not draft the engagement for', id, error)
+      }
+      return { proposal: accepted, clientId, createdClient, packageApplied: Boolean(packageResult), engagementId }
     } catch (e) {
       if (createdClient) e.createdClientId ??= clientId
       throw e

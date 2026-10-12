@@ -25275,6 +25275,49 @@ describe('accepting a proposal (file backend)', () => {
     })
   })
 
+  // Engagements, stage 2 (docs/plans/engagements-2026-10.md): Accept drafts the Won
+  // proposal's engagement letter AFTER its own work, and still creates the client.
+  it('drafts the engagement letter for the Won proposal and answers its id', async () => {
+    const proposal = await prospectProposal()
+    const result = await store.acceptProposal(proposal.id, { actorUserId: 'emp-patrice' })
+    expect(result.createdClient).toBe(true)
+    expect(result.engagementId).toMatch(/^eng-[0-9a-f]{8}$/)
+    const engagement = await store.getEngagement(result.engagementId)
+    expect(engagement).toMatchObject({
+      kind: 'original',
+      status: 'draft',
+      proposalId: proposal.id,
+      clientId: result.clientId,
+      createdBy: 'emp-patrice',
+      retainerAmount: 630,
+      party: { company: 'Acme Books', contactName: 'Pat Doe', email: 'pat@acme.test', phone: '615-555-0101' },
+    })
+    expect(engagement.figures.totals.monthly).toBe(630)
+    expect(engagement.letterBody).not.toBe('')
+  })
+
+  it('an upsell drafts the engagement to the existing client', async () => {
+    const upsell = await store.createProposal({
+      clientId: 'c1',
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    const result = await store.acceptProposal(upsell.id, {})
+    expect(result.createdClient).toBe(false)
+    const engagement = await store.getEngagement(result.engagementId)
+    expect(engagement).toMatchObject({ clientId: 'c1', party: { company: 'Acme' } })
+  })
+
+  it('a failed engagement draft never fails the Accept: the proposal is Won, the answer says no engagement', async () => {
+    const proposal = await prospectProposal()
+    vi.spyOn(store, 'createEngagementFromProposal').mockRejectedValueOnce(new Error('disk full'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const result = await store.acceptProposal(proposal.id, {})
+    expect(result.engagementId).toBeNull()
+    expect(result.createdClient).toBe(true)
+    expect((await store.getProposal(proposal.id)).status).toBe('accepted')
+  })
+
   it('never accepts twice', async () => {
     const proposal = await prospectProposal()
     await store.acceptProposal(proposal.id, {})
@@ -25650,6 +25693,8 @@ describe('accepting a proposal: happy-path statement order (postgres branch)', (
     expect(insertClientAt).toBeGreaterThan(-1)
     expect(linkAt).toBeGreaterThan(insertClientAt)
     expect(acceptedFlipAt).toBeGreaterThan(linkAt)
+    // ...and the engagement letter is drafted only after the flip (stage 2 of engagements).
+    expect(fake.indexOf(/^insert into engagements\b/i)).toBeGreaterThan(acceptedFlipAt)
   })
 })
 
