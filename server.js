@@ -18,6 +18,7 @@ import {
   InvoiceLockedError,
   InvoicePaymentProcessingError,
   ManualPaymentError,
+  NextStageRefusedError,
   NothingToPushError,
   RETAINER_PAID_ON_FLOOR,
   PackageApplyError,
@@ -280,6 +281,7 @@ import {
   waitingOnActionRefusal,
   waitingOnStage,
 } from './lib/waiting-on-state.js'
+import { caseAllDone, nextStageRefusalMessage, stageHasOpenWait } from './lib/open-next-stage.js'
 import {
   generateBackupCodes,
   generateSecret,
@@ -15059,6 +15061,92 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/checklists/:id/open-next-stage — Open next step now
+    // (featreq-8b54d117): "when a task under a step gets a delayed [waiting] but
+    // all other steps checked off, a button to open next step populates to push
+    // the next step while waiting." Starts the case's next stage while this one's
+    // remaining work is all waiting; this stage stays open until its waits clear.
+    // Not Push (that moves a task to a new date). The store decides and refuses
+    // (NextStageRefusedError); this route checks who may ask and words the answer.
+    const checklistOpenNextStageMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)\/open-next-stage$/)
+    if (checklistOpenNextStageMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      // The global guard already refuses writes in preview; said again here so
+      // this route can never run as the real owner under someone else's view.
+      if (request.headers['x-preview-mode'] === '1' || request.headers['x-preview-as']) {
+        sendJson(response, 403, { error: 'Preview mode is read-only' })
+        return
+      }
+
+      const checklistId = decodeURIComponent(checklistOpenNextStageMatch[1])
+      const data = await appDataStore.read()
+      const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId)
+      if (!checklist || checklist.deletedAt || checklistOutOfScope(checklist, visibleClientIdSet(session, data))) {
+        sendJson(response, 404, { error: 'Checklist not found' })
+        return
+      }
+      if (!(session.user.role === 'owner' || checklist.assigneeId === session.user.id)) {
+        sendJson(response, 403, {
+          error: 'Only the owner or the person this step is assigned to can open the next step.',
+        })
+        return
+      }
+
+      const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
+      const template = (data.checklistTemplates ?? []).find((entry) => entry.id === checklist.templateId)
+      let result
+      try {
+        result = await appDataStore.openNextStageEarly(checklistId, session.user.id)
+      } catch (error) {
+        if (error instanceof NextStageRefusedError) {
+          sendJson(response, 409, {
+            error: 'next_stage_refused',
+            reason: error.reason,
+            message: nextStageRefusalMessage(error.reason, {
+              stageIndex,
+              nextStageName: template?.stages?.[stageIndex + 1]?.name ?? '',
+              anyWaiting: stageHasOpenWait(checklist),
+            }),
+          })
+          return
+        }
+        throw error
+      }
+
+      const { checklist: from, spawned } = result
+      const fromIdx = stageIndex + 1
+      const caseId = from.caseId || from.id
+      await appDataStore.recordActivity(
+        session.user.id,
+        'case_advanced_early',
+        `${from.title} · case ${caseId} · stage ${fromIdx} -> stage ${fromIdx + 1} (opened while waiting)`,
+      )
+      // The next stage's assignee is told exactly as a finished stage tells them.
+      const nextAssigneeId = spawned?.assigneeId
+      if (nextAssigneeId && nextAssigneeId !== session.user.id) {
+        await notify(appDataStore, nextAssigneeId, 'task_assigned', {
+          checklistId: spawned.id,
+          caseId,
+          stageIndex: spawned.stageIndex,
+          stageCount: spawned.stageCount,
+          message: `New task: ${spawned.title} (Stage ${(spawned.stageIndex ?? 0) + 1} of ${spawned.stageCount ?? 1})`,
+          link: `/checklists?focus=${spawned.id}`,
+          appPublicUrl: getPublicAppUrl(request),
+        })
+      }
+      sendJson(response, 200, { checklist: from, spawned })
+      return
+    }
+
     const checklistToggleMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)\/items\/([^/]+)\/toggle$/)
     if (checklistToggleMatch) {
       const session = await requireSession(request, response)
@@ -15256,8 +15344,17 @@ const server = createServer(async (request, response) => {
         updatedChecklist.items.length > 0 &&
         updatedChecklist.items.every((entry) => entry.done) &&
         !updatedChecklist.pushedToChecklistId
+      // This tick finished its stage without spawning one: the case_completed
+      // check below reads every stage of the case.
+      const finishedStageWithoutSpawn =
+        !toggleResult.spawned &&
+        toggledItem?.done &&
+        updatedChecklist.items.every((item) => item.done) &&
+        typeof updatedChecklist.stageIndex === 'number' &&
+        typeof updatedChecklist.stageCount === 'number'
+      // ONE workspace read serves the waiting-cleared notices and the case check.
+      const allData = justCompleted || finishedStageWithoutSpawn ? await appDataStore.read() : null
       if (justCompleted) {
-        const allData = await appDataStore.read()
         const notified = new Set()
         for (const other of allData.checklists ?? []) {
           if (other.id === updatedChecklist.id || other.deletedAt) continue
@@ -15323,12 +15420,19 @@ const server = createServer(async (request, response) => {
           })
         }
       } else if (
-        toggledItem?.done &&
-        updatedChecklist.items.every((item) => item.done) &&
-        typeof updatedChecklist.stageIndex === 'number' &&
-        typeof updatedChecklist.stageCount === 'number' &&
-        updatedChecklist.stageIndex + 1 >= updatedChecklist.stageCount
+        finishedStageWithoutSpawn &&
+        (updatedChecklist.stageIndex + 1 >= updatedChecklist.stageCount ||
+          toggleResult.spawnReason === 'already_spawned') &&
+        caseAllDone(allData, updatedChecklist.caseId || updatedChecklist.id) &&
+        !(await appDataStore.hasCaseCompletedActivity(updatedChecklist.caseId || updatedChecklist.id))
       ) {
+        // The case is complete only when EVERY stage of it is (caseAllDone): with
+        // Open next step now (featreq-8b54d117) the last stage can finish while
+        // an earlier one is still waiting - then nothing is said - and it is the
+        // earlier stage's finishing tick (already_spawned, no spawn) that ends it.
+        // Said once per case: an untick/retick of a finished case (any stage)
+        // finds the earlier case_completed row and stays quiet (best effort - the
+        // activity log keeps each person's last 200 rows).
         const caseId = updatedChecklist.caseId || updatedChecklist.id
         await appDataStore.recordActivity(
           session.user.id,
@@ -15339,7 +15443,7 @@ const server = createServer(async (request, response) => {
         // Phase 5: notify the case opener (template's stage-1 assignee).
         // Skip if they're the one who just completed it.
         try {
-          const data = await appDataStore.read()
+          const data = allData
           const template = (data.checklistTemplates ?? []).find(
             (t) => t.id === updatedChecklist.templateId,
           )

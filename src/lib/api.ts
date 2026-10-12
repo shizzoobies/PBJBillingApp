@@ -2424,6 +2424,29 @@ export async function pushChecklistOccurrence(
   return (await response.json()) as { checklist: Checklist; completed: Checklist | null }
 }
 
+/**
+ * Open next step now (featreq-8b54d117): start the case's next stage while every
+ * open step of this one is waiting. This checklist stays open; `spawned` is the
+ * new next-stage checklist. A refusal is a 409 whose `message` says why ("Step 3
+ * is already open.") and becomes the ApiError's message.
+ */
+export async function openNextStageEarly(checklistId: string) {
+  const response = await apiFetch(
+    `/api/checklists/${encodeURIComponent(checklistId)}/open-next-stage`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to open the next step (${response.status})`)
+  }
+  return (await response.json()) as { checklist: Checklist; spawned: Checklist }
+}
+
 /** Owner-only: every skip record ever filed, newest first (reviewed included). */
 export async function listChecklistSkips() {
   const response = await apiFetch('/api/checklists/skips', { credentials: 'same-origin' })

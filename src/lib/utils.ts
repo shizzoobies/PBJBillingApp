@@ -1945,6 +1945,8 @@ export function describeActivityAction(action: string): string {
       return 'started case'
     case 'case_advanced':
       return 'advanced case'
+    case 'case_advanced_early':
+      return 'opened the next step early:'
     case 'case_completed':
       return 'completed case'
     case 'case_advance_failed':

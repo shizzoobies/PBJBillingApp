@@ -59,6 +59,7 @@ import {
   REMOVAL_WOULD_COMPLETE_WAITING_STEP,
   removalOpenWaitRefusal,
   removalWouldCompleteWaitingStep,
+  stageOpenWorkAllWaiting,
   toggleClosingWaits,
   waitingLockRefusal,
   waitingOnStage,
@@ -4563,6 +4564,44 @@ export class StepIsWaitingError extends Error {
     this.name = 'StepIsWaitingError'
     this.refusal = refusal
   }
+}
+
+/**
+ * Thrown by `openNextStageEarly` (Open next step now, featreq-8b54d117) when the
+ * next stage may not be opened from this checklist. `reason` is machine-readable:
+ * `not_found`, `skipped`, `pushed`, `onboarding`, `last_stage`, `already_spawned`,
+ * `not_ready` (some open step is not waiting), `date_taken` (Postgres: another
+ * case of the same recipe holds that step on that date), or a
+ * `maybeSpawnNextStage` reason (`next_stage_empty`, `no_template`,
+ * `template_not_found`, `no_stages`). The
+ * route turns it into a sentence. Nothing was written.
+ */
+export class NextStageRefusedError extends Error {
+  constructor(reason) {
+    super(`The next step cannot be opened: ${reason}`)
+    this.name = 'NextStageRefusedError'
+    this.reason = reason
+  }
+}
+
+/**
+ * Why `openNextStageEarly` may not open the next stage from `checklist`, or null.
+ * Decided on the data as read: the spawn itself re-checks `already_spawned`.
+ */
+function openNextStageEarlyRefusal(data, checklist) {
+  if (!checklist) return 'not_found'
+  if (checklist.skippedAt) return 'skipped'
+  if (checklist.pushedToChecklistId) return 'pushed'
+  if (checklist.onboardingForClientId) return 'onboarding'
+  const stageCount = typeof checklist.stageCount === 'number' ? checklist.stageCount : 1
+  const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
+  if (!checklist.templateId || stageIndex + 1 >= stageCount) return 'last_stage'
+  const caseId = checklist.caseId || checklist.id
+  if ((data.checklists ?? []).some((entry) => entry.caseId === caseId && entry.stageIndex === stageIndex + 1)) {
+    return 'already_spawned'
+  }
+  if (!stageOpenWorkAllWaiting(checklist)) return 'not_ready'
+  return null
 }
 
 /**
@@ -21543,12 +21582,21 @@ export class AppDataStore {
    * `pushed`, `last_stage`, `no_template`, `template_not_found`, `no_stages`,
    * `already_spawned`, `next_stage_empty`).
    *
+   * `allowWaiting` (Open next step now, featreq-8b54d117 - only
+   * `openNextStageEarly` passes it): a stage whose open work is all held by
+   * waits (`stageOpenWorkAllWaiting`) counts as ready too. Everything after the
+   * readiness check is the same path.
+   *
    * In Postgres mode the new checklist is inserted via the existing
-   * createChecklist path so activity log + persistence are consistent. In file
-   * mode the caller is expected to push the returned checklist into data and
-   * persist (since we already hold the open data snapshot for that write).
+   * createChecklist path so activity log + persistence are consistent. Two
+   * spawns racing for the same next stage (two ticks, a tick and an early open,
+   * two early opens) collide on the instance unique index: the loser's 23505 is
+   * answered `already_spawned` when a re-read shows the next stage now exists,
+   * and rethrown otherwise. In file mode the caller is expected to push the
+   * returned checklist into data and persist (since we already hold the open
+   * data snapshot for that write).
    */
-  async maybeSpawnNextStage(data, checklist, { fileMode = false } = {}) {
+  async maybeSpawnNextStage(data, checklist, { fileMode = false, allowWaiting = false } = {}) {
     // Every "did not advance" answer says why (stage advance hardening, after
     // Bright Tower 2026-10-01 and XAct 2026-10-05 stopped at stage 1 with no
     // trace). The reasons that mean "all done, yet no next stage" and are not
@@ -21565,7 +21613,7 @@ export class AppDataStore {
       return { spawned: null, reason: 'not_all_done' }
     }
     const allDone = checklist.items.every((item) => item.done)
-    if (!allDone) return skip('not_all_done')
+    if (!allDone && !(allowWaiting && stageOpenWorkAllWaiting(checklist))) return skip('not_all_done')
     // A row that handed its open work to a pushed copy is a completed RECORD,
     // not the live stage: re-checking one of its steps must not spawn the next
     // stage (the new row carries that duty).
@@ -21603,10 +21651,75 @@ export class AppDataStore {
 
     // Postgres mode: insert via createChecklist so it goes through the same
     // path other instances do.
-    const created = await this.createChecklist(spawn)
+    let created
+    try {
+      created = await this.createChecklist(spawn)
+    } catch (error) {
+      if (error?.code !== '23505') throw error
+      // Another request created this next stage between our read and our insert.
+      const fresh = await this.read()
+      const landed = (fresh.checklists ?? []).some(
+        (entry) => entry.caseId === caseId && entry.stageIndex === stageIndex + 1,
+      )
+      if (landed) return skip('already_spawned')
+      throw error
+    }
     // Auto-grant the new stage's assignee visibility into the client.
     await this.grantClientVisibility(created.clientId, created.assigneeId)
     return { spawned: created, reason: null }
+  }
+
+  /**
+   * Open next step now (featreq-8b54d117): start the next stage of a case while
+   * this stage's remaining work is all waiting. This stage stays open; its waits
+   * clear and its steps are ticked as usual, and the tick that finishes it finds
+   * the next stage already there (`already_spawned`) rather than making another.
+   *
+   * Refuses with `NextStageRefusedError` (see `openNextStageEarlyRefusal`); on
+   * success returns `{ checklist, spawned }`. Onboarding cases are refused: their
+   * stages drive the client's lifecycle, which only real completion may move.
+   * Who may ask is the route's check.
+   */
+  async openNextStageEarly(checklistId, userId) {
+    void userId
+    if (this.pool) {
+      const data = await this.read()
+      const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
+      const refused = openNextStageEarlyRefusal(data, checklist)
+      if (refused) throw new NextStageRefusedError(refused)
+      let advance
+      try {
+        advance = await this.maybeSpawnNextStage(data, checklist, { allowWaiting: true })
+      } catch (error) {
+        // A 23505 that is NOT this case's next stage (maybeSpawnNextStage already
+        // re-read for that): another case of the same recipe holds that step on
+        // that date. Refused in words, logged with the constraint.
+        if (error?.code !== '23505') throw error
+        console.error(
+          `[stage-advance] open early ${checklist.id} case ${checklist.caseId || checklist.id}: 23505 on ${error.constraint || 'unknown constraint'}`,
+        )
+        throw new NextStageRefusedError('date_taken')
+      }
+      if (!advance.spawned) throw new NextStageRefusedError(advance.reason)
+      return { checklist, spawned: advance.spawned }
+    }
+
+    // Read, decide and write inside ONE file-queue slot, like the toggle: two
+    // opens at the same instant must not both see "no next stage yet".
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
+      const refused = openNextStageEarlyRefusal(data, checklist)
+      if (refused) throw new NextStageRefusedError(refused)
+      const advance = await this.maybeSpawnNextStage(data, checklist, {
+        fileMode: true,
+        allowWaiting: true,
+      })
+      if (!advance.spawned) throw new NextStageRefusedError(advance.reason)
+      data.checklists = sortChecklists([...data.checklists, advance.spawned])
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return { checklist, spawned: advance.spawned }
+    })
   }
 
   /**
@@ -30778,6 +30891,30 @@ export class AppDataStore {
       .slice()
       .sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
       .slice(0, safeLimit)
+  }
+
+  /**
+   * Whether a `case_completed` Activity row already exists for this case (its
+   * target ends " · case <caseId>"), so the toggle says "completed case" once
+   * per case, not on every untick/retick of a finished one. Best effort: the
+   * log keeps each person's last 200 rows. Read-only.
+   */
+  async hasCaseCompletedActivity(caseId) {
+    if (!caseId) return false
+    const suffix = ` · case ${caseId}`
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select 1 from activity_log
+         where action = 'case_completed' and right(target, char_length($1)) = $1
+         limit 1`,
+        [suffix],
+      )
+      return result.rowCount > 0
+    }
+    const authState = await readJson(localAuthPath)
+    return (authState.activityLog ?? []).some(
+      (entry) => entry.action === 'case_completed' && String(entry.target ?? '').endsWith(suffix),
+    )
   }
 
   // ---- Phase 3: template stage mutations ----

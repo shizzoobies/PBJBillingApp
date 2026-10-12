@@ -9,6 +9,8 @@ import {
 } from 'react-router-dom'
 import './App.css'
 import { AppContext, useAppContext, type AppContextValue } from './AppContext'
+import { settleWorkspaceSaveWaiters, type WorkspaceSaveWaiter } from './lib/workspaceSaveWaiters'
+import { upsertChecklistById } from './lib/recipeFirstStep'
 import { AppLayout } from './components/AppLayout'
 import { NewVersionToast } from './components/NewVersionToast'
 import { StaleWorkspaceNotice } from './components/StaleWorkspaceNotice'
@@ -66,6 +68,7 @@ import {
   reviewChecklistSkip as reviewChecklistSkipRequest,
   skipChecklistOccurrence as skipChecklistOccurrenceRequest,
   pushChecklistOccurrence as pushChecklistOccurrenceRequest,
+  openNextStageEarly as openNextStageEarlyRequest,
   approvePendingTaskEdit as approvePendingTaskEditRequest,
   rejectPendingTaskEdit as rejectPendingTaskEditRequest,
   isTaskEditPending,
@@ -388,6 +391,9 @@ function App() {
   const dirtyRef = useRef(false)
   const saveInFlightRef = useRef(false)
   const dataRef = useRef(data)
+  // Callers waiting for a particular local edit to be saved (see
+  // src/lib/workspaceSaveWaiters.ts); `saveNow` settles them.
+  const saveWaitersRef = useRef<WorkspaceSaveWaiter[]>([])
   // Latched once the server refuses a bulk save as stale (409 stale_workspace).
   // A ref because `saveNow` and the retry effect read it outside render; the
   // companion state drives the blocking notice. Never un-latches — the only
@@ -973,7 +979,10 @@ function App() {
         const remoteData = ensureRecurringChecklists(
           await fetchAppData(controller.signal, previewAs),
         ).data
-        // Freshly loaded server state is authoritative and clean.
+        // Freshly loaded server state is authoritative and clean. Any edit a
+        // caller was waiting to see saved has just been replaced, so it never
+        // will be: tell them now.
+        saveWaitersRef.current = settleWorkspaceSaveWaiters(saveWaitersRef.current, null)
         dirtyRef.current = false
         setData(remoteData)
         setServerPersistenceEnabled(true)
@@ -1011,6 +1020,7 @@ function App() {
     // refused too. Stop trying — the retry effect below fires every 4s and would
     // otherwise hammer the endpoint forever while the blocking notice is up.
     if (staleWorkspaceRef.current) {
+      saveWaitersRef.current = settleWorkspaceSaveWaiters(saveWaitersRef.current, null)
       return
     }
     if (!dirtyRef.current) {
@@ -1033,7 +1043,10 @@ function App() {
           await new Promise((resolve) => window.setTimeout(resolve, 250))
         }
         firstPass = false
-        const payloadSnapshot = workspaceSnapshot(dataRef.current)
+        // The very object the PUT below sends (nothing awaits in between); the
+        // save waiters are settled against it.
+        const payload = dataRef.current
+        const payloadSnapshot = workspaceSnapshot(payload)
         setDataSyncState('saving')
         let saveResult: { refetch: boolean } | undefined
         try {
@@ -1043,6 +1056,7 @@ function App() {
             setSessionUser(null)
             setServerPersistenceEnabled(false)
             setDataSyncState('offline')
+            saveWaitersRef.current = settleWorkspaceSaveWaiters(saveWaitersRef.current, null)
             return
           }
           // The server refused this tab's snapshot as stale — nothing was
@@ -1053,6 +1067,7 @@ function App() {
             staleWorkspaceRef.current = true
             setStaleWorkspaceMessage(error.message)
             setDataSyncState('error')
+            saveWaitersRef.current = settleWorkspaceSaveWaiters(saveWaitersRef.current, null)
             return
           }
           // The server refused a save that would delete a client with time or
@@ -1066,6 +1081,7 @@ function App() {
             setStaleWorkspaceDetail('Reload to put this client back. Nothing was deleted, and any change since your last save was not saved.')
             setStaleWorkspaceMessage(error.message)
             setDataSyncState('error')
+            saveWaitersRef.current = settleWorkspaceSaveWaiters(saveWaitersRef.current, null)
             return
           }
           // Leave dirtyRef set so the retry effect (and the next edit) try again
@@ -1073,6 +1089,8 @@ function App() {
           setDataSyncState('error')
           return
         }
+        // Whoever was waiting for an edit this payload carried can go on.
+        saveWaitersRef.current = settleWorkspaceSaveWaiters(saveWaitersRef.current, payload)
         // The PUT covered `payloadSnapshot`. Only declare clean/synced if no
         // newer edit landed while it was in flight; otherwise loop and save the
         // newer data.
@@ -1113,6 +1131,21 @@ function App() {
     }, 250)
     return () => window.clearTimeout(timeoutId)
   }, [data, serverPersistenceEnabled, previewUserId, sessionUser, saveNow])
+
+  // A save waiter must never be left hanging: once this tab stops saving
+  // (persistence off) or the signed-in user changes, nothing it waits for
+  // will land, so it hears `false` (src/lib/workspaceSaveWaiters.ts).
+  useEffect(() => {
+    if (!serverPersistenceEnabled) {
+      saveWaitersRef.current = settleWorkspaceSaveWaiters(saveWaitersRef.current, null)
+    }
+  }, [serverPersistenceEnabled])
+  useEffect(
+    () => () => {
+      saveWaitersRef.current = settleWorkspaceSaveWaiters(saveWaitersRef.current, null)
+    },
+    [sessionUser],
+  )
 
   // Sticky-error retry: a failed bulk PUT keeps the workspace dirty and the
   // indicator on "error". Retry on a timer until it succeeds (or the user makes
@@ -1504,6 +1537,24 @@ function App() {
     },
     [refreshChecklistSkips],
   )
+
+  /**
+   * Open next step now (featreq-8b54d117). The server answers the waiting
+   * checklist (unchanged - it stays open) and the NEW next-stage checklist,
+   * whose id is not yet in `current.checklists`, so it is added.
+   */
+  const openNextStageEarly = useCallback(async (checklistId: string) => {
+    if (previewActiveRef.current) return null
+    const { checklist, spawned } = await openNextStageEarlyRequest(checklistId)
+    applyServerDataUpdate((current) => {
+      const merged = current.checklists.map((entry) =>
+        entry.id === checklist.id ? checklist : entry.id === spawned.id ? spawned : entry,
+      )
+      const spawnedIsNew = !current.checklists.some((entry) => entry.id === spawned.id)
+      return { ...current, checklists: spawnedIsNew ? [...merged, spawned] : merged }
+    })
+    return spawned
+  }, [])
 
   /** Owner: "Reviewed" — clears the skip off the dashboard, keeps the record. */
   const reviewChecklistSkip = useCallback(
@@ -2638,21 +2689,39 @@ function App() {
   }
 
   const addChecklistTemplate = (template: Omit<ChecklistTemplate, 'id'>) => {
+    const id = makeId('template')
+    // Stamped here, not left for the server: this recipe is materialized by
+    // the BROWSER's copy of the materializer the moment it lands in local
+    // state, and the autosave then makes whatever it spawned real. Without
+    // a stamp the browser has no floor, spawns the back history, and the
+    // server sees the instances as already existing
+    // (lib/checklist-start-floor.js). A caller that supplies its own stamp
+    // — the plan-checklist clone, which dates the copy deliberately — keeps
+    // it.
+    const added: ChecklistTemplate = { createdAt: new Date().toISOString(), ...template, id }
+    // `saved` settles when a save carrying this recipe lands: "Start the first
+    // one now" needs the server to know the recipe before it can start it.
+    // Preview is read-only (null: nothing to wait for or report); an offline
+    // tab never saves (false).
+    const saved = previewActiveRef.current
+      ? null
+      : !serverPersistenceEnabled
+        ? Promise.resolve(false)
+        : new Promise<boolean>((settle) => {
+            saveWaitersRef.current = [
+              ...saveWaitersRef.current,
+              {
+                covers: (savedData) =>
+                  savedData.checklistTemplates.some((candidate) => candidate.id === id),
+                settle,
+              },
+            ]
+          })
     updateWorkspaceData((current) => ({
       ...current,
-      checklistTemplates: [
-        ...current.checklistTemplates,
-        // Stamped here, not left for the server: this recipe is materialized by
-        // the BROWSER's copy of the materializer the moment it lands in local
-        // state, and the autosave then makes whatever it spawned real. Without
-        // a stamp the browser has no floor, spawns the back history, and the
-        // server sees the instances as already existing
-        // (lib/checklist-start-floor.js). A caller that supplies its own stamp
-        // — the plan-checklist clone, which dates the copy deliberately — keeps
-        // it.
-        { createdAt: new Date().toISOString(), ...template, id: makeId('template') },
-      ],
+      checklistTemplates: [...current.checklistTemplates, added],
     }))
+    return { id, createdAt: added.createdAt, saved }
   }
 
   const updateChecklistTemplate = (
@@ -3729,9 +3798,12 @@ function App() {
     try {
       setDataSyncState('saving')
       const created = await generateChecklistFromTemplateRequest(templateId, payload)
+      // Generating is idempotent: the server hands back this cycle's Step 1
+      // when it already exists (often the row this tab made and just saved),
+      // so merge by id rather than appending a second copy.
       applyServerDataUpdate((current) => ({
         ...current,
-        checklists: [...current.checklists, created],
+        checklists: upsertChecklistById(current.checklists, created),
       }))
       setDataSyncState('synced')
       return created
@@ -4312,6 +4384,7 @@ function App() {
     checklistSkips,
     skipChecklistOccurrence,
     pushChecklistOccurrence,
+    openNextStageEarly,
     reviewChecklistSkip,
     waitingOnMe,
     addWaitingOn,

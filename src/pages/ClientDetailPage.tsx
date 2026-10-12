@@ -66,6 +66,7 @@ import {
 } from '../lib/packages'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
+import { useStartFirstNote } from '../hooks/useStartFirstNote'
 import { pendingNoteCount as pendingNoteCountOf, useClientPendingNotes } from '../hooks/useClientPendingNotes'
 import { ClientStatementsPanel } from '../components/ClientStatementsPanel'
 import { useSaveFlash } from '../lib/useSaveFlash'
@@ -132,6 +133,7 @@ import {
   sortChecklists,
   stageNameFor,
 } from '../lib/utils'
+import { startFirstRecipeStep } from '../lib/recipeFirstStep'
 
 /* -------------------------------------------------------------------------- */
 /* Client notes section                                                       */
@@ -2996,11 +2998,14 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
     ownerMode,
     addChecklistTemplate,
     createChecklist,
+    generateChecklistFromTemplate,
     updateChecklistTemplate,
     applyTemplateToClient,
   } = useAppContext()
   const [query, setQuery] = useState('')
   const [adding, setAdding] = useState(false)
+  // Why "Start the first one now" did not start anything.
+  const startFirstNote = useStartFirstNote(data.checklists)
   const [picking, setPicking] = useState(false)
 
   // Every client-bound recurring template targeting this client. Standard
@@ -3047,27 +3052,18 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
     template: Omit<ChecklistTemplate, 'id'>,
     startFirstNow: boolean,
   ) => {
-    addChecklistTemplate(template)
-    if (startFirstNow) {
-      const stageOne = template.stages[0]
-      if (stageOne && stageOne.items.length > 0) {
-        const today = localDateOnly()
-        const firstDue =
-          template.nextDueDate && template.nextDueDate < today ? template.nextDueDate : today
-        try {
-          await createChecklist({
-            title: template.title,
-            clientId: template.clientId,
-            assigneeId: stageOne.assigneeId || template.assigneeId,
-            dueDate: firstDue,
-            items: stageOne.items.map((item) => ({ label: item.label })),
-          })
-        } catch {
-          /* template still created; the instance can be generated later */
-        }
-      }
-    }
+    const { id, createdAt, saved } = addChecklistTemplate(template)
     setAdding(false)
+    startFirstNote.dismiss()
+    // The recipe's REAL Step 1, never a one-off copy (featreq-8b54d117).
+    if (!startFirstNow) return
+    const result = await startFirstRecipeStep({
+      template: { ...template, createdAt },
+      templateId: id,
+      saved,
+      generate: generateChecklistFromTemplate,
+    })
+    if (result && 'note' in result) startFirstNote.show(id, result.note)
   }
 
   // A retired client's existing recipes stay listed below (they are history,
@@ -3117,6 +3113,14 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
           }}
           onCreateRepeating={handleCreateRepeating}
         />
+      ) : null}
+      {startFirstNote.text ? (
+        <p className="series-scope-text" role="status">
+          {startFirstNote.text}{' '}
+          <button type="button" className="link-action" onClick={startFirstNote.dismiss}>
+            Dismiss
+          </button>
+        </p>
       ) : null}
 
       {templates.length === 0 ? (

@@ -5611,6 +5611,16 @@ td strong {
 .stage-schedule-date {
   margin-left: 6px;
 }
+.stage-schedule-preview {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+.stage-schedule-warning {
+  color: var(--red);
+  font-size: 12px;
+  margin: 0;
+}
 
 /* Wave 2 C5: apply/copy template to a client */
 .apply-to-client {

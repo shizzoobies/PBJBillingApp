@@ -217,7 +217,17 @@ export type AppContextValue = {
     viewerIds: string[],
     editorIds: string[],
   ) => Promise<void>
-  addChecklistTemplate: (template: Omit<ChecklistTemplate, 'id'>) => void
+  /**
+   * Adds a recipe locally (the autosave persists it). Returns its new id, its
+   * creation stamp, and `saved`, which settles true once a save carrying it
+   * has landed, or false when it cannot be saved (offline, signed out, a stale
+   * tab). `saved` is null in preview, which is read-only.
+   */
+  addChecklistTemplate: (template: Omit<ChecklistTemplate, 'id'>) => {
+    id: string
+    createdAt?: string
+    saved: Promise<boolean> | null
+  }
   updateChecklistTemplate: (
     templateId: string,
     updater: (template: ChecklistTemplate) => ChecklistTemplate,
@@ -527,6 +537,13 @@ export type AppContextValue = {
     checklistId: string,
     input: { category: SkipReasonCategory; explanation: string; newDueDate: string },
   ) => Promise<void>
+  /**
+   * Open next step now (featreq-8b54d117): start the case's next stage while
+   * every open step of this one is waiting. Merges the new next-stage checklist
+   * into local state and resolves with it, or null in preview. Throws the
+   * server's sentence on a refusal.
+   */
+  openNextStageEarly: (checklistId: string) => Promise<Checklist | null>
   /** Owner-only: mark a skip reviewed — clears it off the dashboard, keeps the record. */
   reviewChecklistSkip: (skipId: string) => Promise<void>
   /**
