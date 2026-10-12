@@ -37,7 +37,7 @@ export declare function evaluateRecurringTemplate(
     isStandard?: boolean
     clientId?: string
     active?: boolean
-    stages?: { items?: unknown[]; assigneeId?: string }[]
+    stages?: { items?: unknown[]; assigneeId?: string; categoryId?: string | null }[]
     frequency?: string
     scheduledMonths?: number[]
     repeatAnnually?: boolean

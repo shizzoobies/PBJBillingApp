@@ -106,3 +106,25 @@ describe('evaluateRecurringTemplate — retired clients', () => {
     expect(evaluateRecurringTemplate(template, { clientStage: 'active' }).reason).toBeNull()
   })
 })
+
+// featreq-3e81b386: the Board column is set per step, with the recipe's as the
+// default. Step 1 is what generates, so a recipe with no default whose Step 1
+// names a column still lands somewhere - no warning.
+describe('evaluateRecurringTemplate: no-board-column with per-step columns', () => {
+  it('warns when neither the recipe nor Step 1 has a column', () => {
+    const verdict = evaluateRecurringTemplate(makeTemplate({ categoryId: null }))
+    expect(verdict.warnings).toContain('no-board-column')
+  })
+  it('does not warn when Step 1 has its own column and the recipe has none', () => {
+    const verdict = evaluateRecurringTemplate(
+      makeTemplate({
+        categoryId: null,
+        stages: [{ assigneeId: 'emp-1', categoryId: 'cat-prep', items: [{ id: 'i1', label: 'Reconcile' }] }],
+      }),
+    )
+    expect(verdict.warnings).not.toContain('no-board-column')
+  })
+  it('does not warn when the recipe has a default column', () => {
+    expect(evaluateRecurringTemplate(makeTemplate()).warnings).not.toContain('no-board-column')
+  })
+})

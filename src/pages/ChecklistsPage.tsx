@@ -5505,7 +5505,9 @@ export function NewTaskForm({
         </label>
 
         <label className="new-task-field">
-          <span>Board column</span>
+          {/* A repeating recipe's column is the default for its steps; each
+              hand-off step below can pick its own (featreq-3e81b386). */}
+          <span>{mode === 'repeating' ? 'Default board column' : 'Board column'}</span>
           <select
             className="input"
             title="Which column on the Active Checklists board this appears in"
@@ -5628,6 +5630,13 @@ export function NewTaskForm({
                         ))}
                       </select>
                     </label>
+                    <StageBoardColumnSelect
+                      fieldClassName="new-task-field"
+                      value={stage.categoryId}
+                      recipeCategoryId={categoryId || null}
+                      categories={serviceCategories}
+                      onChange={(next) => updateExtraStage(stage.id, { categoryId: next })}
+                    />
                   </div>
                   <StageScheduleControl
                     dueDate={stage.dueDate}
@@ -6405,10 +6414,10 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
           </select>
         </label>
         <label className="field">
-          <span>Board column</span>
+          <span>Default board column</span>
           <select
             className="input"
-            title="Which column on the Active Checklists board this lands in"
+            title="The Active Checklists board column for every step that does not pick its own"
             value={template.categoryId ?? ''}
             onChange={(event) =>
               props.onUpdateTemplate(template.id, (current) => ({
@@ -6658,6 +6667,47 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
   )
 }
 
+/**
+ * A step's own Board column (featreq-3e81b386: "the board setting under each
+ * step and not the checklist as a whole"). '' = "Same as recipe": the step uses
+ * the recipe's default column. A task copies its step's column when the step is
+ * generated, so a change here files the NEXT tasks; ones that exist stay put.
+ */
+function StageBoardColumnSelect({
+  value,
+  recipeCategoryId,
+  categories,
+  onChange,
+  fieldClassName = 'field',
+}: {
+  value: string | null | undefined
+  recipeCategoryId: string | null | undefined
+  categories: readonly { id: string; name: string }[]
+  onChange: (categoryId: string | null) => void
+  fieldClassName?: string
+}) {
+  const recipeName =
+    categories.find((category) => category.id === recipeCategoryId)?.name ?? 'Uncategorized'
+  return (
+    <label className={fieldClassName}>
+      <span>Board column</span>
+      <select
+        className="input"
+        title="Which column on the Active Checklists board this step's task lands in"
+        value={value ?? ''}
+        onChange={(event) => onChange(event.target.value === '' ? null : event.target.value)}
+      >
+        <option value="">Same as recipe ({recipeName})</option>
+        {categories.map((category) => (
+          <option key={category.id} value={category.id}>
+            {category.name}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
 function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[] }) {
   const { stages, template } = props
   const specificMonths = template.frequency === 'specific-months'
@@ -6676,6 +6726,7 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
     : 'Next cycle'
   // A Step 1 due before the day it appears would be born overdue.
   const stepOneLate = stepOneAppearsLate(cycleDues[0], template.nextDueDate, template.leadDays)
+  const { serviceCategories } = useAppContext()
   // Stage-level drag-and-drop reorders entire stages by their header.
   const [draggingStageId, setDraggingStageId] = useState<string | null>(null)
   const [dropTargetStageId, setDropTargetStageId] = useState<string | null>(null)
@@ -6819,6 +6870,14 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
                     ))}
                   </select>
                 </label>
+                <StageBoardColumnSelect
+                  value={stage.categoryId}
+                  recipeCategoryId={template.categoryId}
+                  categories={serviceCategories}
+                  onChange={(categoryId) =>
+                    props.onPatchStage(template.id, stage.id, { categoryId })
+                  }
+                />
               </div>
               <StageScheduleControl
                 dueDate={stage.dueDate}
