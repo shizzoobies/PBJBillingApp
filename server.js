@@ -12999,6 +12999,62 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/proposals/:id/engagement - draft the engagement letter of a Won proposal
+    // that has none (the draft failed at Accept, or it was Won before engagements
+    // existed). docs/plans/engagements-2026-10.md, stage 2. Refused (409
+    // engagement_refused) unless the proposal is accepted and has no engagement that
+    // is not void; the existing one is named by engagementId.
+    const proposalEngagementMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/engagement$/)
+    if (proposalEngagementMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can draft engagement letters' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      let engagement
+      try {
+        engagement = await appDataStore.draftEngagementForProposal(proposalEngagementMatch[1], {
+          createdBy: session.user.id,
+        })
+      } catch (error) {
+        if (error instanceof EngagementStateError) {
+          sendJson(response, 409, {
+            error: 'engagement_refused',
+            reason: error.reason,
+            message: error.message,
+            engagementId: error.engagementId ?? null,
+          })
+          return
+        }
+        throw error
+      }
+      if (!engagement) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      try {
+        await appDataStore.recordActivity(
+          session.user.id,
+          'engagement_created',
+          `${engagement.party?.company || engagement.party?.contactName || 'Engagement'} · ${engagement.id}`,
+        )
+      } catch (error) {
+        console.error('[engagements] could not record the draft:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { engagement })
+      return
+    }
+
     // POST /api/proposals/:id/accept — { packageId?, planIds?, updateMonthlyRate?, addSoftware? }
     // (spec §5.5). The store decides: a prospect becomes a client in Onboarding;
     // an existing client's monthly rate moves only when the page confirmed it.

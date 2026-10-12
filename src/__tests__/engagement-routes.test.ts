@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const serverSource = readFileSync(path.resolve(here, '../../server.js'), 'utf8')
 const libSource = readFileSync(path.resolve(here, '../../lib/engagement-send.js'), 'utf8')
+const hashSource = readFileSync(path.resolve(here, '../../lib/engagement-hash.js'), 'utf8')
 
 /** The body of a route block, from its opening guard onward. */
 function routeBlock(startPattern: RegExp, length = 2200): string {
@@ -273,7 +274,32 @@ describe('the send refuses before the provider is called', () => {
     const body = sendLib()
     expect(body).toContain('if (templateHash !== engagementHash(engagement)) {')
     expect(body).toContain('The engagement changed since this page loaded. Nothing was sent. Reload and send again.')
-    expect(libSource).toContain('export const engagementHash = (engagement) => letterTemplateHash(engagement)')
+    expect(libSource).toContain("import { engagementHash } from './engagement-hash.js'")
+    expect(libSource).toContain('export { engagementHash }')
+  })
+
+  // A second tab can change who it goes to (the party) or the retainer it prints, not only the text.
+  it('the hash covers the three boxes, the retainer and the whole party', () => {
+    for (const piece of [
+      "String(engagement?.subject ?? '')",
+      "String(engagement?.emailBody ?? '')",
+      "String(engagement?.letterBody ?? '')",
+      'retainerKey(engagement?.retainerAmount)',
+      "ENGAGEMENT_HASH_PARTY_KEYS.map((key) => String(party[key] ?? ''))",
+    ]) {
+      expect(hashSource).toContain(piece)
+    }
+    for (const key of ['company', 'contactName', 'title', 'email', 'phone', 'addressLine1', 'addressLine2', 'city', 'state', 'postalCode']) {
+      expect(hashSource).toContain(`'${key}'`)
+    }
+  })
+
+  it('refuses a double click: a send that left under 15 seconds ago, as engagement_refused / just_sent', () => {
+    const body = sendLib()
+    expect(libSource).toContain('export const ENGAGEMENT_JUST_SENT_MS = 15000')
+    expect(body).toContain("reason: 'just_sent'")
+    expect(body.indexOf("reason: 'just_sent'")).toBeLessThan(body.indexOf("'team_address'"))
+    expect(body.indexOf("reason: 'just_sent'")).toBeGreaterThan(body.indexOf("'engagement_refused'"))
   })
 
   it('refuses a letter that is signed, superseded or void', () => {
@@ -388,5 +414,27 @@ describe('the shared pieces are the ones the lib tests cover', () => {
     expect(libSource).toContain("import { buildEngagementDocuments } from './engagement-documents.js'")
     expect(libSource).toContain("import { engagementValues } from './engagement-values.js'")
     expect(libSource).toContain("import { addressesIn, withoutTeamAddresses } from './recipient-addresses.js'")
+  })
+})
+
+describe('a Won proposal with no engagement can get one (POST /api/proposals/:id/engagement)', () => {
+  const pattern = /if \(proposalEngagementMatch && request\.method === 'POST'\)/
+  pinOwnerRoutes([{ name: 'POST /api/proposals/:id/engagement', pattern, write: true }])
+
+  it('drafts through the store, which alone decides Won and not-yet-drafted', () => {
+    const block = routeBlock(pattern, 2600)
+    expect(serverSource).toContain("normalizedPath.match(/^\\/api\\/proposals\\/([^/]+)\\/engagement$/)")
+    expect(block).toContain('appDataStore.draftEngagementForProposal(proposalEngagementMatch[1], {')
+    expect(block).not.toContain('createEngagementFromProposal')
+    expect(block).toContain("error: 'engagement_refused',")
+    expect(block).toContain('reason: error.reason,')
+    expect(block).toContain('engagementId: error.engagementId ?? null,')
+    expect(block).toContain("sendJson(response, 404, { error: 'Proposal not found' })")
+    expect(block).toContain("'engagement_created'")
+    expect(block).toContain('sendJson(response, 200, { engagement })')
+  })
+
+  it('sits with the proposal routes, ahead of Accept', () => {
+    expect(serverSource.search(pattern)).toBeLessThan(serverSource.indexOf('const proposalAcceptMatch ='))
   })
 })
