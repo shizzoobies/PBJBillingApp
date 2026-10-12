@@ -193,6 +193,18 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
     expect(routeBlock(ROUTES[8].pattern, 3000)).toContain('allowUnsent: payload.allowUnsent === true')
     expect(routeBlock(ROUTES[9].pattern, 3000)).toContain("'engagement_voided'")
   })
+
+  // Stage 4, review round 1: the predecessor a superseding letter replaced is in the
+  // activity feed too, recorded after the signature in the same try.
+  it('sign records engagement_superseded for the predecessor the store flipped', () => {
+    const block = routeBlock(ROUTES[8].pattern, 4000)
+    const signedAt = block.indexOf("'engagement_signed'")
+    const supersededAt = block.indexOf("'engagement_superseded'")
+    expect(supersededAt).toBeGreaterThan(signedAt)
+    expect(block).toContain('if (result.supersededId) {')
+    expect(block).toContain('engagementActivityTarget({ party: result.engagement.party, id: result.supersededId })')
+    expect(supersededAt).toBeLessThan(block.indexOf("console.error('[engagements] could not record the signature:'"))
+  })
 })
 
 // What she previews is what is sent, so nothing in the preview may have a side effect.

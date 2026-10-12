@@ -12291,6 +12291,14 @@ const server = createServer(async (request, response) => {
           'engagement_signed',
           engagementActivityTarget(result.engagement),
         )
+        // Stage 4: a superseding letter's predecessor flipped to Superseded in the same unit.
+        if (result.supersededId) {
+          await appDataStore.recordActivity(
+            session.user.id,
+            'engagement_superseded',
+            engagementActivityTarget({ party: result.engagement.party, id: result.supersededId }),
+          )
+        }
       } catch (error) {
         console.error('[engagements] could not record the signature:', error)
       }

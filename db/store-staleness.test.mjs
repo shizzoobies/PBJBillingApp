@@ -48913,6 +48913,24 @@ describe('engagements stage 4: a draft amendment from a saved letter (file backe
             state: 'TX',
             postalCode: '78701',
           },
+          // Review round 1: a master pointing at a company NOT billed on it (stale), and one with none.
+          {
+            id: 'c-master-stale',
+            name: 'Stale Holdings',
+            isBillingMaster: true,
+            billingMode: 'subscription',
+            monthlyRate: 900,
+            invoiceRecipientClientId: 'c1',
+          },
+          { id: 'c-master-none', name: 'Unset Holdings', isBillingMaster: true, billingMode: 'subscription', monthlyRate: 900 },
+          {
+            id: 'c-retired',
+            name: 'Retired Co',
+            email: 'old@retired.test',
+            billingMode: 'subscription',
+            monthlyRate: 300,
+            lifecycleStage: 'inactive',
+          },
         ],
         timeEntries: [],
       }),
@@ -48983,6 +49001,51 @@ describe('engagements stage 4: a draft amendment from a saved letter (file backe
       addressLine1: '9 Pine Rd',
       city: 'Austin',
     })
+  })
+
+  it('a master with a stale receiving company, or none, is refused with the Letters sentence, nothing written', async () => {
+    const letter = await savedLetter()
+    for (const clientId of ['c-master-stale', 'c-master-none']) {
+      const error = await store.createAmendmentFromLetter({ clientId, letterId: letter.id }).catch((caught) => caught)
+      expect(error, clientId).toBeInstanceOf(EngagementStateError)
+      expect(error.reason).toBe('no_addressee')
+      expect(error.message).toBe(
+        'This master has no receiving company set for its invoices yet — pick one on its client page, under Billing.',
+      )
+    }
+    expect((await readAuth()).engagements).toEqual([])
+  })
+
+  // Review round 1: a pure record brings nothing to the client, so it signs even where
+  // nothing could be applied - a billing master, a retired client.
+  it('a pure record signs on a billing master and on a retired client; one with a retainer does not', async () => {
+    const letter = await savedLetter()
+    const onMaster = await store.createAmendmentFromLetter({ clientId: 'c-master', letterId: letter.id })
+    const signedOnMaster = await store.signEngagement(onMaster.id, { signedOn: '2026-10-11', allowUnsent: true })
+    expect(signedOnMaster).toMatchObject({ createdClient: false, clientId: 'c-master', addedPlanIds: [], clonedTemplateIds: [], skipped: [] })
+    expect(signedOnMaster.engagement.status).toBe('signed')
+    expect(signedOnMaster.engagement.signedAt).toBeTruthy()
+
+    const recorded = await store.recordAmendmentFromLetterSend({
+      letterSendId: 'els-retired1',
+      letterId: letter.id,
+      clientId: 'c-retired',
+      party: { company: 'Retired Co', email: 'old@retired.test' },
+      subject: 's',
+      emailBody: 'e',
+      letterBody: 'l',
+      to: ['old@retired.test'],
+    })
+    const signedRetired = await store.signEngagement(recorded.id, { signedOn: '2026-10-11' })
+    expect(signedRetired.engagement.status).toBe('signed')
+
+    const withRetainer = await store.createAmendmentFromLetter({ clientId: 'c-master', letterId: letter.id })
+    await store.updateEngagement(withRetainer.id, { retainerAmount: 250 })
+    const error = await store
+      .signEngagement(withRetainer.id, { signedOn: '2026-10-11', allowUnsent: true })
+      .catch((caught) => caught)
+    expect(error.reason).toBe('billing_master')
+    expect((await store.getEngagement(withRetainer.id)).status).toBe('draft')
   })
 
   it('refuses a letter that is gone or unwritten, answers null for a missing client, and writes nothing', async () => {
@@ -49274,24 +49337,117 @@ describe('engagements stage 4: superseding (file backend)', () => {
     expect(result.supersededId).toBe(original.id)
     expect(result.removedPlanIds).toEqual([])
     expect(result.skipped).toEqual([
-      { what: 'Plans', why: "This letter names no plans or package, so Acme Books's plans were left as they are." },
+      { what: 'Plans', why: "This letter names no plans that still exist, so Acme Books's plans were left as they are." },
     ])
     expect((await store.read()).clients.find((row) => row.id === clientId).planIds).toEqual(['plan-books'])
   })
 
-  it('an old letter that is no longer signed is left as it is, the new one still signs, and it is said', async () => {
+  // Review round 1: the guard is judged on what survives the known-plan filter.
+  it("a superseding letter whose only plan was deleted since takes NO plan off the client", async () => {
+    const { clientId } = await signedClient()
+    const { engagement } = await upsell(clientId, { mode: 'supersede', planIds: ['plan-payroll'] })
+    const workspaceNow = await store.read()
+    await store.write({ ...workspaceNow, plans: workspaceNow.plans.filter((plan) => plan.id !== 'plan-payroll') })
+    const result = await sign(engagement.id)
+    expect(result.removedPlanIds).toEqual([])
+    expect(result.skipped).toEqual([
+      { what: 'Plans', why: 'A plan on the letter no longer exists, so it was left out.' },
+      { what: 'Plans', why: "This letter names no plans that still exist, so Acme Books's plans were left as they are." },
+    ])
+    expect((await store.read()).clients.find((row) => row.id === clientId).planIds).toEqual(['plan-books'])
+  })
+
+  it('a superseding letter whose package holds no plans takes NO plan off the client', async () => {
+    const { clientId } = await signedClient()
+    // A package whose plans were all deleted since (its ids dangle; no plan survives).
+    const pkg = await store.createPackage({ name: 'Emptied', planIds: ['plan-books', 'plan-payroll'] })
+    const authState = await readAuth()
+    authState.packages.find((row) => row.id === pkg.id).planIds = ['plan-gone-1', 'plan-gone-2']
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    const { engagement } = await upsell(clientId, { mode: 'supersede', packageId: pkg.id })
+    expect(engagement.packageId).toBe(pkg.id)
+    const result = await sign(engagement.id)
+    expect(result.removedPlanIds).toEqual([])
+    expect(result.skipped.map((entry) => entry.why)).toContain(
+      "This letter names no plans that still exist, so Acme Books's plans were left as they are.",
+    )
+    expect((await store.read()).clients.find((row) => row.id === clientId).planIds).toEqual(['plan-books'])
+  })
+
+  it('an old letter voided meanwhile is left as it is, the new one still signs, and it is said', async () => {
     const { clientId, original } = await signedClient()
     const { engagement } = await upsell(clientId, { mode: 'supersede', planIds: ['plan-books'] })
     const authState = await readAuth()
-    authState.engagements.find((row) => row.id === original.id).status = 'superseded'
+    authState.engagements.find((row) => row.id === original.id).status = 'void'
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     const result = await sign(engagement.id)
     expect(result.engagement.status).toBe('signed')
     expect(result.supersededId).toBeNull()
     expect(result.skipped).toContainEqual({
       what: 'Superseded letter',
-      why: 'The engagement this letter replaces is superseded now, not signed, so it was left as it is.',
+      why: 'The engagement this letter replaces is void now, not signed, so it was left as it is.',
     })
+  })
+
+  // Review round 1: two superseding drafts aimed at the same letter - the second is refused.
+  it('refuses a second superseding letter whose predecessor another one already replaced, writing nothing', async () => {
+    const { clientId, original, fee } = await signedClient()
+    const first = await upsell(clientId, { mode: 'supersede', planIds: ['plan-payroll'] })
+    const second = await upsell(clientId, { mode: 'supersede', planIds: ['plan-books'] })
+    expect(second.engagement.supersedesId).toBe(original.id)
+    const signedFirst = await sign(first.engagement.id)
+    expect(signedFirst.supersededId).toBe(original.id)
+    const error = await sign(second.engagement.id).catch((caught) => caught)
+    expect(error).toBeInstanceOf(EngagementStateError)
+    expect(error.reason).toBe('predecessor_replaced')
+    expect(error.message).toMatch(
+      new RegExp(`^The engagement this letter replaces was already replaced by ${first.engagement.id} \\(signed [A-Z][a-z]+ \\d{1,2}, \\d{4}\\); accept the proposal again to supersede the current one\\.$`),
+    )
+    expect((await store.getEngagement(second.engagement.id)).status).toBe('draft')
+    const client = (await store.read()).clients.find((row) => row.id === clientId)
+    expect(client.planIds).toEqual(['plan-payroll'])
+    expect(client.monthlyRate).toBe(fee)
+  })
+
+  it('a missing predecessor still signs, with the skip line', async () => {
+    const { clientId, original } = await signedClient()
+    const { engagement } = await upsell(clientId, { mode: 'supersede', planIds: ['plan-books'] })
+    const authState = await readAuth()
+    authState.engagements = authState.engagements.filter((row) => row.id !== original.id)
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    const result = await sign(engagement.id)
+    expect(result.engagement.status).toBe('signed')
+    expect(result.skipped).toContainEqual({
+      what: 'Superseded letter',
+      why: 'The engagement this letter replaces no longer exists.',
+    })
+  })
+
+  // Review round 1: "Draft the engagement" after a failed Accept keeps the supersede choice.
+  it('Accept keeps the supersede choice on the proposal, and the recovery draft honors it', async () => {
+    const { clientId, original } = await signedClient()
+    const proposal = await store.createProposal({ clientId, inputs: { transactions: 120 }, selections })
+    vi.spyOn(store, 'createEngagementFromProposal').mockRejectedValueOnce(new Error('boom'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const accepted = await store.acceptProposal(proposal.id, { mode: 'supersede', planIds: ['plan-payroll'] })
+    expect(accepted.engagementId).toBeNull()
+    vi.restoreAllMocks()
+    expect((await store.getProposal(proposal.id)).acceptPicks).toEqual({
+      packageId: null,
+      planIds: ['plan-payroll'],
+      mode: 'supersede',
+    })
+    const drafted = await store.draftEngagementForProposal(proposal.id, { createdBy: 'emp-patrice' })
+    expect(drafted).toMatchObject({ kind: 'superseding', supersedesId: original.id, feeMode: 'replace', planIds: ['plan-payroll'] })
+
+    // An amend Accept stores no mode, and its recovery draft is an amendment.
+    const other = await store.createProposal({ clientId, inputs: { transactions: 120 }, selections })
+    vi.spyOn(store, 'createEngagementFromProposal').mockRejectedValueOnce(new Error('boom'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await store.acceptProposal(other.id, { planIds: ['plan-books'] })
+    vi.restoreAllMocks()
+    expect((await store.getProposal(other.id)).acceptPicks).toEqual({ packageId: null, planIds: ['plan-books'] })
+    expect((await store.draftEngagementForProposal(other.id)).kind).toBe('amendment')
   })
 
   it('a refused flip leaves the old letter signed', async () => {
@@ -49452,5 +49608,81 @@ describe('engagements stage 4: superseding (Postgres statements)', () => {
     expect(error).toBeInstanceOf(EngagementStateError)
     expect(statements.some((text) => /^update engagements set status = 'superseded'/i.test(text))).toBe(false)
     expect(statements.filter((text) => /^rollback$/i.test(text))).toHaveLength(1)
+  })
+})
+
+describe('engagements stage 4: review round 1 (Postgres statements)', () => {
+  /** One superseding letter (eng-new) and its signed predecessor (eng-old), in memory. */
+  function chainPool({ onFlip = null } = {}) {
+    const statements = []
+    const base = {
+      kind: 'superseding', status: 'sent', proposal_id: null, client_id: 'c1', letter_id: null, supersedes_id: 'eng-old',
+      party: { company: 'Acme' }, subject: 's', email_body: 'e', letter_body: 'l', section_keys: [],
+      figures: { totals: { monthly: 700 }, lines: [] }, retainer_amount: null, package_id: null, plan_ids: ['p2'],
+      fee_mode: 'replace', email_log: [], template_hash: 'h',
+    }
+    const rows = new Map([
+      ['eng-new', { ...base, id: 'eng-new' }],
+      ['eng-old', { ...base, id: 'eng-old', kind: 'original', status: 'signed', supersedes_id: null }],
+    ])
+    const query = async (text, params = []) => {
+      const t = String(text).replace(/\s+/g, ' ').trim()
+      statements.push({ text: t, params })
+      if (/^select .* from engagements where id = \$1$/i.test(t)) {
+        const row = rows.get(params[0])
+        return { rows: row ? [{ ...row }] : [] }
+      }
+      if (/^update engagements set status = 'signed'/i.test(t)) {
+        if (onFlip) onFlip(rows)
+        const row = rows.get(params[0])
+        if (!row || !params[4].includes(row.status) || row.client_id !== params[5] || row.template_hash !== params[6]) return { rows: [] }
+        row.status = 'signed'
+        return { rows: [{ ...row }] }
+      }
+      if (/^update engagements set status = 'superseded'/i.test(t)) {
+        const row = rows.get(params[0])
+        if (!row || row.status !== 'signed' || row.client_id !== params[1]) return { rows: [] }
+        row.status = 'superseded'
+        return { rows: [{ id: row.id }] }
+      }
+      if (/^select status from engagements where id = \$1$/i.test(t)) {
+        const row = rows.get(params[0])
+        return { rows: row ? [{ status: row.status }] : [] }
+      }
+      if (/^update clients set monthly_rate = \$2/i.test(t)) return { rows: [{ monthly_rate: String(params[1]) }], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    }
+    const pgStore = postgresStore({ pool: { query, connect: async () => ({ query, release() {} }) } })
+    pgStore.getClientById = async () => ({ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 400, lifecycleStage: 'active', planIds: ['p1'] })
+    pgStore.listPackages = async () => []
+    pgStore.listEngagements = async () => [...rows.values()].map((row) => ({ id: row.id, supersedesId: row.supersedes_id, status: row.status, signedAt: null }))
+    return { pgStore, statements, rows }
+  }
+
+  it('a predecessor replaced between the checks and the flip refuses inside the transaction and rolls back', async () => {
+    const { pgStore, statements, rows } = chainPool({
+      onFlip: (map) => {
+        map.get('eng-old').status = 'superseded'
+      },
+    })
+    const error = await pgStore.signEngagement('eng-new', { signedOn: '2026-10-09' }).catch((caught) => caught)
+    expect(error).toBeInstanceOf(EngagementStateError)
+    expect(error.reason).toBe('predecessor_replaced')
+    const texts = statements.map((s) => s.text)
+    const casAt = texts.findIndex((text) => /^update engagements set status = 'superseded'/i.test(text))
+    const probeAt = texts.findIndex((text) => /^select status from engagements where id = \$1$/i.test(text))
+    expect(probeAt).toBeGreaterThan(casAt)
+    expect(statements[probeAt].params).toEqual(['eng-old'])
+    expect(texts.filter((text) => /^rollback$/i.test(text))).toHaveLength(1)
+    expect(texts.some((text) => /^commit$/i.test(text))).toBe(false)
+    void rows
+  })
+
+  it('a predecessor already superseded at the checks is refused before any write', async () => {
+    const { pgStore, statements, rows } = chainPool()
+    rows.get('eng-old').status = 'superseded'
+    const error = await pgStore.signEngagement('eng-new', { signedOn: '2026-10-09' }).catch((caught) => caught)
+    expect(error.reason).toBe('predecessor_replaced')
+    expect(statements.filter((s) => /^(insert|update|delete|begin)\b/i.test(s.text))).toEqual([])
   })
 })

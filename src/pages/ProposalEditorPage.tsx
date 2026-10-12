@@ -196,7 +196,12 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
         const current =
           rows
             .filter((row) => row.kind === 'original' || row.kind === 'superseding')
-            .sort((a, b) => String(b.signedAt ?? '').localeCompare(String(a.signedAt ?? '')))[0] ?? null
+            .sort(
+              // The server's order (currentSignedEngagement): newest signed, then newest created.
+              (a, b) =>
+                String(b.signedAt ?? '').localeCompare(String(a.signedAt ?? '')) ||
+                String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')),
+            )[0] ?? null
         setCurrentSigned(current)
         if (!current) setAcceptMode('amend')
       })
