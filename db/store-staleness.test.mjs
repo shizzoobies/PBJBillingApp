@@ -26,6 +26,7 @@ import {
   InvoicePaymentProcessingError,
   MAX_LISTED_PENDING_NOTES,
   ManualPaymentError,
+  NextStageRefusedError,
   NothingToPushError,
   PackageApplyError,
   ProposalQuestionnaireError,
@@ -50361,5 +50362,356 @@ describe('stage advance explains itself (Postgres statements)', () => {
     expect(errorSpy.mock.calls.map((call) => String(call[0]))).toContain(
       '[stage-advance] lifecycle sync FAILED cl-1 client c1: lock timeout',
     )
+  })
+})
+
+/**
+ * Open next step now (featreq-8b54d117): "when a task under a step gets a
+ * delayed [waiting] but all other steps checked off, a button to open next step
+ * populates to push the next step while waiting." `openNextStageEarly` spawns the
+ * next stage through `maybeSpawnNextStage(..., { allowWaiting: true })`; the
+ * waiting stage stays open, and a later tick that finishes it finds the next
+ * stage already there (`already_spawned`) instead of creating a second one.
+ */
+describe('open next step now (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const openWait = { id: 'w-1', blockerId: 'emp-2', requestedBy: 'emp-1', note: 'bank statements' }
+
+  const stagedTemplate = (over = {}) => ({
+    id: 'tmpl-early',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2026-10-31',
+    active: true,
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      { id: 'st-0', name: 'Prep', assigneeId: 'emp-1', offsetDays: 0, items: [{ id: 'ti-0', label: 'Gather' }] },
+      { id: 'st-1', name: 'Review', assigneeId: 'emp-2', offsetDays: 0, items: [{ id: 'ti-1', label: 'Review' }] },
+      { id: 'st-2', name: 'Deliver', assigneeId: 'emp-1', offsetDays: 0, items: [{ id: 'ti-2', label: 'Send' }] },
+    ],
+    ...over,
+  })
+
+  const waitingStage = (over = {}) => ({
+    id: 'cl-wait',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    templateId: 'tmpl-early',
+    dueDate: '2026-10-31',
+    caseId: 'case-e',
+    stageId: 'st-0',
+    stageIndex: 0,
+    stageCount: 3,
+    viewerIds: [],
+    editorIds: [],
+    items: [
+      { id: 'item-a', label: 'Gather', done: true },
+      { id: 'item-b', label: 'Statements', done: false, waitingOns: [openWait] },
+    ],
+    ...over,
+  })
+
+  // The checklists go into the file as-is: the bulk save does not write the
+  // push / skip stamps a few of these rows carry.
+  const seed = async (checklists, templates = [stagedTemplate()]) => {
+    await store.write(workspace({ checklistTemplates: templates }))
+    const data = await persisted()
+    data.checklists = checklists
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const stageRows = async (index) =>
+    (await persisted()).checklists.filter((entry) => entry.caseId === 'case-e' && entry.stageIndex === index)
+  const refusal = (promise) => promise.then(
+    () => {
+      throw new Error('expected a refusal')
+    },
+    (error) => error,
+  )
+
+  let logSpy
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    logSpy.mockRestore()
+  })
+
+  it('opens the next stage while the waiting stage stays open', async () => {
+    await seed([waitingStage()])
+    const result = await store.openNextStageEarly('cl-wait', 'emp-1')
+    expect(result.spawned).toMatchObject({ caseId: 'case-e', stageIndex: 1, assigneeId: 'emp-2' })
+    expect(result.checklist.id).toBe('cl-wait')
+    expect(await stageRows(1)).toHaveLength(1)
+    const waiting = (await stageRows(0))[0]
+    expect(waiting.items[1].done).toBe(false)
+    expect(waiting.items[1].waitingOns[0].verifiedAt).toBeUndefined()
+  })
+
+  it('a plain tick on another step never opens it early: only the action does', async () => {
+    await seed([
+      waitingStage({
+        items: [
+          { id: 'item-a', label: 'Gather', done: false },
+          { id: 'item-b', label: 'Statements', done: false, waiting: true },
+        ],
+      }),
+    ])
+    const result = await store.toggleChecklistItem('cl-wait', 'item-a')
+    expect(result.spawned).toBeNull()
+    expect(result.spawnReason).toBe('not_all_done')
+    expect(await stageRows(1)).toHaveLength(0)
+  })
+
+  it('refuses not_ready when an open step is not waiting, and writes nothing', async () => {
+    await seed([
+      waitingStage({
+        items: [
+          { id: 'item-a', label: 'Gather', done: false },
+          { id: 'item-b', label: 'Statements', done: false, waiting: true },
+        ],
+      }),
+    ])
+    const before = await readFile(localDataPath, 'utf8')
+    const error = await refusal(store.openNextStageEarly('cl-wait', 'emp-1'))
+    expect(error).toBeInstanceOf(NextStageRefusedError)
+    expect(error.reason).toBe('not_ready')
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('refuses not_ready when nothing is waiting at all', async () => {
+    await seed([waitingStage({ items: [{ id: 'item-a', label: 'Gather', done: false }] })])
+    expect((await refusal(store.openNextStageEarly('cl-wait', 'emp-1'))).reason).toBe('not_ready')
+  })
+
+  it('refuses a second open: already_spawned, still one next stage', async () => {
+    await seed([waitingStage()])
+    await store.openNextStageEarly('cl-wait', 'emp-1')
+    const error = await refusal(store.openNextStageEarly('cl-wait', 'emp-1'))
+    expect(error.reason).toBe('already_spawned')
+    expect(await stageRows(1)).toHaveLength(1)
+  })
+
+  it('two opens at the same instant create exactly one next stage', async () => {
+    await seed([waitingStage()])
+    const results = await Promise.allSettled([
+      store.openNextStageEarly('cl-wait', 'emp-1'),
+      store.openNextStageEarly('cl-wait', 'emp-1'),
+    ])
+    expect(results.filter((entry) => entry.status === 'fulfilled')).toHaveLength(1)
+    const rejected = results.find((entry) => entry.status === 'rejected')
+    expect(rejected.reason.reason).toBe('already_spawned')
+    expect(await stageRows(1)).toHaveLength(1)
+  })
+
+  it('the wait cleared and ticked later finds the next stage already there: no second spawn', async () => {
+    await seed([waitingStage()])
+    await store.openNextStageEarly('cl-wait', 'emp-1')
+    const result = await store.toggleChecklistItem('cl-wait', 'item-b', undefined, undefined, {
+      closeWaitsBy: 'emp-owner',
+    })
+    expect(result.checklist.items.every((item) => item.done)).toBe(true)
+    expect(result.spawned).toBeNull()
+    expect(result.spawnReason).toBe('already_spawned')
+    expect(await stageRows(1)).toHaveLength(1)
+  })
+
+  it('the next stage finishing before the waiting one advances the case normally', async () => {
+    await seed([waitingStage()])
+    const { spawned } = await store.openNextStageEarly('cl-wait', 'emp-1')
+    const result = await store.toggleChecklistItem(spawned.id, spawned.items[0].id)
+    expect(result.spawned).toMatchObject({ caseId: 'case-e', stageIndex: 2 })
+    expect(await stageRows(2)).toHaveLength(1)
+    // The waiting stage is untouched and still open.
+    expect((await stageRows(0))[0].items[1].done).toBe(false)
+  })
+
+  it('a next stage moved to the recycle bin is re-created when the waiting stage finishes', async () => {
+    await seed([waitingStage()])
+    const { spawned } = await store.openNextStageEarly('cl-wait', 'emp-1')
+    const data = await persisted()
+    const row = data.checklists.find((entry) => entry.id === spawned.id)
+    data.checklists = data.checklists.filter((entry) => entry.id !== spawned.id)
+    data.recycledChecklists = [...(data.recycledChecklists ?? []), { ...row, deletedAt: '2026-10-12T12:00:00.000Z' }]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const result = await store.toggleChecklistItem('cl-wait', 'item-b', undefined, undefined, {
+      closeWaitsBy: 'emp-owner',
+    })
+    expect(result.spawned).toMatchObject({ caseId: 'case-e', stageIndex: 1 })
+    expect(result.spawned.id).not.toBe(spawned.id)
+  })
+
+  it('a split-pushed waiting stage keeps its case and stage, so already_spawned holds', async () => {
+    await seed([
+      waitingStage({ id: 'cl-orig', items: [{ id: 'item-a', label: 'Gather', done: true }], pushedToChecklistId: 'cl-wait' }),
+      waitingStage({ pushedFromChecklistId: 'cl-orig', items: [waitingStage().items[1]] }),
+    ])
+    const result = await store.openNextStageEarly('cl-wait', 'emp-1')
+    expect(result.spawned).toMatchObject({ caseId: 'case-e', stageIndex: 1 })
+    expect((await refusal(store.openNextStageEarly('cl-wait', 'emp-1'))).reason).toBe('already_spawned')
+    // The done-only record the push left behind is never the live stage.
+    expect((await refusal(store.openNextStageEarly('cl-orig', 'emp-1'))).reason).toBe('pushed')
+  })
+
+  it('refuses an onboarding case, a skipped occurrence, the last stage and a missing task', async () => {
+    await seed([
+      waitingStage({ id: 'cl-onb', caseId: 'case-onb', onboardingForClientId: 'c1' }),
+      waitingStage({ id: 'cl-skip', caseId: 'case-skip', skippedAt: '2026-10-10T12:00:00.000Z', skippedBy: 'emp-1' }),
+      waitingStage({ id: 'cl-last', caseId: 'case-last', stageId: 'st-2', stageIndex: 2 }),
+    ])
+    expect((await refusal(store.openNextStageEarly('cl-onb', 'emp-1'))).reason).toBe('onboarding')
+    expect((await refusal(store.openNextStageEarly('cl-skip', 'emp-1'))).reason).toBe('skipped')
+    expect((await refusal(store.openNextStageEarly('cl-last', 'emp-1'))).reason).toBe('last_stage')
+    expect((await refusal(store.openNextStageEarly('cl-none', 'emp-1'))).reason).toBe('not_found')
+  })
+
+  it('a next stage with no steps refuses next_stage_empty and writes nothing', async () => {
+    const template = stagedTemplate()
+    template.stages[1] = { ...template.stages[1], items: [] }
+    await seed([waitingStage()], [template])
+    expect((await refusal(store.openNextStageEarly('cl-wait', 'emp-1'))).reason).toBe('next_stage_empty')
+    expect(await stageRows(1)).toHaveLength(0)
+  })
+})
+
+describe('open next step now (Postgres)', () => {
+  const stageOne = {
+    id: 'cl-wait',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    templateId: 'tmpl-early',
+    dueDate: '2026-10-31',
+    caseId: 'case-e',
+    stageId: 'st-0',
+    stageIndex: 0,
+    stageCount: 2,
+    items: [
+      { id: 'item-a', label: 'Gather', done: true, subItems: [] },
+      { id: 'item-b', label: 'Statements', done: false, waiting: true, subItems: [] },
+    ],
+  }
+  const template = {
+    id: 'tmpl-early',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      { id: 'st-0', name: 'Prep', assigneeId: 'emp-1', offsetDays: 0, items: [{ id: 'ti-0', label: 'Gather' }] },
+      { id: 'st-1', name: 'Review', assigneeId: 'emp-2', offsetDays: 0, items: [{ id: 'ti-1', label: 'Review' }] },
+    ],
+  }
+  const uniqueViolation = () => Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' })
+
+  let logSpy
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    logSpy.mockRestore()
+  })
+
+  function pgEarlyStore({ readsAfterConflict = [] } = {}) {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    let reads = 0
+    pgStore.read = async () => {
+      reads += 1
+      const extra = reads > 1 ? readsAfterConflict : []
+      return { checklists: [stageOne, ...extra], checklistTemplates: [template] }
+    }
+    const granted = []
+    pgStore.grantClientVisibility = async (clientId, userId) => {
+      granted.push([clientId, userId])
+    }
+    return { fake, pgStore, granted, readCount: () => reads }
+  }
+
+  it('creates the next stage through createChecklist and grants its assignee the client', async () => {
+    const { pgStore, granted } = pgEarlyStore()
+    const created = []
+    pgStore.createChecklist = async (checklist) => {
+      created.push(checklist)
+      return { ...checklist, id: 'cl-next' }
+    }
+    const result = await pgStore.openNextStageEarly('cl-wait', 'emp-1')
+    expect(created).toHaveLength(1)
+    expect(created[0]).toMatchObject({ caseId: 'case-e', stageIndex: 1, assigneeId: 'emp-2' })
+    expect(result.spawned.id).toBe('cl-next')
+    expect(granted).toEqual([['c1', 'emp-2']])
+  })
+
+  it('refuses before any write when the stage is not ready', async () => {
+    const { fake, pgStore } = pgEarlyStore()
+    const notReady = { ...stageOne, items: [{ id: 'item-a', label: 'Gather', done: false, subItems: [] }] }
+    pgStore.read = async () => ({ checklists: [notReady], checklistTemplates: [template] })
+    let created = 0
+    pgStore.createChecklist = async () => {
+      created += 1
+    }
+    const error = await pgStore.openNextStageEarly('cl-wait', 'emp-1').catch((caught) => caught)
+    expect(error).toBeInstanceOf(NextStageRefusedError)
+    expect(error.reason).toBe('not_ready')
+    expect(created).toBe(0)
+    expect(fake.statements.filter((s) => /^(insert|update|delete|begin)\b/i.test(s.text))).toEqual([])
+  })
+
+  it('a 23505 from a concurrent spawn re-reads and answers already_spawned', async () => {
+    const { pgStore, readCount } = pgEarlyStore({
+      readsAfterConflict: [{ ...stageOne, id: 'cl-other', stageId: 'st-1', stageIndex: 1, items: [] }],
+    })
+    pgStore.createChecklist = async () => {
+      throw uniqueViolation()
+    }
+    const data = await pgStore.read()
+    const advance = await pgStore.maybeSpawnNextStage(data, stageOne, { allowWaiting: true })
+    expect(advance).toEqual({ spawned: null, reason: 'already_spawned' })
+    expect(readCount()).toBe(2)
+
+    const error = await pgStore.openNextStageEarly('cl-wait', 'emp-1').catch((caught) => caught)
+    expect(error).toBeInstanceOf(NextStageRefusedError)
+    expect(error.reason).toBe('already_spawned')
+  })
+
+  it('a 23505 with no next stage on the re-read is rethrown, not swallowed', async () => {
+    const { pgStore } = pgEarlyStore()
+    pgStore.createChecklist = async () => {
+      throw uniqueViolation()
+    }
+    const data = await pgStore.read()
+    const error = await pgStore
+      .maybeSpawnNextStage(data, stageOne, { allowWaiting: true })
+      .catch((caught) => caught)
+    expect(error.code).toBe('23505')
+  })
+
+  it('the toggle path maps a double-spawn 23505 the same way (featreq-05e1610d)', async () => {
+    const { pgStore } = pgEarlyStore({
+      readsAfterConflict: [{ ...stageOne, id: 'cl-other', stageId: 'st-1', stageIndex: 1, items: [] }],
+    })
+    pgStore.createChecklist = async () => {
+      throw uniqueViolation()
+    }
+    const allDone = { ...stageOne, items: stageOne.items.map((item) => ({ ...item, done: true, waiting: false })) }
+    const advance = await pgStore.maybeSpawnNextStage(await pgStore.read(), allDone)
+    expect(advance).toEqual({ spawned: null, reason: 'already_spawned' })
+  })
+
+  it('without allowWaiting a waiting stage is not_all_done (the tick path is unchanged)', async () => {
+    const { pgStore } = pgEarlyStore()
+    let created = 0
+    pgStore.createChecklist = async () => {
+      created += 1
+    }
+    const advance = await pgStore.maybeSpawnNextStage(await pgStore.read(), stageOne)
+    expect(advance).toEqual({ spawned: null, reason: 'not_all_done' })
+    expect(created).toBe(0)
   })
 })
