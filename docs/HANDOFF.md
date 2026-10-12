@@ -25,7 +25,28 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-12, 02:10Z - READ THIS FIRST):** `main` = `2a48938` (+ this handoff), deployed, `/health`
+**State right now (2026-10-12, 04:05Z - READ THIS FIRST):** `main` = `e081ddb` (+ this handoff), deployed,
+`/health` 200, voice re-provisioned. **STAGE 3 SHIPPED as `e081ddb`** (filed shipped `featreq-5d346889`): client
+creation moved from Accept to Mark as signed; `engagements.fee_mode` + `proposals.accept_picks` columns are live
+(look-first boot ALTERs, verified in production after the deploy). Production had 0 engagements and 0 Won
+proposals at ship time, so nothing old is affected. **STAGE 4 is next** (amendments logged per client from
+Letters sends, the client-page Engagements card, superseding upsells) - a lane `AP-laneE` `feat/engagements-amend`
+was cut from `e081ddb`; check `git -C "D:\PBJ Accounting Work\AP-laneE" log --oneline -5` and `status` before
+briefing a builder, in case one was already started by the session that wrote this. Then the paragraph below
+(04:00Z) is history. Three more ships after the 02:10Z paragraph: `3226663` (handoff), **`355c61f` STAGE 5**
+(the two-step sent questionnaire: `proposal_questionnaires.partial_answers` boot ALTER, `GROUP_INPUTS` +
+`GROUP_STARTER_POLICY` in `lib/proposal-questionnaire.js`, `unpricedProposalLines` drives the list's "Partly
+priced - $X", Accept 409 `not_priced`, Send 409 `unpriced_lines` + `confirmUnpriced`; filed shipped
+`featreq-b63137fb`). **STAGE 3 IS READY TO SHIP from `AP-laneD` `feat/engagements-signing`** - both review rounds
+done (tip `e37d7af` before the rebase), rolled-back prod trials passed, the builder was rebasing onto `355c61f`
+when the session's usage ran out at ~00:00 Eastern; two session crons (1:03 / 1:27 AM Eastern) resume it. Resume =
+finish the rebase, `npm run verify`, `bash scripts/prod/ship.sh <tip>`, voice, file shipped
+(`scratchpad/signing-shipped.txt`), commit this handoff, then stage 4. Stage 3 adds two look-first boot ALTERs
+(`engagements.fee_mode`, `proposals.accept_picks`) and moves client creation from Accept to Mark as signed
+(fee_mode replace|add|keep for an existing monthly client; upsells draft no retainer; the flip CAS checks status,
+client_id AND template_hash). Follow-ups from its reviews are items 17-22 on `featreq-acb1b663`.
+
+**Earlier (2026-10-12, 02:10Z):** `main` = `2a48938` (+ this handoff), deployed, `/health`
 200, voice re-provisioned. **FIVE deploys on the night of 10-11, all reviewed first, Alex approved me running the
 deploys ("ship once green"):** `8e52181` Hours by task groups typed tasks (featreq-e413267a done); `2e7a34f` the
 sent questionnaire requires business name, phone, address, city, state, ZIP, what the business does, business setup
