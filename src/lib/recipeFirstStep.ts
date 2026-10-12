@@ -12,7 +12,8 @@
  * (`generateChecklistFromTemplate`, which is idempotent: it hands back the one
  * that already exists for that cycle), once the new recipe has been saved.
  */
-import type { Checklist, ChecklistTemplate } from './types'
+import { resolveStageDueDate } from './utils'
+import type { Checklist, ChecklistTemplate, TemplateStage } from './types'
 
 /**
  * Why the first checklist cannot be started, or null when it can. A recipe
@@ -84,3 +85,55 @@ export function upsertChecklistById(checklists: Checklist[], next: Checklist): C
   }
   return checklists.map((checklist) => (checklist.id === next.id ? next : checklist))
 }
+
+/**
+ * Each step's due date for the cycle whose Next due is `nextDueDate`, the way
+ * the app assigns them: Step 1 from the Next due date, and every later step
+ * from the step before it (that is what it is spawned from when the step
+ * before is finished). Empty when there is no Next due date.
+ */
+export function stageDueDatesForCycle(stages: TemplateStage[], nextDueDate: string): string[] {
+  if (!nextDueDate) return []
+  let base = nextDueDate
+  return stages.map((stage) => {
+    const due = resolveStageDueDate(stage, base)
+    base = due
+    return due
+  })
+}
+
+const cycleDateFormat = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+})
+
+/** "Oct 10, 2026" for a YYYY-MM-DD date, read as a calendar day (no zone shift). */
+export function formatCycleDate(dateOnly: string): string {
+  const [year, month, day] = dateOnly.split('-').map(Number)
+  if (!year || !month || !day) return dateOnly
+  return cycleDateFormat.format(new Date(year, month - 1, day))
+}
+
+/**
+ * What the "no date of its own" choice means for step `index` (0-based): Step 1
+ * takes the recipe's Next due date (a specific-months recipe: that month's due
+ * day), every later step the date of the step before it. A legacy
+ * `offsetDays` moves it that many days earlier.
+ */
+export function inheritDueLabel(index: number, offsetDays: number, specificMonths: boolean): string {
+  const anchor =
+    index === 0 ? (specificMonths ? "the month's due day" : 'the Next due date') : 'the step before'
+  const offset = Number(offsetDays) || 0
+  if (offset > 0) return `${offset} day${offset === 1 ? '' : 's'} before ${anchor}`
+  return index === 0 ? `On ${anchor}` : 'Same day as the step before'
+}
+
+/**
+ * A step pinned to one calendar date in a recipe that repeats: the date never
+ * moves, so Step 1 is never started again after that cycle and a later step of
+ * every later cycle is born overdue. New picks are not offered; a step that
+ * already has one keeps it, with this warning.
+ */
+export const SPECIFIC_DATE_ON_RECURRING_WARNING =
+  'A specific date only fits one cycle. This recipe repeats, and every later cycle would keep this same date, so choose one of the options above instead.'

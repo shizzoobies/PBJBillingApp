@@ -89,7 +89,13 @@ import type {
   WaitingOn,
 } from '../lib/types'
 import { pruneEmptyOutlineItems } from '../lib/checklistTree'
-import { startFirstRecipeStep } from '../lib/recipeFirstStep'
+import {
+  formatCycleDate,
+  inheritDueLabel,
+  SPECIFIC_DATE_ON_RECURRING_WARNING,
+  stageDueDatesForCycle,
+  startFirstRecipeStep,
+} from '../lib/recipeFirstStep'
 import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
 import { completedTaskRows } from '../lib/completedTasks'
 import { filterInProgressChecklists, waitingStepCount } from '../lib/inProgressFilter'
@@ -5273,6 +5279,9 @@ export function NewTaskForm({
   // When enabled, we render an editor for additional stages.
   const [extraStages, setExtraStages] = useState<TemplateStage[]>([])
   const showHandOffControls = mode === 'repeating'
+  // Each hand-off step's date in the first cycle: Step 1 is due on the Due
+  // date above, and every later step chains from the step before it.
+  const handOffCycleDues = isSpecificMonths ? [] : stageDueDatesForCycle(extraStages, dueDate)
 
   const addHandOffStage = () => {
     setExtraStages((current) => [
@@ -5591,6 +5600,8 @@ export function NewTaskForm({
                   <StageScheduleControl
                     dueDate={stage.dueDate}
                     dueDayOfMonth={stage.dueDayOfMonth}
+                    inheritLabel={inheritDueLabel(index + 1, stage.offsetDays, isSpecificMonths)}
+                    cycleDue={handOffCycleDues[index]}
                     onChange={(next) =>
                       updateExtraStage(stage.id, {
                         dueDate: next.dueDate,
@@ -6425,13 +6436,13 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
         )}
         {template.frequency === 'specific-months' ? null : (
           <label className="field">
-            <span>Show before due (days)</span>
+            <span>Show before Next due (days)</span>
             <input
               className="input"
               type="number"
               min="0"
               max="120"
-              title="How many days before its due date this task appears, so the team can start it early. 0 = appears on the due date."
+              title="How many days before the Next due date Step 1 appears, so the team can start it early. 0 = it appears on the Next due date."
               value={template.leadDays ?? 0}
               onChange={(event) => {
                 const value = Number(event.target.value)
@@ -6440,6 +6451,10 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
                 props.onUpdateTemplate(template.id, (current) => ({ ...current, leadDays }))
               }}
             />
+            <small className="new-task-hint">
+              Step 1 appears this many days before the recipe&apos;s Next due date; each step then
+              has its own due date below.
+            </small>
           </label>
         )}
         {/* Quiet skip. Whether skipping is offered at all is set here, on the
@@ -6612,6 +6627,10 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
 
 function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[] }) {
   const { stages, template } = props
+  const specificMonths = template.frequency === 'specific-months'
+  // Each step's due date this cycle, shown under its due control. A
+  // specific-months recipe has no single Next due date to chain from.
+  const cycleDues = specificMonths ? [] : stageDueDatesForCycle(stages, template.nextDueDate)
   // Stage-level drag-and-drop reorders entire stages by their header.
   const [draggingStageId, setDraggingStageId] = useState<string | null>(null)
   const [dropTargetStageId, setDropTargetStageId] = useState<string | null>(null)
@@ -6754,6 +6773,8 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
               <StageScheduleControl
                 dueDate={stage.dueDate}
                 dueDayOfMonth={stage.dueDayOfMonth}
+                inheritLabel={inheritDueLabel(index, stage.offsetDays, specificMonths)}
+                cycleDue={cycleDues[index]}
                 onChange={(next) =>
                   props.onPatchStage(template.id, stage.id, {
                     dueDate: next.dueDate ?? '',
@@ -6860,21 +6881,32 @@ function StagesAccordion(props: RepeatingTaskRowProps & { stages: TemplateStage[
 }
 
 /**
- * Per-stage due-date control. A stage either inherits its due date from the
- * offset ("N days after previous step") or pins an explicit fixed date.
- * Picking "Specific date" reveals a date input. Independent *repeat cadence*
- * per stage is intentionally not offered — the template repeats as a whole.
+ * Per-stage due-date control. A step either has no date of its own (Step 1
+ * then takes the recipe's Next due date and every later step the date of the
+ * step before it, less any legacy `offsetDays`), a day of the month in the
+ * cycle, or one fixed calendar date. A fixed date suits no repeating recipe
+ * (it never moves, so later cycles keep it), so it is only shown for a step
+ * that already has one, with a warning. `cycleDue` is the date the step gets
+ * this cycle, chained the way the app assigns it (src/lib/recipeFirstStep.ts).
+ * Independent *repeat cadence* per stage is intentionally not offered: the
+ * template repeats as a whole.
  */
-function StageScheduleControl({
+export function StageScheduleControl({
   dueDate,
   dueDayOfMonth,
+  inheritLabel,
+  cycleDue,
   onChange,
 }: {
   dueDate?: string
   dueDayOfMonth?: number
+  /** What "no date of its own" means for this step (`inheritDueLabel`). */
+  inheritLabel: string
+  /** This step's due date in the current cycle, when it can be worked out. */
+  cycleDue?: string
   /**
    * Sets the stage's due spec. Setting one of `dueDate` / `dueDayOfMonth`
-   * clears the other; the "No specific due date" choice clears both.
+   * clears the other; the "no date of its own" choice clears both.
    */
   onChange: (next: { dueDate?: string; dueDayOfMonth?: number }) => void
 }) {
@@ -6900,7 +6932,7 @@ function StageScheduleControl({
             checked={mode === 'none'}
             onChange={() => emit({ dueDate: undefined, dueDayOfMonth: undefined })}
           />
-          <span>No specific due date</span>
+          <span>{inheritLabel}</span>
         </label>
         <label className="stage-schedule-radio">
           <input
@@ -6925,20 +6957,11 @@ function StageScheduleControl({
             ) : null}
           </span>
         </label>
-        <label className="stage-schedule-radio">
-          <input
-            type="radio"
-            checked={mode === 'date'}
-            onChange={() =>
-              emit({
-                dueDate: dueDate || localDateOnly(),
-                dueDayOfMonth: undefined,
-              })
-            }
-          />
-          <span>
-            Specific date
-            {mode === 'date' ? (
+        {mode === 'date' ? (
+          <label className="stage-schedule-radio">
+            <input type="radio" checked readOnly />
+            <span>
+              Specific date
               <input
                 className="compact-input stage-schedule-date"
                 type="date"
@@ -6947,10 +6970,18 @@ function StageScheduleControl({
                   emit({ dueDate: event.target.value || undefined, dueDayOfMonth: undefined })
                 }
               />
-            ) : null}
-          </span>
-        </label>
+            </span>
+          </label>
+        ) : null}
       </div>
+      {mode === 'date' ? (
+        <p className="stage-schedule-warning" role="note">
+          {SPECIFIC_DATE_ON_RECURRING_WARNING}
+        </p>
+      ) : null}
+      {cycleDue ? (
+        <p className="stage-schedule-preview">This cycle: due {formatCycleDate(cycleDue)}</p>
+      ) : null}
     </div>
   )
 }
