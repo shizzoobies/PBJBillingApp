@@ -5274,7 +5274,8 @@ export function sendLettersRequest(
 
 /**
  * One engagement call: like `proposalRequest`, but a refusal also carries the
- * store's `reason` (a 409 `engagement_refused` says why: 'just_sent', a status...).
+ * store's `reason` (a 409 `engagement_refused` says why: 'just_sent', a status...) and
+ * the `engagementId` a refusal names.
  */
 async function engagementRequest<T>(path: string, init: RequestInit, failure: string): Promise<T> {
   const response = await apiFetch(path, { credentials: 'same-origin', ...init })
@@ -5282,16 +5283,21 @@ async function engagementRequest<T>(path: string, init: RequestInit, failure: st
     let message = ''
     let code: string | undefined
     let reason: string | undefined
+    let engagementId: string | undefined
     try {
       const body = await response.json()
       if (body && typeof body.error === 'string') code = body.error
       if (body && typeof body.reason === 'string') reason = body.reason
+      if (body && typeof body.engagementId === 'string') engagementId = body.engagementId
       if (body && typeof body.message === 'string' && body.message.trim()) message = body.message
       else if (code) message = code
     } catch {
       // not JSON: the generic sentence below
     }
-    throw new ApiError(response.status, message || `${failure} (${response.status})`, code, reason)
+    const error = new ApiError(response.status, message || `${failure} (${response.status})`, code, reason)
+    // A refusal that names an engagement (Draft the engagement when one exists) carries its id.
+    if (engagementId) Object.assign(error, { engagementId })
+    throw error
   }
   return (await response.json()) as T
 }

@@ -177,6 +177,7 @@ import { GanttPage } from './pages/GanttPage'
 import { ProposalEditorPage } from './pages/ProposalEditorPage'
 import { LettersPage } from './pages/LettersPage'
 import { EngagementsPage } from './pages/EngagementsPage'
+import { EngagementEditorPage } from './pages/EngagementEditorPage'
 import { ProposalsPage } from './pages/ProposalsPage'
 import { InvoiceRecapPage } from './pages/InvoiceRecapPage'
 import { InvoicesPage } from './pages/InvoicesPage'
@@ -4475,6 +4476,14 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           element={
             <OwnerOnly ownerMode={ownerMode}>
               <EngagementsPage />
+            </OwnerOnly>
+          }
+        />
+        <Route
+          path="/engagements/:engagementId"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <EngagementEditorPage />
             </OwnerOnly>
           }
         />

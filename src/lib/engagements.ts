@@ -1,6 +1,6 @@
 import { dateOnlyInZone } from '../../lib/firm-time.js'
 import { formatProposalMoney } from '../../lib/proposal-pricing.js'
-import type { Engagement, EngagementKind, EngagementStatus } from './types'
+import { ApiError, type Engagement, type EngagementKind, type EngagementStatus } from './types'
 
 /**
  * Engagements (docs/plans/engagements-2026-10.md, stage 2): the words the list and
@@ -50,4 +50,47 @@ export function engagementInstantLabel(instant: string | null | undefined): stri
 export function engagementMonthlyFee(engagement: Pick<Engagement, 'figures'>): string {
   const monthly = Number(engagement.figures?.totals?.monthly ?? 0)
   return monthly > 0 ? formatProposalMoney(monthly) : '-'
+}
+
+/** The engagement a 409 names (Draft the engagement when one exists already), or null. */
+export function refusedEngagementId(err: unknown): string | null {
+  const id = (err as { engagementId?: unknown } | null)?.engagementId
+  return typeof id === 'string' && id ? id : null
+}
+
+/**
+ * Send's refusals, each as a plain sentence for the page. The server's own
+ * sentence is used where it names something specific (the placeholders, the
+ * status); the rest say what to do next.
+ */
+export function engagementSendRefusalSentence(err: unknown): string {
+  if (!(err instanceof ApiError)) return 'Could not send the engagement letter. Nothing was sent.'
+  switch (err.code) {
+    case 'engagement_changed':
+      return 'The engagement changed since this page loaded, so nothing was sent. The page now shows the saved version: check it and send again.'
+    case 'unknown_placeholder':
+    case 'missing_placeholder':
+      return err.message
+    case 'engagement_empty':
+      return 'Write the subject, the email and the letter before sending. Nothing was sent.'
+    case 'engagement_refused':
+      return err.reason === 'just_sent'
+        ? 'This letter went out a moment ago - check the Activity list before sending again.'
+        : /Nothing was sent\.?$/.test(err.message)
+          ? err.message
+          : `${err.message} Nothing was sent.`
+    case 'team_address':
+      return "That address belongs to someone on your team. An engagement letter goes to the client only: type the client's address. Nothing was sent."
+    case 'no_recipient':
+      return "There is no email address to send to. Type the client's address in Send to. Nothing was sent."
+    case 'engagement_invalid':
+      return 'Type one email address to send to. Nothing was sent.'
+    case 'pdf_failed':
+      return 'The PDF could not be built, so nothing was sent. Open Preview to see what is wrong, or try again in a minute.'
+    case 'engagement_send_failed':
+      return 'Email is not set up yet (no sending address), so nothing was sent.'
+    default:
+      if (err.status === 404) return 'This engagement no longer exists. Nothing was sent.'
+      return err.message || 'Could not send the engagement letter. Nothing was sent.'
+  }
 }

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { useAppContext } from '../AppContext'
 import { ListSearch } from '../components/ListSearch'
 import { LetterPreviewModal } from '../components/LetterPreviewModal'
+import { BoldBar, PlaceholderChips } from '../components/letters/LetterEditorKit'
+import { insertPlaceholder, isBoldShortcut, toggleBold, unknownPlaceholderSentence } from '../components/letters/letterEditing'
 import { SaveBadge } from '../components/SectionKit'
 import {
   createLetterRequest,
@@ -16,7 +18,6 @@ import {
 import type { SaveFlashState } from '../lib/useSaveFlash'
 import { firmToday } from '../../lib/firm-time.js'
 import { invoiceEmailAddressee, resolveInvoiceRecipients } from '../../lib/invoice-recipients.js'
-import { wrapBold } from '../../lib/letter-bold.js'
 import { retiredSentence, templateWarnings } from '../../lib/letter-template.js'
 import { withoutTeamAddresses } from '../../lib/recipient-addresses.js'
 import {
@@ -56,13 +57,6 @@ function dayLabel(day: string): string {
     day: 'numeric',
     year: 'numeric',
   })
-}
-
-function unknownSentence(unknown: string[]): string {
-  const tokens = unknown.map((key) => `{{${key}}}`)
-  return tokens.length > 1
-    ? `${tokens.join(', ')} are not placeholders the app fills in. Send will refuse until they are changed.`
-    : `${tokens[0]} is not a placeholder the app fills in. Send will refuse until it is changed.`
 }
 
 type PickerRow = {
@@ -327,39 +321,14 @@ export function LettersPage() {
   const setters = { subject: setSubject, emailBody: setEmailBody, letterBody: setLetterBody }
   const refs = { subject: subjectRef, emailBody: emailBodyRef, letterBody: letterBodyRef }
 
-  const insertToken = (field: Field, key: string) => {
-    const token = `{{${key}}}`
-    const element = refs[field].current
-    const text = values[field]
-    const start = element?.selectionStart ?? text.length
-    const end = element?.selectionEnd ?? start
-    setters[field](text.slice(0, start) + token + text.slice(end))
-    window.requestAnimationFrame(() => {
-      const target = refs[field].current
-      if (!target) return
-      target.focus()
-      target.setSelectionRange(start + token.length, start + token.length)
-    })
-  }
+  const insertToken = (field: Field, key: string) =>
+    insertPlaceholder(() => refs[field].current, values[field], key, setters[field])
 
   /** The B button and Ctrl/Cmd+B: `**` around the selection (lib/letter-bold.js), or off again. */
-  const applyBold = (field: BodyField) => {
-    const element = refs[field].current
-    const text = values[field]
-    const start = element?.selectionStart ?? text.length
-    const end = element?.selectionEnd ?? start
-    const next = wrapBold(text, start, end)
-    setters[field](next.value)
-    window.requestAnimationFrame(() => {
-      const target = refs[field].current
-      if (!target) return
-      target.focus()
-      target.setSelectionRange(next.start, next.end)
-    })
-  }
+  const applyBold = (field: BodyField) => toggleBold(() => refs[field].current, values[field], setters[field])
 
   const boldShortcut = (event: KeyboardEvent<HTMLTextAreaElement>, field: BodyField) => {
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'b') {
+    if (isBoldShortcut(event)) {
       event.preventDefault()
       applyBold(field)
     }
@@ -559,36 +528,18 @@ export function LettersPage() {
   }
   const fieldWord = (field: Field) => (field === 'subject' ? 'subject' : field === 'emailBody' ? 'email' : 'letter')
 
+  // The chips are exactly the placeholders the Letters GET lists (the 'both' keys):
+  // an engagement-only key is never offered here.
   const chips = (field: Field) => (
-    <div className="letters-chips" role="group" aria-label={`Insert a placeholder into the ${fieldWord(field)}`}>
-      {(state?.placeholders ?? []).map((placeholder) => (
-        <button
-          key={placeholder.key}
-          type="button"
-          className="letters-chip"
-          title={placeholder.description}
-          onClick={() => insertToken(field, placeholder.key)}
-        >
-          {`{{${placeholder.key}}}`}
-        </button>
-      ))}
-    </div>
+    <PlaceholderChips
+      placeholders={state?.placeholders ?? []}
+      fieldWord={fieldWord(field)}
+      onInsert={(key) => insertToken(field, key)}
+    />
   )
 
   const formatBar = (field: BodyField) => (
-    <div className="letters-format" role="toolbar" aria-label={`Format the ${fieldWord(field)}`}>
-      <button
-        type="button"
-        aria-label={`Bold in the ${fieldWord(field)}`}
-        title="Bold (Ctrl+B): puts ** around the selected words"
-        disabled={editorLocked}
-        // Keep the selection in the box: a click would otherwise move the focus first.
-        onMouseDown={(event) => event.preventDefault()}
-        onClick={() => applyBold(field)}
-      >
-        B
-      </button>
-    </div>
+    <BoldBar fieldWord={fieldWord(field)} disabled={editorLocked} onBold={() => applyBold(field)} />
   )
 
   const deleteBlocked =
@@ -758,7 +709,7 @@ export function LettersPage() {
 
             {warnings.unknown.length > 0 ? (
               <p className="form-error" role="status">
-                {unknownSentence(warnings.unknown)}
+                {unknownPlaceholderSentence(warnings.unknown)}
               </p>
             ) : null}
             {warnings.retired.length > 0 ? (
