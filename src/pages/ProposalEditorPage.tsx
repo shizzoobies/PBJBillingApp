@@ -393,7 +393,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   /** A toast/notice on the accepted result — the package could not be applied. */
   const noticeFromAccept = (chosenPackage: string | null, packageApplied: boolean) =>
     chosenPackage && !packageApplied
-      ? "Accepted, but the package could not be applied — add it from the client's page."
+      ? "Won, but the package could not be applied — add it from the client's page."
       : ''
 
   // Accept says what it will do before it does it (spec §5.5). A prospect
@@ -433,7 +433,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           (softwareNames.length > 0
             ? `, and adds ${softwareNames.join(', ')} as monthly Software expenses billed at cost`
             : '') +
-          `. Nothing about any invoice changes.`,
+          `. Nothing about any invoice changes, and this proposal is marked Won.`,
       )
       if (!ok) return
       enqueue(async () => {
@@ -448,7 +448,8 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     }
     const client = data.clients.find((entry) => entry.id === proposal.clientId)
     const clientName = client?.name ?? 'this client'
-    if (!window.confirm(`Accept this proposal for ${clientName}${planWords}?`)) return
+    if (!window.confirm(`Accept this proposal for ${clientName}${planWords}? This proposal is marked Won.`))
+      return
     const monthlyTotal = proposal.pricingSnapshot?.totals.monthly ?? 0
     const skipRateQuestion = monthlyTotal === 0 || client?.billingMode !== 'subscription'
     const updateMonthlyRate = skipRateQuestion
@@ -472,10 +473,15 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     })
   }
 
+  // Close as lost: the note is optional (a prospect who simply went quiet has
+  // none). Cancel closes nothing; OK with the box blank closes it with no note.
   const decline = () => {
-    const note = window.prompt('Why did they decline? (optional — saved on the proposal)', '')
+    const note = window.prompt(
+      'Close this proposal as lost? Add a note if you like (optional — saved on the proposal).',
+      '',
+    )
     if (note === null) return
-    enqueue(() => declineProposalRequest(proposalId, note))
+    enqueue(() => declineProposalRequest(proposalId, note.trim() ? note : ''))
   }
 
   if (!proposal || !pricing) {
@@ -565,7 +571,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
                 Accept
               </button>
               <button type="button" className="ghost-action" disabled={busy} onClick={decline}>
-                Decline
+                Close as lost
               </button>
             </>
           ) : null}

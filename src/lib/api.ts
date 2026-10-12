@@ -1198,12 +1198,13 @@ export function proposalChatRequest(id: string, text: string): Promise<ProposalC
   )
 }
 
-/** Owner-only: decline, with her note. The proposal stays on the list. */
-export function declineProposalRequest(id: string, note: string): Promise<Proposal> {
+/** Owner-only: Close as lost (stored as `declined`), with an optional note -
+ *  a blank one goes as `{ note: '' }`. The proposal stays on the list. */
+export function declineProposalRequest(id: string, note?: string | null): Promise<Proposal> {
   return proposalRequest<Proposal>(
     proposalPath(id, 'decline'),
-    proposalJson('POST', { note }),
-    'The proposal could not be declined',
+    proposalJson('POST', { note: note?.trim() ? note : '' }),
+    'The proposal could not be closed as lost',
   )
 }
 

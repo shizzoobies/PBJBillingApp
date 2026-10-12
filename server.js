@@ -555,6 +555,14 @@ function pickFirmSettingsPatch(payload) {
   return patch
 }
 
+/** A decided proposal's outcome in the words the app shows (engagements stage 1):
+ *  `accepted` reads Won and `declined` reads closed as lost. */
+function proposalOutcomeWords(status) {
+  if (status === 'accepted') return 'Won'
+  if (status === 'declined') return 'closed as lost'
+  return status
+}
+
 async function readJsonBody(request) {
   const chunks = []
   let total = 0
@@ -12278,7 +12286,7 @@ const server = createServer(async (request, response) => {
       if (proposal.status === 'accepted' || proposal.status === 'declined') {
         sendJson(response, 409, {
           error: 'proposal_refused',
-          message: `This proposal is ${proposal.status} — copy it to write a new letter.`,
+          message: `This proposal is ${proposalOutcomeWords(proposal.status)} — copy it to write a new letter.`,
         })
         return
       }
@@ -12388,7 +12396,7 @@ const server = createServer(async (request, response) => {
       if (proposal.status === 'accepted' || proposal.status === 'declined') {
         sendJson(response, 409, {
           error: 'proposal_refused',
-          message: `This proposal is ${proposal.status} — copy it to send a new one.`,
+          message: `This proposal is ${proposalOutcomeWords(proposal.status)} — copy it to send a new one.`,
         })
         return
       }
@@ -12516,8 +12524,11 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // POST /api/proposals/:id/decline — { note } (spec §5.5). A declined
-    // proposal stays on the list and is reopened as a copy.
+    // POST /api/proposals/:id/decline — { note? } (spec §5.5). The button reads
+    // "Close as lost" and the status shows as Closed/Lost (engagements stage 1;
+    // stored as `declined`). The note is optional: missing, empty or blank all
+    // close it with no note; the store caps it at 2000. A closed proposal stays
+    // on the list and is reopened as a copy.
     const proposalDeclineMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/decline$/)
     if (proposalDeclineMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
@@ -12543,7 +12554,7 @@ const server = createServer(async (request, response) => {
       if (current.status === 'accepted' || current.status === 'declined') {
         sendJson(response, 409, {
           error: 'proposal_refused',
-          message: `This proposal is already ${current.status}.`,
+          message: `This proposal is already ${proposalOutcomeWords(current.status)}.`,
         })
         return
       }
@@ -12603,7 +12614,7 @@ const server = createServer(async (request, response) => {
       if (proposal.status === 'accepted' || proposal.status === 'declined') {
         sendJson(response, 409, {
           error: 'proposal_refused',
-          message: `This proposal is ${proposal.status} — copy it to keep working on it.`,
+          message: `This proposal is ${proposalOutcomeWords(proposal.status)} — copy it to keep working on it.`,
         })
         return
       }
@@ -12633,7 +12644,7 @@ const server = createServer(async (request, response) => {
       if (proposal.status === 'accepted' || proposal.status === 'declined') {
         sendJson(response, 409, {
           error: 'proposal_refused',
-          message: `This proposal is ${proposal.status} — copy it to keep working on it.`,
+          message: `This proposal is ${proposalOutcomeWords(proposal.status)} — copy it to keep working on it.`,
         })
         return
       }

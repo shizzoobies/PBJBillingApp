@@ -12735,7 +12735,9 @@ export class AppDataStore {
         `This proposal is already ${current.status} — it can't be ${status} again.`,
       )
     }
-    const cleanNote = typeof note === 'string' ? note.trim().slice(0, 2000) : null
+    // Close as lost takes an optional note: a blank one is no note (null), so
+    // both backends store the same thing and an earlier note is never blanked.
+    const cleanNote = typeof note === 'string' ? note.trim().slice(0, 2000) || null : null
     const linkClient = cleanProposalId(clientId)
     if (this.pool) {
       const { rows } = await this.pool.query(PROPOSAL_STATUS_UPDATE_SQL, [

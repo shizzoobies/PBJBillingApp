@@ -24586,6 +24586,16 @@ describe('proposals (file backend)', () => {
     ).rejects.toBeInstanceOf(ProposalStateError)
   })
 
+  it('Close as lost takes an optional note: blank or missing closes it with no note (engagements stage 1)', async () => {
+    for (const options of [{ note: '' }, { note: '   ' }, {}]) {
+      const created = await store.createProposal({})
+      const closed = await store.setProposalStatus(created.id, 'declined', options)
+      expect(closed.status).toBe('declined')
+      expect(closed.declinedAt).toBeTruthy()
+      expect(closed.declineNote).toBeNull()
+    }
+  })
+
   it('copies into a new draft that points back at the original', async () => {
     const source = await store.createProposal({
       prospect: { company: 'Acme Books' },
@@ -25078,6 +25088,12 @@ describe('proposals (postgres branch)', () => {
     expect(fake.matching(/^update proposals/i)[0].text).toMatch(
       /decline_note = case when \$2 = 'declined' then coalesce\(\$3, decline_note\) else decline_note end/,
     )
+  })
+
+  it('a blank Close as lost note is sent as null, not an empty string (engagements stage 1)', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ status: 'sent' }))
+    await postgresStore(fake).setProposalStatus('prop-1', 'declined', { note: '  ' })
+    expect(fake.matching(/^update proposals/i)[0].params[2]).toBeNull()
   })
 
   it('updateProposal, setProposalStatus and deleteProposal all answer not-found with null/false', async () => {

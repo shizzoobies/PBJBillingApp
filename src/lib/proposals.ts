@@ -54,11 +54,13 @@ export const SOFTWARE_UNIT_LABELS: Record<SoftwareUnit, string> = {
   contractor: 'Per contractor',
 }
 
+/** The words for a status. The two outcomes read Won and Closed/Lost (engagements
+ *  stage 1); the stored statuses stay `accepted` / `declined`. */
 export const PROPOSAL_STATUS_LABELS: Record<ProposalStatus, string> = {
   draft: 'Draft',
   sent: 'Sent',
-  accepted: 'Accepted',
-  declined: 'Declined',
+  accepted: 'Won',
+  declined: 'Closed/Lost',
 }
 
 /** The name a proposal goes by in a list or a heading. */
@@ -262,11 +264,13 @@ export function proposalActivity(
       entries.push({ at: entry.at, text: `${word}${to ? ` (${to})` : ''}` })
     }
   }
-  if (proposal.acceptedAt) entries.push({ at: proposal.acceptedAt, text: 'Accepted' })
+  // The row already starts with its date, so these read "Oct 5, 2026 Won" and
+  // "Oct 5, 2026 Closed as lost: <note>" (the note is optional).
+  if (proposal.acceptedAt) entries.push({ at: proposal.acceptedAt, text: 'Won' })
   if (proposal.declinedAt) {
     entries.push({
       at: proposal.declinedAt,
-      text: `Declined${proposal.declineNote ? `: ${proposal.declineNote}` : ''}`,
+      text: `Closed as lost${proposal.declineNote ? `: ${proposal.declineNote}` : ''}`,
     })
   }
   return entries.sort((a, b) => a.at.localeCompare(b.at))
