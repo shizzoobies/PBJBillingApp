@@ -23,8 +23,10 @@ export type EngagementFigures = {
     amount?: number
     cadence?: string | null
     formula?: string
+    flag?: string | null
     role?: string | null
     hours?: number | null
+    count?: number | null
   }> | null
   hoursByRole?: { bookkeeper?: number; accountant?: number; controller?: number } | null
   paymentTerms?: string
@@ -62,6 +64,18 @@ export declare function engagementValues(args?: {
   paymentTerms?: string
   inputs?: Record<string, number> | null
 }): LetterValues
+
+/**
+ * The proposal lines the letter's service lists leave out (retired, unpriced, $0, no
+ * count typed), with why - "Not in the letter: Budget (no count typed)".
+ */
+export declare function skippedEngagementLines(snapshot: EngagementFigures | null | undefined): Array<{
+  name: string
+  /** null for a selection the catalog no longer names. */
+  group: string | null
+  serviceId: string | null
+  reason: string
+}>
 
 /** sha256 of the three boxes - the same hash as `letterTemplateHash`. */
 export declare function engagementTemplateHash(template: LetterTemplateText | null | undefined): string

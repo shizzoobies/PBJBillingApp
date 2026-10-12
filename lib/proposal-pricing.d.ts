@@ -113,6 +113,12 @@ export type PricedLine = {
    * on a snapshot priced before 2026-10.
    */
   hours?: number | null
+  /**
+   * The number the line is priced per: clean-up months / reports / forms for a per-*
+   * multiplier (a per-count line's typed count; null when none typed), employees for
+   * payroll, states for sales tax; null otherwise. Absent on a snapshot priced before 2026-10.
+   */
+  count?: number | null
   /** Software lines only: the figures the line was priced with (kept on a sent proposal). */
   basePrice?: number | null
   unitPrice?: number
