@@ -1037,9 +1037,11 @@ export function ensureTemplateStages(template: ChecklistTemplate): ChecklistTemp
       ...(typeof stage.dueDayOfMonth === 'number' && stage.dueDayOfMonth >= 1
         ? { dueDayOfMonth: stage.dueDayOfMonth }
         : {}),
-      // The step's own Board column (featreq-3e81b386); absent = the recipe's.
-      ...(typeof stage.categoryId === 'string' && stage.categoryId
-        ? { categoryId: stage.categoryId }
+      // The step's own Board column (featreq-3e81b386); null = the recipe's.
+      // An explicit null is KEPT as a key: the server keeps a step's stored
+      // column when the key is absent, so "Same as recipe" must arrive as null.
+      ...(Object.prototype.hasOwnProperty.call(stage, 'categoryId')
+        ? { categoryId: typeof stage.categoryId === 'string' && stage.categoryId ? stage.categoryId : null }
         : {}),
       viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
       editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],

@@ -1226,6 +1226,9 @@ function fakePostgres({
   clientRows = [],
   userRows = [],
   createdAtRows = {},
+  // `select id, category_id from checklist_template_stages`: each step's stored
+  // Board column, which a payload stage WITHOUT the key keeps.
+  priorStageCategoryRows = [],
   priorItemRows = [],
   priorChecklistRows = [],
   templateRows = [],
@@ -1557,6 +1560,10 @@ function fakePostgres({
     const createdAtSnapshot = /^select id, created_at from (\w+)$/i.exec(trimmed)
     if (createdAtSnapshot) {
       return { rows: createdAtRows[createdAtSnapshot[1]] ?? [] }
+    }
+    // The bulk save's snapshot of each step's stored Board column (featreq-3e81b386).
+    if (/^select id, category_id from checklist_template_stages$/i.test(trimmed)) {
+      return { rows: priorStageCategoryRows }
     }
     // The sibling snapshot of what was already complete — and, since the wait
     // preservation, of what waiting state each row already carried.
@@ -51369,12 +51376,14 @@ describe('board column per step: the stage field persists (both backends)', () =
     let data = await store.read()
     expect(data.checklistTemplates[0].stages[0].categoryId).toBe('cat-prep')
 
+    // A clear is an EXPLICIT null: a stage without the key keeps its stored
+    // column on save (old-bundle protection), so a clear must say so.
     const cleared = await store.patchTemplateStage('tpl-col', 'st-2', { categoryId: null })
-    expect(cleared.stages[1]).not.toHaveProperty('categoryId')
+    expect(cleared.stages[1].categoryId).toBeNull()
     await store.patchTemplateStage('tpl-col', 'st-1', { categoryId: '' })
     data = await store.read()
-    expect(data.checklistTemplates[0].stages[0]).not.toHaveProperty('categoryId')
-    expect(data.checklistTemplates[0].stages[1]).not.toHaveProperty('categoryId')
+    expect(data.checklistTemplates[0].stages[0].categoryId ?? null).toBeNull()
+    expect(data.checklistTemplates[0].stages[1].categoryId ?? null).toBeNull()
     // A patch that does not mention the field leaves it alone.
     await store.patchTemplateStage('tpl-col', 'st-1', { categoryId: 'cat-prep' })
     await store.patchTemplateStage('tpl-col', 'st-1', { name: 'Prep' })
@@ -51643,5 +51652,96 @@ describe('board column per step: tasks copy the step column (both backends)', ()
     const [clear] = fake.matching(/^update checklist_template_stages set category_id = null where category_id = \$1$/i)
     expect(clear).toBeDefined()
     expect(clear.params).toEqual(['cat-review'])
+  })
+})
+
+/**
+ * Board column per step: a tab still running the PREVIOUS bundle (whose stage
+ * normalizer has no `categoryId` in its field list) must not erase every
+ * step's column with its next autosave - the bulk save deletes and re-inserts
+ * every stage row. The rule, the same on both backends: a payload stage with
+ * NO `categoryId` key keeps the stored column for that stage id; an explicit
+ * `categoryId: null` clears it; a value sets it.
+ */
+describe('board column per step: a stage without the key keeps its stored column (both backends)', () => {
+  const recipe = (stageTwo) => ({
+    id: 'tpl-keep',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2099-01-31',
+    active: true,
+    viewerIds: [],
+    editorIds: [],
+    categoryId: 'cat-recipe',
+    stages: [
+      { id: 'st-1', name: 'Prepare', assigneeId: 'emp-1', offsetDays: 0, viewerIds: [], editorIds: [], items: [{ id: 'ti-1', label: 'Reconcile' }] },
+      { id: 'st-2', name: 'Review', assigneeId: 'emp-1', offsetDays: 0, viewerIds: [], editorIds: [], items: [{ id: 'ti-2', label: 'Sign off' }], ...stageTwo },
+    ],
+  })
+  const stored = [
+    { id: 'st-1', category_id: null },
+    { id: 'st-2', category_id: 'cat-review' },
+  ]
+  const writtenColumns = async (stageTwo) => {
+    const fake = fakePostgres({ priorStageCategoryRows: stored })
+    await postgresStore(fake).write(workspace({ checklistTemplates: [recipe(stageTwo)] }))
+    expect(fake.matching(/^select id, category_id from checklist_template_stages$/i)).toHaveLength(1)
+    return insertedRows(fake.statements, 'checklist_template_stages').map((row) => [row.id, row.category_id])
+  }
+
+  it('postgres: an old-shape payload (no key) keeps the stored column', async () => {
+    expect(await writtenColumns({})).toEqual([
+      ['st-1', null],
+      ['st-2', 'cat-review'],
+    ])
+  })
+
+  it('postgres: an explicit null clears it', async () => {
+    expect(await writtenColumns({ categoryId: null })).toEqual([
+      ['st-1', null],
+      ['st-2', null],
+    ])
+  })
+
+  it('postgres: a new value sets it', async () => {
+    expect(await writtenColumns({ categoryId: 'cat-send' })).toEqual([
+      ['st-1', null],
+      ['st-2', 'cat-send'],
+    ])
+  })
+
+  it('postgres: the snapshot is taken before the stage rows are wiped', async () => {
+    const fake = fakePostgres({ priorStageCategoryRows: stored })
+    await postgresStore(fake).write(workspace({ checklistTemplates: [recipe({})] }))
+    const snapshot = fake.indexOf(/^select id, category_id from checklist_template_stages$/i)
+    const wipe = fake.indexOf(/^delete from checklist_template_stages/i)
+    expect(snapshot).toBeGreaterThanOrEqual(0)
+    expect(wipe).toBeGreaterThan(snapshot)
+  })
+
+  const persistedStageTwo = async () => {
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return persisted.checklistTemplates[0].stages[1]
+  }
+
+  it('file backend: an old-shape payload (no key) keeps the stored column', async () => {
+    await store.write(workspace({ checklistTemplates: [recipe({ categoryId: 'cat-review' })] }))
+    await store.write(workspace({ checklistTemplates: [recipe({})] }))
+    expect((await persistedStageTwo()).categoryId).toBe('cat-review')
+    const data = await store.read()
+    expect(data.checklistTemplates[0].stages[1].categoryId).toBe('cat-review')
+  })
+
+  it('file backend: an explicit null clears it, and a new value sets it', async () => {
+    await store.write(workspace({ checklistTemplates: [recipe({ categoryId: 'cat-review' })] }))
+    await store.write(workspace({ checklistTemplates: [recipe({ categoryId: null })] }))
+    expect((await persistedStageTwo()).categoryId ?? null).toBeNull()
+    // ...and stays cleared on the next old-shape save.
+    await store.write(workspace({ checklistTemplates: [recipe({})] }))
+    expect((await persistedStageTwo()).categoryId ?? null).toBeNull()
+    await store.write(workspace({ checklistTemplates: [recipe({ categoryId: 'cat-send' })] }))
+    expect((await persistedStageTwo()).categoryId).toBe('cat-send')
   })
 })

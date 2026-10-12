@@ -2693,6 +2693,8 @@ export async function patchTemplateStageRequest(
     name?: string
     assigneeId?: string
     offsetDays?: number
+    /** The step's own Board column; null (or '') = back to the recipe's. */
+    categoryId?: string | null
     viewerIds?: string[]
     editorIds?: string[]
   },

@@ -36,15 +36,18 @@ describe('ensureTemplateStages (browser) carries the step board column', () => {
     expect(migrated.stages[1].categoryId).toBe('cat-review')
   })
 
-  it('drops an empty or null step column so the step falls back to the recipe', () => {
+  it('keeps an explicit null or empty column as categoryId: null, so "Same as recipe" reaches the save as a clear', () => {
+    // The server keeps a step's STORED column when the payload stage has no
+    // `categoryId` key at all (an old bundle's normalizer drops it); only an
+    // explicit null clears it. So this normalizer must not drop the key.
     const migrated = ensureTemplateStages(
       template([
         { id: 's1', name: 'Prepare', assigneeId: 'emp-1', offsetDays: 0, categoryId: null, viewerIds: [], editorIds: [], items: [] },
         { id: 's2', name: 'Review', assigneeId: 'emp-1', offsetDays: 0, categoryId: '', viewerIds: [], editorIds: [], items: [] },
       ]),
     )
-    expect(migrated.stages[0]).not.toHaveProperty('categoryId')
-    expect(migrated.stages[1]).not.toHaveProperty('categoryId')
+    expect(migrated.stages[0]).toHaveProperty('categoryId', null)
+    expect(migrated.stages[1]).toHaveProperty('categoryId', null)
   })
 })
 

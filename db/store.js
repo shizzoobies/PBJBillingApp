@@ -707,11 +707,29 @@ function snapshotCreatedAt(preservedCreatedAt, table, id) {
 }
 
 /**
+ * A step's Board column as a bulk save writes it (featreq-3e81b386). A payload
+ * stage WITHOUT the `categoryId` key keeps `stored` - the column already saved
+ * for that stage id - because a tab still running a bundle from before the
+ * field existed normalizes its stages through a field list that drops it, and
+ * the save deletes and re-inserts every stage row: without this its next
+ * autosave would erase every step's column. An explicit null (or '') clears;
+ * a value sets. Both backends use this one rule.
+ */
+export function preservedStageCategoryId(stage, stored) {
+  if (stage && Object.prototype.hasOwnProperty.call(stage, 'categoryId')) {
+    return typeof stage.categoryId === 'string' && stage.categoryId ? stage.categoryId : null
+  }
+  return typeof stored === 'string' && stored ? stored : null
+}
+
+/**
  * One template as the rows of three tables: the template, its stages, and the
  * stages' items, each in the order `BULK_INSERT_SHAPES` lists the columns.
  * Values are converted exactly as the per-row inserts converted them.
+ * `priorStageCategories` is the pre-wipe snapshot of each stage's stored Board
+ * column (see `preservedStageCategoryId`).
  */
-export function checklistTemplateBulkRows(template, preservedCreatedAt) {
+export function checklistTemplateBulkRows(template, preservedCreatedAt, priorStageCategories = new Map()) {
   const row = [
     template.id,
     template.title,
@@ -779,7 +797,7 @@ export function checklistTemplateBulkRows(template, preservedCreatedAt) {
       stageIdx,
       Array.isArray(stage.viewerIds) ? stage.viewerIds : [],
       Array.isArray(stage.editorIds) ? stage.editorIds : [],
-      stage.categoryId || null,
+      preservedStageCategoryId(stage, priorStageCategories.get(stage.id)),
     ])
     for (const [index, item] of (stage.items ?? []).entries()) {
       items.push([
@@ -2297,9 +2315,12 @@ function ensureTemplateStages(template) {
         ? { dueDayOfMonth: stage.dueDayOfMonth }
         : {}),
       // The step's own Board column (featreq-3e81b386) - same trap: a field
-      // this list leaves out never reaches the save. Absent = the recipe's.
-      ...(typeof stage.categoryId === 'string' && stage.categoryId
-        ? { categoryId: stage.categoryId }
+      // this list leaves out never reaches the save. Null = the recipe's. The
+      // key's PRESENCE is kept as given: absent means "not mine to change" (the
+      // save keeps the stored column, see `preservedStageCategoryId`), an
+      // explicit null means "clear it".
+      ...(Object.prototype.hasOwnProperty.call(stage, 'categoryId')
+        ? { categoryId: typeof stage.categoryId === 'string' && stage.categoryId ? stage.categoryId : null }
         : {}),
       viewerIds: Array.isArray(stage.viewerIds) ? [...stage.viewerIds] : [],
       editorIds: Array.isArray(stage.editorIds) ? [...stage.editorIds] : [],
@@ -10064,6 +10085,15 @@ export class AppDataStore {
           ]),
         )
 
+        // Each step's stored Board column (featreq-3e81b386), for a payload
+        // stage that does not carry the key at all - a tab on a bundle from
+        // before the field existed. See `preservedStageCategoryId`.
+        const priorStageCategories = new Map(
+          (await client.query(`select id, category_id from checklist_template_stages`)).rows.map(
+            (row) => [row.id, row.category_id],
+          ),
+        )
+
         // The push stamps, by the same rule and for a sharper reason. These
         // five are endpoint-owned (POST /api/checklists/:id/push is the only
         // writer, for a plain move or for a split) and `cycle_due_date` is the
@@ -10314,7 +10344,7 @@ export class AppDataStore {
         // payload order. Stage 2 of docs/plans/bulk-save-batching-2026-10.md.
         const templateRows = { templates: [], stages: [], items: [] }
         for (const template of safeTemplates) {
-          const built = checklistTemplateBulkRows(template, preservedCreatedAt)
+          const built = checklistTemplateBulkRows(template, preservedCreatedAt, priorStageCategories)
           templateRows.templates.push(built.template)
           templateRows.stages.push(...built.stages)
           templateRows.items.push(...built.items)
@@ -10882,6 +10912,29 @@ export class AppDataStore {
               if (typeof stored === 'string' && stored) next.createdAt = stored
               else delete next.createdAt
               return next
+            })
+
+            // Cardinal rule 1 mirror of `priorStageCategories` in the Postgres
+            // branch (featreq-3e81b386): a payload stage WITHOUT the
+            // `categoryId` key keeps the step's stored Board column; an
+            // explicit null clears it. Same helper, same rule.
+            const priorStageCategoryById = new Map()
+            for (const template of Array.isArray(previous.checklistTemplates) ? previous.checklistTemplates : []) {
+              for (const stage of Array.isArray(template?.stages) ? template.stages : []) {
+                if (stage && typeof stage.id === 'string') priorStageCategoryById.set(stage.id, stage.categoryId)
+              }
+            }
+            data.checklistTemplates = data.checklistTemplates.map((template) => {
+              if (!template || !Array.isArray(template.stages)) return template
+              return {
+                ...template,
+                stages: template.stages.map((stage) => {
+                  if (!stage || typeof stage.id !== 'string') return stage
+                  if (Object.prototype.hasOwnProperty.call(stage, 'categoryId')) return stage
+                  const stored = preservedStageCategoryId(stage, priorStageCategoryById.get(stage.id))
+                  return stored ? { ...stage, categoryId: stored } : stage
+                }),
+              }
             })
           }
         }
@@ -31059,12 +31112,13 @@ export class AppDataStore {
       }
       // The step's own Board column (featreq-3e81b386). A non-empty string
       // sets it; an empty string / null clears it, so the step uses the
-      // recipe's column again.
+      // recipe's column again. The clear is an explicit null, never a deleted
+      // key: the save keeps the stored column for a stage without the key.
       if (patch && Object.prototype.hasOwnProperty.call(patch, 'categoryId')) {
         if (typeof patch.categoryId === 'string' && patch.categoryId.trim()) {
           next.categoryId = patch.categoryId.trim()
         } else {
-          delete next.categoryId
+          next.categoryId = null
         }
       }
       if (Array.isArray(patch?.viewerIds)) {
