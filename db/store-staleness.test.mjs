@@ -49715,3 +49715,296 @@ describe('engagements stage 4: review round 1 (Postgres statements)', () => {
     expect(statements.filter((s) => /^(insert|update|delete|begin)\b/i.test(s.text))).toEqual([])
   })
 })
+
+/**
+ * Stage advance hardening (Bright Tower 2026-10-01, XAct 2026-10-05): a staged
+ * checklist's last step was ticked, the next stage was never created, and
+ * nothing anywhere said so. `maybeSpawnNextStage` now answers WHY it did not
+ * advance, and a spawn that throws no longer turns a tick that already saved
+ * into a 500: the toggle resolves with `spawnError` and the tick stands, so a
+ * second tick retries the advance.
+ */
+describe('stage advance explains itself (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  const stagedTemplate = (over = {}) => ({
+    id: 'tmpl-stages',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2026-10-31',
+    active: true,
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      { id: 'st-0', name: 'Prep', assigneeId: 'emp-1', offsetDays: 0, items: [{ id: 'ti-0', label: 'Gather' }] },
+      { id: 'st-1', name: 'Review', assigneeId: 'emp-1', offsetDays: 0, items: [{ id: 'ti-1', label: 'Review' }] },
+    ],
+    ...over,
+  })
+
+  const stageChecklist = (over = {}) => ({
+    id: 'cl-stage',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    templateId: 'tmpl-stages',
+    dueDate: '2026-10-31',
+    caseId: 'case-1',
+    stageId: 'st-0',
+    stageIndex: 0,
+    stageCount: 2,
+    viewerIds: [],
+    editorIds: [],
+    items: [{ id: 'item-a', label: 'Gather', done: false }],
+    ...over,
+  })
+
+  const seed = (checklists, templates = [stagedTemplate()]) =>
+    store.write(workspace({ checklists, checklistTemplates: templates }))
+
+  const stageOnes = async () =>
+    (await persisted()).checklists.filter((entry) => entry.caseId === 'case-1' && entry.stageIndex === 1)
+
+  let logSpy
+  let errorSpy
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    logSpy.mockRestore()
+    errorSpy.mockRestore()
+  })
+  const stageLines = (spy) =>
+    spy.mock.calls.map((call) => String(call[0])).filter((line) => line.startsWith('[stage-advance]'))
+
+  it('an all-done stage advances, with no reason and nothing logged', async () => {
+    await seed([stageChecklist()])
+    const result = await store.toggleChecklistItem('cl-stage', 'item-a')
+    expect(result.spawned).toMatchObject({ caseId: 'case-1', stageIndex: 1, stageCount: 2 })
+    expect(result.spawnReason).toBeNull()
+    expect(result.spawnError).toBeUndefined()
+    expect(await stageOnes()).toHaveLength(1)
+    expect(stageLines(logSpy)).toEqual([])
+  })
+
+  it('the last stage does not advance: last_stage, and it is not logged', async () => {
+    await seed([stageChecklist({ stageId: 'st-1', stageIndex: 1 })])
+    const result = await store.toggleChecklistItem('cl-stage', 'item-a')
+    expect(result.spawned).toBeNull()
+    expect(result.spawnReason).toBe('last_stage')
+    expect(stageLines(logSpy)).toEqual([])
+  })
+
+  it('a step still open: not_all_done, nothing logged', async () => {
+    await seed([
+      stageChecklist({
+        items: [
+          { id: 'item-a', label: 'Gather', done: false },
+          { id: 'item-b', label: 'File', done: false },
+        ],
+      }),
+    ])
+    const result = await store.toggleChecklistItem('cl-stage', 'item-a')
+    expect(result.spawned).toBeNull()
+    expect(result.spawnReason).toBe('not_all_done')
+    expect(stageLines(logSpy)).toEqual([])
+  })
+
+  it('a next stage with no steps: next_stage_empty, and a log line names the case', async () => {
+    const template = stagedTemplate()
+    template.stages[1] = { ...template.stages[1], items: [] }
+    await seed([stageChecklist()], [template])
+    const result = await store.toggleChecklistItem('cl-stage', 'item-a')
+    expect(result.spawned).toBeNull()
+    expect(result.spawnReason).toBe('next_stage_empty')
+    expect(stageLines(logSpy)).toEqual(['[stage-advance] skipped cl-stage case case-1: next_stage_empty'])
+    // The tick itself saved.
+    const row = (await persisted()).checklists.find((entry) => entry.id === 'cl-stage')
+    expect(row.items[0].done).toBe(true)
+  })
+
+  it('a template that is gone: template_not_found, logged', async () => {
+    await seed([stageChecklist({ templateId: 'tmpl-gone' })])
+    const result = await store.toggleChecklistItem('cl-stage', 'item-a')
+    expect(result.spawnReason).toBe('template_not_found')
+    expect(stageLines(logSpy)).toEqual(['[stage-advance] skipped cl-stage case case-1: template_not_found'])
+  })
+
+  it('un-ticking and re-ticking an advanced stage creates nothing new: already_spawned', async () => {
+    await seed([stageChecklist()])
+    await store.toggleChecklistItem('cl-stage', 'item-a')
+    await store.toggleChecklistItem('cl-stage', 'item-a')
+    const result = await store.toggleChecklistItem('cl-stage', 'item-a')
+    expect(result.spawned).toBeNull()
+    expect(result.spawnReason).toBe('already_spawned')
+    expect(await stageOnes()).toHaveLength(1)
+  })
+
+  it('a spawn that throws still saves the tick and answers spawnError, never a throw', async () => {
+    await seed([stageChecklist()])
+    store.maybeSpawnNextStage = async () => {
+      throw new Error('disk hiccup')
+    }
+    const result = await store.toggleChecklistItem('cl-stage', 'item-a')
+    expect(result.spawned).toBeNull()
+    expect(result.spawnError).toBe('disk hiccup')
+    expect(result.checklist.items[0].done).toBe(true)
+    const row = (await persisted()).checklists.find((entry) => entry.id === 'cl-stage')
+    expect(row.items[0].done).toBe(true)
+    expect(await stageOnes()).toHaveLength(0)
+    expect(stageLines(errorSpy)).toEqual(['[stage-advance] FAILED cl-stage case case-1: disk hiccup'])
+  })
+
+  it('a second tick after a failed spawn retries the advance', async () => {
+    await seed([stageChecklist()])
+    const real = store.maybeSpawnNextStage.bind(store)
+    store.maybeSpawnNextStage = async () => {
+      throw new Error('disk hiccup')
+    }
+    await store.toggleChecklistItem('cl-stage', 'item-a')
+    store.maybeSpawnNextStage = real
+    await store.toggleChecklistItem('cl-stage', 'item-a') // un-tick
+    const result = await store.toggleChecklistItem('cl-stage', 'item-a') // re-tick
+    expect(result.spawned).toMatchObject({ caseId: 'case-1', stageIndex: 1 })
+    expect(await stageOnes()).toHaveLength(1)
+  })
+})
+
+describe('stage advance explains itself (Postgres statements)', () => {
+  const itemRow = (over = {}) => ({
+    id: 'it-1',
+    label: 'Gather',
+    done: false,
+    waiting: false,
+    waiting_on: null,
+    waiting_ons: [],
+    sub_items: [],
+    ...over,
+  })
+
+  const template = {
+    id: 'tmpl-stages',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      { id: 'st-0', name: 'Prep', assigneeId: 'emp-1', offsetDays: 0, items: [{ id: 'ti-0', label: 'Gather' }] },
+      { id: 'st-1', name: 'Review', assigneeId: 'emp-2', offsetDays: 0, items: [{ id: 'ti-1', label: 'Review' }] },
+    ],
+  }
+
+  /**
+   * A Postgres store whose one-step stage-1 checklist reads back through the
+   * real `mapChecklistItemRow` after the UPDATE, so `read()` after the commit
+   * sees the tick - the same shape as the owner-tick block above.
+   */
+  function pgStageStore({ stageIndex = 0 } = {}) {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    let current = itemRow()
+    const inner = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      const result = await inner(text, params)
+      const trimmed = String(text).trim()
+      if (/^select id, (checklist_id, label, |label, )?done.*from checklist_items/is.test(trimmed)) {
+        return { rows: [current], rowCount: 1 }
+      }
+      if (/^update checklist_items\s+set done = \$3/i.test(trimmed)) {
+        current = { ...current, done: params[2], sub_items: JSON.parse(params[3]) }
+        return { rows: [], rowCount: 1 }
+      }
+      return result
+    }
+    fake.pool.connect = async () => ({
+      query: (text, params) => fake.pool.query(text, params),
+      release() {},
+    })
+    pgStore.read = async () => ({
+      checklists: [
+        {
+          id: 'cl-1',
+          title: 'Monthly close',
+          clientId: 'c1',
+          assigneeId: 'emp-1',
+          templateId: 'tmpl-stages',
+          dueDate: '2026-10-31',
+          caseId: 'case-1',
+          stageId: `st-${stageIndex}`,
+          stageIndex,
+          stageCount: 2,
+          items: [mapChecklistItemRow(current)],
+        },
+      ],
+      checklistTemplates: [template],
+    })
+    return { fake, pgStore }
+  }
+
+  let errorSpy
+  let logSpy
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    errorSpy.mockRestore()
+    logSpy.mockRestore()
+  })
+
+  it('a next-stage create that throws: the tick committed first, the toggle resolves with spawnError', async () => {
+    const { fake, pgStore } = pgStageStore()
+    let commitSeenAtCreate = -1
+    pgStore.createChecklist = async () => {
+      commitSeenAtCreate = fake.indexOf(/^commit$/i)
+      throw new Error('Connection terminated unexpectedly')
+    }
+    let granted = 0
+    pgStore.grantClientVisibility = async () => {
+      granted += 1
+    }
+
+    const result = await pgStore.toggleChecklistItem('cl-1', 'it-1')
+
+    expect(result.spawned).toBeNull()
+    expect(result.spawnError).toBe('Connection terminated unexpectedly')
+    expect(result.checklist.items[0].done).toBe(true)
+    // The item update ran inside its own transaction and was committed BEFORE
+    // the spawn was attempted; nothing rolled it back afterward.
+    const updateAt = fake.indexOf(/^update checklist_items/i)
+    expect(updateAt).toBeGreaterThan(-1)
+    expect(commitSeenAtCreate).toBeGreaterThan(updateAt)
+    expect(fake.indexOf(/^rollback$/i)).toBe(-1)
+    expect(granted).toBe(0)
+    expect(errorSpy.mock.calls.map((call) => String(call[0]))).toContain(
+      '[stage-advance] FAILED cl-1 case case-1: Connection terminated unexpectedly',
+    )
+  })
+
+  it('a next stage that is created answers spawned with no reason', async () => {
+    const { pgStore } = pgStageStore()
+    pgStore.createChecklist = async (checklist) => ({ ...checklist })
+    pgStore.grantClientVisibility = async () => {}
+    const result = await pgStore.toggleChecklistItem('cl-1', 'it-1')
+    expect(result.spawned).toMatchObject({ caseId: 'case-1', stageIndex: 1, assigneeId: 'emp-2' })
+    expect(result.spawnReason).toBeNull()
+    expect(result.spawnError).toBeUndefined()
+  })
+
+  it('the last stage answers last_stage and creates nothing', async () => {
+    const { pgStore } = pgStageStore({ stageIndex: 1 })
+    let created = 0
+    pgStore.createChecklist = async () => {
+      created += 1
+    }
+    const result = await pgStore.toggleChecklistItem('cl-1', 'it-1')
+    expect(result.spawned).toBeNull()
+    expect(result.spawnReason).toBe('last_stage')
+    expect(created).toBe(0)
+  })
+})

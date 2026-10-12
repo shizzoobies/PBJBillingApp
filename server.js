@@ -15218,6 +15218,32 @@ const server = createServer(async (request, response) => {
         )
       }
 
+      // Stage advance hardening (Bright Tower 2026-10-01, XAct 2026-10-05): the
+      // tick above is saved and recorded even when the next stage could not be
+      // created. A spawn that threw is `spawnError` (the page is told, and a
+      // second tick retries); an all-done stage that should have advanced but
+      // had nothing to advance to is `spawnReason`. Both leave an Activity row.
+      const stageAdvanceFailed = toggleResult.spawnError || null
+      const SHOULD_HAVE_ADVANCED = ['template_not_found', 'no_stages', 'next_stage_empty']
+      if (stageAdvanceFailed || SHOULD_HAVE_ADVANCED.includes(toggleResult.spawnReason)) {
+        const fromIdx = (updatedChecklist.stageIndex ?? 0) + 1
+        const caseId = updatedChecklist.caseId || updatedChecklist.id
+        const where = `${updatedChecklist.title} · case ${caseId} · stage ${fromIdx} -> stage ${fromIdx + 1}`
+        if (stageAdvanceFailed) {
+          await appDataStore.recordActivity(
+            session.user.id,
+            'case_advance_failed',
+            `${where}: ${stageAdvanceFailed}`,
+          )
+        } else {
+          await appDataStore.recordActivity(
+            session.user.id,
+            'case_advance_skipped',
+            `${where}: ${toggleResult.spawnReason}`,
+          )
+        }
+      }
+
       // "Waiting on a task" notifications: if this toggle just COMPLETED the
       // whole checklist, notify the assignee of any step elsewhere that was
       // flagged waiting on it (so they know they're unblocked).
@@ -15330,7 +15356,7 @@ const server = createServer(async (request, response) => {
         }
       }
 
-      sendJson(response, 200, updatedChecklist)
+      sendJson(response, 200, stageAdvanceFailed ? { ...updatedChecklist, stageAdvanceFailed } : updatedChecklist)
       return
     }
 

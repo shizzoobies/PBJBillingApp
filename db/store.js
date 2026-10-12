@@ -5470,6 +5470,32 @@ export function onboardingStageForSync(checklist, spawned) {
 }
 
 /**
+ * The `maybeSpawnNextStage` reasons that mean "every step is done, yet no next
+ * stage was created" and are NOT the ordinary end of a case (`last_stage`) or a
+ * record a push left behind (`pushed`). Each one logs a `[stage-advance]` line.
+ */
+const STAGE_ADVANCE_LOGGED_SKIPS = new Set([
+  'no_template',
+  'template_not_found',
+  'no_stages',
+  'already_spawned',
+  'next_stage_empty',
+])
+
+/**
+ * A next-stage spawn that threw after the tick was saved: log one
+ * `[stage-advance] FAILED` line naming the checklist and case, and answer the
+ * message the toggle reports as `spawnError`.
+ */
+function stageAdvanceFailure(checklist, error) {
+  const message = (error && error.message) || String(error) || 'unknown error'
+  console.error(
+    `[stage-advance] FAILED ${checklist?.id ?? '?'} case ${checklist?.caseId || checklist?.id || '?'}: ${message}`,
+  )
+  return message
+}
+
+/**
  * Forward-only stage progression. When `justCompletedChecklist` represents the
  * final state of a stage instance whose every item is done, materialise the
  * next stage as a fresh checklist instance. Returns the spawned checklist (if
@@ -21343,7 +21369,20 @@ export class AppDataStore {
 
       const data = await this.read()
       const updated = data.checklists.find((checklist) => checklist.id === checklistId) ?? null
-      const spawn = await this.maybeSpawnNextStage(data, updated)
+      // The tick is COMMITTED above. A next stage that cannot be created must
+      // not turn that saved tick into a 500 (the route would then skip the
+      // tick's own activity row and the page would think nothing saved): it is
+      // reported as `spawnError`, logged, and a second tick retries it.
+      let spawn = null
+      let spawnReason = null
+      let spawnError = null
+      try {
+        const advance = await this.maybeSpawnNextStage(data, updated)
+        spawn = advance.spawned
+        spawnReason = advance.reason
+      } catch (error) {
+        spawnError = stageAdvanceFailure(updated, error)
+      }
       // Onboarding case ↔ client lifecycle sync. No-op for normal cases (the
       // helper returns null unless `onboardingForClientId` is set), so ordinary
       // stage advancement is byte-for-byte unchanged.
@@ -21351,7 +21390,13 @@ export class AppDataStore {
       if (lifecycleStage && updated) {
         await this.setClientLifecycleStage(updated.onboardingForClientId, lifecycleStage)
       }
-      return { checklist: updated, spawned: spawn, ...(closeWaitsBy ? { closedWaits } : {}) }
+      return {
+        checklist: updated,
+        spawned: spawn,
+        spawnReason,
+        ...(spawnError ? { spawnError } : {}),
+        ...(closeWaitsBy ? { closedWaits } : {}),
+      }
     }
 
     // Read, decide and write inside ONE file-queue slot (raw fs calls only in
@@ -21425,10 +21470,21 @@ export class AppDataStore {
       }
 
       // Auto-spawn next stage atomically with the toggle so the next assignee
-      // sees the new live checklist on their next refetch.
-      const spawn = await this.maybeSpawnNextStage(data, updatedChecklist, { fileMode: true })
-      if (spawn) {
-        data.checklists = sortChecklists([...data.checklists, spawn])
+      // sees the new live checklist on their next refetch. A spawn that throws
+      // is reported as `spawnError` and the tick still saves - the same answer
+      // the Postgres branch gives, where the tick has already committed.
+      let spawn = null
+      let spawnReason = null
+      let spawnError = null
+      try {
+        const advance = await this.maybeSpawnNextStage(data, updatedChecklist, { fileMode: true })
+        if (advance.spawned) {
+          data.checklists = sortChecklists([...data.checklists, advance.spawned])
+        }
+        spawn = advance.spawned
+        spawnReason = advance.reason
+      } catch (error) {
+        spawnError = stageAdvanceFailure(updatedChecklist, error)
       }
 
       // Onboarding case ↔ client lifecycle sync, applied to the same open
@@ -21444,7 +21500,13 @@ export class AppDataStore {
       }
 
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
-      return { checklist: updatedChecklist, spawned: spawn, ...(closeWaitsBy ? { closedWaits } : {}) }
+      return {
+        checklist: updatedChecklist,
+        spawned: spawn,
+        spawnReason,
+        ...(spawnError ? { spawnError } : {}),
+        ...(closeWaitsBy ? { closedWaits } : {}),
+      }
     })
   }
 
@@ -21452,8 +21514,11 @@ export class AppDataStore {
    * If every item on `checklist` is done, this is the final stage's last toggle,
    * and there's a next stage on the parent template, materialise the next-stage
    * checklist. Guarded against double-spawn by checking for an existing
-   * checklist with the same caseId+stageIndex+1. Returns the spawned checklist
-   * (if any) or null.
+   * checklist with the same caseId+stageIndex+1. Returns
+   * `{ spawned, reason }`: the spawned checklist with `reason: null`, or
+   * `spawned: null` and the reason it did not advance (`not_all_done`,
+   * `pushed`, `last_stage`, `no_template`, `template_not_found`, `no_stages`,
+   * `already_spawned`, `next_stage_empty`).
    *
    * In Postgres mode the new checklist is inserted via the existing
    * createChecklist path so activity log + persistence are consistent. In file
@@ -21461,42 +21526,56 @@ export class AppDataStore {
    * persist (since we already hold the open data snapshot for that write).
    */
   async maybeSpawnNextStage(data, checklist, { fileMode = false } = {}) {
+    // Every "did not advance" answer says why (stage advance hardening, after
+    // Bright Tower 2026-10-01 and XAct 2026-10-05 stopped at stage 1 with no
+    // trace). The reasons that mean "all done, yet no next stage" and are not
+    // the ordinary end of a case are logged, so the next one leaves a line.
+    const skip = (reason) => {
+      if (STAGE_ADVANCE_LOGGED_SKIPS.has(reason)) {
+        console.log(
+          `[stage-advance] skipped ${checklist.id} case ${checklist.caseId || checklist.id}: ${reason}`,
+        )
+      }
+      return { spawned: null, reason }
+    }
     if (!checklist || !Array.isArray(checklist.items) || checklist.items.length === 0) {
-      return null
+      return { spawned: null, reason: 'not_all_done' }
     }
     const allDone = checklist.items.every((item) => item.done)
-    if (!allDone) return null
+    if (!allDone) return skip('not_all_done')
     // A row that handed its open work to a pushed copy is a completed RECORD,
     // not the live stage: re-checking one of its steps must not spawn the next
     // stage (the new row carries that duty).
-    if (checklist.pushedToChecklistId) return null
-    if (!checklist.templateId) return null
+    if (checklist.pushedToChecklistId) return skip('pushed')
     const stageCount = typeof checklist.stageCount === 'number' ? checklist.stageCount : 1
     const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
-    if (stageIndex + 1 >= stageCount) return null
+    // Checked before the template so a finished one-off (no template, one
+    // stage) reads as the ordinary end it is, not as a logged anomaly.
+    if (stageIndex + 1 >= stageCount) return skip('last_stage')
+    if (!checklist.templateId) return skip('no_template')
 
     const template = (data.checklistTemplates ?? []).find((t) => t.id === checklist.templateId)
-    if (!template) return null
+    if (!template) return skip('template_not_found')
     const stages = Array.isArray(template.stages) && template.stages.length > 0
       ? template.stages
       : ensureTemplateStages(template).stages
-    if (!stages || stageIndex + 1 >= stages.length) return null
+    if (!stages || stageIndex + 1 >= stages.length) return skip('no_stages')
 
     const caseId = checklist.caseId || checklist.id
     const alreadySpawned = (data.checklists ?? []).some(
       (entry) => entry.caseId === caseId && entry.stageIndex === stageIndex + 1,
     )
-    if (alreadySpawned) return null
+    if (alreadySpawned) return skip('already_spawned')
 
     const spawn = buildSpawnedNextStageChecklist({
       template: { ...template, stages },
       justCompletedChecklist: checklist,
     })
-    if (!spawn) return null
+    if (!spawn) return skip('next_stage_empty')
 
     if (fileMode) {
       // Caller persists; just return the new instance.
-      return spawn
+      return { spawned: spawn, reason: null }
     }
 
     // Postgres mode: insert via createChecklist so it goes through the same
@@ -21504,7 +21583,7 @@ export class AppDataStore {
     const created = await this.createChecklist(spawn)
     // Auto-grant the new stage's assignee visibility into the client.
     await this.grantClientVisibility(created.clientId, created.assigneeId)
-    return created
+    return { spawned: created, reason: null }
   }
 
   /**
