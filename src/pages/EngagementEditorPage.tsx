@@ -33,6 +33,7 @@ import { formatProposalMoney } from '../../lib/proposal-pricing.js'
 import {
   ApiError,
   type Engagement,
+  type EngagementFeeMode,
   type EngagementPreview,
   type EngagementSignResult,
   type EngagementView,
@@ -145,6 +146,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const [retainer, setRetainer] = useState('')
   const [packageId, setPackageId] = useState('')
   const [planIds, setPlanIds] = useState<string[]>([])
+  const [feeMode, setFeeMode] = useState<EngagementFeeMode>('replace')
   const [saveState, setSaveState] = useState<SaveFlashState>('idle')
   const [saveError, setSaveError] = useState('')
 
@@ -183,7 +185,8 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
       parsedRetainer !== (engagement.retainerAmount && engagement.retainerAmount > 0 ? engagement.retainerAmount : null) ||
       packageId !== (engagement.packageId ?? '') ||
       planIds.length !== savedPlanIds.length ||
-      planIds.some((id) => !savedPlanIds.includes(id)))
+      planIds.some((id) => !savedPlanIds.includes(id)) ||
+      feeMode !== (engagement.feeMode ?? 'replace'))
   const dirtyRef = useRef(false)
   useEffect(() => {
     dirtyRef.current = dirty
@@ -200,6 +203,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
       setRetainer(retainerText(row.retainerAmount))
       setPackageId(row.packageId ?? '')
       setPlanIds(row.planIds ?? [])
+      setFeeMode(row.feeMode ?? 'replace')
     }
   }, [])
 
@@ -313,6 +317,12 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const monthly = Number(totals.monthly ?? 0)
   const hours = figures.hoursByRole ?? {}
   const skipped = skippedEngagementLines(figures)
+  // An existing monthly client: signing replaces its fee, adds to it, or keeps it (her choice).
+  const linkedClient = engagement.clientId ? data.clients.find((entry) => entry.id === engagement.clientId) : undefined
+  const feeChoices =
+    linkedClient && linkedClient.billingMode === 'subscription' && monthly > 0
+      ? feeChoiceLines(Number(linkedClient.monthlyRate ?? 0), monthly)
+      : null
 
   /* ---- the editor ---------------------------------------------------------- */
 
@@ -345,6 +355,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         retainerAmount: parsedRetainer,
         ...(packageChanged ? { packageId: packageId || null } : {}),
         planIds,
+        ...(feeMode !== (engagement.feeMode ?? 'replace') ? { feeMode } : {}),
       })
       adopt(next, { overwrite: true })
       setSaveState('saved')
@@ -414,7 +425,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const sign = async () => {
     if (!canSign || !/^\d{4}-\d{2}-\d{2}$/.test(signedOn)) return
     const ok = window.confirm(
-      `Mark the engagement letter for ${partyName} as signed on ${engagementDayLabel(signedOn)}? ${signingSentence(engagement)}A signed letter can no longer be edited, sent or voided.`,
+      `Mark the engagement letter for ${partyName} as signed on ${engagementDayLabel(signedOn)}? ${signingSentence(engagement, feeChoices ? feeChoices[engagement.feeMode ?? 'replace'] : null)}A signed letter can no longer be edited, sent or voided.`,
     )
     if (!ok) return
     setBusy('sign')
@@ -433,11 +444,10 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
       await refresh({ overwrite: true })
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : 'Could not mark the engagement as signed.')
-      // The letter changed since it was sent (in another tab, say): show the stored
-      // one, so the "signed as edited" choice appears.
-      if (err instanceof ApiError && err.reason === 'changed_since_sent') {
-        await refresh({ overwrite: !dirtyRef.current })
-      }
+      // Whatever went wrong, show the stored engagement: it may have changed since it
+      // was sent (the "signed as edited" choice then appears), or a client may already
+      // be on it from a signing that did not finish (a retry finishes it).
+      await refresh({ overwrite: !dirtyRef.current })
     } finally {
       setBusy('')
     }
@@ -462,7 +472,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
     }
   }
 
-  const blockedReason = dirty ? 'Save the engagement to preview or send it.' : ''
+  const blockedReason = dirty ? 'Save the engagement to preview, send or sign it.' : ''
   const previewTo = sendTo.trim() && sendTo.trim() !== partyEmail ? sendTo.trim() : undefined
   const activity = activityRows(
     engagement,
@@ -631,6 +641,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
               <SigningSummary
                 result={signSummary}
                 partyName={partyName}
+                clientName={data.clients.find((entry) => entry.id === signSummary.clientId)?.name ?? partyName}
                 planName={(planId) => (data.plans ?? []).find((plan) => plan.id === planId)?.name ?? 'a plan'}
                 retainerAmount={engagement.retainerAmount}
               />
@@ -728,7 +739,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                   <button
                     type="button"
                     className="primary-action"
-                    disabled={!canSign || busy !== ''}
+                    disabled={!canSign || dirty || busy !== ''}
                     onClick={() => void sign()}
                   >
                     Mark as signed
@@ -776,14 +787,30 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
               />
             </label>
             <p className="muted-text">
-              {monthly > 0
+              {monthly > 0 && !engagement.clientId
                 ? `The default is one month's fee, ${formatProposalMoney(monthly)}. Blank means no retainer.`
-                : 'Blank means no retainer.'}
+                : 'Blank means no retainer (a letter to an existing client drafts none unless you type one).'}
             </p>
             {parsedRetainer === undefined ? (
               <p className="form-error" role="alert">
                 Type the retainer as an amount, like 630 or 630.00, or leave it blank for none.
               </p>
+            ) : null}
+            {feeChoices ? (
+              <fieldset className="field" disabled={!editable}>
+                <legend>{`${linkedClient?.name ?? 'The client'}'s monthly fee, when signed`}</legend>
+                {(['replace', 'add', 'keep'] as const).map((mode) => (
+                  <label key={mode} className="check-row">
+                    <input
+                      type="radio"
+                      name="engagement-fee-mode"
+                      checked={feeMode === mode}
+                      onChange={() => setFeeMode(mode)}
+                    />
+                    <span>{feeChoices[mode]}</span>
+                  </label>
+                ))}
+              </fieldset>
             ) : null}
             <label className="field">
               <span>Package</span>
@@ -953,7 +980,7 @@ function listWords(items: string[]): string {
  * space when there is anything to say: a letter with no client creates one; a
  * letter to a client brings it the fee, plans, software and retainer.
  */
-function signingSentence(engagement: Engagement): string {
+function signingSentence(engagement: Engagement, feeLine: string | null = null): string {
   const figures = engagement.figures ?? {}
   const monthly = Number(figures.totals?.monthly ?? 0)
   const software = (figures.lines ?? []).filter(
@@ -972,19 +999,36 @@ function signingSentence(engagement: Engagement): string {
       brings.length > 0 ? `, ${listWords(brings)}` : ''
     }. `
   }
-  const existing = [...(monthly > 0 ? ['the monthly fee'] : []), ...brings]
-  return existing.length > 0 ? `This brings ${listWords(existing)} to the client. ` : ''
+  // The fee as she chose it, with amounts, for a monthly client; else the bare words.
+  const existing = [...(monthly > 0 && !feeLine ? ['the monthly fee'] : []), ...brings]
+  return `${existing.length > 0 ? `This brings ${listWords(existing)} to the client. ` : ''}${feeLine ? `Monthly fee: ${feeLine}. ` : ''}`
+}
+
+/**
+ * The three things signing can do to an existing monthly client's fee, with amounts:
+ * "Replace the current fee ($1,200.00 -> $150.00)", "Add to it ($1,200.00 + $150.00 =
+ * $1,350.00)", "Keep $1,200.00".
+ */
+function feeChoiceLines(current: number, letter: number): Record<EngagementFeeMode, string> {
+  const money = (value: number) => formatProposalMoney(value)
+  return {
+    replace: `Replace the current fee (${money(current)} -> ${money(letter)})`,
+    add: `Add to it (${money(current)} + ${money(letter)} = ${money(Math.round((current + letter) * 100) / 100)})`,
+    keep: `Keep ${money(current)}`,
+  }
 }
 
 /** The summary under Send and sign after Mark as signed: what it did, what it skipped, and links. */
 function SigningSummary({
   result,
   partyName,
+  clientName,
   planName,
   retainerAmount,
 }: {
   result: EngagementSignResult
   partyName: string
+  clientName: string
   planName: (planId: string) => string
   retainerAmount: number | null
 }) {
@@ -994,7 +1038,7 @@ function SigningSummary({
       <p>
         {result.createdClient
           ? `${partyName} is now a client, in Onboarding, with its contact.`
-          : 'Signing was applied to the client.'}
+          : `Finished signing for ${clientName}.`}
       </p>
       <ul>
         {result.monthlyRate !== null ? (

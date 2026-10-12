@@ -158,18 +158,12 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   const [engagement, setEngagement] = useState<Engagement | null | undefined>(undefined)
   const [draftingEngagement, setDraftingEngagement] = useState(false)
   const won = proposal?.status === 'accepted'
-  // "Open the client" on a Won proposal: once its engagement is SIGNED (signing
-  // creates or updates the client, engagements stage 3), or - with no live
-  // engagement at all - the client a proposal Won before engagements was linked to.
+  // "Open the client" on a Won proposal: the client its signed engagement created
+  // or updated (engagements stage 3), or the client the proposal is linked to (an
+  // upsell's, one signing linked, or one a proposal Won before engagements created).
   const clientLinkId = !won
     ? null
-    : engagement
-      ? engagement.status === 'signed'
-        ? engagement.clientId
-        : null
-      : engagement === null
-        ? (proposal?.clientId ?? null)
-        : null
+    : (engagement?.status === 'signed' ? engagement.clientId : null) || (proposal?.clientId ?? null)
   useEffect(() => {
     if (!won) return
     let cancelled = false
@@ -487,7 +481,9 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
       navigate(`/engagements/${result.engagementId}`, { state: { notice: `Marked Won. ${signingNotice}` } })
       return
     }
-    setNotice(`Marked Won, but the engagement letter could not be drafted - use Draft the engagement. ${signingNotice}`)
+    setNotice(
+      `Marked Won, but the engagement letter could not be drafted - use Draft the engagement (the package and plans you picked are kept). ${signingNotice}`,
+    )
     setNoticeEngagementId(null)
   }
 

@@ -33,6 +33,7 @@ import {
   cleanProposalInputs,
   cleanProposalProspect,
   cleanProposalSelections,
+  formatProposalMoney,
   priceProposal,
   sanitizeProposalPricing,
   snapshotHoursByRole,
@@ -1557,6 +1558,13 @@ const ENGAGEMENT_BODY_MAX = 20000
 const ENGAGEMENT_NOTE_MAX = 2000
 const ENGAGEMENT_LIST_LIMIT = 500
 const ENGAGEMENT_PLAN_IDS_MAX = 50
+/**
+ * What signing does to an EXISTING monthly client's fee (stage 3): 'replace' it with
+ * the letter's monthly total, 'add' the total to it, or 'keep' it. An engagement
+ * drafted for a client that already exists (an upsell) starts at 'add'; a prospect's
+ * at 'replace' (it has no fee yet, so the mode does not matter).
+ */
+const ENGAGEMENT_FEE_MODES = Object.freeze(['replace', 'add', 'keep'])
 const ENGAGEMENT_PARTY_KEYS = Object.freeze([
   'company',
   'contactName',
@@ -1572,11 +1580,11 @@ const ENGAGEMENT_PARTY_KEYS = Object.freeze([
 const ENGAGEMENT_SECTION_COLUMNS = `id, key, title, body, trigger, sort_order, active, created_at, updated_at`
 const ENGAGEMENT_COLUMNS = `id, kind, status, proposal_id, client_id, letter_id, supersedes_id, party,
           subject, email_body, letter_body, section_keys, figures, retainer_amount, package_id,
-          plan_ids, template_hash, email_log, sent_at, signed_at, signed_by, signed_note, voided_at,
+          plan_ids, fee_mode, template_hash, email_log, sent_at, signed_at, signed_by, signed_note, voided_at,
           created_by, created_at, updated_at`
 /** The list view: no bodies and no email log (the editor reads one engagement whole). */
 const ENGAGEMENT_LIST_COLUMNS = `id, kind, status, proposal_id, client_id, letter_id, supersedes_id, party,
-          subject, section_keys, figures, retainer_amount, package_id, plan_ids, template_hash,
+          subject, section_keys, figures, retainer_amount, package_id, plan_ids, fee_mode, template_hash,
           sent_at, signed_at, signed_by, signed_note, voided_at, created_by, created_at, updated_at`
 
 /**
@@ -1651,6 +1659,7 @@ function mapEngagementRow(row, { list = false } = {}) {
     retainerAmount: engagementRetainer(pick('retainer_amount', 'retainerAmount')),
     packageId: pick('package_id', 'packageId') ?? null,
     planIds: array(pick('plan_ids', 'planIds')).map(String),
+    feeMode: ENGAGEMENT_FEE_MODES.includes(pick('fee_mode', 'feeMode')) ? pick('fee_mode', 'feeMode') : 'replace',
     templateHash: pick('template_hash', 'templateHash') ?? '',
     emailLog: array(pick('email_log', 'emailLog')),
     sentAt: iso(pick('sent_at', 'sentAt')),
@@ -2937,7 +2946,7 @@ const RECURRING_CATEGORIES = ['expense', 'software']
 /** Every `proposals` column, in the order `mapProposal` reads them. */
 const PROPOSAL_COLUMNS = `id, status, prospect, client_id, inputs, selections, pricing_snapshot,
   letter, letter_at, messages, email_log, sent_at, accepted_at, declined_at, decline_note,
-  copied_from_id, created_by, created_at, updated_at`
+  copied_from_id, created_by, created_at, updated_at, accept_picks`
 
 /**
  * `PROPOSAL_COLUMNS` without `messages` — what `listProposals` selects. The
@@ -6584,6 +6593,17 @@ export class AppDataStore {
       await this.pool.query(
         `alter table proposals add constraint proposals_status_check check (status in ('draft', 'sent', 'accepted', 'declined'))`,
       )
+      // Engagements stage 3: the package and plans picked at Accept ({packageId,
+      // planIds}), kept on the Won proposal so the recovery draft (POST
+      // /api/proposals/:id/engagement) carries them. Look-first, so a boot with the
+      // column in place takes no lock.
+      const acceptPicksColumn = await this.pool.query(
+        `select 1 from information_schema.columns
+          where table_schema = current_schema() and table_name = 'proposals' and column_name = 'accept_picks'`,
+      )
+      if ((acceptPicksColumn.rows?.length ?? 0) === 0) {
+        await this.pool.query(`alter table proposals add column if not exists accept_picks jsonb`)
+      }
 
       // PROPOSAL QUESTIONNAIRES (featreq-8f139178): the intake that comes before
       // a proposal - a link a prospect fills in, or a sheet worked on a call.
@@ -7794,6 +7814,19 @@ export class AppDataStore {
       await this.pool.query(`
         create index if not exists engagements_proposal_idx on engagements (proposal_id)
       `)
+      // Engagements stage 3: what signing does to an existing monthly client's fee
+      // - 'replace' it with the letter's monthly total, 'add' the total to it, or
+      // 'keep' it. Look-first, so a boot with the column in place takes no lock.
+      const feeModeColumn = await this.pool.query(
+        `select 1 from information_schema.columns
+          where table_schema = current_schema() and table_name = 'engagements' and column_name = 'fee_mode'`,
+      )
+      if ((feeModeColumn.rows?.length ?? 0) === 0) {
+        await this.pool.query(
+          `alter table engagements add column if not exists fee_mode text not null default 'replace'
+             check (fee_mode in ('replace','add','keep'))`,
+        )
+      }
       // ---- RATE HISTORY (docs/plans/rate-history-2026-09.md) ----
       //
       // Brittany raises rates one client at a time, at that client's yearly
@@ -12611,7 +12644,21 @@ export class AppDataStore {
       createdBy: row.created_by ?? row.createdBy ?? null,
       createdAt: iso(row.created_at ?? row.createdAt),
       updatedAt: iso(row.updated_at ?? row.updatedAt),
+      acceptPicks: AppDataStore._cleanAcceptPicks(json(row.accept_picks ?? row.acceptPicks)),
     }
+  }
+
+  /**
+   * The package and plans picked at Accept (engagements stage 3), as kept on the
+   * Won proposal for the recovery draft: `{packageId, planIds}`, or null for none.
+   */
+  static _cleanAcceptPicks(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const packageId = typeof value.packageId === 'string' && value.packageId ? value.packageId : null
+    const planIds = [
+      ...new Set((Array.isArray(value.planIds) ? value.planIds : []).filter((id) => typeof id === 'string' && id)),
+    ].slice(0, ENGAGEMENT_PLAN_IDS_MAX)
+    return packageId || planIds.length > 0 ? { packageId, planIds } : null
   }
 
   /**
@@ -13088,17 +13135,23 @@ export class AppDataStore {
       )
       return rows[0] ? AppDataStore.mapProposal(rows[0]) : null
     }
-    const authState = await readJson(localAuthPath)
-    const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
-      (row) => row && row.id === id,
-    )
-    if (!target) return null
-    const open = won ? target.status === 'accepted' : target.status === 'draft' || target.status === 'sent'
-    if (target.clientId || !open) return null
-    target.clientId = clientId
-    target.updatedAt = nowIso()
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-    return AppDataStore.mapProposal(target)
+    // The read, the decision and the write in ONE queue slot of the proposals
+    // file, so two links at once cannot both take (raw fs calls: `readJson` /
+    // `writeFile` would enqueue behind this very slot).
+    return enqueueFileOperation(localAuthPath, async () => {
+      if (!existsSync(localAuthPath)) return null
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
+        (row) => row && row.id === id,
+      )
+      if (!target) return null
+      const open = won ? target.status === 'accepted' : target.status === 'draft' || target.status === 'sent'
+      if (target.clientId || !open) return null
+      target.clientId = clientId
+      target.updatedAt = nowIso()
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return AppDataStore.mapProposal(target)
+    })
   }
 
   /**
@@ -13360,13 +13413,21 @@ export class AppDataStore {
       wantedPlans = wantedPlans.filter((planId) => known.has(planId)).slice(0, ENGAGEMENT_PLAN_IDS_MAX)
     }
 
-    const accepted = await this._markProposalAccepted(id)
+    const accepted = await this._markProposalAccepted(id, {
+      picks: AppDataStore._cleanAcceptPicks({ packageId: pkg ? pkg.id : null, planIds: wantedPlans }),
+    })
+    // The proposal is Won by now: a failed activity line must not turn that into a
+    // reported failure (a retry would be refused as already Won).
     if (actorUserId) {
-      await this.recordActivity(
-        actorUserId,
-        'proposal_accepted',
-        `${proposal.prospect.company || proposal.prospect.contactName || 'Proposal'} · ${proposal.id}`,
-      )
+      try {
+        await this.recordActivity(
+          actorUserId,
+          'proposal_accepted',
+          `${proposal.prospect.company || proposal.prospect.contactName || 'Proposal'} · ${proposal.id}`,
+        )
+      } catch (error) {
+        console.error('[proposals] could not record the Accept for', id, error)
+      }
     }
     // The Won proposal's engagement letter, drafted only AFTER the flip. The
     // proposal is Won by now and that cannot be undone, so a failure here is
@@ -13409,7 +13470,7 @@ export class AppDataStore {
    * statement whose WHERE carries the guard. File backend: the read and the
    * flip in one queue slot of the proposals file.
    */
-  async _markProposalAccepted(proposalId) {
+  async _markProposalAccepted(proposalId, { picks = null } = {}) {
     const alreadyDecided = (status) =>
       new ProposalStateError(
         status
@@ -13418,7 +13479,22 @@ export class AppDataStore {
       )
     if (this.pool) {
       const flipped = await this.pool.query(PROPOSAL_STATUS_UPDATE_SQL, [proposalId, 'accepted', null, null])
-      if (flipped.rows?.[0]) return AppDataStore.mapProposal(flipped.rows[0])
+      if (flipped.rows?.[0]) {
+        if (!picks) return AppDataStore.mapProposal(flipped.rows[0])
+        // The picks ride on the Won row for the recovery draft. A convenience, not
+        // part of the decision: a failure here is logged, never a failed Accept.
+        try {
+          const kept = await this.pool.query(
+            `update proposals set accept_picks = $2::jsonb where id = $1 and status = 'accepted'
+              returning ${PROPOSAL_COLUMNS}`,
+            [proposalId, JSON.stringify(picks)],
+          )
+          if (kept.rows?.[0]) return AppDataStore.mapProposal(kept.rows[0])
+        } catch (error) {
+          console.error('[proposals] could not keep the Accept picks for', proposalId, error)
+        }
+        return AppDataStore.mapProposal(flipped.rows[0])
+      }
       const latest = await this.pool.query(`select status from proposals where id = $1`, [proposalId])
       throw alreadyDecided(latest.rows?.[0]?.status ?? null)
     }
@@ -13433,6 +13509,7 @@ export class AppDataStore {
       target.status = 'accepted'
       target.acceptedAt = now
       target.updatedAt = now
+      if (picks) target.acceptPicks = picks
       await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
       return AppDataStore.mapProposal(target)
     })
@@ -13667,34 +13744,14 @@ export class AppDataStore {
       await this._setClientPlanIds(clientId, [...existingPlanIds, ...addedPlanIds])
     }
 
-    // Checklists: one copy per blueprint the client does not already have.
-    const templates = data.checklistTemplates ?? []
-    const alreadyCopied = new Set(
-      templates
-        .filter((template) => template.clientId === clientId && template.sourceTemplateId)
-        .map((template) => template.sourceTemplateId),
-    )
-    const clonedTemplateIds = []
-    const skippedTemplateIds = []
-    for (const templateId of pkg.templateIds) {
-      const source = templates.find((template) => template.id === templateId)
-      // A blueprint deleted since the package was configured is simply not
-      // there to copy — the FK-free array idiom again.
-      if (!source) continue
-      if (alreadyCopied.has(templateId)) {
-        skippedTemplateIds.push(templateId)
-        continue
-      }
-      const copy = await this.copyTemplateToClient(templateId, { clientId })
-      if (!copy) continue
-      clonedTemplateIds.push(templateId)
-      // Same auto-grant the apply-to-client endpoint makes: whoever the copy
-      // hands work to can see the client it is for.
-      if (copy.assigneeId) await this.grantClientVisibility(clientId, copy.assigneeId)
-      for (const stage of copy.stages ?? []) {
-        if (stage.assigneeId) await this.grantClientVisibility(clientId, stage.assigneeId)
-      }
-    }
+    // Checklists: one copy per blueprint the client does not already have (a copy
+    // stamped from it, or the same title), all in ONE workspace save, decided
+    // against the data re-read inside it - so two applies at once copy once. A
+    // blueprint deleted since the package was configured is simply not there to
+    // copy - the FK-free array idiom again.
+    const { copies, skippedTemplateIds } = await this.copyTemplatesToClient(clientId, pkg.templateIds)
+    await this._grantTemplateCopiesVisibility(clientId, copies)
+    const clonedTemplateIds = copies.map((copy) => copy.sourceTemplateId)
 
     if (actorUserId) {
       await this.recordActivity(actorUserId, 'package_applied', `${pkg.name} · ${client.name}`)
@@ -26598,19 +26655,24 @@ export class AppDataStore {
       emailBody: String(assembled.emailBody ?? '').slice(0, ENGAGEMENT_BODY_MAX),
       letterBody: String(assembled.letterBody ?? '').slice(0, ENGAGEMENT_BODY_MAX),
     }
+    const storedClientId = clientId !== undefined ? clientId || null : (proposal.clientId ?? null)
     const row = {
       id: `eng-${randomUUID().slice(0, 8)}`,
       kind,
       status: 'draft',
       proposalId: proposal.id,
-      clientId: clientId !== undefined ? clientId || null : (proposal.clientId ?? null),
+      clientId: storedClientId,
       letterId: null,
       supersedesId: null,
       party,
       ...texts,
       sectionKeys: (Array.isArray(assembled.sectionKeys) ? assembled.sectionKeys : []).map(String),
       figures,
-      retainerAmount: engagementRetainer(figures.totals.monthly),
+      // A retainer of one month's fee for a new client; none by default for a client
+      // that already exists (an upsell) - she can type one in.
+      retainerAmount: storedClientId ? null : engagementRetainer(figures.totals.monthly),
+      // An upsell ADDS to the client's fee by default; she can choose replace or keep.
+      feeMode: storedClientId ? 'add' : 'replace',
       packageId: typeof packageId === 'string' && packageId ? packageId : null,
       planIds: [...new Set((Array.isArray(planIds) ? planIds : []).filter((planId) => typeof planId === 'string' && planId))],
       templateHash: null, // set below from the whole row
@@ -26622,8 +26684,8 @@ export class AppDataStore {
       const { rows } = await this.pool.query(
         `insert into engagements
            (id, kind, status, proposal_id, client_id, party, subject, email_body, letter_body,
-            section_keys, figures, retainer_amount, template_hash, created_by, package_id, plan_ids)
-         values ($1, $2, 'draft', $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15::text[])
+            section_keys, figures, retainer_amount, template_hash, created_by, package_id, plan_ids, fee_mode)
+         values ($1, $2, 'draft', $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15::text[], $16)
          returning ${ENGAGEMENT_COLUMNS}`,
         [
           row.id,
@@ -26641,6 +26703,7 @@ export class AppDataStore {
           row.createdBy,
           row.packageId,
           row.planIds,
+          row.feeMode,
         ],
       )
       return mapEngagementRow(rows[0])
@@ -26684,7 +26747,19 @@ export class AppDataStore {
       error.engagementId = existing.id
       throw error
     }
-    return this.createEngagementFromProposal(proposal, { kind: 'original', createdBy })
+    // The package and plans picked at Accept (kept on the proposal, stage 3), as
+    // far as they still exist: a package or plan deleted since is left out.
+    const picks = proposal.acceptPicks
+    let packageId = null
+    let planIds = []
+    if (picks?.packageId && (await this.listPackages()).some((pkg) => pkg.id === picks.packageId)) {
+      packageId = picks.packageId
+    }
+    if (picks?.planIds?.length) {
+      const known = new Set(((await this.read()).plans ?? []).map((plan) => plan.id))
+      planIds = picks.planIds.filter((planId) => known.has(planId))
+    }
+    return this.createEngagementFromProposal(proposal, { kind: 'original', createdBy, packageId, planIds })
   }
 
   /** A refusal for a write the engagement's status does not allow, worded from the status. */
@@ -26697,7 +26772,7 @@ export class AppDataStore {
 
   /**
    * Edit a draft or sent engagement: any of subject, emailBody, letterBody,
-   * retainerAmount, packageId, planIds, party (merged over the stored party).
+   * retainerAmount, packageId, planIds, feeMode, party (merged over the stored party).
    * Recomputes the template hash. Refuses ('status') a signed, superseded or
    * void one, and ('invalid') a value it cannot take. Returns the engagement,
    * or null when there is none.
@@ -26714,7 +26789,7 @@ export class AppDataStore {
       const { rows } = await this.pool.query(
         `update engagements
             set subject = $2, email_body = $3, letter_body = $4, retainer_amount = $5, package_id = $6,
-                plan_ids = $7::text[], party = $8::jsonb, template_hash = $9, updated_at = now()
+                plan_ids = $7::text[], party = $8::jsonb, template_hash = $9, fee_mode = $10, updated_at = now()
           where id = $1 and status in ('draft', 'sent')
           returning ${ENGAGEMENT_COLUMNS}`,
         [
@@ -26727,6 +26802,7 @@ export class AppDataStore {
           next.planIds,
           JSON.stringify(next.party),
           templateHash,
+          next.feeMode,
         ],
       )
       if (rows[0]) return mapEngagementRow(rows[0])
@@ -26756,6 +26832,7 @@ export class AppDataStore {
       packageId: current.packageId,
       planIds: current.planIds,
       party: current.party,
+      feeMode: current.feeMode ?? 'replace',
     }
     for (const [key, max] of [
       ['subject', ENGAGEMENT_SUBJECT_MAX],
@@ -26801,6 +26878,13 @@ export class AppDataStore {
       const planIds = [...new Set(patch.planIds)].filter((planId) => known.has(planId))
       if (planIds.length > ENGAGEMENT_PLAN_IDS_MAX) throw invalid('That is more plans than one client can take.')
       next.planIds = planIds
+    }
+    if (patch.feeMode !== undefined) {
+      // A signing detail, not letter text: it is not part of the hash.
+      if (!ENGAGEMENT_FEE_MODES.includes(patch.feeMode)) {
+        throw invalid("Choose what signing does to the client's fee: replace it, add to it, or keep it.")
+      }
+      next.feeMode = patch.feeMode
     }
     if (patch.party !== undefined) {
       if (!patch.party || typeof patch.party !== 'object' || Array.isArray(patch.party)) {
@@ -27131,15 +27215,24 @@ export class AppDataStore {
 
     // Everything from here on runs AFTER a client may already exist: any failure
     // carries its id (`??=` never overwrites one an inner throw attached).
+    let claimed = !createdClient
+    let retired = false
+    const retireCreated = async () => {
+      if (!createdClient || retired) return
+      retired = true
+      await this._retireOrphanedSignClient(clientId, id)
+    }
+    const money = (value) => formatProposalMoney(value)
+    const clientName = () => client?.name || 'The client'
     try {
       const skipped = []
       if (createdClient) {
-        const claimed = await this._claimEngagementClient(id, clientId, allowed)
+        claimed = await this._claimEngagementClient(id, clientId, allowed)
         if (!claimed) {
           // Lost the race: another signing of this same letter claimed it with its
           // own client first, or the letter was voided meanwhile. The client just
           // made has no history yet - retire it, and say what actually happened.
-          await this._retireOrphanedSignClient(clientId, id)
+          await retireCreated()
           const latest = await this.getEngagement(id)
           throw refuse(
             !latest
@@ -27156,7 +27249,8 @@ export class AppDataStore {
           const linked = await this.linkProposalClient(current.proposalId, clientId, { won: true })
           if (!linked) {
             await this._releaseEngagementClient(id, clientId)
-            await this._retireOrphanedSignClient(clientId, id)
+            claimed = false
+            await retireCreated()
             throw refuse(
               'The proposal behind this letter is already linked to a client, so no new client was kept. Open the proposal to check which.',
               'proposal_linked',
@@ -27164,62 +27258,113 @@ export class AppDataStore {
           }
         }
         await this._recordSigningActivity(userId, 'client_created', client.name || '')
+      } else if (current.proposalId) {
+        // A retry after a signing whose proposal link failed (or a Won proposal not
+        // linked yet) links it now. Compare-and-set: a proposal already linked - an
+        // upsell's, or this client's from the first try - is left as it is.
+        await this.linkProposalClient(current.proposalId, clientId, { won: true })
       }
 
-      // ---- 2. an existing client billed monthly takes the letter's fee ----
-      let monthlyRate = null
+      // ---- 2. an existing monthly client's fee: replaced, added to, or kept ----
+      // Applied INSIDE the final transaction with the flip, so a retry never adds twice.
+      let fee = null
       if (!createdClient && monthly > 0) {
         if ((client.billingMode ?? 'hourly') === 'subscription') {
-          if (Number(client.monthlyRate ?? 0) !== monthly) {
-            await this.setClientMonthlyRate(clientId, monthly)
-            monthlyRate = monthly
+          const mode = ENGAGEMENT_FEE_MODES.includes(current.feeMode) ? current.feeMode : 'replace'
+          if (mode === 'keep') {
+            skipped.push({
+              what: 'Monthly fee',
+              why: `Kept at ${money(Number(client.monthlyRate) || 0)} as chosen; the letter's ${money(monthly)} was not applied.`,
+            })
+          } else {
+            fee = { mode, amount: monthly, before: Math.round((Number(client.monthlyRate) || 0) * 100) / 100 }
           }
         } else {
           skipped.push({
             what: 'Monthly fee',
-            why: `${client.name || 'The client'} is billed ${client.billingMode === 'annual' ? 'annually' : 'hourly'}, so the letter's monthly fee was not put on them.`,
+            why: `${clientName()} is billed ${client.billingMode === 'annual' ? 'annually' : 'hourly'}, so the letter's monthly fee was not put on them.`,
           })
         }
       }
+      // Totals signing never bills by itself.
+      if (annual > 0 && !(createdClient && monthly === 0)) {
+        skipped.push({
+          what: 'Annual fees',
+          why: `The letter's annual fees (${money(annual)}) were not put on ${clientName()}'s billing - set them on the client page if they apply.`,
+        })
+      }
+      if (Number(totals.oneTime) > 0) {
+        skipped.push({
+          what: 'One-time fees',
+          why: `The letter's one-time fees (${money(Number(totals.oneTime))}) are not billed automatically - add them to an invoice.`,
+        })
+      }
+      if (Number(totals.cleanup) > 0) {
+        skipped.push({
+          what: 'Clean-up',
+          why: `The letter's clean-up (${money(Number(totals.cleanup))}) is not billed automatically - add it to an invoice.`,
+        })
+      }
 
-      // ---- 3. plans, then the package ----
+      // ---- 3. plans and the package ----
       const workspace = await this.read()
       const row = (workspace.clients ?? []).find((entry) => entry.id === clientId)
       const known = new Set((workspace.plans ?? []).map((plan) => plan.id))
       const existing = Array.isArray(row?.planIds) ? row.planIds : []
-      const addedPlanIds = (current.planIds ?? []).filter((planId) => known.has(planId) && !existing.includes(planId))
+      // The package as it is NOW: one deleted since the checks above is said, not applied.
+      let pkgNow = null
+      if (pkg) {
+        pkgNow = (await this.listPackages()).find((entry) => entry.id === pkg.id) ?? null
+        if (!pkgNow) {
+          skipped.push({
+            what: 'Package',
+            why: `The package "${pkg.name}" was deleted while the letter was being signed, so its plans and checklists were not added.`,
+          })
+        }
+      }
       if ((current.planIds ?? []).some((planId) => !known.has(planId))) {
         skipped.push({ what: 'Plans', why: 'A plan on the letter no longer exists, so it was left out.' })
       }
-      if (addedPlanIds.length > 0) await this._setClientPlanIds(clientId, [...existing, ...addedPlanIds])
-      const clonedTemplateIds = []
-      if (pkg) {
-        const applied = await this.applyPackageToClient(clientId, pkg.id, { actorUserId: userId })
-        if (applied) {
-          for (const planId of applied.addedPlanIds) if (!addedPlanIds.includes(planId)) addedPlanIds.push(planId)
-          clonedTemplateIds.push(...applied.clonedTemplateIds)
-        }
-      }
-
-      // ---- 4. each plan's standard checklists ----
-      for (const templateId of await this._copyPlanChecklistBundles(clientId)) {
-        if (!clonedTemplateIds.includes(templateId)) clonedTemplateIds.push(templateId)
-      }
-
-      // ---- 5. the software rows and the flip, as one unit ----
-      const { engagement, software } = await this._signEngagementWithSoftware(
-        id,
-        clientId,
-        allowed,
-        { signedAt, userId, signedNote },
-        figures.lines,
+      const addedPlanIds = [...new Set([...(current.planIds ?? []), ...(pkgNow?.planIds ?? [])])].filter(
+        (planId) => known.has(planId) && !existing.includes(planId),
       )
+      if (addedPlanIds.length > 0) await this._setClientPlanIds(clientId, [...existing, ...addedPlanIds])
+
+      // ---- 4. checklists: the package's, and each ADDED plan's standard ones ----
+      // Only plans this signing added: a recipe she deliberately deleted from a plan
+      // the client already had never comes back. One workspace save for all of them.
+      const { copies } = await this.copyTemplatesToClient(clientId, [
+        ...(pkgNow?.templateIds ?? []),
+        ...AppDataStore._planBundleTemplateIds(workspace.plans, addedPlanIds),
+      ])
+      await this._grantTemplateCopiesVisibility(clientId, copies)
+      const clonedTemplateIds = copies.map((copy) => copy.sourceTemplateId)
+      if (pkgNow) await this._recordSigningActivity(userId, 'package_applied', `${pkgNow.name} · ${client.name || ''}`)
+
+      // ---- 5. the software rows, the fee and the flip, as one unit ----
+      let final
+      try {
+        final = await this._signEngagementWithSoftware(
+          id,
+          clientId,
+          allowed,
+          { signedAt, userId, signedNote },
+          figures.lines,
+          { fee },
+        )
+      } catch (error) {
+        if (error instanceof EngagementStateError) error.flipRefused = true
+        throw error
+      }
+      const { engagement, software } = final
       for (const description of software.skipped) {
         skipped.push({
           what: `Software: ${description}`,
-          why: `${client.name || 'The client'} already has a recurring expense named "${description}", so it was not added again.`,
+          why: `${clientName()} already has a recurring expense named "${description}", so it was not added again.`,
         })
       }
+      const monthlyRate =
+        fee && final.monthlyRate !== null && final.monthlyRate !== fee.before ? final.monthlyRate : null
 
       // ---- 6. the retainer, after the flip, so at most once ----
       let retainerInvoiceId = null
@@ -27227,10 +27372,17 @@ export class AppDataStore {
       const retainerAmount = Number(current.retainerAmount) || 0
       if (retainerAmount > 0) {
         const latestClient = (await this.getClientById(clientId)) ?? client
+        // A client that already exists may hold a retainer already: never a second by default.
+        const held = createdClient ? null : ((await this.listClientRetainers(clientId))[0] ?? null)
         if (latestClient.platformInvoicingOptOut === true) {
           skipped.push({
             what: 'Retainer',
             why: `${latestClient.name || 'The client'} is invoiced outside the app, so no retainer invoice was drafted.`,
+          })
+        } else if (held) {
+          skipped.push({
+            what: 'Retainer',
+            why: `${latestClient.name || 'The client'} already has retainer ${held.number || held.id}; none drafted.`,
           })
         } else {
           let retainer = null
@@ -27275,7 +27427,25 @@ export class AppDataStore {
         skipped,
       }
     } catch (error) {
-      if (createdClient) error.createdClientId ??= clientId
+      if (createdClient) {
+        error.createdClientId ??= clientId
+        try {
+          if (!claimed) {
+            // The claim itself failed (a database error, not a lost race): the client
+            // this call made is not on the letter, so a retry would make another.
+            await retireCreated()
+          } else if (error.flipRefused) {
+            // The letter was voided (or signed elsewhere) after the claim: nothing
+            // signed it, so the client this call made is released and retired.
+            await this._releaseEngagementClient(id, clientId)
+            if (current.proposalId) await this._unlinkProposalClient(current.proposalId, clientId)
+            await retireCreated()
+            error.message = `${error.message} The client this signing created (${client.name || clientId}) was retired.`
+          }
+        } catch (cleanup) {
+          console.error('[engagements] could not retire the client a failed signing created:', clientId, cleanup)
+        }
+      }
       throw error
     }
   }
@@ -27322,19 +27492,22 @@ export class AppDataStore {
     })
   }
 
-  /** Undo a claim whose proposal link then failed (the client is being retired). */
+  /**
+   * Undo a claim whose client is being retired (the proposal link failed, or the
+   * flip refused): only while the row still names THAT client and is not signed.
+   */
   async _releaseEngagementClient(id, clientId) {
     if (this.pool) {
       await this.pool.query(
         `update engagements set client_id = null, updated_at = now()
-          where id = $1 and client_id = $2 and status in ('draft', 'sent')`,
+          where id = $1 and client_id = $2 and status <> 'signed'`,
         [id, clientId],
       )
       return
     }
     await this._mutateEngagementFile((authState) => {
       const row = authState.engagements.find((entry) => entry?.id === id)
-      if (!row || row.clientId !== clientId || !ENGAGEMENT_EDITABLE_STATUSES.includes(row.status)) {
+      if (!row || row.clientId !== clientId || row.status === 'signed') {
         return { result: null, changed: false }
       }
       row.clientId = null
@@ -27344,52 +27517,55 @@ export class AppDataStore {
   }
 
   /**
-   * "Plans when created should be matched to a standard checklist" (Brittany,
-   * 2026-10-10): for every plan on the client, copy each of the plan's bundled
-   * checklists (`plan.templateIds`) the client does not already have, through
-   * `copyTemplateToClient` - the package path's copy. "Already has" is the client
-   * page's own rule (`clientHasPlanTemplate`): a copy stamped from that blueprint,
-   * or a checklist of the same title, so a hand-made "Monthly Close" is never
-   * doubled. Whoever a copy hands work to can see the client, as with a package.
-   * Returns the blueprint ids copied (none twice, and none on a re-run).
+   * Undo signing's proposal link for a client being retired (the letter was voided
+   * after the claim): only while the proposal still points at THAT client.
    */
-  async _copyPlanChecklistBundles(clientId) {
-    const data = await this.read()
-    const client = (data.clients ?? []).find((row) => row.id === clientId)
-    if (!client) return []
-    const planIds = Array.isArray(client.planIds) ? client.planIds : []
-    const plansById = new Map((data.plans ?? []).map((plan) => [plan.id, plan]))
-    const templates = data.checklistTemplates ?? []
-    const mine = templates.filter((template) => template.clientId === clientId)
-    const copiedFrom = new Set(mine.map((template) => template.sourceTemplateId).filter(Boolean))
-    const titleKey = (template) => String(template?.title ?? '').trim().toLowerCase()
-    const titles = new Set(mine.map(titleKey))
-    const cloned = []
-    for (const planId of planIds) {
-      const plan = plansById.get(planId)
-      for (const templateId of Array.isArray(plan?.templateIds) ? plan.templateIds : []) {
-        const source = templates.find((template) => template.id === templateId)
-        // A blueprint deleted since the plan was set up is simply not there to copy.
-        if (!source || copiedFrom.has(templateId) || titles.has(titleKey(source))) continue
-        const copy = await this.copyTemplateToClient(templateId, { clientId })
-        if (!copy) continue
-        cloned.push(templateId)
-        copiedFrom.add(templateId)
-        titles.add(titleKey(source))
-        if (copy.assigneeId) await this.grantClientVisibility(clientId, copy.assigneeId)
-        for (const stage of copy.stages ?? []) {
-          if (stage.assigneeId) await this.grantClientVisibility(clientId, stage.assigneeId)
-        }
-      }
+  async _unlinkProposalClient(proposalId, clientId) {
+    if (!proposalId || !clientId) return
+    if (this.pool) {
+      await this.pool.query(
+        `update proposals set client_id = null, updated_at = now() where id = $1 and client_id = $2`,
+        [proposalId, clientId],
+      )
+      return
     }
-    return cloned
+    await enqueueFileOperation(localAuthPath, async () => {
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
+        (row) => row && row.id === proposalId,
+      )
+      if (!target || target.clientId !== clientId) return
+      target.clientId = null
+      target.updatedAt = nowIso()
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+    })
   }
 
   /**
-   * Signing's final step: the software lines as monthly recurring expenses AND
-   * the flip to signed, as ONE unit - both happen or neither does, and a second
+   * "Plans when created should be matched to a standard checklist" (Brittany,
+   * 2026-10-10): the bundled checklists (`plan.templateIds`) of the given plans,
+   * in plan order, each once. Pure - `copyTemplatesToClient` decides what the
+   * client already has and copies the rest in one save.
+   */
+  static _planBundleTemplateIds(plans, planIds) {
+    const byId = new Map((plans ?? []).map((plan) => [plan.id, plan]))
+    const ids = []
+    for (const planId of planIds ?? []) {
+      for (const templateId of Array.isArray(byId.get(planId)?.templateIds) ? byId.get(planId).templateIds : []) {
+        if (typeof templateId === 'string' && templateId && !ids.includes(templateId)) ids.push(templateId)
+      }
+    }
+    return ids
+  }
+
+  /**
+   * Signing's final step: the software lines as monthly recurring expenses, an
+   * existing client's fee (`fee`: {mode 'replace'|'add', amount}, or null), AND
+   * the flip to signed, as ONE unit - all happen or none does, and a second
    * signing is refused rather than half-applied (what Accept's
-   * `_acceptWithSoftware` did before the software moved here).
+   * `_acceptWithSoftware` did before the software moved here). The fee is
+   * computed from the client row as it is inside the unit, so an 'add' can never
+   * land twice. Returns { engagement, software, monthlyRate } - the fee after.
    *
    * Postgres: one transaction. The compare-and-set flip runs first - it takes
    * the row lock, and only while the status is one signing allows and the row
@@ -27399,7 +27575,7 @@ export class AppDataStore {
    * queue slot of the workspace file, putting the rows back if the flip refuses.
    * Returns { engagement, software: { added, skipped } }.
    */
-  async _signEngagementWithSoftware(id, clientId, allowed, { signedAt, userId, signedNote }, lines) {
+  async _signEngagementWithSoftware(id, clientId, allowed, { signedAt, userId, signedNote }, lines, { fee = null } = {}) {
     const refusal = (status, rowClientId) =>
       status && allowed.includes(status) && rowClientId !== clientId
         ? new EngagementStateError('Someone else is already marking this letter signed.', 'status')
@@ -27418,7 +27594,19 @@ export class AppDataStore {
           throw refusal(latest.rows?.[0]?.status ?? null, latest.rows?.[0]?.client_id ?? null)
         }
         const software = await this._addSoftwareExpenseRows(dbClient, clientId, lines)
-        return { engagement: mapEngagementRow(rows[0]), software }
+        let monthlyRate = null
+        if (fee) {
+          const updated = await dbClient.query(
+            fee.mode === 'add'
+              ? `update clients set monthly_rate = coalesce(monthly_rate, 0) + $2, updated_at = now()
+                  where id = $1 returning monthly_rate`
+              : `update clients set monthly_rate = $2, updated_at = now() where id = $1 returning monthly_rate`,
+            [clientId, fee.amount],
+          )
+          const after = updated.rows?.[0]?.monthly_rate
+          monthlyRate = after === undefined || after === null ? null : Math.round(Number(after) * 100) / 100
+        }
+        return { engagement: mapEngagementRow(rows[0]), software, monthlyRate }
       })
     }
     // Raw fs calls only on the data file in here: `readJson` / `writeFile` would
@@ -27428,7 +27616,17 @@ export class AppDataStore {
       const original = await readFile(localDataPath, 'utf8')
       const data = JSON.parse(original)
       const software = AppDataStore._addSoftwareExpenseRowsToData(data, clientId, lines)
-      if (software.added.length > 0) await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      let monthlyRate = null
+      if (fee) {
+        const stored = (data.clients ?? []).find((entry) => entry?.id === clientId)
+        if (stored) {
+          const before = Number(stored.monthlyRate) || 0
+          monthlyRate = Math.round(clampMoney(fee.mode === 'add' ? before + fee.amount : fee.amount) * 100) / 100
+          stored.monthlyRate = monthlyRate
+        }
+      }
+      const wrote = software.added.length > 0 || monthlyRate !== null
+      if (wrote) await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       try {
         const engagement = await this._mutateEngagementFile((authState) => {
           const row = authState.engagements.find((entry) => entry?.id === id)
@@ -27438,10 +27636,10 @@ export class AppDataStore {
           Object.assign(row, { status: 'signed', signedAt, signedBy: userId, signedNote, updatedAt: nowIso() })
           return { result: mapEngagementRow(row), changed: true }
         })
-        return { engagement, software }
+        return { engagement, software, monthlyRate }
       } catch (error) {
-        // Refused: the rows written a moment ago never happened.
-        if (software.added.length > 0) await fsWriteFile(localDataPath, original)
+        // Refused: the rows (and the fee) written a moment ago never happened.
+        if (wrote) await fsWriteFile(localDataPath, original)
         throw error
       }
     })
@@ -29698,22 +29896,29 @@ export class AppDataStore {
       return
     }
 
-    const authState = await readJson(localAuthPath)
-    const log = Array.isArray(authState.activityLog) ? authState.activityLog : []
-    log.push({ id, userId, action, target, timestamp: createdAt })
-    // Trim to last 200 per user.
-    const counts = new Map()
-    const trimmed = []
-    for (let i = log.length - 1; i >= 0; i -= 1) {
-      const entry = log[i]
-      const next = (counts.get(entry.userId) ?? 0) + 1
-      if (next <= 200) {
-        trimmed.unshift(entry)
-        counts.set(entry.userId, next)
+    // The read and the write in ONE queue slot of the auth file (raw fs calls:
+    // `readJson` / `writeFile` would enqueue behind this very slot). As two
+    // separate steps, an activity line written while an engagement was being
+    // signed put back the copy of the file it had read - un-signing the letter
+    // (engagements stage 3, review round 1).
+    await enqueueFileOperation(localAuthPath, async () => {
+      const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+      const log = Array.isArray(authState.activityLog) ? authState.activityLog : []
+      log.push({ id, userId, action, target, timestamp: createdAt })
+      // Trim to last 200 per user.
+      const counts = new Map()
+      const trimmed = []
+      for (let i = log.length - 1; i >= 0; i -= 1) {
+        const entry = log[i]
+        const next = (counts.get(entry.userId) ?? 0) + 1
+        if (next <= 200) {
+          trimmed.unshift(entry)
+          counts.set(entry.userId, next)
+        }
       }
-    }
-    authState.activityLog = trimmed
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+      authState.activityLog = trimmed
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+    })
   }
 
   async getRecentActivity(userId, limit = 20) {
@@ -30037,14 +30242,77 @@ export class AppDataStore {
     return this._retryOnStaleWorkspace(() => this._copyTemplateToClientOnce(sourceTemplateId, options))
   }
 
-  async _copyTemplateToClientOnce(sourceTemplateId, { clientId, firstDueDate, frequency } = {}) {
+  async _copyTemplateToClientOnce(sourceTemplateId, { clientId, firstDueDate, frequency, skipIfCopied = false } = {}) {
     // A recurring recipe on a master would spawn tasks on a client that collects
     // nothing — the same refusal the one-off checklist path makes.
     await this._refuseBillingMasterWrite(clientId, 'recurring task recipes')
     const { data, version } = await this.readWithVersion()
     const source = (data.checklistTemplates ?? []).find((t) => t.id === sourceTemplateId)
     if (!source) return null
+    // Opt-in (engagements stage 3): decided against the data JUST re-read, so a
+    // retry after a stale workspace - another copy landed meanwhile - copies nothing.
+    if (skipIfCopied && AppDataStore._clientHasTemplateCopy(data.checklistTemplates, clientId, source)) return null
+    const [copy] = await this._writeTemplateCopies(data, version, [
+      this._clientTemplateCopy(source, sourceTemplateId, { clientId, firstDueDate, frequency }),
+    ])
+    return copy
+  }
 
+  /**
+   * Whether a client already has a copy of `source`: a recipe stamped from it, or
+   * one with the same title (trimmed, any case) - the client page's own rule
+   * (`clientHasPlanTemplate`), so a hand-made "Monthly Close" is never doubled.
+   */
+  static _clientHasTemplateCopy(templates, clientId, source) {
+    const title = String(source?.title ?? '').trim().toLowerCase()
+    return (templates ?? []).some(
+      (template) =>
+        template?.clientId === clientId &&
+        (template.sourceTemplateId === source.id || String(template.title ?? '').trim().toLowerCase() === title),
+    )
+  }
+
+  /**
+   * Copy several source templates onto one client in ONE workspace save (the
+   * package path and signing an engagement): each source the client does not
+   * already have (`_clientHasTemplateCopy`, checked against the data re-read on
+   * every attempt, and against the copies made in this same call) gets one copy.
+   * A stale workspace retries the whole read-decide-write, so two callers at once
+   * produce one copy each, never two. Sources that no longer exist are left out.
+   * Returns { copies, skippedTemplateIds } - skipped = already on the client.
+   */
+  async copyTemplatesToClient(clientId, templateIds) {
+    const wanted = [...new Set((Array.isArray(templateIds) ? templateIds : []).filter((id) => typeof id === 'string' && id))]
+    if (!clientId || wanted.length === 0) return { copies: [], skippedTemplateIds: [] }
+    return this._retryOnStaleWorkspace(() => this._copyTemplatesToClientOnce(clientId, wanted))
+  }
+
+  async _copyTemplatesToClientOnce(clientId, templateIds) {
+    await this._refuseBillingMasterWrite(clientId, 'recurring task recipes')
+    const { data, version } = await this.readWithVersion()
+    const existing = data.checklistTemplates ?? []
+    const copies = []
+    const skippedTemplateIds = []
+    for (const templateId of templateIds) {
+      const source = existing.find((template) => template.id === templateId)
+      if (!source) continue
+      if (AppDataStore._clientHasTemplateCopy([...existing, ...copies], clientId, source)) {
+        skippedTemplateIds.push(templateId)
+        continue
+      }
+      copies.push(this._clientTemplateCopy(source, templateId, { clientId }))
+    }
+    await this._writeTemplateCopies(data, version, copies)
+    return { copies, skippedTemplateIds }
+  }
+
+  /**
+   * The copy of a source template for a client: a NEW regular client-bound
+   * recipe with fresh ids for it and every stage and item, stamped with
+   * `sourceTemplateId`. Pure - writes nothing (see `_copyTemplateToClientOnce`
+   * and `_copyTemplatesToClientOnce`).
+   */
+  _clientTemplateCopy(source, sourceTemplateId, { clientId, firstDueDate, frequency } = {}) {
     const migrated = ensureTemplateStages(source)
     const copyFrequency = typeof frequency === 'string' && frequency ? frequency : source.frequency
     // The firm's day — the same one the materializer spawns against and
@@ -30120,12 +30388,30 @@ export class AppDataStore {
       })),
     }
 
-    const nextData = {
-      ...data,
-      checklistTemplates: [...(data.checklistTemplates ?? []), copy],
-    }
-    await this.write(nextData, { expectedVersion: version })
     return copy
+  }
+
+  /**
+   * The auto-grant the apply-to-client paths make: whoever a copied recipe hands
+   * work to (its assignee, each stage's) can see the client it is for.
+   */
+  async _grantTemplateCopiesVisibility(clientId, copies) {
+    for (const copy of copies ?? []) {
+      if (copy.assigneeId) await this.grantClientVisibility(clientId, copy.assigneeId)
+      for (const stage of copy.stages ?? []) {
+        if (stage.assigneeId) await this.grantClientVisibility(clientId, stage.assigneeId)
+      }
+    }
+  }
+
+  /** One workspace save appending `copies` to the templates read at `version`. */
+  async _writeTemplateCopies(data, version, copies) {
+    if (copies.length === 0) return copies
+    await this.write(
+      { ...data, checklistTemplates: [...(data.checklistTemplates ?? []), ...copies] },
+      { expectedVersion: version },
+    )
+    return copies
   }
 
   /**

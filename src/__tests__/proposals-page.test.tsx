@@ -2047,12 +2047,27 @@ describe('the engagement a Won proposal drafts', () => {
     expect(link.getAttribute('href')).toBe('/clients/client-signed')
   })
 
+  it('an upsell Won proposal opens its client even before the letter is signed', async () => {
+    api.getProposalRequest = vi.fn(async () => ({ ...WON, clientId: 'client-1' }))
+    api.listEngagementsRequest = vi.fn(async () => [{ id: 'eng-3', status: 'sent', clientId: 'client-1' }])
+    renderEditorWithEngagements()
+    const link = await screen.findByRole('link', { name: 'Open the client' })
+    expect(link.getAttribute('href')).toBe('/clients/client-1')
+  })
+
+  it('when no letter could be drafted, the notice says the package and plans were kept', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    renderEditorWithEngagements()
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    expect(await screen.findByText(/\(the package and plans you picked are kept\)/)).toBeTruthy()
+  })
+
   it('a proposal Won before engagements, with none drafted, still opens the client it created', async () => {
     api.getProposalRequest = vi.fn(async () => WON_LEGACY)
     renderEditorWithEngagements()
     const link = await screen.findByRole('link', { name: 'Open the client' })
     expect(link.getAttribute('href')).toBe('/clients/client-new')
-    expect(screen.getByRole('button', { name: 'Draft the engagement' })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: 'Draft the engagement' })).toBeTruthy()
   })
 
   it('stays on the proposal when Accept drafted none', async () => {

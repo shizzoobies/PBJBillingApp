@@ -263,7 +263,7 @@ describe('Save', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Payroll' }))
     // Preview and Send wait for the save.
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
-    expect(screen.getByText('Save the engagement to preview or send it.')).toBeTruthy()
+    expect(screen.getByText('Save the engagement to preview, send or sign it.')).toBeTruthy()
     fireEvent.click(save)
     await waitFor(() =>
       expect(api.updateEngagementRequest).toHaveBeenCalledWith('eng-1', {
@@ -550,7 +550,7 @@ describe('Mark as signed', () => {
     await renderEditor()
     fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
     const summary = await screen.findByRole('status', { name: 'What signing did' })
-    expect(within(summary).getByText('Signing was applied to the client.')).toBeTruthy()
+    expect(within(summary).getByText('Finished signing for Acme Books.')).toBeTruthy()
     expect(within(summary).getByText('Monthly fee set to $630.00.')).toBeTruthy()
     expect(
       within(summary).getByText('Skipped - Retainer: Acme is invoiced outside the app, so no retainer invoice was drafted.'),
@@ -628,6 +628,57 @@ describe('Mark as signed', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
     expect(await screen.findByText(/The letter changed since it was sent - send it again/)).toBeTruthy()
     expect(await screen.findByRole('checkbox', { name: /Signed as edited/ })).toBeTruthy()
+  })
+
+  // Review round 1: an existing monthly client's fee is replaced, added to or kept.
+  it('offers replace / add / keep with amounts for an existing monthly client, saves the choice, and the confirm repeats it', async () => {
+    const confirm = mockConfirm(true)
+    contextValue.data.clients = [{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 1200 }] as never
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z', clientId: 'c1', feeMode: 'add', retainerAmount: null }),
+    )
+    api.updateEngagementRequest = vi.fn(async (_id: string, patch: Partial<Engagement>) =>
+      view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z', clientId: 'c1', retainerAmount: null, ...patch }, 'hash-2'),
+    )
+    await renderEditor()
+    const replace = screen.getByRole('radio', { name: 'Replace the current fee ($1,200.00 -> $630.00)' })
+    const add = screen.getByRole('radio', { name: 'Add to it ($1,200.00 + $630.00 = $1,830.00)' })
+    const keep = screen.getByRole('radio', { name: 'Keep $1,200.00' })
+    expect(add).toBeChecked()
+    expect(replace).not.toBeChecked()
+    fireEvent.click(keep)
+    // An unsaved choice is not what signing would use: sign waits for Save.
+    expect(screen.getByRole('button', { name: 'Mark as signed' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(api.updateEngagementRequest).toHaveBeenCalledWith('eng-1', expect.objectContaining({ feeMode: 'keep' })),
+    )
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as signed' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    expect(confirm.mock.calls.at(-1)?.[0]).toContain('Monthly fee: Keep $1,200.00. A signed letter can no longer be edited')
+  })
+
+  it('offers no fee choice for a prospect, or for a client not billed monthly', async () => {
+    await renderEditor()
+    expect(screen.queryByRole('radio', { name: /Keep/ })).toBeNull()
+    cleanup()
+    contextValue.data.clients = [{ id: 'c1', name: 'Acme', billingMode: 'hourly', monthlyRate: 0 }] as never
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent', clientId: 'c1' }))
+    await renderEditor()
+    expect(screen.queryByRole('radio', { name: /Keep/ })).toBeNull()
+  })
+
+  it('reloads the engagement after ANY signing error, so a retry finishes what the first try started', async () => {
+    mockConfirm(true)
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z' }))
+    api.signEngagementRequest = vi.fn(async () => {
+      throw new ApiError(500, 'Something went wrong.')
+    })
+    await renderEditor()
+    const reads = api.getEngagementRequest.mock.calls.length
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    expect(await screen.findByText('Something went wrong.')).toBeTruthy()
+    await waitFor(() => expect(api.getEngagementRequest.mock.calls.length).toBeGreaterThan(reads))
   })
 
   it('a signed letter is read-only: no Save, Send, Sign or Void', async () => {

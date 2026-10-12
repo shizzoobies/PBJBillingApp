@@ -11960,7 +11960,7 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // PATCH /api/engagements/:id - { subject?, emailBody?, letterBody?, retainerAmount?,
+    // PATCH /api/engagements/:id - { subject?, emailBody?, letterBody?, retainerAmount?, feeMode?,
     // packageId?, planIds?, party? } on a draft or sent engagement.
     if (engagementMatch && request.method === 'PATCH') {
       const session = await requireSession(request, response)
@@ -11979,7 +11979,7 @@ const server = createServer(async (request, response) => {
       }
       const payload = (await readJsonBody(request)) ?? {}
       const patch = {}
-      for (const key of ['subject', 'emailBody', 'letterBody', 'retainerAmount', 'packageId', 'planIds', 'party']) {
+      for (const key of ['subject', 'emailBody', 'letterBody', 'retainerAmount', 'packageId', 'planIds', 'feeMode', 'party']) {
         if (payload[key] !== undefined) patch[key] = payload[key]
       }
       let updated

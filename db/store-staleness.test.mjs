@@ -25509,6 +25509,42 @@ describe('accepting a proposal (file backend)', () => {
     })
   })
 
+  // Review round 1: the picks are kept on the Won proposal for the recovery draft.
+  it('keeps the package and plans picked at Accept on the proposal; the recovery draft carries them', async () => {
+    await store.write(
+      workspace({
+        plans: [
+          { id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: [] },
+          { id: 'plan-other', name: 'Payroll', notes: '', templateIds: [] },
+        ],
+        timeEntries: [],
+      }),
+    )
+    const pkg = await store.createPackage({ name: 'Core', description: '', planIds: ['plan-books', 'plan-other'], templateIds: [] })
+    const proposal = await prospectProposal()
+    vi.spyOn(store, 'createEngagementFromProposal').mockRejectedValueOnce(new Error('disk full'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const result = await store.acceptProposal(proposal.id, { packageId: pkg.id, planIds: ['plan-books', 'plan-gone'] })
+    expect(result.engagementId).toBeNull()
+    expect(result.proposal.acceptPicks).toEqual({ packageId: pkg.id, planIds: ['plan-books'] })
+    expect((await store.getProposal(proposal.id)).acceptPicks).toEqual({ packageId: pkg.id, planIds: ['plan-books'] })
+
+    const drafted = await store.draftEngagementForProposal(proposal.id, { createdBy: 'emp-patrice' })
+    expect(drafted).toMatchObject({ packageId: pkg.id, planIds: ['plan-books'] })
+    // Nothing picked: nothing kept.
+    const plain = await prospectProposal()
+    expect((await store.acceptProposal(plain.id, {})).proposal.acceptPicks).toBeNull()
+  })
+
+  it('a failed proposal_accepted activity line never fails the Accept', async () => {
+    const proposal = await prospectProposal()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(store, 'recordActivity').mockRejectedValueOnce(new Error('log full'))
+    const result = await store.acceptProposal(proposal.id, { actorUserId: 'emp-patrice' })
+    expect(result.proposal.status).toBe('accepted')
+    expect(result.engagementId).toEqual(expect.any(String))
+  })
+
   it('a decision landing before the flip refuses the Accept, worded from what happened, and drafts nothing', async () => {
     const proposal = await prospectProposal()
     await store.setProposalStatus(proposal.id, 'sent')
@@ -25694,6 +25730,42 @@ function fakeAcceptOrderPostgres(initialRow, { loseLinkRace = false } = {}) {
     indexOf: (pattern) => statements.findIndex((s) => pattern.test(s.text)),
   }
 }
+
+describe('accepting a proposal: the picks ride on the Won row (postgres branch)', () => {
+  it('writes accept_picks after the flip, only on an accepted row', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fake = fakeAcceptOrderPostgres(
+      proposalRow({ client_id: null, status: 'draft', prospect: { company: 'Acme Books' } }),
+    )
+    const pgStore = postgresStore(fake)
+    pgStore.listPackages = async () => [{ id: 'pkg-1', name: 'Core', planIds: [], templateIds: [] }]
+    await pgStore.acceptProposal('prop-1', { packageId: 'pkg-1' })
+    vi.restoreAllMocks()
+    const flipAt = fake.indexOf(/^update proposals\b[\s\S]*set status = \$2/i)
+    const picksAt = fake.indexOf(/^update proposals set accept_picks = \$2::jsonb/i)
+    expect(picksAt).toBeGreaterThan(flipAt)
+    expect(fake.statements[picksAt].text).toMatch(/where id = \$1 and status = 'accepted'/)
+    expect(JSON.parse(fake.statements[picksAt].params[1])).toEqual({ packageId: 'pkg-1', planIds: [] })
+  })
+
+  it('adds proposals.accept_picks and engagements.fee_mode the look-first way: asks, then one ALTER each', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    expect(fake.matching(/information_schema\.columns[\s\S]*'proposals'[\s\S]*'accept_picks'/i).length).toBeGreaterThan(0)
+    expect(fake.matching(/information_schema\.columns[\s\S]*'engagements'[\s\S]*'fee_mode'/i).length).toBeGreaterThan(0)
+    const picks = fake.matching(/^alter table proposals add column if not exists accept_picks jsonb$/i)
+    expect(picks).toHaveLength(1)
+    const feeMode = fake.matching(/^alter table engagements add column if not exists fee_mode/i)
+    expect(feeMode).toHaveLength(1)
+    expect(feeMode[0].text).toMatch(/text not null default 'replace'\s+check \(fee_mode in \('replace','add','keep'\)\)/)
+    // After the tables they change.
+    expect(fake.indexOf(/^alter table engagements add column if not exists fee_mode/i)).toBeGreaterThan(
+      fake.indexOf(/create table if not exists engagements\b/i),
+    )
+  })
+})
 
 describe('accepting a proposal: happy-path statement order (postgres branch)', () => {
   // Engagements stage 3: Accept writes no client, no contact, no link and no rows.
@@ -47184,7 +47256,7 @@ describe('signing an engagement creates the client (file backend)', () => {
     expect(first.every((template) => template.isStandard !== true)).toBe(true)
 
     // Run again (a retry of the step, or a later letter to the same client): nothing new.
-    expect(await store._copyPlanChecklistBundles(result.clientId)).toEqual([])
+    expect((await store.copyTemplatesToClient(result.clientId, ['bp-close', 'bp-payroll'])).copies).toEqual([])
     expect(await copies()).toHaveLength(2)
   })
 
@@ -47251,7 +47323,9 @@ describe('signing an engagement creates the client (file backend)', () => {
   it('a client invoiced outside the app gets no retainer, and the answer says so', async () => {
     await setup([{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 630, platformInvoicingOptOut: true }])
     const { engagement } = await wonEngagement({ proposal: { clientId: 'c1' } })
-    expect(engagement.retainerAmount).toBe(630)
+    // An upsell drafts no retainer by default; she typed one.
+    expect(engagement.retainerAmount).toBeNull()
+    await store.updateEngagement(engagement.id, { retainerAmount: 630 })
     const result = await sign(engagement.id)
     expect(result.retainerInvoiceId).toBeNull()
     expect(result.skipped).toContainEqual({
@@ -47261,7 +47335,7 @@ describe('signing an engagement creates the client (file backend)', () => {
     expect((await store.listInvoices()).filter((invoice) => invoice.clientId === 'c1')).toEqual([])
   })
 
-  it('an upsell gets the fee, the plans and the software only at signing - and no second client', async () => {
+  it('an upsell ADDS the letter fee by default, and gets the plans and the software only at signing - and no second client', async () => {
     const { engagement } = await wonEngagement({
       proposal: { clientId: 'c1', selections: [...selections, ...softwareSelections] },
       accept: { planIds: ['plan-payroll'] },
@@ -47273,12 +47347,13 @@ describe('signing an engagement creates the client (file backend)', () => {
     expect(await expensesOf('c1')).toEqual([])
     const clientCount = (await store.read()).clients.length
 
+    expect(engagement).toMatchObject({ feeMode: 'add', retainerAmount: null })
     const result = await sign(engagement.id)
-    expect(result).toMatchObject({ createdClient: false, clientId: 'c1', monthlyRate: 630 })
+    expect(result).toMatchObject({ createdClient: false, clientId: 'c1', monthlyRate: 1030, retainerInvoiceId: null })
     const after = await store.read()
     expect(after.clients).toHaveLength(clientCount)
     const client = after.clients.find((row) => row.id === 'c1')
-    expect(client.monthlyRate).toBe(630)
+    expect(client.monthlyRate).toBe(1030)
     expect(client.planIds).toEqual(['plan-payroll'])
     const expenses = (await expensesOf('c1')).sort((a, b) => a.description.localeCompare(b.description))
     expect(expenses.map((row) => [row.description, row.amount, row.category])).toEqual([
@@ -47355,11 +47430,12 @@ describe('signing an engagement creates the client (file backend)', () => {
   // decided by the claim - see the lost-claim tests here and the Postgres statements;
   // the file backend's createClient is not itself safe to run twice at once, a dev-only
   // limit the Postgres insert does not share.)
-  it('two signings at once: exactly one flips, one set of software rows, one retainer; the loser is refused', async () => {
+  it('two signings at once: exactly one flips, one set of software rows, one fee change, one retainer; the loser is refused', async () => {
     await setup([{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 630 }])
     const { engagement } = await wonEngagement({
       proposal: { clientId: 'c1', selections: [...selections, ...softwareSelections] },
     })
+    await store.updateEngagement(engagement.id, { retainerAmount: 500 })
     const results = await Promise.allSettled([sign(engagement.id), sign(engagement.id)])
     const won = results.filter((entry) => entry.status === 'fulfilled')
     const lost = results.filter((entry) => entry.status === 'rejected')
@@ -47368,18 +47444,20 @@ describe('signing an engagement creates the client (file backend)', () => {
     expect(lost[0].reason).toBeInstanceOf(EngagementStateError)
     expect(lost[0].reason.message).toMatch(/signed/)
     expect((await expensesOf('c1')).map((row) => row.description).sort()).toEqual(['QB Time Elite', 'QBO Plus'])
+    // 'add' landed once: the loser's fee went back with its rows.
+    expect((await store.read()).clients.find((row) => row.id === 'c1').monthlyRate).toBe(1260)
     expect((await store.listInvoices()).filter((invoice) => invoice.kind === 'retainer' && invoice.clientId === 'c1')).toHaveLength(1)
     expect((await store.getEngagement(engagement.id)).status).toBe('signed')
   })
 
-  it('a flip refused after the rows were written puts the rows back (file backend)', async () => {
+  it('a flip refused after the rows were written puts the rows and the fee back (file backend)', async () => {
     const { engagement } = await wonEngagement({
       proposal: { clientId: 'c1', selections: [...selections, ...softwareSelections] },
     })
     // Voided between the checks and the flip: the flip refuses inside the workspace slot.
-    const realCopy = store._copyPlanChecklistBundles.bind(store)
-    vi.spyOn(store, '_copyPlanChecklistBundles').mockImplementationOnce(async (clientId) => {
-      const copied = await realCopy(clientId)
+    const realCopy = store.copyTemplatesToClient.bind(store)
+    vi.spyOn(store, 'copyTemplatesToClient').mockImplementationOnce(async (clientId, ids) => {
+      const copied = await realCopy(clientId, ids)
       await store.voidEngagement(engagement.id, {})
       return copied
     })
@@ -47387,7 +47465,176 @@ describe('signing an engagement creates the client (file backend)', () => {
     expect(err).toBeInstanceOf(EngagementStateError)
     expect(err.message).toMatch(/void/)
     expect(await expensesOf('c1')).toEqual([])
+    expect((await store.read()).clients.find((row) => row.id === 'c1').monthlyRate).toBe(400)
     expect((await store.listInvoices()).filter((invoice) => invoice.clientId === 'c1')).toEqual([])
+  })
+
+  // ---- review round 1 ----
+
+  it('the fee on an existing monthly client: replace, add (the default for an upsell) or keep - her choice', async () => {
+    const upsell = () => wonEngagement({ proposal: { clientId: 'c1' } })
+    const feeOf = async () => (await store.read()).clients.find((row) => row.id === 'c1').monthlyRate
+
+    const added = await upsell()
+    expect(added.engagement.feeMode).toBe('add')
+    expect((await sign(added.engagement.id)).monthlyRate).toBe(1030)
+    expect(await feeOf()).toBe(1030)
+
+    const replaced = await upsell()
+    await store.updateEngagement(replaced.engagement.id, { feeMode: 'replace' })
+    expect((await sign(replaced.engagement.id)).monthlyRate).toBe(630)
+    expect(await feeOf()).toBe(630)
+
+    const kept = await upsell()
+    const saved = await store.updateEngagement(kept.engagement.id, { feeMode: 'keep' })
+    // A signing detail, not letter text: the hash does not move.
+    expect(saved.templateHash).toBe(kept.engagement.templateHash)
+    const result = await sign(kept.engagement.id)
+    expect(result.monthlyRate).toBeNull()
+    expect(result.skipped).toContainEqual({
+      what: 'Monthly fee',
+      why: "Kept at $630.00 as chosen; the letter's $630.00 was not applied.",
+    })
+    expect(await feeOf()).toBe(630)
+
+    const bad = await store.updateEngagement(kept.engagement.id, { feeMode: 'double' }).catch((caught) => caught)
+    expect(bad).toBeInstanceOf(EngagementStateError)
+    // A prospect's letter starts at 'replace' (it has no fee yet).
+    expect((await wonEngagement()).engagement.feeMode).toBe('replace')
+  })
+
+  it("an 'add' is never applied twice: a failure before the flip leaves the fee, the retry adds it once", async () => {
+    const { engagement } = await wonEngagement({ proposal: { clientId: 'c1' } })
+    vi.spyOn(store, '_signEngagementWithSoftware').mockRejectedValueOnce(new Error('disk full'))
+    expect((await sign(engagement.id).catch((caught) => caught)).message).toBe('disk full')
+    expect((await store.read()).clients.find((row) => row.id === 'c1').monthlyRate).toBe(400)
+    expect((await sign(engagement.id)).monthlyRate).toBe(1030)
+    expect((await store.read()).clients.find((row) => row.id === 'c1').monthlyRate).toBe(1030)
+  })
+
+  it('two signings at once copy each checklist ONCE (one workspace save each, re-checked on retry)', async () => {
+    await setup([{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 630, planIds: ['plan-books', 'plan-payroll'] }])
+    const pkg = await store.createPackage({
+      name: 'Full service',
+      description: '',
+      planIds: ['plan-books', 'plan-payroll'],
+      templateIds: ['bp-close', 'bp-payroll'],
+    })
+    const { engagement } = await wonEngagement({ proposal: { clientId: 'c1' }, accept: { packageId: pkg.id } })
+    const results = await Promise.allSettled([sign(engagement.id), sign(engagement.id)])
+    expect(results.filter((entry) => entry.status === 'fulfilled')).toHaveLength(1)
+    const copies = (await store.read()).checklistTemplates.filter((template) => template.clientId === 'c1')
+    expect(copies.map((template) => template.sourceTemplateId).sort()).toEqual(['bp-close', 'bp-payroll'])
+  })
+
+  it('copyTemplateToClient with skipIfCopied re-checks the data it re-read: a second copy is never made', async () => {
+    const first = await store.copyTemplateToClient('bp-close', { clientId: 'c1', skipIfCopied: true })
+    expect(first.sourceTemplateId).toBe('bp-close')
+    expect(await store.copyTemplateToClient('bp-close', { clientId: 'c1', skipIfCopied: true })).toBeNull()
+    // Without the opt-in, the old behavior: another copy.
+    expect(await store.copyTemplateToClient('bp-close', { clientId: 'c1' })).toBeTruthy()
+  })
+
+  it('an existing client copies the checklists of the plans THIS signing added, never one she deleted from a plan it had', async () => {
+    await setup([{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 400, planIds: ['plan-books'] }])
+    // plan-books brings bp-close; the client has no copy (she deleted it on purpose).
+    const { engagement } = await wonEngagement({ proposal: { clientId: 'c1' }, accept: { planIds: ['plan-payroll'] } })
+    const result = await sign(engagement.id)
+    expect(result.addedPlanIds).toEqual(['plan-payroll'])
+    // plan-payroll bundles bp-payroll and bp-close: both are its own, so both come.
+    expect([...result.clonedTemplateIds].sort()).toEqual(['bp-close', 'bp-payroll'])
+
+    const again = await wonEngagement({ proposal: { clientId: 'c1' }, accept: { planIds: ['plan-books'] } })
+    const data = await store.read()
+    data.checklistTemplates = data.checklistTemplates.filter((template) => template.clientId !== 'c1')
+    await store.write(data)
+    // plan-books is already on the client: nothing added, nothing copied back.
+    const second = await sign(again.engagement.id)
+    expect(second.addedPlanIds).toEqual([])
+    expect(second.clonedTemplateIds).toEqual([])
+  })
+
+  it('an upsell drafts no retainer by default; a client already holding one gets no second', async () => {
+    const plain = await wonEngagement({ proposal: { clientId: 'c1' } })
+    expect(plain.engagement.retainerAmount).toBeNull()
+
+    const held = await store.createRetainerInvoice({ clientId: 'c1', amount: 900 })
+    const typed = await wonEngagement({ proposal: { clientId: 'c1' } })
+    await store.updateEngagement(typed.engagement.id, { retainerAmount: 630 })
+    const result = await sign(typed.engagement.id)
+    expect(result.retainerInvoiceId).toBeNull()
+    expect(result.skipped).toContainEqual({ what: 'Retainer', why: `Acme already has retainer ${held.number}; none drafted.` })
+    expect((await store.listInvoices()).filter((invoice) => invoice.kind === 'retainer' && invoice.clientId === 'c1')).toHaveLength(1)
+  })
+
+  it('names the totals signing does not bill: annual on a monthly client, one-time, clean-up', async () => {
+    const { engagement } = await wonEngagement()
+    await patchStored(engagement.id, {
+      figures: { ...engagement.figures, totals: { monthly: 630, annual: 1200, oneTime: 300, cleanup: 450, software: 0 } },
+    })
+    const result = await sign(engagement.id)
+    expect(result.skipped.map((entry) => entry.what)).toEqual(['Annual fees', 'One-time fees', 'Clean-up'])
+    expect(result.skipped[0].why).toBe(
+      "The letter's annual fees ($1,200.00) were not put on Acme Books's billing - set them on the client page if they apply.",
+    )
+  })
+
+  it('a package deleted while the letter is being signed is said, not applied', async () => {
+    const pkg = await store.createPackage({ name: 'Core', description: '', planIds: ['plan-books', 'plan-payroll'], templateIds: [] })
+    const { engagement } = await wonEngagement({ accept: { packageId: pkg.id } })
+    const realList = store.listPackages.bind(store)
+    let calls = 0
+    vi.spyOn(store, 'listPackages').mockImplementation(async () => (calls++ === 0 ? realList() : []))
+    const result = await sign(engagement.id)
+    expect(result.skipped).toContainEqual({
+      what: 'Package',
+      why: 'The package "Core" was deleted while the letter was being signed, so its plans and checklists were not added.',
+    })
+    expect(result.addedPlanIds).toEqual([])
+  })
+
+  it('a claim that THROWS (not a lost race) retires the client it made; the retry keeps one active client', async () => {
+    const { engagement } = await wonEngagement()
+    vi.spyOn(store, '_claimEngagementClient').mockRejectedValueOnce(new Error('connection reset'))
+    const err = await sign(engagement.id).catch((caught) => caught)
+    expect(err.message).toBe('connection reset')
+    expect((await store.read()).clients.find((row) => row.id === err.createdClientId)?.lifecycleStage).toBe('inactive')
+    expect((await store.getEngagement(engagement.id)).clientId).toBeNull()
+
+    const retry = await sign(engagement.id)
+    expect(retry.createdClient).toBe(true)
+    expect((await clientsNamed('Acme Books')).filter((row) => row.lifecycleStage !== 'inactive')).toHaveLength(1)
+  })
+
+  it('a link that THROWS keeps the claimed client; the retry finishes signing and links the Won proposal', async () => {
+    const { proposal, engagement } = await wonEngagement()
+    vi.spyOn(store, 'linkProposalClient').mockRejectedValueOnce(new Error('connection reset'))
+    const err = await sign(engagement.id).catch((caught) => caught)
+    expect(err.message).toBe('connection reset')
+    expect((await store.getEngagement(engagement.id)).clientId).toBe(err.createdClientId)
+    expect((await store.getProposal(proposal.id)).clientId).toBeNull()
+
+    const retry = await sign(engagement.id)
+    expect(retry).toMatchObject({ createdClient: false, clientId: err.createdClientId })
+    expect((await store.getProposal(proposal.id)).clientId).toBe(err.createdClientId)
+    expect(await clientsNamed('Acme Books')).toHaveLength(1)
+  })
+
+  it('a prospect letter voided mid-signing: the client it created is released, unlinked, retired, and the refusal says so', async () => {
+    const { proposal, engagement } = await wonEngagement()
+    const realCopy = store.copyTemplatesToClient.bind(store)
+    vi.spyOn(store, 'copyTemplatesToClient').mockImplementationOnce(async (clientId, ids) => {
+      const copied = await realCopy(clientId, ids)
+      await store.voidEngagement(engagement.id, {})
+      return copied
+    })
+    const err = await sign(engagement.id).catch((caught) => caught)
+    expect(err).toBeInstanceOf(EngagementStateError)
+    expect(err.message).toMatch(/void/)
+    expect(err.message).toContain('The client this signing created (Acme Books) was retired.')
+    expect((await store.read()).clients.find((row) => row.id === err.createdClientId)?.lifecycleStage).toBe('inactive')
+    expect(await store.getEngagement(engagement.id)).toMatchObject({ status: 'void', clientId: null })
+    expect((await store.getProposal(proposal.id)).clientId).toBeNull()
   })
 
   it('a lost claim retires the client it created, with a note, and the refusal carries its id', async () => {
@@ -47581,6 +47828,7 @@ describe('engagements (Postgres statements)', () => {
           retainer_amount: params[10] === null ? null : String(params[10]),
           package_id: params[13] ?? null,
           plan_ids: params[14] ?? [],
+          fee_mode: params[15] ?? 'replace',
           template_hash: params[11],
           email_log: [],
           sent_at: null,
@@ -47608,6 +47856,7 @@ describe('engagements (Postgres statements)', () => {
           plan_ids: params[6],
           party: JSON.parse(params[7]),
           template_hash: params[8],
+          fee_mode: params[9] ?? row.fee_mode,
         })
         return { rows: [{ ...row }] }
       }
@@ -47794,7 +48043,7 @@ describe('engagements (Postgres statements)', () => {
     const engagement = await pgStore.createEngagementFromProposal(proposal(), { createdBy: 'emp-patrice', clientId: 'c-new' })
     const [insert] = fake.matching(/^insert into engagements /i)
     expect(insert.text).toMatch(
-      /^insert into engagements \(id, kind, status, proposal_id, client_id, party, subject, email_body, letter_body, section_keys, figures, retainer_amount, template_hash, created_by, package_id, plan_ids\) values \(\$1, \$2, 'draft', \$3, \$4, \$5::jsonb, \$6, \$7, \$8, \$9::jsonb, \$10::jsonb, \$11, \$12, \$13, \$14, \$15::text\[\]\) returning /i,
+      /^insert into engagements \(id, kind, status, proposal_id, client_id, party, subject, email_body, letter_body, section_keys, figures, retainer_amount, template_hash, created_by, package_id, plan_ids, fee_mode\) values \(\$1, \$2, 'draft', \$3, \$4, \$5::jsonb, \$6, \$7, \$8, \$9::jsonb, \$10::jsonb, \$11, \$12, \$13, \$14, \$15::text\[\], \$16\) returning /i,
     )
     expect(insert.params[3]).toBe('c-new')
     expect(JSON.parse(insert.params[9])).toMatchObject({
@@ -47803,11 +48052,14 @@ describe('engagements (Postgres statements)', () => {
       hoursByRole: { bookkeeper: 8.4, accountant: 0, controller: 0 },
       paymentTerms: 'Due on receipt',
     })
-    expect(insert.params[10]).toBe(630)
+    // A client already on the letter (an upsell): no retainer by default, and the fee is added to.
+    expect(insert.params[10]).toBeNull()
+    expect(insert.params[15]).toBe('add')
     expect(engagement).toMatchObject({
       status: 'draft',
       clientId: 'c-new',
-      retainerAmount: 630,
+      retainerAmount: null,
+      feeMode: 'add',
       party: { company: 'Acme Books', contactName: 'Pat Doe', email: 'pat@acme.test' },
     })
     expect(engagement.templateHash).toBe(engagementHash(engagement))
@@ -47820,7 +48072,7 @@ describe('engagements (Postgres statements)', () => {
     const edited = await pgStore.updateEngagement(draft.id, { subject: 'New', planIds: ['p1', 'p-gone'], packageId: 'pkg-1' })
     const [update] = fake.matching(/^update engagements set subject = \$2/i)
     expect(update.text).toMatch(
-      /^update engagements set subject = \$2, email_body = \$3, letter_body = \$4, retainer_amount = \$5, package_id = \$6, plan_ids = \$7::text\[\], party = \$8::jsonb, template_hash = \$9, updated_at = now\(\) where id = \$1 and status in \('draft', 'sent'\) returning /i,
+      /^update engagements set subject = \$2, email_body = \$3, letter_body = \$4, retainer_amount = \$5, package_id = \$6, plan_ids = \$7::text\[\], party = \$8::jsonb, template_hash = \$9, fee_mode = \$10, updated_at = now\(\) where id = \$1 and status in \('draft', 'sent'\) returning /i,
     )
     expect(update.params[6]).toEqual(['p1'])
     expect(edited).toMatchObject({ subject: 'New', planIds: ['p1'], packageId: 'pkg-1' })
@@ -47959,8 +48211,9 @@ describe('engagements (Postgres statements)', () => {
      * inserts, the recurring rows (rolled back with the transaction), the retire.
      * `onSign(row)` may change the row just before the flip is evaluated (a race).
      */
-    function signingPool({ proposalLinked = false, claimLost = false, onSign = null } = {}) {
+    function signingPool({ proposalLinked = false, claimLost = false, onSign = null, clientFee = 400 } = {}) {
       const base = engagementPool()
+      let fee = clientFee
       const recurring = []
       let undo = null
       const log = (text, params) => base.statements.push({ text, params })
@@ -48024,10 +48277,19 @@ describe('engagements (Postgres statements)', () => {
           log(t, params)
           return { rows: [{ id: params[0] }], rowCount: 1 }
         }
+        if (/^update clients set monthly_rate = /i.test(t)) {
+          log(t, params)
+          const before = fee
+          fee = /coalesce\(monthly_rate, 0\) \+ \$2/i.test(t) ? fee + Number(params[1]) : Number(params[1])
+          undo?.push(() => {
+            fee = before
+          })
+          return { rows: [{ monthly_rate: String(fee) }], rowCount: 1 }
+        }
         return base.pool.query(text, params)
       }
       const pool = { query: answer, connect: async () => ({ query: answer, release() {} }) }
-      return { ...base, pool, recurring }
+      return { ...base, pool, recurring, fee: () => fee }
     }
 
     /** A store on the signing pool; the workspace read, the firm and the retainer answered without SQL. */
@@ -48115,14 +48377,73 @@ describe('engagements (Postgres statements)', () => {
       expect(draft.clientId).toBe('c1')
       fake.statements.length = 0
       const result = await pgStore.signEngagement(draft.id, { signedOn: '2026-10-09', allowUnsent: true })
-      expect(result).toMatchObject({ createdClient: false, clientId: 'c1', monthlyRate: 630 })
+      expect(result).toMatchObject({ createdClient: false, clientId: 'c1', monthlyRate: 1030 })
       expect(indexOf(fake, /^insert into clients\b/i)).toBe(-1)
       expect(indexOf(fake, /^insert into contacts\b/i)).toBe(-1)
       expect(indexOf(fake, /^update engagements set client_id/i)).toBe(-1)
-      expect(indexOf(fake, /^update proposals set client_id/i)).toBe(-1)
-      const feeAt = indexOf(fake, /^update clients set monthly_rate = \$2/i)
+      // The Won proposal is linked by compare-and-set (a no-op when it already is).
+      expect(fake.statements[indexOf(fake, /^update proposals set client_id/i)].text).toMatch(/client_id is null and status = 'accepted'/)
+      // The fee is added INSIDE the one transaction, after the flip, before COMMIT.
+      const flipAt = indexOf(fake, /^update engagements set status = 'signed'/i)
+      const feeAt = indexOf(fake, /^update clients set monthly_rate = /i)
+      const commitAt = fake.statements.findIndex((statement, index) => index > feeAt && /^COMMIT$/i.test(statement.text))
+      expect(fake.statements[feeAt].text).toBe(
+        'update clients set monthly_rate = coalesce(monthly_rate, 0) + $2, updated_at = now() where id = $1 returning monthly_rate',
+      )
       expect(fake.statements[feeAt].params).toEqual(['c1', 630])
-      expect(indexOf(fake, /^update engagements set status = 'signed'/i)).toBeGreaterThan(feeAt)
+      expect(feeAt).toBeGreaterThan(flipAt)
+      expect(commitAt).toBeGreaterThan(feeAt)
+      expect(fake.fee()).toBe(1030)
+    })
+
+    it('an upsell is drafted with fee_mode add and no retainer', async () => {
+      const fake = signingPool()
+      const client = { id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 400, lifecycleStage: 'active' }
+      const draft = await signingStore(fake, { client }).createEngagementFromProposal(wonProposal({ clientId: 'c1' }), {})
+      expect(draft).toMatchObject({ feeMode: 'add', retainerAmount: null })
+      const [insert] = fake.matching(/^insert into engagements /i)
+      expect(insert.params[15]).toBe('add')
+      expect(insert.params[10]).toBeNull()
+    })
+
+    it("'replace' sets the fee in the transaction; 'keep' issues no fee statement at all", async () => {
+      const client = { id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 400, lifecycleStage: 'active' }
+      const replaceFake = signingPool()
+      const replaceStore = signingStore(replaceFake, { client })
+      const draft = await replaceStore.createEngagementFromProposal(wonProposal({ clientId: 'c1' }), {})
+      await replaceStore.updateEngagement(draft.id, { feeMode: 'replace' })
+      const replaced = await replaceStore.signEngagement(draft.id, { signedOn: '2026-10-09', allowUnsent: true })
+      expect(replaced.monthlyRate).toBe(630)
+      const [replaceStatement] = replaceFake.matching(/^update clients set monthly_rate = /i)
+      expect(replaceStatement.text).toBe('update clients set monthly_rate = $2, updated_at = now() where id = $1 returning monthly_rate')
+
+      const keepFake = signingPool()
+      const keepStore = signingStore(keepFake, { client })
+      const kept = await keepStore.createEngagementFromProposal(wonProposal({ clientId: 'c1' }), {})
+      await keepStore.updateEngagement(kept.id, { feeMode: 'keep' })
+      const result = await keepStore.signEngagement(kept.id, { signedOn: '2026-10-09', allowUnsent: true })
+      expect(result.monthlyRate).toBeNull()
+      expect(keepFake.matching(/^update clients set monthly_rate/i)).toHaveLength(0)
+      expect(result.skipped.map((entry) => entry.what)).toContain('Monthly fee')
+    })
+
+    it('a flip refused on a PROSPECT signing (voided meanwhile) releases the claim, unlinks the proposal and retires the client', async () => {
+      const fake = signingPool({ onSign: (row) => Object.assign(row, { status: 'void' }) })
+      const pgStore = signingStore(fake)
+      const draft = await pgStore.createEngagementFromProposal(wonProposal(), {})
+      const err = await pgStore
+        .signEngagement(draft.id, { signedOn: '2026-10-09', allowUnsent: true })
+        .catch((caught) => caught)
+      expect(err.message).toMatch(/was retired\.$/)
+      const [inserted] = insertedRows(fake.statements, 'clients')
+      const releaseAt = indexOf(fake, /^update engagements set client_id = null/i)
+      const unlinkAt = indexOf(fake, /^update proposals set client_id = null/i)
+      const retireAt = indexOf(fake, /^update clients set lifecycle_stage = \$2/i)
+      expect(fake.statements[releaseAt].text).toMatch(/where id = \$1 and client_id = \$2 and status <> 'signed'$/)
+      expect(fake.statements[unlinkAt].text).toBe('update proposals set client_id = null, updated_at = now() where id = $1 and client_id = $2')
+      expect(fake.statements[unlinkAt].params).toEqual(['prop-1', inserted.id])
+      expect(retireAt).toBeGreaterThan(unlinkAt)
+      expect(fake.statements[retireAt].params).toEqual([inserted.id, 'inactive'])
     })
 
     it('a lost claim retires the client it inserted and refuses, carrying that client’s id; nothing is flipped', async () => {
@@ -48152,7 +48473,7 @@ describe('engagements (Postgres statements)', () => {
       expect(err.reason).toBe('proposal_linked')
       const releaseAt = indexOf(fake, /^update engagements set client_id = null/i)
       expect(releaseAt).toBeGreaterThan(indexOf(fake, /^update proposals set client_id/i))
-      expect(fake.statements[releaseAt].text).toMatch(/where id = \$1 and client_id = \$2 and status in \('draft', 'sent'\)$/i)
+      expect(fake.statements[releaseAt].text).toMatch(/where id = \$1 and client_id = \$2 and status <> 'signed'$/i)
       expect(fake.engagements[0].client_id).toBeNull()
       expect(indexOf(fake, /^update engagements set status = 'signed'/i)).toBe(-1)
     })

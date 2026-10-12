@@ -154,7 +154,7 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
 
   it('PATCH passes only the editable fields to the store', () => {
     const block = routeBlock(ROUTES[4].pattern, 2600)
-    expect(block).toContain("for (const key of ['subject', 'emailBody', 'letterBody', 'retainerAmount', 'packageId', 'planIds', 'party']) {")
+    expect(block).toContain("for (const key of ['subject', 'emailBody', 'letterBody', 'retainerAmount', 'packageId', 'planIds', 'feeMode', 'party']) {")
     expect(block).toContain('appDataStore.updateEngagement(engagementMatch[1], patch)')
   })
 

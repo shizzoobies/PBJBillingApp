@@ -442,6 +442,8 @@ export type Proposal = {
   createdBy: string | null
   createdAt: string
   updatedAt: string | null
+  /** The package and plans picked at Accept, kept for the recovery draft (engagements stage 3). */
+  acceptPicks?: { packageId: string | null; planIds: string[] } | null
 }
 
 /** What `PATCH /api/proposals/:id` accepts. A field left out is not a statement about it. */
@@ -2786,6 +2788,8 @@ export type Engagement = {
   retainerAmount: number | null
   packageId: string | null
   planIds: string[]
+  /** What signing does to an existing monthly client's fee (stage 3). Older reads may lack it: 'replace'. */
+  feeMode?: EngagementFeeMode
   templateHash: string
   emailLog?: EngagementEmailLogEntry[]
   sentAt: string | null
@@ -2832,6 +2836,9 @@ export type EngagementView = {
   changedSinceSent?: boolean
 }
 
+/** Signing for an existing monthly client: 'replace' its fee with the letter's, 'add' the letter's to it, or 'keep' it. */
+export type EngagementFeeMode = 'replace' | 'add' | 'keep'
+
 /** What the editor may change on a draft or sent engagement. */
 export type EngagementPatch = {
   subject?: string
@@ -2840,6 +2847,7 @@ export type EngagementPatch = {
   retainerAmount?: number | null
   packageId?: string | null
   planIds?: string[]
+  feeMode?: EngagementFeeMode
   party?: Partial<EngagementParty>
 }
 
