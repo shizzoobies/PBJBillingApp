@@ -71,6 +71,7 @@ describe('capability manifest', () => {
       '## Dashboard',
       '## Proposals (owner only)',
       '## Letters (owner only)',
+      '## Engagements (owner only)',
       '## Time tracking',
       '## Timesheet',
       '## Time Approvals',
