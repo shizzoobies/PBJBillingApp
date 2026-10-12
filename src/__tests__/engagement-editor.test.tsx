@@ -222,6 +222,28 @@ describe('loading', () => {
     expect(screen.getByRole('link', { name: 'Client' }).getAttribute('href')).toBe('/clients/client-9')
   })
 
+  // Engagements stage 4: an amendment that came from a saved letter has no proposal behind it.
+  it('an amendment from a saved letter: no proposal figures, sections or re-assemble, and its origin in the activity', async () => {
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ kind: 'amendment', proposalId: null, clientId: 'client-9', letterId: 'letter-1099', sectionKeys: [], figures: {}, retainerAmount: null }),
+    )
+    await renderEditor()
+    expect(screen.getByText('Amendment', { selector: '.status-pill' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'From a saved letter' }).getAttribute('href')).toBe('/letters')
+    expect(screen.queryByRole('link', { name: /From proposal/ })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'From the proposal' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Sections' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Re-assemble from the proposal' })).toBeNull()
+    expect(within(screen.getByRole('list', { name: 'Activity' })).getByText('Drafted from a saved letter')).toBeTruthy()
+    cleanup()
+
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ kind: 'amendment', status: 'sent', proposalId: null, clientId: 'client-9', letterId: 'letter-1099', letterSendId: 'els-1', sectionKeys: [], figures: {} }),
+    )
+    await renderEditor()
+    expect(within(screen.getByRole('list', { name: 'Activity' })).getByText('Recorded from a Letters send')).toBeTruthy()
+  })
+
   it('warns on a placeholder the app does not fill in', async () => {
     await renderEditor()
     fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Hello {{nope}}' } })

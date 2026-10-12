@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { ClientEngagementsCard } from '../components/ClientEngagementsCard'
 import { useAppContext } from '../AppContext'
 import { ChecklistCard, NewTaskForm } from './ChecklistsPage'
 import { SectionScopeContext } from '../components/sectionScope'
@@ -176,7 +177,7 @@ export function ClientNotesSection({
 export function ClientDetailPage() {
   const { clientId } = useParams<{ clientId: string }>()
   const navigate = useNavigate()
-  const { data, ownerMode, sessionUser, updateClient, deleteClient, setClientLifecycle } =
+  const { data, ownerMode, sessionUser, updateClient, deleteClient, setClientLifecycle, dataRefreshCount } =
     useAppContext()
   const [assignedTeamError, setAssignedTeamError] = useState('')
   // Whether the shared "Track time" modal is open for this client.
@@ -595,6 +596,13 @@ export function ClientDetailPage() {
               one only stops it being emailed. */}
           <CollapsibleSection id="client-section-invoice-delivery" kicker="Invoice settings" title="Invoice delivery" lockable>
             <InvoiceDeliverySectionBody client={client} onCommit={commit} />
+          </CollapsibleSection>
+
+          {/* Engagements stage 4: this client's engagement letters (the original, its
+              amendments - each Letters send is one - and any superseding letter), and
+              "New amendment" from a saved letter. Owner only, like the whole tab. */}
+          <CollapsibleSection id="client-section-engagements" kicker="Engagement" title="Engagements" lockable>
+            <ClientEngagementsCard clientId={client.id} ownerMode={ownerMode} refreshKey={dataRefreshCount} />
           </CollapsibleSection>
 
           <CollapsibleSection

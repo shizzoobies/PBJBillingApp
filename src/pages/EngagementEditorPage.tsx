@@ -78,7 +78,16 @@ const HOURS_LABELS = { bookkeeper: 'Bookkeeper', accountant: 'Accountant', contr
 function activityRows(engagement: Engagement, nameOf: (userId: string | null) => string): ActivityRow[] {
   const rows: ActivityRow[] = []
   if (engagement.createdAt) {
-    rows.push({ at: engagement.createdAt, text: engagement.proposalId ? 'Drafted from the proposal' : 'Drafted' })
+    rows.push({
+      at: engagement.createdAt,
+      text: engagement.proposalId
+        ? 'Drafted from the proposal'
+        : engagement.letterSendId
+          ? 'Recorded from a Letters send'
+          : engagement.letterId
+            ? 'Drafted from a saved letter'
+            : 'Drafted',
+    })
   }
   for (const entry of engagement.emailLog ?? []) {
     if (!entry || !entry.at) continue
@@ -319,6 +328,8 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const skipped = skippedEngagementLines(figures)
   // An existing monthly client: signing replaces its fee, adds to it, or keeps it (her choice).
   const linkedClient = engagement.clientId ? data.clients.find((entry) => entry.id === engagement.clientId) : undefined
+  // An amendment from a saved letter (stage 4) has no proposal figures or sections to show.
+  const fromLetter = Boolean(engagement.letterId) && !engagement.proposalId
   const feeChoices =
     linkedClient && linkedClient.billingMode === 'subscription' && monthly > 0
       ? feeChoiceLines(Number(linkedClient.monthlyRate ?? 0), monthly)
@@ -499,6 +510,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
             {engagement.proposalId ? (
               <Link to={`/proposals/${engagement.proposalId}`}>{`From proposal ${partyName}`}</Link>
             ) : null}
+            {engagement.letterId && !engagement.proposalId ? <Link to="/letters">From a saved letter</Link> : null}
             {engagement.clientId ? <Link to={`/clients/${engagement.clientId}`}>Client</Link> : null}
           </div>
         </div>
@@ -874,67 +886,71 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
             ) : null}
           </div>
 
-          <div className="panel">
-            <h3>From the proposal</h3>
-            <dl className="engagement-figures">
-              <div>
-                <dt>Monthly</dt>
-                <dd>{formatProposalMoney(monthly)}</dd>
-              </div>
-              <div>
-                <dt>Annual</dt>
-                <dd>{formatProposalMoney(Number(totals.annual ?? 0))}</dd>
-              </div>
-              <div>
-                <dt>One-time</dt>
-                <dd>{formatProposalMoney(Number(totals.oneTime ?? 0))}</dd>
-              </div>
-              <div>
-                <dt>Clean-up</dt>
-                <dd>{formatProposalMoney(Number(totals.cleanup ?? 0))}</dd>
-              </div>
-            </dl>
-            {hoursRows.length > 0 ? (
-              <p className="engagement-hours" aria-label="Estimated monthly hours">
-                <span className="muted-text">Estimated monthly hours:</span>
-                {hoursRows.map((row) => (
-                  <span key={row.role} className="engagement-hours-item">
-                    {`${HOURS_LABELS[row.role]} ${row.value.toFixed(1)}`}
-                  </span>
-                ))}
-              </p>
-            ) : (
-              <p className="muted-text">No estimated hours on the proposal.</p>
-            )}
-            {skipped.length > 0 ? (
-              <p className="muted-text">
-                {`Not in the letter: ${skipped.map((line) => `${line.name} (${line.reason})`).join(', ')}`}
-              </p>
-            ) : null}
-          </div>
+          {fromLetter ? null : (
+            <div className="panel">
+              <h3>From the proposal</h3>
+              <dl className="engagement-figures">
+                <div>
+                  <dt>Monthly</dt>
+                  <dd>{formatProposalMoney(monthly)}</dd>
+                </div>
+                <div>
+                  <dt>Annual</dt>
+                  <dd>{formatProposalMoney(Number(totals.annual ?? 0))}</dd>
+                </div>
+                <div>
+                  <dt>One-time</dt>
+                  <dd>{formatProposalMoney(Number(totals.oneTime ?? 0))}</dd>
+                </div>
+                <div>
+                  <dt>Clean-up</dt>
+                  <dd>{formatProposalMoney(Number(totals.cleanup ?? 0))}</dd>
+                </div>
+              </dl>
+              {hoursRows.length > 0 ? (
+                <p className="engagement-hours" aria-label="Estimated monthly hours">
+                  <span className="muted-text">Estimated monthly hours:</span>
+                  {hoursRows.map((row) => (
+                    <span key={row.role} className="engagement-hours-item">
+                      {`${HOURS_LABELS[row.role]} ${row.value.toFixed(1)}`}
+                    </span>
+                  ))}
+                </p>
+              ) : (
+                <p className="muted-text">No estimated hours on the proposal.</p>
+              )}
+              {skipped.length > 0 ? (
+                <p className="muted-text">
+                  {`Not in the letter: ${skipped.map((line) => `${line.name} (${line.reason})`).join(', ')}`}
+                </p>
+              ) : null}
+            </div>
+          )}
 
-          <div className="panel">
-            <h3>Sections</h3>
-            {engagement.sectionKeys.length > 0 ? (
-              <ol className="engagement-sections-used" aria-label="Sections used">
-                {engagement.sectionKeys.map((key) => (
-                  <li key={key}>{sectionTitles[key] || key}</li>
-                ))}
-              </ol>
-            ) : (
-              <p className="muted-text">No sections recorded.</p>
-            )}
-            {engagement.status === 'draft' ? (
-              <button
-                type="button"
-                className="secondary-action"
-                disabled={busy !== ''}
-                onClick={() => void reassemble()}
-              >
-                Re-assemble from the proposal
-              </button>
-            ) : null}
-          </div>
+          {fromLetter ? null : (
+            <div className="panel">
+              <h3>Sections</h3>
+              {engagement.sectionKeys.length > 0 ? (
+                <ol className="engagement-sections-used" aria-label="Sections used">
+                  {engagement.sectionKeys.map((key) => (
+                    <li key={key}>{sectionTitles[key] || key}</li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="muted-text">No sections recorded.</p>
+              )}
+              {engagement.status === 'draft' ? (
+                <button
+                  type="button"
+                  className="secondary-action"
+                  disabled={busy !== ''}
+                  onClick={() => void reassemble()}
+                >
+                  Re-assemble from the proposal
+                </button>
+              ) : null}
+            </div>
+          )}
 
           <div className="panel">
             <h3>Activity</h3>

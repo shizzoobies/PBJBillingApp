@@ -102,6 +102,7 @@ const ROUTES: Route[] = [
   { name: 'POST /api/engagements/:id/send', pattern: /if \(engagementSendMatch && request\.method === 'POST'\)/, write: true, broadcastLength: 4000 },
   { name: 'POST /api/engagements/:id/sign', pattern: /if \(engagementSignMatch && request\.method === 'POST'\)/, write: true },
   { name: 'POST /api/engagements/:id/void', pattern: /if \(engagementVoidMatch && request\.method === 'POST'\)/, write: true },
+  { name: 'POST /api/engagements', pattern: /normalizedPath === '\/api\/engagements' && request\.method === 'POST'/, write: true }, // stage 4: appended so the indexes above stay
 ]
 
 describe('the engagement routes are owner-only, same-origin and above the catch-all', () => {
@@ -457,5 +458,37 @@ describe('a Won proposal with no engagement can get one (POST /api/proposals/:id
 
   it('sits with the proposal routes, ahead of Accept', () => {
     expect(serverSource.search(pattern)).toBeLessThan(serverSource.indexOf('const proposalAcceptMatch ='))
+  })
+})
+
+// Engagements stage 4: "New amendment" on a client's page.
+describe('POST /api/engagements starts a draft amendment from a saved letter', () => {
+  const block = () => between('// POST /api/engagements - { kind: ', '// GET /api/engagements/:id - the engagement whole')
+
+  it('checks the body before anything is read: kind amendment, a client and a letter, else 400', () => {
+    const body = block()
+    expect(body).toContain("payload.kind !== 'amendment' ||")
+    expect(body).toContain("typeof payload.clientId !== 'string' ||")
+    expect(body).toContain("typeof payload.letterId !== 'string' ||")
+    expect(body).toContain("error: 'engagement_invalid',")
+    expect(body.indexOf("error: 'engagement_invalid',")).toBeLessThan(body.indexOf('appDataStore.'))
+  })
+
+  it('drafts through the store only, maps its refusals, 404s a missing client, records and answers 201', () => {
+    const body = block()
+    expect(body).toContain('appDataStore.createAmendmentFromLetter({')
+    expect(body).toContain('createdBy: session.user.id,')
+    expect(body).toContain('sendEngagementRefusal(response, error)')
+    expect(body).toContain("sendJson(response, 404, { error: 'Client not found' })")
+    expect(body).toContain("'engagement_created'")
+    expect(body).toContain('sendJson(response, 201, { engagement: created })')
+    // A draft: nothing is sent or signed from here.
+    expect(body).not.toMatch(/sendEngagement\(|signEngagement\(|sendMail|sendInvoiceEmail/)
+  })
+
+  it('sits after the list and before the one-engagement routes', () => {
+    const postAt = serverSource.search(/normalizedPath === '\/api\/engagements' && request\.method === 'POST'/)
+    expect(postAt).toBeGreaterThan(serverSource.search(/normalizedPath === '\/api\/engagements' && request\.method === 'GET'/))
+    expect(postAt).toBeLessThan(serverSource.indexOf('const engagementMatch = normalizedPath.match('))
   })
 })

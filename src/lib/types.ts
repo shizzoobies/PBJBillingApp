@@ -2779,6 +2779,8 @@ export type Engagement = {
   proposalId: string | null
   clientId: string | null
   letterId: string | null
+  /** The Letters send-log row an amendment was recorded from (stage 4); null otherwise. Older reads may lack it. */
+  letterSendId?: string | null
   supersedesId: string | null
   party: EngagementParty
   /** The list endpoint leaves the three bodies and the log out. */

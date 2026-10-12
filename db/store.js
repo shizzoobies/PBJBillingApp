@@ -26897,6 +26897,106 @@ export class AppDataStore {
     })
   }
 
+  /**
+   * Engagements stage 4 ("New amendment" on the client page): a DRAFT amendment for
+   * an existing client from one of the saved Letters, its text as saved - the
+   * placeholders are left for the editor's preview and send to fill for this client.
+   * The party is the client as an invoice would address it (a billing master's
+   * receiving company's contact and address, under the master's name). No figures:
+   * {{fee}} fills from what the client is billed when it is previewed or sent, and
+   * fee 'keep', no retainer, no plans - marking it signed changes no billing unless
+   * she sets those on the engagement.
+   *
+   * Refuses ('invalid') a missing client or letter id, ('letter_missing') a letter
+   * that is gone, ('letter_empty') one with no email or no letter written.
+   * Returns null when there is no such client.
+   */
+  async createAmendmentFromLetter({ clientId, letterId, createdBy = null } = {}) {
+    if (typeof clientId !== 'string' || !clientId || typeof letterId !== 'string' || !letterId) {
+      throw new EngagementStateError('Choose the client and the letter the amendment starts from.', 'invalid')
+    }
+    const client = await this.getClientById(clientId)
+    if (!client) return null
+    const letter = await this.getEngagementLetter(letterId)
+    if (!letter) {
+      throw new EngagementStateError('That letter no longer exists. Choose another one.', 'letter_missing')
+    }
+    if (!String(letter.emailBody ?? '').trim() || !String(letter.letterBody ?? '').trim()) {
+      throw new EngagementStateError(
+        `"${letter.name || 'That letter'}" has no email or no letter written yet. Write it in Letters first.`,
+        'letter_empty',
+      )
+    }
+    const receiving =
+      client.isBillingMaster === true && client.invoiceRecipientClientId
+        ? ((await this.getClientById(client.invoiceRecipientClientId)) ?? client)
+        : client
+    const party = {
+      ...AppDataStore._engagementPartyFromClient(receiving, await this._engagementClientContacts(receiving)),
+      company: String(client.name ?? '').trim().slice(0, 200),
+    }
+    const row = {
+      id: `eng-${randomUUID().slice(0, 8)}`,
+      kind: 'amendment',
+      status: 'draft',
+      proposalId: null,
+      clientId,
+      letterId: letter.id,
+      letterSendId: null,
+      supersedesId: null,
+      party,
+      subject: String(letter.subject ?? '').trim().slice(0, ENGAGEMENT_SUBJECT_MAX),
+      emailBody: String(letter.emailBody ?? '').replace(/\r\n?/g, '\n').trim().slice(0, ENGAGEMENT_BODY_MAX),
+      letterBody: String(letter.letterBody ?? '').replace(/\r\n?/g, '\n').trim().slice(0, ENGAGEMENT_BODY_MAX),
+      sectionKeys: [],
+      figures: {},
+      retainerAmount: null,
+      feeMode: 'keep',
+      packageId: null,
+      planIds: [],
+      templateHash: null,
+      emailLog: [],
+      createdBy,
+    }
+    row.templateHash = engagementHash(row)
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `insert into engagements
+           (id, kind, status, client_id, letter_id, party, subject, email_body, letter_body,
+            figures, fee_mode, template_hash, created_by)
+         values ($1, 'amendment', 'draft', $2, $3, $4::jsonb, $5, $6, $7, '{}'::jsonb, 'keep', $8, $9)
+         returning ${ENGAGEMENT_COLUMNS}`,
+        [
+          row.id,
+          row.clientId,
+          row.letterId,
+          JSON.stringify(row.party),
+          row.subject,
+          row.emailBody,
+          row.letterBody,
+          row.templateHash,
+          row.createdBy,
+        ],
+      )
+      return mapEngagementRow(rows[0])
+    }
+    return this._mutateEngagementFile((authState) => {
+      const now = nowIso()
+      const stored = {
+        ...row,
+        sentAt: null,
+        signedAt: null,
+        signedBy: null,
+        signedNote: null,
+        voidedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      }
+      authState.engagements.push(stored)
+      return { result: mapEngagementRow(stored), changed: true }
+    })
+  }
+
   /** A refusal for a write the engagement's status does not allow, worded from the status. */
   static _engagementStatusRefusal(status, what) {
     return new EngagementStateError(
@@ -27039,6 +27139,14 @@ export class AppDataStore {
     const current = await this.getEngagement(id)
     if (!current) return null
     if (current.status !== 'draft') throw AppDataStore._engagementStatusRefusal(current.status, 're-assembled')
+    // An amendment started from a saved letter (stage 4) has no proposal sections to
+    // rebuild from: re-assembling would throw her letter away for the library's.
+    if (current.letterId) {
+      throw new EngagementStateError(
+        'This amendment came from a saved letter, so there are no proposal sections to re-assemble it from.',
+        'from_letter',
+      )
+    }
     const firm = await this.getFirmSettings()
     const assembled = assembleEngagement({
       sections: await this._engagementLibrary(sections),

@@ -5430,6 +5430,19 @@ export async function voidEngagementRequest(id: string): Promise<Engagement> {
   return body.engagement
 }
 
+/**
+ * "New amendment" on a client's page (engagements stage 4): a draft amendment for this
+ * client from one of the saved Letters, its placeholders left for the editor to fill.
+ */
+export async function createAmendmentRequest(clientId: string, letterId: string): Promise<Engagement> {
+  const body = await engagementRequest<{ engagement: Engagement }>(
+    '/api/engagements',
+    proposalJson('POST', { kind: 'amendment', clientId, letterId }),
+    'Failed to start the amendment',
+  )
+  return body.engagement
+}
+
 /** Draft the engagement for a Won proposal that has none (409 `engagement_refused` otherwise). */
 export async function draftProposalEngagementRequest(proposalId: string): Promise<Engagement> {
   const body = await engagementRequest<{ engagement: Engagement }>(

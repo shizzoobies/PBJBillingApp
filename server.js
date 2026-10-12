@@ -11942,6 +11942,63 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/engagements - { kind: 'amendment', clientId, letterId } (stage 4, "New
+    // amendment" on the client page): a DRAFT amendment for an existing client from one
+    // of the saved Letters, its placeholders left for the editor to fill. Nothing is sent.
+    if (normalizedPath === '/api/engagements' && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can start engagements' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = (await readJsonBody(request)) ?? {}
+      if (
+        payload.kind !== 'amendment' ||
+        typeof payload.clientId !== 'string' ||
+        !payload.clientId ||
+        typeof payload.letterId !== 'string' ||
+        !payload.letterId
+      ) {
+        sendJson(response, 400, {
+          error: 'engagement_invalid',
+          message: 'Send kind amendment, the client and the saved letter it starts from.',
+        })
+        return
+      }
+      let created
+      try {
+        created = await appDataStore.createAmendmentFromLetter({
+          clientId: payload.clientId,
+          letterId: payload.letterId,
+          createdBy: session.user.id,
+        })
+      } catch (error) {
+        sendEngagementRefusal(response, error)
+        return
+      }
+      if (!created) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      try {
+        await appDataStore.recordActivity(session.user.id, 'engagement_created', engagementActivityTarget(created))
+      } catch (error) {
+        console.error('[engagements] could not record the new amendment:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 201, { engagement: created })
+      return
+    }
+
     // GET /api/engagements/:id - the engagement whole, its placeholders, warnings, hash and sender.
     const engagementMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)$/)
     if (engagementMatch && request.method === 'GET') {

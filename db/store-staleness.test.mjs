@@ -48864,3 +48864,252 @@ describe('engagements stage 4: amendments recorded from Letters sends (Postgres 
     expect(fake.statements.filter((s) => /\bletter_send_id\b/i.test(s.text))).toEqual([])
   })
 })
+
+// ---- Engagements stage 4: "New amendment" from a saved letter (client page) --------
+
+describe('engagements stage 4: a draft amendment from a saved letter (file backend)', () => {
+  const readAuth = async () => JSON.parse(await readFile(localAuthPath, 'utf8'))
+
+  beforeEach(async () => {
+    await clearEngagements()
+    const authState = await readAuth()
+    authState.engagementLetters = []
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c1',
+            name: 'Acme',
+            contactName: 'Robin Ray',
+            email: 'robin@acme.test',
+            phone: '615-555-0199',
+            addressLine1: '1 Main St',
+            city: 'Nashville',
+            state: 'TN',
+            postalCode: '37201',
+            billingMode: 'subscription',
+            monthlyRate: 500,
+            lifecycleStage: 'active',
+          },
+          {
+            id: 'c-master',
+            name: 'KLC Holdings',
+            isBillingMaster: true,
+            billingMode: 'subscription',
+            monthlyRate: 900,
+            invoiceRecipientClientId: 'c-sub',
+          },
+          {
+            id: 'c-sub',
+            name: 'KLC South',
+            contactName: 'Sam Sub',
+            email: 'sam@sub.test',
+            billToClientId: 'c-master',
+            addressLine1: '9 Pine Rd',
+            city: 'Austin',
+            state: 'TX',
+            postalCode: '78701',
+          },
+        ],
+        timeEntries: [],
+      }),
+    )
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const savedLetter = (over = {}) =>
+    store.createEngagementLetter({
+      name: 'Fee change',
+      subject: 'Your new fee from {{next_year}}',
+      emailBody: 'Hi {{contact_first_name}},\r\n\r\nYour fee is now {{fee}}.',
+      letterBody: 'Dear {{contact_name}},\n\nFrom January the fee for **{{client_name}}** is {{fee}}.',
+      ...over,
+    })
+
+  it('drafts an amendment for the client with the letter text as saved, the party from the client, no figures', async () => {
+    const letter = await savedLetter()
+    const draft = await store.createAmendmentFromLetter({ clientId: 'c1', letterId: letter.id, createdBy: 'emp-patrice' })
+    expect(draft).toMatchObject({
+      kind: 'amendment',
+      status: 'draft',
+      proposalId: null,
+      clientId: 'c1',
+      letterId: letter.id,
+      letterSendId: null,
+      supersedesId: null,
+      subject: 'Your new fee from {{next_year}}',
+      emailBody: 'Hi {{contact_first_name}},\n\nYour fee is now {{fee}}.',
+      letterBody: 'Dear {{contact_name}},\n\nFrom January the fee for **{{client_name}}** is {{fee}}.',
+      sectionKeys: [],
+      figures: {},
+      retainerAmount: null,
+      feeMode: 'keep',
+      packageId: null,
+      planIds: [],
+      emailLog: [],
+      sentAt: null,
+      createdBy: 'emp-patrice',
+      party: {
+        company: 'Acme',
+        contactName: 'Robin Ray',
+        email: 'robin@acme.test',
+        phone: '615-555-0199',
+        addressLine1: '1 Main St',
+        city: 'Nashville',
+        state: 'TN',
+        postalCode: '37201',
+      },
+    })
+    expect(draft.templateHash).toBe(engagementHash(draft))
+    expect((await readAuth()).engagements).toHaveLength(1)
+    // {{fee}} fills from what the client is billed when it is previewed or sent.
+    const client = (await store.read()).clients.find((row) => row.id === 'c1')
+    expect(engagementValues({ engagement: draft, client, contacts: [] }).fee).toBe('$500.00 per month')
+  })
+
+  it("a billing master's amendment goes to its receiving company's contact and address, under the master's name", async () => {
+    const letter = await savedLetter()
+    const draft = await store.createAmendmentFromLetter({ clientId: 'c-master', letterId: letter.id })
+    expect(draft.party).toMatchObject({
+      company: 'KLC Holdings',
+      contactName: 'Sam Sub',
+      email: 'sam@sub.test',
+      addressLine1: '9 Pine Rd',
+      city: 'Austin',
+    })
+  })
+
+  it('refuses a letter that is gone or unwritten, answers null for a missing client, and writes nothing', async () => {
+    const empty = await savedLetter({ name: 'Blank', emailBody: '', letterBody: '' })
+    for (const [args, reason] of [
+      [{ clientId: 'c1', letterId: 'letter-gone' }, 'letter_missing'],
+      [{ clientId: 'c1', letterId: empty.id }, 'letter_empty'],
+      [{ clientId: 'c1', letterId: '' }, 'invalid'],
+      [{ clientId: '', letterId: empty.id }, 'invalid'],
+    ]) {
+      const error = await store.createAmendmentFromLetter(args).catch((caught) => caught)
+      expect(error, JSON.stringify(args)).toBeInstanceOf(EngagementStateError)
+      expect(error.reason).toBe(reason)
+    }
+    const letter = await savedLetter({ name: 'Real' })
+    expect(await store.createAmendmentFromLetter({ clientId: 'c-gone', letterId: letter.id })).toBeNull()
+    expect((await readAuth()).engagements).toEqual([])
+  })
+
+  it('cannot be re-assembled from proposal sections (it has none), and signs on the existing-client path', async () => {
+    const letter = await savedLetter()
+    const draft = await store.createAmendmentFromLetter({ clientId: 'c1', letterId: letter.id })
+    const error = await store.reassembleEngagement(draft.id).catch((caught) => caught)
+    expect(error).toBeInstanceOf(EngagementStateError)
+    expect(error.reason).toBe('from_letter')
+    expect((await store.getEngagement(draft.id)).letterBody).toBe(draft.letterBody)
+
+    const result = await store.signEngagement(draft.id, { signedOn: '2026-10-11', allowUnsent: true })
+    expect(result).toMatchObject({ createdClient: false, clientId: 'c1', monthlyRate: null, retainerInvoiceId: null, skipped: [] })
+    expect((await store.read()).clients.find((row) => row.id === 'c1').monthlyRate).toBe(500)
+  })
+})
+
+describe('engagements stage 4: a draft amendment from a saved letter (Postgres statements)', () => {
+  it('reads the client and the letter, then inserts ONE draft amendment row with no figures', async () => {
+    const statements = []
+    const query = async (text, params = []) => {
+      const trimmed = String(text).replace(/\s+/g, ' ').trim()
+      statements.push({ text: trimmed, params })
+      if (/^select .* from engagement_letters where id = \$1$/i.test(trimmed)) {
+        return {
+          rows: [
+            {
+              id: 'letter-fee',
+              name: 'Fee change',
+              subject: 'Your new fee',
+              email_body: 'Hi {{contact_first_name}}',
+              letter_body: 'The fee is {{fee}}.',
+              updated_by: null,
+              created_at: new Date('2026-10-10T15:00:00Z'),
+              updated_at: new Date('2026-10-10T15:00:00Z'),
+            },
+          ],
+        }
+      }
+      if (/^insert into engagements /i.test(trimmed)) {
+        return {
+          rows: [
+            {
+              id: params[0],
+              kind: 'amendment',
+              status: 'draft',
+              proposal_id: null,
+              client_id: params[1],
+              letter_id: params[2],
+              letter_send_id: null,
+              supersedes_id: null,
+              party: JSON.parse(params[3]),
+              subject: params[4],
+              email_body: params[5],
+              letter_body: params[6],
+              section_keys: [],
+              figures: {},
+              retainer_amount: null,
+              package_id: null,
+              plan_ids: [],
+              fee_mode: 'keep',
+              template_hash: params[7],
+              email_log: [],
+              created_by: params[8],
+              created_at: new Date('2026-10-11T15:00:00Z'),
+              updated_at: new Date('2026-10-11T15:00:00Z'),
+            },
+          ],
+        }
+      }
+      return { rows: [] }
+    }
+    const pgStore = postgresStore({ pool: { query, connect: async () => ({ query, release() {} }) } })
+    pgStore.getClientById = async (id) =>
+      id === 'c1' ? { id: 'c1', name: 'Acme', contactName: 'Robin Ray', email: 'robin@acme.test', contactIds: [] } : null
+    const draft = await pgStore.createAmendmentFromLetter({ clientId: 'c1', letterId: 'letter-fee', createdBy: 'u1' })
+    const writes = statements.filter((s) => /^(insert|update|delete)\b/i.test(s.text))
+    expect(writes).toHaveLength(1)
+    expect(writes[0].text).toMatch(
+      /^insert into engagements \(id, kind, status, client_id, letter_id, party, subject, email_body, letter_body, figures, fee_mode, template_hash, created_by\) values \(\$1, 'amendment', 'draft', \$2, \$3, \$4::jsonb, \$5, \$6, \$7, '\{\}'::jsonb, 'keep', \$8, \$9\) returning /i,
+    )
+    expect(writes[0].params.slice(1, 3)).toEqual(['c1', 'letter-fee'])
+    expect(writes[0].params[4]).toBe('Your new fee')
+    expect(draft).toMatchObject({ kind: 'amendment', status: 'draft', clientId: 'c1', letterId: 'letter-fee', feeMode: 'keep', figures: {} })
+    expect(draft.templateHash).toBe(engagementHash(draft))
+  })
+
+  it('refuses re-assembling an amendment from a letter before any write', async () => {
+    const statements = []
+    const row = {
+      id: 'eng-1',
+      kind: 'amendment',
+      status: 'draft',
+      client_id: 'c1',
+      letter_id: 'letter-fee',
+      party: {},
+      subject: 's',
+      email_body: 'e',
+      letter_body: 'l',
+      section_keys: [],
+      figures: {},
+      plan_ids: [],
+      email_log: [],
+    }
+    const query = async (text, params = []) => {
+      const trimmed = String(text).replace(/\s+/g, ' ').trim()
+      statements.push(trimmed)
+      if (/^select .* from engagements where id = \$1$/i.test(trimmed) && params[0] === 'eng-1') return { rows: [{ ...row }] }
+      return { rows: [] }
+    }
+    const pgStore = postgresStore({ pool: { query, connect: async () => ({ query, release() {} }) } })
+    const error = await pgStore.reassembleEngagement('eng-1').catch((caught) => caught)
+    expect(error.reason).toBe('from_letter')
+    expect(statements.filter((text) => /^(insert|update|delete)\b/i.test(text))).toEqual([])
+  })
+})
