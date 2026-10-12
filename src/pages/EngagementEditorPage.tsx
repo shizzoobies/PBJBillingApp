@@ -28,7 +28,7 @@ import { PROPOSAL_ROLE_LABELS } from '../lib/proposals'
 import type { SaveFlashState } from '../lib/useSaveFlash'
 import { skippedEngagementLines } from '../../lib/engagement-values.js'
 import { firmToday } from '../../lib/firm-time.js'
-import { retiredSentence } from '../../lib/letter-template.js'
+import { retiredSentence, templateWarnings } from '../../lib/letter-template.js'
 import { formatProposalMoney } from '../../lib/proposal-pricing.js'
 import {
   ApiError,
@@ -86,6 +86,10 @@ function activityRows(engagement: Engagement): ActivityRow[] {
       const label = DELIVERY_LABELS[entry.event] ?? entry.event
       rows.push({ at: entry.at, text: `${label}${to ? ` (${to})` : ''}${entry.detail ? `: ${entry.detail}` : ''}` })
     }
+  }
+  // The sent stamp, when the log holds no successful send (a row written before the log).
+  if (engagement.sentAt && !(engagement.emailLog ?? []).some((entry) => entry?.kind === 'send' && entry.ok)) {
+    rows.push({ at: engagement.sentAt, text: 'Sent' })
   }
   if (engagement.signedAt) {
     rows.push({
@@ -259,19 +263,11 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   }, [plansOpen])
 
   const placeholders = useMemo(() => view?.placeholders ?? [], [view])
-  const warnings = useMemo(() => {
-    const known = new Set(placeholders.map((placeholder) => placeholder.key))
-    const unknown: string[] = []
-    for (const text of [subject, emailBody, letterBody]) {
-      for (const match of text.matchAll(/\{\{([^{}]*)\}\}/g)) {
-        const key = match[1].trim()
-        if (key && !known.has(key) && !unknown.includes(key)) unknown.push(key)
-      }
-    }
-    // Retired keys come from the server (it knows which); they are also not in the list.
-    const retired = (view?.warnings.retired ?? []).filter((key) => unknown.includes(key))
-    return { unknown: unknown.filter((key) => !retired.includes(key)), retired }
-  }, [placeholders, subject, emailBody, letterBody, view])
+  // The same check Send makes, against the engagement placeholder list the GET returned.
+  const warnings = useMemo(
+    () => templateWarnings({ subject, emailBody, letterBody }, placeholders),
+    [placeholders, subject, emailBody, letterBody],
+  )
 
   if (!ownerMode) return null
 

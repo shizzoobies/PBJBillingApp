@@ -204,6 +204,13 @@ describe('loading', () => {
     expect(screen.getByText(/\{\{nope\}\} is not a placeholder the app fills in/)).toBeTruthy()
   })
 
+  it('names a retired placeholder as retired, not as a typo', async () => {
+    await renderEditor()
+    fireEvent.change(screen.getByLabelText('Letter body'), { target: { value: 'At {{hourly_rate}} an hour.' } })
+    expect(screen.getByText(/\{\{hourly_rate\}\} is no longer filled in/)).toBeTruthy()
+    expect(screen.queryByText(/is not a placeholder the app fills in/)).toBeNull()
+  })
+
   it('names the proposal lines the letter leaves out', async () => {
     api.getEngagementRequest = vi.fn(async () =>
       view({
