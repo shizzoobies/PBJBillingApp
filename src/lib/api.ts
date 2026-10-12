@@ -33,6 +33,13 @@
   type LetterSendRecord,
   type LetterSendResponse,
   type LetterTemplateState,
+  type Engagement,
+  type EngagementPatch,
+  type EngagementPreview,
+  type EngagementSection,
+  type EngagementSendResult,
+  type EngagementStatus,
+  type EngagementView,
   type ProposalChatPatch,
   type ProposalPatch,
   type ProposalProspect,
@@ -1046,12 +1053,16 @@ export function sendProposalRequest(
   )
 }
 
-/** What Accept did: the proposal, the client it created or used, and whether a package went on. */
+/**
+ * What Accept did: the proposal, the client it created or used, whether a package
+ * went on, and the engagement letter it drafted (null when none could be drafted).
+ */
 export type AcceptProposalResult = {
   proposal: Proposal
   clientId: string
   createdClient: boolean
   packageApplied: boolean
+  engagementId?: string | null
 }
 
 /**
@@ -5251,4 +5262,164 @@ export function sendLettersRequest(
     proposalJson('POST', input),
     'Failed to send the letter',
   )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Engagements (docs/plans/engagements-2026-10.md, stage 2)                    */
+/* -------------------------------------------------------------------------- */
+/*
+ * One letter to one party with a signed state, drafted when a proposal is
+ * accepted. Endpoint-managed and owner-only on the server, like letters.
+ */
+
+/**
+ * One engagement call: like `proposalRequest`, but a refusal also carries the
+ * store's `reason` (a 409 `engagement_refused` says why: 'just_sent', a status...).
+ */
+async function engagementRequest<T>(path: string, init: RequestInit, failure: string): Promise<T> {
+  const response = await apiFetch(path, { credentials: 'same-origin', ...init })
+  if (!response.ok) {
+    let message = ''
+    let code: string | undefined
+    let reason: string | undefined
+    try {
+      const body = await response.json()
+      if (body && typeof body.error === 'string') code = body.error
+      if (body && typeof body.reason === 'string') reason = body.reason
+      if (body && typeof body.message === 'string' && body.message.trim()) message = body.message
+      else if (code) message = code
+    } catch {
+      // not JSON: the generic sentence below
+    }
+    throw new ApiError(response.status, message || `${failure} (${response.status})`, code, reason)
+  }
+  return (await response.json()) as T
+}
+
+const engagementPath = (id: string, action = '') =>
+  `/api/engagements/${encodeURIComponent(id)}${action ? `/${action}` : ''}`
+
+/** The section library (seeded by the server on the first read). */
+export async function listEngagementSectionsRequest(): Promise<EngagementSection[]> {
+  const body = await engagementRequest<{ sections?: EngagementSection[] }>(
+    '/api/engagement-sections',
+    {},
+    'Failed to load the engagement sections',
+  )
+  return Array.isArray(body.sections) ? body.sections : []
+}
+
+/** Save the whole library; a section left out is deactivated, never deleted. */
+export async function saveEngagementSectionsRequest(
+  sections: Array<Pick<EngagementSection, 'key' | 'title' | 'body' | 'trigger' | 'sortOrder' | 'active'>>,
+): Promise<EngagementSection[]> {
+  const body = await engagementRequest<{ sections?: EngagementSection[] }>(
+    '/api/engagement-sections',
+    proposalJson('PUT', { sections }),
+    'Failed to save the engagement sections',
+  )
+  return Array.isArray(body.sections) ? body.sections : []
+}
+
+/** The engagements, newest first (no bodies), optionally for one client, proposal or status. */
+export async function listEngagementsRequest(
+  filter: { clientId?: string; proposalId?: string; status?: EngagementStatus } = {},
+): Promise<Engagement[]> {
+  const params = new URLSearchParams()
+  if (filter.clientId) params.set('clientId', filter.clientId)
+  if (filter.proposalId) params.set('proposalId', filter.proposalId)
+  if (filter.status) params.set('status', filter.status)
+  const query = params.toString()
+  const body = await engagementRequest<{ engagements?: Engagement[] }>(
+    `/api/engagements${query ? `?${query}` : ''}`,
+    {},
+    'Failed to load the engagements',
+  )
+  return Array.isArray(body.engagements) ? body.engagements : []
+}
+
+/** One engagement whole, with its placeholders, warnings, hash and sender. */
+export function getEngagementRequest(id: string): Promise<EngagementView> {
+  return engagementRequest<EngagementView>(engagementPath(id), {}, 'Failed to load the engagement')
+}
+
+/** Edit a draft or sent engagement; the answer is the stored engagement with its new hash. */
+export function updateEngagementRequest(id: string, patch: EngagementPatch): Promise<EngagementView> {
+  return engagementRequest<EngagementView>(
+    engagementPath(id),
+    proposalJson('PATCH', patch),
+    'Failed to save the engagement',
+  )
+}
+
+/** Rebuild a draft's text from its proposal figures and the current library (edits are replaced). */
+export function reassembleEngagementRequest(id: string): Promise<EngagementView> {
+  return engagementRequest<EngagementView>(
+    engagementPath(id, 'reassemble'),
+    proposalJson('POST', {}),
+    'Failed to re-assemble the engagement',
+  )
+}
+
+/** What the party would receive, from the STORED engagement. Nothing is sent or saved. */
+export function previewEngagementRequest(id: string, to?: string): Promise<EngagementPreview> {
+  return engagementRequest<EngagementPreview>(
+    `${engagementPath(id, 'preview')}${to ? `?to=${encodeURIComponent(to)}` : ''}`,
+    {},
+    'Could not build the preview',
+  )
+}
+
+/** The PDF half of the preview, streamed by the server for an embedded frame. */
+export function engagementPreviewPdfUrl(id: string, to?: string) {
+  return `${engagementPath(id, 'preview.pdf')}${to ? `?to=${encodeURIComponent(to)}` : ''}`
+}
+
+/**
+ * Send the engagement to `to` (the address she confirmed). `templateHash` is the
+ * hash the page loaded: the server refuses (409 `engagement_changed`) when the
+ * engagement changed since.
+ */
+export function sendEngagementRequest(
+  id: string,
+  input: { templateHash: string; to: string },
+): Promise<EngagementSendResult> {
+  return engagementRequest<EngagementSendResult>(
+    engagementPath(id, 'send'),
+    proposalJson('POST', input),
+    'Failed to send the engagement letter',
+  )
+}
+
+/** Mark as signed on a firm day; `allowUnsent` = she handed it over in person. */
+export async function signEngagementRequest(
+  id: string,
+  input: { signedOn: string; note?: string; allowUnsent?: boolean },
+): Promise<Engagement> {
+  const body = await engagementRequest<{ engagement: Engagement }>(
+    engagementPath(id, 'sign'),
+    proposalJson('POST', input),
+    'Failed to mark the engagement as signed',
+  )
+  return body.engagement
+}
+
+/** Void a draft or sent engagement (it stays in the list). */
+export async function voidEngagementRequest(id: string): Promise<Engagement> {
+  const body = await engagementRequest<{ engagement: Engagement }>(
+    engagementPath(id, 'void'),
+    proposalJson('POST', {}),
+    'Failed to void the engagement',
+  )
+  return body.engagement
+}
+
+/** Draft the engagement for a Won proposal that has none (409 `engagement_refused` otherwise). */
+export async function draftProposalEngagementRequest(proposalId: string): Promise<Engagement> {
+  const body = await engagementRequest<{ engagement: Engagement }>(
+    proposalPath(proposalId, 'engagement'),
+    proposalJson('POST', {}),
+    'Failed to draft the engagement',
+  )
+  return body.engagement
 }

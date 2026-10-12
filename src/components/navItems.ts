@@ -18,6 +18,7 @@ import {
   Megaphone,
   Receipt,
   ReceiptText,
+  ScrollText,
   Settings,
   Users,
   WalletCards,
@@ -55,20 +56,27 @@ const CHECKLISTS: NavItem = { to: '/checklists', label: 'Checklists', icon: List
 const BOARD: NavItem = { to: '/board', label: 'Board', icon: Kanban }
 const DELAYED: NavItem = { to: '/delayed', label: 'Delayed', icon: AlarmClock }
 const GANTT: NavItem = { to: '/gantt', label: 'Gantt', icon: BarChart3 }
-// Proposals took the Engagements placeholder's slot (featreq-311473e2); the old
-// /engagements route redirects here.
+// Proposals took the Engagements placeholder's slot (featreq-311473e2).
 const PROPOSALS: NavItem = {
   to: '/proposals',
   label: 'Proposals',
   icon: Handshake,
   ownerOnly: true,
 }
-// Letters joined Proposals under Engagements (featreq-5e195707): the one engagement
-// letter, written once with placeholders and sent to chosen clients as a PDF.
+// Engagements (docs/plans/engagements-2026-10.md): the engagement letter each Won
+// proposal drafts, edited, sent to the party and marked signed. Owner-only.
+const ENGAGEMENTS: NavItem = {
+  to: '/engagements',
+  label: 'Engagements',
+  icon: FileSignature,
+  ownerOnly: true,
+}
+// Letters joined Proposals under Engagements (featreq-5e195707): saved letters,
+// written once with placeholders and sent to chosen clients as a PDF.
 const LETTERS: NavItem = {
   to: '/letters',
   label: 'Letters',
-  icon: FileSignature,
+  icon: ScrollText,
   ownerOnly: true,
 }
 const CLIENTS: NavItem = { to: '/clients', label: 'Clients', icon: Building2 }
@@ -116,6 +124,7 @@ export const navItems: NavItem[] = [
   BOARD,
   DELAYED,
   PROPOSALS,
+  ENGAGEMENTS,
   LETTERS,
   CLIENTS,
   CLIENT_RECAP,
@@ -143,8 +152,9 @@ export const navItems: NavItem[] = [
  */
 export const navSections: NavSection[] = [
   { items: [DASHBOARD] },
-  // Engagements: winning new work (Proposals) and the letters that confirm it.
-  { label: 'Engagements', items: [PROPOSALS, LETTERS] },
+  // Engagements: winning new work (Proposals), the engagement letter each Won
+  // proposal drafts (Engagements), and the saved letters sent to clients (Letters).
+  { label: 'Engagements', items: [PROPOSALS, ENGAGEMENTS, LETTERS] },
   { label: 'Clients', items: [CLIENTS, CONTACTS, CLIENT_RECAP] },
   { label: 'Billing', items: [INVOICES, INVOICE_RECAP, PLANS] },
   {

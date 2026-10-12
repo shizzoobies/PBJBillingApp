@@ -5,9 +5,10 @@ import { describe, expect, it } from 'vitest'
 import { navItems, navSections } from '../components/navItems'
 
 /**
- * Where Letters lives (featreq-5e195707): under an Engagements heading beside
- * Proposals, owner-only in the sidebar, in the route table and in the bounce
- * list that sends a non-owner away from an owner page.
+ * Where Letters lives (featreq-5e195707) and, since stage 2C of
+ * docs/plans/engagements-2026-10.md, the Engagements pages: under an Engagements
+ * heading (Proposals, Engagements, Letters), owner-only in the sidebar, in the
+ * route table and in the bounce list that sends a non-owner away from an owner page.
  */
 
 const appSource = readFileSync(
@@ -16,12 +17,20 @@ const appSource = readFileSync(
 )
 
 describe('the sidebar', () => {
-  it('has an Engagements section holding Proposals then Letters', () => {
+  it('has an Engagements section holding Proposals, Engagements, then Letters', () => {
     const section = navSections.find((entry) => entry.label === 'Engagements')
     expect(section?.items.map((item) => [item.label, item.to])).toEqual([
       ['Proposals', '/proposals'],
+      ['Engagements', '/engagements'],
       ['Letters', '/letters'],
     ])
+  })
+
+  it('makes Engagements owner-only, with an icon of its own (not the Letters one)', () => {
+    const engagements = navItems.find((item) => item.to === '/engagements')
+    const letters = navItems.find((item) => item.to === '/letters')
+    expect(engagements).toMatchObject({ label: 'Engagements', ownerOnly: true })
+    expect(engagements?.icon).not.toBe(letters?.icon)
   })
 
   it('makes Letters owner-only, so staff never see it', () => {
@@ -29,9 +38,10 @@ describe('the sidebar', () => {
     expect(letters).toMatchObject({ label: 'Letters', ownerOnly: true })
   })
 
-  it('lists Letters straight after Proposals in the flat list that names the pages', () => {
+  it('lists Engagements then Letters straight after Proposals in the flat list that names the pages', () => {
     const order = navItems.map((item) => item.to)
-    expect(order.indexOf('/letters')).toBe(order.indexOf('/proposals') + 1)
+    expect(order.indexOf('/engagements')).toBe(order.indexOf('/proposals') + 1)
+    expect(order.indexOf('/letters')).toBe(order.indexOf('/proposals') + 2)
   })
 
   it('shares the same item objects between the two views', () => {
@@ -48,11 +58,19 @@ describe('the routes', () => {
     expect(appSource).toContain("import { LettersPage } from './pages/LettersPage'")
   })
 
-  it('bounces a non-owner off /letters and /proposals', () => {
+  it('serves the engagements list to an owner only, and no longer redirects /engagements to Proposals', () => {
+    expect(appSource).toMatch(
+      /<Route\s+path="\/engagements"\s+element=\{\s*<OwnerOnly ownerMode=\{ownerMode\}>\s*<EngagementsPage \/>\s*<\/OwnerOnly>\s*\}\s*\/>/,
+    )
+    expect(appSource).not.toMatch(/path="\/engagements"\s+element=\{<Navigate/)
+  })
+
+  it('bounces a non-owner off /letters, /engagements and /proposals', () => {
     const start = appSource.indexOf('const ownerOnly = [')
     const end = appSource.indexOf(']', start)
     const list = appSource.slice(start, end)
     expect(list).toContain("'/letters'")
+    expect(list).toContain("'/engagements'")
     expect(list).toContain("'/proposals'")
   })
 })

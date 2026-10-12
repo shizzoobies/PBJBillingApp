@@ -2549,6 +2549,8 @@ export type LetterPlaceholderInfo = {
   description: string
   /** A blank value stops the letter going to that client. */
   required: boolean
+  /** 'both' = Letters and engagement letters; 'engagement' = engagement letters only. */
+  scope?: 'both' | 'engagement'
 }
 
 /** One saved letter as the Letters page lists it. */
@@ -2668,4 +2670,171 @@ export type LetterSendResponse = {
   sent: number
   failed: number
   skipped: number
+}
+
+/* -------------------------------------------------------------------------- */
+/* Engagements (docs/plans/engagements-2026-10.md, stage 2)                    */
+/* -------------------------------------------------------------------------- */
+
+export type EngagementKind = 'original' | 'amendment' | 'superseding'
+export type EngagementStatus = 'draft' | 'sent' | 'signed' | 'superseded' | 'void'
+
+/** When a library section goes into an assembled letter. */
+export type EngagementSectionTrigger = {
+  always?: boolean
+  groups?: string[]
+  serviceIds?: string[]
+}
+
+/** One section of the owner's engagement section library (Settings). */
+export type EngagementSection = {
+  id: string
+  key: string
+  title: string
+  body: string
+  trigger: EngagementSectionTrigger
+  sortOrder: number
+  active: boolean
+  /** 'email' for the cover-email section, 'letter' for the rest (derived from the key). */
+  role: 'email' | 'letter'
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+/** Who the letter is to. */
+export type EngagementParty = {
+  company: string
+  contactName: string
+  title: string
+  email: string
+  phone: string
+  addressLine1: string
+  addressLine2: string
+  city: string
+  state: string
+  postalCode: string
+}
+
+/** One priced line copied from the proposal when the engagement was drafted. */
+export type EngagementFigureLine = {
+  serviceId: string | null
+  group: string | null
+  name: string
+  amount: number
+  cadence: string | null
+  role: string | null
+  hours: number | null
+  formula?: string
+  count?: number | null
+}
+
+/** The proposal's figures, frozen on the engagement. Older rows may lack keys. */
+export type EngagementFigures = {
+  totals?: {
+    monthly?: number
+    annual?: number
+    oneTime?: number
+    cleanup?: number
+    software?: number
+    hoursByRole?: { bookkeeper?: number; accountant?: number; controller?: number } | null
+  } | null
+  lines?: EngagementFigureLine[] | null
+  hoursByRole?: { bookkeeper?: number; accountant?: number; controller?: number } | null
+  paymentTerms?: string
+  inputs?: Record<string, number> | null
+}
+
+/** One entry of an engagement's email log: a send, or a delivery event about one. */
+export type EngagementEmailLogEntry =
+  | {
+      kind: 'send'
+      at: string
+      providerId: string | null
+      to: string[]
+      ok: boolean
+      subject?: string
+      error: string | null
+    }
+  | {
+      kind: 'delivery'
+      at: string
+      providerId: string | null
+      to: string[]
+      event: string
+      detail?: string | null
+    }
+
+export type Engagement = {
+  id: string
+  kind: EngagementKind
+  status: EngagementStatus
+  proposalId: string | null
+  clientId: string | null
+  letterId: string | null
+  supersedesId: string | null
+  party: EngagementParty
+  /** The list endpoint leaves the three bodies and the log out. */
+  subject: string
+  emailBody?: string
+  letterBody?: string
+  sectionKeys: string[]
+  figures: EngagementFigures
+  retainerAmount: number | null
+  packageId: string | null
+  planIds: string[]
+  templateHash: string
+  emailLog?: EngagementEmailLogEntry[]
+  sentAt: string | null
+  signedAt: string | null
+  signedBy: string | null
+  signedNote: string | null
+  voidedAt: string | null
+  createdBy: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+/** One engagement as the editor reads it (GET / PATCH / reassemble answer). */
+export type EngagementView = {
+  engagement: Engagement
+  placeholders: LetterPlaceholderInfo[]
+  warnings: { unknown: string[]; retired: string[] }
+  /** Opaque snapshot key: Send refuses (409 engagement_changed) when it no longer matches. */
+  hash: string
+  sender: { from: string; replyTo: string }
+}
+
+/** What the editor may change on a draft or sent engagement. */
+export type EngagementPatch = {
+  subject?: string
+  emailBody?: string
+  letterBody?: string
+  retainerAmount?: number | null
+  packageId?: string | null
+  planIds?: string[]
+  party?: Partial<EngagementParty>
+}
+
+/** What the party would receive, built by the server with the same code as Send. */
+export type EngagementPreview = {
+  subject: string
+  html: string
+  text: string
+  to: string[]
+  recipientNote: string | null
+  missing: string[]
+  missingNote: string | null
+  unknown: string[]
+  retired: string[]
+  pdfAvailable: boolean
+  pdfFilename: string
+  /** The sentence that would stop Send now, or null. */
+  refusal: string | null
+}
+
+/** The answer to a Send that was not refused: whether the provider took it. */
+export type EngagementSendResult = {
+  engagement: Engagement
+  ok: boolean
+  error: string | null
 }

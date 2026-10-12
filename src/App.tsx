@@ -176,6 +176,7 @@ import { ContactsPage } from './pages/ContactsPage'
 import { GanttPage } from './pages/GanttPage'
 import { ProposalEditorPage } from './pages/ProposalEditorPage'
 import { LettersPage } from './pages/LettersPage'
+import { EngagementsPage } from './pages/EngagementsPage'
 import { ProposalsPage } from './pages/ProposalsPage'
 import { InvoiceRecapPage } from './pages/InvoiceRecapPage'
 import { InvoicesPage } from './pages/InvoicesPage'
@@ -4366,6 +4367,7 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
     const ownerOnly = [
       '/time-approvals',
       '/proposals',
+      '/engagements',
       '/letters',
       '/client-recap',
       '/reports',
@@ -4460,14 +4462,19 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           }
         />
         <Route path="/gantt" element={<GanttPage />} />
-        {/* The Engagements placeholder became Proposals (featreq-311473e2);
-            an old bookmark lands on the list. */}
-        <Route path="/engagements" element={<Navigate to="/proposals" replace />} />
         <Route
           path="/proposals"
           element={
             <OwnerOnly ownerMode={ownerMode}>
               <ProposalsPage />
+            </OwnerOnly>
+          }
+        />
+        <Route
+          path="/engagements"
+          element={
+            <OwnerOnly ownerMode={ownerMode}>
+              <EngagementsPage />
             </OwnerOnly>
           }
         />
