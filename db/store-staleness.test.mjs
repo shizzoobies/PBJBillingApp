@@ -49871,6 +49871,40 @@ describe('stage advance explains itself (file backend)', () => {
     expect(result.spawned).toMatchObject({ caseId: 'case-1', stageIndex: 1 })
     expect(await stageOnes()).toHaveLength(1)
   })
+
+  // The lifecycle sync must still be handed the spawned CHECKLIST (not the
+  // `{ spawned, reason }` answer): stage 2 spawned => the client is Onboarding.
+  it('an onboarding case advancing from stage 1 moves the client to onboarding', async () => {
+    await seed(
+      [stageChecklist({ onboardingForClientId: 'c1' })],
+      [stagedTemplate({ onboardingForClientId: 'c1' })],
+    )
+    const result = await store.toggleChecklistItem('cl-stage', 'item-a')
+    expect(result.spawned).toMatchObject({ caseId: 'case-1', stageIndex: 1 })
+    const client = (await persisted()).clients.find((entry) => entry.id === 'c1')
+    expect(client.lifecycleStage).toBe('onboarding')
+  })
+
+  it('a finished one-off (no template, no stages) is last_stage and logs nothing', async () => {
+    await seed([
+      {
+        id: 'cl-oneoff',
+        title: 'Clean up the 2025 books',
+        clientId: 'c1',
+        assigneeId: 'emp-1',
+        templateId: null,
+        dueDate: '2026-10-31',
+        viewerIds: [],
+        editorIds: [],
+        items: [{ id: 'item-x', label: 'Reconcile', done: false }],
+      },
+    ])
+    const result = await store.toggleChecklistItem('cl-oneoff', 'item-x')
+    expect(result.spawned).toBeNull()
+    expect(result.spawnReason).toBe('last_stage')
+    expect(stageLines(logSpy)).toEqual([])
+    expect(stageLines(errorSpy)).toEqual([])
+  })
 })
 
 describe('stage advance explains itself (Postgres statements)', () => {
@@ -49904,7 +49938,7 @@ describe('stage advance explains itself (Postgres statements)', () => {
    * real `mapChecklistItemRow` after the UPDATE, so `read()` after the commit
    * sees the tick - the same shape as the owner-tick block above.
    */
-  function pgStageStore({ stageIndex = 0 } = {}) {
+  function pgStageStore({ stageIndex = 0, onboardingForClientId = null } = {}) {
     const fake = fakePostgres()
     const pgStore = postgresStore(fake)
     let current = itemRow()
@@ -49938,6 +49972,7 @@ describe('stage advance explains itself (Postgres statements)', () => {
           stageId: `st-${stageIndex}`,
           stageIndex,
           stageCount: 2,
+          ...(onboardingForClientId ? { onboardingForClientId } : {}),
           items: [mapChecklistItemRow(current)],
         },
       ],
@@ -50006,5 +50041,23 @@ describe('stage advance explains itself (Postgres statements)', () => {
     expect(result.spawned).toBeNull()
     expect(result.spawnReason).toBe('last_stage')
     expect(created).toBe(0)
+  })
+
+  it('a lifecycle sync that throws after the committed tick is logged, never thrown', async () => {
+    const { pgStore } = pgStageStore({ onboardingForClientId: 'c1' })
+    pgStore.createChecklist = async (checklist) => ({ ...checklist })
+    pgStore.grantClientVisibility = async () => {}
+    const synced = []
+    pgStore.setClientLifecycleStage = async (clientId, stage) => {
+      synced.push([clientId, stage])
+      throw new Error('lock timeout')
+    }
+    const result = await pgStore.toggleChecklistItem('cl-1', 'it-1')
+    expect(synced).toEqual([['c1', 'onboarding']])
+    expect(result.spawned).toMatchObject({ stageIndex: 1 })
+    expect(result.spawnError).toBeUndefined()
+    expect(errorSpy.mock.calls.map((call) => String(call[0]))).toContain(
+      '[stage-advance] lifecycle sync FAILED cl-1 client c1: lock timeout',
+    )
   })
 })

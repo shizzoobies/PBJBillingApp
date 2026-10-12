@@ -21387,8 +21387,15 @@ export class AppDataStore {
       // helper returns null unless `onboardingForClientId` is set), so ordinary
       // stage advancement is byte-for-byte unchanged.
       const lifecycleStage = onboardingStageForSync(updated, spawn)
+      // Also after the committed tick: a sync that throws is logged, never a 500.
       if (lifecycleStage && updated) {
-        await this.setClientLifecycleStage(updated.onboardingForClientId, lifecycleStage)
+        try {
+          await this.setClientLifecycleStage(updated.onboardingForClientId, lifecycleStage)
+        } catch (error) {
+          console.error(
+            `[stage-advance] lifecycle sync FAILED ${updated.id} client ${updated.onboardingForClientId}: ${error?.message || error}`,
+          )
+        }
       }
       return {
         checklist: updated,

@@ -15224,7 +15224,7 @@ const server = createServer(async (request, response) => {
       // second tick retries); an all-done stage that should have advanced but
       // had nothing to advance to is `spawnReason`. Both leave an Activity row.
       const stageAdvanceFailed = toggleResult.spawnError || null
-      const SHOULD_HAVE_ADVANCED = ['template_not_found', 'no_stages', 'next_stage_empty']
+      const SHOULD_HAVE_ADVANCED = ['no_template', 'template_not_found', 'no_stages', 'next_stage_empty']
       if (stageAdvanceFailed || SHOULD_HAVE_ADVANCED.includes(toggleResult.spawnReason)) {
         const fromIdx = (updatedChecklist.stageIndex ?? 0) + 1
         const caseId = updatedChecklist.caseId || updatedChecklist.id
