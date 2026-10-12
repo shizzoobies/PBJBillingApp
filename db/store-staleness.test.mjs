@@ -45739,6 +45739,17 @@ describe('engagement letters (file backend)', () => {
     expect((await store.getEngagementLetter('default')).name).toBe('1099 letter')
   })
 
+  // That name reads as "not named yet" on the v1 letter, so it could never stick.
+  it('refuses to rename the v1 letter to "Engagement letter" in any case, and lets another letter take it', async () => {
+    await seedLegacyLetter({ name: '1099 Filing' })
+    for (const name of ['Engagement letter', '  engagement LETTER ']) {
+      expect(await store.renameEngagementLetter('default', name)).toBeNull()
+    }
+    expect((await readAuth()).engagementLetters[0].name).toBe('1099 Filing')
+    const other = await store.createEngagementLetter({ name: 'Other' })
+    expect((await store.renameEngagementLetter(other.id, 'Engagement letter')).name).toBe('Engagement letter')
+  })
+
   it('names a v1 letter with a blank subject "Letter 1"', async () => {
     await seedLegacyLetter({ subject: '' })
     expect((await store.getEngagementLetter('default')).name).toBe('Letter 1')
@@ -46155,6 +46166,11 @@ describe('engagement letters (Postgres statements)', () => {
     expect(renamed).toMatchObject({ id: 'default', name: '1099 letter', subject: '1099 Filing' })
     expect(fake.matching(/^update engagement_letters set name = \$2 where id = \$1/i)[0].params).toEqual(['default', '1099 letter'])
     expect(await store2.renameEngagementLetter('letter-gone', 'x')).toBeNull()
+    // The column-default name is refused for the v1 letter without a statement.
+    const updates = fake.matching(/^update engagement_letters set name/i).length
+    expect(await store2.renameEngagementLetter('default', ' ENGAGEMENT letter ')).toBeNull()
+    expect(fake.matching(/^update engagement_letters set name/i)).toHaveLength(updates)
+    expect(fake.letters[0].name).toBe('1099 letter')
   })
 
   it('a save of the still-unnamed v1 letter writes down the name it was listed under, from the OLD subject', async () => {

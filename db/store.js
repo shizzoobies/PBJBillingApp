@@ -1475,6 +1475,14 @@ function engagementLetterName(id, name, subject) {
   return stored || LEGACY_ENGAGEMENT_LETTER_NAME
 }
 
+/**
+ * True for the one name the v1 letter cannot take: the column default, which
+ * `engagementLetterName` reads as "not named yet" (trimmed, any case).
+ */
+export function isReservedEngagementLetterName(id, name) {
+  return id === 'default' && String(name ?? '').trim().toLowerCase() === LEGACY_ENGAGEMENT_LETTER_NAME.toLowerCase()
+}
+
 /** A letter row from the file backend, in the shape the Postgres mapper answers. */
 function fileEngagementLetter(row) {
   return {
@@ -25728,6 +25736,9 @@ export class AppDataStore {
   async renameEngagementLetter(id, name) {
     const clean = String(name ?? '').trim().slice(0, ENGAGEMENT_LETTER_NAME_MAX)
     if (!clean) return null
+    // The v1 letter carrying the column default reads as unnamed (`engagementLetterName`),
+    // so that name could never stick to it: refused, nothing written (the route says why).
+    if (isReservedEngagementLetterName(id, clean)) return null
     if (this.pool) {
       const result = await this.pool.query(
         `update engagement_letters set name = $2 where id = $1 returning ${ENGAGEMENT_LETTER_COLUMNS}`,

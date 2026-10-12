@@ -968,7 +968,7 @@ export function LettersPage() {
                       <button
                         type="button"
                         className="ghost-action"
-                        disabled={sending}
+                        disabled={sending || dirty}
                         onClick={() => void sendAnyway(result.clientId)}
                       >
                         Send again anyway
@@ -980,7 +980,7 @@ export function LettersPage() {
                       <button
                         type="button"
                         className="ghost-action"
-                        disabled={sending}
+                        disabled={sending || dirty}
                         onClick={() => void sendAnyway(result.clientId, 'unfinished')}
                       >
                         Send again anyway

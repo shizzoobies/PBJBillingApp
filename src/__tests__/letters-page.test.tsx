@@ -695,6 +695,42 @@ describe('sending', () => {
     await screen.findByText(/Sent to pat@acme.test/)
   })
 
+  // A resend uses the SAVED letter, so unsaved text in the boxes must not look like what goes out.
+  it('turns "Send again anyway" off while the editor holds unsaved text', async () => {
+    api.sendLettersRequest = vi.fn(async () => ({
+      results: [
+        {
+          clientId: 'c-acme',
+          clientName: 'Acme Books',
+          status: 'skipped' as const,
+          code: 'already_sent' as const,
+          message: 'Acme Books was already sent this letter today. Use Send again to send it a second time.',
+        },
+        {
+          clientId: 'c-sub',
+          clientName: 'KLC North',
+          status: 'skipped' as const,
+          code: 'unfinished' as const,
+          message: 'A send to KLC North started at Oct 8, 2:05 PM and never finished - check with them, then use Send again anyway.',
+        },
+      ],
+      sent: 0,
+      failed: 0,
+      skipped: 2,
+    }))
+    mockConfirm(true)
+    await renderPage()
+    fireEvent.click(screen.getByLabelText('Select Acme Books'))
+    fireEvent.click(screen.getByLabelText('Select KLC North'))
+    fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 2 clients' }))
+    await screen.findByText(/Already sent today\./)
+    const again = () => screen.getAllByRole('button', { name: 'Send again anyway' })
+    expect(again()).toHaveLength(2)
+    for (const button of again()) expect(button).toBeEnabled()
+    fireEvent.change(screen.getByLabelText('Letter body'), { target: { value: 'changed' } })
+    for (const button of again()) expect(button).toBeDisabled()
+  })
+
   it('shows the server\'s sentence for a failure and offers to send again to the ones that failed', async () => {
     let first = true
     api.sendLettersRequest = vi.fn(async (_id: string, input: { clientIds: string[] }) => {

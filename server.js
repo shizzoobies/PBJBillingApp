@@ -35,6 +35,7 @@ import {
   WaitRefusedError,
   WorkspaceBusyError,
   WorkspaceChangedError,
+  isReservedEngagementLetterName,
 } from './db/store.js'
 import {
   allocateGroupMinutes,
@@ -11697,6 +11698,16 @@ const server = createServer(async (request, response) => {
     // /api/letters/:id - one letter: GET reads it, PUT saves its three boxes, PATCH
     // renames it, DELETE removes it when it was never sent. The v1 letter's id
     // ('default') is one of these ids like any other.
+    // The one-letter page's paths (before the list of letters). A tab still showing that page
+    // after a deploy is told to reload: "template" or "send" is never read as a letter id.
+    const legacyLetterMatch = normalizedPath.match(/^\/api\/letters\/(template|preview|preview\.pdf|sends|send)$/)
+    if (legacyLetterMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      sendJson(response, 404, { error: 'app_updated', message: 'The app was updated - reload the page.' })
+      return
+    }
+
     const letterMatch = normalizedPath.match(/^\/api\/letters\/([A-Za-z0-9_-]+)$/)
 
     // GET /api/letters/:id - the saved letter, its hash, the placeholders and the sender.
@@ -11798,6 +11809,12 @@ const server = createServer(async (request, response) => {
       const name = cleanLetterName(payload?.name)
       if (!name) {
         sendJson(response, 400, { error: 'letter_invalid', message: 'Give the letter a name of up to 80 characters.' })
+        return
+      }
+      // The original letter reads its column-default name as "not named yet", so that name
+      // would never stick to it (it would show the subject again).
+      if (isReservedEngagementLetterName(letterMatch[1], name)) {
+        sendJson(response, 400, { error: 'letter_invalid', message: 'Pick another name for this letter.' })
         return
       }
       const existing = await appDataStore.listEngagementLetters()

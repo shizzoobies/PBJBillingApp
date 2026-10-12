@@ -213,14 +213,38 @@ describe('the letter routes are owner-only, same-origin and above the catch-all'
   })
 
   it('every per-letter read answers 404 letter_not_found for a letter that is gone', () => {
-    for (const pattern of [
-      /letterMatch && request\.method === 'GET'/,
-      /letterPreviewMatch && request\.method === 'GET'/,
-      /letterPreviewPdfMatch && request\.method === 'GET'/,
-      /letterSendMatch && request\.method === 'POST'/,
+    // Each route's own block, from its comment to the next route's, so the pin cannot be
+    // satisfied by a neighbor.
+    for (const [start, end] of [
+      ['// GET /api/letters/:id - the saved letter', '// PUT /api/letters/:id'],
+      ['// GET /api/letters/:id/preview?clientId=', '// GET /api/letters/:id/preview.pdf'],
+      ['// GET /api/letters/:id/preview.pdf', '// GET /api/letters/:id/sends'],
+      ['// POST /api/letters/:id/send', '// ---- Proposal questionnaires (owner)'],
     ]) {
-      expect(routeBlock(pattern, 3200)).toContain("error: 'letter_not_found'")
+      expect(between(start, end), start).toContain("error: 'letter_not_found'")
     }
+  })
+
+  it('refuses to rename the original letter to its column-default name, before the store is asked', () => {
+    const rename = between('// PATCH /api/letters/:id', '// DELETE /api/letters/:id')
+    expect(rename).toContain('if (isReservedEngagementLetterName(letterMatch[1], name)) {')
+    expect(rename).toContain("sendJson(response, 400, { error: 'letter_invalid', message: 'Pick another name for this letter.' })")
+    expect(rename.indexOf('isReservedEngagementLetterName(')).toBeLessThan(rename.indexOf('appDataStore.renameEngagementLetter('))
+  })
+
+  it('tells a tab still on the one-letter page to reload, for every old path and before any letter id is read', () => {
+    const legacy = between('// The one-letter page', 'const letterMatch = normalizedPath.match(')
+    expect(legacy).toContain(
+      'const legacyLetterMatch = normalizedPath.match(/^\\/api\\/letters\\/(template|preview|preview\\.pdf|sends|send)$/)',
+    )
+    expect(legacy).toContain('await requireSession(request, response)')
+    expect(legacy).toContain("sendJson(response, 404, { error: 'app_updated', message: 'The app was updated - reload the page.' })")
+    const pattern = /^\/api\/letters\/(template|preview|preview\.pdf|sends|send)$/
+    for (const old of ['template', 'preview', 'preview.pdf', 'sends', 'send']) {
+      expect(pattern.test(`/api/letters/${old}`), old).toBe(true)
+    }
+    expect(pattern.test('/api/letters/default')).toBe(false)
+    expect(pattern.test('/api/letters/letter-ab12cd34')).toBe(false)
   })
 })
 
