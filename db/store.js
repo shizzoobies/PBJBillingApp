@@ -2941,14 +2941,17 @@ const MAX_PROPOSAL_MESSAGES = 200
  * moves a price the prospect already saw.
  */
 function proposalSnapshot(pricing, inputs, selections, at, rates = pricing.rates, softwareLocks = null) {
-  const { lines, totals } = priceProposal({
+  const { lines, totals, hoursByRole } = priceProposal({
     catalog: pricing,
     rates,
     inputs,
     selections,
     softwareLocks,
   })
-  return { rates: { ...rates }, lines, totals, catalogAt: at }
+  // `hoursByRole` (engagements, 2026-10): estimated monthly hours per role, beside the
+  // money totals. A snapshot stored before it has none; read it through
+  // `snapshotHoursByRole` (lib/proposal-pricing.js), which never throws.
+  return { rates: { ...rates }, lines, totals, hoursByRole, catalogAt: at }
 }
 
 /**
