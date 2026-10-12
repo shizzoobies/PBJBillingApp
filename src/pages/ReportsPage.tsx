@@ -3,6 +3,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
+import { groupHoursByTask } from '../lib/hoursByTask'
 import {
   billRateAt,
   costRateFor,
@@ -298,30 +299,9 @@ export function ReportsPage() {
     })
     .sort((left, right) => right.minutes - left.minutes)
 
-  // Hours by task: sum minutes grouped by the linked checklist. Entries with
-  // no task fall under a synthetic "Unassigned" bucket (taskId === null).
-  const taskTotals = new Map<string, TaskReportRow>()
-  for (const entry of billingPeriodEntries) {
-    const taskId = entry.taskId ?? null
-    const key = taskId ?? '__unassigned__'
-    const taskTitle = taskId
-      ? data.checklists.find((checklist: Checklist) => checklist.id === taskId)?.title ??
-        'Unassigned'
-      : 'Unassigned'
-    const existing = taskTotals.get(key) ?? {
-      taskId,
-      taskTitle,
-      minutes: 0,
-      entryCount: 0,
-    }
-    existing.minutes += entry.minutes
-    existing.entryCount += 1
-    taskTotals.set(key, existing)
-  }
-
-  const taskReportRows: TaskReportRow[] = [...taskTotals.values()].sort(
-    (left, right) => right.minutes - left.minutes,
-  )
+  // Hours by task: by checklist, else by the typed task name (case-insensitive),
+  // else a synthetic "Unassigned" row — see groupHoursByTask.
+  const taskReportRows: TaskReportRow[] = groupHoursByTask(billingPeriodEntries, data.checklists)
 
   return (
     <section className="content-grid reports-layout" id="reports">
@@ -1493,7 +1473,7 @@ function ReportsOverview({
               const width =
                 ownerLoggedMinutes === 0 ? 0 : (row.minutes / ownerLoggedMinutes) * 100
               return (
-                <div className="category-row" key={row.taskId ?? '__unassigned__'}>
+                <div className="category-row" key={row.key}>
                   <div className="category-row-header">
                     <strong>{row.taskTitle}</strong>
                     <span>

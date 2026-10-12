@@ -2266,7 +2266,12 @@ export type ClientReportRow = {
 }
 
 export type TaskReportRow = {
-  /** Linked checklist id, or `null` for entries with no task ("Unassigned"). */
+  /**
+   * Unique per row: `task:<checklist id>`, `label:<typed task, lowercased>` or
+   * `__unassigned__` (see `groupHoursByTask` in `./hoursByTask`).
+   */
+  key: string
+  /** Linked checklist id, or `null` for a typed task or no task ("Unassigned"). */
   taskId: string | null
   taskTitle: string
   minutes: number
