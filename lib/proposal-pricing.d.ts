@@ -102,6 +102,17 @@ export type PricedLine = {
   computedAmount: number
   formula: string
   flag: 'unknown-input' | 'needs-count' | 'invalid-input' | 'no-rate' | 'retired' | null
+  /**
+   * Who does the work: the catalog row's role for the formula, payroll and sales-tax
+   * kinds; null for flat and software lines. Absent on a snapshot priced before 2026-10.
+   */
+  role?: ProposalRole | null
+  /**
+   * Hours a month: count x factor x multiplier (formula); factor x employees x runs +
+   * the taxes half hour (payroll); null for sales-tax, flat and software lines. Absent
+   * on a snapshot priced before 2026-10.
+   */
+  hours?: number | null
   /** Software lines only: the figures the line was priced with (kept on a sent proposal). */
   basePrice?: number | null
   unitPrice?: number
@@ -117,6 +128,13 @@ export type ProposalTotals = {
   /** Software at cost - never part of `monthly`. Absent on a snapshot older than the section. */
   software?: number
 }
+
+/**
+ * Estimated monthly hours per role, summed over the monthly groups' lines. It sits
+ * beside `totals` (which stays money only) on priceProposal's result and on a stored
+ * snapshot; read a stored one through `snapshotHoursByRole` (absent = zeros).
+ */
+export type HoursByRole = Record<ProposalRole, number>
 
 /** The figures a sent proposal's software line is held to, by service id. */
 export type SoftwareLocks = Record<
@@ -150,7 +168,17 @@ export declare function priceProposal(args: {
   inputs: Record<string, number> | null | undefined
   selections: readonly ProposalSelection[] | null | undefined
   softwareLocks?: SoftwareLocks | null
-}): { lines: PricedLine[]; totals: ProposalTotals }
+}): { lines: PricedLine[]; totals: ProposalTotals; hoursByRole: HoursByRole }
+
+/** The monthly lines' hours summed per role (two decimals; all three roles). */
+export declare function hoursByRoleOf(lines: readonly Partial<PricedLine>[] | null | undefined): HoursByRole
+/** A stored snapshot's hours by role: its own, else summed from its lines, else zeros. Never throws. */
+export declare function snapshotHoursByRole(
+  snapshot:
+    | { hoursByRole?: Partial<HoursByRole> | null; totals?: object | null; lines?: readonly Partial<PricedLine>[] | null }
+    | null
+    | undefined,
+): HoursByRole
 
 /** The software figures a priced snapshot's lines carry, by service id (`softwareLocks`). */
 export declare function softwareLocksOf(lines: readonly Partial<PricedLine>[] | null | undefined): SoftwareLocks
