@@ -1,5 +1,6 @@
 import type { RateHistoryEntry } from '../../lib/rate-history.js'
 import type {
+  HoursByRole,
   PricedLine,
   ProposalPricing,
   ProposalProspect,
@@ -14,6 +15,7 @@ import type {
  * rate-history types below.
  */
 export type {
+  HoursByRole,
   PayrollRun,
   PricedLine,
   ProposalCadence,
@@ -380,6 +382,8 @@ export type ProposalSnapshot = {
   rates: ProposalRates
   lines: PricedLine[]
   totals: ProposalTotals
+  /** Estimated monthly hours per role (engagements, 2026-10). Absent on an older snapshot. */
+  hoursByRole?: HoursByRole
   catalogAt: string
 }
 

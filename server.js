@@ -11,6 +11,7 @@ import {
   ClientHasHistoryError,
   coerceEntryMinutes,
   CoverageConfirmationError,
+  EngagementStateError,
   EntryTagError,
   InvoiceAiReviewError,
   InvoiceChangedError,
@@ -134,6 +135,13 @@ import {
 } from './lib/proposal-questionnaire-page.js'
 import { applyProposalPatch } from './lib/proposal-pricing.js'
 import { proposalOutcomeWords } from './lib/proposal-outcomes.js'
+import {
+  assembleEngagementPreview,
+  engagementHash,
+  engagementWarnings,
+  sendEngagement,
+} from './lib/engagement-send.js'
+import { placeholdersFor } from './lib/letter-template.js'
 import {
   cardProcessingFeeLine,
   invoiceAsPaidByCredit,
@@ -1933,6 +1941,60 @@ async function recordProposalDelivery(request, proposalId, deliveryEvent, resend
   return true
 }
 
+/**
+ * A Resend delivery event about an ENGAGEMENT letter (docs/plans/engagements-2026-10.md):
+ * appended to that engagement's email log - idempotently, in the store - and, on a
+ * bounce or a spam complaint, told to every owner once. Mirrors
+ * `recordProposalDelivery`. It NEVER touches the engagement's status: a bounce does
+ * not un-send a letter.
+ *
+ * The owner notice is the ordinary `invoice_email_bounced` event (the "Invoice
+ * alerts" switch governs it) and carries no document - only the party's name and a
+ * link - so the rule that the letter goes to the client and nowhere else holds.
+ *
+ * @returns {Promise<boolean>} whether the engagement was found
+ */
+async function recordEngagementDelivery(request, engagementId, deliveryEvent, resendEvent) {
+  const eventData = resendEvent?.data ?? {}
+  const providerId = typeof eventData.email_id === 'string' ? eventData.email_id : null
+  const engagement = await appDataStore.getEngagement(engagementId)
+  if (!engagement) {
+    console.warn('[resend] event for an unknown engagement', resendEvent?.type, engagementId, providerId)
+    return false
+  }
+  const detail =
+    deliveryEvent === 'bounced' || deliveryEvent === 'complained'
+      ? String(eventData.bounce?.message ?? eventData.bounce?.type ?? '')
+      : ''
+  const alreadyLogged = engagement.emailLog.some(
+    (entry) =>
+      entry?.kind === 'delivery' &&
+      entry?.event === deliveryEvent &&
+      (entry?.providerId ?? null) === providerId,
+  )
+  await appDataStore.appendEngagementEmailEvent(engagement.id, {
+    kind: 'delivery',
+    event: deliveryEvent,
+    at: resendEvent?.created_at ?? null,
+    providerId,
+    to: Array.isArray(eventData.to) ? eventData.to : [eventData.to].filter(Boolean),
+    detail,
+  })
+  if (!alreadyLogged && (deliveryEvent === 'bounced' || deliveryEvent === 'complained')) {
+    const what = deliveryEvent === 'bounced' ? 'bounced' : 'was marked as spam'
+    const who = engagement.party?.company || engagement.party?.contactName || 'a client'
+    const members = await appDataStore.getTeamMembers()
+    for (const owner of members.filter((member) => member.role === 'owner')) {
+      await notify(appDataStore, owner.id, 'invoice_email_bounced', {
+        message: `The engagement letter to ${who} ${what}${detail ? `: ${detail}` : ''}`,
+        subject: `Engagement letter email problem: ${who}`,
+        link: `/engagements/${engagement.id}`,
+        appPublicUrl: getPublicAppUrl(request),
+      })
+    }
+  }
+  return true
+}
 // ---- Proposal questionnaires (featreq-8f139178) ----------------------------
 // lib/proposal-questionnaire.js. The intake that comes before a proposal; see
 // the owner routes below ("Proposal questionnaires (owner)").
@@ -2609,6 +2671,75 @@ async function loadLetterContext(session, letterId) {
   }
 }
 // ---- end of the engagement letter helpers ----------------------------------
+
+// ---- Engagements: helpers (docs/plans/engagements-2026-10.md, stage 2B) -----
+// An engagement is one letter to one party with a signed state, drafted from a Won
+// proposal. The preview and the send live in lib/engagement-send.js, which takes the
+// store and the mail sender as arguments so each rule is tested by running it. The
+// Letters rules bind: owner-only, the letter goes to the party and nowhere else,
+// replies go to the invoice mailbox (Brittany's), never to a team member's address.
+
+const engagementPause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** A single address typed at Send: the same shape check the proposal send uses. */
+function isOneEmailAddress(value) {
+  return typeof value === 'string' && value.trim().length <= 320 && /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(value.trim())
+}
+
+/**
+ * Everything an engagement preview or send reads once: the workspace (the linked
+ * client and its contacts), the firm, who is sending, and the addresses of the app's
+ * user accounts. The team read FAILS CLOSED: if it cannot be made, nothing is
+ * previewed or sent.
+ */
+async function loadEngagementContext(session) {
+  const [data, firmSettings, members] = await Promise.all([
+    appDataStore.read(),
+    appDataStore.getFirmSettings().catch(() => null),
+    appDataStore.getTeamMembers(),
+  ])
+  return {
+    data,
+    firmSettings,
+    senderName: session.user.name ?? '',
+    now: new Date(),
+    teamEmails: new Set(
+      members.map((member) => String(member.email ?? '').trim().toLowerCase()).filter(Boolean),
+    ),
+    replyTo: letterSender(firmSettings).replyTo,
+  }
+}
+
+/** One engagement as the editor reads it: the row, its placeholders, warnings, hash and sender. */
+async function engagementView(engagement) {
+  const firmSettings = await appDataStore.getFirmSettings().catch(() => null)
+  return {
+    engagement,
+    placeholders: placeholdersFor('engagement'),
+    warnings: engagementWarnings(engagement),
+    hash: engagementHash(engagement),
+    sender: letterSender(firmSettings),
+  }
+}
+
+/**
+ * Answer a store refusal: a value it cannot take is 400 `engagement_invalid`, a
+ * write the engagement's status refuses is 409 `engagement_refused`. Anything else
+ * is not a refusal and is rethrown (a 500).
+ */
+function sendEngagementRefusal(response, error) {
+  if (!(error instanceof EngagementStateError)) throw error
+  if (error.reason === 'invalid') {
+    sendJson(response, 400, { error: 'engagement_invalid', message: error.message })
+    return
+  }
+  sendJson(response, 409, { error: 'engagement_refused', reason: error.reason, message: error.message })
+}
+
+/** "Acme Books · eng-1a2b3c4d", for the activity log. */
+const engagementActivityTarget = (engagement) =>
+  `${engagement.party?.company || engagement.party?.contactName || 'Engagement'} · ${engagement.id}`
+// ---- end of the engagement helpers -------------------------------------------
 
 /**
  * The page a client reaches from "Turn off automatic payments". A GET only
@@ -6441,6 +6572,13 @@ const server = createServer(async (request, response) => {
             deliveryEvent,
             resendEvent,
           )
+          sendJson(response, 200, { received: true, matched })
+          return
+        }
+        // An engagement letter carries an engagement_id tag: its events go on the
+        // engagement's own log (never its status), and nowhere near an invoice.
+        if (typeof tagBag.engagement_id === 'string' && tagBag.engagement_id) {
+          const matched = await recordEngagementDelivery(request, tagBag.engagement_id, deliveryEvent, resendEvent)
           sendJson(response, 200, { received: true, matched })
           return
         }
@@ -11634,6 +11772,404 @@ const server = createServer(async (request, response) => {
       sendJson(response, 200, applied)
       return
     }
+
+    // ---- Engagements (docs/plans/engagements-2026-10.md, stage 2B) ------------
+    //
+    // Endpoint-managed like the letters below: never in `PUT /api/app-data`, so
+    // outside the bulk save and the workspace fingerprint. Owner-only, same-origin
+    // and JSON on every write. An engagement letter goes to its party and nowhere
+    // else (the Letters rule, Alex 2026-10-08): no owner copy of the document.
+
+    // GET /api/engagement-sections - the section library (seeded on the first read).
+    if (normalizedPath === '/api/engagement-sections' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see engagement sections' })
+        return
+      }
+      sendJson(response, 200, { sections: await appDataStore.listEngagementSections() }, { 'Cache-Control': 'no-store' })
+      return
+    }
+
+    // PUT /api/engagement-sections - { sections }: the whole library as edited. A
+    // section left out is deactivated, never deleted.
+    if (normalizedPath === '/api/engagement-sections' && request.method === 'PUT') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can edit engagement sections' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      if (!Array.isArray(payload?.sections)) {
+        sendJson(response, 400, { error: 'sections_invalid', message: 'Send the sections as a list.' })
+        return
+      }
+      let sections
+      try {
+        sections = await appDataStore.saveEngagementSections(payload.sections, { updatedBy: session.user.id })
+      } catch (error) {
+        if (error instanceof EngagementStateError) {
+          sendJson(response, 400, { error: 'sections_invalid', message: error.message })
+          return
+        }
+        throw error
+      }
+      try {
+        await appDataStore.recordActivity(session.user.id, 'engagement_sections_saved', `${sections.length} sections`)
+      } catch (error) {
+        console.error('[engagements] could not record the library save:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { sections })
+      return
+    }
+
+    // GET /api/engagements?clientId=&proposalId=&status= - the list (no bodies).
+    if (normalizedPath === '/api/engagements' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see engagements' })
+        return
+      }
+      const engagements = await appDataStore.listEngagements({
+        clientId: requestUrl.searchParams.get('clientId') || null,
+        proposalId: requestUrl.searchParams.get('proposalId') || null,
+        status: requestUrl.searchParams.get('status') || null,
+      })
+      sendJson(response, 200, { engagements }, { 'Cache-Control': 'no-store' })
+      return
+    }
+
+    // GET /api/engagements/:id - the engagement whole, its placeholders, warnings, hash and sender.
+    const engagementMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)$/)
+    if (engagementMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see engagements' })
+        return
+      }
+      const engagement = await appDataStore.getEngagement(engagementMatch[1])
+      if (!engagement) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      sendJson(response, 200, await engagementView(engagement), { 'Cache-Control': 'no-store' })
+      return
+    }
+
+    // PATCH /api/engagements/:id - { subject?, emailBody?, letterBody?, retainerAmount?,
+    // packageId?, planIds?, party? } on a draft or sent engagement.
+    if (engagementMatch && request.method === 'PATCH') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can edit engagements' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = (await readJsonBody(request)) ?? {}
+      const patch = {}
+      for (const key of ['subject', 'emailBody', 'letterBody', 'retainerAmount', 'packageId', 'planIds', 'party']) {
+        if (payload[key] !== undefined) patch[key] = payload[key]
+      }
+      let updated
+      try {
+        updated = await appDataStore.updateEngagement(engagementMatch[1], patch)
+      } catch (error) {
+        sendEngagementRefusal(response, error)
+        return
+      }
+      if (!updated) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, await engagementView(updated))
+      return
+    }
+
+    // POST /api/engagements/:id/reassemble - a draft's text rebuilt from its proposal
+    // figures and the current library (her edits are replaced; the page confirms first).
+    const engagementReassembleMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/reassemble$/)
+    if (engagementReassembleMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can edit engagements' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      let rebuilt
+      try {
+        rebuilt = await appDataStore.reassembleEngagement(engagementReassembleMatch[1], {})
+      } catch (error) {
+        sendEngagementRefusal(response, error)
+        return
+      }
+      if (!rebuilt) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, await engagementView(rebuilt))
+      return
+    }
+
+    // GET /api/engagements/:id/preview[?to=] - what the party would receive, from the
+    // STORED engagement and the same builder as Send. Read-only, uncached.
+    // GET /api/engagements/:id/preview.pdf[?to=] - the PDF Send would attach, inline.
+    const engagementPreviewMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/preview(\.pdf)?$/)
+    if (engagementPreviewMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can preview an engagement' })
+        return
+      }
+      const typedTo = requestUrl.searchParams.get('to') || ''
+      if (typedTo && !isOneEmailAddress(typedTo)) {
+        sendJson(response, 400, { error: 'engagement_invalid', message: 'Type one email address to send to.' })
+        return
+      }
+      const engagement = await appDataStore.getEngagement(engagementPreviewMatch[1])
+      if (!engagement) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      const preview = await assembleEngagementPreview(await loadEngagementContext(session), engagement, {
+        to: typedTo || undefined,
+      })
+      if (engagementPreviewMatch[2]) {
+        if (!preview.docs.pdf) {
+          sendJson(response, 502, {
+            error: 'pdf_failed',
+            message: 'The PDF could not be built, so Send would not send it.',
+          })
+          return
+        }
+        response.writeHead(200, {
+          'Content-Type': 'application/pdf',
+          'Content-Disposition': `inline; filename="${preview.docs.pdfFilename}"`,
+          'Cache-Control': 'no-store',
+        })
+        response.end(preview.docs.pdf)
+        return
+      }
+      sendJson(
+        response,
+        200,
+        {
+          subject: preview.docs.email.subject,
+          html: preview.docs.email.html,
+          text: preview.docs.email.text,
+          to: preview.to,
+          recipientNote: preview.recipientNote,
+          missing: preview.missing,
+          missingNote: preview.missingNote,
+          unknown: preview.unknown,
+          retired: preview.retired,
+          pdfAvailable: Boolean(preview.docs.pdf),
+          pdfFilename: preview.docs.pdfFilename,
+          refusal: preview.refusal,
+        },
+        { 'Cache-Control': 'no-store' },
+      )
+      return
+    }
+
+    // POST /api/engagements/:id/send - { templateHash, to? }. Every refusal is decided
+    // in lib/engagement-send.js before the provider is called; then one send to the
+    // party (or the one address typed), logged on the engagement.
+    const engagementSendMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/send$/)
+    if (engagementSendMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can send engagements' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = (await readJsonBody(request)) ?? {}
+      if (
+        typeof payload.templateHash !== 'string' ||
+        (payload.to !== undefined && payload.to !== null && payload.to !== '' && !isOneEmailAddress(payload.to))
+      ) {
+        sendJson(response, 400, {
+          error: 'engagement_invalid',
+          message: 'Send the page hash, and at most one email address to send to.',
+        })
+        return
+      }
+      const engagement = await appDataStore.getEngagement(engagementSendMatch[1])
+      if (!engagement) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      const result = await sendEngagement(
+        await loadEngagementContext(session),
+        engagement,
+        {
+          to: typeof payload.to === 'string' && payload.to.trim() ? payload.to.trim() : undefined,
+          templateHash: payload.templateHash,
+          userId: session.user.id,
+        },
+        {
+          store: appDataStore,
+          sendMail: sendInvoiceEmail,
+          pause: engagementPause,
+          configured: Boolean(
+            process.env.RESEND_API_KEY && (process.env.INVOICE_EMAIL_FROM || process.env.EMAIL_FROM),
+          ),
+        },
+      )
+      if (result.refused) {
+        const { status, ...body } = result.refused
+        sendJson(response, status, body)
+        return
+      }
+      if (result.ok) {
+        try {
+          await appDataStore.recordActivity(
+            session.user.id,
+            'engagement_sent',
+            `${engagementActivityTarget(engagement)} -> ${result.to.join(', ')}`,
+          )
+        } catch (error) {
+          console.error('[engagements] could not record the send:', error)
+        }
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { engagement: result.engagement, ok: result.ok, error: result.error })
+      return
+    }
+
+    // POST /api/engagements/:id/sign - { signedOn: 'YYYY-MM-DD', note?, allowUnsent? }.
+    // Stage 2: the signature only (stage 3 creates the client here).
+    const engagementSignMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/sign$/)
+    if (engagementSignMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can sign engagements' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = (await readJsonBody(request)) ?? {}
+      if (
+        typeof payload.signedOn !== 'string' ||
+        (payload.note !== undefined && payload.note !== null && typeof payload.note !== 'string') ||
+        String(payload.note ?? '').length > 2000
+      ) {
+        sendJson(response, 400, {
+          error: 'engagement_invalid',
+          message: 'Send the day it was signed, and a note of at most 2,000 characters.',
+        })
+        return
+      }
+      let signed
+      try {
+        signed = await appDataStore.signEngagement(engagementSignMatch[1], {
+          signedOn: payload.signedOn,
+          note: payload.note ?? '',
+          userId: session.user.id,
+          allowUnsent: payload.allowUnsent === true,
+        })
+      } catch (error) {
+        sendEngagementRefusal(response, error)
+        return
+      }
+      if (!signed) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      try {
+        await appDataStore.recordActivity(session.user.id, 'engagement_signed', engagementActivityTarget(signed))
+      } catch (error) {
+        console.error('[engagements] could not record the signature:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { engagement: signed })
+      return
+    }
+
+    // POST /api/engagements/:id/void - a draft or sent engagement, never deleted.
+    const engagementVoidMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/void$/)
+    if (engagementVoidMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can void engagements' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      let voided
+      try {
+        voided = await appDataStore.voidEngagement(engagementVoidMatch[1], { userId: session.user.id })
+      } catch (error) {
+        sendEngagementRefusal(response, error)
+        return
+      }
+      if (!voided) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      try {
+        await appDataStore.recordActivity(session.user.id, 'engagement_voided', engagementActivityTarget(voided))
+      } catch (error) {
+        console.error('[engagements] could not record the void:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { engagement: voided })
+      return
+    }
+    // ---- end of the engagement routes ---------------------------------------
 
     // ---- Engagement letters (featreq-5e195707) -----------------------------
     //

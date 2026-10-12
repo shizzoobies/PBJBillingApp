@@ -286,6 +286,15 @@ describe('accepting and declining', () => {
     expect(text).toContain('addSoftware: payload.addSoftware === true')
   })
 
+  // Engagements, stage 2: the store drafts the Won proposal's engagement and returns
+  // `engagementId` with the rest; the route answers the store's result as-is so the
+  // page can open the engagement.
+  it('answers the store result whole, engagementId included', () => {
+    const text = routeBlock(/proposalAcceptMatch && request\.method === 'POST'/, 3200)
+    expect(text).toContain('result = await appDataStore.acceptProposal(')
+    expect(text).toContain('sendJson(response, 200, result)')
+  })
+
   it('a refusal is a 409 with the sentence', () => {
     const text = accept()
     expect(text).toContain('error instanceof ProposalStateError || error instanceof PackageApplyError')
