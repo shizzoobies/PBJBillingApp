@@ -25,7 +25,29 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-12, 21:30Z - READ THIS FIRST):** `main` = `db58327` (+ this handoff), deployed, `/health` 200,
+**State right now (2026-10-12, 22:00Z - READ THIS FIRST):** `main` = `8c197b6` (+ this handoff), deployed, `/health` 200,
+voice re-provisioned, working tree clean, only the primary worktree exists, nothing is Planned in the tracker. **Session
+summary:** every stage of Brittany's 2026-10-10 workflow email is live (engagements: proposal -> Won/Closed-Lost ->
+Original/Amendment/Superseding letter -> client created at Mark as signed with plans/package/checklists/software/retainer
+draft + onboarding case); the Bright Tower/XAct stall was fixed by an approved re-tick and hardened; her five checklist
+submissions are all Shipped (details in the 21:30Z paragraph). **Last prod write (approved, 21:45Z):** the 17 bad
+recipe copies from the 10-10 package applies are OFF and 16 hand-made twins are stamped to the blueprints (snapshot +
+undo `docs/prod-snapshots/2026-10-12-recon-copies-cleanup.json`, committed as `8c197b6`); I-95 Signature now has no
+active reconciliation recipe (hers were already off) - Brittany was told on `featreq-2b067744`. **NEXT SESSION, in
+order:** (1) `node scripts/prod/tracker-list.mjs --all` - her send-backs come back as `sent`/`planned`, and anything new
+she files lands as `sent`, which the default listing HIDES; her Shipped column is her review queue (featreq-8b54d117,
+8bdc5ec5, 2b067744, 3e81b386, 69129d69, plus the engagements set). (2) Her four open needs_input questions:
+`featreq-dc992522` (Terms wording), `af5391e2` (starter lines), `e5ae8279` (amendments under a superseded engagement),
+`acdd0c84` (shared-blueprint cadence: Client Meeting weekly / Reconciliations with Review monthly under quarterly plans)
+- build when answered. (3) Backlogs, none urgent: `featreq-acb1b663` (30 engagement review leftovers; 6, 9, 24 need Alex
+for DDL), `featreq-05e1610d` items 1-9 (checklist leftovers incl. the Postgres double-spawn unique index), `featreq-9c29491a`
+(Letters). (4) Watch for the first real signing: production still had 0 engagements at 06:10Z; when Brittany accepts a
+proposal, read `[engagement]` log lines and the client's Billing tab. **Rules that bit this session:** manifest is
+204,864 / 205,000 bytes - TRIM FIRST on any feature commit; one vitest per worktree; the auto-mode classifier may refuse
+`git rebase main` in a lane - use `git merge main --no-edit` there (ship.sh accepts a merge tip); ship one lane at a time
+with `bash scripts/prod/ship.sh <hash>` from the primary tree, then `node scripts/prod/voice-provision.mjs`; every
+money/store change gets an independent review round before shipping - every round this session found a real defect.
+**Earlier (2026-10-12, 21:30Z):** `main` = `db58327` (+ this handoff), deployed, `/health` 200,
 voice re-provisioned after each of the five ships below. Since the 17:15Z paragraph: **`8dbbdb6`** built Brittany's two
 email answers (signing a prospect's engagement also opens the onboarding case at the Onboarding stage, Proposal stage
 recorded done; "Mark as signed" on the client card's Engagements list; "Start onboarding" on a client with no team assigns
@@ -47,7 +69,7 @@ onto a hand-made twin; Apply waits with "Saving..." while a bulk save is in flig
 recipe; a tab on an old bundle that omits the key keeps the stored column; explicit null clears). Her four tickets
 (`featreq-8b54d117`, `8bdc5ec5`, `2b067744`, `3e81b386`) are Shipped in her words; review leftovers from all four lanes
 are items 6-9 on `featreq-05e1610d` (NOT built). **DECISIONS:** lead days stay measured from Next due, NOT Step 1's date
-(a prod scan showed her quarterly recipes rely on it; gating on the step would move 40+ recipes). **OPEN FOR ALEX:** the
+(a prod scan showed her quarterly recipes rely on it; gating on the step would move 40+ recipes). **DONE 21:45Z (was open for Alex):** the
 10-10 package applies left 17 bad recipe copies on 9 clients (8 "Monthly Reconciliations" with empty months that never
 run; 9 monthly "Reconciliations with Review" copies due 10-30 beside her quarterly hand-made ones) - proposal: deactivate
 the 17, stamp the twins, decide I-95; needs his yes before 2026-10-30, snapshot + rolled-back trial first. **OPEN FOR
