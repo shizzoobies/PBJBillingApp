@@ -7575,6 +7575,26 @@ h2 {
   color: var(--muted);
 }
 
+/* "Link existing" on a Not set up row (featreq-2b067744). */
+.plan-checklist-link {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.plan-checklist-link .link-button {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+}
+
+.plan-checklist-link-select {
+  font-size: 12px;
+  max-width: 220px;
+}
+
 .recurring-edit-row {
   display: grid;
   gap: 10px;

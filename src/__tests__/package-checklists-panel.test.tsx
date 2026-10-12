@@ -28,6 +28,7 @@ vi.mock('../lib/api', () => ({
 let listPackagesRequest = vi.fn()
 let contextValue: AppContextValue
 let addChecklistTemplate = vi.fn()
+let updateChecklistTemplate = vi.fn()
 
 const plan = (id: string, name: string, templateIds: string[]): SubscriptionPlan => ({
   id,
@@ -78,21 +79,28 @@ const TEMPLATES = [
 const P = pkg('P', 'Quarterly Accounting', ['A', 'B', 'C', 'D'], ['T1', 'T2'])
 
 function renderPanel(planIds: string[], templates: ChecklistTemplate[] = TEMPLATES) {
-  const element = (ids: string[]) => {
+  const element = (ids: string[], checklistTemplates: ChecklistTemplate[] = templates) => {
     const client = { id: 'c1', name: 'Acme', planIds: ids } as Client
     const data = {
       plans: PLANS,
       clients: [client],
-      checklistTemplates: templates,
+      checklistTemplates,
     } as unknown as AppData
-    contextValue = { ownerMode: true, data, addChecklistTemplate } as unknown as AppContextValue
+    contextValue = {
+      ownerMode: true,
+      data,
+      addChecklistTemplate,
+      updateChecklistTemplate,
+    } as unknown as AppContextValue
     return <PlanChecklistsBody client={client} data={data} />
   }
   const view = render(element(planIds))
   // The same mounted panel, handed a different plan list - what "+ Add package"
   // does to the client page.
   const rerenderWith = (ids: string[]) => view.rerender(element(ids))
-  return { container: view.container, rerenderWith }
+  // The same panel after a workspace edit (a link) changed the templates.
+  const rerenderTemplates = (next: ChecklistTemplate[]) => view.rerender(element(planIds, next))
+  return { container: view.container, rerenderWith, rerenderTemplates }
 }
 
 /** Let the panel's one packages fetch settle and React apply the result. */
@@ -109,6 +117,7 @@ const groupHeadings = (container: HTMLElement) =>
 beforeEach(() => {
   listPackagesRequest = vi.fn(async () => [P])
   addChecklistTemplate = vi.fn()
+  updateChecklistTemplate = vi.fn()
 })
 
 afterEach(() => {
@@ -296,5 +305,91 @@ describe('Plan checklists grouped by package', () => {
       await Promise.resolve()
     })
     expect(groupHeadings(container)).toEqual(['Plan A', 'Plan B', 'Plan C', 'Plan D'])
+  })
+})
+
+/**
+ * "Link existing" (featreq-2b067744): her hand-made "Quarterly Reconciliations
+ * with Review" IS the blueprint "Reconciliations with Review". Linking stamps
+ * her checklist with the blueprint, the row flips to Set up, and Set up/Apply
+ * skip it from then on.
+ */
+describe('Link existing on a Not set up row', () => {
+  const REC = blueprint('T7', 'Reconciliations with Review')
+  const PLAIN = blueprint('T8', 'Monthly Reconciliations')
+  const hers = (id: string, title: string, over: Partial<ChecklistTemplate> = {}): ChecklistTemplate =>
+    ({
+      id,
+      title,
+      clientId: 'c1',
+      frequency: 'quarterly',
+      isStandard: false,
+      stages: [],
+      ...over,
+    }) as unknown as ChecklistTemplate
+
+  const linkTemplates = () => [
+    ...TEMPLATES,
+    REC,
+    PLAIN,
+    hers('h1', 'Quarterly Reconciliations with Review'),
+    hers('h2', 'Payroll odds and ends'),
+    // Never offered: another client's, and one already linked to a blueprint.
+    hers('x1', 'Quarterly Reconciliations with Review', { clientId: 'c2' }),
+    hers('x2', 'Annual Reconciliations with Review', { sourceTemplateId: 'T1' }),
+  ]
+
+  beforeEach(() => {
+    listPackagesRequest = vi.fn(async () => [pkg('P7', 'Quarterly Accounting', ['D'], ['T7', 'T8'])])
+  })
+
+  it('offers her same-name checklist, links it on a press, and the row flips to Set up', async () => {
+    const templates = linkTemplates()
+    const { container, rerenderTemplates } = renderPanel(['D'], templates)
+    await screen.findByText('Quarterly Accounting')
+
+    expect(screen.getAllByRole('button', { name: /^Link (?!the chosen).* as Reconciliations with Review$/ })).toHaveLength(1)
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Link Quarterly Reconciliations with Review as Reconciliations with Review',
+      }),
+    )
+    expect(updateChecklistTemplate).toHaveBeenCalledTimes(1)
+    const [linkedId, updater] = updateChecklistTemplate.mock.calls[0]
+    expect(linkedId).toBe('h1')
+    const linked = updater(templates.find((t) => t.id === 'h1'))
+    expect(linked).toMatchObject({ id: 'h1', title: 'Quarterly Reconciliations with Review', sourceTemplateId: 'T7' })
+
+    // The workspace now holds the stamped checklist: Set up, and nothing to clone for it.
+    rerenderTemplates(templates.map((t) => (t.id === 'h1' ? linked : t)))
+    const rows = Array.from(container.querySelectorAll('.plan-checklists-row'))
+    expect(within(rows[0] as HTMLElement).getByText('Set up')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /Set up package checklists \(1\)/ }))
+    expect(addChecklistTemplate).toHaveBeenCalledTimes(1)
+    expect(addChecklistTemplate.mock.calls[0][0]).toMatchObject({ sourceTemplateId: 'T8' })
+  })
+
+  it("lists only this client's unstamped checklists to choose from, and links the chosen one", async () => {
+    renderPanel(['D'], linkTemplates())
+    await screen.findByText('Quarterly Accounting')
+
+    const select = screen.getByRole('combobox', { name: 'Choose a checklist to link as Reconciliations with Review' })
+    const options = within(select).getAllByRole('option').map((option) => option.textContent)
+    // The suggested one has its own button; the others are in the list.
+    expect(options).toEqual(['Choose another…', 'Payroll odds and ends'])
+
+    fireEvent.change(select, { target: { value: 'h2' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Link the chosen checklist as Reconciliations with Review' }))
+    expect(updateChecklistTemplate).toHaveBeenCalledTimes(1)
+    expect(updateChecklistTemplate.mock.calls[0][0]).toBe('h2')
+  })
+
+  it('does not suggest "Monthly Reconciliations with Review" for "Monthly Reconciliations"', async () => {
+    renderPanel(['D'], [...linkTemplates(), hers('h3', 'Monthly Reconciliations with Review')])
+    await screen.findByText('Quarterly Accounting')
+
+    expect(screen.queryAllByRole('button', { name: /^Link (?!the chosen).* as Monthly Reconciliations$/ })).toEqual([])
+    const select = screen.getByRole('combobox', { name: 'Choose a checklist to link as Monthly Reconciliations' })
+    expect(within(select).getByRole('option', { name: 'Monthly Reconciliations with Review' })).toBeTruthy()
   })
 })

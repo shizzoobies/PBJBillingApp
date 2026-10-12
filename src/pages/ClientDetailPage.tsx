@@ -17,6 +17,7 @@ import { useAppContext } from '../AppContext'
 import { ChecklistCard, NewTaskForm } from './ChecklistsPage'
 import { SectionScopeContext } from '../components/sectionScope'
 import { AssignedTeamControl } from '../components/AssignedTeamControl'
+import { LinkExistingChecklist } from '../components/LinkExistingChecklist'
 import { AccountCreditPanel } from '../components/AccountCreditPanel'
 import { AutopayPanel } from '../components/AutopayPanel'
 import { BilledOnCard } from '../components/BilledOnCard'
@@ -2121,7 +2122,7 @@ function cloneTemplateForClient(
 }
 
 export function PlanChecklistsBody({ client, data }: { client: Client; data: AppData }) {
-  const { ownerMode, addChecklistTemplate } = useAppContext()
+  const { ownerMode, addChecklistTemplate, updateChecklistTemplate } = useAppContext()
   const [packages, setPackages] = useState<Package[]>([])
   const [loaded, setLoaded] = useState(false)
 
@@ -2293,6 +2294,19 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
                       </>
                     )}
                   </span>
+                  {isMissing ? (
+                    <LinkExistingChecklist
+                      blueprint={template}
+                      clientId={client.id}
+                      templates={data.checklistTemplates}
+                      onLink={(clientTemplateId) =>
+                        updateChecklistTemplate(clientTemplateId, (current) => ({
+                          ...current,
+                          sourceTemplateId: template.id,
+                        }))
+                      }
+                    />
+                  ) : null}
                 </li>
               )
             })}

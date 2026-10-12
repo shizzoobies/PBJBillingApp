@@ -11,6 +11,7 @@ import {
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
+import { LinkExistingChecklist } from '../components/LinkExistingChecklist'
 import {
   computeSetupIssues,
   groupSetupIssues,
@@ -24,7 +25,7 @@ import {
   restoreSetupIssueRequest,
 } from '../lib/api'
 import type { Package } from '../lib/types'
-import { getAssignedTeamIds } from '../lib/utils'
+import { getAssignedTeamIds, missingPlanTemplatesForClient, planTemplates } from '../lib/utils'
 
 const SEVERITY_LABEL: Record<SetupSeverity, string> = {
   high: 'Needs attention',
@@ -345,10 +346,26 @@ export function SetupChecklistPage() {
  * item disappears from the list the moment it's filled in.
  */
 function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => void }) {
-  const { data, updateClient, applyTemplateToClient } = useAppContext()
+  const { data, updateClient, applyTemplateToClient, updateChecklistTemplate } = useAppContext()
   const fix = issue.fix!
   const client =
     'clientId' in fix ? data.clients.find((c) => c.id === fix.clientId) : undefined
+  // The plan checklists this fix names, read LIVE so a Link made in the dialog
+  // shows at once and Set them up skips it (featreq-2b067744).
+  const fixBlueprints =
+    fix.kind === 'planChecklists'
+      ? planTemplates({ templateIds: fix.templateIds }, data.checklistTemplates)
+      : []
+  const stillMissingIds = new Set(
+    fix.kind === 'planChecklists'
+      ? missingPlanTemplatesForClient(
+          { templateIds: fix.templateIds },
+          data.checklistTemplates,
+          fix.clientId,
+          data.checklistTemplates,
+        ).map((template) => template.id)
+      : [],
+  )
 
   const [numberValue, setNumberValue] = useState(() => {
     if (fix.kind === 'clientNumber') {
@@ -404,7 +421,10 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
         // assigned staff can actually see the client.
         updateClient(fix.clientId, { assignedBookkeeperIds: teamIds })
       } else if (fix.kind === 'planChecklists') {
+        // Only what is STILL missing: a checklist linked in this dialog (Link
+        // existing) is already set up and must not be cloned next to hers.
         for (const templateId of fix.templateIds) {
+          if (!stillMissingIds.has(templateId)) continue
           await applyTemplateToClient(templateId, { clientId: fix.clientId })
         }
       }
@@ -475,8 +495,28 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
           <div className="field">
             <span>These plan checklists will be added to {client?.name ?? 'the client'}:</span>
             <ul className="setup-issue-items">
-              {(issue.items ?? []).map((item) => (
-                <li key={item}>{item}</li>
+              {fixBlueprints.map((blueprint) => (
+                <li key={blueprint.id}>
+                  {blueprint.title}
+                  {stillMissingIds.has(blueprint.id) ? (
+                    <>
+                      {' '}
+                      <LinkExistingChecklist
+                        blueprint={blueprint}
+                        clientId={fix.clientId}
+                        templates={data.checklistTemplates}
+                        onLink={(clientTemplateId) =>
+                          updateChecklistTemplate(clientTemplateId, (current) => ({
+                            ...current,
+                            sourceTemplateId: blueprint.id,
+                          }))
+                        }
+                      />
+                    </>
+                  ) : (
+                    <span className="muted-text"> Linked</span>
+                  )}
+                </li>
               ))}
             </ul>
           </div>
@@ -489,7 +529,9 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
             {busy
               ? 'Saving…'
               : fix.kind === 'planChecklists'
-                ? 'Set them up'
+                ? stillMissingIds.size > 0
+                  ? 'Set them up'
+                  : 'Done'
                 : 'Save'}
           </button>
           <button type="button" className="secondary-action" onClick={onClose}>

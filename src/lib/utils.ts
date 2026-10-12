@@ -750,6 +750,56 @@ export function missingPlanTemplatesForClient(
 }
 
 /**
+ * The client's own checklists that are not tied to any blueprint yet: on this
+ * client, not a blueprint, not stamped with a `sourceTemplateId`, and not an
+ * onboarding checklist (that one drives the client's lifecycle). What "Link
+ * existing" can attach to a blueprint (featreq-2b067744), sorted by title. Pure.
+ */
+export function unstampedClientChecklists(
+  clientId: string,
+  templates: readonly ChecklistTemplate[],
+): ChecklistTemplate[] {
+  return templates
+    .filter(
+      (template) =>
+        template.clientId === clientId &&
+        !template.isStandard &&
+        !template.sourceTemplateId &&
+        !template.onboardingForClientId,
+    )
+    .sort((a, b) => a.title.trim().localeCompare(b.title.trim(), undefined, { sensitivity: 'base' }))
+}
+
+/** A title as "Link existing" compares it: no leading cadence word, any case. */
+function linkTitleKey(title: string): string {
+  return title
+    .trim()
+    .replace(/^(weekly|monthly|quarterly|annually|annual)\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+/**
+ * The client's unstamped checklists SUGGESTED for linking to a blueprint: the
+ * same title once a leading Weekly/Monthly/Quarterly/Annual(ly) is dropped, so
+ * her "Quarterly Reconciliations with Review" is offered for the blueprint
+ * "Reconciliations with Review". Only a suggestion - the automatic "Set up"
+ * match (`clientHasPlanTemplate`) stays exact, because the loose rule would
+ * call "Monthly Transactions" a copy of "Weekly Transactions". Pure.
+ */
+export function linkCandidatesForPlanTemplate(
+  blueprint: ChecklistTemplate,
+  clientId: string,
+  templates: readonly ChecklistTemplate[],
+): ChecklistTemplate[] {
+  const want = linkTitleKey(blueprint.title)
+  return unstampedClientChecklists(clientId, templates).filter(
+    (template) => linkTitleKey(template.title) === want,
+  )
+}
+
+/**
  * Roll-up completion, recursing up to three levels (item → sub-item →
  * sub-sub-item). A node with children is `done` exactly when every child is
  * `done` (children are themselves evaluated by the same rule); a node with no

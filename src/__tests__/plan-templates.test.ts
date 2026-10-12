@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  linkCandidatesForPlanTemplate,
   missingPlanTemplatesForClient,
   planTemplates,
   templatePickerLabel,
+  unstampedClientChecklists,
 } from '../lib/utils'
 import type { ChecklistTemplate, SubscriptionPlan } from '../lib/types'
 
@@ -123,5 +125,62 @@ describe('templatePickerLabel', () => {
         makeTemplate({ id: 't2', title: 'Close', frequency: 'monthly', isStandard: true }),
       ),
     ).toBe('Close · Monthly (blueprint)')
+  })
+})
+
+/**
+ * "Link existing" (featreq-2b067744): Brittany's own checklists are titled
+ * "Quarterly Reconciliations with Review" while the blueprint is
+ * "Reconciliations with Review", so the strict title rule never matches. The
+ * candidate rule is looser (a leading cadence word is ignored) but only ever
+ * SUGGESTS - the automatic "Set up" match stays exact.
+ */
+describe('linkCandidatesForPlanTemplate', () => {
+  const blueprint = makeTemplate({ id: 'bp-rec', title: 'Reconciliations with Review', isStandard: true })
+  const hers = (id: string, title: string, over: Partial<ChecklistTemplate> = {}) =>
+    makeTemplate({ id, title, clientId: 'c1', ...over })
+
+  it('offers her checklist whose title matches after a leading cadence word', () => {
+    const quarterly = hers('t-q', 'Quarterly Reconciliations with Review')
+    const monthly = hers('t-m', '  monthly reconciliations WITH review ')
+    const annual = hers('t-a', 'Annually Reconciliations with Review')
+    const other = hers('t-x', 'Payroll run')
+    expect(linkCandidatesForPlanTemplate(blueprint, 'c1', [quarterly, monthly, annual, other]).map((t) => t.id)).toEqual([
+      't-a',
+      't-m',
+      't-q',
+    ])
+  })
+
+  it("never offers another client's checklist, a stamped one, a blueprint or an onboarding checklist", () => {
+    const templates = [
+      hers('t-other-client', 'Quarterly Reconciliations with Review', { clientId: 'c2' }),
+      hers('t-stamped', 'Quarterly Reconciliations with Review', { sourceTemplateId: 'bp-else' }),
+      hers('t-onboarding', 'Quarterly Reconciliations with Review', { onboardingForClientId: 'c1' }),
+      makeTemplate({ id: 't-blueprint', title: 'Quarterly Reconciliations with Review', isStandard: true }),
+    ]
+    expect(linkCandidatesForPlanTemplate(blueprint, 'c1', templates)).toEqual([])
+    expect(unstampedClientChecklists('c1', templates)).toEqual([])
+  })
+
+  it('does not offer "Monthly Reconciliations with Review" for "Monthly Reconciliations"', () => {
+    const plain = makeTemplate({ id: 'bp-plain', title: 'Monthly Reconciliations', isStandard: true })
+    const withReview = hers('t-m', 'Monthly Reconciliations with Review')
+    expect(linkCandidatesForPlanTemplate(plain, 'c1', [withReview])).toEqual([])
+    // ...but it is still in the "choose another" list of her unstamped checklists.
+    expect(unstampedClientChecklists('c1', [withReview]).map((t) => t.id)).toEqual(['t-m'])
+  })
+
+  it('leaves the automatic Set up match strict: a cadence-word variant is still Not set up', () => {
+    const weekly = makeTemplate({ id: 'bp-weekly', title: 'Weekly Transactions', isStandard: true })
+    const monthlyCopy = hers('t-mt', 'Monthly Transactions')
+    expect(
+      missingPlanTemplatesForClient({ templateIds: ['bp-weekly'] }, [weekly, monthlyCopy], 'c1', [weekly, monthlyCopy]),
+    ).toEqual([weekly])
+    // A LINKED checklist (stamped with the blueprint) counts as set up.
+    const linked = { ...monthlyCopy, sourceTemplateId: 'bp-weekly' }
+    expect(
+      missingPlanTemplatesForClient({ templateIds: ['bp-weekly'] }, [weekly, linked], 'c1', [weekly, linked]),
+    ).toEqual([])
   })
 })

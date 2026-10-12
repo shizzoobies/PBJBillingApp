@@ -117,3 +117,55 @@ describe('SetupChecklistPage plan checklist nudges', () => {
     expect(screen.getByText('Set up Accounting checklists for Acme')).toBeTruthy()
   })
 })
+
+/**
+ * "Link existing" in the To 100% fix dialog (featreq-2b067744): a Not set up
+ * checklist the client already has under her own title is linked instead of
+ * cloned, and Set them up then copies only what is still missing.
+ */
+describe('the plan checklists fix dialog offers Link existing', () => {
+  it('links her checklist, then sets up only the rest', async () => {
+    // One package nudge holding both checklists.
+    mockPackages.mockResolvedValue([{ ...PACKAGE, templateIds: ['t1', 't3'] }])
+    const updateChecklistTemplate = vi.fn()
+    const base = contextValue
+    const hers = {
+      ...template('h1', 'Monthly Close'),
+      clientId: 'client-1',
+      isStandard: false,
+    }
+    const withTemplates = (checklistTemplates: unknown[]) => {
+      contextValue = {
+        ...base,
+        data: { ...base.data, checklistTemplates },
+        updateChecklistTemplate,
+      } as unknown as AppContextValue
+    }
+    withTemplates([...base.data.checklistTemplates, hers])
+    const view = renderPage()
+    await act(async () => {})
+    openClients()
+    fireEvent.click(screen.getAllByRole('button', { name: 'Fix' })[0])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Link Monthly Close as Close' }))
+    expect(updateChecklistTemplate).toHaveBeenCalledTimes(1)
+    const [linkedId, updater] = updateChecklistTemplate.mock.calls[0]
+    expect(linkedId).toBe('h1')
+    const linked = updater(hers)
+    expect(linked.sourceTemplateId).toBe('t1')
+
+    // The workspace now holds the link: Close reads Linked; Set them up copies the rest.
+    withTemplates([...base.data.checklistTemplates, linked])
+    view.rerender(
+      <MemoryRouter>
+        <SetupChecklistPage />
+      </MemoryRouter>,
+    )
+    expect(screen.getByText('Linked')).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Set them up' }))
+    })
+    const apply = vi.mocked(contextValue.applyTemplateToClient)
+    expect(apply.mock.calls.map((call) => call[0])).toEqual(['t3'])
+  })
+})
