@@ -25,7 +25,33 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-11 - READ THIS FIRST):** `main` = `6a7707c` (+ this handoff), deployed,
+**State right now (2026-10-12, 02:10Z - READ THIS FIRST):** `main` = `2a48938` (+ this handoff), deployed, `/health`
+200, voice re-provisioned. **FIVE deploys on the night of 10-11, all reviewed first, Alex approved me running the
+deploys ("ship once green"):** `8e52181` Hours by task groups typed tasks (featreq-e413267a done); `2e7a34f` the
+sent questionnaire requires business name, phone, address, city, state, ZIP, what the business does, business setup
+(filed shipped `featreq-635d314a`); `33f8170` **stage 1** proposal outcomes read Won / Closed-Lost, Close as lost
+takes an optional note, every refusal + the firm Activity feed reworded (filed shipped `featreq-ad4d342b`);
+`93be8ed` **Letters v2** - `**bold**` (parsed on the template, then filled per run, shared `lib/letter-bold.js`),
+several named letters (`/api/letters`, `/api/letters/:id/...`; the v1 'default' letter is named from its subject at
+her first save), per-letter send state (`featreq-5e195707` SHIPPED); `2a48938` **ENGAGEMENTS STAGE 2** (filed
+shipped `featreq-b369e609`; leftovers `featreq-acb1b663`). **The build of record is Brittany's 2026-10-10 email
+"App questions/workflow" turned into `docs/plans/engagements-2026-10.md`** (Alex's decisions 10-11: client created
+at SIGNING; Mark-as-signed button, no e-sign; retainer draft = one month's fee by default). Stage 2 = tables
+`engagement_sections` + `engagements` (boot DDL, no FKs, outside the bulk save; rolled-back prod trial passed),
+`lib/engagement-{sections,assemble,values,documents,hash,send}.js`, routes `/api/engagement-sections`,
+`/api/engagements/*`, `POST /api/proposals/:id/engagement` (recovery draft), Resend tag `engagement_id`, pages
+`/engagements` + `/engagements/:id`, Settings > Engagement sections, Accept drafts the engagement and navigates to
+it. IN THIS STAGE ACCEPT STILL CREATES THE CLIENT. **Stage 3 (signing creates the client, retainer draft, plan
+checklist bundles, estimated hours, sent-hash guard) is BUILDING in `AP-laneD` `feat/engagements-signing`** - it
+must branch on `clientId == null`, never on `kind` (stage-2 rows carry `client_id`); two review rounds + a
+rolled-back prod trial before it ships. Then stage 4 (amendments per client from Letters sends, client-page
+Engagements card, superseding upsells) and stage 5 (two-step questionnaire; ticked services select lines). The
+section library ships with seeded wording - Brittany must read it; two Terms sentences are flagged as questions on
+`featreq-acb1b663`. Lanes: B (letters-v2, merged), C (engagements-ui, merged), D (stage 3), E/F (lib/store, merged)
+- remove B/C/E/F when convenient (junction LINK first). Suite 367 files / 8,452 tests; manifest 204,977 (TRIM FIRST).
+Run ledger + code maps: `.superpowers/sdd/engagements-maps/` (this machine).
+
+**Earlier (2026-10-11, morning - superseded by the paragraph above):** `main` = `6a7707c` (+ this handoff), deployed,
 `/health` 200; nothing has shipped since the 2026-10-08 handoff below. Suite **353 files / 8079 tests**;
 manifest **204,983 bytes - 17 under the cap; TRIM FIRST before any manifest edit.** **ONE ITEM IS PLANNED,
 a send-back on Letters (`featreq-5e195707`)** - Brittany used it on 10-10 (one saved letter, "1099 Filing";
