@@ -24596,6 +24596,35 @@ describe('proposals (file backend)', () => {
     }
   })
 
+  it('every refusal on a decided proposal says Won or closed as lost, never accepted/declined (engagements stage 1)', async () => {
+    const lost = await store.createProposal({ prospect: { company: 'Acme Books' } })
+    await store.setProposalStatus(lost.id, 'declined')
+    const messages = []
+    const capture = async (promise) => {
+      const err = await promise.catch((e) => e)
+      expect(err).toBeInstanceOf(ProposalStateError)
+      messages.push(err.message)
+    }
+    await capture(store.updateProposal(lost.id, { inputs: { transactions: 1 } }))
+    await capture(store.setProposalLetter(lost.id, { subject: 'x', sections: [], text: 'x' }))
+    await capture(store.appendProposalMessages(lost.id, [{ role: 'user', text: 'hi', at: '2026-10-11T12:00:00.000Z' }]))
+    await capture(store.acceptProposal(lost.id, {}))
+    await capture(store.setProposalStatus(lost.id, 'accepted'))
+    expect(messages).toEqual([
+      'This proposal is closed as lost — copy it to a new proposal to change anything.',
+      'This proposal is closed as lost — copy it to a new proposal to change anything.',
+      'This proposal is closed as lost — copy it to keep working on it.',
+      'This proposal is already closed as lost.',
+      "This proposal is already closed as lost — it can't be marked Won again.",
+    ])
+
+    const sent = await store.createProposal({})
+    await store.setProposalStatus(sent.id, 'sent')
+    await capture(store.deleteProposal(sent.id))
+    expect(messages.at(-1)).toBe('Only a draft can be deleted — close a sent proposal as lost instead.')
+    for (const message of messages) expect(message).not.toMatch(/accepted|declined|decline /)
+  })
+
   it('copies into a new draft that points back at the original', async () => {
     const source = await store.createProposal({
       prospect: { company: 'Acme Books' },
@@ -25431,7 +25460,7 @@ describe('accepting a proposal (file backend)', () => {
     const proposal = await prospectProposal()
     // The final step (the accepted flip and its software rows) refusing.
     vi.spyOn(store, '_acceptWithSoftware').mockRejectedValueOnce(
-      new ProposalStateError('This proposal is already declined.'),
+      new ProposalStateError('This proposal is already closed as lost.'),
     )
     const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
     expect(err).toBeInstanceOf(ProposalStateError)
@@ -25445,7 +25474,7 @@ describe('accepting a proposal (file backend)', () => {
     vi.spyOn(store, 'linkProposalClient').mockResolvedValueOnce(null)
     const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
     expect(err).toBeInstanceOf(ProposalStateError)
-    expect(err.message).toBe('Someone else already accepted this proposal.')
+    expect(err.message).toBe('Someone else already marked this proposal Won.')
     expect(typeof err.createdClientId).toBe('string')
     const client = (await store.read()).clients.find((row) => row.id === err.createdClientId)
     expect(client?.lifecycleStage).toBe('inactive')
@@ -25463,7 +25492,7 @@ describe('accepting a proposal (file backend)', () => {
     })
     const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
     expect(err).toBeInstanceOf(ProposalStateError)
-    expect(err.message).toBe('This proposal was declined while you were accepting it.')
+    expect(err.message).toBe('This proposal was closed as lost while you were accepting it.')
     expect(typeof err.createdClientId).toBe('string')
   })
 
@@ -25679,7 +25708,7 @@ describe('accepting a proposal: the lost-link race retires the orphan (postgres 
       .acceptProposal('prop-1', { actorUserId: 'emp-patrice' })
       .catch((e) => e)
     expect(err).toBeInstanceOf(ProposalStateError)
-    expect(err.message).toBe('Someone else already accepted this proposal.')
+    expect(err.message).toBe('Someone else already marked this proposal Won.')
 
     const insertClientAt = fake.indexOf(/^insert into clients\b/i)
     const lifecycleAt = fake.indexOf(/^update clients set lifecycle_stage = \$2/i)

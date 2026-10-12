@@ -325,10 +325,10 @@ describe('accepting and declining', () => {
   })
 
   it('a decided proposal is named Won or closed as lost in every refusal, never accepted/declined', () => {
-    const helper = routeBlock(/function proposalOutcomeWords\(status\) \{/, 300)
-    expect(helper).toContain("if (status === 'accepted') return 'Won'")
-    expect(helper).toContain("if (status === 'declined') return 'closed as lost'")
+    // The words live in lib/proposal-outcomes.js, shared with db/store.js.
+    expect(serverSource).toContain("import { proposalOutcomeWords } from './lib/proposal-outcomes.js'")
     expect(serverSource).not.toMatch(/This proposal is (already )?\$\{(proposal|current)\.status\}/)
+    expect(serverSource).not.toContain('Only owners can decline proposals')
   })
 
   it('Decline maps a refused status write to a 409 with the sentence, like accept and letter', () => {

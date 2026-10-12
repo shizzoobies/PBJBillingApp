@@ -1424,7 +1424,7 @@ describe('Accept and Decline', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
     expect(
       await screen.findByText(
-        "Won, but the package could not be applied — add it from the client's page.",
+        "Marked Won, but the package could not be applied — add it from the client's page.",
       ),
     ).toBeTruthy()
   })

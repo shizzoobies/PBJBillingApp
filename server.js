@@ -133,6 +133,7 @@ import {
   renderQuestionnaireThanksPage,
 } from './lib/proposal-questionnaire-page.js'
 import { applyProposalPatch } from './lib/proposal-pricing.js'
+import { proposalOutcomeWords } from './lib/proposal-outcomes.js'
 import {
   cardProcessingFeeLine,
   invoiceAsPaidByCredit,
@@ -553,14 +554,6 @@ function pickFirmSettingsPatch(payload) {
     }
   }
   return patch
-}
-
-/** A decided proposal's outcome in the words the app shows (engagements stage 1):
- *  `accepted` reads Won and `declined` reads closed as lost. */
-function proposalOutcomeWords(status) {
-  if (status === 'accepted') return 'Won'
-  if (status === 'declined') return 'closed as lost'
-  return status
 }
 
 async function readJsonBody(request) {
@@ -12534,7 +12527,7 @@ const server = createServer(async (request, response) => {
       const session = await requireSession(request, response)
       if (!session) return
       if (session.user.role !== 'owner') {
-        sendJson(response, 403, { error: 'Only owners can decline proposals' })
+        sendJson(response, 403, { error: 'Only owners can close proposals as lost' })
         return
       }
       if (isCrossSiteOrigin(request)) {

@@ -37,6 +37,7 @@ import {
   sanitizeProposalPricing,
   softwareLocksOf,
 } from '../lib/proposal-pricing.js'
+import { proposalOutcomeAction, proposalOutcomeWords } from '../lib/proposal-outcomes.js'
 import {
   QUESTIONNAIRE_EXPIRY_DAYS,
   answersToProposalSeed,
@@ -12496,7 +12497,7 @@ export class AppDataStore {
     if (!current) return null
     if (current.status === 'accepted' || current.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(current.status)} — copy it to a new proposal to change anything.`,
       )
     }
     const has = (key) => Object.prototype.hasOwnProperty.call(patch ?? {}, key)
@@ -12504,7 +12505,7 @@ export class AppDataStore {
     const isExplicitReprice = !recognizedFields.some((key) => has(key))
     if (isExplicitReprice && current.status !== 'draft') {
       throw new ProposalStateError(
-        `Only a draft can be repriced — this proposal is ${current.status}.`,
+        `Only a draft can be repriced — this proposal is ${proposalOutcomeWords(current.status)}.`,
       )
     }
     const shouldReprice = has('inputs') || has('selections') || isExplicitReprice
@@ -12597,7 +12598,7 @@ export class AppDataStore {
       // concurrent write moved it to accepted/declined, or (for a `clientId`
       // patch) linked a different client, in between.
       throw new ProposalStateError(
-        `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(current.status)} — copy it to a new proposal to change anything.`,
       )
     }
 
@@ -12612,17 +12613,17 @@ export class AppDataStore {
     // write can land in — same convention `setProposalLetter` uses.
     if (target.status === 'accepted' || target.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is ${target.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(target.status)} — copy it to a new proposal to change anything.`,
       )
     }
     if (isExplicitReprice && target.status !== 'draft') {
       throw new ProposalStateError(
-        `Only a draft can be repriced — this proposal is ${target.status}.`,
+        `Only a draft can be repriced — this proposal is ${proposalOutcomeWords(target.status)}.`,
       )
     }
     if (has('clientId') && (target.clientId ?? null) !== (current.clientId ?? null)) {
       throw new ProposalStateError(
-        `This proposal is ${target.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(target.status)} — copy it to a new proposal to change anything.`,
       )
     }
     Object.assign(target, next, { pricingSnapshot, updatedAt })
@@ -12648,7 +12649,7 @@ export class AppDataStore {
     const current = await this.getProposal(id)
     if (!current) return false
     if (current.status !== 'draft') {
-      throw new ProposalStateError('Only a draft can be deleted — decline a sent proposal instead.')
+      throw new ProposalStateError('Only a draft can be deleted — close a sent proposal as lost instead.')
     }
     if (this.pool) {
       const result = await this.pool.query(
@@ -12726,13 +12727,13 @@ export class AppDataStore {
     // accepted/declined, to any status, ever. Copy is how she starts again.
     if (current.status === 'accepted' || current.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is already ${current.status} — it can't be ${status} again.`,
+        `This proposal is already ${proposalOutcomeWords(current.status)} — it can't be ${proposalOutcomeAction(status)} again.`,
       )
     }
     const isDecision = status === 'accepted' || status === 'declined'
     if (isDecision && current.status !== 'draft' && current.status !== 'sent') {
       throw new ProposalStateError(
-        `This proposal is already ${current.status} — it can't be ${status} again.`,
+        `This proposal is already ${proposalOutcomeWords(current.status)} — it can't be ${proposalOutcomeAction(status)} again.`,
       )
     }
     // Close as lost takes an optional note: a blank one is no note (null), so
@@ -12750,7 +12751,7 @@ export class AppDataStore {
       // We just confirmed this id exists and was in a state that allows this
       // transition; zero rows here means a concurrent write raced us to it.
       throw new ProposalStateError(
-        `This proposal is already ${current.status} — it can't be ${status} again.`,
+        `This proposal is already ${proposalOutcomeWords(current.status)} — it can't be ${proposalOutcomeAction(status)} again.`,
       )
     }
     const authState = await readJson(localAuthPath)
@@ -12925,7 +12926,7 @@ export class AppDataStore {
     if (!current) return null
     if (current.status === 'accepted' || current.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(current.status)} — copy it to a new proposal to change anything.`,
       )
     }
     const clean = {
@@ -12948,7 +12949,7 @@ export class AppDataStore {
       // Zero rows for an id we just confirmed exists and was writable: a
       // concurrent accept/decline moved it in between.
       throw new ProposalStateError(
-        `This proposal is ${current.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(current.status)} — copy it to a new proposal to change anything.`,
       )
     }
     const authState = await readJson(localAuthPath)
@@ -12958,7 +12959,7 @@ export class AppDataStore {
     if (!target) return null
     if (target.status === 'accepted' || target.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is ${target.status} — copy it to a new proposal to change anything.`,
+        `This proposal is ${proposalOutcomeWords(target.status)} — copy it to a new proposal to change anything.`,
       )
     }
     const now = nowIso()
@@ -13052,7 +13053,7 @@ export class AppDataStore {
     const proposal = await this.getProposal(id)
     if (!proposal) return null
     if (proposal.status === 'accepted' || proposal.status === 'declined') {
-      throw new ProposalStateError(`This proposal is already ${proposal.status}.`)
+      throw new ProposalStateError(`This proposal is already ${proposalOutcomeWords(proposal.status)}.`)
     }
 
     // Everything that can refuse runs BEFORE any write. `proposals.client_id`
@@ -13143,8 +13144,8 @@ export class AppDataStore {
           const message = !latest
             ? 'This proposal no longer exists.'
             : latest.status === 'declined'
-              ? 'This proposal was declined while you were accepting it.'
-              : 'Someone else already accepted this proposal.'
+              ? 'This proposal was closed as lost while you were accepting it.'
+              : 'Someone else already marked this proposal Won.'
           throw new ProposalStateError(message)
         }
       } else if (updateMonthlyRate === true) {
@@ -13223,7 +13224,7 @@ export class AppDataStore {
     const alreadyDecided = (status) =>
       new ProposalStateError(
         status
-          ? `This proposal is already ${status} — it can't be accepted again.`
+          ? `This proposal is already ${proposalOutcomeWords(status)} — it can't be marked Won again.`
           : 'This proposal no longer exists.',
       )
     const linkClient = cleanProposalId(clientId)
@@ -13366,7 +13367,7 @@ export class AppDataStore {
     if (!current) return null
     if (current.status === 'accepted' || current.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is ${current.status} — copy it to keep working on it.`,
+        `This proposal is ${proposalOutcomeWords(current.status)} — copy it to keep working on it.`,
       )
     }
     if (this.pool) {
@@ -13387,7 +13388,7 @@ export class AppDataStore {
       // Zero rows for an id we just confirmed exists and was open: a
       // concurrent accept/decline moved it in between.
       throw new ProposalStateError(
-        `This proposal is ${current.status} — copy it to keep working on it.`,
+        `This proposal is ${proposalOutcomeWords(current.status)} — copy it to keep working on it.`,
       )
     }
     const authState = await readJson(localAuthPath)
@@ -13397,7 +13398,7 @@ export class AppDataStore {
     if (!target) return null
     if (target.status === 'accepted' || target.status === 'declined') {
       throw new ProposalStateError(
-        `This proposal is ${target.status} — copy it to keep working on it.`,
+        `This proposal is ${proposalOutcomeWords(target.status)} — copy it to keep working on it.`,
       )
     }
     target.messages = [...(Array.isArray(target.messages) ? target.messages : []), ...clean].slice(

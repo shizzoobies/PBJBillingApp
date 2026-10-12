@@ -393,7 +393,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   /** A toast/notice on the accepted result — the package could not be applied. */
   const noticeFromAccept = (chosenPackage: string | null, packageApplied: boolean) =>
     chosenPackage && !packageApplied
-      ? "Won, but the package could not be applied — add it from the client's page."
+      ? "Marked Won, but the package could not be applied — add it from the client's page."
       : ''
 
   // Accept says what it will do before it does it (spec §5.5). A prospect

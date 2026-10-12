@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { PROPOSAL_STATUS_LABELS, proposalActivity } from '../lib/proposals'
 import type { Proposal } from '../lib/types'
+import { describeActivityAction } from '../lib/utils'
 
 // Engagements stage 1 (docs/plans/engagements-2026-10.md): a proposal's two
 // outcomes read Won and Closed/Lost. The stored statuses stay accepted /
@@ -85,5 +86,16 @@ describe('proposal activity outcome wording', () => {
       })
       expect(entries.at(-1)?.text).toBe('Closed as lost')
     }
+  })
+})
+
+describe('the firm Activity feed', () => {
+  it('words the stored proposal outcome actions as Won and closed as lost', () => {
+    expect(describeActivityAction('proposal_accepted')).toBe('marked a proposal Won:')
+    expect(describeActivityAction('proposal_declined')).toBe('closed a proposal as lost:')
+  })
+
+  it('leaves other proposal actions on the underscore fallback', () => {
+    expect(describeActivityAction('proposal_sent')).toBe('proposal sent')
   })
 })
