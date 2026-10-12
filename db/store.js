@@ -17,7 +17,7 @@ import {
   newTemplateCreatedAt,
   templateStartFloor,
 } from '../lib/checklist-start-floor.js'
-import { dateOnlyInZone, firmToday } from '../lib/firm-time.js'
+import { dateOnlyInZone, firmTimeZone, firmToday } from '../lib/firm-time.js'
 import {
   CHECKLIST_INSTANCE_UNIQUE_INDEX,
   CHECKLIST_INSTANCE_UNIQUE_INDEX_V2,
@@ -37,6 +37,9 @@ import {
   sanitizeProposalPricing,
   softwareLocksOf,
 } from '../lib/proposal-pricing.js'
+import { DEFAULT_ENGAGEMENT_SECTIONS, sanitizeEngagementSections } from '../lib/engagement-sections.js'
+import { assembleEngagement } from '../lib/engagement-assemble.js'
+import { letterTemplateHash } from '../lib/letter-template.js'
 import {
   QUESTIONNAIRE_EXPIRY_DAYS,
   answersToProposalSeed,
@@ -1505,6 +1508,186 @@ function mapEngagementSendRow(row) {
     createdAt: isoOrNull(row.created_at),
     completedAt: isoOrNull(row.completed_at),
   }
+}
+
+// ---- Engagements (docs/plans/engagements-2026-10.md, stage 2B) -------------
+// One letter to one party with a signed state, born from a Won proposal, and the
+// owner-edited section library its letter is assembled from. Endpoint-managed
+// like engagement_letters: no foreign keys, outside the bulk save and the
+// fingerprint, never deleted from.
+const ENGAGEMENT_KINDS = Object.freeze(['original', 'amendment', 'superseding'])
+const ENGAGEMENT_STATUSES = Object.freeze(['draft', 'sent', 'signed', 'superseded', 'void'])
+/** The statuses whose letter can still be edited (a sent one is re-sent after an edit). */
+const ENGAGEMENT_EDITABLE_STATUSES = Object.freeze(['draft', 'sent'])
+const ENGAGEMENT_SUBJECT_MAX = 200
+const ENGAGEMENT_BODY_MAX = 20000
+const ENGAGEMENT_NOTE_MAX = 2000
+const ENGAGEMENT_LIST_LIMIT = 500
+const ENGAGEMENT_PLAN_IDS_MAX = 50
+const ENGAGEMENT_PARTY_KEYS = Object.freeze([
+  'company',
+  'contactName',
+  'title',
+  'email',
+  'phone',
+  'addressLine1',
+  'addressLine2',
+  'city',
+  'state',
+  'postalCode',
+])
+const ENGAGEMENT_SECTION_COLUMNS = `id, key, title, body, trigger, sort_order, active, created_at, updated_at`
+const ENGAGEMENT_COLUMNS = `id, kind, status, proposal_id, client_id, letter_id, supersedes_id, party,
+          subject, email_body, letter_body, section_keys, figures, retainer_amount, package_id,
+          plan_ids, template_hash, email_log, sent_at, signed_at, signed_by, signed_note, voided_at,
+          created_by, created_at, updated_at`
+/** The list view: no bodies and no email log (the editor reads one engagement whole). */
+const ENGAGEMENT_LIST_COLUMNS = `id, kind, status, proposal_id, client_id, letter_id, supersedes_id, party,
+          subject, section_keys, figures, retainer_amount, package_id, plan_ids, template_hash,
+          sent_at, signed_at, signed_by, signed_note, voided_at, created_by, created_at, updated_at`
+
+/**
+ * An engagement write the engagement's own state refuses (editing a signed one,
+ * signing a void one) or a value it cannot take. `reason` is machine-readable -
+ * 'status' (the state refuses it) or 'invalid' (the value is wrong) - and
+ * `message` is a sentence for her screen, answered as-is with a 409 or a 400.
+ */
+export class EngagementStateError extends Error {
+  constructor(message, reason = 'status') {
+    super(message)
+    this.name = 'EngagementStateError'
+    this.reason = reason
+  }
+}
+
+/** A party as stored: the ten address-card strings, trimmed and capped, nothing else. */
+function cleanEngagementParty(raw) {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  const party = {}
+  for (const key of ENGAGEMENT_PARTY_KEYS) {
+    party[key] = String(source[key] ?? '').trim().slice(0, key === 'email' ? 320 : 200)
+  }
+  return party
+}
+
+/** A jsonb column on either backend: parsed when it came back as text, `fallback` when unreadable. */
+function engagementJson(value, fallback) {
+  if (value === null || value === undefined) return fallback
+  if (typeof value === 'string') {
+    const parsed = safeJsonParse(value)
+    return parsed ?? fallback
+  }
+  return value
+}
+
+/** A retainer amount: a positive figure rounded to cents, or null for none (blank, 0). */
+function engagementRetainer(value) {
+  if (value === null || value === undefined || value === '') return null
+  const amount = Number(value)
+  if (!Number.isFinite(amount) || amount <= 0) return null
+  return Math.round(amount * 100) / 100
+}
+
+/** One engagement for the API, from either backend's row shape. */
+function mapEngagementRow(row, { list = false } = {}) {
+  const pick = (snake, camel) => (row[snake] !== undefined ? row[snake] : row[camel])
+  const iso = (value) => {
+    if (!value) return null
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? null : date.toISOString()
+  }
+  const array = (value) => {
+    const parsed = engagementJson(value, [])
+    return Array.isArray(parsed) ? parsed : []
+  }
+  const figures = engagementJson(pick('figures', 'figures'), {})
+  const engagement = {
+    id: row.id,
+    kind: row.kind,
+    status: row.status,
+    proposalId: pick('proposal_id', 'proposalId') ?? null,
+    clientId: pick('client_id', 'clientId') ?? null,
+    letterId: pick('letter_id', 'letterId') ?? null,
+    supersedesId: pick('supersedes_id', 'supersedesId') ?? null,
+    party: cleanEngagementParty(engagementJson(row.party, {})),
+    subject: row.subject ?? '',
+    emailBody: pick('email_body', 'emailBody') ?? '',
+    letterBody: pick('letter_body', 'letterBody') ?? '',
+    sectionKeys: array(pick('section_keys', 'sectionKeys')).map(String),
+    figures: figures && typeof figures === 'object' && !Array.isArray(figures) ? figures : {},
+    retainerAmount: engagementRetainer(pick('retainer_amount', 'retainerAmount')),
+    packageId: pick('package_id', 'packageId') ?? null,
+    planIds: array(pick('plan_ids', 'planIds')).map(String),
+    templateHash: pick('template_hash', 'templateHash') ?? '',
+    emailLog: array(pick('email_log', 'emailLog')),
+    sentAt: iso(pick('sent_at', 'sentAt')),
+    signedAt: iso(pick('signed_at', 'signedAt')),
+    signedBy: pick('signed_by', 'signedBy') ?? null,
+    signedNote: pick('signed_note', 'signedNote') ?? null,
+    voidedAt: iso(pick('voided_at', 'voidedAt')),
+    createdBy: pick('created_by', 'createdBy') ?? null,
+    createdAt: iso(pick('created_at', 'createdAt')),
+    updatedAt: iso(pick('updated_at', 'updatedAt')),
+  }
+  if (list) {
+    delete engagement.emailBody
+    delete engagement.letterBody
+    delete engagement.emailLog
+  }
+  return engagement
+}
+
+/** One library section for the API. `role` is not stored: the `email` key IS the email body. */
+function mapEngagementSectionRow(row) {
+  const trigger = engagementJson(row.trigger, {})
+  return {
+    id: row.id,
+    key: row.key,
+    title: row.title ?? '',
+    body: row.body ?? '',
+    trigger: trigger && typeof trigger === 'object' && !Array.isArray(trigger) ? trigger : {},
+    sortOrder: Number(row.sort_order ?? row.sortOrder ?? 0) || 0,
+    active: (row.active ?? true) !== false,
+    role: row.key === 'email' ? 'email' : 'letter',
+    createdAt: isoOrNull(row.created_at ?? row.createdAt),
+    updatedAt: isoOrNull(row.updated_at ?? row.updatedAt),
+  }
+}
+
+/**
+ * The instant of noon on a firm calendar day ('YYYY-MM-DD'), so a signed date
+ * reads as that same day in every US zone and on the firm's own clock.
+ */
+function firmNoonInstant(day) {
+  const guess = new Date(`${day}T12:00:00.000Z`)
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: firmTimeZone(),
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(guess)
+      .map((part) => [part.type, part.value]),
+  )
+  const wall = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+  )
+  return new Date(guess.getTime() - (wall - guess.getTime())).toISOString()
+}
+
+/** A calendar day 'YYYY-MM-DD' that exists. */
+function isRealDay(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
 }
 
 /**
@@ -7508,6 +7691,56 @@ export class AppDataStore {
       `)
       await this.pool.query(`
         create index if not exists engagement_letter_sends_client_idx on engagement_letter_sends (client_id)
+      `)
+      // Engagements (docs/plans/engagements-2026-10.md, stage 2B): the section
+      // library an engagement letter is assembled from, and the engagements
+      // themselves (one letter to one party with a signed state, born from a Won
+      // proposal). Same rules as the two tables above: endpoint-managed, NO
+      // foreign keys, outside the bulk save's lock list and the fingerprint,
+      // never deleted from - a section is deactivated, an engagement voided.
+      await this.pool.query(`
+        create table if not exists engagement_sections (
+          id text primary key,                 -- 'esec-xxxxxxxx'
+          key text not null unique,
+          title text not null default '',
+          body text not null default '',
+          trigger jsonb not null default '{}',
+          sort_order int not null default 0,
+          active boolean not null default true,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`
+        create table if not exists engagements (
+          id text primary key,                 -- 'eng-xxxxxxxx'
+          kind text not null check (kind in ('original','amendment','superseding')),
+          status text not null default 'draft' check (status in ('draft','sent','signed','superseded','void')),
+          proposal_id text,                    -- original / superseding: the Won proposal; amendment: null or the upsell proposal
+          client_id text,                      -- null until signed for a prospect original; set for upsells and amendments
+          letter_id text,                      -- the saved Letters template an amendment came from (stage 4)
+          supersedes_id text,                  -- superseding: the original it replaces (stage 4)
+          party jsonb not null default '{}',   -- {company, contactName, title, email, phone, addressLine1, addressLine2, city, state, postalCode}
+          subject text not null default '',
+          email_body text not null default '',
+          letter_body text not null default '',
+          section_keys jsonb not null default '[]',
+          figures jsonb not null default '{}', -- snapshot at creation: {totals, lines:[{serviceId, group, name, amount, cadence, role, hours}], hoursByRole, paymentTerms}
+          retainer_amount numeric,             -- null/0 = none
+          package_id text,
+          plan_ids text[] not null default '{}',
+          template_hash text not null default '',
+          email_log jsonb not null default '[]',  -- [{kind:'send'|'delivery', at, to, providerId, ok, error, event}]
+          sent_at timestamptz, signed_at timestamptz, signed_by text, signed_note text,
+          voided_at timestamptz,
+          created_by text, created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`
+        create index if not exists engagements_client_idx on engagements (client_id)
+      `)
+      await this.pool.query(`
+        create index if not exists engagements_proposal_idx on engagements (proposal_id)
       `)
       // ---- RATE HISTORY (docs/plans/rate-history-2026-09.md) ----
       //
@@ -25770,6 +26003,773 @@ export class AppDataStore {
       row.error = ok ? null : String(error ?? '').slice(0, 1000) || null
       row.completedAt = nowIso()
       return { result: { ...row }, changed: true }
+    })
+  }
+
+  // ---- Engagements (docs/plans/engagements-2026-10.md, stage 2B) ----
+  //
+  // The section library (`engagement_sections`) and the engagements built from
+  // it (`engagements`). Endpoint-managed like the engagement letters above: NOT
+  // part of the bulk /api/app-data write, no foreign keys, never deleted from (a
+  // section is deactivated, an engagement voided). Stored in auth-state
+  // (`engagementSections` / `engagements`) on the file backend. Stage 2: signing
+  // records the signature only; stage 3 adds the client creation to the same call.
+
+  /**
+   * The ONE read-modify-write on the file backend's engagements, in a single
+   * queue slot with raw fs calls (see `_mutateLetterFile`, which this copies).
+   * `mutate(authState)` returns `{ result, changed }`.
+   */
+  async _mutateEngagementFile(mutate) {
+    return enqueueFileOperation(localAuthPath, async () => {
+      const authState = existsSync(localAuthPath)
+        ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+        : {}
+      if (!Array.isArray(authState.engagementSections)) authState.engagementSections = []
+      if (!Array.isArray(authState.engagements)) authState.engagements = []
+      const { result, changed } = mutate(authState)
+      if (changed) await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return result
+    })
+  }
+
+  /** The file backend's engagement arrays, read once (never written here). */
+  async _readEngagementFile() {
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    return {
+      sections: Array.isArray(authState.engagementSections) ? authState.engagementSections : [],
+      engagements: Array.isArray(authState.engagements) ? authState.engagements : [],
+    }
+  }
+
+  /**
+   * The section library, active and deactivated, in letter order. The first
+   * read of an empty library seeds it from DEFAULT_ENGAGEMENT_SECTIONS, once:
+   * a library she emptied by deactivating every section is not empty, so it is
+   * never re-seeded over her edits.
+   */
+  async listEngagementSections() {
+    const order = (a, b) => a.sortOrder - b.sortOrder || String(a.key).localeCompare(String(b.key))
+    const seeds = () =>
+      DEFAULT_ENGAGEMENT_SECTIONS.map((section, index) => ({
+        id: `esec-${randomUUID().slice(0, 8)}`,
+        key: section.key,
+        title: String(section.title ?? ''),
+        body: String(section.body ?? ''),
+        trigger: section.trigger && typeof section.trigger === 'object' ? section.trigger : {},
+        sortOrder: Number.isInteger(section.sortOrder) ? section.sortOrder : index,
+      }))
+    if (this.pool) {
+      const select = `select ${ENGAGEMENT_SECTION_COLUMNS} from engagement_sections order by sort_order, key`
+      let { rows } = await this.pool.query(select)
+      if (rows.length === 0) {
+        // Two first reads at once both seed: the unique key makes the second a no-op.
+        for (const seed of seeds()) {
+          await this.pool.query(
+            `insert into engagement_sections (id, key, title, body, trigger, sort_order)
+             values ($1, $2, $3, $4, $5::jsonb, $6)
+             on conflict (key) do nothing`,
+            [seed.id, seed.key, seed.title, seed.body, JSON.stringify(seed.trigger), seed.sortOrder],
+          )
+        }
+        rows = (await this.pool.query(select)).rows
+      }
+      return rows.map(mapEngagementSectionRow)
+    }
+    const { sections } = await this._readEngagementFile()
+    if (sections.length > 0) return sections.map(mapEngagementSectionRow).sort(order)
+    return this._mutateEngagementFile((authState) => {
+      if (authState.engagementSections.length === 0) {
+        const now = nowIso()
+        authState.engagementSections = seeds().map((seed) => ({
+          ...seed,
+          active: true,
+          createdAt: now,
+          updatedAt: now,
+        }))
+        return { result: authState.engagementSections.map(mapEngagementSectionRow).sort(order), changed: true }
+      }
+      return { result: authState.engagementSections.map(mapEngagementSectionRow).sort(order), changed: false }
+    })
+  }
+
+  /**
+   * Save the library as she edited it: every listed section is upserted by key
+   * and active; every stored key NOT listed (or listed with `active: false`) is
+   * deactivated, never deleted - an engagement assembled from it still names it.
+   * A list the sanitizer cannot take whole (a bad key, an over-long body, a
+   * duplicate key) is refused with reason 'invalid' and nothing is written.
+   * Returns the whole library, as `listEngagementSections` does.
+   */
+  async saveEngagementSections(list, { updatedBy = null } = {}) {
+    void updatedBy // who saved is the route's activity entry; the table has no column for it
+    if (!Array.isArray(list)) {
+      throw new EngagementStateError('Send the sections as a list.', 'invalid')
+    }
+    const wanted = list.filter((entry) => entry?.active !== false)
+    const clean = sanitizeEngagementSections(wanted)
+    if (clean.length !== wanted.length) {
+      throw new EngagementStateError(
+        'Every section needs a key of lower-case letters, digits and underscores, used once, and a library holds at most 60 sections. Nothing was saved.',
+        'invalid',
+      )
+    }
+    const keys = clean.map((section) => section.key)
+    if (this.pool) {
+      await this._withTransaction(async (dbClient) => {
+        for (const section of clean) {
+          await dbClient.query(
+            `insert into engagement_sections (id, key, title, body, trigger, sort_order, active)
+             values ($1, $2, $3, $4, $5::jsonb, $6, true)
+             on conflict (key) do update set
+               title = excluded.title,
+               body = excluded.body,
+               trigger = excluded.trigger,
+               sort_order = excluded.sort_order,
+               active = true,
+               updated_at = now()`,
+            [
+              `esec-${randomUUID().slice(0, 8)}`,
+              section.key,
+              section.title,
+              section.body,
+              JSON.stringify(section.trigger ?? {}),
+              section.sortOrder,
+            ],
+          )
+        }
+        await dbClient.query(
+          `update engagement_sections set active = false, updated_at = now()
+            where active and not (key = any($1::text[]))`,
+          [keys],
+        )
+      })
+      return this.listEngagementSections()
+    }
+    await this._mutateEngagementFile((authState) => {
+      const now = nowIso()
+      for (const section of clean) {
+        const at = authState.engagementSections.findIndex((row) => row?.key === section.key)
+        const fields = {
+          title: section.title,
+          body: section.body,
+          trigger: section.trigger ?? {},
+          sortOrder: section.sortOrder,
+          active: true,
+          updatedAt: now,
+        }
+        if (at >= 0) authState.engagementSections[at] = { ...authState.engagementSections[at], ...fields }
+        else {
+          authState.engagementSections.push({
+            id: `esec-${randomUUID().slice(0, 8)}`,
+            key: section.key,
+            ...fields,
+            createdAt: now,
+          })
+        }
+      }
+      for (const row of authState.engagementSections) {
+        if (row && row.active !== false && !keys.includes(row.key)) {
+          row.active = false
+          row.updatedAt = now
+        }
+      }
+      return { result: null, changed: true }
+    })
+    return this.listEngagementSections()
+  }
+
+  /** The active sections an engagement is assembled from: the caller's list, or the library's. */
+  async _engagementLibrary(sections) {
+    const list = Array.isArray(sections) ? sections : await this.listEngagementSections()
+    return list.filter((section) => section && section.active !== false)
+  }
+
+  /**
+   * Engagements, newest first; one client's, one proposal's or one status's
+   * when asked. List rows carry no bodies and no email log. Postgres caps the
+   * answer at 500.
+   */
+  async listEngagements({ clientId = null, proposalId = null, status = null } = {}) {
+    if (status && !ENGAGEMENT_STATUSES.includes(status)) return []
+    if (this.pool) {
+      const params = []
+      const where = []
+      if (clientId) {
+        params.push(clientId)
+        where.push(`client_id = $${params.length}`)
+      }
+      if (proposalId) {
+        params.push(proposalId)
+        where.push(`proposal_id = $${params.length}`)
+      }
+      if (status) {
+        params.push(status)
+        where.push(`status = $${params.length}`)
+      }
+      const { rows } = await this.pool.query(
+        `select ${ENGAGEMENT_LIST_COLUMNS} from engagements
+          ${where.length > 0 ? `where ${where.join(' and ')}` : ''}
+          order by created_at desc, id desc
+          limit ${ENGAGEMENT_LIST_LIMIT}`,
+        params,
+      )
+      return rows.map((row) => mapEngagementRow(row, { list: true }))
+    }
+    const { engagements } = await this._readEngagementFile()
+    return engagements
+      .map((row, index) => ({ row, index }))
+      .filter(
+        ({ row }) =>
+          row &&
+          (!clientId || row.clientId === clientId) &&
+          (!proposalId || row.proposalId === proposalId) &&
+          (!status || row.status === status),
+      )
+      .sort((a, b) => String(b.row.createdAt).localeCompare(String(a.row.createdAt)) || b.index - a.index)
+      .map(({ row }) => mapEngagementRow(row, { list: true }))
+  }
+
+  /** One engagement, whole, or null. */
+  async getEngagement(id) {
+    if (!id) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(`select ${ENGAGEMENT_COLUMNS} from engagements where id = $1`, [id])
+      return rows[0] ? mapEngagementRow(rows[0]) : null
+    }
+    const { engagements } = await this._readEngagementFile()
+    const found = engagements.find((row) => row?.id === id)
+    return found ? mapEngagementRow(found) : null
+  }
+
+  /**
+   * The figures an engagement keeps from its proposal, frozen at creation:
+   * totals and lines from the STORED pricing snapshot (money is never
+   * re-priced), plus each line's role, hours and formula text, the monthly
+   * hours by role, the payment terms and the proposal's counts (`inputs`).
+   * A snapshot priced before lines carried hours gets them from `priceProposal`
+   * on the current catalog with the snapshot's own rates - hours only; a
+   * failure there reads as zero hours, never as a refusal.
+   */
+  _engagementFigures(proposal, firm, linkedClient) {
+    const snapshot =
+      proposal.pricingSnapshot && typeof proposal.pricingSnapshot === 'object' ? proposal.pricingSnapshot : {}
+    const storedLines = Array.isArray(snapshot.lines) ? snapshot.lines : []
+    const totals = snapshot.totals && typeof snapshot.totals === 'object' ? { ...snapshot.totals } : {}
+    const hasHours = (value) => value && typeof value === 'object' && !Array.isArray(value)
+    let recomputed = null
+    if (!hasHours(totals.hoursByRole) || storedLines.some((line) => line?.hours === undefined)) {
+      try {
+        recomputed = priceProposal({
+          catalog: firm?.proposalPricing,
+          rates: snapshot.rates ?? firm?.proposalPricing?.rates,
+          inputs: proposal.inputs ?? {},
+          selections: proposal.selections ?? [],
+          softwareLocks: softwareLocksOf(storedLines),
+        })
+      } catch (error) {
+        console.error('[engagements] could not work out the hours for', proposal.id, error?.message || error)
+      }
+    }
+    const again = new Map((recomputed?.lines ?? []).map((line) => [line.serviceId, line]))
+    const lines = storedLines
+      .filter((line) => line && typeof line === 'object')
+      .map((line) => {
+        const priced = again.get(line.serviceId)
+        const role = line.role !== undefined ? line.role : priced?.role
+        const hours = line.hours !== undefined ? line.hours : priced?.hours
+        return {
+          serviceId: line.serviceId ?? null,
+          group: line.group ?? null,
+          name: String(line.name ?? ''),
+          amount: Number(line.amount) || 0,
+          cadence: line.cadence ?? null,
+          role: typeof role === 'string' && role ? role : null,
+          hours: Number.isFinite(Number(hours)) && hours !== null ? Number(hours) : null,
+          // The priced formula text names the counts a line was priced with (clean-up
+          // months, sales-tax states), which the letter's placeholders print.
+          formula: String(line.formula ?? ''),
+        }
+      })
+    const source = hasHours(totals.hoursByRole) ? totals.hoursByRole : (recomputed?.totals?.hoursByRole ?? {})
+    const hoursOf = (value) => Math.round((Number(value) || 0) * 100) / 100
+    const hoursByRole = {
+      bookkeeper: hoursOf(source.bookkeeper),
+      accountant: hoursOf(source.accountant),
+      controller: hoursOf(source.controller),
+    }
+    return {
+      totals: { ...totals, hoursByRole },
+      lines,
+      hoursByRole,
+      paymentTerms: String(linkedClient?.paymentTerms || firm?.clientDefaults?.paymentTerms || ''),
+      // The proposal's counts, the fallback for clean-up months and states when no line says.
+      inputs: proposal.inputs && typeof proposal.inputs === 'object' ? { ...proposal.inputs } : {},
+    }
+  }
+
+  /** The party of a letter to an existing client: its name, contact, email, phone and address. */
+  static _engagementPartyFromClient(client) {
+    return cleanEngagementParty({
+      company: client.name,
+      contactName: client.contactName || client.contact,
+      email: client.email,
+      phone: client.phone,
+      addressLine1: client.addressLine1,
+      addressLine2: client.addressLine2,
+      city: client.city,
+      state: client.state,
+      postalCode: client.postalCode,
+    })
+  }
+
+  /**
+   * Draft an engagement from a proposal: the party (the prospect, or the linked
+   * client for a proposal to an existing client), the figures from its pricing
+   * snapshot, a retainer of one month's fee by default, and the subject and
+   * bodies assembled from the active section library (or `sections`). Stage 2:
+   * `clientId` (default: the proposal's) is stored as given - Accept passes the
+   * client it just created. Returns the new engagement.
+   */
+  async createEngagementFromProposal(proposal, { kind = 'original', createdBy = null, sections = null, clientId } = {}) {
+    if (!proposal?.id) {
+      throw new EngagementStateError('There is no proposal to draft the engagement from.', 'invalid')
+    }
+    if (!ENGAGEMENT_KINDS.includes(kind)) {
+      throw new EngagementStateError('That is not a kind of engagement.', 'invalid')
+    }
+    const firm = await this.getFirmSettings()
+    const linked = proposal.clientId ? await this.getClientById(proposal.clientId) : null
+    const party = linked
+      ? AppDataStore._engagementPartyFromClient(linked)
+      : cleanEngagementParty(proposal.prospect)
+    const figures = this._engagementFigures(proposal, firm, linked)
+    const assembled = assembleEngagement({
+      sections: await this._engagementLibrary(sections),
+      snapshot: figures,
+      kind,
+      party,
+      firmName: firm?.name ?? '',
+    })
+    const texts = {
+      subject: String(assembled.subject ?? '').slice(0, ENGAGEMENT_SUBJECT_MAX),
+      emailBody: String(assembled.emailBody ?? '').slice(0, ENGAGEMENT_BODY_MAX),
+      letterBody: String(assembled.letterBody ?? '').slice(0, ENGAGEMENT_BODY_MAX),
+    }
+    const row = {
+      id: `eng-${randomUUID().slice(0, 8)}`,
+      kind,
+      status: 'draft',
+      proposalId: proposal.id,
+      clientId: clientId !== undefined ? clientId || null : (proposal.clientId ?? null),
+      letterId: null,
+      supersedesId: null,
+      party,
+      ...texts,
+      sectionKeys: (Array.isArray(assembled.sectionKeys) ? assembled.sectionKeys : []).map(String),
+      figures,
+      retainerAmount: engagementRetainer(figures.totals.monthly),
+      packageId: null,
+      planIds: [],
+      templateHash: letterTemplateHash(texts),
+      emailLog: [],
+      createdBy,
+    }
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `insert into engagements
+           (id, kind, status, proposal_id, client_id, party, subject, email_body, letter_body,
+            section_keys, figures, retainer_amount, template_hash, created_by)
+         values ($1, $2, 'draft', $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13)
+         returning ${ENGAGEMENT_COLUMNS}`,
+        [
+          row.id,
+          row.kind,
+          row.proposalId,
+          row.clientId,
+          JSON.stringify(row.party),
+          row.subject,
+          row.emailBody,
+          row.letterBody,
+          JSON.stringify(row.sectionKeys),
+          JSON.stringify(row.figures),
+          row.retainerAmount,
+          row.templateHash,
+          row.createdBy,
+        ],
+      )
+      return mapEngagementRow(rows[0])
+    }
+    return this._mutateEngagementFile((authState) => {
+      const now = nowIso()
+      const stored = {
+        ...row,
+        sentAt: null,
+        signedAt: null,
+        signedBy: null,
+        signedNote: null,
+        voidedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      }
+      authState.engagements.push(stored)
+      return { result: mapEngagementRow(stored), changed: true }
+    })
+  }
+
+  /** A refusal for a write the engagement's status does not allow, worded from the status. */
+  static _engagementStatusRefusal(status, what) {
+    return new EngagementStateError(
+      status ? `This engagement is ${status}, so it can no longer be ${what}.` : 'This engagement no longer exists.',
+      'status',
+    )
+  }
+
+  /**
+   * Edit a draft or sent engagement: any of subject, emailBody, letterBody,
+   * retainerAmount, packageId, planIds, party (merged over the stored party).
+   * Recomputes the template hash. Refuses ('status') a signed, superseded or
+   * void one, and ('invalid') a value it cannot take. Returns the engagement,
+   * or null when there is none.
+   */
+  async updateEngagement(id, patch = {}) {
+    const current = await this.getEngagement(id)
+    if (!current) return null
+    if (!ENGAGEMENT_EDITABLE_STATUSES.includes(current.status)) {
+      throw AppDataStore._engagementStatusRefusal(current.status, 'edited')
+    }
+    const next = await this._engagementPatched(current, patch ?? {})
+    const templateHash = letterTemplateHash(next)
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update engagements
+            set subject = $2, email_body = $3, letter_body = $4, retainer_amount = $5, package_id = $6,
+                plan_ids = $7::text[], party = $8::jsonb, template_hash = $9, updated_at = now()
+          where id = $1 and status in ('draft', 'sent')
+          returning ${ENGAGEMENT_COLUMNS}`,
+        [
+          id,
+          next.subject,
+          next.emailBody,
+          next.letterBody,
+          next.retainerAmount,
+          next.packageId,
+          next.planIds,
+          JSON.stringify(next.party),
+          templateHash,
+        ],
+      )
+      if (rows[0]) return mapEngagementRow(rows[0])
+      const latest = await this.getEngagement(id)
+      if (!latest) return null
+      throw AppDataStore._engagementStatusRefusal(latest.status, 'edited')
+    }
+    return this._mutateEngagementFile((authState) => {
+      const row = authState.engagements.find((entry) => entry?.id === id)
+      if (!row) return { result: null, changed: false }
+      if (!ENGAGEMENT_EDITABLE_STATUSES.includes(row.status)) {
+        throw AppDataStore._engagementStatusRefusal(row.status, 'edited')
+      }
+      Object.assign(row, next, { templateHash, updatedAt: nowIso() })
+      return { result: mapEngagementRow(row), changed: true }
+    })
+  }
+
+  /** The editable fields after a patch, each checked; throws 'invalid' for a value it cannot take. */
+  async _engagementPatched(current, patch) {
+    const invalid = (message) => new EngagementStateError(message, 'invalid')
+    const next = {
+      subject: current.subject,
+      emailBody: current.emailBody,
+      letterBody: current.letterBody,
+      retainerAmount: current.retainerAmount,
+      packageId: current.packageId,
+      planIds: current.planIds,
+      party: current.party,
+    }
+    for (const [key, max] of [
+      ['subject', ENGAGEMENT_SUBJECT_MAX],
+      ['emailBody', ENGAGEMENT_BODY_MAX],
+      ['letterBody', ENGAGEMENT_BODY_MAX],
+    ]) {
+      if (patch[key] === undefined) continue
+      if (typeof patch[key] !== 'string') throw invalid('Send the subject, the email and the letter as text.')
+      const text = patch[key].trim()
+      if (text.length > max) {
+        throw invalid(
+          key === 'subject'
+            ? 'The subject can be at most 200 characters.'
+            : 'The email and the letter can each be at most 20,000 characters.',
+        )
+      }
+      next[key] = text
+    }
+    if (patch.retainerAmount !== undefined) {
+      const raw = patch.retainerAmount
+      if (raw === null || raw === '' || raw === 0) next.retainerAmount = null
+      else if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0 || raw > 1000000) {
+        throw invalid('The retainer is a dollar amount of zero or more (blank for none).')
+      } else next.retainerAmount = engagementRetainer(raw)
+    }
+    if (patch.packageId !== undefined) {
+      if (patch.packageId === null || patch.packageId === '') next.packageId = null
+      else if (typeof patch.packageId !== 'string') throw invalid('Choose a package from the list.')
+      else {
+        const packages = await this.listPackages()
+        if (!packages.some((pkg) => pkg.id === patch.packageId)) throw invalid('That package no longer exists.')
+        next.packageId = patch.packageId
+      }
+    }
+    if (patch.planIds !== undefined) {
+      if (!Array.isArray(patch.planIds) || patch.planIds.some((planId) => typeof planId !== 'string' || !planId)) {
+        throw invalid('Choose the plans from the list.')
+      }
+      const planIds = [...new Set(patch.planIds)]
+      if (planIds.length > ENGAGEMENT_PLAN_IDS_MAX) throw invalid('That is more plans than one client can take.')
+      next.planIds = planIds
+    }
+    if (patch.party !== undefined) {
+      if (!patch.party || typeof patch.party !== 'object' || Array.isArray(patch.party)) {
+        throw invalid('Send the party as its name, contact and address fields.')
+      }
+      next.party = cleanEngagementParty({ ...current.party, ...patch.party })
+    }
+    return next
+  }
+
+  /**
+   * Rebuild a DRAFT's subject, bodies and section keys from its stored figures
+   * and party and the active library (or `sections`) - her edits are replaced,
+   * which the page confirms first. Refuses ('status') anything past draft.
+   */
+  async reassembleEngagement(id, { sections = null } = {}) {
+    const current = await this.getEngagement(id)
+    if (!current) return null
+    if (current.status !== 'draft') throw AppDataStore._engagementStatusRefusal(current.status, 're-assembled')
+    const firm = await this.getFirmSettings()
+    const assembled = assembleEngagement({
+      sections: await this._engagementLibrary(sections),
+      snapshot: current.figures,
+      kind: current.kind,
+      party: current.party,
+      firmName: firm?.name ?? '',
+    })
+    const texts = {
+      subject: String(assembled.subject ?? '').slice(0, ENGAGEMENT_SUBJECT_MAX),
+      emailBody: String(assembled.emailBody ?? '').slice(0, ENGAGEMENT_BODY_MAX),
+      letterBody: String(assembled.letterBody ?? '').slice(0, ENGAGEMENT_BODY_MAX),
+    }
+    const sectionKeys = (Array.isArray(assembled.sectionKeys) ? assembled.sectionKeys : []).map(String)
+    const templateHash = letterTemplateHash(texts)
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update engagements
+            set subject = $2, email_body = $3, letter_body = $4, section_keys = $5::jsonb,
+                template_hash = $6, updated_at = now()
+          where id = $1 and status = 'draft'
+          returning ${ENGAGEMENT_COLUMNS}`,
+        [id, texts.subject, texts.emailBody, texts.letterBody, JSON.stringify(sectionKeys), templateHash],
+      )
+      if (rows[0]) return mapEngagementRow(rows[0])
+      const latest = await this.getEngagement(id)
+      if (!latest) return null
+      throw AppDataStore._engagementStatusRefusal(latest.status, 're-assembled')
+    }
+    return this._mutateEngagementFile((authState) => {
+      const row = authState.engagements.find((entry) => entry?.id === id)
+      if (!row) return { result: null, changed: false }
+      if (row.status !== 'draft') throw AppDataStore._engagementStatusRefusal(row.status, 're-assembled')
+      Object.assign(row, texts, { sectionKeys, templateHash, updatedAt: nowIso() })
+      return { result: mapEngagementRow(row), changed: true }
+    })
+  }
+
+  /** An email-log entry as stored: a send or a delivery event, the shapes of `appendProposalEmailEvent`. */
+  static _engagementLogEntry(entry, kind) {
+    const at =
+      entry.at && !Number.isNaN(new Date(entry.at).getTime()) ? new Date(entry.at).toISOString() : nowIso()
+    return {
+      kind,
+      at,
+      providerId: entry.providerId ? String(entry.providerId) : null,
+      to: (Array.isArray(entry.to) ? entry.to : [entry.to])
+        .filter(Boolean)
+        .map((address) => String(address).slice(0, 320))
+        .slice(0, 10),
+      ...(kind === 'send'
+        ? {
+            ok: entry.ok === true,
+            subject: String(entry.subject ?? '').slice(0, 200),
+            error: entry.error ? String(entry.error).slice(0, 300) : null,
+          }
+        : {
+            event: String(entry.event ?? '').trim().slice(0, 40),
+            detail: String(entry.detail ?? '').slice(0, 300),
+          }),
+    }
+  }
+
+  /**
+   * Log one send attempt. A send that left (`ok`) moves a draft to sent and
+   * stamps `sent_at` the first time only; a failed one is logged and changes
+   * nothing else. A re-send of a sent letter is just another entry. Returns the
+   * engagement, or null when there is none.
+   */
+  async markEngagementSent(id, { to = [], providerId = null, ok = false, error = null, at = null, subject = '' } = {}) {
+    const entry = AppDataStore._engagementLogEntry({ to, providerId, ok, error, at, subject }, 'send')
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update engagements
+            set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                status = case when $3 and status = 'draft' then 'sent' else status end,
+                sent_at = case when $3 then coalesce(sent_at, $4::timestamptz) else sent_at end,
+                updated_at = now()
+          where id = $1
+          returning ${ENGAGEMENT_COLUMNS}`,
+        [id, JSON.stringify([entry]), entry.ok, entry.at],
+      )
+      return rows[0] ? mapEngagementRow(rows[0]) : null
+    }
+    return this._mutateEngagementFile((authState) => {
+      const row = authState.engagements.find((candidate) => candidate?.id === id)
+      if (!row) return { result: null, changed: false }
+      row.emailLog = [...(Array.isArray(row.emailLog) ? row.emailLog : []), entry]
+      if (entry.ok) {
+        if (row.status === 'draft') row.status = 'sent'
+        if (!row.sentAt) row.sentAt = entry.at
+      }
+      row.updatedAt = nowIso()
+      return { result: mapEngagementRow(row), changed: true }
+    })
+  }
+
+  /**
+   * Append a provider delivery event (or a send) to the email log - the
+   * webhook path. NEVER touches status: a bounce does not un-send a letter.
+   * Idempotent on (kind, event, providerId), like `appendProposalEmailEvent`,
+   * because Resend retries until it gets a 200. Returns the engagement, or null.
+   */
+  async appendEngagementEmailEvent(id, entry = {}) {
+    const current = await this.getEngagement(id)
+    if (!current) return null
+    const kind = entry.kind === 'delivery' ? 'delivery' : 'send'
+    const clean = AppDataStore._engagementLogEntry(entry, kind)
+    const event = kind === 'delivery' ? clean.event : null
+    // A delivery event with no event name says nothing - a no-op, not a failure.
+    if (kind === 'delivery' && !event) return current
+    const providerId = clean.providerId
+    const sameAs = (logged) =>
+      logged?.kind === kind && (logged?.event ?? null) === event && logged?.providerId === providerId
+    if (providerId !== null && current.emailLog.some(sameAs)) return current
+
+    if (this.pool) {
+      // Appended IN the row; with a providerId the WHERE carries a containment
+      // probe so two concurrent retries of one webhook cannot both append.
+      const probe = providerId !== null ? { kind, providerId, ...(kind === 'delivery' ? { event } : {}) } : null
+      const { rows } = await this.pool.query(
+        probe
+          ? `update engagements
+                set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                    updated_at = now()
+              where id = $1 and not (coalesce(email_log, '[]'::jsonb) @> $3::jsonb)
+              returning ${ENGAGEMENT_COLUMNS}`
+          : `update engagements
+                set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                    updated_at = now()
+              where id = $1
+              returning ${ENGAGEMENT_COLUMNS}`,
+        probe ? [id, JSON.stringify([clean]), JSON.stringify([probe])] : [id, JSON.stringify([clean])],
+      )
+      if (rows[0]) return mapEngagementRow(rows[0])
+      if (probe) return (await this.getEngagement(id)) ?? current
+      return null
+    }
+    return this._mutateEngagementFile((authState) => {
+      const row = authState.engagements.find((candidate) => candidate?.id === id)
+      if (!row) return { result: null, changed: false }
+      const log = Array.isArray(row.emailLog) ? row.emailLog : []
+      if (providerId !== null && log.some(sameAs)) return { result: mapEngagementRow(row), changed: false }
+      row.emailLog = [...log, clean]
+      row.updatedAt = nowIso()
+      return { result: mapEngagementRow(row), changed: true }
+    })
+  }
+
+  /**
+   * Mark a SENT engagement signed - or a draft one, with `allowUnsent: true`,
+   * for a letter she handed over in person. `signedOn` is the firm day it was
+   * signed ('YYYY-MM-DD', not in the future), stored as that day's firm noon.
+   * Stage 2: the signature only, no side effects (stage 3 creates the client in
+   * this same call). Returns the engagement, or null when there is none.
+   */
+  async signEngagement(id, { signedOn, note = '', userId = null, allowUnsent = false } = {}) {
+    if (!isRealDay(signedOn)) throw new EngagementStateError('Choose the day the letter was signed.', 'invalid')
+    if (signedOn > firmToday()) throw new EngagementStateError('The signed date cannot be in the future.', 'invalid')
+    const allowed = allowUnsent === true ? ['sent', 'draft'] : ['sent']
+    const refusal = (status) =>
+      status === 'draft'
+        ? new EngagementStateError(
+            'This letter has not been sent. Send it first, or mark it as signed in person.',
+            'status',
+          )
+        : AppDataStore._engagementStatusRefusal(status, 'signed')
+    const current = await this.getEngagement(id)
+    if (!current) return null
+    if (!allowed.includes(current.status)) throw refusal(current.status)
+    const signedAt = firmNoonInstant(signedOn)
+    const signedNote = String(note ?? '').trim().slice(0, ENGAGEMENT_NOTE_MAX) || null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update engagements
+            set status = 'signed', signed_at = $2, signed_by = $3, signed_note = $4, updated_at = now()
+          where id = $1 and status = any($5::text[])
+          returning ${ENGAGEMENT_COLUMNS}`,
+        [id, signedAt, userId, signedNote, allowed],
+      )
+      if (rows[0]) return mapEngagementRow(rows[0])
+      const latest = await this.getEngagement(id)
+      if (!latest) return null
+      throw refusal(latest.status)
+    }
+    return this._mutateEngagementFile((authState) => {
+      const row = authState.engagements.find((entry) => entry?.id === id)
+      if (!row) return { result: null, changed: false }
+      if (!allowed.includes(row.status)) throw refusal(row.status)
+      Object.assign(row, { status: 'signed', signedAt, signedBy: userId, signedNote, updatedAt: nowIso() })
+      return { result: mapEngagementRow(row), changed: true }
+    })
+  }
+
+  /** Void a draft or sent engagement (never deleted). Returns the engagement, or null. */
+  async voidEngagement(id, { userId = null } = {}) {
+    void userId // who voided is the route's activity entry; the table has no column for it
+    const current = await this.getEngagement(id)
+    if (!current) return null
+    if (!ENGAGEMENT_EDITABLE_STATUSES.includes(current.status)) {
+      throw AppDataStore._engagementStatusRefusal(current.status, 'voided')
+    }
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update engagements
+            set status = 'void', voided_at = now(), updated_at = now()
+          where id = $1 and status in ('draft', 'sent')
+          returning ${ENGAGEMENT_COLUMNS}`,
+        [id],
+      )
+      if (rows[0]) return mapEngagementRow(rows[0])
+      const latest = await this.getEngagement(id)
+      if (!latest) return null
+      throw AppDataStore._engagementStatusRefusal(latest.status, 'voided')
+    }
+    return this._mutateEngagementFile((authState) => {
+      const row = authState.engagements.find((entry) => entry?.id === id)
+      if (!row) return { result: null, changed: false }
+      if (!ENGAGEMENT_EDITABLE_STATUSES.includes(row.status)) {
+        throw AppDataStore._engagementStatusRefusal(row.status, 'voided')
+      }
+      const now = nowIso()
+      Object.assign(row, { status: 'void', voidedAt: now, updatedAt: now })
+      return { result: mapEngagementRow(row), changed: true }
     })
   }
 

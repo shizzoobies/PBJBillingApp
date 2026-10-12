@@ -46010,3 +46010,867 @@ describe('engagement letters (Postgres statements)', () => {
     expect(fake.statements.filter((s) => /engagement_letter/i.test(s.text))).toEqual([])
   })
 })
+
+// ---- Engagements (docs/plans/engagements-2026-10.md, stage 2B) ------------------
+// Imported here rather than in the list at the top so this block stays one hunk.
+import { EngagementStateError } from './store.js'
+import { DEFAULT_ENGAGEMENT_SECTIONS } from '../lib/engagement-sections.js'
+import { assembleEngagement } from '../lib/engagement-assemble.js'
+import { letterTemplateHash } from '../lib/letter-template.js'
+
+async function clearEngagements() {
+  const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+  authState.engagementSections = []
+  authState.engagements = []
+  await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+}
+
+const seedKeysInOrder = () =>
+  DEFAULT_ENGAGEMENT_SECTIONS.map((section, index) => ({ section, index }))
+    .sort((a, b) => a.section.sortOrder - b.section.sortOrder || a.index - b.index)
+    .map(({ section }) => section.key)
+
+describe('engagements (file backend)', () => {
+  const readAuth = async () => JSON.parse(await readFile(localAuthPath, 'utf8'))
+
+  beforeEach(async () => {
+    await clearProposals()
+    await clearEngagements()
+    await setProposalRates(store)
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c1',
+            name: 'Acme',
+            contactName: 'Robin Ray',
+            email: 'robin@acme.test',
+            phone: '615-555-0199',
+            addressLine1: '1 Main St',
+            city: 'Nashville',
+            state: 'TN',
+            postalCode: '37201',
+            paymentTerms: 'Net 15',
+          },
+        ],
+        plans: [{ id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: [] }],
+        timeEntries: [],
+      }),
+    )
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const prospectProposal = () =>
+    store.createProposal({
+      prospect: {
+        company: 'Acme Books',
+        contactName: 'Pat Doe',
+        title: 'Owner',
+        email: 'pat@acme.test',
+        phone: '615-555-0101',
+        addressLine1: '9 Elm St',
+        city: 'Franklin',
+        state: 'TN',
+        postalCode: '37064',
+        notes: 'not part of a party',
+      },
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+
+  const draftFromProspect = async () => {
+    const proposal = await prospectProposal()
+    return store.createEngagementFromProposal(proposal, { createdBy: 'emp-patrice' })
+  }
+
+  it('seeds the section library once, in letter order, on the first read', async () => {
+    const first = await store.listEngagementSections()
+    expect(first.map((section) => section.key)).toEqual(seedKeysInOrder())
+    expect(first.every((section) => /^esec-[0-9a-f]{8}$/.test(section.id))).toBe(true)
+    expect(first.every((section) => section.active === true)).toBe(true)
+    expect(first.find((section) => section.key === 'email')?.role).toBe('email')
+    expect(first.filter((section) => section.role === 'letter')).toHaveLength(first.length - 1)
+    expect((await readAuth()).engagementSections).toHaveLength(DEFAULT_ENGAGEMENT_SECTIONS.length)
+
+    const second = await store.listEngagementSections()
+    expect(second.map((section) => section.id)).toEqual(first.map((section) => section.id))
+    expect((await readAuth()).engagementSections).toHaveLength(DEFAULT_ENGAGEMENT_SECTIONS.length)
+  })
+
+  it('two first reads at once seed the library once', async () => {
+    const [a, b] = await Promise.all([store.listEngagementSections(), store.listEngagementSections()])
+    expect(a.map((section) => section.id)).toEqual(b.map((section) => section.id))
+    expect((await readAuth()).engagementSections).toHaveLength(DEFAULT_ENGAGEMENT_SECTIONS.length)
+  })
+
+  it('saves the library by key: edits land, a missing key is deactivated (never deleted), a listed one comes back', async () => {
+    const library = await store.listEngagementSections()
+    const intro = library.find((section) => section.key === 'intro')
+    const kept = library
+      .filter((section) => section.key !== 'payroll')
+      .map((section) => (section.key === 'intro' ? { ...section, body: 'Dear {{contact_name}},' } : section))
+    kept.push({ key: 'new_terms', title: 'New terms', body: 'Something new.', trigger: { always: true }, sortOrder: 999 })
+
+    const saved = await store.saveEngagementSections(kept, { updatedBy: 'emp-patrice' })
+    expect(saved).toHaveLength(library.length + 1)
+    expect(saved.find((section) => section.key === 'payroll')?.active).toBe(false)
+    expect(saved.find((section) => section.key === 'intro')).toMatchObject({
+      id: intro.id,
+      body: 'Dear {{contact_name}},',
+      active: true,
+    })
+    expect(saved.at(-1)).toMatchObject({ key: 'new_terms', active: true, trigger: { always: true } })
+    expect((await readAuth()).engagementSections).toHaveLength(library.length + 1)
+
+    // An entry sent back with `active: false` reads as "not listed"; a deactivated one listed
+    // as active comes back.
+    const off = await store.saveEngagementSections(
+      saved.map((section) =>
+        section.key === 'new_terms'
+          ? { ...section, active: false }
+          : section.key === 'payroll'
+            ? { ...section, active: true }
+            : section,
+      ),
+    )
+    expect(off.find((section) => section.key === 'new_terms')?.active).toBe(false)
+    expect(off.find((section) => section.key === 'payroll')?.active).toBe(true)
+
+    // Deactivating everything is not "empty": nothing is re-seeded over it.
+    const none = await store.saveEngagementSections([])
+    expect(none.every((section) => section.active === false)).toBe(true)
+    expect((await store.listEngagementSections()).every((section) => section.active === false)).toBe(true)
+  })
+
+  it('refuses a library it cannot take whole, and writes nothing', async () => {
+    const library = await store.listEngagementSections()
+    const before = await readAuth()
+    for (const bad of [
+      [...library, { key: 'Bad Key!', title: 'x', body: 'y', trigger: {} }],
+      [...library, { ...library[1] }],
+    ]) {
+      const error = await store.saveEngagementSections(bad).catch((caught) => caught)
+      expect(error).toBeInstanceOf(EngagementStateError)
+      expect(error.reason).toBe('invalid')
+    }
+    await expect(store.saveEngagementSections('nope')).rejects.toBeInstanceOf(EngagementStateError)
+    expect((await readAuth()).engagementSections).toEqual(before.engagementSections)
+  })
+
+  it('drafts an Original from a prospect proposal: party, figures, retainer, assembled text and its hash', async () => {
+    const proposal = await prospectProposal()
+    const engagement = await store.createEngagementFromProposal(proposal, { createdBy: 'emp-patrice' })
+
+    expect(engagement.id).toMatch(/^eng-[0-9a-f]{8}$/)
+    expect(engagement).toMatchObject({
+      kind: 'original',
+      status: 'draft',
+      proposalId: proposal.id,
+      clientId: null,
+      letterId: null,
+      supersedesId: null,
+      packageId: null,
+      planIds: [],
+      emailLog: [],
+      sentAt: null,
+      signedAt: null,
+      voidedAt: null,
+      createdBy: 'emp-patrice',
+      retainerAmount: 630,
+      party: {
+        company: 'Acme Books',
+        contactName: 'Pat Doe',
+        title: 'Owner',
+        email: 'pat@acme.test',
+        phone: '615-555-0101',
+        addressLine1: '9 Elm St',
+        addressLine2: '',
+        city: 'Franklin',
+        state: 'TN',
+        postalCode: '37064',
+      },
+    })
+    expect(engagement.party).not.toHaveProperty('notes')
+
+    // Money from the stored snapshot; each line gains role and hours; hours by role at the top and in totals.
+    expect(engagement.figures.totals.monthly).toBe(proposal.pricingSnapshot.totals.monthly)
+    expect(engagement.figures.lines).toHaveLength(proposal.pricingSnapshot.lines.length)
+    const [line] = engagement.figures.lines
+    expect(Object.keys(line).sort()).toEqual(['amount', 'cadence', 'formula', 'group', 'hours', 'name', 'role', 'serviceId'])
+    expect(line).toMatchObject({ serviceId: 'monthly-weekly-transactions-basic', amount: 630 })
+    expect(Object.keys(engagement.figures.hoursByRole).sort()).toEqual(['accountant', 'bookkeeper', 'controller'])
+    expect(engagement.figures.totals.hoursByRole).toEqual(engagement.figures.hoursByRole)
+    expect(engagement.figures.paymentTerms).toBe((await store.getFirmSettings()).clientDefaults?.paymentTerms ?? '')
+    expect(engagement.figures.inputs).toEqual(proposal.inputs)
+    expect(line.formula).toBe(proposal.pricingSnapshot.lines[0].formula)
+
+    const expected = assembleEngagement({
+      sections: (await store.listEngagementSections()).filter((section) => section.active),
+      snapshot: engagement.figures,
+      kind: 'original',
+    })
+    expect(engagement.subject).toBe(expected.subject)
+    expect(engagement.emailBody).toBe(expected.emailBody)
+    expect(engagement.letterBody).toBe(expected.letterBody)
+    expect(engagement.sectionKeys).toEqual(expected.sectionKeys)
+    expect(engagement.templateHash).toBe(letterTemplateHash(engagement))
+
+    expect(await store.getEngagement(engagement.id)).toEqual(engagement)
+    expect((await readAuth()).engagements).toHaveLength(1)
+  })
+
+  it('takes the party from the linked client for a proposal to an existing client', async () => {
+    const upsell = await store.createProposal({
+      clientId: 'c1',
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    const engagement = await store.createEngagementFromProposal(upsell, {})
+    expect(engagement.clientId).toBe('c1')
+    expect(engagement.party).toMatchObject({
+      company: 'Acme',
+      contactName: 'Robin Ray',
+      email: 'robin@acme.test',
+      addressLine1: '1 Main St',
+      city: 'Nashville',
+    })
+    expect(engagement.figures.paymentTerms).toBe('Net 15')
+  })
+
+  it('a proposal with no monthly fee drafts no retainer; an empty snapshot is not a refusal', async () => {
+    const empty = await store.createProposal({ prospect: { company: 'Tiny Co' } })
+    const engagement = await store.createEngagementFromProposal(empty, {})
+    expect(engagement.retainerAmount).toBeNull()
+    expect(engagement.figures.lines).toEqual([])
+    expect(engagement.figures.hoursByRole).toEqual({ bookkeeper: 0, accountant: 0, controller: 0 })
+    await expect(store.createEngagementFromProposal(null)).rejects.toBeInstanceOf(EngagementStateError)
+    await expect(store.createEngagementFromProposal(empty, { kind: 'nope' })).rejects.toBeInstanceOf(
+      EngagementStateError,
+    )
+  })
+
+  it('edits a draft: text, retainer, plans and party; the hash follows the text', async () => {
+    const draft = await draftFromProspect()
+    const edited = await store.updateEngagement(draft.id, {
+      subject: '  Our engagement  ',
+      letterBody: 'Dear {{contact_name}},\n\n**Scope**\n\nAll of it.',
+      retainerAmount: 500.555,
+      planIds: ['plan-books', 'plan-books', 'plan-x'],
+      party: { email: 'owner@acme.test', notes: 'dropped' },
+    })
+    expect(edited).toMatchObject({
+      subject: 'Our engagement',
+      emailBody: draft.emailBody,
+      letterBody: 'Dear {{contact_name}},\n\n**Scope**\n\nAll of it.',
+      retainerAmount: 500.56,
+      planIds: ['plan-books', 'plan-x'],
+      party: { ...draft.party, email: 'owner@acme.test' },
+    })
+    expect(edited.party).not.toHaveProperty('notes')
+    expect(edited.templateHash).toBe(letterTemplateHash(edited))
+    expect(edited.templateHash).not.toBe(draft.templateHash)
+
+    expect((await store.updateEngagement(draft.id, { retainerAmount: 0 })).retainerAmount).toBeNull()
+    expect((await store.updateEngagement(draft.id, { retainerAmount: null })).retainerAmount).toBeNull()
+    expect(await store.updateEngagement('eng-missing', { subject: 'x' })).toBeNull()
+  })
+
+  it('refuses a value it cannot take, with reason invalid, and changes nothing', async () => {
+    const draft = await draftFromProspect()
+    for (const patch of [
+      { subject: 's'.repeat(201) },
+      { letterBody: 'l'.repeat(20001) },
+      { emailBody: 42 },
+      { retainerAmount: -1 },
+      { retainerAmount: '500' },
+      { packageId: 'pkg-missing' },
+      { planIds: 'plan-books' },
+      { planIds: [3] },
+      { party: 'Acme' },
+    ]) {
+      const error = await store.updateEngagement(draft.id, patch).catch((caught) => caught)
+      expect(error, JSON.stringify(patch)).toBeInstanceOf(EngagementStateError)
+      expect(error.reason).toBe('invalid')
+    }
+    expect(await store.getEngagement(draft.id)).toEqual(draft)
+  })
+
+  it('logs a failed send and stays a draft; a send that left marks it sent, sent_at stamped once', async () => {
+    const draft = await draftFromProspect()
+    const failed = await store.markEngagementSent(draft.id, {
+      to: ['pat@acme.test'],
+      ok: false,
+      error: 'Email provider refused the message (422).',
+      subject: 'Engagement letter - Acme Books',
+    })
+    expect(failed.status).toBe('draft')
+    expect(failed.sentAt).toBeNull()
+    expect(failed.emailLog).toEqual([
+      expect.objectContaining({
+        kind: 'send',
+        ok: false,
+        to: ['pat@acme.test'],
+        providerId: null,
+        error: 'Email provider refused the message (422).',
+      }),
+    ])
+
+    const sent = await store.markEngagementSent(draft.id, {
+      to: ['pat@acme.test'],
+      ok: true,
+      providerId: 're_1',
+      at: '2026-10-09T15:00:00.000Z',
+    })
+    expect(sent).toMatchObject({ status: 'sent', sentAt: '2026-10-09T15:00:00.000Z' })
+    const again = await store.markEngagementSent(draft.id, {
+      to: ['pat@acme.test'],
+      ok: true,
+      providerId: 're_2',
+      at: '2026-10-10T15:00:00.000Z',
+    })
+    expect(again).toMatchObject({ status: 'sent', sentAt: '2026-10-09T15:00:00.000Z' })
+    expect(again.emailLog.map((entry) => entry.providerId)).toEqual([null, 're_1', 're_2'])
+    expect(await store.markEngagementSent('eng-missing', { ok: true })).toBeNull()
+  })
+
+  it('appends a delivery event once per (event, provider id) and never touches the status', async () => {
+    const draft = await draftFromProspect()
+    await store.markEngagementSent(draft.id, { to: ['pat@acme.test'], ok: true, providerId: 're_1' })
+    const event = { kind: 'delivery', event: 'bounced', providerId: 're_1', to: 'pat@acme.test', detail: 'Mailbox full' }
+    const first = await store.appendEngagementEmailEvent(draft.id, event)
+    const second = await store.appendEngagementEmailEvent(draft.id, event)
+    expect(second.emailLog).toEqual(first.emailLog)
+    expect(first.emailLog.at(-1)).toMatchObject({
+      kind: 'delivery',
+      event: 'bounced',
+      providerId: 're_1',
+      to: ['pat@acme.test'],
+      detail: 'Mailbox full',
+    })
+    expect(first.status).toBe('sent')
+    const delivered = await store.appendEngagementEmailEvent(draft.id, { ...event, event: 'delivered', detail: '' })
+    expect(delivered.emailLog).toHaveLength(3)
+    // No event name says nothing: a no-op that still answers the engagement.
+    expect((await store.appendEngagementEmailEvent(draft.id, { kind: 'delivery', providerId: 're_1' })).emailLog).toHaveLength(3)
+    expect(await store.appendEngagementEmailEvent('eng-missing', event)).toBeNull()
+  })
+
+  it('re-assembles a draft from its stored figures and the library, and refuses once it is sent', async () => {
+    const draft = await draftFromProspect()
+    await store.updateEngagement(draft.id, { subject: 'Edited', letterBody: 'Edited' })
+    const library = await store.listEngagementSections()
+    const rebuilt = await store.reassembleEngagement(draft.id, {})
+    expect(rebuilt).toMatchObject({
+      subject: draft.subject,
+      emailBody: draft.emailBody,
+      letterBody: draft.letterBody,
+      sectionKeys: draft.sectionKeys,
+      templateHash: draft.templateHash,
+    })
+
+    // A caller's library wins over the stored one.
+    const onlyIntro = library.filter((section) => section.key === 'email' || section.key === 'intro')
+    const narrow = await store.reassembleEngagement(draft.id, { sections: onlyIntro })
+    expect(narrow.sectionKeys).toEqual(['intro'])
+
+    await store.markEngagementSent(draft.id, { to: ['pat@acme.test'], ok: true, providerId: 're_1' })
+    const error = await store.reassembleEngagement(draft.id, {}).catch((caught) => caught)
+    expect(error).toBeInstanceOf(EngagementStateError)
+    expect(error.reason).toBe('status')
+    expect(await store.reassembleEngagement('eng-missing', {})).toBeNull()
+  })
+
+  it('signs a sent letter on the firm day given (firm noon), and then nothing more can change it', async () => {
+    const draft = await draftFromProspect()
+    const unsent = await store.signEngagement(draft.id, { signedOn: '2026-10-09' }).catch((caught) => caught)
+    expect(unsent).toBeInstanceOf(EngagementStateError)
+    expect(unsent.reason).toBe('status')
+    expect(unsent.message).toMatch(/not been sent/)
+
+    await store.markEngagementSent(draft.id, { to: ['pat@acme.test'], ok: true, providerId: 're_1' })
+    for (const signedOn of ['', '2026-02-30', '10/09/2026', '2999-01-01']) {
+      const error = await store.signEngagement(draft.id, { signedOn }).catch((caught) => caught)
+      expect(error, signedOn).toBeInstanceOf(EngagementStateError)
+      expect(error.reason).toBe('invalid')
+    }
+    const signed = await store.signEngagement(draft.id, {
+      signedOn: '2026-10-09',
+      note: '  Came back by email  ',
+      userId: 'emp-patrice',
+    })
+    expect(signed).toMatchObject({
+      status: 'signed',
+      // Noon in New York (EDT, UTC-4) on that day.
+      signedAt: '2026-10-09T16:00:00.000Z',
+      signedBy: 'emp-patrice',
+      signedNote: 'Came back by email',
+    })
+    for (const write of [
+      () => store.updateEngagement(draft.id, { subject: 'x' }),
+      () => store.voidEngagement(draft.id, {}),
+      () => store.signEngagement(draft.id, { signedOn: '2026-10-09' }),
+      () => store.reassembleEngagement(draft.id, {}),
+    ]) {
+      const error = await write().catch((caught) => caught)
+      expect(error).toBeInstanceOf(EngagementStateError)
+      expect(error.reason).toBe('status')
+    }
+    expect(await store.signEngagement('eng-missing', { signedOn: '2026-10-09' })).toBeNull()
+  })
+
+  it('signs an unsent draft only when she says it was signed in person; winter days are noon EST', async () => {
+    const draft = await draftFromProspect()
+    const signed = await store.signEngagement(draft.id, { signedOn: '2026-01-15', allowUnsent: true })
+    expect(signed).toMatchObject({ status: 'signed', signedAt: '2026-01-15T17:00:00.000Z', signedNote: null })
+  })
+
+  it('voids a draft or a sent letter, once', async () => {
+    const draft = await draftFromProspect()
+    const voided = await store.voidEngagement(draft.id, { userId: 'emp-patrice' })
+    expect(voided.status).toBe('void')
+    expect(Number.isNaN(Date.parse(voided.voidedAt))).toBe(false)
+    await expect(store.voidEngagement(draft.id, {})).rejects.toBeInstanceOf(EngagementStateError)
+    expect(await store.voidEngagement('eng-missing', {})).toBeNull()
+
+    const other = await draftFromProspect()
+    await store.markEngagementSent(other.id, { to: ['pat@acme.test'], ok: true, providerId: 're_9' })
+    expect((await store.voidEngagement(other.id, {})).status).toBe('void')
+  })
+
+  it('lists newest first, filtered by client, proposal or status, without bodies or the log', async () => {
+    const a = await draftFromProspect()
+    const upsell = await store.createProposal({
+      clientId: 'c1',
+      inputs: { transactions: 120 },
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+    })
+    const b = await store.createEngagementFromProposal(upsell, {})
+    const c = await draftFromProspect()
+    await store.voidEngagement(c.id, {})
+    // Make the time order differ from the insertion order: b is the newest.
+    const authState = await readAuth()
+    const stamp = { [a.id]: '2026-10-09T12:00:00.000Z', [b.id]: '2026-10-09T15:00:00.000Z', [c.id]: '2026-10-09T09:00:00.000Z' }
+    for (const row of authState.engagements) row.createdAt = stamp[row.id]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+
+    const all = await store.listEngagements()
+    expect(all.map((row) => row.id)).toEqual([b.id, a.id, c.id])
+    for (const row of all) {
+      expect(row).not.toHaveProperty('emailBody')
+      expect(row).not.toHaveProperty('letterBody')
+      expect(row).not.toHaveProperty('emailLog')
+      expect(row.figures.totals).toBeTruthy()
+    }
+    expect((await store.listEngagements({ clientId: 'c1' })).map((row) => row.id)).toEqual([b.id])
+    expect((await store.listEngagements({ proposalId: a.proposalId })).map((row) => row.id)).toEqual([a.id])
+    expect((await store.listEngagements({ status: 'void' })).map((row) => row.id)).toEqual([c.id])
+    expect(await store.listEngagements({ status: 'bogus' })).toEqual([])
+  })
+
+  it('a bulk save leaves the library and every engagement intact', async () => {
+    const draft = await draftFromProspect()
+    await store.markEngagementSent(draft.id, { to: ['pat@acme.test'], ok: true, providerId: 're_1' })
+    const before = { sections: await store.listEngagementSections(), engagement: await store.getEngagement(draft.id) }
+
+    await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme' }, { id: 'c9', name: 'Somebody Else' }] }))
+    await store.write(workspace())
+
+    expect(await store.listEngagementSections()).toEqual(before.sections)
+    expect(await store.getEngagement(draft.id)).toEqual(before.engagement)
+  })
+})
+
+describe('engagements (Postgres statements)', () => {
+  /** A recording pool that emulates only the two engagement tables, in memory. */
+  function engagementPool({ sectionRows = [], engagementRows = [] } = {}) {
+    const statements = []
+    const sections = sectionRows.map((row) => ({ ...row }))
+    const engagements = engagementRows.map((row) => ({ ...row }))
+    const compact = (text) => text.replace(/\s+/g, ' ').trim()
+    const now = new Date('2026-10-09T15:00:00Z')
+    const answer = async (text, params = []) => {
+      const trimmed = compact(text)
+      statements.push({ text: trimmed, params })
+      if (/^(begin|commit|rollback)$/i.test(trimmed)) return { rows: [] }
+      if (/^select .* from engagement_sections order by sort_order, key$/i.test(trimmed)) {
+        return {
+          rows: sections
+            .slice()
+            .sort((a, b) => a.sort_order - b.sort_order || a.key.localeCompare(b.key))
+            .map((row) => ({ ...row })),
+        }
+      }
+      if (/^insert into engagement_sections /i.test(trimmed)) {
+        const at = sections.findIndex((row) => row.key === params[1])
+        if (at >= 0) {
+          if (/do nothing$/i.test(trimmed)) return { rows: [], rowCount: 0 }
+          Object.assign(sections[at], {
+            title: params[2],
+            body: params[3],
+            trigger: JSON.parse(params[4]),
+            sort_order: params[5],
+            active: true,
+            updated_at: now,
+          })
+          return { rows: [], rowCount: 1 }
+        }
+        sections.push({
+          id: params[0],
+          key: params[1],
+          title: params[2],
+          body: params[3],
+          trigger: JSON.parse(params[4]),
+          sort_order: params[5],
+          active: true,
+          created_at: now,
+          updated_at: now,
+        })
+        return { rows: [], rowCount: 1 }
+      }
+      if (/^update engagement_sections set active = false/i.test(trimmed)) {
+        for (const row of sections) if (row.active && !params[0].includes(row.key)) row.active = false
+        return { rows: [] }
+      }
+      if (/^select .* from engagements where id = \$1$/i.test(trimmed)) {
+        return { rows: engagements.filter((row) => row.id === params[0]).map((row) => ({ ...row })) }
+      }
+      if (/^insert into engagements /i.test(trimmed)) {
+        const row = {
+          id: params[0],
+          kind: params[1],
+          status: 'draft',
+          proposal_id: params[2],
+          client_id: params[3],
+          letter_id: null,
+          supersedes_id: null,
+          party: JSON.parse(params[4]),
+          subject: params[5],
+          email_body: params[6],
+          letter_body: params[7],
+          section_keys: JSON.parse(params[8]),
+          figures: JSON.parse(params[9]),
+          retainer_amount: params[10] === null ? null : String(params[10]),
+          package_id: null,
+          plan_ids: [],
+          template_hash: params[11],
+          email_log: [],
+          sent_at: null,
+          signed_at: null,
+          signed_by: null,
+          signed_note: null,
+          voided_at: null,
+          created_by: params[12],
+          created_at: now,
+          updated_at: now,
+        }
+        engagements.push(row)
+        return { rows: [{ ...row }], rowCount: 1 }
+      }
+      const find = () => engagements.find((row) => row.id === params[0])
+      if (/^update engagements set subject = \$2, email_body = \$3, letter_body = \$4, retainer_amount/i.test(trimmed)) {
+        const row = find()
+        if (!row || !['draft', 'sent'].includes(row.status)) return { rows: [] }
+        Object.assign(row, {
+          subject: params[1],
+          email_body: params[2],
+          letter_body: params[3],
+          retainer_amount: params[4] === null ? null : String(params[4]),
+          package_id: params[5],
+          plan_ids: params[6],
+          party: JSON.parse(params[7]),
+          template_hash: params[8],
+        })
+        return { rows: [{ ...row }] }
+      }
+      if (/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb, status = case/i.test(trimmed)) {
+        const row = find()
+        if (!row) return { rows: [] }
+        row.email_log = [...row.email_log, ...JSON.parse(params[1])]
+        if (params[2] && row.status === 'draft') row.status = 'sent'
+        if (params[2] && !row.sent_at) row.sent_at = params[3]
+        return { rows: [{ ...row }] }
+      }
+      if (/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb, updated_at = now\(\) where id = \$1 and not/i.test(trimmed)) {
+        const row = find()
+        const probe = JSON.parse(params[2])[0]
+        const contains = row?.email_log.some((entry) => Object.entries(probe).every(([key, value]) => entry[key] === value))
+        if (!row || contains) return { rows: [] }
+        row.email_log = [...row.email_log, ...JSON.parse(params[1])]
+        return { rows: [{ ...row }] }
+      }
+      if (/^update engagements set status = 'signed'/i.test(trimmed)) {
+        const row = find()
+        if (!row || !params[4].includes(row.status)) return { rows: [] }
+        Object.assign(row, { status: 'signed', signed_at: params[1], signed_by: params[2], signed_note: params[3] })
+        return { rows: [{ ...row }] }
+      }
+      if (/^update engagements set status = 'void'/i.test(trimmed)) {
+        const row = find()
+        if (!row || !['draft', 'sent'].includes(row.status)) return { rows: [] }
+        Object.assign(row, { status: 'void', voided_at: now })
+        return { rows: [{ ...row }] }
+      }
+      if (/^select .* from engagements/i.test(trimmed)) {
+        return { rows: engagements.slice().reverse().map((row) => ({ ...row })) }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+    const pool = { query: answer, connect: async () => ({ query: answer, release() {} }) }
+    const matching = (pattern) => statements.filter((s) => pattern.test(s.text))
+    return { pool, statements, matching, sections, engagements }
+  }
+
+  /** A store on the fake pool, with the firm settings and the client read answered without SQL. */
+  const engagementStore = (fake, { client = null } = {}) => {
+    const pgStore = postgresStore(fake)
+    pgStore.getFirmSettings = async () => ({
+      name: 'PB&J Strategic Accounting',
+      clientDefaults: { paymentTerms: 'Due on receipt' },
+      proposalPricing: { rates: { bookkeeper: 75, accountant: 115, controller: 125 } },
+    })
+    pgStore.getClientById = async (id) => (client && client.id === id ? client : null)
+    pgStore.listPackages = async () => [{ id: 'pkg-1', name: 'Core', planIds: [], templateIds: [] }]
+    return pgStore
+  }
+
+  const proposal = (over = {}) => ({
+    id: 'prop-1',
+    status: 'accepted',
+    prospect: { company: 'Acme Books', contactName: 'Pat Doe', email: 'pat@acme.test' },
+    clientId: null,
+    inputs: {},
+    selections: [],
+    pricingSnapshot: {
+      rates: { bookkeeper: 75, accountant: 115, controller: 125 },
+      lines: [
+        {
+          serviceId: 'monthly-weekly-transactions-basic',
+          group: 'Monthly',
+          name: 'Transactions',
+          amount: 630,
+          cadence: null,
+          role: 'bookkeeper',
+          hours: 8.4,
+        },
+      ],
+      totals: { monthly: 630, annual: 0, oneTime: 0, cleanup: 0, software: 0, hoursByRole: { bookkeeper: 8.4, accountant: 0, controller: 0 } },
+    },
+    ...over,
+  })
+
+  it('creates both tables with NO foreign keys, exactly the planned columns, and the planned indexes', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    const strip = (sql) =>
+      sql
+        .split(/\r?\n/)
+        .map((line) => line.replace(/--.*$/, '').trim())
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+    const rawOf = (pattern) => {
+      const found = fake.statements.find((s) => pattern.test(s.text))
+      expect(found, `${pattern} was never run`).toBeTruthy()
+      return found
+    }
+    const sections = rawOf(/create table if not exists engagement_sections\b/i)
+    const engagements = rawOf(/create table if not exists engagements\b/i)
+    for (const table of [sections, engagements]) expect(table.text).not.toMatch(/references/i)
+
+    // The plan's DDL, verbatim (comments aside).
+    const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
+    const ddl = (name) => {
+      const start = source.indexOf(`create table if not exists ${name} (`)
+      expect(start, `${name} DDL is gone`).toBeGreaterThan(-1)
+      return strip(source.slice(start, source.indexOf('`)', start)))
+    }
+    expect(ddl('engagement_sections')).toBe(
+      "create table if not exists engagement_sections ( id text primary key, key text not null unique, title text not null default '', body text not null default '', trigger jsonb not null default '{}', sort_order int not null default 0, active boolean not null default true, created_at timestamptz not null default now(), updated_at timestamptz not null default now() )",
+    )
+    expect(ddl('engagements')).toBe(
+      "create table if not exists engagements ( id text primary key, kind text not null check (kind in ('original','amendment','superseding')), status text not null default 'draft' check (status in ('draft','sent','signed','superseded','void')), proposal_id text, client_id text, letter_id text, supersedes_id text, party jsonb not null default '{}', subject text not null default '', email_body text not null default '', letter_body text not null default '', section_keys jsonb not null default '[]', figures jsonb not null default '{}', retainer_amount numeric, package_id text, plan_ids text[] not null default '{}', template_hash text not null default '', email_log jsonb not null default '[]', sent_at timestamptz, signed_at timestamptz, signed_by text, signed_note text, voided_at timestamptz, created_by text, created_at timestamptz not null default now(), updated_at timestamptz not null default now() )",
+    )
+
+    const compact = (s) => s.text.replace(/\s+/g, ' ').trim()
+    expect(compact(rawOf(/create index if not exists engagements_client_idx/i))).toBe(
+      'create index if not exists engagements_client_idx on engagements (client_id)',
+    )
+    expect(compact(rawOf(/create index if not exists engagements_proposal_idx/i))).toBe(
+      'create index if not exists engagements_proposal_idx on engagements (proposal_id)',
+    )
+    // Next to the engagement letters, after them.
+    expect(fake.indexOf(/create table if not exists engagement_sections\b/i)).toBeGreaterThan(
+      fake.indexOf(/create index if not exists engagement_letter_sends_client_idx/i),
+    )
+    expect(fake.indexOf(/create table if not exists engagements\b/i)).toBeGreaterThan(
+      fake.indexOf(/create table if not exists engagement_sections\b/i),
+    )
+  })
+
+  it('seeds an empty library once with insert ... on conflict (key) do nothing, then reads it back', async () => {
+    const fake = engagementPool()
+    const pgStore = engagementStore(fake)
+    const first = await pgStore.listEngagementSections()
+    expect(first.map((section) => section.key)).toEqual(seedKeysInOrder())
+    const seeds = fake.matching(/^insert into engagement_sections /i)
+    expect(seeds).toHaveLength(DEFAULT_ENGAGEMENT_SECTIONS.length)
+    for (const seed of seeds) expect(seed.text).toMatch(/on conflict \(key\) do nothing$/i)
+
+    await pgStore.listEngagementSections()
+    expect(fake.matching(/^insert into engagement_sections /i)).toHaveLength(DEFAULT_ENGAGEMENT_SECTIONS.length)
+  })
+
+  it('saves the library in one transaction: an upsert per key, then one deactivation of the rest', async () => {
+    const fake = engagementPool()
+    const pgStore = engagementStore(fake)
+    const library = await pgStore.listEngagementSections()
+    fake.statements.length = 0
+    const saved = await pgStore.saveEngagementSections(library.filter((section) => section.key !== 'payroll'))
+    const texts = fake.statements.map((s) => s.text)
+    expect(texts[0]).toMatch(/^begin$/i)
+    const upserts = fake.matching(/^insert into engagement_sections /i)
+    expect(upserts).toHaveLength(library.length - 1)
+    expect(upserts[0].text).toMatch(
+      /on conflict \(key\) do update set title = excluded\.title, body = excluded\.body, trigger = excluded\.trigger, sort_order = excluded\.sort_order, active = true, updated_at = now\(\)$/i,
+    )
+    const [deactivate] = fake.matching(/^update engagement_sections /i)
+    expect(deactivate.text).toBe(
+      'update engagement_sections set active = false, updated_at = now() where active and not (key = any($1::text[]))',
+    )
+    expect(deactivate.params[0]).not.toContain('payroll')
+    expect(texts.indexOf(deactivate.text)).toBeLessThan(texts.findIndex((text) => /^commit$/i.test(text)))
+    expect(saved.find((section) => section.key === 'payroll')?.active).toBe(false)
+    expect(fake.statements.some((s) => /^delete\b/i.test(s.text))).toBe(false)
+  })
+
+  it('drafts from a proposal with one insert, the snapshot money untouched and the figures as jsonb', async () => {
+    const fake = engagementPool()
+    const pgStore = engagementStore(fake)
+    const engagement = await pgStore.createEngagementFromProposal(proposal(), { createdBy: 'emp-patrice', clientId: 'c-new' })
+    const [insert] = fake.matching(/^insert into engagements /i)
+    expect(insert.text).toMatch(
+      /^insert into engagements \(id, kind, status, proposal_id, client_id, party, subject, email_body, letter_body, section_keys, figures, retainer_amount, template_hash, created_by\) values \(\$1, \$2, 'draft', \$3, \$4, \$5::jsonb, \$6, \$7, \$8, \$9::jsonb, \$10::jsonb, \$11, \$12, \$13\) returning /i,
+    )
+    expect(insert.params[3]).toBe('c-new')
+    expect(JSON.parse(insert.params[9])).toMatchObject({
+      totals: { monthly: 630, hoursByRole: { bookkeeper: 8.4, accountant: 0, controller: 0 } },
+      lines: [{ serviceId: 'monthly-weekly-transactions-basic', amount: 630, role: 'bookkeeper', hours: 8.4 }],
+      hoursByRole: { bookkeeper: 8.4, accountant: 0, controller: 0 },
+      paymentTerms: 'Due on receipt',
+    })
+    expect(insert.params[10]).toBe(630)
+    expect(engagement).toMatchObject({
+      status: 'draft',
+      clientId: 'c-new',
+      retainerAmount: 630,
+      party: { company: 'Acme Books', contactName: 'Pat Doe', email: 'pat@acme.test' },
+    })
+    expect(engagement.templateHash).toBe(letterTemplateHash(engagement))
+  })
+
+  it('edits with a compare-and-set on the editable statuses, and refuses a signed one', async () => {
+    const fake = engagementPool()
+    const pgStore = engagementStore(fake)
+    const draft = await pgStore.createEngagementFromProposal(proposal(), {})
+    const edited = await pgStore.updateEngagement(draft.id, { subject: 'New', planIds: ['p1'], packageId: 'pkg-1' })
+    const [update] = fake.matching(/^update engagements set subject = \$2/i)
+    expect(update.text).toMatch(
+      /^update engagements set subject = \$2, email_body = \$3, letter_body = \$4, retainer_amount = \$5, package_id = \$6, plan_ids = \$7::text\[\], party = \$8::jsonb, template_hash = \$9, updated_at = now\(\) where id = \$1 and status in \('draft', 'sent'\) returning /i,
+    )
+    expect(update.params[6]).toEqual(['p1'])
+    expect(edited).toMatchObject({ subject: 'New', planIds: ['p1'], packageId: 'pkg-1' })
+    expect(edited.templateHash).toBe(letterTemplateHash(edited))
+
+    // A sign landing between the read and the write: the read still says draft, the
+    // compare-and-set matches nothing, and the refusal is worded from the row as it is now.
+    const readDraft = await pgStore.getEngagement(draft.id)
+    fake.engagements[0].status = 'signed'
+    const realGet = pgStore.getEngagement.bind(pgStore)
+    let reads = 0
+    pgStore.getEngagement = async (id) => (reads++ === 0 ? readDraft : realGet(id))
+    const error = await pgStore.updateEngagement(draft.id, { subject: 'Late' }).catch((caught) => caught)
+    expect(error).toBeInstanceOf(EngagementStateError)
+    expect(error.reason).toBe('status')
+    expect(error.message).toMatch(/signed/)
+    expect(fake.engagements[0].subject).not.toBe('Late')
+  })
+
+  it('marks sent in one statement: the log appended in the row, draft -> sent, sent_at kept once set', async () => {
+    const fake = engagementPool()
+    const pgStore = engagementStore(fake)
+    const draft = await pgStore.createEngagementFromProposal(proposal(), {})
+    const sent = await pgStore.markEngagementSent(draft.id, { to: ['pat@acme.test'], ok: true, providerId: 're_1', at: '2026-10-09T15:00:00.000Z' })
+    const [update] = fake.matching(/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb, status = case/i)
+    expect(update.text).toMatch(
+      /status = case when \$3 and status = 'draft' then 'sent' else status end, sent_at = case when \$3 then coalesce\(sent_at, \$4::timestamptz\) else sent_at end/i,
+    )
+    expect(update.params[2]).toBe(true)
+    expect(sent).toMatchObject({ status: 'sent', sentAt: '2026-10-09T15:00:00.000Z' })
+  })
+
+  it('appends a webhook event behind a containment probe, so a retried webhook lands once', async () => {
+    const fake = engagementPool()
+    const pgStore = engagementStore(fake)
+    const draft = await pgStore.createEngagementFromProposal(proposal(), {})
+    const event = { kind: 'delivery', event: 'delivered', providerId: 're_1', to: 'pat@acme.test' }
+    await pgStore.appendEngagementEmailEvent(draft.id, event)
+    await pgStore.appendEngagementEmailEvent(draft.id, event)
+    const appends = fake.matching(/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb, updated_at = now\(\) where id = \$1 and not/i)
+    expect(appends[0].text).toMatch(/where id = \$1 and not \(coalesce\(email_log, '\[\]'::jsonb\) @> \$3::jsonb\)/i)
+    expect(JSON.parse(appends[0].params[2])).toEqual([{ kind: 'delivery', providerId: 're_1', event: 'delivered' }])
+    expect(fake.engagements[0].email_log).toHaveLength(1)
+    expect(fake.engagements[0].status).toBe('draft')
+  })
+
+  it('signs and voids with a compare-and-set on the allowed statuses', async () => {
+    const fake = engagementPool()
+    const pgStore = engagementStore(fake)
+    const draft = await pgStore.createEngagementFromProposal(proposal(), {})
+    const signed = await pgStore.signEngagement(draft.id, { signedOn: '2026-10-09', allowUnsent: true, userId: 'u1' })
+    const [sign] = fake.matching(/^update engagements set status = 'signed'/i)
+    expect(sign.text).toMatch(/where id = \$1 and status = any\(\$5::text\[\]\) returning /i)
+    expect(sign.params).toEqual([draft.id, '2026-10-09T16:00:00.000Z', 'u1', null, ['sent', 'draft']])
+    expect(signed.status).toBe('signed')
+
+    const other = await pgStore.createEngagementFromProposal(proposal({ id: 'prop-2' }), {})
+    await pgStore.voidEngagement(other.id, {})
+    const [voided] = fake.matching(/^update engagements set status = 'void'/i)
+    expect(voided.text).toMatch(/set status = 'void', voided_at = now\(\), updated_at = now\(\) where id = \$1 and status in \('draft', 'sent'\)/i)
+  })
+
+  it('lists newest first, filtered in the statement, capped at 500, without the bodies', async () => {
+    const fake = engagementPool()
+    const pgStore = engagementStore(fake)
+    await pgStore.listEngagements()
+    await pgStore.listEngagements({ clientId: 'c1', proposalId: 'prop-1', status: 'sent' })
+    const lists = fake.matching(/^select .* from engagements/i)
+    expect(lists.map((s) => s.text.replace(/^select .* from /i, 'select ... from '))).toEqual([
+      'select ... from engagements order by created_at desc, id desc limit 500',
+      'select ... from engagements where client_id = $1 and proposal_id = $2 and status = $3 order by created_at desc, id desc limit 500',
+    ])
+    expect(lists[1].params).toEqual(['c1', 'prop-1', 'sent'])
+    expect(lists[0].text).not.toMatch(/email_body|letter_body|email_log/)
+  })
+
+  it('is never deleted from: not in write(), not in the lock list, not anywhere in the store', async () => {
+    expect(BULK_SAVE_LOCK_TABLES.join(',')).not.toMatch(/engagement_sections|engagements\b/i)
+    // ...and not in the workspace fingerprint either.
+    expect(BULK_SAVE_TABLES.join(',')).not.toMatch(/engagement_sections|engagements\b/i)
+    const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
+    expect(source).not.toMatch(/delete from engagement(s|_sections)\b/i)
+    expect(source).not.toMatch(/truncate[^\n]*engagement(s|_sections)\b/i)
+    const start = source.indexOf('  async write(data, {')
+    const end = source.indexOf('Fingerprint of everything the bulk save can destroy', start)
+    expect(start).toBeGreaterThan(-1)
+    expect(source.slice(start, end)).not.toMatch(/engagement(s|_sections)\b/i)
+
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace())
+    expect(fake.statements.filter((s) => /\bengagement(s|_sections)\b/i.test(s.text))).toEqual([])
+  })
+})
