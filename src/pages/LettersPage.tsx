@@ -528,11 +528,11 @@ export function LettersPage() {
   }
   const fieldWord = (field: Field) => (field === 'subject' ? 'subject' : field === 'emailBody' ? 'email' : 'letter')
 
-  // The chips are exactly the placeholders the Letters GET lists (the 'both' keys):
-  // an engagement-only key is never offered here.
+  // The chips are the placeholders the Letters GET lists (the 'both' keys); an
+  // engagement-only key is never offered here, even if one were listed.
   const chips = (field: Field) => (
     <PlaceholderChips
-      placeholders={state?.placeholders ?? []}
+      placeholders={(state?.placeholders ?? []).filter((placeholder) => placeholder.scope !== 'engagement')}
       fieldWord={fieldWord(field)}
       onInsert={(key) => insertToken(field, key)}
     />

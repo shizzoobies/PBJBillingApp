@@ -27,6 +27,8 @@ vi.mock('../lib/api', () => ({
   listProposalsRequest: (...args: unknown[]) => api.listProposalsRequest(...args),
   createProposalRequest: (...args: unknown[]) => api.createProposalRequest(...args),
   getProposalRequest: (...args: unknown[]) => api.getProposalRequest(...args),
+  listEngagementsRequest: (...args: unknown[]) => api.listEngagementsRequest(...args),
+  draftProposalEngagementRequest: (...args: unknown[]) => api.draftProposalEngagementRequest(...args),
   fetchFirmSettings: (...args: unknown[]) => api.fetchFirmSettings(...args),
   updateProposalRequest: (...args: unknown[]) => api.updateProposalRequest(...args),
   repriceProposalRequest: (...args: unknown[]) => api.repriceProposalRequest(...args),
@@ -295,6 +297,8 @@ beforeEach(() => {
   }))
   api.declineProposalRequest = vi.fn(async () => ({ ...PROPOSAL, status: 'declined' }))
   api.listQuestionnairesRequest = vi.fn(async () => [])
+  api.listEngagementsRequest = vi.fn(async () => [])
+  api.draftProposalEngagementRequest = vi.fn()
 })
 
 afterEach(() => {
@@ -1209,7 +1213,7 @@ describe('Accept and Decline', () => {
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
     expect(confirm).toHaveBeenCalledWith(
-      'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00. Nothing about any invoice changes, and this proposal is marked Won.',
+      'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00. Nothing about any invoice changes, and this proposal is marked Won. An engagement letter will be drafted for you to edit and send.',
     )
     await waitFor(() =>
       expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
@@ -1257,7 +1261,7 @@ describe('Accept and Decline', () => {
     expect(confirm).toHaveBeenCalledWith(
       'Accept this proposal? This adds Acme Books as a client in Onboarding, ' +
         'billed monthly at $630.00, with the plans Monthly Bookkeeping and Payroll. ' +
-        'Nothing about any invoice changes, and this proposal is marked Won.',
+        'Nothing about any invoice changes, and this proposal is marked Won. An engagement letter will be drafted for you to edit and send.',
     )
     await waitFor(() =>
       expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
@@ -1296,7 +1300,7 @@ describe('Accept and Decline', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
     expect(confirm).toHaveBeenNthCalledWith(
       1,
-      'Accept this proposal for Existing Co, with the plan Monthly Bookkeeping? This proposal is marked Won.',
+      'Accept this proposal for Existing Co, with the plan Monthly Bookkeeping? This proposal is marked Won. An engagement letter will be drafted for you to edit and send.',
     )
     await waitFor(() =>
       expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
@@ -1337,7 +1341,7 @@ describe('Accept and Decline', () => {
     expect(confirm).toHaveBeenCalledWith(
       'Accept this proposal? This adds Acme Books as a client in Onboarding, ' +
         'billed monthly at $630.00, with the plan Payroll, Tax. ' +
-        'Nothing about any invoice changes, and this proposal is marked Won.',
+        'Nothing about any invoice changes, and this proposal is marked Won. An engagement letter will be drafted for you to edit and send.',
     )
   })
 
@@ -1350,7 +1354,7 @@ describe('Accept and Decline', () => {
     vi.stubGlobal('confirm', confirm)
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
-    expect(confirm).toHaveBeenNthCalledWith(1, 'Accept this proposal for Existing Co? This proposal is marked Won.')
+    expect(confirm).toHaveBeenNthCalledWith(1, 'Accept this proposal for Existing Co? This proposal is marked Won. An engagement letter will be drafted for you to edit and send.')
     await waitFor(() => expect(api.acceptProposalRequest).toHaveBeenCalled())
     expect(api.acceptProposalRequest.mock.calls[0][1]).not.toHaveProperty('planIds')
   })
@@ -1361,7 +1365,7 @@ describe('Accept and Decline', () => {
     vi.stubGlobal('confirm', confirm)
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
-    expect(confirm).toHaveBeenNthCalledWith(1, 'Accept this proposal for Existing Co? This proposal is marked Won.')
+    expect(confirm).toHaveBeenNthCalledWith(1, 'Accept this proposal for Existing Co? This proposal is marked Won. An engagement letter will be drafted for you to edit and send.')
     expect(confirm).toHaveBeenNthCalledWith(
       2,
       'Also change Existing Co’s monthly fee to $630.00? Cancel keeps their current fee.',
@@ -1765,7 +1769,7 @@ describe('Software on the proposal editor', () => {
       renderEditor()
       fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
       expect(confirm).toHaveBeenCalledWith(
-        'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00, and adds QBO Plus as monthly Software expenses billed at cost. Nothing about any invoice changes, and this proposal is marked Won.',
+        'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00, and adds QBO Plus as monthly Software expenses billed at cost. Nothing about any invoice changes, and this proposal is marked Won. An engagement letter will be drafted for you to edit and send.',
       )
       await waitFor(() =>
         expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
@@ -1786,7 +1790,7 @@ describe('Software on the proposal editor', () => {
       fireEvent.click(screen.getByRole('checkbox', { name: 'Payroll' }))
       fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
       expect(confirm).toHaveBeenCalledWith(
-        'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00, with the plans Monthly Bookkeeping and Payroll, and adds QBO Plus as monthly Software expenses billed at cost. Nothing about any invoice changes, and this proposal is marked Won.',
+        'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00, with the plans Monthly Bookkeeping and Payroll, and adds QBO Plus as monthly Software expenses billed at cost. Nothing about any invoice changes, and this proposal is marked Won. An engagement letter will be drafted for you to edit and send.',
       )
     })
 
@@ -1850,5 +1854,83 @@ describe('the software total in a letter (featreq-a69a3cc0)', () => {
     expect(
       staleLetterFigureCount({ letter: letter('Software is $104.00 a month at cost.'), pricingSnapshot: snapshot }),
     ).toBe(1)
+  })
+})
+
+// Engagements stage 2C (docs/plans/engagements-2026-10.md): Accept drafts the
+// engagement letter and the page goes straight to it; a Won proposal links its
+// engagement, or offers to draft one when it has none.
+describe('the engagement a Won proposal drafts', () => {
+  function renderEditorWithEngagements() {
+    render(
+      <MemoryRouter initialEntries={['/proposals/prop-1']}>
+        <Routes>
+          <Route path="/proposals/:proposalId" element={<ProposalEditorPage />} />
+          <Route path="/engagements/:engagementId" element={<p>Engagement editor</p>} />
+        </Routes>
+      </MemoryRouter>,
+    )
+  }
+
+  const WON = { ...PROPOSAL, status: 'accepted' as const, clientId: 'client-new' }
+
+  it('after Accept opens the engagement Accept drafted', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    api.acceptProposalRequest = vi.fn(async () => ({
+      proposal: WON,
+      clientId: 'client-new',
+      createdClient: true,
+      packageApplied: false,
+      engagementId: 'eng-7',
+    }))
+    renderEditorWithEngagements()
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    expect(await screen.findByText('Engagement editor')).toBeTruthy()
+  })
+
+  it('stays on the proposal when Accept drafted none', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    renderEditorWithEngagements()
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    expect(await screen.findByText('Won', { selector: '.status-pill' })).toBeTruthy()
+    expect(screen.queryByText('Engagement editor')).toBeNull()
+  })
+
+  it('a Won proposal links its engagement', async () => {
+    api.getProposalRequest = vi.fn(async () => WON)
+    api.listEngagementsRequest = vi.fn(async () => [
+      { id: 'eng-old', status: 'void' },
+      { id: 'eng-3', status: 'sent' },
+    ])
+    renderEditorWithEngagements()
+    const link = await screen.findByRole('link', { name: 'Open the engagement' })
+    expect(link.getAttribute('href')).toBe('/engagements/eng-3')
+    expect(api.listEngagementsRequest).toHaveBeenCalledWith({ proposalId: 'prop-1' })
+    expect(screen.queryByRole('button', { name: 'Draft the engagement' })).toBeNull()
+  })
+
+  it('a Won proposal with none offers to draft one, then opens it', async () => {
+    api.getProposalRequest = vi.fn(async () => WON)
+    api.draftProposalEngagementRequest = vi.fn(async () => ({ id: 'eng-new' }))
+    renderEditorWithEngagements()
+    fireEvent.click(await screen.findByRole('button', { name: 'Draft the engagement' }))
+    expect(await screen.findByText('Engagement editor')).toBeTruthy()
+    expect(api.draftProposalEngagementRequest).toHaveBeenCalledWith('prop-1')
+  })
+
+  it('opens the one that exists when the draft is refused as a duplicate', async () => {
+    api.getProposalRequest = vi.fn(async () => WON)
+    api.draftProposalEngagementRequest = vi.fn(async () => {
+      throw Object.assign(new ApiError(409, 'It has one.', 'engagement_refused', 'exists'), { engagementId: 'eng-9' })
+    })
+    renderEditorWithEngagements()
+    fireEvent.click(await screen.findByRole('button', { name: 'Draft the engagement' }))
+    expect(await screen.findByText('Engagement editor')).toBeTruthy()
+  })
+
+  it('a draft proposal never looks for an engagement', async () => {
+    renderEditorWithEngagements()
+    await screen.findByRole('button', { name: 'Accept' })
+    expect(api.listEngagementsRequest).not.toHaveBeenCalled()
   })
 })

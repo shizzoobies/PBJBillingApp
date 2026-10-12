@@ -20,6 +20,8 @@ vi.mock('../lib/api', () => ({
   listProposalsRequest: (...args: unknown[]) => api.listProposalsRequest(...args),
   createProposalRequest: (...args: unknown[]) => api.createProposalRequest(...args),
   getProposalRequest: (...args: unknown[]) => api.getProposalRequest(...args),
+  listEngagementsRequest: (...args: unknown[]) => api.listEngagementsRequest(...args),
+  draftProposalEngagementRequest: (...args: unknown[]) => api.draftProposalEngagementRequest(...args),
   fetchFirmSettings: (...args: unknown[]) => api.fetchFirmSettings(...args),
   listPackagesRequest: (...args: unknown[]) => api.listPackagesRequest(...args),
   listQuestionnairesRequest: (...args: unknown[]) => api.listQuestionnairesRequest(...args),
@@ -116,6 +118,8 @@ beforeEach(() => {
   api.fetchFirmSettings = vi.fn(async () => ({ name: 'PB&J', proposalPricing: pricing }))
   api.listPackagesRequest = vi.fn(async () => [])
   api.listQuestionnairesRequest = vi.fn(async () => [])
+  api.listEngagementsRequest = vi.fn(async () => [])
+  api.draftProposalEngagementRequest = vi.fn()
   api.createQuestionnaireRequest = vi.fn(async () => questionnaire())
   api.saveQuestionnaireAnswersRequest = vi.fn(async () => questionnaire())
   api.submitQuestionnaireRequest = vi.fn(async () => ({

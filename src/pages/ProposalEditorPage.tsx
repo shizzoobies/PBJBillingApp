@@ -6,15 +6,18 @@ import { ChatPanel } from '../components/proposals/ChatPanel'
 import { EstimateTab } from '../components/proposals/EstimateTab'
 import { LetterTab } from '../components/proposals/LetterTab'
 import { workableClients } from '../lib/clientLifecycle'
+import { refusedEngagementId } from '../lib/engagements'
 import { defaultProposalPricing, formatProposalMoney } from '../../lib/proposal-pricing.js'
 import {
   acceptProposalRequest,
   copyProposalRequest,
   declineProposalRequest,
   deleteProposalRequest,
+  draftProposalEngagementRequest,
   draftProposalLetterRequest,
   fetchFirmSettings,
   getProposalRequest,
+  listEngagementsRequest,
   listPackagesRequest,
   listQuestionnairesRequest,
   proposalChatRequest,
@@ -35,11 +38,15 @@ import {
 } from '../lib/proposals'
 import {
   ApiError,
+  type Engagement,
   type Package,
   type Proposal,
   type ProposalPricing,
   type ProposalQuestionnaire,
 } from '../lib/types'
+
+/** The sentence every Accept confirm ends with (engagements stage 2). */
+const ENGAGEMENT_DRAFTED = 'An engagement letter will be drafted for you to edit and send.'
 
 /**
  * Keyed on the proposal id (review M1): a Copy navigation swaps the URL to a
@@ -131,6 +138,47 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
       cancelled = true
     }
   }, [proposalId])
+
+  // A Won proposal's engagement letter (docs/plans/engagements-2026-10.md): the
+  // newest one that is not void, or null when it has none (then the page offers
+  // to draft one). `undefined` = not looked up yet.
+  const [engagement, setEngagement] = useState<Engagement | null | undefined>(undefined)
+  const [draftingEngagement, setDraftingEngagement] = useState(false)
+  const won = proposal?.status === 'accepted'
+  useEffect(() => {
+    if (!won) return
+    let cancelled = false
+    void listEngagementsRequest({ proposalId })
+      .then((rows) => {
+        if (!cancelled) setEngagement(rows.find((row) => row.status !== 'void') ?? null)
+      })
+      .catch(() => {
+        // Unknown is not "none": offer nothing rather than a second draft.
+        if (!cancelled) setEngagement(undefined)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [won, proposalId])
+
+  /** "Draft the engagement" on a Won proposal that has none; one that exists already is opened. */
+  const draftEngagement = async () => {
+    setDraftingEngagement(true)
+    setError('')
+    try {
+      const created = await draftProposalEngagementRequest(proposalId)
+      navigate(`/engagements/${created.id}`)
+    } catch (err) {
+      const existing = refusedEngagementId(err)
+      if (existing) {
+        navigate(`/engagements/${existing}`)
+        return
+      }
+      setError(err instanceof ApiError ? err.message : 'Could not draft the engagement letter.')
+    } finally {
+      setDraftingEngagement(false)
+    }
+  }
 
   // The last server-CONFIRMED proposal. A queued save's patch is built from
   // this, not from `proposal` as it stood when the save was requested.
@@ -390,6 +438,11 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     }
   }
 
+  /** After Accept: straight to the engagement letter it drafted, when it drafted one. */
+  const openDraftedEngagement = (engagementId: string | null | undefined) => {
+    if (engagementId) navigate(`/engagements/${engagementId}`)
+  }
+
   /** A toast/notice on the accepted result — the package could not be applied. */
   const noticeFromAccept = (chosenPackage: string | null, packageApplied: boolean) =>
     chosenPackage && !packageApplied
@@ -433,7 +486,8 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           (softwareNames.length > 0
             ? `, and adds ${softwareNames.join(', ')} as monthly Software expenses billed at cost`
             : '') +
-          `. Nothing about any invoice changes, and this proposal is marked Won.`,
+          `. Nothing about any invoice changes, and this proposal is marked Won. ` +
+          ENGAGEMENT_DRAFTED,
       )
       if (!ok) return
       enqueue(async () => {
@@ -442,13 +496,14 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           ...(planIds.length > 0 ? { planIds } : {}),
         })
         setNotice(noticeFromAccept(chosenPackage, result.packageApplied))
+        openDraftedEngagement(result.engagementId)
         return result.proposal
       })
       return
     }
     const client = data.clients.find((entry) => entry.id === proposal.clientId)
     const clientName = client?.name ?? 'this client'
-    if (!window.confirm(`Accept this proposal for ${clientName}${planWords}? This proposal is marked Won.`))
+    if (!window.confirm(`Accept this proposal for ${clientName}${planWords}? This proposal is marked Won. ${ENGAGEMENT_DRAFTED}`))
       return
     const monthlyTotal = proposal.pricingSnapshot?.totals.monthly ?? 0
     const skipRateQuestion = monthlyTotal === 0 || client?.billingMode !== 'subscription'
@@ -469,6 +524,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
         ...(addSoftware === null ? {} : { addSoftware }),
       })
       setNotice(noticeFromAccept(chosenPackage, result.packageApplied))
+      openDraftedEngagement(result.engagementId)
       return result.proposal
     })
   }
@@ -579,6 +635,21 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
             <Link className="secondary-action" to={`/clients/${proposal.clientId}`}>
               Open the client
             </Link>
+          ) : null}
+          {won && engagement ? (
+            <Link className="secondary-action" to={`/engagements/${engagement.id}`}>
+              Open the engagement
+            </Link>
+          ) : null}
+          {won && engagement === null ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busy || draftingEngagement}
+              onClick={() => void draftEngagement()}
+            >
+              Draft the engagement
+            </button>
           ) : null}
           <button type="button" className="secondary-action" disabled={busy} onClick={() => void copy()}>
             Copy to new proposal

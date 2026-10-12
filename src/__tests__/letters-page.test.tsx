@@ -243,6 +243,25 @@ describe('the editor', () => {
     expect(screen.queryByRole('button', { name: '{{hourly_rate}}' })).not.toBeInTheDocument()
   })
 
+  // Engagements stage 2C: the engagement-only keys (retainer, services lists...) belong
+  // to engagement letters; a Letters template that named one would be refused as unknown.
+  it('never offers an engagement-only placeholder, even if the server listed one', async () => {
+    api.fetchLetterTemplate = vi.fn(async () => ({
+      ...templateState(),
+      placeholders: [
+        ...PLACEHOLDERS,
+        { key: 'retainer_sentence', label: 'Retainer', description: 'The retainer.', required: false, scope: 'engagement' as const },
+      ],
+    }))
+    await renderPage()
+    const group = screen.getByRole('group', { name: 'Insert a placeholder into the email' })
+    expect(within(group).getAllByRole('button').map((button) => button.textContent)).toEqual([
+      '{{client_name}}',
+      '{{fee}}',
+      '{{next_year}}',
+    ])
+  })
+
   it('warns that {{hourly_rate}} is no longer filled in, with the retired wording, and clears it when taken out', async () => {
     await renderPage()
     const letter = screen.getByLabelText('Letter body')
