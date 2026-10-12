@@ -30,9 +30,10 @@ function routeBlock(startPattern: RegExp, length = 4000): string {
 const block = () =>
   routeBlock(
     /if \(normalizedPath === '\/api\/resend\/webhook' && request\.method === 'POST'\)/,
-    // Wide enough for the proposal and questionnaire branches ahead of the
-    // invoice lookup; a longer route block is not a reason to re-anchor.
-    7000,
+    // Wide enough for the proposal, engagement and questionnaire branches ahead
+    // of the invoice lookup; a longer route block is not a reason to re-anchor.
+    // (7000 -> 8000 when the engagement branch arrived, 2026-10-11.)
+    8000,
   )
 
 describe('the Resend webhook verifies before it trusts anything', () => {
@@ -146,5 +147,51 @@ describe('what the Resend webhook may and may not do to an invoice', () => {
     )
     expect(text).toContain("'invoice_email_bounced'")
     expect(text).toContain("members.filter((member) => member.role === 'owner')")
+  })
+})
+
+describe('an engagement letter event goes on the engagement, never on an invoice', () => {
+  const helper = () => {
+    const start = serverSource.indexOf('async function recordEngagementDelivery(')
+    expect(start, 'recordEngagementDelivery is gone').toBeGreaterThan(-1)
+    const rest = serverSource.slice(start)
+    const end = rest.search(/\r?\n\}\r?\n/)
+    expect(end, 'recordEngagementDelivery has no end').toBeGreaterThan(-1)
+    return rest.slice(0, end + 3)
+  }
+
+  it('routes an engagement_id tag to the engagement before the questionnaire and invoice lookups', () => {
+    const text = block()
+    const branchAt = text.indexOf("if (typeof tagBag.engagement_id === 'string' && tagBag.engagement_id) {")
+    expect(branchAt).toBeGreaterThan(-1)
+    expect(branchAt).toBeGreaterThan(text.indexOf("if (typeof tagBag.proposal_id === 'string' && tagBag.proposal_id) {"))
+    expect(branchAt).toBeLessThan(text.indexOf("if (typeof tagBag.questionnaire_id === 'string' && tagBag.questionnaire_id) {"))
+    expect(branchAt).toBeLessThan(text.indexOf('appDataStore.listInvoices()'))
+    const branch = text.slice(branchAt, branchAt + 400)
+    expect(branch).toContain('await recordEngagementDelivery(request, tagBag.engagement_id, deliveryEvent, resendEvent)')
+    expect(branch).toContain('sendJson(response, 200, { received: true, matched })')
+  })
+
+  it('appends the event through the store, idempotently, and never writes a status', () => {
+    const text = helper()
+    expect(text).toContain('appDataStore.getEngagement(engagementId)')
+    expect(text).toContain('appDataStore.appendEngagementEmailEvent(engagement.id, {')
+    expect(text).toContain("kind: 'delivery',")
+    for (const write of ['signEngagement', 'voidEngagement', 'updateEngagement', 'markEngagementSent', 'recordInvoiceDeliveryEvent']) {
+      expect(text).not.toContain(write)
+    }
+    expect(text).not.toMatch(/status:\s*'/)
+    // An event for an engagement that is gone is answered 200 (matched: false), not retried for days.
+    expect(text).toContain('return false')
+  })
+
+  it('tells the owners once on a bounce or a complaint, with the ordinary event and no document', () => {
+    const text = helper()
+    expect(text).toContain('const alreadyLogged =')
+    expect(text).toContain("if (!alreadyLogged && (deliveryEvent === 'bounced' || deliveryEvent === 'complained'))")
+    expect(text).toContain("notify(appDataStore, owner.id, 'invoice_email_bounced', {")
+    expect(text).toContain("members.filter((member) => member.role === 'owner')")
+    expect(text).toContain('link: `/engagements/${engagement.id}`')
+    expect(text).not.toMatch(/attachments|pdf|letterBody|emailBody/i)
   })
 })
