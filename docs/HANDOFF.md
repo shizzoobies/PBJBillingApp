@@ -25,7 +25,23 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-12, 04:05Z - READ THIS FIRST):** `main` = `e081ddb` (+ this handoff), deployed,
+**State right now (2026-10-12, 06:10Z - READ THIS FIRST):** `main` = `3f0391d` (+ this handoff), deployed,
+`/health` 200, voice re-provisioned. **EVERY STAGE OF BRITTANY'S 2026-10-10 WORKFLOW EMAIL IS LIVE.** After the
+04:05Z paragraph below: **`3f0391d` STAGE 4** (filed shipped `featreq-afecfd28`): every Letters send also records a
+sent Amendment on the client (`engagements.letter_send_id` + partial unique index, look-first boot DDL, verified
+live); an Engagements card on the client's Billing tab with New amendment from a saved letter; Accept on an upsell
+offers Amend (kind amendment, fee added) or Supersede (kind superseding; signing replaces the monthly fee when the
+letter has one, SETs plans only when any named plan still exists, flips the predecessor to superseded inside the
+flip transaction; `predecessor_replaced` refusal); pure records sign even on masters/retired clients. Two review
+rounds each on stages 2, 3 and 4; rolled-back production trials for every new statement. Production has 0
+engagements so far - Brittany has not yet accepted a proposal since the build. **OPEN:** the follow-up ticket
+`featreq-acb1b663` (30 deferred items from the reviews; items 15, 29, 30 are questions for Brittany; 6, 9, 24 need
+Alex for DDL); the Shipped column is her review queue (`featreq-635d314a`, `ad4d342b`, `5e195707`, `b369e609`,
+`b63137fb`, `5d346889`, `afecfd28`). Lanes: only the primary tree remains (AP-laneE removed after this ship).
+Suite 368 files / 8,639 tests; manifest 204,961 bytes (TRIM FIRST). Next session: nothing is Planned - wait for her
+send-backs, or pick from `featreq-acb1b663` / `featreq-9c29491a` (Letters leftovers).
+
+**Earlier (2026-10-12, 04:05Z):** `main` = `e081ddb` (+ this handoff), deployed,
 `/health` 200, voice re-provisioned. **STAGE 3 SHIPPED as `e081ddb`** (filed shipped `featreq-5d346889`): client
 creation moved from Accept to Mark as signed; `engagements.fee_mode` + `proposals.accept_picks` columns are live
 (look-first boot ALTERs, verified in production after the deploy). Production had 0 engagements and 0 Won
