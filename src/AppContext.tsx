@@ -527,6 +527,13 @@ export type AppContextValue = {
     checklistId: string,
     input: { category: SkipReasonCategory; explanation: string; newDueDate: string },
   ) => Promise<void>
+  /**
+   * Open next step now (featreq-8b54d117): start the case's next stage while
+   * every open step of this one is waiting. Merges the new next-stage checklist
+   * into local state and resolves with it, or null in preview. Throws the
+   * server's sentence on a refusal.
+   */
+  openNextStageEarly: (checklistId: string) => Promise<Checklist | null>
   /** Owner-only: mark a skip reviewed — clears it off the dashboard, keeps the record. */
   reviewChecklistSkip: (skipId: string) => Promise<void>
   /**

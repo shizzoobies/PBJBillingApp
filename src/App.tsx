@@ -66,6 +66,7 @@ import {
   reviewChecklistSkip as reviewChecklistSkipRequest,
   skipChecklistOccurrence as skipChecklistOccurrenceRequest,
   pushChecklistOccurrence as pushChecklistOccurrenceRequest,
+  openNextStageEarly as openNextStageEarlyRequest,
   approvePendingTaskEdit as approvePendingTaskEditRequest,
   rejectPendingTaskEdit as rejectPendingTaskEditRequest,
   isTaskEditPending,
@@ -1493,6 +1494,24 @@ function App() {
     },
     [refreshChecklistSkips],
   )
+
+  /**
+   * Open next step now (featreq-8b54d117). The server answers the waiting
+   * checklist (unchanged - it stays open) and the NEW next-stage checklist,
+   * whose id is not yet in `current.checklists`, so it is added.
+   */
+  const openNextStageEarly = useCallback(async (checklistId: string) => {
+    if (previewActiveRef.current) return null
+    const { checklist, spawned } = await openNextStageEarlyRequest(checklistId)
+    applyServerDataUpdate((current) => {
+      const merged = current.checklists.map((entry) =>
+        entry.id === checklist.id ? checklist : entry.id === spawned.id ? spawned : entry,
+      )
+      const spawnedIsNew = !current.checklists.some((entry) => entry.id === spawned.id)
+      return { ...current, checklists: spawnedIsNew ? [...merged, spawned] : merged }
+    })
+    return spawned
+  }, [])
 
   /** Owner: "Reviewed" — clears the skip off the dashboard, keeps the record. */
   const reviewChecklistSkip = useCallback(
@@ -4301,6 +4320,7 @@ function App() {
     checklistSkips,
     skipChecklistOccurrence,
     pushChecklistOccurrence,
+    openNextStageEarly,
     reviewChecklistSkip,
     waitingOnMe,
     addWaitingOn,

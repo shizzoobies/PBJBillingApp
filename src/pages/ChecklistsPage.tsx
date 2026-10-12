@@ -35,6 +35,7 @@ import {
   removalWouldCompleteWaitingStep,
   removalWouldDropOpenWait,
   STEP_HAS_OPEN_WAIT_MESSAGE,
+  stageOpenWorkAllWaiting,
   stepWouldDropOpenWait,
   WAITING_BLOCK_TITLES,
   waitingOnStage,
@@ -2503,6 +2504,8 @@ export function ChecklistCard({
     data: contextData,
     skipChecklistOccurrence,
     pushChecklistOccurrence,
+    openNextStageEarly,
+    previewMode,
   } = useAppContext()
   // Dismiss on a repeating note's copy is for the people the server lets dismiss
   // it: the SAME predicate as `pendingNoteWriteDenial` in the dismiss route
@@ -2661,6 +2664,47 @@ export function ChecklistCard({
   // toggle controls. We don't know the next assignee's name from this scope,
   // so we just report the hand-off generically.
   const handedOff = allDone && !isLastStage
+
+  // Open next step now (featreq-8b54d117): "when a task under a step gets a
+  // delayed [waiting] but all other steps checked off, a button to open next step
+  // populates to push the next step while waiting." Offered when every open step
+  // here is waiting (the predicate the server refuses by), the case has a next
+  // step that is not open yet, and the viewer is the owner or this step's
+  // assignee (not in preview). Onboarding, skipped and pushed-away rows never.
+  const [openingNextStage, setOpeningNextStage] = useState(false)
+  const [openedNextStage, setOpenedNextStage] = useState<{ id: string; number: number } | null>(null)
+  const [openNextStageError, setOpenNextStageError] = useState<string | null>(null)
+  const nextStageName =
+    contextData.checklistTemplates.find((entry) => entry.id === checklist.templateId)?.stages?.[
+      stageIndex + 1
+    ]?.name ?? ''
+  const caseKey = checklist.caseId || checklist.id
+  const nextStageAlreadyOpen = contextData.checklists.some(
+    (entry) => (entry.caseId || entry.id) === caseKey && entry.stageIndex === stageIndex + 1,
+  )
+  const canOpenNextStage =
+    !checklist.projected &&
+    !isLastStage &&
+    Boolean(checklist.templateId) &&
+    !checklist.onboardingForClientId &&
+    !checklist.pushedToChecklistId &&
+    !checklist.skippedAt &&
+    (role === 'owner' || isAssignee) &&
+    !previewMode &&
+    !nextStageAlreadyOpen &&
+    stageOpenWorkAllWaiting(checklist)
+  const openNextStageNow = async () => {
+    setOpeningNextStage(true)
+    setOpenNextStageError(null)
+    try {
+      const spawned = await openNextStageEarly(checklist.id)
+      if (spawned) setOpenedNextStage({ id: spawned.id, number: stageNumber + 1 })
+    } catch (error) {
+      setOpenNextStageError(error instanceof Error ? error.message : 'Could not open the next step.')
+    } finally {
+      setOpeningNextStage(false)
+    }
+  }
 
   // Checking a step off is PERSONAL — only the person it's assigned to (its own
   // assignee, else the checklist's) can do it, plus the owner. Mirrors the
@@ -2906,6 +2950,27 @@ export function ChecklistCard({
             >
               Push to a new date
             </button>
+          ) : null}
+          {canOpenNextStage ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={openingNextStage}
+              onClick={() => void openNextStageNow()}
+              title={`Steps here are waiting. Start Step ${stageNumber + 1}${nextStageName ? ` (${nextStageName})` : ''} now; this step stays open until its waits clear.`}
+            >
+              {openingNextStage ? 'Opening…' : 'Open next step now'}
+            </button>
+          ) : null}
+          {openedNextStage ? (
+            <Link className="status-pill" to={`/checklists?focus=${encodeURIComponent(openedNextStage.id)}`}>
+              Step {openedNextStage.number} opened
+            </Link>
+          ) : null}
+          {openNextStageError ? (
+            <p className="waiting-editor-error" role="alert">
+              {openNextStageError}
+            </p>
           ) : null}
           {/* The actions menu is available to anyone who can edit the task's
               structure (owner, assignee, or editor). For an owner "Delete"
