@@ -2821,6 +2821,10 @@ export type EngagementSignResult = {
   retainerPeriod: string | null
   monthlyRate: number | null
   addedPlanIds: string[]
+  /** A superseding letter (stage 4): the plans its signing took off the client. */
+  removedPlanIds?: string[]
+  /** A superseding letter (stage 4): the engagement its signing marked Superseded, or null. */
+  supersededId?: string | null
   softwareAdded: string[]
   skipped: { what: string; why: string }[]
 }

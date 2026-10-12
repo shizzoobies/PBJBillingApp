@@ -13383,11 +13383,19 @@ export class AppDataStore {
    * a prospect has a name to give the client it will become. A letter that could
    * never be signed is refused here, not discovered at signing.
    *
-   * @returns {{ proposal, clientId, packageApplied, engagementId } | null} -
+   * Engagements stage 4 - an UPSELL's letter is an amendment (`mode: 'amend'`, the
+   * default: kind 'amendment', the letter's fee added to the client's), or, when the
+   * client has a SIGNED original or superseding engagement, it can supersede that one
+   * (`mode: 'supersede'`: kind 'superseding' naming it, fee replaced, no retainer by
+   * default; signing sets the client's plans to the letter's and marks the old one
+   * Superseded). Superseding with no signed engagement to replace, or for a
+   * prospect, is refused before the write.
+   *
+   * @returns {{ proposal, clientId, packageApplied, engagementId, engagementKind } | null} -
    *   `clientId` is the upsell's existing client, else null; `packageApplied` is
    *   always false (nothing is applied at Accept; kept for the response shape).
    */
-  async acceptProposal(id, { actorUserId = null, packageId = null, planIds = [] } = {}) {
+  async acceptProposal(id, { actorUserId = null, packageId = null, planIds = [], mode = 'amend' } = {}) {
     const proposal = await this.getProposal(id)
     if (!proposal) return null
     if (proposal.status === 'accepted' || proposal.status === 'declined') {
@@ -13428,6 +13436,20 @@ export class AppDataStore {
     if (!linkedClientId && !(proposal.prospect?.company || proposal.prospect?.contactName)) {
       throw new ProposalStateError('Give the prospect a company or contact name before accepting.')
     }
+    // Superseding replaces the client's CURRENT signed engagement, so there must be one.
+    let superseded = null
+    if (mode === 'supersede') {
+      if (!linkedClientId) {
+        throw new ProposalStateError('Only a proposal to an existing client can supersede an engagement.')
+      }
+      superseded = await this.currentSignedEngagement(linkedClientId)
+      if (!superseded) {
+        throw new ProposalStateError(
+          `${linkedClient.name || 'This client'} has no signed engagement to supersede. Accept it as an amendment instead.`,
+        )
+      }
+    }
+    const kind = !linkedClientId ? 'original' : superseded ? 'superseding' : 'amendment'
     // Plans the workspace knows, in the order picked (a dangling id would follow
     // the engagement onto the client at signing - plan_ids has no foreign key).
     let wantedPlans = [
@@ -13464,10 +13486,11 @@ export class AppDataStore {
     let engagement = null
     try {
       engagement = await this.createEngagementFromProposal(proposal, {
-        kind: 'original',
+        kind,
         createdBy: actorUserId,
         packageId: pkg ? pkg.id : null,
         planIds: wantedPlans,
+        ...(superseded ? { supersedesId: superseded.id, feeMode: 'replace' } : {}),
       })
       engagementId = engagement?.id ?? null
     } catch (error) {
@@ -13485,7 +13508,13 @@ export class AppDataStore {
         console.error('[engagements] could not record the draft for', id, error)
       }
     }
-    return { proposal: accepted, clientId: linkedClientId ?? null, packageApplied: false, engagementId }
+    return {
+      proposal: accepted,
+      clientId: linkedClientId ?? null,
+      packageApplied: false,
+      engagementId,
+      engagementKind: engagementId ? kind : null,
+    }
   }
 
   /**
@@ -26507,6 +26536,24 @@ export class AppDataStore {
       .map(({ row }) => mapEngagementRow(row, { list: true }))
   }
 
+  /**
+   * A client's CURRENT engagement (stage 4): its newest SIGNED original or superseding
+   * letter (amendments only add to one), by signed date, or null - what an upsell's
+   * superseding letter replaces.
+   */
+  async currentSignedEngagement(clientId) {
+    if (!clientId) return null
+    const signed = (await this.listEngagements({ clientId, status: 'signed' })).filter(
+      (engagement) => engagement.kind === 'original' || engagement.kind === 'superseding',
+    )
+    signed.sort(
+      (a, b) =>
+        String(b.signedAt ?? '').localeCompare(String(a.signedAt ?? '')) ||
+        String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')),
+    )
+    return signed[0] ?? null
+  }
+
   /** One engagement, whole, or null. */
   async getEngagement(id) {
     if (!id) return null
@@ -26655,7 +26702,16 @@ export class AppDataStore {
    */
   async createEngagementFromProposal(
     proposal,
-    { kind = 'original', createdBy = null, sections = null, clientId, packageId = null, planIds = [] } = {},
+    {
+      kind = 'original',
+      createdBy = null,
+      sections = null,
+      clientId,
+      packageId = null,
+      planIds = [],
+      supersedesId = null,
+      feeMode,
+    } = {},
   ) {
     if (!proposal?.id) {
       throw new EngagementStateError('There is no proposal to draft the engagement from.', 'invalid')
@@ -26689,7 +26745,8 @@ export class AppDataStore {
       proposalId: proposal.id,
       clientId: storedClientId,
       letterId: null,
-      supersedesId: null,
+      // A superseding letter names the signed engagement it replaces (stage 4).
+      supersedesId: kind === 'superseding' && typeof supersedesId === 'string' && supersedesId ? supersedesId : null,
       party,
       ...texts,
       sectionKeys: (Array.isArray(assembled.sectionKeys) ? assembled.sectionKeys : []).map(String),
@@ -26697,8 +26754,9 @@ export class AppDataStore {
       // A retainer of one month's fee for a new client; none by default for a client
       // that already exists (an upsell) - she can type one in.
       retainerAmount: storedClientId ? null : engagementRetainer(figures.totals.monthly),
-      // An upsell ADDS to the client's fee by default; she can choose replace or keep.
-      feeMode: storedClientId ? 'add' : 'replace',
+      // An upsell ADDS to the client's fee by default; she can choose replace or keep. A
+      // superseding letter replaces it (the caller says so).
+      feeMode: ENGAGEMENT_FEE_MODES.includes(feeMode) ? feeMode : storedClientId ? 'add' : 'replace',
       packageId: typeof packageId === 'string' && packageId ? packageId : null,
       planIds: [...new Set((Array.isArray(planIds) ? planIds : []).filter((planId) => typeof planId === 'string' && planId))],
       templateHash: null, // set below from the whole row
@@ -26710,8 +26768,8 @@ export class AppDataStore {
       const { rows } = await this.pool.query(
         `insert into engagements
            (id, kind, status, proposal_id, client_id, party, subject, email_body, letter_body,
-            section_keys, figures, retainer_amount, template_hash, created_by, package_id, plan_ids, fee_mode)
-         values ($1, $2, 'draft', $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15::text[], $16)
+            section_keys, figures, retainer_amount, template_hash, created_by, package_id, plan_ids, fee_mode, supersedes_id)
+         values ($1, $2, 'draft', $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15::text[], $16, $17)
          returning ${ENGAGEMENT_COLUMNS}`,
         [
           row.id,
@@ -26730,6 +26788,7 @@ export class AppDataStore {
           row.packageId,
           row.planIds,
           row.feeMode,
+          row.supersedesId,
         ],
       )
       return mapEngagementRow(rows[0])
@@ -26785,7 +26844,13 @@ export class AppDataStore {
       const known = new Set(((await this.read()).plans ?? []).map((plan) => plan.id))
       planIds = picks.planIds.filter((planId) => known.has(planId))
     }
-    return this.createEngagementFromProposal(proposal, { kind: 'original', createdBy, packageId, planIds })
+    // An upsell's letter is an amendment (stage 4), as Accept drafts it.
+    return this.createEngagementFromProposal(proposal, {
+      kind: proposal.clientId ? 'amendment' : 'original',
+      createdBy,
+      packageId,
+      planIds,
+    })
   }
 
   /**
@@ -27336,6 +27401,12 @@ export class AppDataStore {
    *      route records engagement_signed).
    * The onboarding case is NOT opened: the new client simply arrives in Onboarding.
    *
+   * A SUPERSEDING letter (stage 4) replaces the client's current engagement: its
+   * predecessor flips to 'superseded' inside the unit of step 2 (a compare-and-set on
+   * it still being signed; otherwise it is left and said), its fee mode is 'replace',
+   * and step 3 SETS the client's plans to the letter's plans and package plans instead
+   * of adding them (a letter naming none leaves them; removed plans' checklists stay).
+   *
    * A refusal before the flip leaves nothing applied. A client this call created is
    * retired when it cannot be kept (the claim was lost or threw, the proposal is
    * linked to another client, the flip refused) - but never when the letter was
@@ -27344,7 +27415,8 @@ export class AppDataStore {
    * same client. Any failure after a client was created carries `createdClientId`.
    *
    * @returns {Promise<null | {engagement, clientId, createdClient, clonedTemplateIds,
-   *   retainerInvoiceId, retainerPeriod, monthlyRate, addedPlanIds, softwareAdded,
+   *   retainerInvoiceId, retainerPeriod, monthlyRate, addedPlanIds, removedPlanIds,
+   *   supersededId, softwareAdded,
    *   skipped: {what: string, why: string}[]}>} null when there is no such engagement.
    */
   async signEngagement(
@@ -27554,6 +27626,10 @@ export class AppDataStore {
         })
       }
 
+      // A superseding letter REPLACES the client's current engagement (stage 4): it flips
+      // that one to Superseded and sets the plans to its own instead of adding them.
+      const replacing = current.kind === 'superseding'
+
       // ---- the flip, the software rows and the fee, as one unit ----
       let final
       try {
@@ -27563,13 +27639,25 @@ export class AppDataStore {
           allowed,
           { signedAt, userId, signedNote, templateHash: current.templateHash },
           figures.lines,
-          { fee },
+          { fee, supersedesId: replacing ? current.supersedesId : null },
         )
       } catch (error) {
         if (error instanceof EngagementStateError) error.flipRefused = true
         throw error
       }
       const { engagement, software } = final
+      // The letter this one supersedes, flipped to Superseded in the same unit; one that
+      // was no longer signed by then is left as it is, and said.
+      const supersededId = final.supersededId ?? null
+      if (replacing && current.supersedesId && !supersededId) {
+        const old = await this.getEngagement(current.supersedesId)
+        skipped.push({
+          what: 'Superseded letter',
+          why: old
+            ? `The engagement this letter replaces is ${old.status} now, not signed, so it was left as it is.`
+            : 'The engagement this letter replaces no longer exists.',
+        })
+      }
       for (const description of software.skipped) {
         skipped.push({
           what: `Software: ${description}`,
@@ -27581,6 +27669,7 @@ export class AppDataStore {
 
       // ---- after the flip: plans, the package, checklists - never a refusal ----
       const addedPlanIds = []
+      const removedPlanIds = []
       let clonedTemplateIds = []
       try {
         const workspace = await this.read()
@@ -27601,12 +27690,30 @@ export class AppDataStore {
         if ((current.planIds ?? []).some((planId) => !known.has(planId))) {
           skipped.push({ what: 'Plans', why: 'A plan on the letter no longer exists, so it was left out.' })
         }
-        addedPlanIds.push(
-          ...[...new Set([...(current.planIds ?? []), ...(pkgNow?.planIds ?? [])])].filter(
-            (planId) => known.has(planId) && !existing.includes(planId),
-          ),
+        const lettered = [...new Set([...(current.planIds ?? []), ...(pkgNow?.planIds ?? [])])].filter((planId) =>
+          known.has(planId),
         )
-        if (addedPlanIds.length > 0) await this._setClientPlanIds(clientId, [...existing, ...addedPlanIds])
+        addedPlanIds.push(...lettered.filter((planId) => !existing.includes(planId)))
+        if (replacing && (current.planIds ?? []).length === 0 && !pkgNow) {
+          // A superseding letter that names no plans and no package is not a decision to
+          // take every plan away: the client's plans are left as they are.
+          skipped.push({
+            what: 'Plans',
+            why: `This letter names no plans or package, so ${clientName()}'s plans were left as they are.`,
+          })
+        } else if (replacing) {
+          // SET, not added to: the client's plans become exactly the letter's.
+          removedPlanIds.push(...existing.filter((planId) => !lettered.includes(planId)))
+          if (addedPlanIds.length > 0 || removedPlanIds.length > 0) await this._setClientPlanIds(clientId, lettered)
+          if (removedPlanIds.length > 0) {
+            skipped.push({
+              what: 'Checklists',
+              why: `The plans the letter no longer names were taken off ${clientName()}; their checklists already on the client were kept - remove them from the client's page if they no longer apply.`,
+            })
+          }
+        } else if (addedPlanIds.length > 0) {
+          await this._setClientPlanIds(clientId, [...existing, ...addedPlanIds])
+        }
         // The package's checklists and each ADDED plan's standard ones - a recipe she
         // deleted from a plan the client already had never comes back. One save.
         const { copies } = await this.copyTemplatesToClient(clientId, [
@@ -27687,6 +27794,8 @@ export class AppDataStore {
         retainerPeriod,
         monthlyRate,
         addedPlanIds,
+        removedPlanIds,
+        supersededId,
         softwareAdded: software.added,
         skipped,
       }
@@ -27841,7 +27950,10 @@ export class AppDataStore {
    * signing is refused rather than half-applied (what Accept's
    * `_acceptWithSoftware` did before the software moved here). The fee is
    * computed from the client row as it is inside the unit, so an 'add' can never
-   * land twice. Returns { engagement, software, monthlyRate } - the fee after.
+   * land twice. A superseding letter's predecessor (`supersedesId`) is flipped to
+   * 'superseded' in the same unit, only while it is still this client's signed letter.
+   * Returns { engagement, software, monthlyRate, supersededId } - the fee after, and
+   * the predecessor flipped (null when none was).
    *
    * Postgres: one transaction. The compare-and-set flip runs first - it takes
    * the row lock, and only while the status is one signing allows and the row
@@ -27857,7 +27969,7 @@ export class AppDataStore {
     allowed,
     { signedAt, userId, signedNote, templateHash },
     lines,
-    { fee = null } = {},
+    { fee = null, supersedesId = null } = {},
   ) {
     const refusal = (status, rowClientId, rowHash) =>
       !status || !allowed.includes(status)
@@ -27900,7 +28012,19 @@ export class AppDataStore {
           const after = updated.rows?.[0]?.monthly_rate
           monthlyRate = after === undefined || after === null ? null : Math.round(Number(after) * 100) / 100
         }
-        return { engagement: mapEngagementRow(rows[0]), software, monthlyRate }
+        // A superseding letter's predecessor flips to Superseded in this same unit - a
+        // compare-and-set on it still being this client's SIGNED letter (stage 4).
+        let supersededId = null
+        if (supersedesId) {
+          const old = await dbClient.query(
+            `update engagements set status = 'superseded', updated_at = now()
+              where id = $1 and status = 'signed' and client_id = $2
+              returning id`,
+            [supersedesId, clientId],
+          )
+          supersededId = old.rows?.[0]?.id ?? null
+        }
+        return { engagement: mapEngagementRow(rows[0]), software, monthlyRate, supersededId }
       })
     }
     // Raw fs calls only on the data file in here: `readJson` / `writeFile` would
@@ -27934,9 +28058,21 @@ export class AppDataStore {
             throw refusal(row?.status ?? null, row?.clientId ?? null, row?.templateHash ?? null)
           }
           Object.assign(row, { status: 'signed', signedAt, signedBy: userId, signedNote, updatedAt: nowIso() })
-          return { result: mapEngagementRow(row), changed: true }
+          // The superseded predecessor, in the same slot (see the Postgres branch).
+          let supersededId = null
+          const old = supersedesId
+            ? authState.engagements.find(
+                (entry) => entry?.id === supersedesId && entry.status === 'signed' && entry.clientId === clientId,
+              )
+            : null
+          if (old) {
+            old.status = 'superseded'
+            old.updatedAt = nowIso()
+            supersededId = old.id
+          }
+          return { result: { engagement: mapEngagementRow(row), supersededId }, changed: true }
         })
-        return { engagement, software, monthlyRate }
+        return { engagement: engagement.engagement, software, monthlyRate, supersededId: engagement.supersededId }
       } catch (error) {
         // Refused: the rows (and the fee) written a moment ago never happened.
         if (wrote) await fsWriteFile(localDataPath, original)

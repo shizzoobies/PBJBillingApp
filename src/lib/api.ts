@@ -34,6 +34,7 @@
   type LetterSendResponse,
   type LetterTemplateState,
   type Engagement,
+  type EngagementKind,
   type EngagementPatch,
   type EngagementPreview,
   type EngagementSection,
@@ -1071,6 +1072,8 @@ export type AcceptProposalResult = {
   clientId: string | null
   packageApplied: boolean
   engagementId?: string | null
+  /** The kind of letter drafted (stage 4): original for a prospect, amendment or superseding for an upsell. */
+  engagementKind?: EngagementKind | null
 }
 
 /**
@@ -1083,6 +1086,8 @@ export function acceptProposalRequest(
   input: {
     packageId?: string | null
     planIds?: string[]
+    /** An upsell: amend the current engagement (default) or supersede it (stage 4). */
+    mode?: 'amend' | 'supersede'
   } = {},
 ): Promise<AcceptProposalResult> {
   return proposalRequest<AcceptProposalResult>(

@@ -1489,6 +1489,79 @@ describe('Accept and Decline', () => {
     ).toBeTruthy()
   })
 
+  // Engagements stage 4: an upsell amends or supersedes the client's current signed engagement.
+  describe('amend or supersede the current engagement', () => {
+    const signedOriginal = {
+      id: 'eng-orig',
+      kind: 'original',
+      status: 'signed',
+      clientId: 'client-1',
+      signedAt: '2026-09-15T16:00:00.000Z',
+    }
+
+    it('offers no choice when the client has no signed original or superseding letter', async () => {
+      api.getProposalRequest = vi.fn(async () => ({ ...PROPOSAL, clientId: 'client-1' }))
+      api.listEngagementsRequest = vi.fn(async () => [{ ...signedOriginal, kind: 'amendment' }])
+      renderEditor()
+      await screen.findByRole('button', { name: 'Accept' })
+      await waitFor(() =>
+        expect(api.listEngagementsRequest).toHaveBeenCalledWith({ clientId: 'client-1', status: 'signed' }),
+      )
+      expect(screen.queryByRole('combobox', { name: 'What the letter does to the current engagement' })).toBeNull()
+    })
+
+    it('amends by default: the same question, no mode sent', async () => {
+      api.getProposalRequest = vi.fn(async () => ({ ...PROPOSAL, clientId: 'client-1' }))
+      api.listEngagementsRequest = vi.fn(async () => [signedOriginal])
+      const confirm = vi.fn((message?: string) => (void message, true))
+      vi.stubGlobal('confirm', confirm)
+      renderEditor()
+      const choice = await screen.findByRole('combobox', { name: 'What the letter does to the current engagement' })
+      expect(choice).toHaveValue('amend')
+      fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+      expect(confirm.mock.calls[0][0]).toMatch(/is added to their monthly fee/)
+      await waitFor(() => expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }))
+    })
+
+    it('supersede says what signing replaces and sends mode supersede', async () => {
+      contextValue.data.plans = [{ id: 'plan-1', name: 'Monthly Bookkeeping', notes: '' }] as unknown as SubscriptionPlan[]
+      api.getProposalRequest = vi.fn(async () => ({ ...PROPOSAL, clientId: 'client-1' }))
+      api.listEngagementsRequest = vi.fn(async () => [signedOriginal])
+      const confirm = vi.fn((message?: string) => (void message, true))
+      vi.stubGlobal('confirm', confirm)
+      renderEditor()
+      const choice = await screen.findByRole('combobox', { name: 'What the letter does to the current engagement' })
+      fireEvent.change(choice, { target: { value: 'supersede' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Plans' }))
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Monthly Bookkeeping' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+      expect(confirm).toHaveBeenCalledTimes(1)
+      expect(confirm.mock.calls[0][0]).toBe(
+        "Accept this proposal for Existing Co, with the plan Monthly Bookkeeping? This proposal is marked Won. A superseding engagement letter will be drafted to replace the one signed Sep 15, 2026, for you to edit and send. Nothing changes for Existing Co until the letter is marked signed: then the letter's $630.00 replaces their monthly fee, their plans become exactly the letter's plans and the engagement signed Sep 15, 2026 is marked Superseded.",
+      )
+      await waitFor(() =>
+        expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
+          packageId: null,
+          planIds: ['plan-1'],
+          mode: 'supersede',
+        }),
+      )
+    })
+
+    it('a no on the supersede question sends nothing', async () => {
+      api.getProposalRequest = vi.fn(async () => ({ ...PROPOSAL, clientId: 'client-1' }))
+      api.listEngagementsRequest = vi.fn(async () => [signedOriginal])
+      vi.stubGlobal('confirm', vi.fn(() => false))
+      renderEditor()
+      fireEvent.change(
+        await screen.findByRole('combobox', { name: 'What the letter does to the current engagement' }),
+        { target: { value: 'supersede' } },
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+      expect(api.acceptProposalRequest).not.toHaveBeenCalled()
+    })
+  })
+
   it('names no fee change for a non-subscription client even with a fee above $0', async () => {
     contextValue.data.clients = [
       { id: 'client-1', name: 'Existing Co', billingMode: 'hourly' },

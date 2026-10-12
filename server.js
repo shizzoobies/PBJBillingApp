@@ -13461,7 +13461,7 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // POST /api/proposals/:id/accept — { packageId?, planIds? } (spec §5.5). The
+    // POST /api/proposals/:id/accept — { packageId?, planIds?, mode? } (spec §5.5). The
     // proposal is marked Won and its engagement letter drafted, carrying the
     // package and plans. Nothing is written to any client: since engagements
     // stage 3 the client is created (or an upsell's fee, plans and software
@@ -13483,6 +13483,15 @@ const server = createServer(async (request, response) => {
         return
       }
       const payload = (await readJsonBody(request)) ?? {}
+      // Engagements stage 4: an upsell's letter amends the client's current engagement
+      // ('amend', the default) or supersedes it ('supersede').
+      if (payload.mode !== undefined && payload.mode !== null && !['amend', 'supersede'].includes(payload.mode)) {
+        sendJson(response, 400, {
+          error: 'proposal_invalid',
+          message: "Choose whether the letter amends or supersedes the current engagement.",
+        })
+        return
+      }
       // A line not yet priced (a count only asked on a call, a role rate at zero)
       // would make the client's fee a partial total: refused until it is priced.
       const toAccept = await appDataStore.getProposal(proposalAcceptMatch[1])
@@ -13496,6 +13505,7 @@ const server = createServer(async (request, response) => {
           actorUserId: session.user.id,
           packageId: typeof payload.packageId === 'string' ? payload.packageId : null,
           planIds: Array.isArray(payload.planIds) ? payload.planIds : [],
+          mode: payload.mode === 'supersede' ? 'supersede' : 'amend',
         })
       } catch (error) {
         if (error instanceof ProposalStateError || error instanceof PackageApplyError) {

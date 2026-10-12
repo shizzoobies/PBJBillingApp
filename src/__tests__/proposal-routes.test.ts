@@ -329,6 +329,17 @@ describe('accepting and declining', () => {
     expect(text).toContain('sendJson(response, 200, result)')
   })
 
+  // Engagements stage 4: an upsell's letter amends (default) or supersedes the
+  // client's current engagement; anything else is a 400 before anything is read.
+  it('takes mode amend or supersede, refuses any other value with a 400 first, and defaults to amend', () => {
+    const text = routeBlock(/proposalAcceptMatch && request\.method === 'POST'/, 3800)
+    const guard = text.indexOf("!['amend', 'supersede'].includes(payload.mode)")
+    expect(guard).toBeGreaterThan(-1)
+    expect(text).toContain("error: 'proposal_invalid',")
+    expect(guard).toBeLessThan(text.indexOf('appDataStore.'))
+    expect(text).toContain("mode: payload.mode === 'supersede' ? 'supersede' : 'amend',")
+  })
+
   it('a refusal is a 409 with the sentence', () => {
     const text = accept()
     expect(text).toContain('error instanceof ProposalStateError || error instanceof PackageApplyError')

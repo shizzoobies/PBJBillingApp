@@ -10,12 +10,13 @@ import {
   engagementMonthlyFee,
   engagementPartyName,
 } from '../lib/engagements'
-import { ApiError, type Engagement, type EngagementStatus } from '../lib/types'
+import { ApiError, type Engagement, type EngagementKind, type EngagementStatus } from '../lib/types'
 
 /**
  * Engagements (docs/plans/engagements-2026-10.md, stage 2C): every engagement
- * letter, newest first. There is no "New" button: an engagement is drafted when a
- * proposal is accepted (and, later, from a client's page). A row opens the editor.
+ * letter, newest first, filtered by status and kind. There is no "New" button: an
+ * engagement is drafted when a proposal is accepted, recorded for each Letters send,
+ * or started from a client's Billing tab (stage 4). A row opens the editor.
  */
 export function EngagementsPage() {
   const { ownerMode, dataRefreshCount } = useAppContext()
@@ -23,6 +24,8 @@ export function EngagementsPage() {
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState('')
   const [status, setStatus] = useState<'all' | EngagementStatus>('all')
+  // Stage 4: originals, amendments (each Letters send is one) and superseding letters.
+  const [kind, setKind] = useState<'all' | EngagementKind>('all')
   const [query, setQuery] = useState('')
 
   // The list; again when another tab or session changes data.
@@ -50,6 +53,7 @@ export function EngagementsPage() {
     const needle = query.trim().toLowerCase()
     return engagements
       .filter((engagement) => status === 'all' || engagement.status === status)
+      .filter((engagement) => kind === 'all' || engagement.kind === kind)
       .filter(
         (engagement) =>
           !needle ||
@@ -57,7 +61,7 @@ export function EngagementsPage() {
             String(value ?? '').toLowerCase().includes(needle),
           ),
       )
-  }, [engagements, status, query])
+  }, [engagements, status, kind, query])
 
   if (!ownerMode) return null
 
@@ -93,6 +97,22 @@ export function EngagementsPage() {
             </select>
           </label>
           <label className="field">
+            <span>Kind</span>
+            <select
+              className="input"
+              aria-label="Kind filter"
+              value={kind}
+              onChange={(event) => setKind(event.target.value as 'all' | EngagementKind)}
+            >
+              <option value="all">All</option>
+              {(Object.keys(ENGAGEMENT_KIND_LABELS) as EngagementKind[]).map((value) => (
+                <option key={value} value={value}>
+                  {ENGAGEMENT_KIND_LABELS[value]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
             <span>Search</span>
             <input
               className="input"
@@ -114,7 +134,7 @@ export function EngagementsPage() {
         {loaded && !error && visible.length === 0 ? (
           <p className="empty-state">
             {engagements.length === 0
-              ? 'No engagements yet. An engagement letter is drafted for you when you Accept a proposal; open it here to edit and send it.'
+              ? "No engagements yet. An engagement letter is drafted for you when you Accept a proposal, each Letters send is recorded as an amendment, and an amendment can be started from a client's Billing tab; open one here to edit and send it."
               : 'No engagements match.'}
           </p>
         ) : null}

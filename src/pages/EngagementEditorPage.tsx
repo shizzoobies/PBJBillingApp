@@ -9,6 +9,7 @@ import {
   engagementPreviewPdfUrl,
   getEngagementRequest,
   listEngagementSectionsRequest,
+  listEngagementsRequest,
   listPackagesRequest,
   previewEngagementRequest,
   reassembleEngagementRequest,
@@ -269,6 +270,26 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
     }
   }, [ownerMode])
 
+  // Stage 4: the superseding chain - the letter this one supersedes, or the one that
+  // superseded it - read from the client's engagements (a failed read names neither).
+  const chainClientId =
+    engagement && (engagement.supersedesId || engagement.status === 'superseded') ? engagement.clientId : null
+  const [related, setRelated] = useState<Engagement[]>([])
+  useEffect(() => {
+    if (!ownerMode || !chainClientId) return
+    let cancelled = false
+    void listEngagementsRequest({ clientId: chainClientId })
+      .then((rows) => {
+        if (!cancelled) setRelated(rows)
+      })
+      .catch(() => {
+        if (!cancelled) setRelated([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [ownerMode, chainClientId, dataRefreshCount])
+
   const partyEmail = engagement?.party?.email ?? ''
   const sendTo = typedTo ?? partyEmail
 
@@ -330,6 +351,15 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const linkedClient = engagement.clientId ? data.clients.find((entry) => entry.id === engagement.clientId) : undefined
   // An amendment from a saved letter (stage 4) has no proposal figures or sections to show.
   const fromLetter = Boolean(engagement.letterId) && !engagement.proposalId
+  const supersedes = engagement.supersedesId
+    ? (related.find((row) => row.id === engagement.supersedesId) ?? null)
+    : null
+  const successor =
+    engagement.status === 'superseded'
+      ? (related.find((row) => row.supersedesId === engagement.id && row.status === 'signed') ??
+        related.find((row) => row.supersedesId === engagement.id) ??
+        null)
+      : null
   const feeChoices =
     linkedClient && linkedClient.billingMode === 'subscription' && monthly > 0
       ? feeChoiceLines(Number(linkedClient.monthlyRate ?? 0), monthly)
@@ -511,6 +541,13 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
               <Link to={`/proposals/${engagement.proposalId}`}>{`From proposal ${partyName}`}</Link>
             ) : null}
             {engagement.letterId && !engagement.proposalId ? <Link to="/letters">From a saved letter</Link> : null}
+            {engagement.supersedesId ? (
+              <Link to={`/engagements/${engagement.supersedesId}`}>
+                {supersedes?.signedAt
+                  ? `Supersedes the engagement signed ${engagementInstantLabel(supersedes.signedAt)}`
+                  : 'Supersedes an earlier engagement'}
+              </Link>
+            ) : null}
             {engagement.clientId ? <Link to={`/clients/${engagement.clientId}`}>Client</Link> : null}
           </div>
         </div>
@@ -535,6 +572,21 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
       {typeof arrivalNotice === 'string' && arrivalNotice ? (
         <p className="empty-state" role="status">
           {arrivalNotice}
+        </p>
+      ) : null}
+      {engagement.status === 'superseded' ? (
+        <p className="empty-state" role="note" aria-label="Superseded">
+          {'Superseded by '}
+          {successor ? (
+            <Link to={`/engagements/${successor.id}`}>
+              {successor.signedAt
+                ? `the engagement signed ${engagementInstantLabel(successor.signedAt)}`
+                : 'a newer engagement'}
+            </Link>
+          ) : (
+            'a newer engagement'
+          )}
+          . This letter is kept as it was signed and can no longer be changed.
         </p>
       ) : null}
       {loadError ? (
@@ -1017,7 +1069,12 @@ function signingSentence(engagement: Engagement, feeLine: string | null = null):
   }
   // The fee as she chose it, with amounts, for a monthly client; else the bare words.
   const existing = [...(monthly > 0 && !feeLine ? ['the monthly fee'] : []), ...brings]
-  return `${existing.length > 0 ? `This brings ${listWords(existing)} to the client. ` : ''}${feeLine ? `Monthly fee: ${feeLine}. ` : ''}`
+  // A superseding letter (stage 4) replaces the client's current engagement.
+  const replaces =
+    engagement.kind === 'superseding'
+      ? "It replaces the client's current engagement: that one is marked Superseded, and the client's plans become this letter's plans (a letter naming none leaves them). "
+      : ''
+  return `${replaces}${existing.length > 0 ? `This brings ${listWords(existing)} to the client. ` : ''}${feeLine ? `Monthly fee: ${feeLine}. ` : ''}`
 }
 
 /**
@@ -1062,6 +1119,16 @@ function SigningSummary({
         ) : null}
         {result.addedPlanIds.length > 0 ? (
           <li>{`Plans added: ${result.addedPlanIds.map(planName).join(', ')}.`}</li>
+        ) : null}
+        {(result.removedPlanIds ?? []).length > 0 ? (
+          <li>{`Plans taken off: ${(result.removedPlanIds ?? []).map(planName).join(', ')}.`}</li>
+        ) : null}
+        {result.supersededId ? (
+          <li>
+            {'The engagement this letter replaces is now marked Superseded ('}
+            <Link to={`/engagements/${result.supersededId}`}>open it</Link>
+            {').'}
+          </li>
         ) : null}
         {checklists > 0 ? (
           <li>{`${checklists} recurring checklist${checklists === 1 ? '' : 's'} copied from the plans and package.`}</li>

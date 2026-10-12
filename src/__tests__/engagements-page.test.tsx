@@ -117,6 +117,36 @@ describe('the Engagements list', () => {
     expect(options).toEqual(['All', 'Draft', 'Sent', 'Signed', 'Superseded', 'Void'])
   })
 
+  // Engagements stage 4: originals, amendments and superseding letters.
+  it('filters by kind', async () => {
+    api.listEngagementsRequest = vi.fn(async () => [
+      ...ROWS,
+      engagementFixture({
+        id: 'eng-3',
+        kind: 'amendment',
+        status: 'sent',
+        party: { ...engagementFixture().party, company: 'Gold Leaf Co' },
+      }),
+    ])
+    renderPage()
+    await screen.findByRole('link', { name: 'Gold Leaf Co' })
+    fireEvent.change(screen.getByLabelText('Kind filter'), { target: { value: 'amendment' } })
+    expect(screen.getByRole('link', { name: 'Gold Leaf Co' })).toBeTruthy()
+    expect(screen.queryByRole('link', { name: 'Acme Books' })).toBeNull()
+    expect(screen.queryByRole('link', { name: 'Blue Fern LLC' })).toBeNull()
+    fireEvent.change(screen.getByLabelText('Kind filter'), { target: { value: 'original' } })
+    expect(screen.queryByRole('link', { name: 'Gold Leaf Co' })).toBeNull()
+    expect(screen.getByRole('link', { name: 'Acme Books' })).toBeTruthy()
+    // Both filters apply together.
+    fireEvent.change(screen.getByLabelText('Status filter'), { target: { value: 'signed' } })
+    expect(screen.queryByRole('link', { name: 'Acme Books' })).toBeNull()
+    expect(screen.getByRole('link', { name: 'Blue Fern LLC' })).toBeTruthy()
+    const options = within(screen.getByLabelText('Kind filter'))
+      .getAllByRole('option')
+      .map((option) => option.textContent)
+    expect(options).toEqual(['All', 'Original', 'Amendment', 'Superseding'])
+  })
+
   it('searches by the party: company, contact or email', async () => {
     renderPage()
     await screen.findByRole('link', { name: 'Acme Books' })

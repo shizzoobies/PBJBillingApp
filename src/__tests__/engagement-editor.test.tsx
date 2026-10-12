@@ -24,6 +24,7 @@ vi.mock('../lib/api', () => ({
   voidEngagementRequest: (...args: unknown[]) => api.voidEngagementRequest(...args),
   listPackagesRequest: (...args: unknown[]) => api.listPackagesRequest(...args),
   listEngagementSectionsRequest: (...args: unknown[]) => api.listEngagementSectionsRequest(...args),
+  listEngagementsRequest: (...args: unknown[]) => api.listEngagementsRequest(...args),
 }))
 
 const api: Record<string, Mock> = {}
@@ -166,6 +167,7 @@ beforeEach(() => {
   }))
   api.signEngagementRequest = vi.fn(async () => signResult())
   api.voidEngagementRequest = vi.fn(async () => engagement({ status: 'void' }))
+  api.listEngagementsRequest = vi.fn(async () => [])
   api.listPackagesRequest = vi.fn(async () => [
     { id: 'pkg-1', name: 'Full service', description: '', planIds: [], templateIds: [], createdAt: '', updatedAt: null },
   ])
@@ -242,6 +244,75 @@ describe('loading', () => {
     )
     await renderEditor()
     expect(within(screen.getByRole('list', { name: 'Activity' })).getByText('Recorded from a Letters send')).toBeTruthy()
+  })
+
+  // Engagements stage 4: superseding.
+  it('a superseding letter says which engagement it supersedes, linked, and its confirm says what it replaces', async () => {
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ kind: 'superseding', status: 'sent', clientId: 'client-9', supersedesId: 'eng-old', feeMode: 'replace' }),
+    )
+    api.listEngagementsRequest = vi.fn(async () => [
+      engagement({ id: 'eng-old', kind: 'original', status: 'signed', clientId: 'client-9', signedAt: '2026-09-15T16:00:00.000Z' }),
+    ])
+    const confirm = mockConfirm(false)
+    await renderEditor()
+    const link = await screen.findByRole('link', { name: 'Supersedes the engagement signed Sep 15, 2026' })
+    expect(link.getAttribute('href')).toBe('/engagements/eng-old')
+    expect(api.listEngagementsRequest).toHaveBeenCalledWith({ clientId: 'client-9' })
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    expect(confirm.mock.calls[0][0]).toContain(
+      "It replaces the client's current engagement: that one is marked Superseded, and the client's plans become this letter's plans (a letter naming none leaves them).",
+    )
+  })
+
+  it('a superseded letter says what superseded it, read-only', async () => {
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ status: 'superseded', clientId: 'client-9', signedAt: '2026-09-15T16:00:00.000Z' }),
+    )
+    api.listEngagementsRequest = vi.fn(async () => [
+      engagement({ id: 'eng-new', kind: 'superseding', status: 'signed', clientId: 'client-9', supersedesId: 'eng-1', signedAt: '2026-10-09T16:00:00.000Z' }),
+      engagement({ id: 'eng-1', status: 'superseded', clientId: 'client-9' }),
+    ])
+    await renderEditor()
+    const note = await screen.findByRole('note', { name: 'Superseded' })
+    await waitFor(() =>
+      expect(within(note).getByRole('link', { name: 'the engagement signed Oct 9, 2026' }).getAttribute('href')).toBe(
+        '/engagements/eng-new',
+      ),
+    )
+    expect(note.textContent).toContain('can no longer be changed')
+    expect(screen.getByText('Superseded', { selector: '.status-pill' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Mark as signed' })).toBeNull()
+  })
+
+  it('after signing a superseding letter, says the plans taken off and links the engagement it superseded', async () => {
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ kind: 'superseding', status: 'sent', clientId: 'client-9', supersedesId: 'eng-old', feeMode: 'replace' }),
+    )
+    api.signEngagementRequest = vi.fn(async () =>
+      signResult({
+        engagement: engagement({ kind: 'superseding', status: 'signed', clientId: 'client-9', supersedesId: 'eng-old' }),
+        clientId: 'client-9',
+        createdClient: false,
+        addedPlanIds: ['plan-2'],
+        removedPlanIds: ['plan-1'],
+        supersededId: 'eng-old',
+      }),
+    )
+    mockConfirm(true)
+    await renderEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    const summary = await screen.findByRole('status', { name: 'What signing did' })
+    expect(within(summary).getByText('Plans added: Payroll.')).toBeTruthy()
+    expect(within(summary).getByText('Plans taken off: Monthly Bookkeeping.')).toBeTruthy()
+    expect(within(summary).getByRole('link', { name: 'open it' }).getAttribute('href')).toBe('/engagements/eng-old')
+  })
+
+  it('reads no other engagements for a letter outside a superseding chain', async () => {
+    await renderEditor()
+    expect(api.listEngagementsRequest).not.toHaveBeenCalled()
+    expect(screen.queryByRole('link', { name: /Supersedes/ })).toBeNull()
   })
 
   it('warns on a placeholder the app does not fill in', async () => {

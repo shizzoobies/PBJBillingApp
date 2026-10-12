@@ -6,7 +6,7 @@ import { ChatPanel } from '../components/proposals/ChatPanel'
 import { EstimateTab } from '../components/proposals/EstimateTab'
 import { LetterTab } from '../components/proposals/LetterTab'
 import { workableClients } from '../lib/clientLifecycle'
-import { refusedEngagementId } from '../lib/engagements'
+import { engagementInstantLabel, refusedEngagementId } from '../lib/engagements'
 import {
   PROPOSAL_NOT_PRICED_MESSAGE,
   defaultProposalPricing,
@@ -179,6 +179,34 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
       cancelled = true
     }
   }, [won, proposalId])
+
+  // An upsell (engagements stage 4): the client's CURRENT signed engagement - its newest
+  // signed original or superseding letter - which Accept can amend or supersede. Null
+  // when it has none (or it could not be read: Accept then simply amends).
+  const upsellClientId = proposal && !won && proposal.status !== 'declined' ? (proposal.clientId ?? null) : null
+  const [currentSigned, setCurrentSigned] = useState<Engagement | null>(null)
+  const [acceptMode, setAcceptMode] = useState<'amend' | 'supersede'>('amend')
+  useEffect(() => {
+    // No upsell: nothing to read (the choice only shows beside a client's proposal).
+    if (!upsellClientId) return
+    let cancelled = false
+    void listEngagementsRequest({ clientId: upsellClientId, status: 'signed' })
+      .then((rows) => {
+        if (cancelled) return
+        const current =
+          rows
+            .filter((row) => row.kind === 'original' || row.kind === 'superseding')
+            .sort((a, b) => String(b.signedAt ?? '').localeCompare(String(a.signedAt ?? '')))[0] ?? null
+        setCurrentSigned(current)
+        if (!current) setAcceptMode('amend')
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentSigned(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [upsellClientId])
 
   /** "Draft the engagement" on a Won proposal that has none; one that exists already is opened. */
   const draftEngagement = async () => {
@@ -524,11 +552,13 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
       .filter((line) => line.group === 'Software' && !line.flag && line.amount > 0)
       .map((line) => line.name)
     const softwareList = listWords(softwareNames)
+    const superseding = Boolean(proposal.clientId && currentSigned && acceptMode === 'supersede')
     const send = (signingNotice: string) =>
       enqueue(async () => {
         const result = await acceptProposalRequest(proposalId, {
           packageId: chosenPackage,
           ...(planIds.length > 0 ? { planIds } : {}),
+          ...(superseding ? { mode: 'supersede' as const } : {}),
         })
         afterAccept(result, signingNotice)
         return result.proposal
@@ -555,6 +585,28 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     }
     const client = data.clients.find((entry) => entry.id === proposal.clientId)
     const clientName = client?.name ?? 'this client'
+    if (superseding && currentSigned) {
+      // Supersede (stage 4): the letter REPLACES the current engagement when signed.
+      const signedDay = engagementInstantLabel(currentSigned.signedAt) || 'earlier'
+      const replaced = [
+        ...(client?.billingMode === 'subscription' && monthlyTotal > 0 ? [`the letter's ${monthly} replaces their monthly fee`] : []),
+        chosenPlans.length > 0 || chosenPackage
+          ? "their plans become exactly the letter's plans"
+          : 'their plans stay as they are (the letter names none)',
+        ...(softwareNames.length > 0
+          ? [`${softwareList} ${softwareNames.length === 1 ? 'is' : 'are'} added as monthly Software expenses billed at cost`]
+          : []),
+        `the engagement signed ${signedDay} is marked Superseded`,
+      ]
+      const ok = window.confirm(
+        `Accept this proposal for ${clientName}${planWords}? This proposal is marked Won. ` +
+          `A superseding engagement letter will be drafted to replace the one signed ${signedDay}, for you to edit and send. ` +
+          `Nothing changes for ${clientName} until the letter is marked signed: then ${listWords(replaced)}.`,
+      )
+      if (!ok) return
+      send(`Nothing changes for ${clientName} until this letter is marked signed; then it replaces the engagement signed ${signedDay}.`)
+      return
+    }
     // What signing will change for an existing client, named now so nothing surprises her later.
     const changes = [
       ...(client?.billingMode === 'subscription' && monthlyTotal > 0 ? [`the letter's ${monthly} is added to their monthly fee (you can choose replace or keep on the letter)`] : []),
@@ -666,6 +718,17 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
                   </div>
                 ) : null}
               </div>
+              {proposal.clientId && currentSigned ? (
+                <select
+                  className="input"
+                  aria-label="What the letter does to the current engagement"
+                  value={acceptMode}
+                  onChange={(event) => setAcceptMode(event.target.value === 'supersede' ? 'supersede' : 'amend')}
+                >
+                  <option value="amend">Amend the current engagement</option>
+                  <option value="supersede">Supersede it</option>
+                </select>
+              ) : null}
               <button type="button" className="primary-action" disabled={busy} onClick={accept}>
                 Accept
               </button>
