@@ -150,6 +150,7 @@ import {
   localDateOnly,
   makeId,
   sortChecklists,
+  stageAdvanceFailedNotice,
 } from './lib/utils'
 import { workableClients } from './lib/clientLifecycle'
 import { checklistsVisibleTo } from './lib/checklistVisibility'
@@ -2311,7 +2312,10 @@ function App() {
     if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
-      const updatedChecklist = await toggleChecklistItemRequest(checklistId, itemId)
+      const { checklist: updatedChecklist, stageAdvanceFailed } = await toggleChecklistItemRequest(
+        checklistId,
+        itemId,
+      )
       applyServerDataUpdate((current) => ({
         ...current,
         checklists: current.checklists.map((checklist) =>
@@ -2319,6 +2323,9 @@ function App() {
         ),
       }))
       setDataSyncState('synced')
+      // The tick saved; only the next stage of its case is missing. Keep the
+      // tick and say so - a second tick retries the advance.
+      if (stageAdvanceFailed) window.alert(stageAdvanceFailedNotice(stageAdvanceFailed))
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setSessionUser(null)
@@ -2350,7 +2357,11 @@ function App() {
     if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
-      const updatedChecklist = await toggleChecklistItemRequest(checklistId, itemId, subItemId)
+      const { checklist: updatedChecklist, stageAdvanceFailed } = await toggleChecklistItemRequest(
+        checklistId,
+        itemId,
+        subItemId,
+      )
       applyServerDataUpdate((current) => ({
         ...current,
         checklists: current.checklists.map((checklist) =>
@@ -2358,6 +2369,7 @@ function App() {
         ),
       }))
       setDataSyncState('synced')
+      if (stageAdvanceFailed) window.alert(stageAdvanceFailedNotice(stageAdvanceFailed))
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setSessionUser(null)
@@ -2448,7 +2460,7 @@ function App() {
     if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
-      const updatedChecklist = await toggleChecklistItemRequest(
+      const { checklist: updatedChecklist, stageAdvanceFailed } = await toggleChecklistItemRequest(
         checklistId,
         itemId,
         subItemId,
@@ -2461,6 +2473,7 @@ function App() {
         ),
       }))
       setDataSyncState('synced')
+      if (stageAdvanceFailed) window.alert(stageAdvanceFailedNotice(stageAdvanceFailed))
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setSessionUser(null)

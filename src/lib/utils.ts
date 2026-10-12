@@ -1779,6 +1779,16 @@ export function formatActivityTimestamp(value: string): string {
   }).format(date)
 }
 
+/**
+ * The notice a tick shows when it saved but the next stage of its case could
+ * not be created (the toggle route's `stageAdvanceFailed`). A second tick
+ * retries the advance, so the notice says how.
+ */
+export function stageAdvanceFailedNotice(message: string): string {
+  const reason = String(message ?? '').trim().replace(/\.+$/, '') || 'unknown error'
+  return `Saved. The next stage could not be created: ${reason}. Untick and tick this step again, or tell Alex.`
+}
+
 export function describeActivityAction(action: string): string {
   switch (action) {
     case 'login_password':
@@ -1840,6 +1850,10 @@ export function describeActivityAction(action: string): string {
       return 'advanced case'
     case 'case_completed':
       return 'completed case'
+    case 'case_advance_failed':
+      return 'could not advance case'
+    case 'case_advance_skipped':
+      return 'did not advance case'
     case 'template_stage_added':
       return 'added template stage'
     case 'template_stage_removed':

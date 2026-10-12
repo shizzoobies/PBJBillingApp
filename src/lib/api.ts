@@ -1374,7 +1374,16 @@ export async function toggleChecklistItemRequest(
     throw new ApiError(response.status, message || `Failed to update checklist item (${response.status})`)
   }
 
-  return (await response.json()) as Checklist
+  // The tick saved. `stageAdvanceFailed` is set when the next stage of its case
+  // could not be created; it is split off so it never lands on the stored
+  // checklist (and from there into a bulk save).
+  const { stageAdvanceFailed, ...checklist } = (await response.json()) as Checklist & {
+    stageAdvanceFailed?: string
+  }
+  return {
+    checklist: checklist as Checklist,
+    stageAdvanceFailed: typeof stageAdvanceFailed === 'string' && stageAdvanceFailed ? stageAdvanceFailed : null,
+  }
 }
 
 /** Add a sub-item (one nested level) under a live-checklist item. */
