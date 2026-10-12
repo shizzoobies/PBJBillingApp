@@ -50,8 +50,14 @@ import {
   type ProposalQuestionnaire,
 } from '../lib/types'
 
-/** The sentence every Accept confirm ends with (engagements stage 2). */
+/** The sentence every Accept confirm carries (engagements stage 2). */
 const ENGAGEMENT_DRAFTED = 'An engagement letter will be drafted for you to edit and send.'
+
+/** "A", "A and B", "A, B and C". */
+function listWords(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? ''
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`
+}
 
 /**
  * Keyed on the proposal id (review M1): a Copy navigation swaps the URL to a
@@ -89,7 +95,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   const [busy, setBusy] = useState(false)
   const [packages, setPackages] = useState<Package[]>([])
   const [packageId, setPackageId] = useState('')
-  // Individual plans to add on accept, on top of any package (featreq-98527217).
+  // Individual plans for the engagement (applied when it is signed), on top of any package (featreq-98527217).
   const [planPickIds, setPlanPickIds] = useState<string[]>([])
   const [plansOpen, setPlansOpen] = useState(false)
   const plansMenuRef = useRef<HTMLDivElement | null>(null)
@@ -116,7 +122,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   // Estimate tab (featreq-8f139178). A failed read just means no panel.
   const [questionnaire, setQuestionnaire] = useState<ProposalQuestionnaire | null>(null)
 
-  // Packages are endpoint-managed; Accept can apply one. A failed list just
+  // Packages are endpoint-managed; Accept puts one on the engagement. A failed list just
   // means Accept offers none.
   useEffect(() => {
     let cancelled = false
@@ -152,6 +158,18 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   const [engagement, setEngagement] = useState<Engagement | null | undefined>(undefined)
   const [draftingEngagement, setDraftingEngagement] = useState(false)
   const won = proposal?.status === 'accepted'
+  // "Open the client" on a Won proposal: once its engagement is SIGNED (signing
+  // creates or updates the client, engagements stage 3), or - with no live
+  // engagement at all - the client a proposal Won before engagements was linked to.
+  const clientLinkId = !won
+    ? null
+    : engagement
+      ? engagement.status === 'signed'
+        ? engagement.clientId
+        : null
+      : engagement === null
+        ? (proposal?.clientId ?? null)
+        : null
   useEffect(() => {
     if (!won) return
     let cancelled = false
@@ -460,29 +478,23 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   }
 
   /**
-   * After Accept: straight to the engagement letter it drafted - unless there is a
-   * notice to read first (the package could not be applied), which then carries an
-   * "Open the engagement" link instead.
+   * After Accept: straight to the engagement letter it drafted, carrying a notice
+   * that says when the client side happens (engagements stage 3: at signing). With
+   * no engagement drafted, the page stays and says so ("Draft the engagement").
    */
-  const afterAccept = (chosenPackage: string | null, result: { packageApplied: boolean; engagementId?: string | null }) => {
-    const message = noticeFromAccept(chosenPackage, result.packageApplied)
-    setNotice(message)
-    setNoticeEngagementId(message ? (result.engagementId ?? null) : null)
-    if (!message && result.engagementId) navigate(`/engagements/${result.engagementId}`)
+  const afterAccept = (result: { engagementId?: string | null }, signingNotice: string) => {
+    if (result.engagementId) {
+      navigate(`/engagements/${result.engagementId}`, { state: { notice: `Marked Won. ${signingNotice}` } })
+      return
+    }
+    setNotice(`Marked Won, but the engagement letter could not be drafted - use Draft the engagement. ${signingNotice}`)
+    setNoticeEngagementId(null)
   }
 
-  /** A toast/notice on the accepted result — the package could not be applied. */
-  const noticeFromAccept = (chosenPackage: string | null, packageApplied: boolean) =>
-    chosenPackage && !packageApplied
-      ? "Marked Won, but the package could not be applied — add it from the client's page."
-      : ''
-
-  // Accept says what it will do before it does it (spec §5.5). A prospect
-  // becomes a client; an existing client's fee moves only on a second yes —
-  // unless there is no fee to move: a $0 snapshot or a client not on
-  // subscription billing skips that second question and sends
-  // `updateMonthlyRate: false` outright, rather than asking about a fee the
-  // accept would never actually change.
+  // Accept says what it will do before it does it (spec §5.5). Since engagements
+  // stage 3 it writes nothing to any client: a prospect becomes a client, and an
+  // existing client gets the fee, plans and software, only when the engagement
+  // letter is marked signed. One question, then.
   const accept = () => {
     if (!proposal) return
     // A line not yet priced (a count only asked on a call, a rate at zero) would
@@ -491,7 +503,10 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
       setError(PROPOSAL_NOT_PRICED_MESSAGE)
       return
     }
-    const monthly = formatProposalMoney(proposal.pricingSnapshot?.totals.monthly ?? 0)
+    const totals = proposal.pricingSnapshot?.totals
+    const monthlyTotal = totals?.monthly ?? 0
+    const annualTotal = totals?.annual ?? 0
+    const monthly = formatProposalMoney(monthlyTotal)
     const chosenPackage = packageId || null
     // Ticked plans, in the order the firm lists them; ids that no longer exist drop out.
     const chosenPlans = (data.plans ?? []).filter((plan) => planPickIds.includes(plan.id))
@@ -507,58 +522,58 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
                   .map((plan) => plan.name)
                   .join(', ')} and ${chosenPlans[chosenPlans.length - 1].name}`
           }`
-    // Software is billed at cost and is not part of the monthly fee; Accept adds
+    // Software is billed at cost and is not part of the monthly fee; signing adds
     // each priced line to the client as a monthly expense marked Software.
     const softwareNames = (proposal.pricingSnapshot?.lines ?? [])
       .filter((line) => line.group === 'Software' && !line.flag && line.amount > 0)
       .map((line) => line.name)
-    if (!proposal.clientId) {
-      const ok = window.confirm(
-        `Accept this proposal? This adds ${proposalTitle(proposal)} as a client in Onboarding, ` +
-          `billed monthly at ${monthly}` +
-          planWords +
-          (softwareNames.length > 0
-            ? `, and adds ${softwareNames.join(', ')} as monthly Software expenses billed at cost`
-            : '') +
-          `. Nothing about any invoice changes, and this proposal is marked Won. ` +
-          ENGAGEMENT_DRAFTED,
-      )
-      if (!ok) return
+    const softwareList = listWords(softwareNames)
+    const send = (signingNotice: string) =>
       enqueue(async () => {
         const result = await acceptProposalRequest(proposalId, {
           packageId: chosenPackage,
           ...(planIds.length > 0 ? { planIds } : {}),
         })
-        afterAccept(chosenPackage, result)
+        afterAccept(result, signingNotice)
         return result.proposal
       })
+    if (!proposal.clientId) {
+      const title = proposalTitle(proposal)
+      // A proposal with only annual fees makes an annually billed client at signing.
+      const billing =
+        monthlyTotal === 0 && annualTotal > 0
+          ? `billed annually at ${formatProposalMoney(annualTotal)}`
+          : `billed monthly at ${monthly}`
+      const ok = window.confirm(
+        `Accept this proposal? This proposal is marked Won. ${ENGAGEMENT_DRAFTED} ` +
+          `${title} becomes a client in Onboarding, ${billing}` +
+          planWords +
+          (softwareNames.length > 0
+            ? `${planWords ? ', and' : ','} with ${softwareList} as monthly Software expenses billed at cost`
+            : '') +
+          `, when the letter is marked signed - not before. Nothing about any invoice changes now.`,
+      )
+      if (!ok) return
+      send(`${title} becomes a client when this letter is marked signed.`)
       return
     }
     const client = data.clients.find((entry) => entry.id === proposal.clientId)
     const clientName = client?.name ?? 'this client'
-    if (!window.confirm(`Accept this proposal for ${clientName}${planWords}? This proposal is marked Won. ${ENGAGEMENT_DRAFTED}`))
-      return
-    const monthlyTotal = proposal.pricingSnapshot?.totals.monthly ?? 0
-    const skipRateQuestion = monthlyTotal === 0 || client?.billingMode !== 'subscription'
-    const updateMonthlyRate = skipRateQuestion
-      ? false
-      : window.confirm(`Also change ${clientName}’s monthly fee to ${monthly}? Cancel keeps their current fee.`)
-    const addSoftware =
-      softwareNames.length > 0
-        ? window.confirm(
-            `Also add ${softwareNames.join(', ')} to ${clientName} as monthly Software expenses, billed at cost? Cancel leaves their expenses as they are.`,
-          )
-        : null
-    enqueue(async () => {
-      const result = await acceptProposalRequest(proposalId, {
-        packageId: chosenPackage,
-        updateMonthlyRate,
-        ...(planIds.length > 0 ? { planIds } : {}),
-        ...(addSoftware === null ? {} : { addSoftware }),
-      })
-      afterAccept(chosenPackage, result)
-      return result.proposal
-    })
+    // What signing will change for an existing client, named now so nothing surprises her later.
+    const changes = [
+      ...(client?.billingMode === 'subscription' && monthlyTotal > 0 ? [`their monthly fee becomes ${monthly}`] : []),
+      ...(chosenPlans.length > 0 ? [`the plan${chosenPlans.length === 1 ? ' is' : 's are'} added`] : []),
+      ...(softwareNames.length > 0
+        ? [`${softwareList} ${softwareNames.length === 1 ? 'is' : 'are'} added as monthly Software expenses billed at cost`]
+        : []),
+    ]
+    const ok = window.confirm(
+      `Accept this proposal for ${clientName}${planWords}? This proposal is marked Won. ${ENGAGEMENT_DRAFTED} ` +
+        `Nothing changes for ${clientName} until the letter is marked signed` +
+        (changes.length > 0 ? `: then ${listWords(changes)}.` : '.'),
+    )
+    if (!ok) return
+    send(`Nothing changes for ${clientName} until this letter is marked signed.`)
   }
 
   // Close as lost: the note is optional (a prospect who simply went quiet has
@@ -606,7 +621,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
             <>
               <select
                 className="input"
-                aria-label="Package to apply on accept"
+                aria-label="Package to apply when signed"
                 value={packageId}
                 onChange={(event) => setPackageId(event.target.value)}
               >
@@ -630,7 +645,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
                   <div
                     className="new-task-menu-popover plans-menu-popover"
                     role="group"
-                    aria-label="Plans to apply on accept"
+                    aria-label="Plans to apply when signed"
                   >
                     {(data.plans ?? []).length === 0 ? (
                       <p className="muted-text">No plans yet.</p>
@@ -663,8 +678,8 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
               </button>
             </>
           ) : null}
-          {proposal.status === 'accepted' && proposal.clientId ? (
-            <Link className="secondary-action" to={`/clients/${proposal.clientId}`}>
+          {clientLinkId ? (
+            <Link className="secondary-action" to={`/clients/${clientLinkId}`}>
               Open the client
             </Link>
           ) : null}

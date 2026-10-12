@@ -25297,44 +25297,57 @@ describe('accepting a proposal (file backend)', () => {
       selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
     })
 
-  it('creates the client in Onboarding, billed monthly at the proposal total', async () => {
+  // Engagements stage 3 (docs/plans/engagements-2026-10.md): Accept creates no client.
+  // The client is created when the engagement letter is marked signed - see
+  // "signing an engagement creates the client" below, which is where the old
+  // "creates the client in Onboarding" test now lives.
+  it('creates NO client for a prospect: the proposal is Won and unlinked, the engagement carries the package and plans', async () => {
+    const pkg = await store.createPackage({
+      name: 'Core',
+      description: '',
+      planIds: ['plan-books', 'plan-other'],
+      templateIds: [],
+    })
     const proposal = await prospectProposal()
+    const clientsBefore = (await store.read()).clients.length
+    const contactsBefore = ((await store.read()).contacts ?? []).length
     const result = await store.acceptProposal(proposal.id, {
       actorUserId: 'emp-patrice',
+      packageId: pkg.id,
       planIds: ['plan-books', 'plan-gone'],
     })
-    expect(result.createdClient).toBe(true)
+    expect(result).not.toHaveProperty('createdClient')
+    expect(result.clientId).toBeNull()
+    expect(result.packageApplied).toBe(false)
     expect(result.proposal.status).toBe('accepted')
-    expect(result.proposal.clientId).toBe(result.clientId)
+    expect(result.proposal.clientId).toBeNull()
     expect(result.proposal.acceptedAt).toBeTruthy()
 
-    const client = (await store.read()).clients.find((row) => row.id === result.clientId)
-    expect(client).toMatchObject({
-      name: 'Acme Books',
-      contactName: 'Pat Doe',
-      email: 'pat@acme.test',
-      lifecycleStage: 'onboarding',
-      billingMode: 'subscription',
-      monthlyRate: 630,
-      planIds: ['plan-books'],
-    })
+    const data = await store.read()
+    expect(data.clients).toHaveLength(clientsBefore)
+    expect(data.clients.some((row) => row.name === 'Acme Books')).toBe(false)
+    expect(data.contacts ?? []).toHaveLength(contactsBefore)
+
+    const engagement = await store.getEngagement(result.engagementId)
+    // A plan the workspace does not know is dropped, as Accept always dropped it.
+    expect(engagement).toMatchObject({ clientId: null, packageId: pkg.id, planIds: ['plan-books'] })
   })
 
-  // Engagements, stage 2 (docs/plans/engagements-2026-10.md): Accept drafts the Won
-  // proposal's engagement letter AFTER its own work, and still creates the client.
+  // Engagements, stage 2: Accept drafts the Won proposal's engagement letter AFTER its flip.
   it('drafts the engagement letter for the Won proposal and answers its id', async () => {
     const proposal = await prospectProposal()
     const result = await store.acceptProposal(proposal.id, { actorUserId: 'emp-patrice' })
-    expect(result.createdClient).toBe(true)
     expect(result.engagementId).toMatch(/^eng-[0-9a-f]{8}$/)
     const engagement = await store.getEngagement(result.engagementId)
     expect(engagement).toMatchObject({
       kind: 'original',
       status: 'draft',
       proposalId: proposal.id,
-      clientId: result.clientId,
+      clientId: null,
       createdBy: 'emp-patrice',
       retainerAmount: 630,
+      packageId: null,
+      planIds: [],
       party: { company: 'Acme Books', contactName: 'Pat Doe', email: 'pat@acme.test', phone: '615-555-0101' },
     })
     expect(engagement.figures.totals.monthly).toBe(630)
@@ -25348,7 +25361,7 @@ describe('accepting a proposal (file backend)', () => {
       selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
     })
     const result = await store.acceptProposal(upsell.id, {})
-    expect(result.createdClient).toBe(false)
+    expect(result.clientId).toBe('c1')
     const engagement = await store.getEngagement(result.engagementId)
     expect(engagement).toMatchObject({ clientId: 'c1', party: { company: 'Acme' } })
   })
@@ -25359,7 +25372,6 @@ describe('accepting a proposal (file backend)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const result = await store.acceptProposal(proposal.id, {})
     expect(result.engagementId).toBeNull()
-    expect(result.createdClient).toBe(true)
     expect((await store.getProposal(proposal.id)).status).toBe('accepted')
   })
 
@@ -25367,26 +25379,22 @@ describe('accepting a proposal (file backend)', () => {
     const proposal = await prospectProposal()
     await store.acceptProposal(proposal.id, {})
     await expect(store.acceptProposal(proposal.id, {})).rejects.toBeInstanceOf(ProposalStateError)
-    expect((await store.read()).clients.filter((row) => row.name === 'Acme Books')).toHaveLength(1)
+    expect(await store.listEngagements({ proposalId: proposal.id })).toHaveLength(1)
   })
 
-  it('an upsell leaves the client’s monthly rate alone unless she confirmed it', async () => {
+  it('an upsell writes NOTHING to the client at Accept: fee, plans and software wait for signing', async () => {
+    const before = (await store.read()).clients.find((row) => row.id === 'c1')
     const upsell = await store.createProposal({
       clientId: 'c1',
       inputs: { transactions: 120 },
-      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
+      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }, { serviceId: 'software-qbo-plus' }],
     })
-    const kept = await store.acceptProposal(upsell.id, { updateMonthlyRate: false })
-    expect(kept.createdClient).toBe(false)
-    expect((await store.read()).clients.find((row) => row.id === 'c1').monthlyRate ?? 0).not.toBe(630)
-
-    const again = await store.createProposal({
-      clientId: 'c1',
-      inputs: { transactions: 120 },
-      selections: [{ serviceId: 'monthly-weekly-transactions-basic' }],
-    })
-    await store.acceptProposal(again.id, { updateMonthlyRate: true })
-    expect((await store.read()).clients.find((row) => row.id === 'c1').monthlyRate).toBe(630)
+    const result = await store.acceptProposal(upsell.id, { planIds: ['plan-books'] })
+    expect(result.proposal.status).toBe('accepted')
+    const data = await store.read()
+    expect(data.clients.find((row) => row.id === 'c1')).toEqual(before)
+    expect((data.recurringReimbursements ?? []).filter((row) => row.clientId === 'c1')).toEqual([])
+    expect((await store.getEngagement(result.engagementId)).planIds).toEqual(['plan-books'])
   })
 
   it('refuses a prospect with no name to put on the client', async () => {
@@ -25479,7 +25487,7 @@ describe('accepting a proposal (file backend)', () => {
     expect((await store.getProposal(proposal.id)).status).toBe('draft')
   })
 
-  it('records client_created for the client it makes, the same shape POST /api/clients does, alongside proposal_accepted', async () => {
+  it('records proposal_accepted and engagement_created, and no client_created (no client exists yet)', async () => {
     // Other tests in this file share the same tmp/auth-state.json and the same
     // actor, so the log already carries entries from earlier runs — only what
     // THIS call appends is asserted on, not the whole log.
@@ -25489,14 +25497,10 @@ describe('accepting a proposal (file backend)', () => {
     const result = await store.acceptProposal(proposal.id, { actorUserId: 'emp-patrice' })
     const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
     const added = (authState.activityLog ?? []).slice(beforeCount)
-    expect(added.find((entry) => entry.action === 'client_created')).toMatchObject({
-      action: 'client_created',
-      target: 'Acme Books',
-    })
+    expect(added.find((entry) => entry.action === 'client_created')).toBeUndefined()
     expect(added.find((entry) => entry.action === 'proposal_accepted')).toMatchObject({
       action: 'proposal_accepted',
     })
-    expect(result.createdClient).toBe(true)
     // The engagement Accept drafted is logged as the recovery route logs one (round-2 review L11).
     expect(result.engagementId).toEqual(expect.any(String))
     expect(added.find((entry) => entry.action === 'engagement_created')).toMatchObject({
@@ -25505,56 +25509,18 @@ describe('accepting a proposal (file backend)', () => {
     })
   })
 
-  it('carries createdClientId on ANY failure after the client is created, not just the lost-link race', async () => {
-    const proposal = await prospectProposal()
-    // The final step (the accepted flip and its software rows) refusing.
-    vi.spyOn(store, '_acceptWithSoftware').mockRejectedValueOnce(
-      new ProposalStateError('This proposal is already closed as lost.'),
-    )
-    const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
-    expect(err).toBeInstanceOf(ProposalStateError)
-    expect(typeof err.createdClientId).toBe('string')
-    const client = (await store.read()).clients.find((row) => row.id === err.createdClientId)
-    expect(client?.name).toBe('Acme Books')
-  })
-
-  it('retires the orphaned client on the lost-link race, with a ProposalStateError carrying its id', async () => {
-    const proposal = await prospectProposal()
-    vi.spyOn(store, 'linkProposalClient').mockResolvedValueOnce(null)
-    const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
-    expect(err).toBeInstanceOf(ProposalStateError)
-    expect(err.message).toBe('Someone else already marked this proposal Won.')
-    expect(typeof err.createdClientId).toBe('string')
-    const client = (await store.read()).clients.find((row) => row.id === err.createdClientId)
-    expect(client?.lifecycleStage).toBe('inactive')
-    const note = (await store.listClientNotes(err.createdClientId))[0]
-    expect(note).toMatchObject({ authorName: 'System' })
-    expect(note.body).toContain(proposal.id)
-  })
-
-  it('words the lost-link refusal from what actually happened: declined mid-accept', async () => {
+  it('a decision landing before the flip refuses the Accept, worded from what happened, and drafts nothing', async () => {
     const proposal = await prospectProposal()
     await store.setProposalStatus(proposal.id, 'sent')
-    vi.spyOn(store, 'linkProposalClient').mockImplementationOnce(async () => {
+    vi.spyOn(store, 'listPackages').mockImplementationOnce(async () => {
       await store.setProposalStatus(proposal.id, 'declined', { note: 'Went with a friend' })
-      return null
+      return [{ id: 'pkg-1', name: 'Core', planIds: [], templateIds: [] }]
     })
-    const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
+    const err = await store.acceptProposal(proposal.id, { packageId: 'pkg-1' }).catch((e) => e)
     expect(err).toBeInstanceOf(ProposalStateError)
-    expect(err.message).toBe('This proposal was closed as lost while you were accepting it.')
-    expect(typeof err.createdClientId).toBe('string')
-  })
-
-  it('words the lost-link refusal from what actually happened: the proposal was deleted mid-accept', async () => {
-    const proposal = await prospectProposal()
-    vi.spyOn(store, 'linkProposalClient').mockImplementationOnce(async () => {
-      await store.deleteProposal(proposal.id)
-      return null
-    })
-    const err = await store.acceptProposal(proposal.id, {}).catch((e) => e)
-    expect(err).toBeInstanceOf(ProposalStateError)
-    expect(err.message).toBe('This proposal no longer exists.')
-    expect(typeof err.createdClientId).toBe('string')
+    expect(err.message).toMatch(/closed as lost/)
+    expect(await store.listEngagements({ proposalId: proposal.id })).toEqual([])
+    expect((await store.getProposal(proposal.id)).status).toBe('declined')
   })
 })
 
@@ -25730,49 +25696,29 @@ function fakeAcceptOrderPostgres(initialRow, { loseLinkRace = false } = {}) {
 }
 
 describe('accepting a proposal: happy-path statement order (postgres branch)', () => {
-  it('writes the client insert, then the proposal link, then the accepted flip, in that order', async () => {
+  // Engagements stage 3: Accept writes no client, no contact, no link and no rows.
+  it('writes only the accepted flip (one compare-and-set statement), then the engagement insert', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const fake = fakeAcceptOrderPostgres(
       proposalRow({ client_id: null, status: 'draft', prospect: { company: 'Acme Books' } }),
     )
     const result = await postgresStore(fake).acceptProposal('prop-1', { actorUserId: 'emp-patrice' })
-    expect(result.createdClient).toBe(true)
+    vi.restoreAllMocks()
+    expect(result).not.toHaveProperty('createdClient')
+    expect(result.clientId).toBeNull()
     expect(result.proposal.status).toBe('accepted')
 
-    const insertClientAt = fake.indexOf(/^insert into clients\b/i)
-    const linkAt = fake.indexOf(/^update proposals set client_id = \$2/i)
-    const acceptedFlipAt = fake.indexOf(/^update proposals\b[\s\S]*set status = \$2/i)
-    expect(insertClientAt).toBeGreaterThan(-1)
-    expect(linkAt).toBeGreaterThan(insertClientAt)
-    expect(acceptedFlipAt).toBeGreaterThan(linkAt)
+    expect(fake.indexOf(/^insert into clients\b/i)).toBe(-1)
+    expect(fake.indexOf(/^insert into contacts\b/i)).toBe(-1)
+    expect(fake.indexOf(/^update clients\b/i)).toBe(-1)
+    expect(fake.indexOf(/^update proposals set client_id = \$2/i)).toBe(-1)
+    expect(fake.indexOf(/^insert into recurring_reimbursements\b/i)).toBe(-1)
+    const flips = fake.matching(/^update proposals\b[\s\S]*set status = \$2/i)
+    expect(flips).toHaveLength(1)
+    expect(flips[0].text).toMatch(/and status not in \('accepted', 'declined'\)/)
+    expect(flips[0].params).toEqual(['prop-1', 'accepted', null, null])
     // ...and the engagement letter is drafted only after the flip (stage 2 of engagements).
-    expect(fake.indexOf(/^insert into engagements\b/i)).toBeGreaterThan(acceptedFlipAt)
-  })
-})
-
-describe('accepting a proposal: the lost-link race retires the orphan (postgres branch)', () => {
-  it('sets lifecycle_stage and inserts a client note after the client insert, and the refusal carries the new client’s id', async () => {
-    const fake = fakeAcceptOrderPostgres(
-      proposalRow({ client_id: null, status: 'draft', prospect: { company: 'Acme Books' } }),
-      { loseLinkRace: true },
-    )
-    const err = await postgresStore(fake)
-      .acceptProposal('prop-1', { actorUserId: 'emp-patrice' })
-      .catch((e) => e)
-    expect(err).toBeInstanceOf(ProposalStateError)
-    expect(err.message).toBe('Someone else already marked this proposal Won.')
-
-    const insertClientAt = fake.indexOf(/^insert into clients\b/i)
-    const lifecycleAt = fake.indexOf(/^update clients set lifecycle_stage = \$2/i)
-    const noteAt = fake.indexOf(/^insert into client_notes\b/i)
-    expect(insertClientAt).toBeGreaterThan(-1)
-    expect(lifecycleAt).toBeGreaterThan(insertClientAt)
-    expect(noteAt).toBeGreaterThan(insertClientAt)
-
-    const insertedClientId = insertedRows(fake.statements, 'clients')[0].id
-    expect(err.createdClientId).toBe(insertedClientId)
-    // The link that lost is a DIFFERENT client — the retire targets the one
-    // THIS call created, never the one that won the race.
-    expect(err.createdClientId).not.toBe('client-concurrent')
+    expect(fake.indexOf(/^insert into engagements\b/i)).toBeGreaterThan(fake.indexOf(/^update proposals\b[\s\S]*set status = \$2/i))
   })
 })
 
@@ -36492,28 +36438,29 @@ describe('proposal questionnaires (file backend)', () => {
   })
 })
 
-describe('Accept hands the questionnaire’s title and address to the new client', () => {
+describe('Accept hands the questionnaire’s title and address to the engagement (and so to the client at signing)', () => {
   beforeEach(async () => {
     await clearQuestionnaires()
     await setProposalRates(store)
   })
 
-  it('copies the address onto the client and the title onto its primary contact', async () => {
+  it('carries the address and the contact title on the engagement party', async () => {
     const created = await store.createProposalQuestionnaire({ mode: 'link' })
     await store.submitProposalQuestionnaire({ token: created.token }, LINK_ANSWERS)
     const { proposal } = await store.startProposalQuestionnaireDraft(created.id)
     const result = await store.acceptProposal(proposal.id, {})
-    const data = await store.read()
-    const client = data.clients.find((row) => row.id === result.clientId)
-    expect(client).toMatchObject({
-      name: 'Acme Books',
+    expect(result.clientId).toBeNull()
+    const engagement = await store.getEngagement(result.engagementId)
+    expect(engagement.party).toMatchObject({
+      company: 'Acme Books',
+      contactName: 'Pat Doe',
+      title: 'Owner',
+      email: 'pat@acme.test',
       addressLine1: '1 Main St',
       city: 'Nashville',
       state: 'TN',
       postalCode: '37201',
     })
-    const contact = data.contacts.find((row) => row.id === client.contactIds[0])
-    expect(contact).toMatchObject({ name: 'Pat Doe', title: 'Owner', email: 'pat@acme.test' })
   })
 })
 
@@ -37125,65 +37072,13 @@ describe('Software on a proposal (file backend)', () => {
     expect(repriced.pricingSnapshot.lines.find((line) => line.serviceId === 'software-qbo-plus').amount).toBe(120)
   })
 
-  it('Accept on a prospect adds each priced software line as a monthly expense marked Software', async () => {
-    const proposal = await softwareProposal()
-    const result = await store.acceptProposal(proposal.id, {})
-    const expenses = (await expensesOf(result.clientId)).sort((a, b) => a.description.localeCompare(b.description))
-    expect(expenses.map((row) => [row.description, row.amount])).toEqual([
-      ['QB Time Elite', 70.6],
-      ['QBO Plus', 98],
-    ])
-    for (const row of expenses) {
-      expect(row).toMatchObject({
-        frequency: 'monthly',
-        category: 'software',
-        startDate: `${firmToday().slice(0, 7)}-01`,
-        coverageEnabled: false,
-      })
-    }
-    // Software is not part of the monthly rate.
-    const client = (await store.read()).clients.find((row) => row.id === result.clientId)
-    expect(client.monthlyRate).toBe(630)
-  })
-
-  it('Accept skips a $0 line (Bill Pay Basic): nothing to bill, nothing added', async () => {
-    const proposal = await store.createProposal({
-      prospect: { company: 'Free Co' },
-      selections: [{ serviceId: 'software-bill-pay-basic' }],
-    })
-    const result = await store.acceptProposal(proposal.id, {})
-    expect(await expensesOf(result.clientId)).toEqual([])
-  })
-
-  it('an upsell adds software only when the page confirmed it (addSoftware)', async () => {
-    const asked = await softwareProposal({ clientId: 'c1' })
-    await store.acceptProposal(asked.id, { addSoftware: false })
-    expect(await expensesOf('c1')).toEqual([])
-
-    const confirmed = await softwareProposal({ clientId: 'c1' })
-    await store.acceptProposal(confirmed.id, { addSoftware: true })
-    expect((await expensesOf('c1')).map((row) => row.description).sort()).toEqual(['QB Time Elite', 'QBO Plus'])
-  })
-
-  it('never doubles a line: a description the client already carries is skipped, so a retry is safe', async () => {
-    await store.addRecurringReimbursement({
-      clientId: 'c1',
-      description: 'QBO Plus',
-      amount: 90,
-      frequency: 'monthly',
-      startDate: '2026-01-01',
-    })
-    const proposal = await softwareProposal({ clientId: 'c1' })
-    await store.acceptProposal(proposal.id, { addSoftware: true })
-    const plus = (await expensesOf('c1')).filter((row) => row.description === 'QBO Plus')
-    expect(plus).toHaveLength(1)
-    expect(plus[0]).toMatchObject({ amount: 90, category: 'expense' })
-
-    // A second proposal naming the same plans (a retry, a re-sent proposal).
-    const again = await softwareProposal({ clientId: 'c1' })
-    await store.acceptProposal(again.id, { addSoftware: true })
-    expect((await expensesOf('c1')).filter((row) => row.description === 'QB Time Elite')).toHaveLength(1)
-    expect((await expensesOf('c1')).filter((row) => row.description === 'QBO Plus')).toHaveLength(1)
+  // Engagements stage 3: Accept adds no software anywhere; signing the engagement does
+  // (see "signing an engagement: software" below).
+  it('Accept adds no software rows, to a prospect or an existing client', async () => {
+    const before = ((await store.read()).recurringReimbursements ?? []).length
+    await store.acceptProposal((await softwareProposal()).id, {})
+    await store.acceptProposal((await softwareProposal({ clientId: 'c1' })).id, {})
+    expect(((await store.read()).recurringReimbursements ?? []).length).toBe(before)
   })
 
   it('refuses a billing master, like every other recurring expense, and writes nothing', async () => {
@@ -37196,7 +37091,7 @@ describe('Software on a proposal (file backend)', () => {
       }),
     )
     const proposal = await softwareProposal({ clientId: 'c1' })
-    await expect(store.acceptProposal(proposal.id, { addSoftware: true })).rejects.toThrow()
+    await expect(store.acceptProposal(proposal.id, {})).rejects.toThrow()
     expect(await expensesOf('c1')).toEqual([])
     expect((await store.getProposal(proposal.id)).status).toBe('draft')
   })
@@ -37402,14 +37297,14 @@ describe('a recurring expense and its invoice section (postgres branch)', () => 
 })
 
 /**
- * Accept's flip and its software rows are ONE atomic unit (featreq-a69a3cc0,
- * second fix round): the compare-and-set on the proposal and the inserts happen
- * together or not at all, so two Accepts can never leave an accepted proposal
- * without its rows, nor rows without an accepted proposal.
+ * Accept's one write is the compare-and-set flip (engagements stage 3: the software
+ * rows moved to signing - see "signing an engagement: the flip and the software rows
+ * are one unit"), so two Accepts can never both mark a proposal Won.
  */
-describe('Accept: the flip and the software rows are one unit (file backend)', () => {
+describe('Accept: the flip is one compare-and-set (file backend)', () => {
   beforeEach(async () => {
     await clearProposals()
+    await clearEngagements()
     const data = JSON.parse(await readFile(localDataPath, 'utf8'))
     delete data.firmSettings
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
@@ -37431,56 +37326,32 @@ describe('Accept: the flip and the software rows are one unit (file backend)', (
         { serviceId: 'software-qb-time-elite', quantity: 3 },
       ],
     })
-  const softwareRows = async () =>
-    (await store.read()).recurringReimbursements.filter((row) => row.clientId === 'c1')
 
-  it('two simultaneous Accepts: exactly one is accepted, exactly one set of rows, the loser is refused', async () => {
+  it('two simultaneous Accepts: exactly one is accepted, one engagement drafted, the loser refused', async () => {
     const proposal = await upsell()
     const results = await Promise.allSettled([
-      store.acceptProposal(proposal.id, { addSoftware: true }),
-      store.acceptProposal(proposal.id, { addSoftware: true }),
+      store.acceptProposal(proposal.id, {}),
+      store.acceptProposal(proposal.id, {}),
     ])
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
     const loser = results.find((result) => result.status === 'rejected')
     expect(loser.reason).toBeInstanceOf(ProposalStateError)
-    expect((await softwareRows()).map((row) => row.description).sort()).toEqual(['QB Time Elite', 'QBO Plus'])
     expect((await store.getProposal(proposal.id)).status).toBe('accepted')
+    expect(await store.listEngagements({ proposalId: proposal.id })).toHaveLength(1)
   })
 
-  it('a decline that lands before the flip refuses the Accept and leaves no software rows behind', async () => {
+  it('a decline that lands before the flip refuses the Accept', async () => {
     const proposal = await upsell()
     vi.spyOn(store, '_refuseBillingMasterWrite').mockImplementationOnce(async () => {
       await store.setProposalStatus(proposal.id, 'declined', { note: 'Went elsewhere' })
     })
-    await expect(store.acceptProposal(proposal.id, { addSoftware: true })).rejects.toBeInstanceOf(
-      ProposalStateError,
-    )
-    expect(await softwareRows()).toEqual([])
-    expect((await store.getProposal(proposal.id)).status).toBe('declined')
-  })
-
-  it('a second proposal for the same client never doubles a line the client already carries', async () => {
-    const first = await upsell()
-    await store.acceptProposal(first.id, { addSoftware: true })
-    const second = await upsell()
-    await store.acceptProposal(second.id, { addSoftware: true })
-    expect(await softwareRows()).toHaveLength(2)
-  })
-
-  it('an Accept with no software still flips through the same compare-and-set', async () => {
-    const proposal = await store.createProposal({ clientId: 'c1', prospect: { company: 'Acme' } })
-    const accepted = await store.acceptProposal(proposal.id, {})
-    expect(accepted.proposal.status).toBe('accepted')
     await expect(store.acceptProposal(proposal.id, {})).rejects.toBeInstanceOf(ProposalStateError)
+    expect((await store.getProposal(proposal.id)).status).toBe('declined')
+    expect(await store.listEngagements({ proposalId: proposal.id })).toEqual([])
   })
 })
 
-describe('Accept: the flip and the software rows are one unit (postgres branch)', () => {
-  const softwareLines = [
-    { serviceId: 'software-qbo-plus', group: 'Software', name: 'QBO Plus', amount: 98, flag: null },
-    { serviceId: 'software-qb-time-elite', group: 'Software', name: 'QB Time Elite', amount: 70.6, flag: null },
-    { serviceId: 'software-bill-pay-basic', group: 'Software', name: 'QB Bill Pay Basic', amount: 0, flag: null },
-  ]
+describe('Accept: the flip is one compare-and-set (postgres branch)', () => {
   const clientRow = {
     id: 'c1',
     name: 'Acme',
@@ -37490,160 +37361,29 @@ describe('Accept: the flip and the software rows are one unit (postgres branch)'
     is_billing_master: false,
   }
 
-  /**
-   * fakeProposalPostgres plus what this needs to be honest about atomicity: a
-   * proposal row whose status the compare-and-set really changes, a
-   * recurring_reimbursements table, a `for update` row lock that a second
-   * connection waits on until the first COMMITs, and ROLLBACK that restores the
-   * status and the rows as they stood at BEGIN.
-   */
-  function softwarePg({ stored = [], failNthInsert = null } = {}) {
-    const row = proposalRow({
-      client_id: 'c1',
-      pricing_snapshot: { lines: softwareLines, totals: { monthly: 0, annual: 0, oneTime: 0, cleanup: 0, software: 168.6 } },
-    })
-    const base = fakeProposalPostgres(row, { clientRows: [clientRow] })
-    const recurring = stored.map((description, index) => ({ id: `recur-old${index}`, client_id: 'c1', description }))
-    const log = (text, params) => base.statements.push({ text, params })
-    let lockTail = Promise.resolve()
-    let inserts = 0
-
-    const makeQuery = (conn) => async (text, params) => {
-      const trimmed = String(text).trim()
-      if (/^BEGIN$/i.test(trimmed)) {
-        log(trimmed, params)
-        conn.undo = []
-        return { rows: [] }
-      }
-      if (/^COMMIT$/i.test(trimmed) || /^ROLLBACK$/i.test(trimmed)) {
-        log(trimmed, params)
-        // Undo only what THIS connection did (a snapshot taken at BEGIN would
-        // wipe a commit that landed while it waited on the lock).
-        if (/^ROLLBACK$/i.test(trimmed)) for (const undo of (conn.undo ?? []).reverse()) undo()
-        conn.undo = null
-        conn.release_lock?.()
-        conn.release_lock = null
-        return { rows: [] }
-      }
-      if (/^select id from proposals where id = \$1 for update$/i.test(trimmed)) {
-        log(trimmed, params)
-        const previous = lockTail
-        let release
-        lockTail = new Promise((resolve) => {
-          release = resolve
-        })
-        await previous
-        conn.release_lock = release
-        return { rows: [{ id: params[0] }], rowCount: 1 }
-      }
-      if (/^update proposals\s+set status = \$2/i.test(trimmed)) {
-        log(trimmed, params)
-        const eligible = !['accepted', 'declined'].includes(row.status)
-        if (!eligible) return { rows: [], rowCount: 0 }
-        const before = { status: row.status, accepted_at: row.accepted_at, client_id: row.client_id }
-        conn.undo?.push(() => Object.assign(row, before))
-        row.status = params[1]
-        if (params[1] === 'accepted') row.accepted_at = new Date()
-        if (params[3]) row.client_id = params[3]
-        return { rows: [{ ...row }], rowCount: 1 }
-      }
-      if (/^select description from recurring_reimbursements where client_id = \$1$/i.test(trimmed)) {
-        log(trimmed, params)
-        return { rows: recurring.filter((r) => r.client_id === params[0]).map((r) => ({ description: r.description })) }
-      }
-      if (/^insert into recurring_reimbursements/i.test(trimmed)) {
-        log(trimmed, params)
-        inserts += 1
-        if (failNthInsert === inserts) throw new Error('insert failed')
-        const added = { id: params[0], client_id: params[1], description: params[2], amount: params[3], category: params[14] }
-        recurring.push(added)
-        conn.undo?.push(() => recurring.splice(recurring.indexOf(added), 1))
-        return { rows: [], rowCount: 1 }
-      }
-      if (/^select 1 from clients/i.test(trimmed)) return { rows: [{}], rowCount: 1 }
-      return base.pool.query(text, params)
-    }
-    const pool = {
-      query: makeQuery({}),
-      async connect() {
-        const conn = {}
-        conn.query = makeQuery(conn)
-        conn.release = () => {}
-        return conn
-      },
-    }
-    return { pool, statements: base.statements, matching: base.matching, recurring, row }
-  }
-
-  it('flips first under the row lock, then lists and inserts on the same connection, then commits', async () => {
-    const fake = softwarePg()
-    const result = await postgresStore(fake).acceptProposal('prop-1', { addSoftware: true })
-    expect(result.proposal.status).toBe('accepted')
-    const texts = fake.statements.map((statement) => statement.text)
-    const at = (pattern) => texts.findIndex((text) => pattern.test(text))
-    const begin = at(/^BEGIN$/i)
-    const lock = at(/^select id from proposals where id = \$1 for update$/i)
-    const flip = at(/^update proposals\s+set status = \$2/i)
-    const listing = at(/^select description from recurring_reimbursements where client_id = \$1$/i)
-    const insert = at(/^insert into recurring_reimbursements/i)
-    const commit = at(/^COMMIT$/i)
-    expect(lock).toBeGreaterThan(begin)
-    expect(flip).toBeGreaterThan(lock)
-    expect(listing).toBeGreaterThan(flip)
-    expect(insert).toBeGreaterThan(listing)
-    expect(commit).toBeGreaterThan(insert)
-    expect(fake.recurring.map((r) => [r.description, r.amount, r.category])).toEqual([
-      ['QBO Plus', 98, 'software'],
-      ['QB Time Elite', 70.6, 'software'],
-    ])
-    // Not the whole-workspace read, and no after-the-fact delete.
-    expect(fake.matching(/^select[\s\S]*from recurring_reimbursements\s+order by start_date/i)).toHaveLength(0)
-    expect(fake.matching(/^delete from recurring_reimbursements/i)).toHaveLength(0)
-  })
-
-  it('two simultaneous Accepts: exactly one accepted, exactly one set of rows, the loser is refused', async () => {
-    const fake = softwarePg()
-    const store2 = postgresStore(fake)
-    const results = await Promise.allSettled([
-      store2.acceptProposal('prop-1', { addSoftware: true }),
-      store2.acceptProposal('prop-1', { addSoftware: true }),
-    ])
-    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
-    const loser = results.find((result) => result.status === 'rejected')
-    expect(loser.reason).toBeInstanceOf(ProposalStateError)
-    expect(fake.recurring.map((r) => r.description).sort()).toEqual(['QB Time Elite', 'QBO Plus'])
-    expect(fake.row.status).toBe('accepted')
-    // The winner's rows are never deleted by anyone.
-    expect(fake.matching(/^delete from recurring_reimbursements/i)).toHaveLength(0)
-    expect(fake.matching(/^insert into recurring_reimbursements/i)).toHaveLength(2)
-  })
-
-  it('a retry after a failed Accept adds each line once: what is already there is skipped', async () => {
-    const fake = softwarePg({ stored: ['QBO Plus'] })
-    await postgresStore(fake).acceptProposal('prop-1', { addSoftware: true })
-    expect(fake.recurring.map((r) => r.description)).toEqual(['QBO Plus', 'QB Time Elite'])
-    expect(fake.matching(/^insert into recurring_reimbursements/i)).toHaveLength(1)
-  })
-
-  it('a failure on any insert rolls back the flip and the earlier rows together', async () => {
-    const fake = softwarePg({ failNthInsert: 2 })
-    await expect(postgresStore(fake).acceptProposal('prop-1', { addSoftware: true })).rejects.toThrow('insert failed')
-    expect(fake.recurring).toEqual([])
-    expect(fake.row.status).toBe('draft')
-    expect(fake.matching(/^ROLLBACK$/i)).toHaveLength(1)
-    expect(fake.matching(/^COMMIT$/i)).toHaveLength(0)
-  })
-
-  it('a proposal decided in the meantime is refused by the compare-and-set, and nothing is inserted', async () => {
-    const fake = softwarePg()
+  it('one statement carries the guard; a proposal decided in the meantime is refused and nothing else is written', async () => {
+    const row = proposalRow({ client_id: 'c1' })
+    const fake = fakeProposalPostgres(row, { clientRows: [clientRow] })
     const store2 = postgresStore(fake)
     vi.spyOn(store2, '_refuseBillingMasterWrite').mockImplementationOnce(async () => {
-      fake.row.status = 'declined'
+      row.status = 'declined'
     })
-    await expect(store2.acceptProposal('prop-1', { addSoftware: true })).rejects.toBeInstanceOf(ProposalStateError)
-    expect(fake.matching(/^insert into recurring_reimbursements/i)).toHaveLength(0)
-    expect(fake.recurring).toEqual([])
-    expect(fake.matching(/^ROLLBACK$/i)).toHaveLength(1)
+    const pool = fake.pool
+    const realQuery = pool.query.bind(pool)
+    // The fixed-row fake answers every proposals statement; make the flip honor its WHERE.
+    pool.query = async (text, params) => {
+      if (/^update proposals\s+set status = \$2/i.test(String(text).trim()) && row.status === 'declined') {
+        fake.statements.push({ text: String(text).trim(), params })
+        return { rows: [], rowCount: 0 }
+      }
+      return realQuery(text, params)
+    }
+    await expect(store2.acceptProposal('prop-1', {})).rejects.toBeInstanceOf(ProposalStateError)
+    const flips = fake.matching(/^update proposals\s+set status = \$2/i)
+    expect(flips).toHaveLength(1)
+    expect(flips[0].text).toMatch(/where id = \$1\s+and status not in \('accepted', 'declined'\)/)
+    expect(fake.matching(/^insert into (engagements|recurring_reimbursements|clients)\b/i)).toHaveLength(0)
+    vi.restoreAllMocks()
   })
 })
 
@@ -47169,11 +46909,12 @@ describe('engagements (file backend)', () => {
       kind: 'original',
       status: 'draft',
       proposalId: proposal.id,
-      clientId: accepted.clientId,
+      // Stage 3: a Won prospect has no client until its letter is signed.
+      clientId: null,
       createdBy: 'emp-patrice',
-      // The proposal is linked to its client by now, so the party is the client's.
-      party: { company: 'Acme Books', email: 'pat@acme.test' },
+      party: { company: 'Acme Books', title: 'Owner', email: 'pat@acme.test' },
     })
+    expect(accepted.clientId).toBeNull()
 
     const twice = await store.draftEngagementForProposal(proposal.id, {}).catch((caught) => caught)
     expect(twice).toBeInstanceOf(EngagementStateError)
@@ -47300,8 +47041,8 @@ describe('engagements (Postgres statements)', () => {
           section_keys: JSON.parse(params[8]),
           figures: JSON.parse(params[9]),
           retainer_amount: params[10] === null ? null : String(params[10]),
-          package_id: null,
-          plan_ids: [],
+          package_id: params[13] ?? null,
+          plan_ids: params[14] ?? [],
           template_hash: params[11],
           email_log: [],
           sent_at: null,
@@ -47515,7 +47256,7 @@ describe('engagements (Postgres statements)', () => {
     const engagement = await pgStore.createEngagementFromProposal(proposal(), { createdBy: 'emp-patrice', clientId: 'c-new' })
     const [insert] = fake.matching(/^insert into engagements /i)
     expect(insert.text).toMatch(
-      /^insert into engagements \(id, kind, status, proposal_id, client_id, party, subject, email_body, letter_body, section_keys, figures, retainer_amount, template_hash, created_by\) values \(\$1, \$2, 'draft', \$3, \$4, \$5::jsonb, \$6, \$7, \$8, \$9::jsonb, \$10::jsonb, \$11, \$12, \$13\) returning /i,
+      /^insert into engagements \(id, kind, status, proposal_id, client_id, party, subject, email_body, letter_body, section_keys, figures, retainer_amount, template_hash, created_by, package_id, plan_ids\) values \(\$1, \$2, 'draft', \$3, \$4, \$5::jsonb, \$6, \$7, \$8, \$9::jsonb, \$10::jsonb, \$11, \$12, \$13, \$14, \$15::text\[\]\) returning /i,
     )
     expect(insert.params[3]).toBe('c-new')
     expect(JSON.parse(insert.params[9])).toMatchObject({

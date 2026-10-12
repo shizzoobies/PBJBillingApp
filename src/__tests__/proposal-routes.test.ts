@@ -306,12 +306,18 @@ describe('accepting and declining', () => {
     expect(guard).toBeLessThan(text.indexOf('appDataStore.acceptProposal('))
   })
 
-  it('Accept goes through the store, which alone decides whether a client is created', () => {
+  // Engagements stage 3: Accept creates no client and writes nothing to one - the
+  // fee, the plans and the software move to signing - so the route passes only the
+  // package and the plans the engagement carries, and answers no createdClient.
+  it('Accept goes through the store with the package and plans only, and creates no client', () => {
     const text = accept()
     expect(text).toContain('appDataStore.acceptProposal(proposalAcceptMatch[1], {')
     expect(text).not.toContain('appDataStore.createClient(')
-    expect(text).toContain('updateMonthlyRate: payload.updateMonthlyRate === true')
-    expect(text).toContain('addSoftware: payload.addSoftware === true')
+    expect(text).toContain("packageId: typeof payload.packageId === 'string' ? payload.packageId : null,")
+    expect(text).toContain('planIds: Array.isArray(payload.planIds) ? payload.planIds : [],')
+    expect(text).not.toContain('updateMonthlyRate')
+    expect(text).not.toContain('addSoftware')
+    expect(text).not.toContain('createdClient')
   })
 
   // Engagements, stage 2: the store drafts the Won proposal's engagement and returns
@@ -329,24 +335,12 @@ describe('accepting and declining', () => {
     expect(text).toContain("sendJson(response, 409, { error: 'proposal_refused', message: error.message })")
   })
 
-  it('broadcasts before the 409 when the refusal carries a createdClientId — the concurrent-accept race', () => {
+  it('broadcasts only after a successful Accept: a refusal has written nothing to tell other tabs about', () => {
     const text = accept()
-    expect(text).toContain('if (error.createdClientId) broadcastDataChanged()')
-    const broadcastAt = text.indexOf('if (error.createdClientId) broadcastDataChanged()')
-    const sendAt = text.indexOf("sendJson(response, 409, { error: 'proposal_refused', message: error.message })")
-    expect(broadcastAt).toBeGreaterThan(-1)
-    expect(broadcastAt).toBeLessThan(sendAt)
-  })
-
-  it('checks createdClientId BEFORE the instanceof check, so an unexpected error still broadcasts before it is rethrown', () => {
-    const text = accept()
-    const broadcastAt = text.indexOf('if (error.createdClientId) broadcastDataChanged()')
-    const instanceofAt = text.indexOf(
-      'error instanceof ProposalStateError || error instanceof PackageApplyError',
-    )
-    expect(broadcastAt).toBeGreaterThan(-1)
-    expect(instanceofAt).toBeGreaterThan(-1)
-    expect(broadcastAt).toBeLessThan(instanceofAt)
+    const refusalAt = text.indexOf("sendJson(response, 409, { error: 'proposal_refused', message: error.message })")
+    const broadcastAt = text.indexOf('broadcastDataChanged()')
+    expect(refusalAt).toBeGreaterThan(-1)
+    expect(broadcastAt).toBeGreaterThan(refusalAt)
   })
 
   it('Decline records the note through the status write', () => {

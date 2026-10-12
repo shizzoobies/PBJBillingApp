@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useLocation, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { BoldBar, PlaceholderChipsToggle } from '../components/letters/LetterEditorKit'
 import { DocumentPreviewModal } from '../components/letters/DocumentPreviewModal'
@@ -133,6 +133,8 @@ export function EngagementEditorPage() {
  */
 function EngagementEditor({ engagementId }: { engagementId: string }) {
   const { ownerMode, data, dataRefreshCount } = useAppContext()
+  // A notice handed over by the page that opened this one (Accept on a proposal).
+  const arrivalNotice = (useLocation().state as { notice?: unknown } | null)?.notice
   const [view, setView] = useState<EngagementView | null>(null)
   const [loadError, setLoadError] = useState('')
 
@@ -491,6 +493,11 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         </div>
       </header>
 
+      {typeof arrivalNotice === 'string' && arrivalNotice ? (
+        <p className="empty-state" role="status">
+          {arrivalNotice}
+        </p>
+      ) : null}
       {loadError ? (
         <p className="form-error" role="alert">
           {loadError}
@@ -709,7 +716,11 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         <aside className="engagement-rail">
           <div className="panel">
             <h3>Signing details</h3>
-            <p className="muted-text">Kept on the engagement for when it is signed.</p>
+            <p className="muted-text">
+              {editable && !engagement.clientId
+                ? `Kept on the engagement for when it is signed. ${partyName} becomes a client only then.`
+                : 'Kept on the engagement for when it is signed.'}
+            </p>
             <label className="field">
               <span>Retainer amount</span>
               <input

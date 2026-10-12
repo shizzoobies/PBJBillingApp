@@ -13272,72 +13272,36 @@ export class AppDataStore {
   }
 
   /**
-   * Accept a proposal (spec §5.5).
+   * Accept a proposal (spec §5.5): it is marked Won and its engagement letter is
+   * drafted. Since engagements stage 3 (docs/plans/engagements-2026-10.md) Accept
+   * writes NOTHING to any client. A PROSPECT becomes a client only when that
+   * letter is marked signed (`signEngagement`), and an UPSELL's fee, plans and
+   * software reach the existing client at signing too. A package and plans
+   * picked at Accept ride on the drafted engagement (its signing details), to be
+   * applied when it is signed.
    *
-   * A PROSPECT (no `client_id`) becomes a client: company, contact fields,
-   * Onboarding, Monthly billing at the proposal's monthly total, the firm's
-   * default payment terms. The new client is linked to the proposal through
-   * `linkProposalClient` (compare-and-set) right after it is created, so a
-   * second press after a later failure can never create it twice, and two
-   * concurrent presses can never both link a client to the same proposal.
+   * Every check that CAN refuse runs before the one write (the accepted flip):
+   * the client an upsell points at exists and is not a billing master, a chosen
+   * package exists (and an upsell client is not retired when one is chosen), and
+   * a prospect has a name to give the client it will become. A letter that could
+   * never be signed is refused here, not discovered at signing.
    *
-   * An UPSELL (`client_id` set) changes that client's monthly rate only when
-   * `updateMonthlyRate` is true — the page asks first.
-   *
-   * SOFTWARE (featreq-a69a3cc0) is not part of the monthly rate: each software
-   * line with a price becomes a monthly recurring expense on the client, marked
-   * Software, starting in the acceptance month with covered dates off. A new
-   * client gets them always; an upsell only when `addSoftware` is true (the page
-   * asks, as it does for the rate). A line whose description is already on the
-   * client is skipped, so a retry never doubles one.
-   *
-   * Chosen plans are unioned in through the targeted plan write and a chosen
-   * package through `applyPackageToClient`, the same paths the client page
-   * uses. Nothing about any existing invoice changes.
-   *
-   * Deliberately several statements, not one transaction: creating a client is
-   * itself several statements (see `createClient`), and wrapping all of this in
-   * one transaction would hold it open across an AI-free but still multi-step
-   * write for no benefit. What keeps a half-finished accept from being a
-   * problem is doing every check that CAN refuse — the client this proposal
-   * already points at exists and is not a billing master, a chosen package
-   * exists and (if applying it) the client is not retired — before the first
-   * write, and linking the create-then-link order narrows the retry window to
-   * exactly the interval between those two calls.
-   *
-   * Once a client exists, though, this cannot un-happen — a decline landing
-   * before the final accepted flip, a package/plan write failure, and the
-   * lost-link race below are all still possible, and every one of them
-   * throws with `createdClientId` set to that client's id (see the `catch`
-   * below), so the route still tells other tabs a client now exists even
-   * though this call itself refuses.
-   *
-   * @returns {{ proposal, clientId, createdClient, packageApplied, engagementId } | null}
+   * @returns {{ proposal, clientId, packageApplied, engagementId } | null} -
+   *   `clientId` is the upsell's existing client, else null; `packageApplied` is
+   *   always false (nothing is applied at Accept; kept for the response shape).
    */
-  async acceptProposal(
-    id,
-    {
-      actorUserId = null,
-      packageId = null,
-      planIds = [],
-      updateMonthlyRate = false,
-      addSoftware = false,
-    } = {},
-  ) {
+  async acceptProposal(id, { actorUserId = null, packageId = null, planIds = [] } = {}) {
     const proposal = await this.getProposal(id)
     if (!proposal) return null
     if (proposal.status === 'accepted' || proposal.status === 'declined') {
       throw new ProposalStateError(`This proposal is already ${proposalOutcomeWords(proposal.status)}.`)
     }
 
-    // Everything that can refuse runs BEFORE any write. `proposals.client_id`
+    // Everything that can refuse runs BEFORE the write. `proposals.client_id`
     // has no FK (the 2026-06-17 outage), so a proposal can outlive the client
-    // it points at — that is checked here rather than left for the rate
-    // change or the plan union to trip over. The billing-master guard used to
-    // run only inside `applyPackageToClient`, which meant a rate change or a
-    // plan union could land on a master, unguarded, before a chosen package's
-    // refusal ever ran; both now check up front, so a refusal here leaves a
-    // sent proposal exactly as it was.
+    // it points at - that is checked here. A billing master holds no fee, plans
+    // or software of its own, so an upsell to one would draft a letter signing
+    // must refuse; it is refused now instead, leaving the proposal as it was.
     const linkedClientId = proposal.clientId
     let linkedClient = null
     if (linkedClientId) {
@@ -13362,276 +13326,94 @@ export class AppDataStore {
       }
     }
 
-    const monthlyRate = Number(proposal.pricingSnapshot?.totals?.monthly) || 0
-    let clientId = linkedClientId
-    let createdClient = false
-    let createdClientName = null
-
-    if (!clientId) {
-      const { company, contactName, title, email, phone, addressLine1, addressLine2, city, state, postalCode } =
-        proposal.prospect
-      const name = company || contactName
-      if (!name) {
-        throw new ProposalStateError('Give the prospect a company or contact name before accepting.')
-      }
-      const firm = await this.getFirmSettings()
-      const client = await this.createClient({
-        name,
-        contact: contactName,
-        contactName,
-        email,
-        phone,
-        addressLine1,
-        addressLine2,
-        city,
-        state,
-        postalCode,
-        lifecycleStage: 'onboarding',
-        billingMode: 'subscription',
-        monthlyRate,
-        paymentTerms: firm.clientDefaults?.paymentTerms ?? '',
-        ...(contactName ? { newPrimaryContact: { name: contactName, title, email, phone } } : {}),
-      })
-      if (!client) throw new ProposalStateError('The client could not be created.')
-      clientId = client.id
-      createdClient = true
-      createdClientName = client.name
+    if (!linkedClientId && !(proposal.prospect?.company || proposal.prospect?.contactName)) {
+      throw new ProposalStateError('Give the prospect a company or contact name before accepting.')
+    }
+    // Plans the workspace knows, in the order picked (a dangling id would follow
+    // the engagement onto the client at signing - plan_ids has no foreign key).
+    let wantedPlans = [
+      ...new Set((Array.isArray(planIds) ? planIds : []).filter((planId) => typeof planId === 'string' && planId)),
+    ]
+    if (wantedPlans.length > 0) {
+      const known = new Set(((await this.read()).plans ?? []).map((plan) => plan.id))
+      wantedPlans = wantedPlans.filter((planId) => known.has(planId)).slice(0, ENGAGEMENT_PLAN_IDS_MAX)
     }
 
-    // Everything from here on runs AFTER a client may already exist, so any
-    // failure — the lost-link race below, a decline landing before the final
-    // accepted flip, a package/plan write failure, or `_retireOrphanedAcceptClient`
-    // itself throwing — must still tell the caller a client was created, the
-    // same way the lost-link race always has. `??=` never overwrites an id an
-    // inner throw already attached.
-    try {
-      if (createdClient) {
-        const linked = await this.linkProposalClient(id, clientId)
-        if (!linked) {
-          // Lost the race: a concurrent Accept of this SAME proposal linked
-          // its own client first, or the proposal was declined or deleted
-          // while this one was creating its client. The one just created has
-          // no history yet — retire it rather than leave an orphan, and word
-          // the refusal from what actually happened to the proposal.
-          await this._retireOrphanedAcceptClient(clientId, id)
-          const latest = await this.getProposal(id)
-          const message = !latest
-            ? 'This proposal no longer exists.'
-            : latest.status === 'declined'
-              ? 'This proposal was closed as lost while you were accepting it.'
-              : 'Someone else already marked this proposal Won.'
-          throw new ProposalStateError(message)
-        }
-      } else if (updateMonthlyRate === true) {
-        await this.setClientMonthlyRate(clientId, monthlyRate)
-      }
-
-      const wantedPlans = [
-        ...new Set(
-          (Array.isArray(planIds) ? planIds : []).filter((planId) => typeof planId === 'string' && planId),
-        ),
-      ]
-      if (wantedPlans.length > 0) {
-        const data = await this.read()
-        const client = (data.clients ?? []).find((row) => row.id === clientId)
-        const known = new Set((data.plans ?? []).map((plan) => plan.id))
-        const existing = Array.isArray(client?.planIds) ? client.planIds : []
-        const added = wantedPlans.filter((planId) => known.has(planId) && !existing.includes(planId))
-        if (client && added.length > 0) await this._setClientPlanIds(clientId, [...existing, ...added])
-      }
-      const packageResult = pkg ? await this.applyPackageToClient(clientId, packageId, { actorUserId }) : null
-
-      // The accepted flip and the software rows are ONE unit (see
-      // `_acceptWithSoftware`): both happen or neither does, and a second
-      // Accept of the same proposal is refused rather than half-applied.
-      const accepted = await this._acceptWithSoftware(
-        id,
-        clientId,
-        createdClient || addSoftware === true ? proposal.pricingSnapshot?.lines : [],
+    const accepted = await this._markProposalAccepted(id)
+    if (actorUserId) {
+      await this.recordActivity(
+        actorUserId,
+        'proposal_accepted',
+        `${proposal.prospect.company || proposal.prospect.contactName || 'Proposal'} · ${proposal.id}`,
       )
-      if (actorUserId) {
-        if (createdClient) {
-          // Same event name and shape as `POST /api/clients` (server.js) — a
-          // client this route creates is still a client created.
-          await this.recordActivity(actorUserId, 'client_created', createdClientName || '')
-        }
+    }
+    // The Won proposal's engagement letter, drafted only AFTER the flip. The
+    // proposal is Won by now and that cannot be undone, so a failure here is
+    // logged and answered as no engagement (`engagementId: null`, the page then
+    // offers "Draft the engagement") rather than as a failed Accept. The party is
+    // the prospect, or the client for an upsell; the row carries the upsell's
+    // client and nothing for a prospect (signing fills it in).
+    let engagementId = null
+    let engagement = null
+    try {
+      engagement = await this.createEngagementFromProposal(proposal, {
+        kind: 'original',
+        createdBy: actorUserId,
+        packageId: pkg ? pkg.id : null,
+        planIds: wantedPlans,
+      })
+      engagementId = engagement?.id ?? null
+    } catch (error) {
+      console.error('[engagements] Accept could not draft the engagement for', id, error)
+    }
+    // The same entry the recovery route (POST /api/proposals/:id/engagement) records.
+    if (engagementId && actorUserId) {
+      try {
         await this.recordActivity(
           actorUserId,
-          'proposal_accepted',
-          `${proposal.prospect.company || proposal.prospect.contactName || 'Proposal'} · ${proposal.id}`,
+          'engagement_created',
+          `${engagement.party?.company || engagement.party?.contactName || 'Engagement'} · ${engagementId}`,
         )
-      }
-      // The Won proposal's engagement letter (docs/plans/engagements-2026-10.md,
-      // stage 2), drafted only AFTER everything above has landed. The proposal
-      // is accepted and the client exists by now, neither of which can be
-      // undone, so a failure here is logged and answered as no engagement
-      // (`engagementId: null`) rather than as a failed Accept. The party is the
-      // prospect for a new client (the proposal as it was before Accept linked
-      // it) and the client for an upsell; the row carries the client either way.
-      let engagementId = null
-      let engagement = null
-      try {
-        engagement = await this.createEngagementFromProposal(
-          { ...proposal, clientId: linkedClientId },
-          { kind: 'original', createdBy: actorUserId, clientId },
-        )
-        engagementId = engagement?.id ?? null
       } catch (error) {
-        console.error('[engagements] Accept could not draft the engagement for', id, error)
+        console.error('[engagements] could not record the draft for', id, error)
       }
-      // The same entry the recovery route (POST /api/proposals/:id/engagement) records.
-      if (engagementId && actorUserId) {
-        try {
-          await this.recordActivity(
-            actorUserId,
-            'engagement_created',
-            `${engagement.party?.company || engagement.party?.contactName || 'Engagement'} · ${engagementId}`,
-          )
-        } catch (error) {
-          console.error('[engagements] could not record the draft for', id, error)
-        }
-      }
-      return { proposal: accepted, clientId, createdClient, packageApplied: Boolean(packageResult), engagementId }
-    } catch (e) {
-      if (createdClient) e.createdClientId ??= clientId
-      throw e
     }
+    return { proposal: accepted, clientId: linkedClientId ?? null, packageApplied: false, engagementId }
   }
 
   /**
-   * Accept's final step: the accepted flip AND the software lines of the
-   * proposal as monthly recurring expenses (featreq-a69a3cc0), as ONE atomic
-   * unit. Returns the accepted proposal; refuses with `ProposalStateError`
-   * (writing nothing) when the proposal is already decided.
-   *
-   * Software: description = the plan's name, the line's amount, Software
-   * category, starting the first day of the firm's current month, covered dates
-   * off. Lines at $0 (Bill Pay Basic) or unpriced bill nothing and add nothing;
-   * a line whose description the client already carries is skipped, so a retry
-   * after a failed Accept adds each line once.
-   *
-   * Postgres: one transaction. The proposal row is locked `for update`, the
-   * compare-and-set flip runs first (zero rows = already decided, roll back),
-   * then the rows are inserted through the SAME connection, so a failure
-   * anywhere undoes all of it together. Two Accepts at once: the loser waits
-   * on the lock, finds the proposal decided, and is refused with nothing
-   * written. The file backend does the same inside one queue slot.
+   * Accept's one write: the compare-and-set flip to accepted. Refuses with
+   * `ProposalStateError` (writing nothing) when the proposal is already decided
+   * or gone, so of two Accepts at once exactly one wins. Postgres: one
+   * statement whose WHERE carries the guard. File backend: the read and the
+   * flip in one queue slot of the proposals file.
    */
-  async _acceptWithSoftware(proposalId, clientId, lines) {
-    const wanted = (Array.isArray(lines) ? lines : []).filter(
-      (line) => line?.group === 'Software' && Number(line.amount) > 0 && !line.flag,
-    )
-    const startDate = `${firmToday().slice(0, 7)}-01`
-    const descriptionOf = (line) => String(line.name ?? '').trim()
-    const refuse = (line) =>
-      new ProposalStateError(`The software line "${descriptionOf(line)}" could not be added to the client.`)
+  async _markProposalAccepted(proposalId) {
     const alreadyDecided = (status) =>
       new ProposalStateError(
         status
           ? `This proposal is already ${proposalOutcomeWords(status)} — it can't be marked Won again.`
           : 'This proposal no longer exists.',
       )
-    const linkClient = cleanProposalId(clientId)
-
     if (this.pool) {
-      return this._withTransaction(async (dbClient) => {
-        await dbClient.query(`select id from proposals where id = $1 for update`, [proposalId])
-        const flipped = await dbClient.query(PROPOSAL_STATUS_UPDATE_SQL, [
-          proposalId,
-          'accepted',
-          null,
-          linkClient,
-        ])
-        if (!flipped.rows[0]) {
-          const latest = await dbClient.query(`select status from proposals where id = $1`, [proposalId])
-          throw alreadyDecided(latest.rows?.[0]?.status ?? null)
-        }
-        if (wanted.length > 0) {
-          const { rows } = await dbClient.query(
-            `select description from recurring_reimbursements where client_id = $1`,
-            [clientId],
-          )
-          const have = new Set(rows.map((row) => String(row.description ?? '').trim().toLowerCase()))
-          for (const line of wanted) {
-            const description = descriptionOf(line)
-            if (!description || have.has(description.toLowerCase())) continue
-            const added = await this.addRecurringReimbursement({
-              clientId,
-              description,
-              amount: line.amount,
-              frequency: 'monthly',
-              startDate,
-              category: 'software',
-              dbClient,
-            })
-            if (!added) throw refuse(line)
-            have.add(description.toLowerCase())
-          }
-        }
-        return AppDataStore.mapProposal(flipped.rows[0])
-      })
+      const flipped = await this.pool.query(PROPOSAL_STATUS_UPDATE_SQL, [proposalId, 'accepted', null, null])
+      if (flipped.rows?.[0]) return AppDataStore.mapProposal(flipped.rows[0])
+      const latest = await this.pool.query(`select status from proposals where id = $1`, [proposalId])
+      throw alreadyDecided(latest.rows?.[0]?.status ?? null)
     }
-
-    // The file backend: the read, the decision, the rows and the flip inside
-    // ONE queue slot of the workspace file (the flip's own file is entered
-    // through ITS queue, a different one, so this cannot deadlock). Raw fs
-    // calls only on the data file in here: `readJson` / `writeFile` would
-    // enqueue behind this very slot.
-    return enqueueFileOperation(localDataPath, async () => {
-      const original = await readFile(localDataPath, 'utf8')
-      const data = JSON.parse(original)
-      let wrote = false
-      if (wanted.length > 0) {
-        if (!Array.isArray(data.clients) || !data.clients.some((entry) => entry.id === clientId)) {
-          throw refuse(wanted[0])
-        }
-        if (!Array.isArray(data.recurringReimbursements)) data.recurringReimbursements = []
-        const have = new Set(
-          data.recurringReimbursements
-            .filter((entry) => entry.clientId === clientId)
-            .map((entry) => String(entry.description ?? '').trim().toLowerCase()),
-        )
-        for (const line of wanted) {
-          const description = descriptionOf(line)
-          if (!description || have.has(description.toLowerCase())) continue
-          data.recurringReimbursements.push(
-            normalizeRecurringReimbursement({
-              id: `recur-${randomUUID().slice(0, 8)}`,
-              clientId,
-              description,
-              amount: line.amount,
-              frequency: 'monthly',
-              startDate,
-              category: 'software',
-            }),
-          )
-          have.add(description.toLowerCase())
-          wrote = true
-        }
-        if (wrote) await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
-      }
-      try {
-        // The compare-and-set, in the proposals file's own slot.
-        return await enqueueFileOperation(localAuthPath, async () => {
-          const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
-          const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
-            (row) => row && row.id === proposalId,
-          )
-          if (!target) throw alreadyDecided(null)
-          if (target.status !== 'draft' && target.status !== 'sent') throw alreadyDecided(target.status)
-          const now = nowIso()
-          target.status = 'accepted'
-          target.acceptedAt = now
-          if (linkClient) target.clientId = linkClient
-          target.updatedAt = now
-          await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
-          return AppDataStore.mapProposal(target)
-        })
-      } catch (error) {
-        // Refused: the rows written a moment ago never happened.
-        if (wrote) await fsWriteFile(localDataPath, original)
-        throw error
-      }
+    return enqueueFileOperation(localAuthPath, async () => {
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
+        (row) => row && row.id === proposalId,
+      )
+      if (!target) throw alreadyDecided(null)
+      if (target.status !== 'draft' && target.status !== 'sent') throw alreadyDecided(target.status)
+      const now = nowIso()
+      target.status = 'accepted'
+      target.acceptedAt = now
+      target.updatedAt = now
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return AppDataStore.mapProposal(target)
     })
   }
 
@@ -26665,11 +26447,16 @@ export class AppDataStore {
    * Draft an engagement from a proposal: the party (the prospect, or the linked
    * client for a proposal to an existing client), the figures from its pricing
    * snapshot, a retainer of one month's fee by default, and the subject and
-   * bodies assembled from the active section library (or `sections`). Stage 2:
-   * `clientId` (default: the proposal's) is stored as given - Accept passes the
-   * client it just created. Returns the new engagement.
+   * bodies assembled from the active section library (or `sections`).
+   * `clientId` (default: the proposal's) is stored as given: null for a prospect
+   * until the letter is marked signed (stage 3). `packageId` / `planIds` are the
+   * signing details Accept picked (the caller has checked them); none by default.
+   * Returns the new engagement.
    */
-  async createEngagementFromProposal(proposal, { kind = 'original', createdBy = null, sections = null, clientId } = {}) {
+  async createEngagementFromProposal(
+    proposal,
+    { kind = 'original', createdBy = null, sections = null, clientId, packageId = null, planIds = [] } = {},
+  ) {
     if (!proposal?.id) {
       throw new EngagementStateError('There is no proposal to draft the engagement from.', 'invalid')
     }
@@ -26707,8 +26494,8 @@ export class AppDataStore {
       sectionKeys: (Array.isArray(assembled.sectionKeys) ? assembled.sectionKeys : []).map(String),
       figures,
       retainerAmount: engagementRetainer(figures.totals.monthly),
-      packageId: null,
-      planIds: [],
+      packageId: typeof packageId === 'string' && packageId ? packageId : null,
+      planIds: [...new Set((Array.isArray(planIds) ? planIds : []).filter((planId) => typeof planId === 'string' && planId))],
       templateHash: null, // set below from the whole row
       emailLog: [],
       createdBy,
@@ -26718,8 +26505,8 @@ export class AppDataStore {
       const { rows } = await this.pool.query(
         `insert into engagements
            (id, kind, status, proposal_id, client_id, party, subject, email_body, letter_body,
-            section_keys, figures, retainer_amount, template_hash, created_by)
-         values ($1, $2, 'draft', $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13)
+            section_keys, figures, retainer_amount, template_hash, created_by, package_id, plan_ids)
+         values ($1, $2, 'draft', $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15::text[])
          returning ${ENGAGEMENT_COLUMNS}`,
         [
           row.id,
@@ -26735,6 +26522,8 @@ export class AppDataStore {
           row.retainerAmount,
           row.templateHash,
           row.createdBy,
+          row.packageId,
+          row.planIds,
         ],
       )
       return mapEngagementRow(rows[0])

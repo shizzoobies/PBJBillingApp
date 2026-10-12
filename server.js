@@ -13380,9 +13380,11 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // POST /api/proposals/:id/accept — { packageId?, planIds?, updateMonthlyRate?, addSoftware? }
-    // (spec §5.5). The store decides: a prospect becomes a client in Onboarding;
-    // an existing client's monthly rate moves only when the page confirmed it.
+    // POST /api/proposals/:id/accept — { packageId?, planIds? } (spec §5.5). The
+    // proposal is marked Won and its engagement letter drafted, carrying the
+    // package and plans. Nothing is written to any client: since engagements
+    // stage 3 the client is created (or an upsell's fee, plans and software
+    // applied) when the letter is marked signed - POST /api/engagements/:id/sign.
     const proposalAcceptMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/accept$/)
     if (proposalAcceptMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
@@ -13413,18 +13415,8 @@ const server = createServer(async (request, response) => {
           actorUserId: session.user.id,
           packageId: typeof payload.packageId === 'string' ? payload.packageId : null,
           planIds: Array.isArray(payload.planIds) ? payload.planIds : [],
-          updateMonthlyRate: payload.updateMonthlyRate === true,
-          addSoftware: payload.addSoftware === true,
         })
       } catch (error) {
-        // A refusal that landed AFTER `acceptProposal` created a client — the
-        // lost-link race, a decline landing before the final flip, a
-        // package/plan write failure, anything after `createClient` — still
-        // changed the workspace. The store attaches `createdClientId` to
-        // every one of those, so this broadcasts BEFORE the instanceof check
-        // below: even an error neither branch below recognizes (rethrown as a
-        // 500) must still tell the other tabs a client now exists.
-        if (error.createdClientId) broadcastDataChanged()
         if (error instanceof ProposalStateError || error instanceof PackageApplyError) {
           sendJson(response, 409, { error: 'proposal_refused', message: error.message })
           return

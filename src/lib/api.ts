@@ -1060,29 +1060,28 @@ export function sendProposalRequest(
 }
 
 /**
- * What Accept did: the proposal, the client it created or used, whether a package
- * went on, and the engagement letter it drafted (null when none could be drafted).
+ * What Accept did: the Won proposal, the existing client of an upsell (null for a
+ * prospect - it becomes a client when the letter is marked signed), and the
+ * engagement letter it drafted (null when none could be drafted). `packageApplied`
+ * is always false: the package rides on the engagement and is applied at signing.
  */
 export type AcceptProposalResult = {
   proposal: Proposal
-  clientId: string
-  createdClient: boolean
+  clientId: string | null
   packageApplied: boolean
   engagementId?: string | null
 }
 
 /**
- * Owner-only: accept. A prospect becomes a client in Onboarding; an existing
- * client's monthly fee moves only with `updateMonthlyRate: true`.
+ * Owner-only: accept. The proposal is marked Won and its engagement letter drafted,
+ * carrying the package and plans; nothing changes on any client until the letter
+ * is marked signed.
  */
 export function acceptProposalRequest(
   id: string,
   input: {
     packageId?: string | null
     planIds?: string[]
-    updateMonthlyRate?: boolean
-    /** An existing client only: also add the proposal's software lines as monthly expenses. */
-    addSoftware?: boolean
   } = {},
 ): Promise<AcceptProposalResult> {
   return proposalRequest<AcceptProposalResult>(

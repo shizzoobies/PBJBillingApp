@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { AppContextValue } from '../AppContext'
 import { defaultProposalPricing } from '../../lib/proposal-pricing.js'
@@ -307,10 +307,10 @@ beforeEach(() => {
   api.listPackagesRequest = vi.fn(async () => [
     { id: 'pkg-1', name: 'Full service', description: '', planIds: [], templateIds: [], createdAt: '', updatedAt: null },
   ])
+  // Engagements stage 3: Accept creates no client - the prospect stays unlinked until signing.
   api.acceptProposalRequest = vi.fn(async () => ({
-    proposal: { ...PROPOSAL, status: 'accepted', clientId: 'client-new' },
-    clientId: 'client-new',
-    createdClient: true,
+    proposal: { ...PROPOSAL, status: 'accepted', clientId: null },
+    clientId: null,
     packageApplied: false,
   }))
   api.declineProposalRequest = vi.fn(async () => ({ ...PROPOSAL, status: 'declined' }))
@@ -1278,21 +1278,46 @@ describe('refetching on the app-wide data broadcast (item 5, final fix wave)', (
   })
 })
 
+// Engagements stage 3: Accept writes nothing to a client; the confirm says the client
+// side happens when the engagement letter is marked signed.
+const WON_DRAFTED =
+  'This proposal is marked Won. An engagement letter will be drafted for you to edit and send.'
+const PROSPECT_CONFIRM = (middle: string) =>
+  `Accept this proposal? ${WON_DRAFTED} Acme Books becomes a client in Onboarding, billed monthly at $630.00${middle}, when the letter is marked signed - not before. Nothing about any invoice changes now.`
+
 describe('Accept and Decline', () => {
-  it('Accept on a prospect says what it will create, then accepts', async () => {
+  it('Accept on a prospect says the client is created at signing, then accepts', async () => {
+    const confirm = vi.fn(() => true)
+    vi.stubGlobal('confirm', confirm)
+    renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    expect(confirm).toHaveBeenCalledWith(PROSPECT_CONFIRM(''))
+    await waitFor(() =>
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
+    )
+    expect(await screen.findByText('Won', { selector: '.status-pill' })).toBeTruthy()
+    // No engagement came back, so the page stays and says when the client arrives.
+    expect(
+      await screen.findByText(/Acme Books becomes a client when this letter is marked signed\./),
+    ).toBeTruthy()
+    // Not signed yet: no client to open.
+    expect(screen.queryByRole('link', { name: 'Open the client' })).toBeNull()
+  })
+
+  it('a prospect with only annual fees is named as billed annually', async () => {
+    api.getProposalRequest = vi.fn(async () => ({
+      ...PROPOSAL,
+      pricingSnapshot: {
+        ...PROPOSAL.pricingSnapshot!,
+        totals: { ...PROPOSAL.pricingSnapshot!.totals, monthly: 0, annual: 1200 },
+      },
+    }))
     const confirm = vi.fn(() => true)
     vi.stubGlobal('confirm', confirm)
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
     expect(confirm).toHaveBeenCalledWith(
-      'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00. Nothing about any invoice changes, and this proposal is marked Won. An engagement letter will be drafted for you to edit and send.',
-    )
-    await waitFor(() =>
-      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
-    )
-    expect(await screen.findByText('Won', { selector: '.status-pill' })).toBeTruthy()
-    expect(screen.getByRole('link', { name: 'Open the client' }).getAttribute('href')).toBe(
-      '/clients/client-new',
+      `Accept this proposal? ${WON_DRAFTED} Acme Books becomes a client in Onboarding, billed annually at $1,200.00, when the letter is marked signed - not before. Nothing about any invoice changes now.`,
     )
   })
 
@@ -1331,7 +1356,7 @@ describe('Accept and Decline', () => {
     vi.stubGlobal('confirm', vi.fn(() => true))
     renderEditor()
     await waitFor(() => expect(api.listPackagesRequest).toHaveBeenCalled())
-    fireEvent.change(await screen.findByLabelText('Package to apply on accept'), {
+    fireEvent.change(await screen.findByLabelText('Package to apply when signed'), {
       target: { value: 'pkg-1' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
@@ -1354,11 +1379,7 @@ describe('Accept and Decline', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Payroll' }))
     expect(screen.getByRole('button', { name: 'Plans · 2' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
-    expect(confirm).toHaveBeenCalledWith(
-      'Accept this proposal? This adds Acme Books as a client in Onboarding, ' +
-        'billed monthly at $630.00, with the plans Monthly Bookkeeping and Payroll. ' +
-        'Nothing about any invoice changes, and this proposal is marked Won. An engagement letter will be drafted for you to edit and send.',
-    )
+    expect(confirm).toHaveBeenCalledWith(PROSPECT_CONFIRM(', with the plans Monthly Bookkeeping and Payroll'))
     await waitFor(() =>
       expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
         packageId: null,
@@ -1394,14 +1415,13 @@ describe('Accept and Decline', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Plans' }))
     fireEvent.click(screen.getByRole('checkbox', { name: 'Monthly Bookkeeping' }))
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
-    expect(confirm).toHaveBeenNthCalledWith(
-      1,
-      'Accept this proposal for Existing Co, with the plan Monthly Bookkeeping? This proposal is marked Won. An engagement letter will be drafted for you to edit and send.',
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(confirm).toHaveBeenCalledWith(
+      `Accept this proposal for Existing Co, with the plan Monthly Bookkeeping? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed: then their monthly fee becomes $630.00 and the plan is added.`,
     )
     await waitFor(() =>
       expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
         packageId: null,
-        updateMonthlyRate: true,
         planIds: ['plan-1'],
       }),
     )
@@ -1434,11 +1454,7 @@ describe('Accept and Decline', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Plans' }))
     fireEvent.click(screen.getByRole('checkbox', { name: 'Payroll, Tax' }))
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
-    expect(confirm).toHaveBeenCalledWith(
-      'Accept this proposal? This adds Acme Books as a client in Onboarding, ' +
-        'billed monthly at $630.00, with the plan Payroll, Tax. ' +
-        'Nothing about any invoice changes, and this proposal is marked Won. An engagement letter will be drafted for you to edit and send.',
-    )
+    expect(confirm).toHaveBeenCalledWith(PROSPECT_CONFIRM(', with the plan Payroll, Tax'))
   })
 
   it('sends no planIds key for an existing client when no plan is ticked', async () => {
@@ -1450,31 +1466,30 @@ describe('Accept and Decline', () => {
     vi.stubGlobal('confirm', confirm)
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
-    expect(confirm).toHaveBeenNthCalledWith(1, 'Accept this proposal for Existing Co? This proposal is marked Won. An engagement letter will be drafted for you to edit and send.')
+    expect(confirm).toHaveBeenNthCalledWith(
+      1,
+      `Accept this proposal for Existing Co? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed: then their monthly fee becomes $630.00.`,
+    )
     await waitFor(() => expect(api.acceptProposalRequest).toHaveBeenCalled())
     expect(api.acceptProposalRequest.mock.calls[0][1]).not.toHaveProperty('planIds')
   })
 
-  it('an upsell asks separately before it changes the client’s monthly fee', async () => {
+  it('an upsell asks once: the fee change is named, and nothing is sent about it', async () => {
     api.getProposalRequest = vi.fn(async () => ({ ...PROPOSAL, clientId: 'client-1' }))
-    const confirm = vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false)
+    const confirm = vi.fn(() => true)
     vi.stubGlobal('confirm', confirm)
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
-    expect(confirm).toHaveBeenNthCalledWith(1, 'Accept this proposal for Existing Co? This proposal is marked Won. An engagement letter will be drafted for you to edit and send.')
-    expect(confirm).toHaveBeenNthCalledWith(
-      2,
-      'Also change Existing Co’s monthly fee to $630.00? Cancel keeps their current fee.',
-    )
+    expect(confirm).toHaveBeenCalledTimes(1)
     await waitFor(() =>
-      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
-        packageId: null,
-        updateMonthlyRate: false,
-      }),
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
     )
+    expect(
+      await screen.findByText(/Nothing changes for Existing Co until this letter is marked signed\./),
+    ).toBeTruthy()
   })
 
-  it('skips the second question for a non-subscription client even with a fee above $0', async () => {
+  it('names no fee change for a non-subscription client even with a fee above $0', async () => {
     contextValue.data.clients = [
       { id: 'client-1', name: 'Existing Co', billingMode: 'hourly' },
     ] as unknown as Client[]
@@ -1483,16 +1498,16 @@ describe('Accept and Decline', () => {
     vi.stubGlobal('confirm', confirm)
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    expect(confirm).toHaveBeenCalledWith(
+      `Accept this proposal for Existing Co? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed.`,
+    )
     await waitFor(() =>
-      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
-        packageId: null,
-        updateMonthlyRate: false,
-      }),
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
     )
     expect(confirm).toHaveBeenCalledTimes(1)
   })
 
-  it('skips the second question and sends updateMonthlyRate: false when the snapshot is $0', async () => {
+  it('names no fee change when the snapshot is $0', async () => {
     api.getProposalRequest = vi.fn(async () => ({
       ...PROPOSAL,
       clientId: 'client-1',
@@ -1505,28 +1520,27 @@ describe('Accept and Decline', () => {
     vi.stubGlobal('confirm', confirm)
     renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
-    await waitFor(() =>
-      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
-        packageId: null,
-        updateMonthlyRate: false,
-      }),
+    expect(confirm).toHaveBeenCalledWith(
+      `Accept this proposal for Existing Co? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed.`,
     )
-    expect(confirm).toHaveBeenCalledTimes(1)
+    await waitFor(() =>
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
+    )
   })
 
-  it('shows a notice when a chosen package could not be applied', async () => {
+  it('a chosen package rides with the Accept and raises no "could not be applied" notice', async () => {
     vi.stubGlobal('confirm', vi.fn(() => true))
     renderEditor()
     await waitFor(() => expect(api.listPackagesRequest).toHaveBeenCalled())
-    fireEvent.change(await screen.findByLabelText('Package to apply on accept'), {
+    fireEvent.change(await screen.findByLabelText('Package to apply when signed'), {
       target: { value: 'pkg-1' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
-    expect(
-      await screen.findByText(
-        "Marked Won, but the package could not be applied — add it from the client's page.",
-      ),
-    ).toBeTruthy()
+    await waitFor(() =>
+      expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: 'pkg-1' }),
+    )
+    expect(await screen.findByText('Won', { selector: '.status-pill' })).toBeTruthy()
+    expect(screen.queryByText(/could not be applied/)).toBeNull()
   })
 
   it('Close as lost asks for an optional note and saves it', async () => {
@@ -1865,7 +1879,7 @@ describe('Software on the proposal editor', () => {
       renderEditor()
       fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
       expect(confirm).toHaveBeenCalledWith(
-        'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00, and adds QBO Plus as monthly Software expenses billed at cost. Nothing about any invoice changes, and this proposal is marked Won. An engagement letter will be drafted for you to edit and send.',
+        PROSPECT_CONFIRM(', with QBO Plus as monthly Software expenses billed at cost'),
       )
       await waitFor(() =>
         expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
@@ -1886,30 +1900,28 @@ describe('Software on the proposal editor', () => {
       fireEvent.click(screen.getByRole('checkbox', { name: 'Payroll' }))
       fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
       expect(confirm).toHaveBeenCalledWith(
-        'Accept this proposal? This adds Acme Books as a client in Onboarding, billed monthly at $630.00, with the plans Monthly Bookkeeping and Payroll, and adds QBO Plus as monthly Software expenses billed at cost. Nothing about any invoice changes, and this proposal is marked Won. An engagement letter will be drafted for you to edit and send.',
+        PROSPECT_CONFIRM(
+          ', with the plans Monthly Bookkeeping and Payroll, and with QBO Plus as monthly Software expenses billed at cost',
+        ),
       )
     })
 
-    it('an upsell asks separately before it adds the software, and sends the answer', async () => {
+    it('an upsell names the software signing will add, in the one question, and sends no flag', async () => {
       api.getProposalRequest = vi.fn(async () => ({ ...WITH_SOFTWARE, clientId: 'client-1' }))
-      const confirm = vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false).mockReturnValueOnce(true)
+      const confirm = vi.fn(() => true)
       vi.stubGlobal('confirm', confirm)
       renderEditor()
       fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
-      expect(confirm).toHaveBeenNthCalledWith(
-        3,
-        'Also add QBO Plus to Existing Co as monthly Software expenses, billed at cost? Cancel leaves their expenses as they are.',
+      expect(confirm).toHaveBeenCalledTimes(1)
+      expect(confirm).toHaveBeenCalledWith(
+        `Accept this proposal for Existing Co? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed: then their monthly fee becomes $630.00 and QBO Plus is added as monthly Software expenses billed at cost.`,
       )
       await waitFor(() =>
-        expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
-          packageId: null,
-          updateMonthlyRate: false,
-          addSoftware: true,
-        }),
+        expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
       )
     })
 
-    it('an upsell whose only software is $0 asks nothing about software', async () => {
+    it('an upsell whose only software is $0 names no software', async () => {
       api.getProposalRequest = vi.fn(async () => ({
         ...WITH_SOFTWARE,
         clientId: 'client-1',
@@ -1923,13 +1935,13 @@ describe('Software on the proposal editor', () => {
       vi.stubGlobal('confirm', confirm)
       renderEditor()
       fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
-      await waitFor(() =>
-        expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', {
-          packageId: null,
-          updateMonthlyRate: true,
-        }),
+      expect(confirm).toHaveBeenCalledWith(
+        `Accept this proposal for Existing Co? ${WON_DRAFTED} Nothing changes for Existing Co until the letter is marked signed: then their monthly fee becomes $630.00.`,
       )
-      expect(confirm).toHaveBeenCalledTimes(2)
+      await waitFor(() =>
+        expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: null }),
+      )
+      expect(confirm).toHaveBeenCalledTimes(1)
     })
   })
 })
@@ -1957,50 +1969,90 @@ describe('the software total in a letter (featreq-a69a3cc0)', () => {
 // engagement letter and the page goes straight to it; a Won proposal links its
 // engagement, or offers to draft one when it has none.
 describe('the engagement a Won proposal drafts', () => {
+  /** The engagement route shows the notice Accept handed over, as the editor does. */
+  function EngagementStub() {
+    const state = useLocation().state as { notice?: string } | null
+    return (
+      <>
+        <p>Engagement editor</p>
+        {state?.notice ? <p>{state.notice}</p> : null}
+      </>
+    )
+  }
+
   function renderEditorWithEngagements() {
     render(
       <MemoryRouter initialEntries={['/proposals/prop-1']}>
         <Routes>
           <Route path="/proposals/:proposalId" element={<ProposalEditorPage />} />
-          <Route path="/engagements/:engagementId" element={<p>Engagement editor</p>} />
+          <Route path="/engagements/:engagementId" element={<EngagementStub />} />
         </Routes>
       </MemoryRouter>,
     )
   }
 
-  const WON = { ...PROPOSAL, status: 'accepted' as const, clientId: 'client-new' }
+  const WON = { ...PROPOSAL, status: 'accepted' as const, clientId: null }
+  // A proposal Won before engagements: it was linked to the client its Accept created.
+  const WON_LEGACY = { ...PROPOSAL, status: 'accepted' as const, clientId: 'client-new' }
 
-  it('after Accept opens the engagement Accept drafted', async () => {
+  it('after Accept opens the engagement Accept drafted, saying the client comes at signing', async () => {
     vi.stubGlobal('confirm', vi.fn(() => true))
     api.acceptProposalRequest = vi.fn(async () => ({
       proposal: WON,
-      clientId: 'client-new',
-      createdClient: true,
+      clientId: null,
       packageApplied: false,
       engagementId: 'eng-7',
     }))
     renderEditorWithEngagements()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
     expect(await screen.findByText('Engagement editor')).toBeTruthy()
+    expect(
+      screen.getByText('Marked Won. Acme Books becomes a client when this letter is marked signed.'),
+    ).toBeTruthy()
   })
 
-  it('when the package could not be applied, stays to show that and links the engagement instead', async () => {
+  it('a chosen package no longer holds the page back: it rides on the engagement Accept opens', async () => {
     vi.stubGlobal('confirm', vi.fn(() => true))
     api.acceptProposalRequest = vi.fn(async () => ({
       proposal: WON,
-      clientId: 'client-new',
-      createdClient: true,
+      clientId: null,
       packageApplied: false,
       engagementId: 'eng-7',
     }))
     renderEditorWithEngagements()
     await waitFor(() => expect(api.listPackagesRequest).toHaveBeenCalled())
-    fireEvent.change(await screen.findByLabelText('Package to apply on accept'), { target: { value: 'pkg-1' } })
+    fireEvent.change(await screen.findByLabelText('Package to apply when signed'), { target: { value: 'pkg-1' } })
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
-    expect(await screen.findByText(/the package could not be applied/)).toBeTruthy()
-    const links = screen.getAllByRole('link', { name: 'Open the engagement' })
-    expect(links.some((link) => link.getAttribute('href') === '/engagements/eng-7')).toBe(true)
-    expect(screen.queryByText('Engagement editor')).toBeNull()
+    expect(await screen.findByText('Engagement editor')).toBeTruthy()
+    expect(api.acceptProposalRequest).toHaveBeenCalledWith('prop-1', { packageId: 'pkg-1' })
+  })
+
+  it('"Open the client" waits for the engagement to be signed', async () => {
+    api.getProposalRequest = vi.fn(async () => WON)
+    api.listEngagementsRequest = vi.fn(async () => [{ id: 'eng-3', status: 'sent', clientId: null }])
+    const { unmount } = render(
+      <MemoryRouter initialEntries={['/proposals/prop-1']}>
+        <Routes>
+          <Route path="/proposals/:proposalId" element={<ProposalEditorPage />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    await screen.findByRole('link', { name: 'Open the engagement' })
+    expect(screen.queryByRole('link', { name: 'Open the client' })).toBeNull()
+    unmount()
+
+    api.listEngagementsRequest = vi.fn(async () => [{ id: 'eng-3', status: 'signed', clientId: 'client-signed' }])
+    renderEditorWithEngagements()
+    const link = await screen.findByRole('link', { name: 'Open the client' })
+    expect(link.getAttribute('href')).toBe('/clients/client-signed')
+  })
+
+  it('a proposal Won before engagements, with none drafted, still opens the client it created', async () => {
+    api.getProposalRequest = vi.fn(async () => WON_LEGACY)
+    renderEditorWithEngagements()
+    const link = await screen.findByRole('link', { name: 'Open the client' })
+    expect(link.getAttribute('href')).toBe('/clients/client-new')
+    expect(screen.getByRole('button', { name: 'Draft the engagement' })).toBeTruthy()
   })
 
   it('stays on the proposal when Accept drafted none', async () => {
