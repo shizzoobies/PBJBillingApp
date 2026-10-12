@@ -277,7 +277,7 @@ Sidebar: **Proposals**. Every prospect's estimate, letter, chat and outcome is k
 - **Letter** - **Draft the proposal** has the AI write the letter (Opening, What you told us, What we will do, Pricing, Terms, Next step) around the priced estimate; she edits the text; **Regenerate** replaces it after confirm; **Copy text**; **Preview PDF**; **Send to prospect** (address prefilled) emails the branded PDF; a badge shows delivery status (Delivered, Bounced, Spam) and a bounce/spam report notifies owners.
 - **Activity** - created, letter drafted, sends/delivery, Won or Closed as lost (note), and the chat transcript.
 
-**Questionnaires** (Proposals list): **Send questionnaire** emails the prospect a two-step link they fill in alone: about them, wanted services and software; then only the counts those services need (**Back** returns). **Fill in on the call** is one sheet of every question, incl. call-only ones. Answers start a draft (in **From the questionnaire** on its Estimate tab) and notify owners, with one starter line per service they picked, priced at the Basic tier. Step 1 requires business and contact name, email, phone, street address, city, state, ZIP, what the business does and its setup (a refused send names each); the call sheet does not. A Questionnaires block lists Waiting, Answered, Expired (**New link**, **Start draft** if one failed).
+**Questionnaires** (Proposals list): **Send questionnaire** emails the prospect a two-step link they fill in alone: about them, wanted services and software; then only the counts those services need (**Back** returns). **Fill in on the call** is one sheet of every question, incl. call-only ones. Answers start a draft (in **From the questionnaire** on its Estimate tab) and notify owners, with one starter line per service they picked (AR and AP start with all their lines), at the Basic tier; lines that need a count only asked on a call show Not yet priced. Step 1 requires business and contact name, email, phone, street address, city, state, ZIP, what the business does and its setup (a refused send names each); the call sheet does not. A Questionnaires block lists Waiting, Answered, Expired (**New link**, **Start draft** if one failed).
 
 Header actions: **Accept** marks the proposal Won and turns a new prospect into an Onboarding client billed monthly at the proposal's total (firm-default terms, an optional package, and any plans ticked in the **Plans** picker beside it; the confirm names them); an existing client is asked before any fee change; invoices untouched. Accept also drafts the engagement letter and opens it (the confirm says so). Once Won, **Open the client** and **Open the engagement** (or **Draft the engagement** if none) jump there. **Close as lost** (optional note; status Closed/Lost), **Copy to new proposal**, **Delete** (drafts only).
 
@@ -679,13 +679,13 @@ Header actions: **Accept** marks the proposal Won and turns a new prospect into 
 
 ## Install as an app (computer and phone)
 
-> The app can be installed so it opens in its own window with its own taskbar or home-screen icon - no browser tabs, no address bar. Nothing changes about how it works: it is the same live app, always current, same sign-in.
+> The app can be installed to open in its own window with its own taskbar or home-screen icon - no tabs, no address bar. It is the same live app, always current, same sign-in.
 >
 > **On Windows (Edge):** open the app, click the ⋯ menu -> **Apps** -> **Install this site as an app** (Chrome: ⋮ menu -> **Cast, save, and share** -> **Install page as app**, or the install icon in the address bar). It then lives in the Start menu and taskbar like any program.
 >
 > **On iPhone (Safari):** Share button -> **Add to Home Screen**. On Android (Chrome): ⋮ menu -> **Add to home screen** / **Install app**.
 >
-> There is nothing to update or uninstall-to-upgrade - every new feature is just there, and the same refresh notice appears when a new version ships.
+> Nothing to update or reinstall - new features just appear, with the same refresh notice when a version ships.
 
 ## Notifications
 

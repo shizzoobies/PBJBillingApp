@@ -4399,8 +4399,9 @@ const server = createServer(async (request, response) => {
             { 'Retry-After': '300' },
           )
         // Two limits: 30 opens per source address in five minutes, so nobody can
-        // walk the token space, and 5 submissions per token, so one link cannot
-        // be used to hammer the store.
+        // walk the token space, and 10 posts per token (a two-step run is 2; a
+        // refusal, Back and a resend reach 5), so one link cannot be used to
+        // hammer the store.
         if (isRateLimited(`ip:${getClientIp(request)}`, { max: 30, bucket: questionnaireAttempts })) {
           tooMany()
           return
@@ -4447,7 +4448,7 @@ const server = createServer(async (request, response) => {
         }
 
         // ---- POST ----
-        if (isRateLimited(`token:${linkToken}`, { max: 5, bucket: questionnaireAttempts })) {
+        if (isRateLimited(`token:${linkToken}`, { max: 10, bucket: questionnaireAttempts })) {
           tooMany()
           return
         }

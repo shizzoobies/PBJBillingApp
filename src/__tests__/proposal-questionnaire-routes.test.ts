@@ -186,7 +186,8 @@ describe('the public questionnaire route', () => {
     expect(ipLimit).toBeGreaterThan(shape)
     expect(lookup).toBeGreaterThan(ipLimit)
     expect(publicBlock).toContain('{ max: 30, bucket: questionnaireAttempts }')
-    expect(publicBlock).toContain('{ max: 5, bucket: questionnaireAttempts }')
+    // 10 posts per token since the two steps (a normal run is 2 posts).
+    expect(publicBlock).toContain('{ max: 10, bucket: questionnaireAttempts }')
   })
 
   it('answers an unknown and a malformed token with the same page and status', () => {

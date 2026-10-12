@@ -36281,9 +36281,9 @@ describe('proposal questionnaires (file backend)', () => {
     })
     expect(proposal.prospect.notes).toContain('Bakery')
     expect(proposal.inputs).toEqual({ transactions: 120 })
-    // "Monthly" was ticked: ONE starter line (its first, at the Basic tier), priced on arrival.
+    // "Monthly" was ticked: ONE starter line (monthly transactions, Basic tier), priced on arrival.
     expect(proposal.selections.map((entry) => entry.serviceId)).toEqual([
-      'monthly-weekly-transactions-basic',
+      'monthly-monthly-transactions-basic',
     ])
     expect(proposal.pricingSnapshot.totals.monthly).toBeGreaterThan(0)
     expect(proposal.prospect.notes).toContain('Monthly')
@@ -36386,6 +36386,20 @@ describe('proposal questionnaires (file backend)', () => {
       await expect(store.saveProposalQuestionnairePartial({}, STEP_ONE)).rejects.toMatchObject({
         reason: 'missing',
       })
+    })
+
+    it('the send and a withdrawal both clear the kept step 1 (the answers hold it, or nothing should)', async () => {
+      const sent = await store.createProposalQuestionnaire({ mode: 'link' })
+      const kept = await store.saveProposalQuestionnairePartial({ token: sent.token }, STEP_ONE)
+      const submitted = await store.submitProposalQuestionnaire({ token: sent.token }, kept.partialAnswers)
+      expect(submitted.partialAnswers).toEqual({})
+      expect(submitted.answers).toMatchObject({ company: 'Acme Books' })
+      expect((await store.getProposalQuestionnaire(sent.id)).partialAnswers).toEqual({})
+
+      const taken = await store.createProposalQuestionnaire({ mode: 'link' })
+      await store.saveProposalQuestionnairePartial({ token: taken.token }, STEP_ONE)
+      const withdrawn = await store.withdrawProposalQuestionnaire(taken.id)
+      expect(withdrawn.partialAnswers).toEqual({})
     })
 
     it('a new link forgets the half-filled step 1, so a re-sent link shows nobody else’s answers', async () => {
@@ -36560,6 +36574,21 @@ describe('proposal questionnaires (postgres branch)', () => {
     expect(updates[0].text).toMatch(/expires_at is null or expires_at > now\(\)/)
     expect(updates[0].text).toMatch(/token is not distinct from \$3/)
     expect(updates[0].params[2]).toBe('T'.repeat(43))
+    // The same write clears a sent questionnaire's kept step 1.
+    expect(updates[0].text).toMatch(/partial_answers = '\{\}'::jsonb/)
+  })
+
+  it('withdraws with one conditional update that also clears the kept step 1', async () => {
+    const fake = questionnairePool((sql) => {
+      if (/^select .* from proposal_questionnaires where id/is.test(sql)) return [openRow()]
+      if (/^update proposal_questionnaires/i.test(sql)) return [openRow({ status: 'withdrawn' })]
+      return []
+    })
+    await postgresStore(fake).withdrawProposalQuestionnaire('pq-1')
+    const updates = fake.statements.filter((s) => /^update proposal_questionnaires/i.test(s.text))
+    expect(updates).toHaveLength(1)
+    expect(updates[0].text).toMatch(/set status = 'withdrawn', partial_answers = '\{\}'::jsonb, updated_at = now\(\)/)
+    expect(updates[0].text).toMatch(/where id = \$1 and status = 'open'/)
   })
 
   it('answers the loser of a submit race from the row that beat it', async () => {

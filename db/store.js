@@ -17303,6 +17303,9 @@ export class AppDataStore {
    * What is wrong with the answers (a link with no email) is refused BEFORE the
    * claim, so a mistake does not use up the one submission.
    *
+   * A sent questionnaire's kept step 1 is cleared by the same write - the
+   * answers now hold it.
+   *
    * Returns the submitted questionnaire. Starting the draft is its own call
    * (`startProposalQuestionnaireDraft`): a draft that fails to build must not
    * undo an answer the prospect already gave.
@@ -17325,7 +17328,8 @@ export class AppDataStore {
     if (this.pool) {
       const { rows } = await this.pool.query(
         `update proposal_questionnaires
-            set status = 'submitted', answers = $2::jsonb, submitted_at = now(), updated_at = now()
+            set status = 'submitted', answers = $2::jsonb, partial_answers = '{}'::jsonb,
+                submitted_at = now(), updated_at = now()
           where id = $1 and token is not distinct from $3
             and status = 'open' and (expires_at is null or expires_at > now())
           returning ${PROPOSAL_QUESTIONNAIRE_COLUMNS}`,
@@ -17343,6 +17347,7 @@ export class AppDataStore {
       const now = nowIso()
       target.status = 'submitted'
       target.answers = answers
+      target.partialAnswers = {}
       target.submittedAt = now
       target.updatedAt = now
       return { result: AppDataStore.mapProposalQuestionnaire(target), changed: true }
@@ -17423,7 +17428,10 @@ export class AppDataStore {
     }
   }
 
-  /** Take a questionnaire back. Only an open one: an answered one is a record. */
+  /**
+   * Take a questionnaire back. Only an open one: an answered one is a record. A
+   * sent questionnaire's kept step 1 goes with it.
+   */
   async withdrawProposalQuestionnaire(id) {
     const current = await this.getProposalQuestionnaire(id)
     if (!current) return null
@@ -17431,7 +17439,7 @@ export class AppDataStore {
     if (this.pool) {
       const { rows } = await this.pool.query(
         `update proposal_questionnaires
-            set status = 'withdrawn', updated_at = now()
+            set status = 'withdrawn', partial_answers = '{}'::jsonb, updated_at = now()
           where id = $1 and status = 'open'
           returning ${PROPOSAL_QUESTIONNAIRE_COLUMNS}`,
         [id],
@@ -17445,6 +17453,7 @@ export class AppDataStore {
         throw AppDataStore.questionnaireClosedError(AppDataStore.mapProposalQuestionnaire(target))
       }
       target.status = 'withdrawn'
+      target.partialAnswers = {}
       target.updatedAt = nowIso()
       return { result: AppDataStore.mapProposalQuestionnaire(target), changed: true }
     })
