@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-10-06. Everything below is committed on
+Written 2026-07-21, last updated 2026-10-12. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -25,7 +25,37 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-12, 17:15Z - READ THIS FIRST):** `main` = `6cb77b8` (+ this handoff), deployed,
+**State right now (2026-10-12, 21:30Z - READ THIS FIRST):** `main` = `db58327` (+ this handoff), deployed, `/health` 200,
+voice re-provisioned after each of the five ships below. Since the 17:15Z paragraph: **`8dbbdb6`** built Brittany's two
+email answers (signing a prospect's engagement also opens the onboarding case at the Onboarding stage, Proposal stage
+recorded done; "Mark as signed" on the client card's Engagements list; "Start onboarding" on a client with no team assigns
+the clicking owner). Then **her five checklist submissions** (they arrive in legacy tracker status `sent`, which
+`tracker-list.mjs` HIDES - run `--all`): `featreq-0a7a4358` was the stall (6cb77b8); the other four were built in four
+parallel worktree lanes, each with one independent Opus review + fix round, and shipped one at a time, each rebased or
+merged onto the previous main: **`c2a7a43`** "Open next step now" (POST `/api/checklists/:id/open-next-stage`; allowed
+only when every open step is Waiting; 409 `next_stage_refused` with reasons incl. `date_taken`; `case_completed` now
+waits for every stage; a 23505 double spawn reads as `already_spawned`); **`5947fa6`** recipe Step 1 ("Start the first
+one now" creates the REAL Step 1 through `generateChecklistFromTemplate` on the floored cycle - before this it made an
+unlinked one-off, which is why some recipes never reached Step 2; editor says "Show before Next due (days)", previews
+"Next cycle (Next due <date>): due X" per step, warns when Step 1 would appear after it is due; Specific date retired,
+"Remove fixed date" button; `saved` waiters settle on a 40 s timeout / sign-out / reload); **`fc05ca4`** plan + package
+checklists (server copies now keep the WHOLE recipe via `lib/checklist-template-copy.js` - the old `_clientTemplateCopy`
+dropped scheduled months, lead days, board column and sub-items; Apply also copies added plans' bundles; covered-plan
+leftovers get their own group + nudge; plan-chip "Set up" offer; "Link existing checklist" stamps `source_template_id`
+onto a hand-made twin; Apply waits with "Saving..." while a bulk save is in flight); **`db58327`** Board column per step
+(`checklist_template_stages.category_id`, look-first ALTER verified by rolled-back prod trial; precedence task > step >
+recipe; a tab on an old bundle that omits the key keeps the stored column; explicit null clears). Her four tickets
+(`featreq-8b54d117`, `8bdc5ec5`, `2b067744`, `3e81b386`) are Shipped in her words; review leftovers from all four lanes
+are items 6-9 on `featreq-05e1610d` (NOT built). **DECISIONS:** lead days stay measured from Next due, NOT Step 1's date
+(a prod scan showed her quarterly recipes rely on it; gating on the step would move 40+ recipes). **OPEN FOR ALEX:** the
+10-10 package applies left 17 bad recipe copies on 9 clients (8 "Monthly Reconciliations" with empty months that never
+run; 9 monthly "Reconciliations with Review" copies due 10-30 beside her quarterly hand-made ones) - proposal: deactivate
+the 17, stamp the twins, decide I-95; needs his yes before 2026-10-30, snapshot + rolled-back trial first. **OPEN FOR
+BRITTANY (needs_input in-app):** `featreq-dc992522`, `af5391e2`, `e5ae8279`, `acdd0c84`. **GOTCHA:** the auto-mode
+classifier refused `git rebase main` in one lane (for the builder and the orchestrator) while allowing it in three others;
+`git merge main --no-edit` in the lane is the no-rewrite fallback and ship.sh accepts the merge tip. Lanes: only the
+primary tree remains (I/J/K/L removed). Suite 377 files / 8,848 tests; manifest 204,864 bytes (TRIM FIRST).
+**Earlier (2026-10-12, 17:15Z):** `main` = `6cb77b8` (+ this handoff), deployed,
 `/health` 200, voice re-provisioned. Since the 06:10Z paragraph below: **the Bright Tower stall** - Brittany texted
 that "Quarterly Reconciliations with Review" step 2 of 5 never appeared. Diagnosis (read-only): two cases
 (Bright Tower 10-01, XAct 10-05) were all-done at stage 1 with no stage-2 row; both first stages had been generated
