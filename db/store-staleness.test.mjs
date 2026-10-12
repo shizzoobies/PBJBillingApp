@@ -46352,7 +46352,7 @@ describe('engagement letters (Postgres statements)', () => {
 import { EngagementStateError } from './store.js'
 import { DEFAULT_ENGAGEMENT_SECTIONS } from '../lib/engagement-sections.js'
 import { assembleEngagement } from '../lib/engagement-assemble.js'
-import { letterTemplateHash } from '../lib/letter-template.js'
+import { engagementHash } from '../lib/engagement-hash.js'
 
 async function clearEngagements() {
   const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
@@ -46554,7 +46554,7 @@ describe('engagements (file backend)', () => {
     expect(engagement.emailBody).toBe(expected.emailBody)
     expect(engagement.letterBody).toBe(expected.letterBody)
     expect(engagement.sectionKeys).toEqual(expected.sectionKeys)
-    expect(engagement.templateHash).toBe(letterTemplateHash(engagement))
+    expect(engagement.templateHash).toBe(engagementHash(engagement))
 
     expect(await store.getEngagement(engagement.id)).toEqual(engagement)
     expect((await readAuth()).engagements).toHaveLength(1)
@@ -46590,7 +46590,7 @@ describe('engagements (file backend)', () => {
     )
   })
 
-  it('edits a draft: text, retainer, plans and party; the hash follows the text', async () => {
+  it('edits a draft: text, retainer, plans and party; the hash follows all of them', async () => {
     const draft = await draftFromProspect()
     const edited = await store.updateEngagement(draft.id, {
       subject: '  Our engagement  ',
@@ -46604,11 +46604,12 @@ describe('engagements (file backend)', () => {
       emailBody: draft.emailBody,
       letterBody: 'Dear {{contact_name}},\n\n**Scope**\n\nAll of it.',
       retainerAmount: 500.56,
-      planIds: ['plan-books', 'plan-x'],
+      // A plan the workspace does not know is dropped, as Accept drops it.
+      planIds: ['plan-books'],
       party: { ...draft.party, email: 'owner@acme.test' },
     })
     expect(edited.party).not.toHaveProperty('notes')
-    expect(edited.templateHash).toBe(letterTemplateHash(edited))
+    expect(edited.templateHash).toBe(engagementHash(edited))
     expect(edited.templateHash).not.toBe(draft.templateHash)
 
     expect((await store.updateEngagement(draft.id, { retainerAmount: 0 })).retainerAmount).toBeNull()
@@ -46776,6 +46777,88 @@ describe('engagements (file backend)', () => {
     const other = await draftFromProspect()
     await store.markEngagementSent(other.id, { to: ['pat@acme.test'], ok: true, providerId: 're_9' })
     expect((await store.voidEngagement(other.id, {})).status).toBe('void')
+  })
+
+  it('the hash covers the retainer and the party, not only the text: a second tab cannot slip either past Send', async () => {
+    const draft = await draftFromProspect()
+    expect(draft.templateHash).toBe(engagementHash(draft))
+    const retainer = await store.updateEngagement(draft.id, { retainerAmount: 250 })
+    expect(retainer.templateHash).not.toBe(draft.templateHash)
+    expect(retainer.templateHash).toBe(engagementHash(retainer))
+    const moved = await store.updateEngagement(draft.id, { party: { email: 'someone-else@acme.test' } })
+    expect(moved.templateHash).not.toBe(retainer.templateHash)
+    const renamed = await store.updateEngagement(draft.id, { party: { addressLine1: '10 Oak Ave' } })
+    expect(renamed.templateHash).not.toBe(moved.templateHash)
+    // A plan or package change does not touch what is sent, so the hash stays.
+    const planned = await store.updateEngagement(draft.id, { planIds: ['plan-books'] })
+    expect(planned.templateHash).toBe(renamed.templateHash)
+    // Re-assembling keeps the party and retainer in the key.
+    const rebuilt = await store.reassembleEngagement(draft.id, {})
+    expect(rebuilt.templateHash).toBe(engagementHash(rebuilt))
+  })
+
+  it('drops a dangling plan id on edit, keeping the ones the workspace knows', async () => {
+    const draft = await draftFromProspect()
+    const edited = await store.updateEngagement(draft.id, { planIds: ['plan-gone', 'plan-books'] })
+    expect(edited.planIds).toEqual(['plan-books'])
+    expect((await store.updateEngagement(draft.id, { planIds: ['plan-gone'] })).planIds).toEqual([])
+  })
+
+  it('refuses an over-long section title or body instead of cutting it short', async () => {
+    const library = await store.listEngagementSections()
+    for (const bad of [
+      library.map((section) => (section.key === 'terms' ? { ...section, body: 'x'.repeat(20001) } : section)),
+      library.map((section) => (section.key === 'terms' ? { ...section, title: 't'.repeat(121) } : section)),
+    ]) {
+      const error = await store.saveEngagementSections(bad).catch((caught) => caught)
+      expect(error).toBeInstanceOf(EngagementStateError)
+      expect(error.reason).toBe('invalid')
+      expect(error.message).toMatch(/too long/)
+    }
+    // Exactly at the limit is fine.
+    const atLimit = library.map((section) => (section.key === 'terms' ? { ...section, body: 'x'.repeat(20000) } : section))
+    const saved = await store.saveEngagementSections(atLimit)
+    expect(saved.find((section) => section.key === 'terms').body).toHaveLength(20000)
+  })
+
+  it('signing an engagement that does not exist is "not found", whatever the date says', async () => {
+    expect(await store.signEngagement('eng-missing', { signedOn: 'not a day' })).toBeNull()
+  })
+
+  it('recovers a Won proposal with no engagement: drafts one, then refuses a second', async () => {
+    const proposal = await prospectProposal()
+    const notWon = await store.draftEngagementForProposal(proposal.id, {}).catch((caught) => caught)
+    expect(notWon).toBeInstanceOf(EngagementStateError)
+    expect(notWon.reason).toBe('not_won')
+
+    // A Won proposal whose Accept could not draft its engagement.
+    vi.spyOn(store, 'createEngagementFromProposal').mockRejectedValueOnce(new Error('disk full'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const accepted = await store.acceptProposal(proposal.id, {})
+    expect(accepted.engagementId).toBeNull()
+    expect(await store.listEngagements({ proposalId: proposal.id })).toEqual([])
+
+    const drafted = await store.draftEngagementForProposal(proposal.id, { createdBy: 'emp-patrice' })
+    expect(drafted).toMatchObject({
+      kind: 'original',
+      status: 'draft',
+      proposalId: proposal.id,
+      clientId: accepted.clientId,
+      createdBy: 'emp-patrice',
+      // The proposal is linked to its client by now, so the party is the client's.
+      party: { company: 'Acme Books', email: 'pat@acme.test' },
+    })
+
+    const twice = await store.draftEngagementForProposal(proposal.id, {}).catch((caught) => caught)
+    expect(twice).toBeInstanceOf(EngagementStateError)
+    expect(twice.reason).toBe('exists')
+    expect(twice.engagementId).toBe(drafted.id)
+
+    // A void one does not count: she can start again.
+    await store.voidEngagement(drafted.id, {})
+    const again = await store.draftEngagementForProposal(proposal.id, {})
+    expect(again.id).not.toBe(drafted.id)
+    expect(await store.draftEngagementForProposal('prop-missing', {})).toBeNull()
   })
 
   it('lists newest first, filtered by client, proposal or status, without bodies or the log', async () => {
@@ -46971,6 +47054,7 @@ describe('engagements (Postgres statements)', () => {
     })
     pgStore.getClientById = async (id) => (client && client.id === id ? client : null)
     pgStore.listPackages = async () => [{ id: 'pkg-1', name: 'Core', planIds: [], templateIds: [] }]
+    pgStore.read = async () => ({ plans: [{ id: 'p1', name: 'Bookkeeping' }] })
     return pgStore
   }
 
@@ -47087,6 +47171,18 @@ describe('engagements (Postgres statements)', () => {
     expect(fake.statements.some((s) => /^delete\b/i.test(s.text))).toBe(false)
   })
 
+  it('seeds the library inside one transaction', async () => {
+    const fake = engagementPool()
+    await engagementStore(fake).listEngagementSections()
+    const texts = fake.statements.map((statement) => statement.text)
+    const beginAt = texts.findIndex((text) => /^begin$/i.test(text))
+    const commitAt = texts.findIndex((text) => /^commit$/i.test(text))
+    const inserts = texts.map((text, index) => (/^insert into engagement_sections /i.test(text) ? index : -1)).filter((index) => index >= 0)
+    expect(beginAt).toBeGreaterThan(-1)
+    expect(Math.min(...inserts)).toBeGreaterThan(beginAt)
+    expect(Math.max(...inserts)).toBeLessThan(commitAt)
+  })
+
   it('drafts from a proposal with one insert, the snapshot money untouched and the figures as jsonb', async () => {
     const fake = engagementPool()
     const pgStore = engagementStore(fake)
@@ -47109,21 +47205,21 @@ describe('engagements (Postgres statements)', () => {
       retainerAmount: 630,
       party: { company: 'Acme Books', contactName: 'Pat Doe', email: 'pat@acme.test' },
     })
-    expect(engagement.templateHash).toBe(letterTemplateHash(engagement))
+    expect(engagement.templateHash).toBe(engagementHash(engagement))
   })
 
   it('edits with a compare-and-set on the editable statuses, and refuses a signed one', async () => {
     const fake = engagementPool()
     const pgStore = engagementStore(fake)
     const draft = await pgStore.createEngagementFromProposal(proposal(), {})
-    const edited = await pgStore.updateEngagement(draft.id, { subject: 'New', planIds: ['p1'], packageId: 'pkg-1' })
+    const edited = await pgStore.updateEngagement(draft.id, { subject: 'New', planIds: ['p1', 'p-gone'], packageId: 'pkg-1' })
     const [update] = fake.matching(/^update engagements set subject = \$2/i)
     expect(update.text).toMatch(
       /^update engagements set subject = \$2, email_body = \$3, letter_body = \$4, retainer_amount = \$5, package_id = \$6, plan_ids = \$7::text\[\], party = \$8::jsonb, template_hash = \$9, updated_at = now\(\) where id = \$1 and status in \('draft', 'sent'\) returning /i,
     )
     expect(update.params[6]).toEqual(['p1'])
     expect(edited).toMatchObject({ subject: 'New', planIds: ['p1'], packageId: 'pkg-1' })
-    expect(edited.templateHash).toBe(letterTemplateHash(edited))
+    expect(edited.templateHash).toBe(engagementHash(edited))
 
     // A sign landing between the read and the write: the read still says draft, the
     // compare-and-set matches nothing, and the refusal is worded from the row as it is now.
@@ -47146,7 +47242,7 @@ describe('engagements (Postgres statements)', () => {
     const sent = await pgStore.markEngagementSent(draft.id, { to: ['pat@acme.test'], ok: true, providerId: 're_1', at: '2026-10-09T15:00:00.000Z' })
     const [update] = fake.matching(/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb, status = case/i)
     expect(update.text).toMatch(
-      /status = case when \$3 and status = 'draft' then 'sent' else status end, sent_at = case when \$3 then coalesce\(sent_at, \$4::timestamptz\) else sent_at end/i,
+      /status = case when \$3::boolean and status = 'draft' then 'sent' else status end, sent_at = case when \$3::boolean then coalesce\(sent_at, \$4::timestamptz\) else sent_at end/i,
     )
     expect(update.params[2]).toBe(true)
     expect(sent).toMatchObject({ status: 'sent', sentAt: '2026-10-09T15:00:00.000Z' })

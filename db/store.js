@@ -41,7 +41,7 @@ import {
 import { proposalOutcomeAction, proposalOutcomeWords } from '../lib/proposal-outcomes.js'
 import { DEFAULT_ENGAGEMENT_SECTIONS, sanitizeEngagementSections } from '../lib/engagement-sections.js'
 import { assembleEngagement } from '../lib/engagement-assemble.js'
-import { letterTemplateHash } from '../lib/letter-template.js'
+import { engagementHash } from '../lib/engagement-hash.js'
 import {
   QUESTIONNAIRE_EXPIRY_DAYS,
   answersToProposalSeed,
@@ -26252,15 +26252,19 @@ export class AppDataStore {
       const select = `select ${ENGAGEMENT_SECTION_COLUMNS} from engagement_sections order by sort_order, key`
       let { rows } = await this.pool.query(select)
       if (rows.length === 0) {
-        // Two first reads at once both seed: the unique key makes the second a no-op.
-        for (const seed of seeds()) {
-          await this.pool.query(
-            `insert into engagement_sections (id, key, title, body, trigger, sort_order)
-             values ($1, $2, $3, $4, $5::jsonb, $6)
-             on conflict (key) do nothing`,
-            [seed.id, seed.key, seed.title, seed.body, JSON.stringify(seed.trigger), seed.sortOrder],
-          )
-        }
+        // One transaction, so a failure part-way never leaves half a library (which, not
+        // being empty, would never be seeded again). Two first reads at once both seed:
+        // the unique key makes the second a no-op.
+        await this._withTransaction(async (dbClient) => {
+          for (const seed of seeds()) {
+            await dbClient.query(
+              `insert into engagement_sections (id, key, title, body, trigger, sort_order)
+               values ($1, $2, $3, $4, $5::jsonb, $6)
+               on conflict (key) do nothing`,
+              [seed.id, seed.key, seed.title, seed.body, JSON.stringify(seed.trigger), seed.sortOrder],
+            )
+          }
+        })
         rows = (await this.pool.query(select)).rows
       }
       return rows.map(mapEngagementSectionRow)
@@ -26286,8 +26290,9 @@ export class AppDataStore {
    * Save the library as she edited it: every listed section is upserted by key
    * and active; every stored key NOT listed (or listed with `active: false`) is
    * deactivated, never deleted - an engagement assembled from it still names it.
-   * A list the sanitizer cannot take whole (a bad key, an over-long body, a
-   * duplicate key) is refused with reason 'invalid' and nothing is written.
+   * A list it cannot take whole - a bad or duplicate key, more than 60 sections,
+   * a title over 120 characters or a body over 20,000 - is refused with reason
+   * 'invalid' and nothing is written (nothing is silently cut short).
    * Returns the whole library, as `listEngagementSections` does.
    */
   async saveEngagementSections(list, { updatedBy = null } = {}) {
@@ -26296,6 +26301,17 @@ export class AppDataStore {
       throw new EngagementStateError('Send the sections as a list.', 'invalid')
     }
     const wanted = list.filter((entry) => entry?.active !== false)
+    const tooLong = wanted.find(
+      (entry) =>
+        (typeof entry?.title === 'string' && entry.title.trim().length > 120) ||
+        (typeof entry?.body === 'string' && entry.body.replace(/\r\n?/g, '\n').trim().length > ENGAGEMENT_BODY_MAX),
+    )
+    if (tooLong) {
+      throw new EngagementStateError(
+        `The section "${String(tooLong.title || tooLong.key || '').trim().slice(0, 60)}" is too long: a title can be at most 120 characters and a body at most 20,000. Nothing was saved.`,
+        'invalid',
+      )
+    }
     const clean = sanitizeEngagementSections(wanted)
     if (clean.length !== wanted.length) {
       throw new EngagementStateError(
@@ -26416,6 +26432,7 @@ export class AppDataStore {
           (!status || row.status === status),
       )
       .sort((a, b) => String(b.row.createdAt).localeCompare(String(a.row.createdAt)) || b.index - a.index)
+      .slice(0, ENGAGEMENT_LIST_LIMIT)
       .map(({ row }) => mapEngagementRow(row, { list: true }))
   }
 
@@ -26559,10 +26576,11 @@ export class AppDataStore {
       retainerAmount: engagementRetainer(figures.totals.monthly),
       packageId: null,
       planIds: [],
-      templateHash: letterTemplateHash(texts),
+      templateHash: null, // set below from the whole row
       emailLog: [],
       createdBy,
     }
+    row.templateHash = engagementHash(row)
     if (this.pool) {
       const { rows } = await this.pool.query(
         `insert into engagements
@@ -26605,6 +26623,31 @@ export class AppDataStore {
     })
   }
 
+  /**
+   * The recovery path for a Won proposal with no engagement letter (the draft failed
+   * at Accept, or the proposal was Won before engagements existed): draft its
+   * Original now - party from the linked client when the proposal has one, else the
+   * prospect. Refuses ('not_won') a proposal that is not accepted, and ('exists') one
+   * that already has an engagement that is not void (`engagementId` names it).
+   * Returns the new engagement, or null when there is no such proposal.
+   */
+  async draftEngagementForProposal(proposalId, { createdBy = null } = {}) {
+    const proposal = await this.getProposal(proposalId)
+    if (!proposal) return null
+    if (proposal.status !== 'accepted') {
+      throw new EngagementStateError('Only a Won proposal gets an engagement letter.', 'not_won')
+    }
+    const existing = (await this.listEngagements({ proposalId: proposal.id })).find(
+      (engagement) => engagement.status !== 'void',
+    )
+    if (existing) {
+      const error = new EngagementStateError('This proposal already has an engagement letter.', 'exists')
+      error.engagementId = existing.id
+      throw error
+    }
+    return this.createEngagementFromProposal(proposal, { kind: 'original', createdBy })
+  }
+
   /** A refusal for a write the engagement's status does not allow, worded from the status. */
   static _engagementStatusRefusal(status, what) {
     return new EngagementStateError(
@@ -26627,7 +26670,7 @@ export class AppDataStore {
       throw AppDataStore._engagementStatusRefusal(current.status, 'edited')
     }
     const next = await this._engagementPatched(current, patch ?? {})
-    const templateHash = letterTemplateHash(next)
+    const templateHash = engagementHash(next)
     if (this.pool) {
       const { rows } = await this.pool.query(
         `update engagements
@@ -26712,7 +26755,11 @@ export class AppDataStore {
       if (!Array.isArray(patch.planIds) || patch.planIds.some((planId) => typeof planId !== 'string' || !planId)) {
         throw invalid('Choose the plans from the list.')
       }
-      const planIds = [...new Set(patch.planIds)]
+      // A plan id the workspace does not know (deleted, or never there) is dropped, the
+      // way Accept drops one: plan_ids has no foreign key, and a dangling id would
+      // follow the engagement onto the client at signing.
+      const known = new Set(((await this.read()).plans ?? []).map((plan) => plan.id))
+      const planIds = [...new Set(patch.planIds)].filter((planId) => known.has(planId))
       if (planIds.length > ENGAGEMENT_PLAN_IDS_MAX) throw invalid('That is more plans than one client can take.')
       next.planIds = planIds
     }
@@ -26748,7 +26795,7 @@ export class AppDataStore {
       letterBody: String(assembled.letterBody ?? '').slice(0, ENGAGEMENT_BODY_MAX),
     }
     const sectionKeys = (Array.isArray(assembled.sectionKeys) ? assembled.sectionKeys : []).map(String)
-    const templateHash = letterTemplateHash(texts)
+    const templateHash = engagementHash({ ...current, ...texts })
     if (this.pool) {
       const { rows } = await this.pool.query(
         `update engagements
@@ -26809,8 +26856,8 @@ export class AppDataStore {
       const { rows } = await this.pool.query(
         `update engagements
             set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
-                status = case when $3 and status = 'draft' then 'sent' else status end,
-                sent_at = case when $3 then coalesce(sent_at, $4::timestamptz) else sent_at end,
+                status = case when $3::boolean and status = 'draft' then 'sent' else status end,
+                sent_at = case when $3::boolean then coalesce(sent_at, $4::timestamptz) else sent_at end,
                 updated_at = now()
           where id = $1
           returning ${ENGAGEMENT_COLUMNS}`,
@@ -26891,6 +26938,8 @@ export class AppDataStore {
    * this same call). Returns the engagement, or null when there is none.
    */
   async signEngagement(id, { signedOn, note = '', userId = null, allowUnsent = false } = {}) {
+    const current = await this.getEngagement(id)
+    if (!current) return null
     if (!isRealDay(signedOn)) throw new EngagementStateError('Choose the day the letter was signed.', 'invalid')
     if (signedOn > firmToday()) throw new EngagementStateError('The signed date cannot be in the future.', 'invalid')
     const allowed = allowUnsent === true ? ['sent', 'draft'] : ['sent']
@@ -26901,8 +26950,6 @@ export class AppDataStore {
             'status',
           )
         : AppDataStore._engagementStatusRefusal(status, 'signed')
-    const current = await this.getEngagement(id)
-    if (!current) return null
     if (!allowed.includes(current.status)) throw refusal(current.status)
     const signedAt = firmNoonInstant(signedOn)
     const signedNote = String(note ?? '').trim().slice(0, ENGAGEMENT_NOTE_MAX) || null
