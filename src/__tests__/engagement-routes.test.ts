@@ -172,7 +172,8 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
   // tells the other tabs (before any mapping), a client-side refusal is a 409, and the
   // route answers the store's whole result (client, checklists, retainer, skips).
   it('sign broadcasts a created client before any refusal, maps client refusals to 409, and answers the result whole', () => {
-    const block = routeBlock(ROUTES[8].pattern, 3000)
+    // 4000: the route grew by the engagement_superseded line's own try (stage 4, review round 2).
+    const block = routeBlock(ROUTES[8].pattern, 4000)
     const broadcastAt = block.indexOf('if (error.createdClientId) broadcastDataChanged()')
     const masterAt = block.indexOf('error instanceof BillingMasterError || error instanceof PackageApplyError')
     const refusalAt = block.indexOf('sendEngagementRefusal(response, error)')
@@ -197,13 +198,16 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
   // Stage 4, review round 1: the predecessor a superseding letter replaced is in the
   // activity feed too, recorded after the signature in the same try.
   it('sign records engagement_superseded for the predecessor the store flipped', () => {
-    const block = routeBlock(ROUTES[8].pattern, 4000)
+    const block = routeBlock(ROUTES[8].pattern, 4600)
     const signedAt = block.indexOf("'engagement_signed'")
     const supersededAt = block.indexOf("'engagement_superseded'")
     expect(supersededAt).toBeGreaterThan(signedAt)
     expect(block).toContain('if (result.supersededId) {')
     expect(block).toContain('engagementActivityTarget({ party: result.engagement.party, id: result.supersededId })')
-    expect(supersededAt).toBeLessThan(block.indexOf("console.error('[engagements] could not record the signature:'"))
+    // Its own try/catch, after the signature's.
+    expect(supersededAt).toBeGreaterThan(block.indexOf("console.error('[engagements] could not record the signature:'"))
+    expect(block.indexOf("console.error('[engagements] could not record the superseded letter:'")).toBeGreaterThan(supersededAt)
+    expect(supersededAt).toBeLessThan(block.indexOf('sendJson(response, 200, result)'))
   })
 })
 

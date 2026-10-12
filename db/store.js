@@ -27524,7 +27524,7 @@ export class AppDataStore {
         throw refuse(
           `The engagement this letter replaces was already replaced by ${
             replacer ? `${replacer.id}${signedDay ? ` (signed ${engagementDayWords(signedDay)})` : ''}` : 'another letter'
-          }; accept the proposal again to supersede the current one.`,
+          }; void this letter, then use Draft the engagement on its proposal to draft one that supersedes the current engagement.`,
           'predecessor_replaced',
         )
       }
@@ -27656,6 +27656,20 @@ export class AppDataStore {
             why: `${clientName()} is billed ${client.billingMode === 'annual' ? 'annually' : 'hourly'}, so the letter's monthly fee was not put on them.`,
           })
         }
+      }
+      // A superseding letter with no monthly fee (annual-only, clean-up-only) replaces the
+      // engagement but not the fee: the client's fee stays, and that is said.
+      if (
+        current.kind === 'superseding' &&
+        !createdClient &&
+        monthly === 0 &&
+        (client.billingMode ?? 'hourly') === 'subscription' &&
+        Number(client.monthlyRate) > 0
+      ) {
+        skipped.push({
+          what: 'Monthly fee',
+          why: `This letter has no monthly fee, so ${clientName()}'s ${money(Number(client.monthlyRate))} per month was left as it is - change it on the client page if it no longer applies.`,
+        })
       }
       // Totals signing never bills by itself.
       if (annual > 0 && !(createdClient && monthly === 0)) {
@@ -28100,7 +28114,7 @@ export class AppDataStore {
             const now = await dbClient.query(`select status from engagements where id = $1`, [supersedesId])
             if (now.rows?.[0]?.status === 'superseded') {
               throw new EngagementStateError(
-                'The engagement this letter replaces was already replaced by another letter; accept the proposal again to supersede the current one.',
+                'The engagement this letter replaces was already replaced by another letter; void this letter, then use Draft the engagement on its proposal to draft one that supersedes the current engagement.',
                 'predecessor_replaced',
               )
             }
@@ -28139,17 +28153,18 @@ export class AppDataStore {
           ) {
             throw refusal(row?.status ?? null, row?.clientId ?? null, row?.templateHash ?? null)
           }
-          Object.assign(row, { status: 'signed', signedAt, signedBy: userId, signedNote, updatedAt: nowIso() })
           // The superseded predecessor, in the same slot (see the Postgres branch); one
-          // replaced by another letter since the checks refuses the whole signing.
+          // replaced by another letter since the checks refuses the whole signing - checked
+          // before this row is touched.
           let supersededId = null
           const predecessor = supersedesId ? authState.engagements.find((entry) => entry?.id === supersedesId) : null
           if (predecessor?.status === 'superseded') {
             throw new EngagementStateError(
-              'The engagement this letter replaces was already replaced by another letter; accept the proposal again to supersede the current one.',
+              'The engagement this letter replaces was already replaced by another letter; void this letter, then use Draft the engagement on its proposal to draft one that supersedes the current engagement.',
               'predecessor_replaced',
             )
           }
+          Object.assign(row, { status: 'signed', signedAt, signedBy: userId, signedNote, updatedAt: nowIso() })
           const old =
             predecessor && predecessor.status === 'signed' && predecessor.clientId === clientId ? predecessor : null
           if (old) {

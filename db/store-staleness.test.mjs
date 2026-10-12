@@ -49401,12 +49401,41 @@ describe('engagements stage 4: superseding (file backend)', () => {
     expect(error).toBeInstanceOf(EngagementStateError)
     expect(error.reason).toBe('predecessor_replaced')
     expect(error.message).toMatch(
-      new RegExp(`^The engagement this letter replaces was already replaced by ${first.engagement.id} \\(signed [A-Z][a-z]+ \\d{1,2}, \\d{4}\\); accept the proposal again to supersede the current one\\.$`),
+      new RegExp(`^The engagement this letter replaces was already replaced by ${first.engagement.id} \\(signed [A-Z][a-z]+ \\d{1,2}, \\d{4}\\); void this letter, then use Draft the engagement on its proposal to draft one that supersedes the current engagement\\.$`),
     )
     expect((await store.getEngagement(second.engagement.id)).status).toBe('draft')
     const client = (await store.read()).clients.find((row) => row.id === clientId)
     expect(client.planIds).toEqual(['plan-payroll'])
     expect(client.monthlyRate).toBe(fee)
+  })
+
+  // Review round 2: a superseding letter with no monthly fee keeps the client's, and says so.
+  it("a superseding letter with no monthly fee leaves the client's fee as it is, and says so", async () => {
+    const { clientId, fee } = await signedClient()
+    const { engagement } = await upsell(clientId, { mode: 'supersede', planIds: ['plan-books'] })
+    const authState = await readAuth()
+    authState.engagements.find((row) => row.id === engagement.id).figures.totals = { monthly: 0, annual: 1200 }
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    const result = await sign(engagement.id)
+    expect(result.monthlyRate).toBeNull()
+    expect(result.skipped).toContainEqual({
+      what: 'Monthly fee',
+      why: `This letter has no monthly fee, so Acme Books's ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(fee)} per month was left as it is - change it on the client page if it no longer applies.`,
+    })
+    expect((await store.read()).clients.find((row) => row.id === clientId).monthlyRate).toBe(fee)
+  })
+
+  // Through Draft the engagement, as the refusal says: void it, and the recovery draft
+  // supersedes the CURRENT engagement (the one that replaced the original).
+  it('after predecessor_replaced, void + Draft the engagement supersedes the current letter', async () => {
+    const { clientId } = await signedClient()
+    const first = await upsell(clientId, { mode: 'supersede', planIds: ['plan-payroll'] })
+    const second = await upsell(clientId, { mode: 'supersede', planIds: ['plan-books'] })
+    await sign(first.engagement.id)
+    expect((await sign(second.engagement.id).catch((caught) => caught)).reason).toBe('predecessor_replaced')
+    await store.voidEngagement(second.engagement.id)
+    const redrafted = await store.draftEngagementForProposal(second.proposal.id)
+    expect(redrafted).toMatchObject({ kind: 'superseding', supersedesId: first.engagement.id })
   })
 
   it('a missing predecessor still signs, with the skip line', async () => {

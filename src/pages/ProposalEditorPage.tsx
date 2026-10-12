@@ -593,11 +593,17 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     if (superseding && currentSigned) {
       // Supersede (stage 4): the letter REPLACES the current engagement when signed.
       const signedDay = engagementInstantLabel(currentSigned.signedAt) || 'earlier'
+      // Plans are SET only when the letter names some (its own or its package's).
+      const packagePlans = packages.find((entry) => entry.id === chosenPackage)?.planIds ?? []
+      const namesPlans = chosenPlans.length > 0 || packagePlans.length > 0
+      const currentFee = Number(client?.monthlyRate ?? 0)
       const replaced = [
         ...(client?.billingMode === 'subscription' && monthlyTotal > 0 ? [`the letter's ${monthly} replaces their monthly fee`] : []),
-        chosenPlans.length > 0 || chosenPackage
-          ? "their plans become exactly the letter's plans"
-          : 'their plans stay as they are (the letter names none)',
+        // A letter with no monthly fee leaves theirs (signing says so too).
+        ...(client?.billingMode === 'subscription' && monthlyTotal === 0 && currentFee > 0
+          ? [`their monthly fee stays at ${formatProposalMoney(currentFee)} (the letter has none)`]
+          : []),
+        namesPlans ? "their plans become exactly the letter's plans" : 'their plans stay as they are (the letter names none)',
         ...(softwareNames.length > 0
           ? [`${softwareList} ${softwareNames.length === 1 ? 'is' : 'are'} added as monthly Software expenses billed at cost`]
           : []),

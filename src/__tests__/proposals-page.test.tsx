@@ -1548,6 +1548,40 @@ describe('Accept and Decline', () => {
       )
     })
 
+    // Review round 2: plans are SET only when the letter names some; a letter with no
+    // monthly fee leaves theirs, and the question says so.
+    it('a package with no plans and no monthly fee: plans and fee both stay, and the question says so', async () => {
+      contextValue.data.clients = [
+        { id: 'client-1', name: 'Existing Co', billingMode: 'subscription', monthlyRate: 400 },
+      ] as unknown as Client[]
+      api.getProposalRequest = vi.fn(async () => ({
+        ...PROPOSAL,
+        clientId: 'client-1',
+        pricingSnapshot: {
+          ...PROPOSAL.pricingSnapshot,
+          totals: { monthly: 0, annual: 1200, oneTime: 0, cleanup: 0 },
+        },
+      }))
+      api.listEngagementsRequest = vi.fn(async () => [signedOriginal])
+      const confirm = vi.fn((message?: string) => (void message, true))
+      vi.stubGlobal('confirm', confirm)
+      renderEditor()
+      fireEvent.change(
+        await screen.findByRole('combobox', { name: 'What the letter does to the current engagement' }),
+        { target: { value: 'supersede' } },
+      )
+      await waitFor(() => expect(screen.getByRole('option', { name: 'Full service' })).toBeTruthy())
+      fireEvent.change(screen.getByRole('combobox', { name: 'Package to apply when signed' }), {
+        target: { value: 'pkg-1' },
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+      const question = String(confirm.mock.calls[0][0])
+      expect(question).toContain('their monthly fee stays at $400.00 (the letter has none)')
+      expect(question).toContain('their plans stay as they are (the letter names none)')
+      expect(question).not.toContain('replaces their monthly fee')
+      expect(question).not.toContain("become exactly the letter's plans")
+    })
+
     it('a no on the supersede question sends nothing', async () => {
       api.getProposalRequest = vi.fn(async () => ({ ...PROPOSAL, clientId: 'client-1' }))
       api.listEngagementsRequest = vi.fn(async () => [signedOriginal])
