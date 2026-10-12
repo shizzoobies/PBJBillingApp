@@ -43,7 +43,7 @@ function between(startAnchor: string, endAnchor: string, source = serverSource):
   return source.slice(start, end)
 }
 
-type Route = { name: string; pattern: RegExp; write: boolean; broadcastLength?: number }
+type Route = { name: string; pattern: RegExp; write: boolean; json?: boolean; broadcastLength?: number }
 
 /** Owner-only on every route; same-origin, JSON and a broadcast on every write. */
 function pinOwnerRoutes(routes: Route[]) {
@@ -60,7 +60,7 @@ function pinOwnerRoutes(routes: Route[]) {
         const block = routeBlock(route.pattern)
         expect(block).toContain('isCrossSiteOrigin(request)')
         expect(block).toContain("sendJson(response, 403, { error: 'Origin not allowed' })")
-        expect(block).toContain('isJsonContentType(request)')
+        if (route.json !== false) expect(block).toContain('isJsonContentType(request)')
       })
 
       it(`${route.name} tells the other sessions`, () => {
@@ -84,11 +84,11 @@ function pinOwnerRoutes(routes: Route[]) {
 const routesBlock = () =>
   between('// ---- Engagement letters (featreq-5e195707) ---', '// ---- Proposal questionnaires (owner)')
 /** The preview half: the two routes and the builder they share with Send. */
-const previewRoutes = () => between('// GET /api/letters/preview?clientId=', '// GET /api/letters/sends')
+const previewRoutes = () => between('// GET /api/letters/:id/preview?clientId=', '// GET /api/letters/:id/sends')
 const previewAssembly = () =>
   between('export async function assembleLetterPreview(', 'export async function sendOneLetter(', libSource)
 /** The send half: the route, and the one-client function it loops over. */
-const sendRoute = () => between('// POST /api/letters/send', '// ---- Proposal questionnaires (owner)')
+const sendRoute = () => between('// POST /api/letters/:id/send', '// ---- Proposal questionnaires (owner)')
 const sendOne = () =>
   between('export async function sendOneLetter(', 'export async function sendLetterBatch(', libSource)
 const sendBatch = () => libSource.slice(libSource.indexOf('export async function sendLetterBatch('))
@@ -100,33 +100,54 @@ const helpers = () => serverHelpers() + libSource
 describe('the letter routes are owner-only, same-origin and above the catch-all', () => {
   pinOwnerRoutes([
     {
-      name: 'GET /api/letters/template',
-      pattern: /normalizedPath === '\/api\/letters\/template' && request\.method === 'GET'/,
+      name: 'GET /api/letters',
+      pattern: /normalizedPath === '\/api\/letters' && request\.method === 'GET'/,
       write: false,
     },
     {
-      name: 'PUT /api/letters/template',
-      pattern: /normalizedPath === '\/api\/letters\/template' && request\.method === 'PUT'/,
+      name: 'POST /api/letters',
+      pattern: /normalizedPath === '\/api\/letters' && request\.method === 'POST'/,
       write: true,
     },
     {
-      name: 'GET /api/letters/preview',
-      pattern: /normalizedPath === '\/api\/letters\/preview' && request\.method === 'GET'/,
+      name: 'GET /api/letters/:id',
+      pattern: /letterMatch && request\.method === 'GET'/,
       write: false,
     },
     {
-      name: 'GET /api/letters/preview.pdf',
-      pattern: /normalizedPath === '\/api\/letters\/preview\.pdf' && request\.method === 'GET'/,
+      name: 'PUT /api/letters/:id',
+      pattern: /letterMatch && request\.method === 'PUT'/,
+      write: true,
+    },
+    {
+      name: 'PATCH /api/letters/:id',
+      pattern: /letterMatch && request\.method === 'PATCH'/,
+      write: true,
+    },
+    {
+      name: 'DELETE /api/letters/:id',
+      pattern: /letterMatch && request\.method === 'DELETE'/,
+      write: true,
+      json: false,
+    },
+    {
+      name: 'GET /api/letters/:id/preview',
+      pattern: /letterPreviewMatch && request\.method === 'GET'/,
       write: false,
     },
     {
-      name: 'GET /api/letters/sends',
-      pattern: /normalizedPath === '\/api\/letters\/sends' && request\.method === 'GET'/,
+      name: 'GET /api/letters/:id/preview.pdf',
+      pattern: /letterPreviewPdfMatch && request\.method === 'GET'/,
       write: false,
     },
     {
-      name: 'POST /api/letters/send',
-      pattern: /normalizedPath === '\/api\/letters\/send' && request\.method === 'POST'/,
+      name: 'GET /api/letters/:id/sends',
+      pattern: /letterSendsMatch && request\.method === 'GET'/,
+      write: false,
+    },
+    {
+      name: 'POST /api/letters/:id/send',
+      pattern: /letterSendMatch && request\.method === 'POST'/,
       write: true,
       broadcastLength: 12000,
     },
@@ -138,12 +159,68 @@ describe('the letter routes are owner-only, same-origin and above the catch-all'
     }
   })
 
-  it('the template PUT saves through the store and records the save', () => {
-    const block = routeBlock(/normalizedPath === '\/api\/letters\/template' && request\.method === 'PUT'/, 3200)
+  it('matches a letter id by one plain path segment, the same shape everywhere', () => {
+    for (const [name, suffix] of [
+      ['letterMatch', ''],
+      ['letterPreviewMatch', '\\/preview'],
+      ['letterPreviewPdfMatch', '\\/preview\\.pdf'],
+      ['letterSendsMatch', '\\/sends'],
+      ['letterSendMatch', '\\/send'],
+    ]) {
+      expect(routesBlock()).toContain(`const ${name} = normalizedPath.match(/^\\/api\\/letters\\/([A-Za-z0-9_-]+)${suffix}$/)`)
+    }
+  })
+
+  it('the letter PUT saves through the store, records the save, and answers 404 for a deleted letter', () => {
+    const block = routeBlock(/letterMatch && request\.method === 'PUT'/, 3400)
     expect(block).toContain('appDataStore.saveEngagementLetter({')
+    expect(block).toContain('id: letterMatch[1],')
     expect(block).toContain("'engagement_letter_saved'")
     // A refused shape is a 400 with the sentence, before the store is touched.
     expect(block.indexOf('letter_invalid')).toBeLessThan(block.indexOf('saveEngagementLetter('))
+    // The store saves only an existing letter; nothing is recreated.
+    expect(block.indexOf("error: 'letter_not_found'")).toBeLessThan(block.indexOf("'engagement_letter_saved'"))
+  })
+
+  it('a new letter and a rename need a unique name of 1 to 80 characters, checked before the store writes', () => {
+    expect(serverHelpers()).toContain('return name && name.length <= 80 ? name : null')
+    const create = routeBlock(/normalizedPath === '\/api\/letters' && request\.method === 'POST'/, 2400)
+    const rename = routeBlock(/letterMatch && request\.method === 'PATCH'/, 2400)
+    for (const [block, write] of [
+      [create, 'appDataStore.createEngagementLetter('],
+      [rename, 'appDataStore.renameEngagementLetter('],
+    ] as const) {
+      expect(block).toContain('cleanLetterName(payload?.name)')
+      expect(block).toContain("error: 'letter_name_taken'")
+      expect(block).toContain('.toLowerCase() === name.toLowerCase()')
+      expect(block.indexOf("error: 'letter_invalid'")).toBeLessThan(block.indexOf(write))
+      expect(block.indexOf("error: 'letter_name_taken'")).toBeLessThan(block.indexOf(write))
+    }
+    // A rename may keep its own name (in another case).
+    expect(rename).toContain('letter.id !== letterMatch[1] &&')
+    expect(create).toContain("'engagement_letter_created'")
+    expect(rename).toContain("'engagement_letter_renamed'")
+  })
+
+  it('deletes only through the store guard, and says why a sent letter stays', () => {
+    const block = routeBlock(/letterMatch && request\.method === 'DELETE'/, 2400)
+    expect(block).toContain('appDataStore.deleteEngagementLetter(letterMatch[1])')
+    expect(block).toContain("outcome.reason === 'has_sends'")
+    expect(block).toContain("error: 'letter_has_sends'")
+    expect(block).toContain('Rename it instead if it is no longer used.')
+    expect(block).toContain("'engagement_letter_deleted'")
+    expect(block).not.toContain('engagement_letter_sends')
+  })
+
+  it('every per-letter read answers 404 letter_not_found for a letter that is gone', () => {
+    for (const pattern of [
+      /letterMatch && request\.method === 'GET'/,
+      /letterPreviewMatch && request\.method === 'GET'/,
+      /letterPreviewPdfMatch && request\.method === 'GET'/,
+      /letterSendMatch && request\.method === 'POST'/,
+    ]) {
+      expect(routeBlock(pattern, 3200)).toContain("error: 'letter_not_found'")
+    }
   })
 })
 
@@ -163,8 +240,9 @@ const NEVER_IN_A_PREVIEW = [
 
 describe('the preview routes', () => {
   it('build from the STORED template through the shared document builder', () => {
-    expect(previewRoutes()).toContain('loadLetterContext(session)')
-    expect(serverHelpers()).toContain('appDataStore.getEngagementLetter(LETTER_ID)')
+    expect(previewRoutes()).toContain('loadLetterContext(session, letterPreviewMatch[1])')
+    expect(previewRoutes()).toContain('loadLetterContext(session, letterPreviewPdfMatch[1])')
+    expect(serverHelpers()).toContain('appDataStore.getEngagementLetter(letterId)')
     expect(previewAssembly()).toContain('buildLetterDocuments({')
     expect(previewAssembly()).toContain('invoiceEmailAddressee(client, clients)')
     expect(previewAssembly()).toContain('resolveInvoiceRecipients({')
@@ -221,14 +299,16 @@ describe('the send refuses the whole batch before the first client', () => {
   }
 
   it('checks the hash, then unknown placeholders, then an empty letter, then email configuration, in that order', () => {
+    expect(route()).toContain('const context = await loadLetterContext(session, letterSendMatch[1])')
     const order = [
+      "error: 'letter_not_found'",
       "error: 'letter_changed'",
       "error: 'unknown_placeholder'",
       "error: 'letter_empty'",
       "error: 'letter_send_failed'",
     ].map(at)
     expect([...order].sort((a, b) => a - b)).toEqual(order)
-    expect(order[3]).toBeLessThan(at('await sendLetterBatch('))
+    expect(order[4]).toBeLessThan(at('await sendLetterBatch('))
   })
 
   it('compares the page hash with the STORED template hash, and says nothing was sent', () => {
@@ -324,7 +404,7 @@ describe('sending to one client', () => {
   it('claims attempt 1, or the next attempt for "Send again", for the firm day and the template hash', () => {
     const body = sendOne()
     expect(body).toContain('const attempt = resend')
-    expect(body).toContain('deps.store.nextEngagementLetterAttempt({ letterId: LETTER_ID, clientId, templateHash, firmDay })')
+    expect(body).toContain('deps.store.nextEngagementLetterAttempt({ letterId, clientId, templateHash, firmDay })')
     expect(sendRoute()).toContain('firmDay: firmToday(context.now),')
     expect(sendRoute()).toContain('resend: payload.resendToday === true')
   })
@@ -389,7 +469,7 @@ describe('a letter goes to the client and nowhere else (Alex, 2026-10-08)', () =
   })
 
   it('hands the page the team addresses, reply-to excepted, so the list shows what Send will use', () => {
-    const view = serverHelpers().slice(serverHelpers().indexOf('async function letterTemplateView('))
+    const view = serverHelpers().slice(serverHelpers().indexOf('async function letterFrameView('))
     expect(view).toContain('.getTeamMembers()')
     expect(view).toContain('.catch(() => [])')
     expect(view).toContain('teamAddresses: teamAddresses.filter((address) => address !== sender.replyTo.toLowerCase()),')

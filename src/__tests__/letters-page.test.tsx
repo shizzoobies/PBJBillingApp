@@ -24,7 +24,7 @@ vi.mock('../lib/api', () => ({
   listLetterSendsRequest: (...args: unknown[]) => api.listLetterSendsRequest(...args),
   sendLettersRequest: (...args: unknown[]) => api.sendLettersRequest(...args),
   previewLetterRequest: (...args: unknown[]) => api.previewLetterRequest(...args),
-  letterPreviewPdfUrl: (id: string) => `/api/letters/preview.pdf?clientId=${id}`,
+  letterPreviewPdfUrl: (letterId: string, clientId: string) => `/api/letters/${letterId}/preview.pdf?clientId=${clientId}`,
 }))
 
 const api: Record<string, Mock> = {}
@@ -43,6 +43,8 @@ function templateState(
 ): LetterTemplateState {
   return {
     template: {
+      id: 'default',
+      name: '1099 Filing',
       subject: 'Your {{next_year}} 1099s',
       emailBody: 'Hi {{client_name}},\n\nThe letter is attached.',
       letterBody: 'Dear {{client_name}},\n\nOur fee is {{fee}}.',
@@ -130,11 +132,11 @@ async function renderPage() {
 beforeEach(() => {
   setClients(CLIENTS)
   api.fetchLetterTemplate = vi.fn(async () => templateState())
-  api.saveLetterTemplate = vi.fn(async (input: { subject: string; emailBody: string; letterBody: string }) =>
+  api.saveLetterTemplate = vi.fn(async (_id: string, input: { subject: string; emailBody: string; letterBody: string }) =>
     templateState(input, 'hash-2'),
   )
   api.listLetterSendsRequest = vi.fn(async () => [])
-  api.sendLettersRequest = vi.fn(async (input: { clientIds: string[] }) => ({
+  api.sendLettersRequest = vi.fn(async (_id: string, input: { clientIds: string[] }) => ({
     results: input.clientIds.map((clientId) => ({
       clientId,
       clientName: clientId,
@@ -174,7 +176,7 @@ describe('the editor', () => {
     expect(save).toBeEnabled()
     fireEvent.click(save)
     await waitFor(() =>
-      expect(api.saveLetterTemplate).toHaveBeenCalledWith({
+      expect(api.saveLetterTemplate).toHaveBeenCalledWith('default', {
         subject: 'New subject',
         emailBody: 'Hi {{client_name}},\n\nThe letter is attached.',
         letterBody: 'Dear {{client_name}},\n\nOur fee is {{fee}}.',
@@ -388,7 +390,7 @@ describe('a send that never finished', () => {
   })
 
   it('shows the unfinished sentence and offers Send again anyway, with its own confirm', async () => {
-    api.sendLettersRequest = vi.fn(async (input: { clientIds: string[]; resendToday?: boolean }) => ({
+    api.sendLettersRequest = vi.fn(async (_id: string, input: { clientIds: string[]; resendToday?: boolean }) => ({
       results: input.resendToday
         ? [{ clientId: 'c-acme', clientName: 'Acme Books', status: 'sent' as const, to: ['pat@acme.test'] }]
         : [
@@ -416,13 +418,13 @@ describe('a send that never finished', () => {
       'Send the letter to Acme Books again? An earlier send to them never finished, so check that it did not go out first.',
     )
     await waitFor(() =>
-      expect(api.sendLettersRequest).toHaveBeenLastCalledWith({ clientIds: ['c-acme'], templateHash: 'hash-1', resendToday: true }),
+      expect(api.sendLettersRequest).toHaveBeenLastCalledWith('default', { clientIds: ['c-acme'], templateHash: 'hash-1', resendToday: true }),
     )
   })
 })
 
 describe('sending', () => {
-  const ids = (call: unknown[]) => (call[0] as { clientIds: string[] }).clientIds
+  const ids = (call: unknown[]) => (call[1] as { clientIds: string[] }).clientIds
 
   it('confirms with the count and the reply address, and sends nothing if she cancels', async () => {
     const confirm = mockConfirm(false)
@@ -442,7 +444,7 @@ describe('sending', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send to 3 clients' }))
     await screen.findByText('3 sent, 0 skipped, 0 failed.')
     expect(api.sendLettersRequest).toHaveBeenCalledTimes(1)
-    expect(api.sendLettersRequest).toHaveBeenCalledWith({
+    expect(api.sendLettersRequest).toHaveBeenCalledWith('default', {
       clientIds: expect.arrayContaining(['c-acme', 'c-sub']),
       templateHash: 'hash-1',
     })
@@ -469,7 +471,7 @@ describe('sending', () => {
   })
 
   it('offers "Send again anyway" for an already-sent client and then claims a second send', async () => {
-    api.sendLettersRequest = vi.fn(async (input: { clientIds: string[]; resendToday?: boolean }) => ({
+    api.sendLettersRequest = vi.fn(async (_id: string, input: { clientIds: string[]; resendToday?: boolean }) => ({
       results: input.resendToday
         ? [{ clientId: 'c-acme', clientName: 'Acme Books', status: 'sent' as const, to: ['pat@acme.test'] }]
         : [
@@ -493,7 +495,7 @@ describe('sending', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send again anyway' }))
     expect(confirm).toHaveBeenLastCalledWith('Send the letter to Acme Books again? It was already sent today.')
     await waitFor(() =>
-      expect(api.sendLettersRequest).toHaveBeenLastCalledWith({
+      expect(api.sendLettersRequest).toHaveBeenLastCalledWith('default', {
         clientIds: ['c-acme'],
         templateHash: 'hash-1',
         resendToday: true,
@@ -504,7 +506,7 @@ describe('sending', () => {
 
   it('shows the server\'s sentence for a failure and offers to send again to the ones that failed', async () => {
     let first = true
-    api.sendLettersRequest = vi.fn(async (input: { clientIds: string[] }) => {
+    api.sendLettersRequest = vi.fn(async (_id: string, input: { clientIds: string[] }) => {
       const failing = first
       first = false
       return {
@@ -531,7 +533,7 @@ describe('sending', () => {
     await screen.findByText(/Failed: Email provider refused the message \(422\)\./)
     fireEvent.click(screen.getByRole('button', { name: 'Send again to the 1 that failed' }))
     await waitFor(() => expect(api.sendLettersRequest).toHaveBeenCalledTimes(2))
-    expect((api.sendLettersRequest as Mock).mock.calls[1][0]).toEqual({
+    expect((api.sendLettersRequest as Mock).mock.calls[1][1]).toEqual({
       clientIds: ['c-sub'],
       templateHash: 'hash-1',
     })
@@ -606,7 +608,7 @@ describe('Preview', () => {
     const row = screen.getByText('Acme Books').closest('tr') as HTMLElement
     fireEvent.click(within(row).getByRole('button', { name: 'Preview' }))
     expect(await screen.findByRole('dialog', { name: 'Preview of the letter for Acme Books' })).toBeInTheDocument()
-    expect(api.previewLetterRequest).toHaveBeenCalledWith('c-acme')
+    expect(api.previewLetterRequest).toHaveBeenCalledWith('default', 'c-acme')
   })
 })
 
@@ -630,7 +632,7 @@ describe('LetterPreviewModal', () => {
 
   it('renders the email in a sandboxed frame with links retargeted, and the PDF in its own tab', async () => {
     api.previewLetterRequest = vi.fn(async () => base)
-    render(<LetterPreviewModal clientId="c-acme" clientName="Acme Books" onClose={() => {}} />)
+    render(<LetterPreviewModal letterId="default" clientId="c-acme" clientName="Acme Books" onClose={() => {}} />)
     expect(await screen.findByText('What Acme Books receives')).toBeInTheDocument()
     expect(screen.getByText('Built by the same code as Send. Nothing is sent or saved from here.')).toBeInTheDocument()
     expect(screen.getByText('To: pat@acme.test, lee@acme.test')).toBeInTheDocument()
@@ -641,7 +643,7 @@ describe('LetterPreviewModal', () => {
     expect(frame.getAttribute('srcdoc')?.startsWith('<base target="_blank">')).toBe(true)
 
     fireEvent.click(screen.getByRole('tab', { name: 'PDF attachment' }))
-    expect(screen.getByTitle('PDF preview').getAttribute('src')).toBe('/api/letters/preview.pdf?clientId=c-acme')
+    expect(screen.getByTitle('PDF preview').getAttribute('src')).toBe('/api/letters/default/preview.pdf?clientId=c-acme')
   })
 
   it('says what would stop Send: missing values, a missing PDF, a refusal', async () => {
@@ -655,7 +657,7 @@ describe('LetterPreviewModal', () => {
       pdfAvailable: false,
       flags: { neverEmailed: true, billedOutside: true, inactive: false, billingMasterSub: 'KLC Holdings' },
     }))
-    render(<LetterPreviewModal clientId="c-acme" clientName="Acme Books" onClose={() => {}} />)
+    render(<LetterPreviewModal letterId="default" clientId="c-acme" clientName="Acme Books" onClose={() => {}} />)
     expect(await screen.findByText(/No email address on file for this client/)).toBeInTheDocument()
     expect(screen.getByText('Missing for this client: {{fee}}. Send skips this client.')).toBeInTheDocument()
     expect(screen.getByText(/is billed hourly, so there is no single fee to fill in - take \{\{fee\}\} out of the letter/)).toBeInTheDocument()
@@ -668,7 +670,7 @@ describe('LetterPreviewModal', () => {
 
   it('lists a retired placeholder in the notes, with why and that Send refuses', async () => {
     api.previewLetterRequest = vi.fn(async () => ({ ...base, retired: ['hourly_rate'] }))
-    render(<LetterPreviewModal clientId="c-acme" clientName="Acme Books" onClose={() => {}} />)
+    render(<LetterPreviewModal letterId="default" clientId="c-acme" clientName="Acme Books" onClose={() => {}} />)
     expect(
       await screen.findByText(
         '{{hourly_rate}} is no longer filled in - hourly clients have no single rate; take it out. Send refuses until it is taken out.',
@@ -681,7 +683,7 @@ describe('LetterPreviewModal', () => {
       throw new ApiError(404, 'Client not found')
     })
     const onClose = vi.fn()
-    render(<LetterPreviewModal clientId="gone" clientName="Gone Co" onClose={onClose} />)
+    render(<LetterPreviewModal letterId="default" clientId="gone" clientName="Gone Co" onClose={onClose} />)
     expect(await screen.findByRole('alert')).toHaveTextContent('Client not found')
     fireEvent.keyDown(window, { key: 'Escape' })
     fireEvent.click(screen.getByRole('button', { name: 'Close' }))

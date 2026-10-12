@@ -1445,32 +1445,54 @@ const ACCOUNT_CREDIT_SELECT_COLUMNS = `id, client_id, amount, source_kind, sourc
           note, created_by, created_at, voided_at, voided_by`
 
 // ---- Engagement letters (featreq-5e195707) --------------------------------
-// The saved template and the per-client send log: endpoint-managed, no foreign
-// keys, never deleted from. See the section of methods on AppDataStore.
+// The saved letters and the per-client send log: endpoint-managed, no foreign
+// keys. A send row is never deleted; a letter can be deleted only while it has
+// no send rows. See the section of methods on AppDataStore.
+const ENGAGEMENT_LETTER_NAME_MAX = 80
 const ENGAGEMENT_LETTER_SUBJECT_MAX = 200
 const ENGAGEMENT_LETTER_BODY_MAX = 20000
 const ENGAGEMENT_LETTER_COLUMNS = `id, name, subject, email_body, letter_body, updated_by,
           created_at, updated_at`
 const ENGAGEMENT_SEND_COLUMNS = `id, letter_id, client_id, template_hash, firm_day, attempt, status,
           recipients, subject, provider_id, error, delivery, created_by, created_at, completed_at`
+/**
+ * The column default, and the name every letter saved before letters had names
+ * carries (v1 never wrote `name`: there was one letter, 'default').
+ */
+const LEGACY_ENGAGEMENT_LETTER_NAME = 'Engagement letter'
 
-function emptyEngagementLetter(id = 'default') {
+/**
+ * The name a letter is listed under. The v1 letter ('default') still carries the
+ * column default, which says nothing about it, so until it is renamed it is listed
+ * under its subject as typed (her "1099 Filing" letter), or "Letter 1" when the
+ * subject is blank. Read-time on purpose: nothing is written to name it.
+ */
+function engagementLetterName(id, name, subject) {
+  const stored = String(name ?? '').trim()
+  if (id === 'default' && (!stored || stored === LEGACY_ENGAGEMENT_LETTER_NAME)) {
+    return String(subject ?? '').trim().slice(0, ENGAGEMENT_LETTER_NAME_MAX) || 'Letter 1'
+  }
+  return stored || LEGACY_ENGAGEMENT_LETTER_NAME
+}
+
+/** A letter row from the file backend, in the shape the Postgres mapper answers. */
+function fileEngagementLetter(row) {
   return {
-    id,
-    name: 'Engagement letter',
-    subject: '',
-    emailBody: '',
-    letterBody: '',
-    updatedBy: null,
-    createdAt: null,
-    updatedAt: null,
+    id: row.id,
+    name: engagementLetterName(row.id, row.name, row.subject),
+    subject: row.subject ?? '',
+    emailBody: row.emailBody ?? '',
+    letterBody: row.letterBody ?? '',
+    updatedBy: row.updatedBy ?? null,
+    createdAt: row.createdAt ?? null,
+    updatedAt: row.updatedAt ?? null,
   }
 }
 
 function mapEngagementLetterRow(row) {
   return {
     id: row.id,
-    name: row.name,
+    name: engagementLetterName(row.id, row.name, row.subject),
     subject: row.subject ?? '',
     emailBody: row.email_body ?? '',
     letterBody: row.letter_body ?? '',
@@ -25548,14 +25570,16 @@ export class AppDataStore {
 
   // ---- Engagement letters (featreq-5e195707) ----
   //
-  // One saved template (the singleton row 'default') and one row per attempt to
-  // send it to a client. Endpoint-managed like client_notes: NOT part of the bulk
-  // /api/app-data write, no foreign keys, never deleted from, so an autosave or a
-  // client re-insert can neither roll a letter back nor forget what was sent.
-  // Stored in auth-state (`engagementLetters` / `engagementLetterSends`) on the
-  // file backend. The send log is also the double-send guard: a claim row is
-  // INSERTED before the provider call and only one non-failed claim per
-  // (letter, client, template hash, firm day, attempt) can exist.
+  // The saved letters (a list since the 2026-10-10 send-back; the v1 singleton
+  // 'default' is one of them) and one row per attempt to send one to a client.
+  // Endpoint-managed like client_notes: NOT part of the bulk /api/app-data write
+  // and no foreign keys, so an autosave or a client re-insert can neither roll a
+  // letter back nor forget what was sent. A send row is never deleted, and a
+  // letter is deleted only while no send row names it. Stored in auth-state
+  // (`engagementLetters` / `engagementLetterSends`) on the file backend. The send
+  // log is also the double-send guard: a claim row is INSERTED before the provider
+  // call and only one non-failed claim per (letter, client, template hash, firm
+  // day, attempt) can exist.
 
   /**
    * The ONE read-modify-write on the file backend's engagement letters. Raw fs
@@ -25577,22 +25601,89 @@ export class AppDataStore {
     })
   }
 
-  /** The saved letter, or an empty one (never null) when none was saved yet. */
+  /**
+   * Every saved letter, oldest first, each with `sendCount` (its rows in the send
+   * log, failed ones included - what decides whether it can be deleted).
+   */
+  async listEngagementLetters() {
+    if (this.pool) {
+      const letters = await this.pool.query(
+        `select ${ENGAGEMENT_LETTER_COLUMNS} from engagement_letters order by created_at asc, id asc`,
+      )
+      const counts = await this.pool.query(
+        `select letter_id, count(*)::int as sends from engagement_letter_sends group by letter_id`,
+      )
+      const byLetter = new Map(counts.rows.map((row) => [row.letter_id, Number(row.sends) || 0]))
+      return letters.rows.map((row) => ({
+        ...mapEngagementLetterRow(row),
+        sendCount: byLetter.get(row.id) ?? 0,
+      }))
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const list = Array.isArray(authState.engagementLetters) ? authState.engagementLetters : []
+    const sends = Array.isArray(authState.engagementLetterSends) ? authState.engagementLetterSends : []
+    return list
+      .filter((row) => row?.id)
+      .map((row, index) => ({ row, index }))
+      .sort(
+        (a, b) =>
+          String(a.row.createdAt ?? '').localeCompare(String(b.row.createdAt ?? '')) || a.index - b.index,
+      )
+      .map(({ row }) => ({
+        ...fileEngagementLetter(row),
+        sendCount: sends.filter((send) => send?.letterId === row.id).length,
+      }))
+  }
+
+  /** One saved letter, or null when there is no letter with that id. */
   async getEngagementLetter(id = 'default') {
     if (this.pool) {
       const result = await this.pool.query(
         `select ${ENGAGEMENT_LETTER_COLUMNS} from engagement_letters where id = $1`,
         [id],
       )
-      return result.rows.length > 0 ? mapEngagementLetterRow(result.rows[0]) : emptyEngagementLetter(id)
+      return result.rows.length > 0 ? mapEngagementLetterRow(result.rows[0]) : null
     }
     const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
     const list = Array.isArray(authState.engagementLetters) ? authState.engagementLetters : []
     const found = list.find((row) => row?.id === id)
-    return found ? { ...emptyEngagementLetter(id), ...found } : emptyEngagementLetter(id)
+    return found ? fileEngagementLetter(found) : null
   }
 
-  /** Save the letter (an upsert). Trimmed; the subject is capped at 200 characters, each body at 20,000. */
+  /**
+   * A new letter, named, with its three boxes (blank unless given). The id is
+   * generated (`letter-xxxxxxxx`); the name is trimmed and capped at 80 characters.
+   */
+  async createEngagementLetter({ name, subject = '', emailBody = '', letterBody = '', createdBy = null } = {}) {
+    const id = `letter-${randomUUID().slice(0, 8)}`
+    const fields = {
+      name: String(name ?? '').trim().slice(0, ENGAGEMENT_LETTER_NAME_MAX) || 'New letter',
+      subject: String(subject ?? '').trim().slice(0, ENGAGEMENT_LETTER_SUBJECT_MAX),
+      emailBody: String(emailBody ?? '').trim().slice(0, ENGAGEMENT_LETTER_BODY_MAX),
+      letterBody: String(letterBody ?? '').trim().slice(0, ENGAGEMENT_LETTER_BODY_MAX),
+    }
+    if (this.pool) {
+      const result = await this.pool.query(
+        `insert into engagement_letters (id, name, subject, email_body, letter_body, updated_by)
+         values ($1, $2, $3, $4, $5, $6)
+         returning ${ENGAGEMENT_LETTER_COLUMNS}`,
+        [id, fields.name, fields.subject, fields.emailBody, fields.letterBody, createdBy],
+      )
+      return mapEngagementLetterRow(result.rows[0])
+    }
+    return this._mutateLetterFile((authState) => {
+      const now = nowIso()
+      const row = { id, ...fields, updatedBy: createdBy, createdAt: now, updatedAt: now }
+      authState.engagementLetters.push(row)
+      return { result: fileEngagementLetter(row), changed: true }
+    })
+  }
+
+  /**
+   * Save a letter's three boxes. Trimmed; the subject is capped at 200 characters,
+   * each body at 20,000. Null when there is no letter with that id (deleted in
+   * another tab): a save never brings a deleted letter back.
+   */
   async saveEngagementLetter({ id = 'default', subject, emailBody, letterBody, updatedBy = null } = {}) {
     const fields = {
       subject: String(subject ?? '').trim().slice(0, ENGAGEMENT_LETTER_SUBJECT_MAX),
@@ -25601,29 +25692,80 @@ export class AppDataStore {
     }
     if (this.pool) {
       const result = await this.pool.query(
-        `insert into engagement_letters (id, subject, email_body, letter_body, updated_by)
-         values ($1, $2, $3, $4, $5)
-         on conflict (id) do update set
-           subject = excluded.subject,
-           email_body = excluded.email_body,
-           letter_body = excluded.letter_body,
-           updated_by = excluded.updated_by,
-           updated_at = now()
-         returning ${ENGAGEMENT_LETTER_COLUMNS}`,
+        `update engagement_letters
+            set subject = $2, email_body = $3, letter_body = $4, updated_by = $5, updated_at = now()
+          where id = $1
+          returning ${ENGAGEMENT_LETTER_COLUMNS}`,
         [id, fields.subject, fields.emailBody, fields.letterBody, updatedBy],
       )
-      return mapEngagementLetterRow(result.rows[0])
+      return result.rows.length > 0 ? mapEngagementLetterRow(result.rows[0]) : null
     }
     return this._mutateLetterFile((authState) => {
       const at = authState.engagementLetters.findIndex((row) => row?.id === id)
-      const now = nowIso()
-      const row =
-        at >= 0
-          ? { ...authState.engagementLetters[at], ...fields, updatedBy, updatedAt: now }
-          : { ...emptyEngagementLetter(id), ...fields, updatedBy, createdAt: now, updatedAt: now }
-      if (at >= 0) authState.engagementLetters[at] = row
-      else authState.engagementLetters.push(row)
-      return { result: { ...row }, changed: true }
+      if (at < 0) return { result: null, changed: false }
+      const row = { ...authState.engagementLetters[at], ...fields, updatedBy, updatedAt: nowIso() }
+      authState.engagementLetters[at] = row
+      return { result: fileEngagementLetter(row), changed: true }
+    })
+  }
+
+  /**
+   * Rename a letter (trimmed, capped at 80 characters). Its text, its "last saved"
+   * stamp and its send history are untouched. Null when there is no such letter.
+   */
+  async renameEngagementLetter(id, name) {
+    const clean = String(name ?? '').trim().slice(0, ENGAGEMENT_LETTER_NAME_MAX)
+    if (!clean) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update engagement_letters set name = $2 where id = $1 returning ${ENGAGEMENT_LETTER_COLUMNS}`,
+        [id, clean],
+      )
+      return result.rows.length > 0 ? mapEngagementLetterRow(result.rows[0]) : null
+    }
+    return this._mutateLetterFile((authState) => {
+      const at = authState.engagementLetters.findIndex((row) => row?.id === id)
+      if (at < 0) return { result: null, changed: false }
+      const row = { ...authState.engagementLetters[at], name: clean }
+      authState.engagementLetters[at] = row
+      return { result: fileEngagementLetter(row), changed: true }
+    })
+  }
+
+  /**
+   * Delete a letter that has never been sent. A letter with ANY row in the send log
+   * (failed attempts included) is kept, so the log never names a letter that is
+   * gone: `{ deleted: false, reason: 'has_sends', sendCount }`. In Postgres the
+   * check and the delete are one statement.
+   *
+   * @returns {Promise<{deleted: true} | {deleted: false, reason: 'not_found' | 'has_sends', sendCount: number}>}
+   */
+  async deleteEngagementLetter(id) {
+    if (this.pool) {
+      const removed = await this.pool.query(
+        `delete from engagement_letters
+          where id = $1
+            and not exists (select 1 from engagement_letter_sends where letter_id = $1)
+          returning id`,
+        [id],
+      )
+      if (removed.rows.length > 0) return { deleted: true }
+      const why = await this.pool.query(
+        `select (select count(*)::int from engagement_letters where id = $1) as letters,
+                (select count(*)::int from engagement_letter_sends where letter_id = $1) as sends`,
+        [id],
+      )
+      const letters = Number(why.rows[0]?.letters) || 0
+      const sendCount = Number(why.rows[0]?.sends) || 0
+      return { deleted: false, reason: letters > 0 ? 'has_sends' : 'not_found', sendCount }
+    }
+    return this._mutateLetterFile((authState) => {
+      const at = authState.engagementLetters.findIndex((row) => row?.id === id)
+      const sendCount = authState.engagementLetterSends.filter((send) => send?.letterId === id).length
+      if (at < 0) return { result: { deleted: false, reason: 'not_found', sendCount }, changed: false }
+      if (sendCount > 0) return { result: { deleted: false, reason: 'has_sends', sendCount }, changed: false }
+      authState.engagementLetters.splice(at, 1)
+      return { result: { deleted: true }, changed: true }
     })
   }
 

@@ -28,6 +28,7 @@
   type NotificationEntry,
   type Package,
   type Proposal,
+  type LetterListState,
   type LetterPreview,
   type LetterSendRecord,
   type LetterSendResponse,
@@ -5151,50 +5152,80 @@ export async function checkAutopayAttemptRequest(invoiceId: string) {
 /* Letters (featreq-5e195707)                                                 */
 /* -------------------------------------------------------------------------- */
 /*
- * The engagement letter: one saved template, a per-client preview and a send.
- * Endpoint-managed and owner-only on the server, like proposals.
+ * The engagement letters: a list of saved letters, each with a per-client preview
+ * and a send. Endpoint-managed and owner-only on the server, like proposals.
  */
 
-/** The saved template, its hash, the placeholders and the sender. */
-export function fetchLetterTemplate(): Promise<LetterTemplateState> {
+const letterPath = (letterId: string, action = '') =>
+  `/api/letters/${encodeURIComponent(letterId)}${action ? `/${action}` : ''}`
+
+/** The saved letters, the placeholders and the sender. */
+export function listLettersRequest(): Promise<LetterListState> {
+  return proposalRequest<LetterListState>('/api/letters', {}, 'Failed to load the letters')
+}
+
+/** A new, blank letter with this name; the answer is the new letter, ready to edit. */
+export function createLetterRequest(name: string): Promise<LetterTemplateState> {
   return proposalRequest<LetterTemplateState>(
-    '/api/letters/template',
-    {},
-    'Failed to load the letter',
+    '/api/letters',
+    proposalJson('POST', { name }),
+    'Failed to add the letter',
   )
 }
 
-/** Save the template; the answer is the stored state, with its new hash. */
-export function saveLetterTemplate(input: {
-  subject: string
-  emailBody: string
-  letterBody: string
-}): Promise<LetterTemplateState> {
+/** One saved letter, its hash, the placeholders and the sender. */
+export function fetchLetterTemplate(letterId: string): Promise<LetterTemplateState> {
+  return proposalRequest<LetterTemplateState>(letterPath(letterId), {}, 'Failed to load the letter')
+}
+
+/** Save one letter's three boxes; the answer is the stored letter, with its new hash. */
+export function saveLetterTemplate(
+  letterId: string,
+  input: {
+    subject: string
+    emailBody: string
+    letterBody: string
+  },
+): Promise<LetterTemplateState> {
   return proposalRequest<LetterTemplateState>(
-    '/api/letters/template',
+    letterPath(letterId),
     proposalJson('PUT', input),
     'Failed to save the letter',
   )
 }
 
-/** What one client would receive, from the STORED template. Nothing is sent or saved. */
-export function previewLetterRequest(clientId: string): Promise<LetterPreview> {
+/** Rename a letter. Its text and send history are untouched. */
+export function renameLetterRequest(letterId: string, name: string): Promise<LetterTemplateState> {
+  return proposalRequest<LetterTemplateState>(
+    letterPath(letterId),
+    proposalJson('PATCH', { name }),
+    'Failed to rename the letter',
+  )
+}
+
+/** Delete a letter that was never sent (409 `letter_has_sends` says why one cannot be). */
+export async function deleteLetterRequest(letterId: string): Promise<void> {
+  await proposalRequest<{ ok: boolean }>(letterPath(letterId), { method: 'DELETE' }, 'Failed to delete the letter')
+}
+
+/** What one client would receive, from the STORED letter. Nothing is sent or saved. */
+export function previewLetterRequest(letterId: string, clientId: string): Promise<LetterPreview> {
   return proposalRequest<LetterPreview>(
-    `/api/letters/preview?clientId=${encodeURIComponent(clientId)}`,
+    `${letterPath(letterId, 'preview')}?clientId=${encodeURIComponent(clientId)}`,
     {},
     'Could not build the preview',
   )
 }
 
 /** The PDF half of the preview, streamed by the server for an embedded frame. */
-export function letterPreviewPdfUrl(clientId: string) {
-  return `/api/letters/preview.pdf?clientId=${encodeURIComponent(clientId)}`
+export function letterPreviewPdfUrl(letterId: string, clientId: string) {
+  return `${letterPath(letterId, 'preview.pdf')}?clientId=${encodeURIComponent(clientId)}`
 }
 
-/** The send log, newest first. */
-export async function listLetterSendsRequest(): Promise<LetterSendRecord[]> {
+/** One letter's send log, newest first. */
+export async function listLetterSendsRequest(letterId: string): Promise<LetterSendRecord[]> {
   const body = await proposalRequest<{ sends?: LetterSendRecord[] }>(
-    '/api/letters/sends',
+    letterPath(letterId, 'sends'),
     {},
     'Failed to load the send log',
   )
@@ -5202,17 +5233,21 @@ export async function listLetterSendsRequest(): Promise<LetterSendRecord[]> {
 }
 
 /**
- * Send the saved letter to up to 50 clients. `templateHash` is the hash the page
+ * Send one saved letter to up to 50 clients. `templateHash` is the hash the page
  * loaded: the server refuses (409 `letter_changed`) when the letter has changed since.
- * `resendToday` is "Send again": it claims a new attempt for a client already sent today.
+ * `resendToday` is "Send again": it claims a new attempt for a client already sent
+ * this letter today.
  */
-export function sendLettersRequest(input: {
-  clientIds: string[]
-  templateHash: string
-  resendToday?: boolean
-}): Promise<LetterSendResponse> {
+export function sendLettersRequest(
+  letterId: string,
+  input: {
+    clientIds: string[]
+    templateHash: string
+    resendToday?: boolean
+  },
+): Promise<LetterSendResponse> {
   return proposalRequest<LetterSendResponse>(
-    '/api/letters/send',
+    letterPath(letterId, 'send'),
     proposalJson('POST', input),
     'Failed to send the letter',
   )

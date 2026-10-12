@@ -22,6 +22,9 @@ import {
   type LetterTemplateState,
 } from '../lib/types'
 
+/** The letter this page edits until the letters list arrives: the v1 letter. */
+const LETTER_ID = 'default'
+
 /** Clients are sent in chunks of this many so the page can show progress. */
 const SEND_CHUNK = 10
 
@@ -126,7 +129,7 @@ export function LettersPage() {
 
   const refreshSends = useCallback(async () => {
     try {
-      setSends(await listLetterSendsRequest())
+      setSends(await listLetterSendsRequest(LETTER_ID))
     } catch {
       // The log is context for the table; a failed read leaves what was on screen.
     }
@@ -136,7 +139,7 @@ export function LettersPage() {
   useEffect(() => {
     if (!ownerMode) return
     let cancelled = false
-    void fetchLetterTemplate()
+    void fetchLetterTemplate(LETTER_ID)
       .then((next) => {
         if (cancelled) return
         setLoadError('')
@@ -145,7 +148,7 @@ export function LettersPage() {
       .catch((err) => {
         if (!cancelled) setLoadError(err instanceof ApiError ? err.message : 'Could not load the letter.')
       })
-    void listLetterSendsRequest()
+    void listLetterSendsRequest(LETTER_ID)
       .then((rows) => {
         if (!cancelled) setSends(rows)
       })
@@ -166,7 +169,7 @@ export function LettersPage() {
     setSaveState('saving')
     setSaveError('')
     try {
-      const next = await saveLetterTemplate({ subject, emailBody, letterBody })
+      const next = await saveLetterTemplate(LETTER_ID, { subject, emailBody, letterBody })
       adopt(next, { overwriteText: true })
       setSaveState('saved')
       window.setTimeout(() => setSaveState('idle'), 1800)
@@ -306,7 +309,7 @@ export function LettersPage() {
       for (let at = 0; at < ids.length; at += SEND_CHUNK) {
         const chunk = ids.slice(at, at + SEND_CHUNK)
         setProgress(`Sending ${Math.min(done + 1, ids.length)} to ${Math.min(done + chunk.length, ids.length)} of ${ids.length}...`)
-        const answer = await sendLettersRequest({
+        const answer = await sendLettersRequest(LETTER_ID, {
           clientIds: chunk,
           templateHash: state.hash,
           ...(resend ? { resendToday: true } : {}),
@@ -322,7 +325,7 @@ export function LettersPage() {
       if (err instanceof ApiError && err.code === 'letter_changed') {
         // Someone saved a different letter: show it, and stop before sending more.
         try {
-          adopt(await fetchLetterTemplate(), { overwriteText: !dirtyRef.current })
+          adopt(await fetchLetterTemplate(LETTER_ID), { overwriteText: !dirtyRef.current })
         } catch {
           // The sentence below still tells her to reload.
         }
@@ -716,6 +719,7 @@ export function LettersPage() {
 
       {previewId && previewClient ? (
         <LetterPreviewModal
+          letterId={LETTER_ID}
           clientId={previewId}
           clientName={previewClient.name}
           onClose={() => setPreviewId(null)}
