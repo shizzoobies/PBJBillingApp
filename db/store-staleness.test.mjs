@@ -46202,7 +46202,9 @@ describe('engagements (file backend)', () => {
     expect(Object.keys(line).sort()).toEqual(['amount', 'cadence', 'formula', 'group', 'hours', 'name', 'role', 'serviceId'])
     expect(line).toMatchObject({ serviceId: 'monthly-weekly-transactions-basic', amount: 630 })
     expect(Object.keys(engagement.figures.hoursByRole).sort()).toEqual(['accountant', 'bookkeeper', 'controller'])
-    expect(engagement.figures.totals.hoursByRole).toEqual(engagement.figures.hoursByRole)
+    // Hours by role sit beside the money totals, as in the pricing snapshot.
+    expect(engagement.figures.totals).not.toHaveProperty('hoursByRole')
+    expect(engagement.figures.hoursByRole).toEqual(proposal.pricingSnapshot.hoursByRole)
     expect(engagement.figures.paymentTerms).toBe((await store.getFirmSettings()).clientDefaults?.paymentTerms ?? '')
     expect(engagement.figures.inputs).toEqual(proposal.inputs)
     expect(line.formula).toBe(proposal.pricingSnapshot.lines[0].formula)
@@ -46656,7 +46658,8 @@ describe('engagements (Postgres statements)', () => {
           hours: 8.4,
         },
       ],
-      totals: { monthly: 630, annual: 0, oneTime: 0, cleanup: 0, software: 0, hoursByRole: { bookkeeper: 8.4, accountant: 0, controller: 0 } },
+      totals: { monthly: 630, annual: 0, oneTime: 0, cleanup: 0, software: 0 },
+      hoursByRole: { bookkeeper: 8.4, accountant: 0, controller: 0 },
     },
     ...over,
   })
@@ -46758,7 +46761,7 @@ describe('engagements (Postgres statements)', () => {
     )
     expect(insert.params[3]).toBe('c-new')
     expect(JSON.parse(insert.params[9])).toMatchObject({
-      totals: { monthly: 630, hoursByRole: { bookkeeper: 8.4, accountant: 0, controller: 0 } },
+      totals: { monthly: 630 },
       lines: [{ serviceId: 'monthly-weekly-transactions-basic', amount: 630, role: 'bookkeeper', hours: 8.4 }],
       hoursByRole: { bookkeeper: 8.4, accountant: 0, controller: 0 },
       paymentTerms: 'Due on receipt',

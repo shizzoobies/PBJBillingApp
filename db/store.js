@@ -35,6 +35,7 @@ import {
   cleanProposalSelections,
   priceProposal,
   sanitizeProposalPricing,
+  snapshotHoursByRole,
   softwareLocksOf,
 } from '../lib/proposal-pricing.js'
 import { DEFAULT_ENGAGEMENT_SECTIONS, sanitizeEngagementSections } from '../lib/engagement-sections.js'
@@ -26260,8 +26261,9 @@ export class AppDataStore {
     const storedLines = Array.isArray(snapshot.lines) ? snapshot.lines : []
     const totals = snapshot.totals && typeof snapshot.totals === 'object' ? { ...snapshot.totals } : {}
     const hasHours = (value) => value && typeof value === 'object' && !Array.isArray(value)
+    const storedHours = hasHours(snapshot.hoursByRole) || hasHours(totals.hoursByRole)
     let recomputed = null
-    if (!hasHours(totals.hoursByRole) || storedLines.some((line) => line?.hours === undefined)) {
+    if (!storedHours || storedLines.some((line) => line?.hours === undefined)) {
       try {
         recomputed = priceProposal({
           catalog: firm?.proposalPricing,
@@ -26294,15 +26296,13 @@ export class AppDataStore {
           formula: String(line.formula ?? ''),
         }
       })
-    const source = hasHours(totals.hoursByRole) ? totals.hoursByRole : (recomputed?.totals?.hoursByRole ?? {})
-    const hoursOf = (value) => Math.round((Number(value) || 0) * 100) / 100
-    const hoursByRole = {
-      bookkeeper: hoursOf(source.bookkeeper),
-      accountant: hoursOf(source.accountant),
-      controller: hoursOf(source.controller),
-    }
+    // Hours by role sit BESIDE the money totals (lib/proposal-pricing.js). The stored
+    // snapshot's own when it has them, else the re-priced answer, else summed from the
+    // lines; `snapshotHoursByRole` never throws and reads an old snapshot as zeros.
+    const hoursByRole = snapshotHoursByRole(storedHours ? snapshot : (recomputed ?? { lines }))
+    delete totals.hoursByRole
     return {
-      totals: { ...totals, hoursByRole },
+      totals,
       lines,
       hoursByRole,
       paymentTerms: String(linkedClient?.paymentTerms || firm?.clientDefaults?.paymentTerms || ''),
