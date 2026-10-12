@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { createAmendmentRequest, listEngagementsRequest, listLettersRequest } from '../lib/api'
 import { ENGAGEMENT_KIND_LABELS, ENGAGEMENT_STATUS_LABELS, engagementInstantLabel } from '../lib/engagements'
 import { ApiError, type Engagement, type LetterSummary } from '../lib/types'
+import { SignEngagementDialog } from './engagements/SignEngagement'
 
 /**
  * The Engagements card on a client's Billing tab (engagements stage 4,
@@ -10,17 +11,25 @@ import { ApiError, type Engagement, type LetterSummary } from '../lib/types'
  * original, its amendments (each Letters send is one) and any superseding letter -
  * newest first, each with its kind, status, sent and signed dates and an Open link.
  * "New amendment" starts a draft from one of the saved Letters and opens it in the
- * editor. Owner only: the Billing tab is, and the card renders nothing otherwise.
+ * editor. A sent letter (or a draft signed in person) has **Mark as signed**, the
+ * editor's own form in a dialog (featreq-b2142264). Owner only: the Billing tab is,
+ * and the card renders nothing otherwise.
  */
 export function ClientEngagementsCard({
   clientId,
   ownerMode,
   refreshKey = 0,
+  client = null,
+  plans = [],
 }: {
   clientId: string
   ownerMode: boolean
   /** Changes when another tab or session changed data (the list is read again). */
   refreshKey?: number
+  /** The client as the page has it: its name, and whether signing's fee choice matters. */
+  client?: { name?: string; billingMode?: string | null; monthlyRate?: number | null } | null
+  /** The workspace plans, to name the ones signing added. */
+  plans?: { id: string; name: string }[]
 }) {
   const navigate = useNavigate()
   const [engagements, setEngagements] = useState<Engagement[] | null>(null)
@@ -30,6 +39,9 @@ export function ClientEngagementsCard({
   const [letterId, setLetterId] = useState('')
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState('')
+  // The letter Mark as signed is open for, and a bump that reads the list again after it.
+  const [signing, setSigning] = useState<Engagement | null>(null)
+  const [reloads, setReloads] = useState(0)
 
   useEffect(() => {
     if (!ownerMode) return
@@ -48,7 +60,7 @@ export function ClientEngagementsCard({
     return () => {
       cancelled = true
     }
-  }, [clientId, ownerMode, refreshKey])
+  }, [clientId, ownerMode, refreshKey, reloads])
 
   if (!ownerMode) return null
 
@@ -119,9 +131,16 @@ export function ClientEngagementsCard({
                   <td>{engagementInstantLabel(engagement.sentAt) || '-'}</td>
                   <td>{engagementInstantLabel(engagement.signedAt) || '-'}</td>
                   <td>
-                    <Link to={`/engagements/${engagement.id}`} aria-label={`Open ${ENGAGEMENT_KIND_LABELS[engagement.kind] ?? 'engagement'} ${engagement.id}`}>
-                      Open
-                    </Link>
+                    <div className="button-row">
+                      <Link to={`/engagements/${engagement.id}`} aria-label={`Open ${ENGAGEMENT_KIND_LABELS[engagement.kind] ?? 'engagement'} ${engagement.id}`}>
+                        Open
+                      </Link>
+                      {engagement.status === 'sent' || engagement.status === 'draft' ? (
+                        <button type="button" className="ghost-action" onClick={() => setSigning(engagement)}>
+                          Mark as signed
+                        </button>
+                      ) : null}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -176,6 +195,17 @@ export function ClientEngagementsCard({
         <p className="form-error" role="alert">
           {error}
         </p>
+      ) : null}
+      {/* After a signing the list reads again; the server's data-changed broadcast refreshes the page. */}
+      {signing ? (
+        <SignEngagementDialog
+          engagement={signing}
+          client={client}
+          clientName={client?.name || 'The client'}
+          planName={(planId) => plans.find((plan) => plan.id === planId)?.name ?? 'a plan'}
+          onSigned={() => setReloads((count) => count + 1)}
+          onClose={() => setSigning(null)}
+        />
       ) : null}
     </div>
   )

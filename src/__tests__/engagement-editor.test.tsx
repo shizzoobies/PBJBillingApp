@@ -629,6 +629,45 @@ describe('Mark as signed', () => {
     )
   })
 
+  // featreq-b2142264: a prospect's signing opens the new client's onboarding checklist.
+  it("links the new client's onboarding checklist, opened at the Onboarding stage", async () => {
+    mockConfirm(true)
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z' }))
+    api.signEngagementRequest = vi.fn(async () =>
+      signResult({ onboardingCaseId: 'case-1', onboardingChecklistId: 'check-onb' }),
+    )
+    await renderEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    const summary = await screen.findByRole('status', { name: 'What signing did' })
+    expect(
+      within(summary).getByText('Onboarding checklist opened at the Onboarding stage - the Proposal stage is marked done.'),
+    ).toBeTruthy()
+    expect(within(summary).getByRole('link', { name: 'Open the onboarding checklist' }).getAttribute('href')).toBe(
+      '/checklists?focus=check-onb',
+    )
+  })
+
+  it('a case that could not be opened says so, with no checklist link', async () => {
+    mockConfirm(true)
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z' }))
+    api.signEngagementRequest = vi.fn(async () =>
+      signResult({
+        skipped: [
+          {
+            what: 'Onboarding checklist',
+            why: 'The letter is signed and Acme Books is in Onboarding, but the onboarding checklist could not be opened. Add the onboarding steps on the Checklists page.',
+          },
+        ],
+      }),
+    )
+    await renderEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    const summary = await screen.findByRole('status', { name: 'What signing did' })
+    expect(within(summary).getByText(/^Skipped - Onboarding checklist: The letter is signed/)).toBeTruthy()
+    expect(within(summary).queryByText(/Onboarding checklist opened/)).toBeNull()
+    expect(within(summary).queryByRole('link', { name: 'Open the onboarding checklist' })).toBeNull()
+  })
+
   it('a signing with no retainer offers no retainer link, and says an opted-out skip', async () => {
     mockConfirm(true)
     api.getEngagementRequest = vi.fn(async () => view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z', clientId: 'c1' }))

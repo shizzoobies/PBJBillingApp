@@ -2826,6 +2826,13 @@ export type EngagementSignResult = {
   /** A superseding letter (stage 4): the engagement its signing marked Superseded, or null. */
   supersededId?: string | null
   softwareAdded: string[]
+  /**
+   * A prospect's signing (featreq-b2142264): the new client's onboarding case, opened at
+   * the Onboarding stage, and that stage's live checklist (the summary links it). Null
+   * when signing created no client or the case could not be opened (a skipped line says).
+   */
+  onboardingCaseId?: string | null
+  onboardingChecklistId?: string | null
   skipped: { what: string; why: string }[]
 }
 

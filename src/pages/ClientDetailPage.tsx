@@ -602,7 +602,13 @@ export function ClientDetailPage() {
               amendments - each Letters send is one - and any superseding letter), and
               "New amendment" from a saved letter. Owner only, like the whole tab. */}
           <CollapsibleSection id="client-section-engagements" kicker="Engagement" title="Engagements" lockable>
-            <ClientEngagementsCard clientId={client.id} ownerMode={ownerMode} refreshKey={dataRefreshCount} />
+            <ClientEngagementsCard
+              clientId={client.id}
+              ownerMode={ownerMode}
+              refreshKey={dataRefreshCount}
+              client={client}
+              plans={data.plans ?? []}
+            />
           </CollapsibleSection>
 
           <CollapsibleSection

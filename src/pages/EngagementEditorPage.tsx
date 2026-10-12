@@ -5,6 +5,7 @@ import { BoldBar, PlaceholderChipsToggle } from '../components/letters/LetterEdi
 import { DocumentPreviewModal } from '../components/letters/DocumentPreviewModal'
 import { insertPlaceholder, isBoldShortcut, toggleBold, unknownPlaceholderSentence } from '../components/letters/letterEditing'
 import { SaveBadge } from '../components/SectionKit'
+import { SignEngagementForm, SigningSummary } from '../components/engagements/SignEngagement'
 import {
   engagementPreviewPdfUrl,
   getEngagementRequest,
@@ -14,10 +15,10 @@ import {
   previewEngagementRequest,
   reassembleEngagementRequest,
   sendEngagementRequest,
-  signEngagementRequest,
   updateEngagementRequest,
   voidEngagementRequest,
 } from '../lib/api'
+import { engagementFeeChoices } from '../lib/engagementSigning'
 import {
   ENGAGEMENT_KIND_LABELS,
   ENGAGEMENT_STATUS_LABELS,
@@ -28,7 +29,6 @@ import {
 } from '../lib/engagements'
 import type { SaveFlashState } from '../lib/useSaveFlash'
 import { skippedEngagementLines } from '../../lib/engagement-values.js'
-import { firmToday } from '../../lib/firm-time.js'
 import { retiredSentence, templateWarnings } from '../../lib/letter-template.js'
 import { formatProposalMoney } from '../../lib/proposal-pricing.js'
 import {
@@ -172,12 +172,8 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const [actionError, setActionError] = useState('')
   const [notice, setNotice] = useState('')
 
-  const [signedOn, setSignedOn] = useState(() => firmToday())
-  const [signNote, setSignNote] = useState('')
-  const [inPerson, setInPerson] = useState(false)
-  // "Signed as edited": sign a sent letter that changed after it went out.
-  const [signedAsEdited, setSignedAsEdited] = useState(false)
-  // What the last Mark as signed did (the client, checklists, retainer, skips).
+  // What the last Mark as signed did (the client, checklists, retainer, skips). The form
+  // itself (day, note, in person, signed as edited) is the shared SignEngagementForm.
   const [signSummary, setSignSummary] = useState<EngagementSignResult | null>(null)
 
   const subjectRef = useRef<HTMLInputElement>(null)
@@ -360,10 +356,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         related.find((row) => row.supersedesId === engagement.id) ??
         null)
       : null
-  const feeChoices =
-    linkedClient && linkedClient.billingMode === 'subscription' && monthly > 0
-      ? feeChoiceLines(Number(linkedClient.monthlyRate ?? 0), monthly)
-      : null
+  const feeChoices = engagementFeeChoices(engagement, linkedClient)
 
   /* ---- the editor ---------------------------------------------------------- */
 
@@ -460,38 +453,27 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
 
   // The sent-hash guard: a sent letter edited since it went out signs only "as edited".
   const changedSinceSent = engagement.status === 'sent' && view.changedSinceSent === true
-  const canSign =
-    (engagement.status === 'sent' && (!changedSinceSent || signedAsEdited)) ||
-    (engagement.status === 'draft' && inPerson)
-  const sign = async () => {
-    if (!canSign || !/^\d{4}-\d{2}-\d{2}$/.test(signedOn)) return
-    const ok = window.confirm(
-      `Mark the engagement letter for ${partyName} as signed on ${engagementDayLabel(signedOn)}? ${signingSentence(engagement, feeChoices ? feeChoices[engagement.feeMode ?? 'replace'] : null)}A signed letter can no longer be edited, sent or voided.`,
-    )
-    if (!ok) return
-    setBusy('sign')
-    setActionError('')
-    setNotice('')
-    setSignSummary(null)
-    try {
-      const result = await signEngagementRequest(engagementId, {
-        signedOn,
-        ...(signNote.trim() ? { note: signNote.trim() } : {}),
-        ...(engagement.status === 'draft' ? { allowUnsent: true } : {}),
-        ...(changedSinceSent && signedAsEdited ? { confirmChanged: true } : {}),
-      })
+  // Mark as signed's outcome, from the shared form: shown at the top of Send and sign.
+  const signHandlers = {
+    onStart: () => {
+      setBusy('sign')
+      setActionError('')
+      setNotice('')
+      setSignSummary(null)
+    },
+    onSigned: async (result: EngagementSignResult, signedOn: string) => {
       setSignSummary(result)
       setNotice(`Marked signed on ${engagementDayLabel(signedOn)}.`)
       await refresh({ overwrite: true })
-    } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : 'Could not mark the engagement as signed.')
+    },
+    onFailed: async (message: string) => {
+      setActionError(message)
       // Whatever went wrong, show the stored engagement: it may have changed since it
       // was sent (the "signed as edited" choice then appears), or a client may already
       // be on it from a signing that did not finish (a retry finishes it).
       await refresh({ overwrite: !dirtyRef.current })
-    } finally {
-      setBusy('')
-    }
+    },
+    onDone: () => setBusy(''),
   }
 
   const voidIt = async () => {
@@ -750,71 +732,18 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                 </div>
 
                 <h3>Mark as signed</h3>
-                <div className="form-grid two-col">
-                  <label className="field">
-                    <span>Signed on</span>
-                    <input
-                      className="input"
-                      type="date"
-                      aria-label="Signed on"
-                      value={signedOn}
-                      onChange={(event) => setSignedOn(event.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Note (optional)</span>
-                    <textarea
-                      className="input"
-                      rows={2}
-                      maxLength={2000}
-                      aria-label="Signing note"
-                      value={signNote}
-                      onChange={(event) => setSignNote(event.target.value)}
-                    />
-                  </label>
-                </div>
-                {engagement.status === 'draft' ? (
-                  <label className="check-row">
-                    <input
-                      type="checkbox"
-                      checked={inPerson}
-                      onChange={(event) => setInPerson(event.target.checked)}
-                    />
-                    <span>This letter was signed in person (it was never sent from here)</span>
-                  </label>
-                ) : null}
-                {changedSinceSent ? (
-                  <>
-                    <p className="form-error" role="status">
-                      The letter changed since it was sent. Send it again, or tick &quot;Signed as edited&quot; if they
-                      signed this version.
-                    </p>
-                    <label className="check-row">
-                      <input
-                        type="checkbox"
-                        checked={signedAsEdited}
-                        onChange={(event) => setSignedAsEdited(event.target.checked)}
-                      />
-                      <span>Signed as edited (they signed this version, not the one sent)</span>
-                    </label>
-                  </>
-                ) : null}
-                <div className="button-row">
-                  <button
-                    type="button"
-                    className="primary-action"
-                    disabled={!canSign || dirty || busy !== ''}
-                    onClick={() => void sign()}
-                  >
-                    Mark as signed
-                  </button>
-                  <button type="button" className="ghost-action" disabled={busy !== ''} onClick={() => void voidIt()}>
-                    Void
-                  </button>
-                </div>
-                {!canSign && !changedSinceSent ? (
-                  <p className="muted-text">Send the letter first, or tick &quot;signed in person&quot;.</p>
-                ) : null}
+                <SignEngagementForm
+                  engagement={engagement}
+                  changedSinceSent={changedSinceSent}
+                  feeLine={feeChoices ? feeChoices[engagement.feeMode ?? 'replace'] : null}
+                  disabled={dirty || busy !== ''}
+                  actions={
+                    <button type="button" className="ghost-action" disabled={busy !== ''} onClick={() => void voidIt()}>
+                      Void
+                    </button>
+                  }
+                  {...signHandlers}
+                />
               </>
             ) : (
               <>
@@ -1034,129 +963,6 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         />
       ) : null}
     </section>
-  )
-}
-
-/** "A", "A and B", "A, B and C". */
-function listWords(items: string[]): string {
-  if (items.length <= 1) return items[0] ?? ''
-  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`
-}
-
-/**
- * What Mark as signed will do, for its confirm (engagements stage 3), ending in a
- * space when there is anything to say: a letter with no client creates one; a
- * letter to a client brings it the fee, plans, software and retainer.
- */
-function signingSentence(engagement: Engagement, feeLine: string | null = null): string {
-  const figures = engagement.figures ?? {}
-  const monthly = Number(figures.totals?.monthly ?? 0)
-  const software = (figures.lines ?? []).filter(
-    (line) => line?.group === 'Software' && !line.flag && Number(line.amount) > 0,
-  )
-  const retainer = Number(engagement.retainerAmount ?? 0)
-  const brings = [
-    ...(engagement.packageId || (engagement.planIds ?? []).length > 0
-      ? ['the plans and package, with their checklists']
-      : []),
-    ...(software.length > 0 ? ['the software as monthly expenses'] : []),
-    ...(retainer > 0 ? [`a draft retainer invoice of ${formatProposalMoney(retainer)} to review`] : []),
-  ]
-  if (!engagement.clientId) {
-    return `This creates ${engagementPartyName(engagement)} as a client in Onboarding, with its contact${
-      brings.length > 0 ? `, ${listWords(brings)}` : ''
-    }. `
-  }
-  // The fee as she chose it, with amounts, for a monthly client; else the bare words.
-  const existing = [...(monthly > 0 && !feeLine ? ['the monthly fee'] : []), ...brings]
-  // A superseding letter (stage 4) replaces the client's current engagement.
-  const replaces =
-    engagement.kind === 'superseding'
-      ? "It replaces the client's current engagement: that one is marked Superseded, and the client's plans become this letter's plans (a letter naming none leaves them). "
-      : ''
-  return `${replaces}${existing.length > 0 ? `This brings ${listWords(existing)} to the client. ` : ''}${feeLine ? `Monthly fee: ${feeLine}. ` : ''}`
-}
-
-/**
- * The three things signing can do to an existing monthly client's fee, with amounts:
- * "Replace the current fee ($1,200.00 -> $150.00)", "Add to it ($1,200.00 + $150.00 =
- * $1,350.00)", "Keep $1,200.00".
- */
-function feeChoiceLines(current: number, letter: number): Record<EngagementFeeMode, string> {
-  const money = (value: number) => formatProposalMoney(value)
-  return {
-    replace: `Replace the current fee (${money(current)} -> ${money(letter)})`,
-    add: `Add to it (${money(current)} + ${money(letter)} = ${money(Math.round((current + letter) * 100) / 100)})`,
-    keep: `Keep ${money(current)}`,
-  }
-}
-
-/** The summary under Send and sign after Mark as signed: what it did, what it skipped, and links. */
-function SigningSummary({
-  result,
-  partyName,
-  clientName,
-  planName,
-  retainerAmount,
-}: {
-  result: EngagementSignResult
-  partyName: string
-  clientName: string
-  planName: (planId: string) => string
-  retainerAmount: number | null
-}) {
-  const checklists = result.clonedTemplateIds.length
-  return (
-    <div className="engagement-sign-summary" role="status" aria-label="What signing did">
-      <p>
-        {result.createdClient
-          ? `${partyName} is now a client, in Onboarding, with its contact.`
-          : `Finished signing for ${clientName}.`}
-      </p>
-      <ul>
-        {result.monthlyRate !== null ? (
-          <li>{`Monthly fee set to ${formatProposalMoney(result.monthlyRate)}.`}</li>
-        ) : null}
-        {result.addedPlanIds.length > 0 ? (
-          <li>{`Plans added: ${result.addedPlanIds.map(planName).join(', ')}.`}</li>
-        ) : null}
-        {(result.removedPlanIds ?? []).length > 0 ? (
-          <li>{`Plans taken off: ${(result.removedPlanIds ?? []).map(planName).join(', ')}.`}</li>
-        ) : null}
-        {result.supersededId ? (
-          <li>
-            {'The engagement this letter replaces is now marked Superseded ('}
-            <Link to={`/engagements/${result.supersededId}`}>open it</Link>
-            {').'}
-          </li>
-        ) : null}
-        {checklists > 0 ? (
-          <li>{`${checklists} recurring checklist${checklists === 1 ? '' : 's'} copied from the plans and package.`}</li>
-        ) : null}
-        {result.softwareAdded.length > 0 ? (
-          <li>{`Software added as monthly expenses: ${result.softwareAdded.join(', ')}.`}</li>
-        ) : null}
-        {result.retainerInvoiceId ? (
-          <li>{`Retainer invoice of ${formatProposalMoney(Number(retainerAmount ?? 0))} drafted - it is in To review in the month run.`}</li>
-        ) : null}
-        {result.skipped.map((entry) => (
-          <li key={`${entry.what}-${entry.why}`}>{`Skipped - ${entry.what}: ${entry.why}`}</li>
-        ))}
-      </ul>
-      <div className="button-row">
-        <Link className="secondary-action" to={`/clients/${result.clientId}`}>
-          Open the client
-        </Link>
-        {result.retainerInvoiceId ? (
-          <Link
-            className="secondary-action"
-            to={result.retainerPeriod ? `/invoices?period=${result.retainerPeriod}` : '/invoices'}
-          >
-            Open the retainer
-          </Link>
-        ) : null}
-      </div>
-    </div>
   )
 }
 

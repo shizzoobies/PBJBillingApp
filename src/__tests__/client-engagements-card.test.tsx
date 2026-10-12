@@ -2,7 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { ClientEngagementsCard } from '../components/ClientEngagementsCard'
-import { ApiError, type Engagement } from '../lib/types'
+import { firmToday } from '../../lib/firm-time.js'
+import { ApiError, type Engagement, type EngagementSignResult } from '../lib/types'
 
 /**
  * The Engagements card on a client's Billing tab (engagements stage 4): this client's
@@ -15,6 +16,8 @@ vi.mock('../lib/api', () => ({
   listEngagementsRequest: (...args: unknown[]) => api.listEngagementsRequest(...args),
   listLettersRequest: (...args: unknown[]) => api.listLettersRequest(...args),
   createAmendmentRequest: (...args: unknown[]) => api.createAmendmentRequest(...args),
+  getEngagementRequest: (...args: unknown[]) => api.getEngagementRequest(...args),
+  signEngagementRequest: (...args: unknown[]) => api.signEngagementRequest(...args),
 }))
 
 const api: Record<string, Mock> = {}
@@ -79,11 +82,11 @@ function EditorStub() {
   return <p>Editor for {id}</p>
 }
 
-function renderCard(ownerMode = true) {
+function renderCard(ownerMode = true, props: Partial<Parameters<typeof ClientEngagementsCard>[0]> = {}) {
   render(
     <MemoryRouter initialEntries={['/clients/c-acme']}>
       <Routes>
-        <Route path="/clients/:id" element={<ClientEngagementsCard clientId="c-acme" ownerMode={ownerMode} />} />
+        <Route path="/clients/:id" element={<ClientEngagementsCard clientId="c-acme" ownerMode={ownerMode} {...props} />} />
         <Route path="/engagements/:id" element={<EditorStub />} />
       </Routes>
     </MemoryRouter>,
@@ -172,5 +175,173 @@ describe('ClientEngagementsCard', () => {
     expect(screen.queryByLabelText('Client engagements')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'New amendment' })).not.toBeInTheDocument()
     expect(api.listEngagementsRequest).not.toHaveBeenCalled()
+  })
+})
+
+// featreq-b2142264: Mark as signed from the client card - the editor's own form, call and
+// summary (src/components/engagements/SignEngagement.tsx), in a dialog.
+describe('ClientEngagementsCard: Mark as signed', () => {
+  const signResult = (over: Partial<EngagementSignResult> = {}): EngagementSignResult => ({
+    engagement: engagementFixture({ id: 'eng-amend', kind: 'amendment', status: 'signed' }),
+    clientId: 'c-acme',
+    createdClient: false,
+    clonedTemplateIds: [],
+    retainerInvoiceId: null,
+    retainerPeriod: null,
+    monthlyRate: null,
+    addedPlanIds: [],
+    softwareAdded: [],
+    onboardingCaseId: null,
+    onboardingChecklistId: null,
+    skipped: [],
+    ...over,
+  })
+  const viewOf = (row: Engagement, changedSinceSent = false) => ({
+    engagement: row,
+    placeholders: [],
+    warnings: { unknown: [], retired: [] },
+    hash: 'hash-1',
+    sender: { from: '', replyTo: '' },
+    changedSinceSent,
+  })
+  let confirm: Mock
+
+  beforeEach(() => {
+    confirm = vi.fn(() => true)
+    window.confirm = confirm as unknown as typeof window.confirm
+    api.getEngagementRequest = vi.fn(async (id: string) => viewOf(ROWS.find((row) => row.id === id) ?? ROWS[0]))
+    api.signEngagementRequest = vi.fn(async () => signResult())
+  })
+
+  const rowsOf = async () => within(await screen.findByRole('table')).getAllByRole('row').slice(1)
+
+  it('a sent row has Mark as signed (a signed one does not); it opens the dialog, posts the day and shows what signing did', async () => {
+    renderCard(true, { client: { name: 'Acme', billingMode: 'hourly', monthlyRate: 0 } })
+    const [sentRow, signedRow] = await rowsOf()
+    expect(within(signedRow).queryByRole('button', { name: 'Mark as signed' })).toBeNull()
+    fireEvent.click(within(sentRow).getByRole('button', { name: 'Mark as signed' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Mark as signed: Acme Books' })
+    await waitFor(() => expect(api.getEngagementRequest).toHaveBeenCalledWith('eng-amend'))
+    expect(within(dialog).getByLabelText('Signed on')).toHaveValue(firmToday())
+    expect(within(dialog).queryByRole('checkbox', { name: /signed in person/ })).toBeNull()
+    fireEvent.change(within(dialog).getByLabelText('Signing note'), { target: { value: 'Signed at the office' } })
+    const reads = api.listEngagementsRequest.mock.calls.length
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
+    expect(confirm.mock.calls[0][0]).toMatch(/^Mark the engagement letter for Acme Books as signed on /)
+    await waitFor(() =>
+      expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-amend', { signedOn: firmToday(), note: 'Signed at the office' }),
+    )
+    const summary = await within(dialog).findByRole('status', { name: 'What signing did' })
+    expect(within(summary).getByText('Finished signing for Acme.')).toBeTruthy()
+    expect(within(summary).getByRole('link', { name: 'Open the client' })).toHaveAttribute('href', '/clients/c-acme')
+    // The card reads its list again.
+    await waitFor(() => expect(api.listEngagementsRequest.mock.calls.length).toBeGreaterThan(reads))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('a draft row signs only once "signed in person" is ticked, and posts allowUnsent', async () => {
+    const draft = engagementFixture({ id: 'eng-draft', status: 'draft', sentAt: null, signedAt: null, signedBy: null })
+    api.listEngagementsRequest = vi.fn(async () => [draft])
+    api.getEngagementRequest = vi.fn(async () => viewOf(draft))
+    renderCard()
+    const [row] = await rowsOf()
+    fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
+    const dialog = await screen.findByRole('dialog')
+    const sign = within(dialog).getByRole('button', { name: 'Mark as signed' })
+    expect(sign).toBeDisabled()
+    expect(within(dialog).getByText('Send the letter first, or tick "signed in person".')).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /signed in person/ }))
+    expect(sign).toBeEnabled()
+    fireEvent.click(sign)
+    await waitFor(() =>
+      expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-draft', { signedOn: firmToday(), allowUnsent: true }),
+    )
+  })
+
+  it("a prospect's signing links the new client's onboarding checklist", async () => {
+    renderCard()
+    api.signEngagementRequest = vi.fn(async () =>
+      signResult({ createdClient: true, clientId: 'client-new', onboardingCaseId: 'case-1', onboardingChecklistId: 'check-onb' }),
+    )
+    const [row] = await rowsOf()
+    fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
+    const summary = await within(dialog).findByRole('status', { name: 'What signing did' })
+    expect(within(summary).getByText('Acme Books is now a client, in Onboarding, with its contact.')).toBeTruthy()
+    expect(
+      within(summary).getByText('Onboarding checklist opened at the Onboarding stage - the Proposal stage is marked done.'),
+    ).toBeTruthy()
+    expect(within(summary).getByRole('link', { name: 'Open the onboarding checklist' })).toHaveAttribute(
+      'href',
+      '/checklists?focus=check-onb',
+    )
+  })
+
+  it('a refusal is its plain sentence; changed since sent reads the letter again and offers "Signed as edited"', async () => {
+    renderCard()
+    let reads = 0
+    api.getEngagementRequest = vi.fn(async () => viewOf(ROWS[0], reads++ > 0))
+    api.signEngagementRequest = vi.fn(async () => {
+      throw new ApiError(
+        409,
+        "The letter changed since it was sent - send it again, or tick 'signed as edited' to sign this version",
+        'engagement_refused',
+        'changed_since_sent',
+      )
+    })
+    const [row] = await rowsOf()
+    fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
+    const dialog = await screen.findByRole('dialog')
+    await waitFor(() => expect(api.getEngagementRequest).toHaveBeenCalledTimes(1))
+    expect(within(dialog).queryByRole('checkbox', { name: /Signed as edited/ })).toBeNull()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/The letter changed since it was sent - send it again/)
+    const asEdited = await within(dialog).findByRole('checkbox', { name: /Signed as edited/ })
+    expect(within(dialog).getByRole('button', { name: 'Mark as signed' })).toBeDisabled()
+    fireEvent.click(asEdited)
+    api.signEngagementRequest = vi.fn(async () => signResult())
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
+    await waitFor(() =>
+      expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-amend', { signedOn: firmToday(), confirmChanged: true }),
+    )
+  })
+
+  it('any other refusal shows the server sentence and stays open', async () => {
+    renderCard()
+    api.signEngagementRequest = vi.fn(async () => {
+      throw new ApiError(409, 'This letter was voided while you were marking it signed.', 'engagement_refused', 'status')
+    })
+    const [row] = await rowsOf()
+    fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('This letter was voided while you were marking it signed.')
+    expect(within(dialog).queryByRole('status', { name: 'What signing did' })).toBeNull()
+  })
+
+  it("an existing monthly client's fee choice is shown read-only, with the letter to change it, and the confirm repeats it", async () => {
+    const upsell = engagementFixture({
+      id: 'eng-upsell',
+      status: 'sent',
+      signedAt: null,
+      signedBy: null,
+      feeMode: 'add',
+      figures: { totals: { monthly: 630, annual: 0, oneTime: 0, cleanup: 0, software: 0 } },
+    })
+    api.listEngagementsRequest = vi.fn(async () => [upsell])
+    api.getEngagementRequest = vi.fn(async () => viewOf(upsell))
+    renderCard(true, { client: { name: 'Acme', billingMode: 'subscription', monthlyRate: 1200 } })
+    const [row] = await rowsOf()
+    fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
+    const dialog = await screen.findByRole('dialog')
+    const fee = within(dialog).getByLabelText('Monthly fee when signed')
+    expect(fee).toHaveTextContent("Acme's monthly fee, when signed: Add to it ($1,200.00 + $630.00 = $1,830.00).")
+    expect(within(fee).getByRole('link', { name: 'Open the letter to change' })).toHaveAttribute('href', '/engagements/eng-upsell')
+    expect(within(dialog).queryByRole('radio')).toBeNull()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
+    expect(confirm.mock.calls[0][0]).toContain('Monthly fee: Add to it ($1,200.00 + $630.00 = $1,830.00). A signed letter')
   })
 })
