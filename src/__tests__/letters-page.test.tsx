@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { AppContextValue } from '../AppContext'
 import { LetterPreviewModal } from '../components/LetterPreviewModal'
@@ -137,7 +138,11 @@ function setClients(clients: unknown[]) {
 }
 
 async function renderPage() {
-  render(<LettersPage />)
+  render(
+    <MemoryRouter>
+      <LettersPage />
+    </MemoryRouter>,
+  )
   await screen.findByDisplayValue('Your {{next_year}} 1099s')
 }
 
@@ -467,7 +472,11 @@ describe('the letters list', () => {
 
   it('says so when there are no letters yet', async () => {
     api.listLettersRequest = vi.fn(async () => listState([]))
-    render(<LettersPage />)
+    render(
+    <MemoryRouter>
+      <LettersPage />
+    </MemoryRouter>,
+  )
     expect(await screen.findByText('No letters yet. Add one with New letter.')).toBeInTheDocument()
     expect(screen.queryByLabelText('Subject')).not.toBeInTheDocument()
     expect(api.fetchLetterTemplate).not.toHaveBeenCalled()
@@ -659,6 +668,31 @@ describe('sending', () => {
       templateHash: 'hash-1',
     })
     expect(screen.getByText(/Sent to c-acme@x.test/)).toBeInTheDocument()
+  })
+
+  // Engagements stage 4: each send is recorded as an amendment on the client.
+  it('links each sent client to the amendment its send was recorded as, and none when recording failed', async () => {
+    mockConfirm(true)
+    api.sendLettersRequest = vi.fn(async (_id: string, input: { clientIds: string[] }) => ({
+      results: input.clientIds.map((clientId, index) => ({
+        clientId,
+        clientName: clientId,
+        status: 'sent' as const,
+        to: [`${clientId}@x.test`],
+        engagementId: index === 0 ? `eng-${clientId}` : null,
+      })),
+      sent: input.clientIds.length,
+      failed: 0,
+      skipped: 0,
+    }))
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Select all shown' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 3 clients' }))
+    await screen.findByText('3 sent, 0 skipped, 0 failed.')
+    const links = screen.getAllByRole('link', { name: 'View in Engagements' })
+    expect(links).toHaveLength(1)
+    const firstId = (api.sendLettersRequest as Mock).mock.calls[0][1].clientIds[0]
+    expect(links[0]).toHaveAttribute('href', `/engagements/eng-${firstId}`)
   })
 
   it('sends in chunks of ten, one request after the other', async () => {

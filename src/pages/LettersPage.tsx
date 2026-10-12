@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ListSearch } from '../components/ListSearch'
 import { LetterPreviewModal } from '../components/LetterPreviewModal'
@@ -912,7 +913,17 @@ export function LettersPage() {
                 <li key={result.clientId}>
                   <strong>{nameOf(result.clientId, result.clientName)}</strong>:{' '}
                   {result.status === 'sent' ? (
-                    <span>Sent to {(result.to ?? []).join(', ')}</span>
+                    <span>
+                      Sent to {(result.to ?? []).join(', ')}
+                      {result.engagementId ? (
+                        <>
+                          {' '}
+                          <Link className="ghost-action" to={`/engagements/${result.engagementId}`}>
+                            View in Engagements
+                          </Link>
+                        </>
+                      ) : null}
+                    </span>
                   ) : result.code === 'already_sent' ? (
                     <span>
                       Already sent today.{' '}

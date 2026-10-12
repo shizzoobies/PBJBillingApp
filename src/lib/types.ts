@@ -2665,6 +2665,8 @@ export type LetterSendResult = {
   message?: string
   to?: string[]
   sendId?: string
+  /** The amendment this send was recorded as on the client's engagements (stage 4); null when recording failed. */
+  engagementId?: string | null
 }
 
 export type LetterSendResponse = {

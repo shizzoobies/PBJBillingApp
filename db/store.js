@@ -1581,11 +1581,11 @@ const ENGAGEMENT_SECTION_COLUMNS = `id, key, title, body, trigger, sort_order, a
 const ENGAGEMENT_COLUMNS = `id, kind, status, proposal_id, client_id, letter_id, supersedes_id, party,
           subject, email_body, letter_body, section_keys, figures, retainer_amount, package_id,
           plan_ids, fee_mode, template_hash, email_log, sent_at, signed_at, signed_by, signed_note, voided_at,
-          created_by, created_at, updated_at`
+          created_by, created_at, updated_at, letter_send_id`
 /** The list view: no bodies and no email log (the editor reads one engagement whole). */
 const ENGAGEMENT_LIST_COLUMNS = `id, kind, status, proposal_id, client_id, letter_id, supersedes_id, party,
           subject, section_keys, figures, retainer_amount, package_id, plan_ids, fee_mode, template_hash,
-          sent_at, signed_at, signed_by, signed_note, voided_at, created_by, created_at, updated_at`
+          sent_at, signed_at, signed_by, signed_note, voided_at, created_by, created_at, updated_at, letter_send_id`
 
 /**
  * An engagement write the engagement's own state refuses (editing a signed one,
@@ -1649,6 +1649,8 @@ function mapEngagementRow(row, { list = false } = {}) {
     proposalId: pick('proposal_id', 'proposalId') ?? null,
     clientId: pick('client_id', 'clientId') ?? null,
     letterId: pick('letter_id', 'letterId') ?? null,
+    // The Letters send-log row an amendment was recorded from (stage 4), else null.
+    letterSendId: pick('letter_send_id', 'letterSendId') ?? null,
     supersedesId: pick('supersedes_id', 'supersedesId') ?? null,
     party: cleanEngagementParty(engagementJson(row.party, {})),
     subject: row.subject ?? '',
@@ -7825,6 +7827,26 @@ export class AppDataStore {
         await this.pool.query(
           `alter table engagements add column if not exists fee_mode text not null default 'replace'
              check (fee_mode in ('replace','add','keep'))`,
+        )
+      }
+      // Engagements stage 4: an amendment recorded from a Letters send names the
+      // send-log row it came from, once - the partial unique index makes a second
+      // record of the same send a no-op. Both look-first, so a boot with them in
+      // place takes no lock.
+      const letterSendColumn = await this.pool.query(
+        `select 1 from information_schema.columns
+          where table_schema = current_schema() and table_name = 'engagements' and column_name = 'letter_send_id'`,
+      )
+      if ((letterSendColumn.rows?.length ?? 0) === 0) {
+        await this.pool.query(`alter table engagements add column if not exists letter_send_id text`)
+      }
+      const letterSendIndex = await this.pool.query(
+        `select 1 from pg_indexes where schemaname = current_schema() and indexname = 'engagements_letter_send_idx'`,
+      )
+      if ((letterSendIndex.rows?.length ?? 0) === 0) {
+        await this.pool.query(
+          `create unique index if not exists engagements_letter_send_idx
+             on engagements (letter_send_id) where letter_send_id is not null`,
         )
       }
       // ---- RATE HISTORY (docs/plans/rate-history-2026-09.md) ----
@@ -26764,6 +26786,115 @@ export class AppDataStore {
       planIds = picks.planIds.filter((planId) => known.has(planId))
     }
     return this.createEngagementFromProposal(proposal, { kind: 'original', createdBy, packageId, planIds })
+  }
+
+  /**
+   * Engagements stage 4: a Letters send that LEFT is also an amendment on the
+   * client's engagements - kind 'amendment', status 'sent', the saved letter it came
+   * from, and the FILLED subject and bodies that went out (so the record shows what
+   * the client received). No figures, no retainer, fee 'keep': marking it signed
+   * changes no billing. The email log holds the one send, carrying the record's hash
+   * (the sent-hash guard at signing reads it as unchanged).
+   *
+   * Idempotent on `letterSendId` (the send-log row): a second record of the same
+   * send returns the first, never a second row (Postgres: the partial unique index
+   * `engagements_letter_send_idx`; the file backend: one queue slot). The send log
+   * stays the double-send guard - this is only the record.
+   *
+   * @returns {Promise<object>} the amendment (the existing one when already recorded)
+   */
+  async recordAmendmentFromLetterSend({
+    letterSendId,
+    letterId = null,
+    clientId,
+    party = {},
+    subject = '',
+    emailBody = '',
+    letterBody = '',
+    providerId = null,
+    to = [],
+    at = null,
+    createdBy = null,
+  } = {}) {
+    if (typeof letterSendId !== 'string' || !letterSendId || typeof clientId !== 'string' || !clientId) {
+      throw new EngagementStateError('An amendment needs the send and the client it was sent to.', 'invalid')
+    }
+    const row = {
+      id: `eng-${randomUUID().slice(0, 8)}`,
+      kind: 'amendment',
+      status: 'sent',
+      proposalId: null,
+      clientId,
+      letterId: typeof letterId === 'string' && letterId ? letterId : null,
+      letterSendId,
+      supersedesId: null,
+      party: cleanEngagementParty(party),
+      subject: String(subject ?? '').slice(0, ENGAGEMENT_SUBJECT_MAX),
+      emailBody: String(emailBody ?? '').slice(0, ENGAGEMENT_BODY_MAX),
+      letterBody: String(letterBody ?? '').slice(0, ENGAGEMENT_BODY_MAX),
+      sectionKeys: [],
+      figures: {},
+      retainerAmount: null,
+      feeMode: 'keep',
+      packageId: null,
+      planIds: [],
+      templateHash: null,
+      createdBy,
+    }
+    row.templateHash = engagementHash(row)
+    const entry = AppDataStore._engagementLogEntry(
+      { to, providerId, ok: true, at, subject: row.subject, hash: row.templateHash },
+      'send',
+    )
+    row.emailLog = [entry]
+    row.sentAt = entry.at
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `insert into engagements
+           (id, kind, status, client_id, letter_id, letter_send_id, party, subject, email_body, letter_body,
+            figures, fee_mode, template_hash, email_log, sent_at, created_by)
+         values ($1, 'amendment', 'sent', $2, $3, $4, $5::jsonb, $6, $7, $8, '{}'::jsonb, 'keep', $9, $10::jsonb, $11, $12)
+         on conflict do nothing
+         returning ${ENGAGEMENT_COLUMNS}`,
+        [
+          row.id,
+          row.clientId,
+          row.letterId,
+          row.letterSendId,
+          JSON.stringify(row.party),
+          row.subject,
+          row.emailBody,
+          row.letterBody,
+          row.templateHash,
+          JSON.stringify(row.emailLog),
+          row.sentAt,
+          row.createdBy,
+        ],
+      )
+      if (rows[0]) return mapEngagementRow(rows[0])
+      const existing = await this.pool.query(
+        `select ${ENGAGEMENT_COLUMNS} from engagements where letter_send_id = $1`,
+        [letterSendId],
+      )
+      if (existing.rows[0]) return mapEngagementRow(existing.rows[0])
+      throw new Error('the amendment was not recorded')
+    }
+    return this._mutateEngagementFile((authState) => {
+      const already = authState.engagements.find((entry) => entry?.letterSendId === letterSendId)
+      if (already) return { result: mapEngagementRow(already), changed: false }
+      const now = nowIso()
+      const stored = {
+        ...row,
+        signedAt: null,
+        signedBy: null,
+        signedNote: null,
+        voidedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      }
+      authState.engagements.push(stored)
+      return { result: mapEngagementRow(stored), changed: true }
+    })
   }
 
   /** A refusal for a write the engagement's status does not allow, worded from the status. */

@@ -48610,3 +48610,257 @@ describe('engagements (Postgres statements)', () => {
     })
   })
 })
+
+// ---- Engagements stage 4: a Letters send is recorded as an amendment ----------------
+// docs/plans/engagements-2026-10.md stage 4 (A). recordAmendmentFromLetterSend on both
+// backends: a SENT amendment with the filled text, idempotent on the send-log row.
+
+const amendmentArgs = (over = {}) => ({
+  letterSendId: 'els-1a2b3c4d',
+  letterId: 'letter-1099',
+  clientId: 'c1',
+  party: { company: 'Acme', contactName: 'Robin Ray', email: 'robin@acme.test', addressLine1: '1 Main St', notes: 'dropped' },
+  subject: 'Your 2027 1099s',
+  emailBody: 'Hi Robin, our fee for Acme is $500.00 per month.',
+  letterBody: 'Dear Robin Ray,\n\nThe fee is **$500.00 per month**.',
+  providerId: 're_1',
+  to: ['robin@acme.test'],
+  at: '2026-10-11T15:00:00.000Z',
+  createdBy: 'emp-patrice',
+  ...over,
+})
+
+describe('engagements stage 4: amendments recorded from Letters sends (file backend)', () => {
+  const readAuth = async () => JSON.parse(await readFile(localAuthPath, 'utf8'))
+
+  beforeEach(async () => {
+    await clearEngagements()
+    await store.write(
+      workspace({
+        clients: [
+          {
+            id: 'c1',
+            name: 'Acme',
+            contactName: 'Robin Ray',
+            email: 'robin@acme.test',
+            billingMode: 'subscription',
+            monthlyRate: 500,
+            lifecycleStage: 'active',
+          },
+        ],
+        plans: [{ id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: [] }],
+        timeEntries: [],
+      }),
+    )
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('records a SENT amendment with the filled text, the party, no figures and the one send in its log', async () => {
+    const amendment = await store.recordAmendmentFromLetterSend(amendmentArgs())
+    expect(amendment).toMatchObject({
+      kind: 'amendment',
+      status: 'sent',
+      proposalId: null,
+      clientId: 'c1',
+      letterId: 'letter-1099',
+      letterSendId: 'els-1a2b3c4d',
+      supersedesId: null,
+      subject: 'Your 2027 1099s',
+      letterBody: 'Dear Robin Ray,\n\nThe fee is **$500.00 per month**.',
+      figures: {},
+      retainerAmount: null,
+      feeMode: 'keep',
+      packageId: null,
+      planIds: [],
+      sentAt: '2026-10-11T15:00:00.000Z',
+      createdBy: 'emp-patrice',
+    })
+    expect(amendment.party).toEqual({
+      company: 'Acme',
+      contactName: 'Robin Ray',
+      title: '',
+      email: 'robin@acme.test',
+      phone: '',
+      addressLine1: '1 Main St',
+      addressLine2: '',
+      city: '',
+      state: '',
+      postalCode: '',
+    })
+    expect(amendment.templateHash).toBe(engagementHash(amendment))
+    expect(amendment.emailLog).toEqual([
+      {
+        kind: 'send',
+        at: '2026-10-11T15:00:00.000Z',
+        providerId: 're_1',
+        to: ['robin@acme.test'],
+        ok: true,
+        subject: 'Your 2027 1099s',
+        error: null,
+        hash: amendment.templateHash,
+      },
+    ])
+    const listed = await store.listEngagements({ clientId: 'c1' })
+    expect(listed.map((row) => [row.id, row.kind, row.status])).toEqual([[amendment.id, 'amendment', 'sent']])
+  })
+
+  it('is idempotent on the send-log row: a second record of the same send returns the first, one row stored', async () => {
+    const first = await store.recordAmendmentFromLetterSend(amendmentArgs())
+    const again = await store.recordAmendmentFromLetterSend(amendmentArgs({ subject: 'Different' }))
+    expect(again.id).toBe(first.id)
+    expect(again.subject).toBe('Your 2027 1099s')
+    expect((await readAuth()).engagements).toHaveLength(1)
+    const other = await store.recordAmendmentFromLetterSend(amendmentArgs({ letterSendId: 'els-99999999' }))
+    expect(other.id).not.toBe(first.id)
+    expect((await readAuth()).engagements).toHaveLength(2)
+  })
+
+  it('refuses a record with no send or no client, writing nothing', async () => {
+    for (const bad of [{ letterSendId: '' }, { clientId: null }]) {
+      const error = await store.recordAmendmentFromLetterSend(amendmentArgs(bad)).catch((caught) => caught)
+      expect(error).toBeInstanceOf(EngagementStateError)
+      expect(error.reason).toBe('invalid')
+    }
+    expect((await readAuth()).engagements).toEqual([])
+  })
+
+  it('marking it signed takes the existing-client path and changes no billing', async () => {
+    const amendment = await store.recordAmendmentFromLetterSend(amendmentArgs())
+    const result = await store.signEngagement(amendment.id, { signedOn: '2026-10-11', userId: 'emp-patrice' })
+    expect(result).toMatchObject({
+      createdClient: false,
+      clientId: 'c1',
+      retainerInvoiceId: null,
+      monthlyRate: null,
+      addedPlanIds: [],
+      softwareAdded: [],
+      skipped: [],
+    })
+    expect(result.engagement.status).toBe('signed')
+    const client = (await store.read()).clients.find((row) => row.id === 'c1')
+    expect(client.monthlyRate).toBe(500)
+  })
+})
+
+describe('engagements stage 4: amendments recorded from Letters sends (Postgres statements)', () => {
+  it('adds engagements.letter_send_id and its partial unique index the look-first way, after the table', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    expect(fake.matching(/information_schema\.columns[\s\S]*'engagements'[\s\S]*'letter_send_id'/i)).toHaveLength(1)
+    expect(fake.matching(/^alter table engagements add column if not exists letter_send_id text$/i)).toHaveLength(1)
+    expect(fake.matching(/pg_indexes[\s\S]*'engagements_letter_send_idx'/i)).toHaveLength(1)
+    const [index] = fake.matching(/^create unique index if not exists engagements_letter_send_idx/i)
+    expect(index.text.replace(/\s+/g, ' ').trim()).toBe(
+      'create unique index if not exists engagements_letter_send_idx on engagements (letter_send_id) where letter_send_id is not null',
+    )
+    expect(index.text).not.toMatch(/references/i)
+    expect(fake.indexOf(/^alter table engagements add column if not exists letter_send_id/i)).toBeGreaterThan(
+      fake.indexOf(/create table if not exists engagements\b/i),
+    )
+    expect(fake.indexOf(/^create unique index if not exists engagements_letter_send_idx/i)).toBeGreaterThan(
+      fake.indexOf(/^alter table engagements add column if not exists letter_send_id/i),
+    )
+  })
+
+  it('a boot with the column and the index in place asks and alters nothing', async () => {
+    const statements = []
+    const query = async (text) => {
+      const trimmed = String(text).replace(/\s+/g, ' ').trim()
+      statements.push(trimmed)
+      if (/information_schema\.columns[\s\S]*'letter_send_id'/i.test(trimmed)) return { rows: [{ '?column?': 1 }] }
+      if (/pg_indexes[\s\S]*'engagements_letter_send_idx'/i.test(trimmed)) return { rows: [{ '?column?': 1 }] }
+      return { rows: [] }
+    }
+    const pgStore = new AppDataStore()
+    pgStore.pool = { query, connect: async () => ({ query, release() {} }) }
+    pgStore.mode = 'postgres'
+    await pgStore.initialize().catch(() => {})
+    expect(statements.filter((text) => /letter_send_id/i.test(text) && /^(alter|create)\b/i.test(text))).toEqual([])
+  })
+
+  /** A recording pool with the one engagements table and the partial unique index on letter_send_id. */
+  function amendmentPool() {
+    const statements = []
+    const rows = []
+    const compact = (text) => String(text).replace(/\s+/g, ' ').trim()
+    const query = async (text, params = []) => {
+      const trimmed = compact(text)
+      statements.push({ text: trimmed, params })
+      if (/^insert into engagements /i.test(trimmed)) {
+        if (rows.some((row) => row.letter_send_id === params[3])) return { rows: [], rowCount: 0 }
+        const row = {
+          id: params[0],
+          kind: 'amendment',
+          status: 'sent',
+          proposal_id: null,
+          client_id: params[1],
+          letter_id: params[2],
+          letter_send_id: params[3],
+          supersedes_id: null,
+          party: JSON.parse(params[4]),
+          subject: params[5],
+          email_body: params[6],
+          letter_body: params[7],
+          section_keys: [],
+          figures: {},
+          retainer_amount: null,
+          package_id: null,
+          plan_ids: [],
+          fee_mode: 'keep',
+          template_hash: params[8],
+          email_log: JSON.parse(params[9]),
+          sent_at: params[10],
+          created_by: params[11],
+          created_at: new Date('2026-10-11T15:00:00Z'),
+          updated_at: new Date('2026-10-11T15:00:00Z'),
+        }
+        rows.push(row)
+        return { rows: [{ ...row }], rowCount: 1 }
+      }
+      if (/^select .* from engagements where letter_send_id = \$1$/i.test(trimmed)) {
+        return { rows: rows.filter((row) => row.letter_send_id === params[0]).map((row) => ({ ...row })) }
+      }
+      return { rows: [] }
+    }
+    return { pool: { query, connect: async () => ({ query, release() {} }) }, statements, rows }
+  }
+
+  it('inserts the sent amendment in ONE statement with on conflict do nothing, then answers a repeat from the index', async () => {
+    const fake = amendmentPool()
+    const pgStore = postgresStore(fake)
+    const first = await pgStore.recordAmendmentFromLetterSend(amendmentArgs())
+    expect(fake.statements).toHaveLength(1)
+    const [insert] = fake.statements
+    expect(insert.text).toMatch(
+      /^insert into engagements \(id, kind, status, client_id, letter_id, letter_send_id, party, subject, email_body, letter_body, figures, fee_mode, template_hash, email_log, sent_at, created_by\) values \(\$1, 'amendment', 'sent', \$2, \$3, \$4, \$5::jsonb, \$6, \$7, \$8, '\{\}'::jsonb, 'keep', \$9, \$10::jsonb, \$11, \$12\) on conflict do nothing returning /i,
+    )
+    expect(insert.text).toMatch(/\bletter_send_id\b[\s\S]*returning[\s\S]*\bletter_send_id\b/i)
+    expect(insert.params.slice(1, 4)).toEqual(['c1', 'letter-1099', 'els-1a2b3c4d'])
+    expect(JSON.parse(insert.params[9])).toEqual([expect.objectContaining({ kind: 'send', ok: true, providerId: 're_1', hash: insert.params[8] })])
+    expect(first).toMatchObject({ kind: 'amendment', status: 'sent', letterSendId: 'els-1a2b3c4d', feeMode: 'keep' })
+    expect(first.templateHash).toBe(engagementHash(first))
+
+    const again = await pgStore.recordAmendmentFromLetterSend(amendmentArgs())
+    expect(again.id).toBe(first.id)
+    expect(fake.rows).toHaveLength(1)
+    expect(fake.statements.map((s) => s.text.replace(/^(\w+ \w+).*$/, '$1'))).toEqual([
+      'insert into',
+      'insert into',
+      'select id',
+    ])
+    expect(fake.statements[2].params).toEqual(['els-1a2b3c4d'])
+  })
+
+  it('is never part of the bulk save: write() issues no engagements statement', async () => {
+    const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
+    expect(source).not.toMatch(/delete from engagements\b/i)
+    const fake = fakePostgres()
+    await postgresStore(fake).write(workspace())
+    expect(fake.statements.filter((s) => /\bletter_send_id\b/i.test(s.text))).toEqual([])
+  })
+})

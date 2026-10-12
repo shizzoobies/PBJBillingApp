@@ -480,6 +480,22 @@ describe('a letter goes to the client and nowhere else (Alex, 2026-10-08)', () =
     expect(all).not.toMatch(/\bsend[A-Z]\w*Email\((?!mail\))/)
   })
 
+  // Engagements stage 4: a send that left is recorded as an amendment - through the
+  // store only, after the mail call, in its own try/catch, and never mailed to anyone.
+  it('records each sent letter as an amendment through the store only, after the send, never as a failure', () => {
+    const body = sendOne()
+    const sendAt = body.lastIndexOf('deps.sendMail(')
+    const recordAt = body.indexOf('deps.store.recordAmendmentFromLetterSend({')
+    expect(recordAt).toBeGreaterThan(sendAt)
+    expect(body.slice(body.indexOf('if (!sendResult.ok) {'), recordAt)).toContain("status: 'failed'")
+    const record = body.slice(body.lastIndexOf('try {', recordAt), body.indexOf("return { ...base, status: 'sent'", recordAt))
+    expect(record).toContain('} catch (error) {')
+    expect(record).toContain('console.error(')
+    expect(record).toContain('to: preview.to,')
+    expect(record.match(/deps\.\w+/g)).toEqual(['deps.store'])
+    expect(libSource.match(/recordAmendmentFromLetterSend\(/g)).toHaveLength(1)
+  })
+
   it('reads the addresses of the team once, fails closed, and hands them to the builder with the reply-to', () => {
     const body = serverHelpers().slice(serverHelpers().indexOf('async function loadLetterContext('))
     expect(body).toContain('appDataStore.getTeamMembers()')
