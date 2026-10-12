@@ -45729,8 +45729,13 @@ describe('engagement letters (file backend)', () => {
     // Nothing was written to name it.
     expect((await readAuth()).engagementLetters[0].name).toBe('Engagement letter')
 
+    // Her first save writes that name down, from the OLD subject: a new subject never renames it.
+    const saved = await store.saveEngagementLetter({ id: 'default', subject: 'Your 2027 1099s', emailBody: 'e', letterBody: 'l' })
+    expect(saved).toMatchObject({ name: '1099 Filing', subject: 'Your 2027 1099s' })
+    expect((await readAuth()).engagementLetters[0].name).toBe('1099 Filing')
+
     const renamed = await store.renameEngagementLetter('default', '  1099 letter  ')
-    expect(renamed).toMatchObject({ id: 'default', name: '1099 letter', subject: '1099 Filing', updatedAt: before.updatedAt })
+    expect(renamed).toMatchObject({ id: 'default', name: '1099 letter', subject: 'Your 2027 1099s', updatedAt: saved.updatedAt })
     expect((await store.getEngagementLetter('default')).name).toBe('1099 letter')
   })
 
@@ -45951,9 +45956,13 @@ describe('engagement letters (Postgres statements)', () => {
         letters.push(row)
         return { rows: [{ ...row }], rowCount: 1 }
       }
-      if (/^update engagement_letters set subject = \$2, email_body = \$3, letter_body = \$4, updated_by = \$5, updated_at = now\(\) where id = \$1 returning /i.test(trimmed)) {
+      if (/^update engagement_letters set subject = \$2, email_body = \$3, letter_body = \$4, updated_by = \$5, updated_at = now\(\), name = case when id = 'default' and btrim\(name\) in \('', 'Engagement letter'\) then coalesce\(nullif\(left\(btrim\(subject\), 80\), ''\), 'Letter 1'\) else name end where id = \$1 returning /i.test(trimmed)) {
         const row = letters.find((entry) => entry.id === params[0])
         if (!row) return { rows: [], rowCount: 0 }
+        // The CASE reads the row as it was before the update.
+        if (row.id === 'default' && ['', 'Engagement letter'].includes(row.name.trim())) {
+          row.name = row.subject.trim().slice(0, 80) || 'Letter 1'
+        }
         Object.assign(row, {
           subject: params[1],
           email_body: params[2],
@@ -46146,6 +46155,27 @@ describe('engagement letters (Postgres statements)', () => {
     expect(renamed).toMatchObject({ id: 'default', name: '1099 letter', subject: '1099 Filing' })
     expect(fake.matching(/^update engagement_letters set name = \$2 where id = \$1/i)[0].params).toEqual(['default', '1099 letter'])
     expect(await store2.renameEngagementLetter('letter-gone', 'x')).toBeNull()
+  })
+
+  it('a save of the still-unnamed v1 letter writes down the name it was listed under, from the OLD subject', async () => {
+    const fake = letterPool()
+    const store2 = letterStore(fake)
+    fake.letters.push({
+      id: 'default',
+      name: 'Engagement letter',
+      subject: '1099 Filing',
+      email_body: 'e',
+      letter_body: 'l',
+      updated_by: 'u',
+      created_at: new Date('2026-10-08T12:00:00Z'),
+      updated_at: new Date('2026-10-08T12:00:00Z'),
+    })
+    const saved = await store2.saveEngagementLetter({ id: 'default', subject: 'Your 2027 1099s', emailBody: 'e', letterBody: 'l' })
+    expect(saved).toMatchObject({ name: '1099 Filing', subject: 'Your 2027 1099s' })
+    expect(fake.letters[0].name).toBe('1099 Filing')
+    // A named letter is never renamed by a save.
+    const other = await store2.createEngagementLetter({ name: 'Other', subject: 'x' })
+    expect((await store2.saveEngagementLetter({ id: other.id, subject: 'y', emailBody: '', letterBody: '' })).name).toBe('Other')
   })
 
   it('deletes in one statement only when no send names the letter, and says why not', async () => {

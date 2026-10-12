@@ -25683,6 +25683,10 @@ export class AppDataStore {
    * Save a letter's three boxes. Trimmed; the subject is capped at 200 characters,
    * each body at 20,000. Null when there is no letter with that id (deleted in
    * another tab): a save never brings a deleted letter back.
+   *
+   * The v1 letter, still unnamed, keeps the name it is listed under: the first save
+   * stores the name read from its OLD subject, so editing the subject never renames
+   * it (`engagementLetterName`, written down at her own save).
    */
   async saveEngagementLetter({ id = 'default', subject, emailBody, letterBody, updatedBy = null } = {}) {
     const fields = {
@@ -25691,9 +25695,15 @@ export class AppDataStore {
       letterBody: String(letterBody ?? '').trim().slice(0, ENGAGEMENT_LETTER_BODY_MAX),
     }
     if (this.pool) {
+      // `subject` and `name` on the right-hand side are the row's values BEFORE this update.
       const result = await this.pool.query(
         `update engagement_letters
-            set subject = $2, email_body = $3, letter_body = $4, updated_by = $5, updated_at = now()
+            set subject = $2, email_body = $3, letter_body = $4, updated_by = $5, updated_at = now(),
+                name = case
+                  when id = 'default' and btrim(name) in ('', '${LEGACY_ENGAGEMENT_LETTER_NAME}')
+                    then coalesce(nullif(left(btrim(subject), ${ENGAGEMENT_LETTER_NAME_MAX}), ''), 'Letter 1')
+                  else name
+                end
           where id = $1
           returning ${ENGAGEMENT_LETTER_COLUMNS}`,
         [id, fields.subject, fields.emailBody, fields.letterBody, updatedBy],
@@ -25703,7 +25713,9 @@ export class AppDataStore {
     return this._mutateLetterFile((authState) => {
       const at = authState.engagementLetters.findIndex((row) => row?.id === id)
       if (at < 0) return { result: null, changed: false }
-      const row = { ...authState.engagementLetters[at], ...fields, updatedBy, updatedAt: nowIso() }
+      const before = authState.engagementLetters[at]
+      const name = engagementLetterName(before.id, before.name, before.subject)
+      const row = { ...before, ...fields, name, updatedBy, updatedAt: nowIso() }
       authState.engagementLetters[at] = row
       return { result: fileEngagementLetter(row), changed: true }
     })
