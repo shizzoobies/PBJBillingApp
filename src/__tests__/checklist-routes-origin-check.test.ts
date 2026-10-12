@@ -32,6 +32,7 @@ const ROUTES: [string, string][] = [
   ['POST /api/checklists/skips/:id/review', 'if (skipReviewMatch) {'],
   ['POST /api/checklists/:id/skip', 'if (checklistSkipMatch) {'],
   ['POST /api/checklists/:id/push', 'if (checklistPushMatch) {'],
+  ['POST /api/checklists/:id/open-next-stage', 'if (checklistOpenNextStageMatch) {'],
   ["PATCH /api/checklists/:id", "if (checklistMetaPatchMatch && request.method === 'PATCH') {"],
   ['DELETE /api/checklists/:id', 'if (checklistDeleteMatch) {'],
   ['POST /api/checklists/:id/items/:itemId/toggle', 'if (checklistToggleMatch) {'],
