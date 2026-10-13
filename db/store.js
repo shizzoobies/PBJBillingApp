@@ -18,7 +18,13 @@ import {
   templateStartFloor,
 } from '../lib/checklist-start-floor.js'
 import { copiedTemplateSettings, copiedTemplateStages } from '../lib/checklist-template-copy.js'
-import { effectivePlanCadence, normalizePlanCadence, preservedPlanCadence } from '../lib/plan-cadence.js'
+import {
+  bundlingPlan,
+  cadenceSchedule,
+  effectivePlanCadence,
+  normalizePlanCadence,
+  preservedPlanCadence,
+} from '../lib/plan-cadence.js'
 import { dateOnlyInZone, firmTimeZone, firmToday } from '../lib/firm-time.js'
 import {
   CHECKLIST_INSTANCE_UNIQUE_INDEX,
@@ -2721,6 +2727,21 @@ export class PackageApplyError extends Error {
   constructor(message) {
     super(message)
     this.name = 'PackageApplyError'
+  }
+}
+
+/**
+ * "Match plan" (featreq-acdd0c84 B3) refused: `reason` is 'not_client_copy' (a
+ * blueprint, or a client checklist not stamped from one), 'not_bundled' (the plan
+ * is gone or does not bundle the copy's blueprint) or 'blueprint_cadence' (the
+ * plan says "use the checklist's own schedule", so there is nothing to match).
+ * The route answers 409 with the sentence.
+ */
+export class PlanCadenceMatchError extends Error {
+  constructor(reason, message) {
+    super(message)
+    this.name = 'PlanCadenceMatchError'
+    this.reason = reason
   }
 }
 
@@ -14030,10 +14051,13 @@ export class AppDataStore {
     // each plan this apply ADDED (its bundled checklists) - the rule signing an
     // engagement uses, so a plan's checklist the package does not list still
     // populates (featreq-8bdc5ec5). A plan the client already had is left alone.
-    const { copies, skippedTemplateIds } = await this.copyTemplatesToClient(clientId, [
-      ...pkg.templateIds,
-      ...AppDataStore._planBundleTemplateIds(data.plans, addedPlanIds),
-    ])
+    // Each copy follows the "How often" of the plan that bundles it - an added
+    // plan first, then the package's others (featreq-acdd0c84 B2).
+    const { copies, skippedTemplateIds } = await this.copyTemplatesToClient(
+      clientId,
+      [...pkg.templateIds, ...AppDataStore._planBundleTemplateIds(data.plans, addedPlanIds)],
+      { cadenceByTemplateId: AppDataStore._planBundleCadences(data.plans, [...addedPlanIds, ...pkg.planIds]) },
+    )
     await this._grantTemplateCopiesVisibility(clientId, copies)
     const clonedTemplateIds = copies.map((copy) => copy.sourceTemplateId)
 
@@ -28278,10 +28302,13 @@ export class AppDataStore {
         }
         // The package's checklists and each ADDED plan's standard ones - a recipe she
         // deleted from a plan the client already had never comes back. One save.
-        const { copies } = await this.copyTemplatesToClient(clientId, [
-          ...(pkgNow?.templateIds ?? []),
-          ...AppDataStore._planBundleTemplateIds(workspace.plans, addedPlanIds),
-        ])
+        // Each copy follows the "How often" of the plan that bundles it - an added
+        // plan first, then the letter's others (featreq-acdd0c84 B2).
+        const { copies } = await this.copyTemplatesToClient(
+          clientId,
+          [...(pkgNow?.templateIds ?? []), ...AppDataStore._planBundleTemplateIds(workspace.plans, addedPlanIds)],
+          { cadenceByTemplateId: AppDataStore._planBundleCadences(workspace.plans, [...addedPlanIds, ...lettered]) },
+        )
         await this._grantTemplateCopiesVisibility(clientId, copies)
         clonedTemplateIds = copies.map((copy) => copy.sourceTemplateId)
         if (pkgNow) await this._recordSigningActivity(userId, 'package_applied', `${pkgNow.name} · ${client.name || ''}`)
@@ -28542,6 +28569,24 @@ export class AppDataStore {
       }
     }
     return ids
+  }
+
+  /**
+   * How often each checklist the given plans bundle runs on a client
+   * (featreq-acdd0c84 B2): { [templateId]: effective cadence } of the FIRST plan
+   * in `planIds` that bundles it - the plan that triggered the copy. The value
+   * applies to every checklist a plan bundles. Pure; feeds
+   * `copyTemplatesToClient`'s `cadenceByTemplateId`.
+   */
+  static _planBundleCadences(plans, planIds) {
+    const byId = new Map((plans ?? []).map((plan) => [plan?.id, plan]))
+    const ordered = [...new Set(planIds ?? [])].map((planId) => byId.get(planId)).filter(Boolean)
+    const cadences = {}
+    for (const templateId of AppDataStore._planBundleTemplateIds(plans, planIds)) {
+      const plan = bundlingPlan(templateId, ordered)
+      if (plan) cadences[templateId] = effectivePlanCadence(plan)
+    }
+    return cadences
   }
 
   /**
@@ -31463,14 +31508,19 @@ export class AppDataStore {
    * A stale workspace retries the whole read-decide-write, so two callers at once
    * produce one copy each, never two. Sources that no longer exist are left out.
    * Returns { copies, skippedTemplateIds } - skipped = already on the client.
+   *
+   * `cadenceByTemplateId` ({ [sourceId]: plan cadence }, from `_planBundleCadences`)
+   * makes a copy follow the plan that brought it (featreq-acdd0c84 B2): see
+   * `cadenceSchedule` in lib/plan-cadence.js. A source with no entry, or
+   * 'blueprint', is copied on its own schedule exactly as before.
    */
-  async copyTemplatesToClient(clientId, templateIds) {
+  async copyTemplatesToClient(clientId, templateIds, { cadenceByTemplateId = {} } = {}) {
     const wanted = [...new Set((Array.isArray(templateIds) ? templateIds : []).filter((id) => typeof id === 'string' && id))]
     if (!clientId || wanted.length === 0) return { copies: [], skippedTemplateIds: [] }
-    return this._retryOnStaleWorkspace(() => this._copyTemplatesToClientOnce(clientId, wanted))
+    return this._retryOnStaleWorkspace(() => this._copyTemplatesToClientOnce(clientId, wanted, cadenceByTemplateId))
   }
 
-  async _copyTemplatesToClientOnce(clientId, templateIds) {
+  async _copyTemplatesToClientOnce(clientId, templateIds, cadenceByTemplateId = {}) {
     await this._refuseBillingMasterWrite(clientId, 'recurring task recipes')
     const { data, version } = await this.readWithVersion()
     const existing = data.checklistTemplates ?? []
@@ -31483,7 +31533,8 @@ export class AppDataStore {
         skippedTemplateIds.push(templateId)
         continue
       }
-      copies.push(this._clientTemplateCopy(source, templateId, { clientId }))
+      const cadence = Object.hasOwn(cadenceByTemplateId ?? {}, templateId) ? cadenceByTemplateId[templateId] : null
+      copies.push(this._clientTemplateCopy(source, templateId, { clientId, cadence }))
     }
     await this._writeTemplateCopies(data, version, copies)
     return { copies, skippedTemplateIds }
@@ -31495,14 +31546,22 @@ export class AppDataStore {
    * `sourceTemplateId`. Pure - writes nothing (see `_copyTemplateToClientOnce`
    * and `_copyTemplatesToClientOnce`).
    */
-  _clientTemplateCopy(source, sourceTemplateId, { clientId, firstDueDate, frequency } = {}) {
+  _clientTemplateCopy(source, sourceTemplateId, { clientId, firstDueDate, frequency, cadence = null } = {}) {
     const migrated = ensureTemplateStages(source)
-    const copyFrequency = typeof frequency === 'string' && frequency ? frequency : source.frequency
     // The firm's day — the same one the materializer spawns against and
     // `templateStartFloor` reads the stamp below as. On the UTC date, a recipe
     // copied at 9 pm Eastern on the last day of a month was walked straight
     // past the month it was set up in.
     const today = firmToday()
+    // A copy a PLAN brought follows the plan's "How often" (featreq-acdd0c84 B2):
+    // weekly / monthly change the frequency, quarterly / yearly become
+    // specific-months with the first designated month's due date on or after
+    // today. An explicit `frequency` (Copy to client's own choice) wins; 'blueprint'
+    // and no plan are the copy as it always was.
+    const planSchedule =
+      typeof frequency === 'string' && frequency ? null : cadenceSchedule(cadence, source, today)
+    const copyFrequency =
+      typeof frequency === 'string' && frequency ? frequency : (planSchedule?.frequency ?? source.frequency)
     // Only a well-formed date counts as "the owner chose this" — anything else
     // falls through to the floored walk below rather than becoming a stamp.
     const explicitFirstDue =
@@ -31517,6 +31576,10 @@ export class AppDataStore {
       // days, Board column, skip and period-label settings, sub-steps and step
       // due days. FIRST, so the copy's own identity below always wins.
       ...copiedTemplateSettings(source),
+      // The plan's months (and, when the blueprint had no due day, the day of its
+      // next due date) over the blueprint's.
+      ...(planSchedule?.scheduledMonths ? { scheduledMonths: planSchedule.scheduledMonths } : {}),
+      ...(planSchedule?.dueDayOfMonth ? { dueDayOfMonth: planSchedule.dueDayOfMonth } : {}),
       id: `template-${randomUUID().slice(0, 8)}`,
       title: source.title,
       clientId,
@@ -31530,14 +31593,18 @@ export class AppDataStore {
       // one open instance per cycle from that date to today — the dozen
       // backdated tasks behind featreq-c133daf8. The walk keeps the cadence's
       // phase, so a monthly recipe due on the 15th stays on the 15th.
+      // A plan's quarterly / yearly schedule carries its own first due date (the
+      // first designated month's, on or after today); the monthly walk below
+      // knows nothing about designated months.
       nextDueDate: explicitFirstDue
         ? explicitFirstDue
-        : firstCycleOnOrAfter(
+        : (planSchedule?.nextDueDate ??
+          firstCycleOnOrAfter(
             source.nextDueDate || today,
             copyFrequency,
             today,
             advanceChecklistFrequency,
-          ),
+          )),
       // The stamp the floor is measured from, and the ONLY thing that makes
       // an explicit past `firstDueDate` durable. Honoring the date on this
       // object is not enough: the materializer runs on the next `read()`, sees
@@ -31578,6 +31645,101 @@ export class AppDataStore {
         if (stage.assigneeId) await this.grantClientVisibility(clientId, stage.assigneeId)
       }
     }
+  }
+
+  /**
+   * "Match plan" (featreq-acdd0c84 B3): re-sync ONE existing client copy to its
+   * plan's "How often" - the schedule a new copy from that plan would get
+   * (`cadenceSchedule`, months from the copy's blueprint, due day from the copy
+   * itself), with `nextDueDate` floored to the first occurrence on or after today.
+   * Refused (PlanCadenceMatchError) for a template that is not a client copy
+   * stamped from a blueprint, a plan that is gone or does not bundle that
+   * blueprint, and a plan whose cadence is 'blueprint'. Null for an unknown id.
+   *
+   * Nothing already generated changes: instances are left exactly as they are.
+   * A switch to specific-months also dates the copy TODAY (`createdAt`), because
+   * the specific-months materializer walks every designated month of the year
+   * back to the copy's creation and would otherwise add the ones that already
+   * ended - born completed - as history the client never had. A weekly / monthly
+   * switch keeps its date: its floored `nextDueDate` already starts it today.
+   *
+   * A TARGETED single-row update on both backends (like
+   * `setChecklistTemplateActive`), never the bulk save. Returns the updated
+   * template as the next read gives it.
+   */
+  async matchTemplateToPlanCadence(templateId, planId) {
+    const data = await this.read()
+    const template = (data.checklistTemplates ?? []).find((row) => row.id === templateId)
+    if (!template) return null
+    if (template.isStandard || !template.clientId || !template.sourceTemplateId) {
+      throw new PlanCadenceMatchError(
+        'not_client_copy',
+        'Only a client checklist made from a plan checklist can be matched to its plan.',
+      )
+    }
+    const plan = (data.plans ?? []).find((row) => row.id === planId)
+    if (!plan || !bundlingPlan(template.sourceTemplateId, [plan])) {
+      throw new PlanCadenceMatchError(
+        'not_bundled',
+        "That plan doesn't include this checklist any more, so there is nothing to match. Reload the page.",
+      )
+    }
+    const cadence = effectivePlanCadence(plan)
+    const today = firmToday()
+    // The blueprint decides a yearly plan's month; one deleted since the copy was
+    // made leaves the copy's own schedule to read it from.
+    const blueprint =
+      (data.checklistTemplates ?? []).find((row) => row.id === template.sourceTemplateId) ?? template
+    const schedule = cadenceSchedule(cadence, blueprint, today, template)
+    if (!schedule) {
+      throw new PlanCadenceMatchError(
+        'blueprint_cadence',
+        `${plan.name || 'That plan'} uses each checklist's own schedule, so there is nothing to match.`,
+      )
+    }
+    const specificMonths = schedule.frequency === 'specific-months'
+    const scheduledMonths = specificMonths ? schedule.scheduledMonths : (template.scheduledMonths ?? [])
+    const dueDayOfMonth = schedule.dueDayOfMonth ?? (typeof template.dueDayOfMonth === 'number' ? template.dueDayOfMonth : null)
+    const nextDueDate =
+      schedule.nextDueDate ??
+      firstCycleOnOrAfter(template.nextDueDate || today, schedule.frequency, today, advanceChecklistFrequency)
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update checklist_templates
+            set frequency = $2,
+                scheduled_months = $3,
+                due_day_of_month = $4,
+                next_due_date = $5,
+                created_at = case when $6::boolean then now() else created_at end,
+                updated_at = now()
+          where id = $1 and is_standard = false and client_id is not null
+          returning id`,
+        [templateId, schedule.frequency, scheduledMonths, dueDayOfMonth, nextDueDate, specificMonths],
+      )
+      if (!result.rowCount) return null
+      const after = await this.read()
+      return (after.checklistTemplates ?? []).find((row) => row.id === templateId) ?? null
+    }
+
+    const file = await readJson(localDataPath)
+    let updated = null
+    file.checklistTemplates = (file.checklistTemplates ?? []).map((row) => {
+      if (row.id !== templateId) return row
+      updated = {
+        ...row,
+        frequency: schedule.frequency,
+        scheduledMonths,
+        nextDueDate,
+        ...(dueDayOfMonth === null ? {} : { dueDayOfMonth }),
+        ...(specificMonths ? { createdAt: nowIso() } : {}),
+      }
+      return updated
+    })
+    if (!updated) return null
+    await writeFile(localDataPath, JSON.stringify(file, null, 2))
+    const after = await this.read()
+    return (after.checklistTemplates ?? []).find((row) => row.id === templateId) ?? updated
   }
 
   /** One workspace save appending `copies` to the templates read at `version`. */

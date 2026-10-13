@@ -29,6 +29,7 @@ import {
   NextStageRefusedError,
   NothingToPushError,
   PackageApplyError,
+  PlanCadenceMatchError,
   ProposalQuestionnaireError,
   ProposalStateError,
   PushConflictError,
@@ -47837,6 +47838,23 @@ describe('signing an engagement creates the client (file backend)', () => {
     expect(await copies()).toHaveLength(2)
   })
 
+  it("each copy follows the cadence of the plan that brought it (featreq-acdd0c84): a quarterly plan's checklist is Jan/Apr/Jul/Oct", async () => {
+    const data = await store.read()
+    await store.write({
+      ...data,
+      plans: data.plans.map((plan) => (plan.id === 'plan-payroll' ? { ...plan, name: 'Payroll - Quarterly' } : plan)),
+    })
+    const { engagement } = await wonEngagement({ accept: { planIds: ['plan-books', 'plan-payroll'] } })
+    const result = await sign(engagement.id)
+    const after = await store.read()
+    const copyOf = (sourceId) =>
+      after.checklistTemplates.find((template) => template.clientId === result.clientId && template.sourceTemplateId === sourceId)
+    expect(copyOf('bp-payroll')).toMatchObject({ frequency: 'specific-months', scheduledMonths: [1, 4, 7, 10], dueDayOfMonth: 31 })
+    expect(copyOf('bp-payroll').nextDueDate >= firmToday()).toBe(true)
+    // bp-close came with Bookkeeping first (no cadence): its own monthly schedule.
+    expect(copyOf('bp-close').frequency).toBe('monthly')
+  })
+
   it('a hand-made checklist with the same title counts as already set up (the client page rule)', async () => {
     await setup([
       { id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 400, planIds: [] },
@@ -52358,5 +52376,350 @@ describe('engagements: a superseding letter replaces the open amendments (Postgr
       expect(settled.filter((entry) => entry.status === 'fulfilled')).toHaveLength(1)
       expect(settled.find((entry) => entry.status === 'rejected').reason).toBeInstanceOf(EngagementStateError)
     })
+  })
+})
+
+/**
+ * Plan cadence part 2 (featreq-acdd0c84, stages B2 + B3). A NEW client copy made
+ * from a plan follows the plan's "How often" (quarterly = January / April / July
+ * / October, as specific-months); an existing copy changes only through "Match
+ * plan". Today is pinned to 2026-10-13 (noon Eastern) so the floors are exact.
+ */
+describe('a client copy follows its plan cadence (file backend)', () => {
+  const TODAY = '2026-10-13'
+  const blueprint = (id, title, over = {}) => ({
+    id,
+    title,
+    clientId: '',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2026-01-15',
+    active: false,
+    isStandard: true,
+    stages: [
+      {
+        id: `${id}-stage`,
+        name: 'Stage 1',
+        assigneeId: 'emp-1',
+        offsetDays: 0,
+        viewerIds: [],
+        editorIds: [],
+        items: [{ id: `${id}-item`, label: 'Reconcile' }],
+      },
+    ],
+    ...over,
+  })
+  const BLUEPRINTS = [
+    blueprint('bp-books', 'Monthly books'),
+    blueprint('bp-payroll', 'Payroll run', { nextDueDate: '2026-06-30' }),
+    blueprint('bp-tax', 'Sales tax', { frequency: 'specific-months', scheduledMonths: [9, 3], dueDayOfMonth: 20, nextDueDate: null }),
+    blueprint('bp-loose', 'Loose ends', { nextDueDate: '2026-05-31' }),
+  ]
+  const PLANS = [
+    { id: 'plan-q', name: 'Accounting', notes: '', cadence: 'quarterly', templateIds: ['bp-books'] },
+    { id: 'plan-w', name: 'Payroll - Weekly', notes: '', templateIds: ['bp-payroll'] },
+    { id: 'plan-own', name: 'Taxes', notes: '', cadence: 'blueprint', templateIds: ['bp-tax'] },
+  ]
+  const copyOf = (data, sourceId, clientId = 'c1') =>
+    data.checklistTemplates.find((t) => t.clientId === clientId && t.sourceTemplateId === sourceId)
+
+  beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-13T16:00:00.000Z'))
+    await clearPackages()
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', planIds: [] }],
+        timeEntries: [],
+        plans: PLANS,
+        checklistTemplates: BLUEPRINTS,
+      }),
+    )
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  describe('B2: new copies', () => {
+    it('quarterly: specific-months Jan/Apr/Jul/Oct, the next-due day kept, first due on or after today in one of those months', async () => {
+      const { copies } = await store.copyTemplatesToClient('c1', ['bp-books'], {
+        cadenceByTemplateId: { 'bp-books': 'quarterly' },
+      })
+      const stored = copyOf(await store.read(), 'bp-books')
+      for (const copy of [copies[0], stored]) {
+        expect(copy).toMatchObject({
+          frequency: 'specific-months',
+          scheduledMonths: [1, 4, 7, 10],
+          dueDayOfMonth: 15,
+          nextDueDate: '2026-10-15',
+        })
+      }
+      expect(stored.nextDueDate >= TODAY).toBe(true)
+      expect([1, 4, 7, 10]).toContain(Number(stored.nextDueDate.slice(5, 7)))
+    })
+
+    it('weekly and monthly set the frequency; the first due date is floored to today by that cadence', async () => {
+      const { copies } = await store.copyTemplatesToClient('c1', ['bp-payroll', 'bp-tax'], {
+        cadenceByTemplateId: { 'bp-payroll': 'weekly', 'bp-tax': 'monthly' },
+      })
+      const [weekly, monthlyCopy] = copies
+      expect(weekly.frequency).toBe('weekly')
+      // 2026-06-30 (a Tuesday) walked by weeks to the first one on or after today.
+      expect(weekly.nextDueDate).toBe('2026-10-13')
+      expect(monthlyCopy.frequency).toBe('monthly')
+      expect(monthlyCopy.nextDueDate >= TODAY).toBe(true)
+      // Stored the same way (the read has since generated today's weekly task).
+      const data = await store.read()
+      expect(copyOf(data, 'bp-payroll').frequency).toBe('weekly')
+      expect(copyOf(data, 'bp-tax').frequency).toBe('monthly')
+      expect(data.checklists.filter((c) => c.templateId === weekly.id).map((c) => c.dueDate)).toEqual(['2026-10-13'])
+    })
+
+    it("annual: a specific-months blueprint's first month, else its next-due month, else January", async () => {
+      await store.write(
+        workspace({
+          clients: [{ id: 'c1', name: 'Acme', planIds: [] }],
+          timeEntries: [],
+          plans: PLANS,
+          checklistTemplates: [...BLUEPRINTS, blueprint('bp-none', 'No date', { nextDueDate: null })],
+        }),
+      )
+      await store.copyTemplatesToClient('c1', ['bp-tax', 'bp-loose', 'bp-none'], {
+        cadenceByTemplateId: { 'bp-tax': 'annual', 'bp-loose': 'annual', 'bp-none': 'annual' },
+      })
+      const data = await store.read()
+      expect(copyOf(data, 'bp-tax')).toMatchObject({ frequency: 'specific-months', scheduledMonths: [3], dueDayOfMonth: 20, nextDueDate: '2027-03-20' })
+      expect(copyOf(data, 'bp-loose')).toMatchObject({ frequency: 'specific-months', scheduledMonths: [5], dueDayOfMonth: 31, nextDueDate: '2027-05-31' })
+      expect(copyOf(data, 'bp-none')).toMatchObject({ frequency: 'specific-months', scheduledMonths: [1], nextDueDate: '2027-01-31' })
+    })
+
+    it("'blueprint' and no cadence copy exactly as before", async () => {
+      await store.copyTemplatesToClient('c1', ['bp-tax', 'bp-books'], { cadenceByTemplateId: { 'bp-tax': 'blueprint' } })
+      const data = await store.read()
+      expect(copyOf(data, 'bp-tax')).toMatchObject({ frequency: 'specific-months', scheduledMonths: [9, 3], dueDayOfMonth: 20 })
+      expect(copyOf(data, 'bp-books')).toMatchObject({ frequency: 'monthly', nextDueDate: '2026-10-15' })
+    })
+
+    it('a direct "Copy to client" without a plan is unchanged', async () => {
+      const copy = await store.copyTemplateToClient('bp-books', { clientId: 'c1' })
+      expect(copy).toMatchObject({ frequency: 'monthly', nextDueDate: '2026-10-15', scheduledMonths: undefined })
+    })
+
+    it("applying a package: each checklist follows the plan that bundles it (stored cadence, or the name's \" - Weekly\")", async () => {
+      const pkg = await store.createPackage({
+        name: 'Everything',
+        planIds: ['plan-q', 'plan-w', 'plan-own'],
+        templateIds: ['bp-loose'],
+      })
+      await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+      const data = await store.read()
+      expect(copyOf(data, 'bp-books')).toMatchObject({ frequency: 'specific-months', scheduledMonths: [1, 4, 7, 10] })
+      expect(copyOf(data, 'bp-payroll').frequency).toBe('weekly')
+      // Its first task is today's, not a backlog from the blueprint's June date.
+      const weeklyTasks = data.checklists.filter((c) => c.templateId === copyOf(data, 'bp-payroll').id)
+      expect(weeklyTasks.map((c) => c.dueDate)).toEqual(['2026-10-13'])
+      // 'blueprint': its own schedule; the package's own checklist no plan bundles: as before.
+      expect(copyOf(data, 'bp-tax')).toMatchObject({ frequency: 'specific-months', scheduledMonths: [9, 3] })
+      expect(copyOf(data, 'bp-loose').frequency).toBe('monthly')
+      expect(copyOf(data, 'bp-loose').scheduledMonths).toBeUndefined()
+    })
+
+    it('a plan with no stored cadence but a " - Quarterly" name behaves as quarterly', async () => {
+      await store.write(
+        workspace({
+          clients: [{ id: 'c1', name: 'Acme', planIds: [] }],
+          timeEntries: [],
+          plans: [
+            { id: 'plan-a', name: 'Client Meeting - Quarterly', notes: '', templateIds: ['bp-loose'] },
+            { id: 'plan-b', name: 'Other', notes: '', templateIds: [] },
+          ],
+          checklistTemplates: BLUEPRINTS,
+        }),
+      )
+      const pkg = await store.createPackage({ name: 'Meetings', planIds: ['plan-a', 'plan-b'], templateIds: [] })
+      await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+      expect(copyOf(await store.read(), 'bp-loose')).toMatchObject({
+        frequency: 'specific-months',
+        scheduledMonths: [1, 4, 7, 10],
+        dueDayOfMonth: 31,
+        nextDueDate: '2026-10-31',
+      })
+    })
+
+    it("a blueprint two plans bundle takes the cadence of the first plan that triggered the copy", () => {
+      const plans = [
+        { id: 'p1', name: 'One', cadence: 'weekly', templateIds: ['bp'] },
+        { id: 'p2', name: 'Two', cadence: 'quarterly', templateIds: ['bp'] },
+      ]
+      expect(AppDataStore._planBundleCadences(plans, ['p2', 'p1'])).toEqual({ bp: 'quarterly' })
+      expect(AppDataStore._planBundleCadences(plans, ['p1', 'p2'])).toEqual({ bp: 'weekly' })
+      expect(AppDataStore._planBundleCadences(plans, ['nope'])).toEqual({})
+    })
+  })
+
+  describe('B3: Match plan', () => {
+    /** A monthly copy of bp-books made on August 1st (before B2), read back on October 13th. */
+    const seedCopy = async () => {
+      vi.setSystemTime(new Date('2026-08-01T16:00:00.000Z'))
+      const copy = await store.copyTemplateToClient('bp-books', { clientId: 'c1' })
+      vi.setSystemTime(new Date('2026-10-13T16:00:00.000Z'))
+      expect(copy.createdAt).toBe('2026-08-01T16:00:00.000Z')
+      return copy.id
+    }
+
+    it("re-syncs a copy to its plan's quarterly schedule, flooring the next due date and dating the copy today", async () => {
+      const id = await seedCopy()
+      const updated = await store.matchTemplateToPlanCadence(id, 'plan-q')
+      expect(updated).toMatchObject({
+        id,
+        frequency: 'specific-months',
+        scheduledMonths: [1, 4, 7, 10],
+        dueDayOfMonth: 15,
+        nextDueDate: '2026-10-15',
+      })
+      const stored = (await store.read()).checklistTemplates.find((t) => t.id === id)
+      expect(stored).toMatchObject({ frequency: 'specific-months', scheduledMonths: [1, 4, 7, 10], nextDueDate: '2026-10-15' })
+      // Months that ended before today are not back-filled as finished work.
+      expect(templateStartFloor(stored)).toBe(TODAY)
+      expect(stored.title).toBe('Monthly books')
+      expect(stored.stages[0].items.map((item) => item.label)).toEqual(['Reconcile'])
+    })
+
+    it('weekly: the frequency changes, the next due date is floored, the creation date is kept', async () => {
+      await store.write({
+        ...(await store.read()),
+        plans: [...PLANS.slice(0, 2), { ...PLANS[2], cadence: 'weekly', templateIds: ['bp-tax', 'bp-books'] }],
+      })
+      const id = await seedCopy()
+      const updated = await store.matchTemplateToPlanCadence(id, 'plan-own')
+      expect(updated.frequency).toBe('weekly')
+      expect(updated.nextDueDate >= TODAY).toBe(true)
+      expect(updated.createdAt).toBe('2026-08-01T16:00:00.000Z')
+    })
+
+    it('refuses a template that is not a client copy, a plan that does not bundle its blueprint, and a blueprint-cadence plan', async () => {
+      const reason = (promise) => promise.then(() => 'resolved', (error) => (error instanceof PlanCadenceMatchError ? error.reason : error))
+      expect(await reason(store.matchTemplateToPlanCadence('bp-books', 'plan-q'))).toBe('not_client_copy')
+      const handMade = await seedCopy()
+      const data = await store.read()
+      data.checklistTemplates = data.checklistTemplates.map((t) => (t.id === handMade ? { ...t, sourceTemplateId: undefined } : t))
+      await store.write(data)
+      expect(await reason(store.matchTemplateToPlanCadence(handMade, 'plan-q'))).toBe('not_client_copy')
+      const id = await seedCopy()
+      expect(await reason(store.matchTemplateToPlanCadence(id, 'plan-w'))).toBe('not_bundled')
+      expect(await reason(store.matchTemplateToPlanCadence(id, 'plan-gone'))).toBe('not_bundled')
+      await store.write({
+        ...(await store.read()),
+        plans: [...PLANS.slice(0, 2), { ...PLANS[2], templateIds: ['bp-tax', 'bp-books'] }],
+      })
+      expect(await reason(store.matchTemplateToPlanCadence(id, 'plan-own'))).toBe('blueprint_cadence')
+      // Nothing changed on a refusal.
+      expect((await store.read()).checklistTemplates.find((t) => t.id === id).frequency).toBe('monthly')
+      expect(await store.matchTemplateToPlanCadence('template-nope', 'plan-q')).toBeNull()
+    })
+  })
+})
+
+describe('a client copy follows its plan cadence (postgres branch)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-13T16:00:00.000Z'))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const templateRow = (over = {}) => ({
+    id: 'bp-books',
+    title: 'Monthly books',
+    client_id: null,
+    assignee_id: 'emp-1',
+    frequency: 'monthly',
+    next_due_date: new Date('2026-01-15T00:00:00.000Z'),
+    active: false,
+    is_standard: true,
+    category_id: null,
+    skip_allowed: false,
+    period_label_enabled: false,
+    period_coverage_start: null,
+    period_coverage_end: null,
+    period_coverage_anchor_due: null,
+    onboarding_for_client_id: null,
+    source_template_id: null,
+    viewer_ids: [],
+    editor_ids: [],
+    scheduled_months: [],
+    due_day_of_month: null,
+    monthly_due_days: null,
+    repeat_annually: true,
+    schedule_year: null,
+    lead_days: 0,
+    ...over,
+  })
+  const clientRows = [
+    {
+      id: 'c1',
+      name: 'Acme',
+      contact: 'Pat',
+      billing_mode: 'hourly',
+      hourly_rate: 0,
+      plan_id: null,
+      plan_ids: [],
+      contact_ids: [],
+      assigned_bookkeeper_ids: [],
+      lifecycle_stage: 'active',
+    },
+  ]
+
+  it('the copy insert carries the quarterly schedule', async () => {
+    const fake = fakePostgres({ clientRows, templateRows: [templateRow()] })
+    const { copies } = await postgresStore(fake).copyTemplatesToClient('c1', ['bp-books'], {
+      cadenceByTemplateId: { 'bp-books': 'quarterly' },
+    })
+    const row = insertedRows(fake.statements, 'checklist_templates').find((entry) => entry.id === copies[0].id)
+    expect(row).toMatchObject({
+      client_id: 'c1',
+      frequency: 'specific-months',
+      scheduled_months: [1, 4, 7, 10],
+      due_day_of_month: 15,
+      source_template_id: 'bp-books',
+    })
+  })
+
+  it('Match plan is one targeted update of the copy, never the bulk save', async () => {
+    const fake = fakePostgres({
+      clientRows,
+      planRows: [{ id: 'plan-q', name: 'Accounting', notes: '', template_ids: ['bp-books'], cadence: 'quarterly' }],
+      templateRows: [
+        templateRow(),
+        templateRow({
+          id: 'copy-1',
+          client_id: 'c1',
+          is_standard: false,
+          // Off, so the fake's read() never runs the materializer's write-back.
+          active: false,
+          source_template_id: 'bp-books',
+          next_due_date: new Date('2026-11-15T00:00:00.000Z'),
+        }),
+      ],
+    })
+    const pgStore = postgresStore(fake)
+    // The workspace as the real read() maps it, then read() and write() stubbed so
+    // only the method's own statements reach the fake.
+    const data = await pgStore.read()
+    fake.statements.length = 0
+    const read = vi.spyOn(pgStore, 'read').mockResolvedValue(data)
+    const write = vi.spyOn(pgStore, 'write').mockResolvedValue(undefined)
+    expect(data.checklistTemplates.find((t) => t.id === 'copy-1').nextDueDate).toBe('2026-11-15')
+
+    await pgStore.matchTemplateToPlanCadence('copy-1', 'plan-q')
+    const updates = fake.matching(/^update checklist_templates\s+set frequency/i)
+    expect(updates).toHaveLength(1)
+    expect(updates[0].params).toEqual(['copy-1', 'specific-months', [1, 4, 7, 10], 15, '2026-10-15', true])
+    expect(updates[0].text).toMatch(/where id = \$1 and is_standard = false and client_id is not null/)
+    expect(fake.statements).toHaveLength(1)
+    expect(write).not.toHaveBeenCalled()
+    expect(read).toHaveBeenCalled()
   })
 })
