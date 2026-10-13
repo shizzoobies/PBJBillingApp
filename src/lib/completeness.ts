@@ -49,7 +49,16 @@ export type SetupFix =
   | { kind: 'clientNumber'; clientId: string; field: 'monthlyRate' | 'annualRate'; label: string }
   | { kind: 'clientText'; clientId: string; field: 'email'; label: string }
   | { kind: 'clientTeam'; clientId: string }
-  | { kind: 'planChecklists'; clientId: string; templateIds: string[] }
+  | {
+      kind: 'planChecklists'
+      clientId: string
+      templateIds: string[]
+      /**
+       * The plans the copies take their "How often" from (featreq-acdd0c84): the
+       * plan itself, or the covering package's plans in its order.
+       */
+      planIds: string[]
+    }
 
 export interface SetupIssue {
   /** Stable id so React keys + tests are deterministic. */
@@ -266,15 +275,32 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     // only for what it bundles beyond the package's set - featreq-8bdc5ec5).
     // A checklist is named in at most one nudge.
     const shown = new Set<string>()
-    const groups: { id: string; name: string; kind: 'package' | 'plan'; templateIds: string[] }[] =
-      []
+    const groups: {
+      id: string
+      name: string
+      kind: 'package' | 'plan'
+      templateIds: string[]
+      planIds: string[]
+    }[] = []
     for (const pkg of packagesCoveringPlans(client.planIds ?? [], input.packages ?? [])) {
-      groups.push({ id: `pkg-${pkg.id}`, name: pkg.name, kind: 'package', templateIds: pkg.templateIds })
+      groups.push({
+        id: `pkg-${pkg.id}`,
+        name: pkg.name,
+        kind: 'package',
+        templateIds: pkg.templateIds,
+        planIds: [...pkg.planIds],
+      })
     }
     for (const planId of client.planIds ?? []) {
       const plan = planById.get(planId)
       if (!plan) continue
-      groups.push({ id: plan.id, name: plan.name, kind: 'plan', templateIds: plan.templateIds ?? [] })
+      groups.push({
+        id: plan.id,
+        name: plan.name,
+        kind: 'plan',
+        templateIds: plan.templateIds ?? [],
+        planIds: [plan.id],
+      })
     }
     for (const group of groups) {
       const own = planTemplates({ templateIds: group.templateIds }, checklistTemplates)
@@ -301,6 +327,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
             kind: 'planChecklists',
             clientId: client.id,
             templateIds: missing.map((template) => template.id),
+            planIds: group.planIds,
           },
           to: where,
           severity: 'medium',

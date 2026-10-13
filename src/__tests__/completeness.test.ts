@@ -509,12 +509,20 @@ describe('computeSetupIssues — plan checklists group by package like the clien
     expect(found[1].id).toBe('client:plan-checklists:client-1:plan-b')
     expect(found[1].title).toBe('Set up Quarterly checklists for Acme')
     expect(found[1].items).toEqual(['Client Meeting'])
-    expect(found[1].fix).toEqual({ kind: 'planChecklists', clientId: 'client-1', templateIds: ['t3'] })
+    // Each fix names the plans its copies take their "How often" from
+    // (featreq-acdd0c84): the plan, or the package's plans in its order.
+    expect(found[1].fix).toEqual({
+      kind: 'planChecklists',
+      clientId: 'client-1',
+      templateIds: ['t3'],
+      planIds: ['plan-b'],
+    })
     expect(found[0].detail).toContain('2 plan checklists')
     expect(found[0].fix).toEqual({
       kind: 'planChecklists',
       clientId: 'client-1',
       templateIds: ['t1', 't2'],
+      planIds: ['plan-a', 'plan-b'],
     })
   })
 
@@ -531,6 +539,7 @@ describe('computeSetupIssues — plan checklists group by package like the clien
       kind: 'planChecklists',
       clientId: 'client-1',
       templateIds: ['t2'],
+      planIds: ['plan-a', 'plan-b'],
     })
     input.checklistTemplates = [...input.checklistTemplates, tmpl('c-2', 'Reconcile', 'client-1')]
     // The package set is done; only the covered plan's leftover is still asked for.
@@ -556,6 +565,7 @@ describe('computeSetupIssues — plan checklists group by package like the clien
       kind: 'planChecklists',
       clientId: 'client-1',
       templateIds: ['t4'],
+      planIds: ['plan-c'],
     })
   })
 

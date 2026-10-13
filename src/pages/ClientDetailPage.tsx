@@ -26,7 +26,15 @@ import { ClientTimeModal } from '../components/ClientTimeModal'
 import { RecurringReimbursementsCard } from '../components/RecurringReimbursementsCard'
 import { ReimbursementsCard } from '../components/ReimbursementsCard'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
-import { cloneChecklistTemplate } from '../lib/cloneChecklistTemplate'
+import { cloneChecklistTemplate, planCadenceFor } from '../lib/cloneChecklistTemplate'
+import {
+  bundlingPlan,
+  cadenceSchedule,
+  effectivePlanCadence,
+  planCadenceLabel,
+  scheduleDiffers,
+  type PlanCadence,
+} from '../../lib/plan-cadence.js'
 import { inactiveClientIdSet, isInactiveClient, markInactiveConfirm } from '../lib/clientLifecycle'
 import {
   activeChecklistsForClient,
@@ -1219,8 +1227,13 @@ export function PlanServicesField({
     if (missing.length === 0) return
     const titles = missing.map((template) => template.title).join(', ')
     if (!window.confirm(`Also set up these checklists for ${client.name}: ${titles}?`)) return
+    // Each copy follows the "How often" of the added plan that bundles it
+    // (featreq-acdd0c84 B2).
+    const addedPlans = added.map((id) => plans.find((plan) => plan.id === id))
     for (const template of missing) {
-      addChecklistTemplate(cloneTemplateForClient(template, client.id))
+      addChecklistTemplate(
+        cloneTemplateForClient(template, client.id, planCadenceFor(template.id, addedPlans)),
+      )
     }
   }
   return (
@@ -2126,12 +2139,61 @@ function RetainerIssueForm({
  *
  * This copy is born ACTIVE, unlike a Duplicate: its client is chosen up front,
  * so there is no window in which it could generate work for the wrong one.
+ *
+ * `cadence` is the "How often" of the plan that brought the copy
+ * (featreq-acdd0c84 B2); null keeps the blueprint's own schedule.
  */
 function cloneTemplateForClient(
   source: ChecklistTemplate,
   clientId: string,
+  cadence: PlanCadence | null = null,
 ): Omit<ChecklistTemplate, 'id'> {
-  return cloneChecklistTemplate(source, { clientId, active: true })
+  return cloneChecklistTemplate(source, { clientId, active: true, cadence })
+}
+
+/**
+ * "Match plan: Quarterly" (featreq-acdd0c84 B3): owner-only, on each client copy
+ * of a plan checklist whose schedule is not the one its plan's "How often" gives
+ * a new copy. The server re-syncs it; future due dates move, nothing already
+ * generated changes.
+ */
+function MatchPlanButton({
+  copy,
+  plan,
+  cadence,
+}: {
+  copy: ChecklistTemplate
+  plan: SubscriptionPlan
+  cadence: PlanCadence
+}) {
+  const { matchTemplateToPlanCadence } = useAppContext()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const label = planCadenceLabel(cadence)
+  return (
+    <>
+      <button
+        type="button"
+        className="secondary-action match-plan-cadence"
+        disabled={busy}
+        title={`Change this checklist to run ${label.toLowerCase()} like its plan. Future due dates move; nothing already generated changes.`}
+        onClick={async () => {
+          setBusy(true)
+          setError('')
+          try {
+            await matchTemplateToPlanCadence(copy.id, plan.id)
+          } catch (caught) {
+            setError(caught instanceof ApiError ? caught.message : 'Could not match the plan.')
+          } finally {
+            setBusy(false)
+          }
+        }}
+      >
+        Match plan: {label}
+      </button>
+      {error ? <span className="field-error">{error}</span> : null}
+    </>
+  )
 }
 
 export function PlanChecklistsBody({ client, data }: { client: Client; data: AppData }) {
@@ -2196,6 +2258,9 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
       kind: 'plan' | 'package'
       templateIds: string[]
       handledElsewhere: boolean
+      // The plans a checklist here takes its "How often" from (featreq-acdd0c84):
+      // the plan itself, or the package's plans in the package's order.
+      plans: SubscriptionPlan[]
     }[] = []
     const covered = new Set<string>()
     for (const pkg of coveringPackages) {
@@ -2208,6 +2273,9 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
         kind: 'package',
         templateIds,
         handledElsewhere: own.length > 0 && templateIds.length === 0,
+        plans: pkg.planIds
+          .map((planId) => clientPlans.find((plan) => plan.id === planId))
+          .filter((plan): plan is SubscriptionPlan => Boolean(plan)),
       })
     }
     for (const plan of clientPlans) {
@@ -2220,6 +2288,7 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
         kind: 'plan',
         templateIds,
         handledElsewhere: own.length > 0 && templateIds.length === 0,
+        plans: [plan],
       })
     }
     return result
@@ -2247,6 +2316,7 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
     kind,
     templateIds,
     handledElsewhere,
+    plans: groupPlans,
   }: (typeof groups)[number]) => {
     const source = { templateIds }
     const templates = planTemplates(source, data.checklistTemplates)
@@ -2257,6 +2327,23 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
       data.checklistTemplates,
     )
     const missingIds = new Set(missing.map((template) => template.id))
+    // "Match plan" (featreq-acdd0c84 B3): this client's copies of a blueprint
+    // (stamped from it) whose schedule is not the one its plan's "How often"
+    // gives a new copy. Only a plan that names a cadence offers it.
+    const mismatchedCopies = (blueprint: ChecklistTemplate) => {
+      const plan = bundlingPlan(blueprint.id, groupPlans)
+      const cadence = plan ? effectivePlanCadence(plan) : 'blueprint'
+      if (!plan || cadence === 'blueprint') return []
+      return data.checklistTemplates
+        .filter(
+          (copy) =>
+            copy.clientId === client.id &&
+            !copy.isStandard &&
+            copy.sourceTemplateId === blueprint.id &&
+            scheduleDiffers(copy, cadenceSchedule(cadence, blueprint, undefined, copy)),
+        )
+        .map((copy) => ({ copy, plan, cadence }))
+    }
     return (
       <div className="plan-checklists-group" key={key}>
         <div className="plan-checklists-head">
@@ -2268,7 +2355,9 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
               className="secondary-action"
               onClick={() => {
                 for (const template of missing) {
-                  addChecklistTemplate(cloneTemplateForClient(template, client.id))
+                  addChecklistTemplate(
+                    cloneTemplateForClient(template, client.id, planCadenceFor(template.id, groupPlans)),
+                  )
                 }
               }}
             >
@@ -2319,7 +2408,11 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
                         }))
                       }
                     />
-                  ) : null}
+                  ) : (
+                    mismatchedCopies(template).map(({ copy, plan, cadence }) => (
+                      <MatchPlanButton key={copy.id} copy={copy} plan={plan} cadence={cadence} />
+                    ))
+                  )}
                 </li>
               )
             })}

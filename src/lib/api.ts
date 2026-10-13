@@ -2790,6 +2790,28 @@ export async function setTemplateViewersRequest(
   return (await response.json()) as ChecklistTemplate
 }
 
+/**
+ * Owner-only "Match plan" (featreq-acdd0c84 B3): re-sync one client copy to its
+ * plan's "How often". Answers the updated template; a refusal (409) carries a
+ * sentence the page shows as-is.
+ */
+export async function matchPlanCadenceRequest(templateId: string, planId: string) {
+  const response = await apiFetch(
+    `/api/checklist-templates/${encodeURIComponent(templateId)}/match-plan-cadence`,
+    {
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ planId }),
+    },
+  )
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to match the plan (${response.status})`)
+  }
+  return (await response.json()) as ChecklistTemplate
+}
+
 // ---- Wave 2: standard templates, apply/copy to client, on-demand generate ----
 
 /** Owner-only: create a standard (client-agnostic) reusable blueprint template. */

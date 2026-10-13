@@ -394,6 +394,12 @@ export type AppContextValue = {
   createStandardTemplate: (
     payload: Omit<ChecklistTemplate, 'id' | 'clientId' | 'isStandard'>,
   ) => Promise<void>
+  /**
+   * Owner-only "Match plan" (featreq-acdd0c84 B3): re-sync one client copy of a
+   * plan checklist to the plan's "How often", then merge the server's template.
+   * Rejects with the server's sentence on a refusal.
+   */
+  matchTemplateToPlanCadence: (templateId: string, planId: string) => Promise<void>
   /** Wave 2: copy a standard OR regular template onto a client. */
   applyTemplateToClient: (
     templateId: string,

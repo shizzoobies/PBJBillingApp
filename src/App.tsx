@@ -100,6 +100,7 @@ import {
   setChecklistViewersRequest,
   setPreviewUser,
   setTemplateViewersRequest,
+  matchPlanCadenceRequest,
   toggleChecklistItemRequest,
   unlockTimesheetRequest,
   updateChecklistItemRequest,
@@ -3765,6 +3766,36 @@ function App() {
     }
   }
 
+  /**
+   * "Match plan" (featreq-acdd0c84 B3): the server re-syncs one client copy to
+   * its plan's "How often" with a targeted write; the template it answers
+   * replaces this tab's copy wholesale (its schedule, next due date and the
+   * creation date a specific-months switch restamps).
+   */
+  const matchTemplateToPlanCadence = async (templateId: string, planId: string) => {
+    if (previewActiveRef.current) return
+    try {
+      setDataSyncState('saving')
+      const updated = await matchPlanCadenceRequest(templateId, planId)
+      applyServerDataUpdate((current) => ({
+        ...current,
+        checklistTemplates: current.checklistTemplates.map((template) =>
+          template.id === templateId ? updated : template,
+        ),
+      }))
+      setDataSyncState('synced')
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setSessionUser(null)
+        setServerPersistenceEnabled(false)
+        setDataSyncState('offline')
+        return
+      }
+      setDataSyncState('error')
+      throw error
+    }
+  }
+
   const applyTemplateToClient = async (
     templateId: string,
     payload: { clientId: string; firstDueDate?: string; frequency?: string },
@@ -4358,6 +4389,7 @@ function App() {
     reorderTemplateStages,
     duplicateChecklistTemplate,
     createStandardTemplate,
+    matchTemplateToPlanCadence,
     applyTemplateToClient,
     generateChecklistFromTemplate,
     startOnboarding,
