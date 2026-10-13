@@ -52476,7 +52476,7 @@ describe('a client copy follows its plan cadence (file backend)', () => {
       expect(data.checklists.filter((c) => c.templateId === weekly.id).map((c) => c.dueDate)).toEqual(['2026-10-13'])
     })
 
-    it("annual: a specific-months blueprint's first month, else its next-due month, else January", async () => {
+    it("annual: a specific-months blueprint's first month, else January (never a stale next-due month)", async () => {
       await store.write(
         workspace({
           clients: [{ id: 'c1', name: 'Acme', planIds: [] }],
@@ -52490,8 +52490,34 @@ describe('a client copy follows its plan cadence (file backend)', () => {
       })
       const data = await store.read()
       expect(copyOf(data, 'bp-tax')).toMatchObject({ frequency: 'specific-months', scheduledMonths: [3], dueDayOfMonth: 20, nextDueDate: '2027-03-20' })
-      expect(copyOf(data, 'bp-loose')).toMatchObject({ frequency: 'specific-months', scheduledMonths: [5], dueDayOfMonth: 31, nextDueDate: '2027-05-31' })
+      expect(copyOf(data, 'bp-loose')).toMatchObject({ frequency: 'specific-months', scheduledMonths: [1], dueDayOfMonth: 31, nextDueDate: '2027-01-31' })
       expect(copyOf(data, 'bp-none')).toMatchObject({ frequency: 'specific-months', scheduledMonths: [1], nextDueDate: '2027-01-31' })
+    })
+
+    it('a quarterly or yearly copy repeats every year even when the blueprint was set to one past year', async () => {
+      await store.write(
+        workspace({
+          clients: [{ id: 'c1', name: 'Acme', planIds: [] }],
+          timeEntries: [],
+          plans: PLANS,
+          checklistTemplates: [
+            blueprint('bp-once', 'One year only', {
+              frequency: 'specific-months',
+              scheduledMonths: [10],
+              dueDayOfMonth: 20,
+              repeatAnnually: false,
+              scheduleYear: 2025,
+              nextDueDate: null,
+            }),
+          ],
+        }),
+      )
+      const { copies } = await store.copyTemplatesToClient('c1', ['bp-once'], { cadenceByTemplateId: { 'bp-once': 'quarterly' } })
+      expect(copies[0]).toMatchObject({ repeatAnnually: true, scheduledMonths: [1, 4, 7, 10] })
+      const data = await store.read()
+      expect(copyOf(data, 'bp-once').repeatAnnually).toBe(true)
+      // And so it actually runs: this October's task is generated.
+      expect(data.checklists.filter((c) => c.templateId === copies[0].id).map((c) => c.dueDate)).toEqual(['2026-10-20'])
     })
 
     it("'blueprint' and no cadence copy exactly as before", async () => {
@@ -52586,6 +52612,19 @@ describe('a client copy follows its plan cadence (file backend)', () => {
       expect(stored.stages[0].items.map((item) => item.label)).toEqual(['Reconcile'])
     })
 
+    it('turns "Repeat every year" on when it switches a one-year copy to quarterly', async () => {
+      const id = await seedCopy()
+      const data = await store.read()
+      data.checklistTemplates = data.checklistTemplates.map((t) =>
+        t.id === id ? { ...t, repeatAnnually: false, scheduleYear: 2025 } : t,
+      )
+      await store.write(data)
+      expect((await store.read()).checklistTemplates.find((t) => t.id === id).repeatAnnually).toBe(false)
+      const updated = await store.matchTemplateToPlanCadence(id, 'plan-q')
+      expect(updated.repeatAnnually).toBe(true)
+      expect((await store.read()).checklistTemplates.find((t) => t.id === id).repeatAnnually).toBe(true)
+    })
+
     it('weekly: the frequency changes, the next due date is floored, the creation date is kept', async () => {
       await store.write({
         ...(await store.read()),
@@ -52673,7 +52712,8 @@ describe('a client copy follows its plan cadence (postgres branch)', () => {
   ]
 
   it('the copy insert carries the quarterly schedule', async () => {
-    const fake = fakePostgres({ clientRows, templateRows: [templateRow()] })
+    // A stale one-year blueprint: the copy must still repeat every year.
+    const fake = fakePostgres({ clientRows, templateRows: [templateRow({ repeat_annually: false, schedule_year: 2025 })] })
     const { copies } = await postgresStore(fake).copyTemplatesToClient('c1', ['bp-books'], {
       cadenceByTemplateId: { 'bp-books': 'quarterly' },
     })
@@ -52683,6 +52723,7 @@ describe('a client copy follows its plan cadence (postgres branch)', () => {
       frequency: 'specific-months',
       scheduled_months: [1, 4, 7, 10],
       due_day_of_month: 15,
+      repeat_annually: true,
       source_template_id: 'bp-books',
     })
   })
@@ -52718,6 +52759,8 @@ describe('a client copy follows its plan cadence (postgres branch)', () => {
     expect(updates).toHaveLength(1)
     expect(updates[0].params).toEqual(['copy-1', 'specific-months', [1, 4, 7, 10], 15, '2026-10-15', true])
     expect(updates[0].text).toMatch(/where id = \$1 and is_standard = false and client_id is not null/)
+    expect(updates[0].text).toMatch(/repeat_annually = case when \$6::boolean then true else repeat_annually end/)
+    expect(updates[0].text).toMatch(/created_at = case when \$6::boolean then now\(\) else created_at end/)
     expect(fake.statements).toHaveLength(1)
     expect(write).not.toHaveBeenCalled()
     expect(read).toHaveBeenCalled()

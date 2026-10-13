@@ -29,6 +29,8 @@ export declare function planCadenceLabel(cadence: unknown): string
 export type CadenceScheduleFields = {
   frequency: 'weekly' | 'monthly' | 'specific-months'
   scheduledMonths?: number[]
+  /** Always true on a specific-months result: a plan's schedule runs every year. */
+  repeatAnnually?: true
   dueDayOfMonth?: number
   nextDueDate?: string
 }
@@ -52,7 +54,10 @@ export declare function cadenceSchedule(
 
 /** The frequency differs, or the designated months differ as sets. */
 export declare function scheduleDiffers(
-  template: { frequency?: unknown; scheduledMonths?: readonly number[] | null } | null | undefined,
+  template:
+    | { frequency?: unknown; scheduledMonths?: readonly number[] | null; repeatAnnually?: boolean | null }
+    | null
+    | undefined,
   mapped: CadenceScheduleFields | null,
 ): boolean
 

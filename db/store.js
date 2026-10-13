@@ -31580,6 +31580,9 @@ export class AppDataStore {
       // next due date) over the blueprint's.
       ...(planSchedule?.scheduledMonths ? { scheduledMonths: planSchedule.scheduledMonths } : {}),
       ...(planSchedule?.dueDayOfMonth ? { dueDayOfMonth: planSchedule.dueDayOfMonth } : {}),
+      // A plan's quarterly / yearly schedule runs every year, whatever a stale
+      // blueprint's "Repeat every year" / schedule year says.
+      ...(planSchedule?.repeatAnnually ? { repeatAnnually: true } : {}),
       id: `template-${randomUUID().slice(0, 8)}`,
       title: source.title,
       clientId,
@@ -31662,6 +31665,8 @@ export class AppDataStore {
    * back to the copy's creation and would otherwise add the ones that already
    * ended - born completed - as history the client never had. A weekly / monthly
    * switch keeps its date: its floored `nextDueDate` already starts it today.
+   * A specific-months switch also turns "Repeat every year" on, so a stale
+   * `repeatAnnually: false` / old `scheduleYear` cannot leave it never running.
    *
    * A TARGETED single-row update on both backends (like
    * `setChecklistTemplateActive`), never the bulk save. Returns the updated
@@ -31712,6 +31717,7 @@ export class AppDataStore {
                 due_day_of_month = $4,
                 next_due_date = $5,
                 created_at = case when $6::boolean then now() else created_at end,
+                repeat_annually = case when $6::boolean then true else repeat_annually end,
                 updated_at = now()
           where id = $1 and is_standard = false and client_id is not null
           returning id`,
@@ -31732,7 +31738,7 @@ export class AppDataStore {
         scheduledMonths,
         nextDueDate,
         ...(dueDayOfMonth === null ? {} : { dueDayOfMonth }),
-        ...(specificMonths ? { createdAt: nowIso() } : {}),
+        ...(specificMonths ? { createdAt: nowIso(), repeatAnnually: true } : {}),
       }
       return updated
     })

@@ -2176,7 +2176,11 @@ function MatchPlanButton({
         type="button"
         className="secondary-action match-plan-cadence"
         disabled={busy}
-        title={`Change this checklist to run ${label.toLowerCase()} like its plan. Future due dates move; nothing already generated changes.`}
+        title={`Change this checklist to run ${label.toLowerCase()} like its plan. ${
+          cadence === 'quarterly' || cadence === 'annual'
+            ? 'The schedule restarts from today (past months are not generated)'
+            : 'Future due dates move'
+        }; nothing already generated changes.`}
         onClick={async () => {
           setBusy(true)
           setError('')

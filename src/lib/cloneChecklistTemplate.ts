@@ -75,6 +75,7 @@ export function cloneChecklistTemplate(
     ...copiedTemplateSettings(source),
     ...(planSchedule?.scheduledMonths ? { scheduledMonths: planSchedule.scheduledMonths } : {}),
     ...(planSchedule?.dueDayOfMonth ? { dueDayOfMonth: planSchedule.dueDayOfMonth } : {}),
+    ...(planSchedule?.repeatAnnually ? { repeatAnnually: true } : {}),
     title: options.title ?? source.title,
     clientId: options.clientId,
     frequency,

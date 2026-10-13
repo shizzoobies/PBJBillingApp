@@ -81,17 +81,23 @@ describe('cloneChecklistTemplate with a plan cadence', () => {
     })
   })
 
-  it('annual: the blueprint month (its next due date), else January', () => {
+  it("annual: a specific-months blueprint's first month, else January (never a stale next due date)", () => {
     expect(
-      cloneChecklistTemplate(blueprint('bp', 'Tax', { nextDueDate: '2026-04-30' }), {
+      cloneChecklistTemplate(blueprint('bp', 'Tax', { frequency: 'specific-months', scheduledMonths: [9, 4], dueDayOfMonth: 15 }), {
         clientId: 'c1',
         active: true,
         cadence: 'annual',
       }),
-    ).toMatchObject({ frequency: 'specific-months', scheduledMonths: [4], nextDueDate: '2027-04-30' })
+    ).toMatchObject({ frequency: 'specific-months', scheduledMonths: [4], nextDueDate: '2027-04-15', repeatAnnually: true })
     expect(
-      cloneChecklistTemplate(blueprint('bp', 'Tax', { nextDueDate: '' }), { clientId: 'c1', active: true, cadence: 'annual' }),
-    ).toMatchObject({ frequency: 'specific-months', scheduledMonths: [1], nextDueDate: '2027-01-31' })
+      cloneChecklistTemplate(blueprint('bp', 'Tax', { nextDueDate: '2026-04-30' }), { clientId: 'c1', active: true, cadence: 'annual' }),
+    ).toMatchObject({ frequency: 'specific-months', scheduledMonths: [1], nextDueDate: '2027-01-30' })
+  })
+
+  it('quarterly and yearly copies repeat every year even from a one-year blueprint', () => {
+    const once = blueprint('bp', 'Once', { frequency: 'specific-months', scheduledMonths: [10], repeatAnnually: false, scheduleYear: 2025 })
+    expect(cloneChecklistTemplate(once, { clientId: 'c1', active: true, cadence: 'quarterly' }).repeatAnnually).toBe(true)
+    expect(cloneChecklistTemplate(once, { clientId: 'c1', active: true }).repeatAnnually).toBe(false)
   })
 
   it('weekly and monthly set the frequency and floor the date by it', () => {
@@ -172,7 +178,7 @@ describe('Plan checklists: Match plan', () => {
     await flush()
     const button = screen.getByRole('button', { name: 'Match plan: Quarterly' })
     expect(button.getAttribute('title')).toBe(
-      'Change this checklist to run quarterly like its plan. Future due dates move; nothing already generated changes.',
+      'Change this checklist to run quarterly like its plan. The schedule restarts from today (past months are not generated); nothing already generated changes.',
     )
     await act(async () => {
       fireEvent.click(button)
@@ -206,13 +212,15 @@ describe('Plan checklists: Match plan', () => {
       plans: [plan('W', 'Payroll - Weekly', ['bp']), plan('Y', 'Taxes - Yearly', ['bp2'])],
       templates: [
         blueprint('bp', 'Payroll'),
-        blueprint('bp2', 'Tax return', { nextDueDate: '2026-04-15' }),
+        blueprint('bp2', 'Tax return', { frequency: 'specific-months', scheduledMonths: [4] }),
         clientCopy('copy-1', 'bp'),
         clientCopy('copy-2', 'bp2', { frequency: 'specific-months', scheduledMonths: [3] }),
       ],
     })
     await flush()
-    expect(screen.getByRole('button', { name: 'Match plan: Weekly' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Match plan: Weekly' }).getAttribute('title')).toBe(
+      'Change this checklist to run weekly like its plan. Future due dates move; nothing already generated changes.',
+    )
     // Yearly runs in the blueprint's April, so a March copy differs.
     expect(screen.getByRole('button', { name: 'Match plan: Yearly' })).toBeTruthy()
   })
