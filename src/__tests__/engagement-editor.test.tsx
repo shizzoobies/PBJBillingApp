@@ -349,9 +349,16 @@ describe('loading', () => {
         supersededId: 'eng-old',
       }),
     )
+    // The amendment list read is slow on purpose: Mark as signed stays disabled until it
+    // resolves, so the click must wait for the button (clicking a disabled button does
+    // nothing, and under full-suite load the read used to lose that race).
+    api.listEngagementsRequest = vi.fn(() => new Promise<Engagement[]>((resolve) => setTimeout(() => resolve([]), 50)))
     mockConfirm(true)
     await renderEditor()
-    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    const signButton = screen.getByRole('button', { name: 'Mark as signed' })
+    expect(signButton).toBeDisabled()
+    await waitFor(() => expect(signButton).toBeEnabled())
+    fireEvent.click(signButton)
     const summary = await screen.findByRole('status', { name: 'What signing did' })
     expect(within(summary).getByText('Plans added: Payroll.')).toBeTruthy()
     expect(within(summary).getByText('Plans taken off: Monthly Bookkeeping.')).toBeTruthy()
