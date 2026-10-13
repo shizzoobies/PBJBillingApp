@@ -116,6 +116,36 @@ describe('SetupChecklistPage plan checklist nudges', () => {
     openClients()
     expect(screen.getByText('Set up Accounting checklists for Acme')).toBeTruthy()
   })
+
+  it("Fix sets the checklists up on the plan's How often (featreq-acdd0c84): a quarterly plan's copy is Jan/Apr/Jul/Oct", async () => {
+    const addChecklistTemplate = vi.fn()
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...contextValue.data,
+        plans: contextValue.data.plans.map((plan) =>
+          plan.id === 'plan-b' ? { ...plan, name: 'Quarterly - Quarterly' } : plan,
+        ),
+      },
+      addChecklistTemplate,
+      updateChecklistTemplate: vi.fn(),
+      workspaceSaving: false,
+    } as unknown as AppContextValue
+    mockPackages.mockRejectedValue(new Error('down'))
+    renderPage()
+    await act(async () => {})
+    openClients()
+    const issue = screen.getByText('Set up Quarterly - Quarterly checklists for Acme').closest('li')!
+    fireEvent.click(issue.querySelector('button.setup-issue-fix')!)
+    fireEvent.click(screen.getByRole('button', { name: 'Set them up' }))
+    expect(addChecklistTemplate).toHaveBeenCalledTimes(1)
+    expect(addChecklistTemplate.mock.calls[0][0]).toMatchObject({
+      sourceTemplateId: 't3',
+      clientId: 'client-1',
+      frequency: 'specific-months',
+      scheduledMonths: [1, 4, 7, 10],
+    })
+  })
 })
 
 /**

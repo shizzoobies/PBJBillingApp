@@ -22,6 +22,7 @@ import {
   NothingToPushError,
   RETAINER_PAID_ON_FLOOR,
   PackageApplyError,
+  PlanCadenceMatchError,
   ProposalQuestionnaireError,
   ProposalStateError,
   PushConflictError,
@@ -18025,6 +18026,49 @@ const server = createServer(async (request, response) => {
         template.title,
       )
       sendJson(response, 201, template)
+      return
+    }
+
+    // POST /api/checklist-templates/:id/match-plan-cadence — "Match plan" on the
+    // client page (featreq-acdd0c84 B3): re-sync one client copy to its plan's
+    // "How often". Owner only. Body: { planId }. A targeted store write, never the
+    // bulk save; 409 with a sentence when the store refuses.
+    const matchPlanCadenceMatch = normalizedPath.match(
+      /^\/api\/checklist-templates\/([^/]+)\/match-plan-cadence$/,
+    )
+    if (matchPlanCadenceMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can change a checklist schedule' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const planId = typeof payload?.planId === 'string' ? payload.planId : ''
+      if (!planId) {
+        sendJson(response, 400, { error: 'A plan is required' })
+        return
+      }
+      let updated
+      try {
+        updated = await appDataStore.matchTemplateToPlanCadence(matchPlanCadenceMatch[1], planId)
+      } catch (error) {
+        if (error instanceof PlanCadenceMatchError) {
+          sendJson(response, 409, { error: error.reason, message: error.message })
+          return
+        }
+        throw error
+      }
+      if (!updated) {
+        sendJson(response, 404, { error: 'Template not found' })
+        return
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, updated)
       return
     }
 

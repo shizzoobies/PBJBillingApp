@@ -25,7 +25,7 @@ import {
   restoreSetupIssueRequest,
 } from '../lib/api'
 import type { Package } from '../lib/types'
-import { cloneChecklistTemplate } from '../lib/cloneChecklistTemplate'
+import { cloneChecklistTemplate, planCadenceFor } from '../lib/cloneChecklistTemplate'
 import {
   getAssignedTeamIds,
   missingPlanTemplatesForClient,
@@ -436,8 +436,17 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
         // save as any link made here. A server copy (the old path) moved the
         // workspace under that pending save, which then landed stale and lost
         // the link.
+        // Each copy follows the "How often" of the group's plan that bundles it
+        // (featreq-acdd0c84 B2), as the client page's Set up does.
+        const fixPlans = (fix.planIds ?? []).map((planId) => data.plans.find((plan) => plan.id === planId))
         for (const blueprint of uniqueByTitle(fixBlueprints.filter((b) => stillMissingIds.has(b.id)))) {
-          addChecklistTemplate(cloneChecklistTemplate(blueprint, { clientId: fix.clientId, active: true }))
+          addChecklistTemplate(
+            cloneChecklistTemplate(blueprint, {
+              clientId: fix.clientId,
+              active: true,
+              cadence: planCadenceFor(blueprint.id, fixPlans),
+            }),
+          )
         }
       }
       onClose()

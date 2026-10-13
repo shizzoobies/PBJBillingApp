@@ -74,6 +74,10 @@ const TEMPLATE_ROUTES: [string, string][] = [
     'POST /api/checklist-templates/:id/generate',
     "if (templateGenerateMatch && request.method === 'POST') {",
   ],
+  [
+    'POST /api/checklist-templates/:id/match-plan-cadence',
+    "if (matchPlanCadenceMatch && request.method === 'POST') {",
+  ],
 ]
 
 /** The block of one route, from its opening line to its closing brace at route level. */
@@ -128,6 +132,10 @@ describe('every state-changing checklist route checks the request origin', () =>
         'Only owners can create standard templates',
       ],
       ['if (applyToClientMatch && request.method === \'POST\') {', 'templateApplyRoleDenial(session.user)'],
+      [
+        "if (matchPlanCadenceMatch && request.method === 'POST') {",
+        'Only owners can change a checklist schedule',
+      ],
     ]) {
       const block = routeBlock(opening)
       expect(block.search(GUARD), opening).toBeGreaterThan(block.indexOf(denial))
@@ -171,7 +179,7 @@ describe('every state-changing checklist route checks the request origin', () =>
         `${literal} has no origin check listed`,
       ).toBe(true)
     }
-    expect(declared.length).toBe(6)
+    expect(declared.length).toBe(7)
     expect(literals.length).toBe(1)
   })
 })

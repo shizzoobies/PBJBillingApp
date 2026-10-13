@@ -1,6 +1,7 @@
 import { firstCycleOnOrAfter } from '../../lib/checklist-start-floor.js'
 import { copiedTemplateSettings, copiedTemplateStages } from '../../lib/checklist-template-copy.js'
-import type { ChecklistTemplate } from './types'
+import { bundlingPlan, cadenceSchedule, effectivePlanCadence, type PlanCadence } from '../../lib/plan-cadence.js'
+import type { ChecklistTemplate, SubscriptionPlan } from './types'
 import { advanceChecklistFrequency, ensureTemplateStages, localDateOnly, makeId } from './utils'
 
 /**
@@ -35,6 +36,25 @@ export type CloneChecklistTemplateOptions = {
   title?: string
   /** Whether the copy starts generating immediately. */
   active: boolean
+  /**
+   * The "How often" of the plan that brought this copy (featreq-acdd0c84 B2):
+   * the copy runs on `cadenceSchedule`'s schedule instead of the source's.
+   * Absent / null / 'blueprint' = the source's own schedule, as always.
+   */
+  cadence?: PlanCadence | null
+}
+
+/**
+ * The cadence a copy of `templateId` takes from `plans` - the effective "How
+ * often" of the FIRST of them that bundles it (the plans that triggered the
+ * copy, in order) - or null when none does.
+ */
+export function planCadenceFor(
+  templateId: string,
+  plans: readonly (SubscriptionPlan | null | undefined)[],
+): PlanCadence | null {
+  const plan = bundlingPlan(templateId, plans)
+  return plan ? effectivePlanCadence(plan) : null
 }
 
 export function cloneChecklistTemplate(
@@ -42,26 +62,31 @@ export function cloneChecklistTemplate(
   options: CloneChecklistTemplateOptions,
 ): Omit<ChecklistTemplate, 'id'> {
   const migrated = ensureTemplateStages(source)
+  const today = localDateOnly()
+  // A plan's quarterly / yearly schedule is specific-months, with its own first
+  // due date; weekly / monthly only change the frequency (lib/plan-cadence.js).
+  const planSchedule = cadenceSchedule(options.cadence ?? null, source, today)
+  const frequency = planSchedule?.frequency ?? source.frequency
   return {
     // Everything a copy keeps - the schedule, the Board column, the skip and
     // period-label settings, access - comes from the ONE list the server's copy
     // uses too (lib/checklist-template-copy.js), so the two paths cannot drift.
     // FIRST, so the copy's own identity below can never be overridden by it.
     ...copiedTemplateSettings(source),
+    ...(planSchedule?.scheduledMonths ? { scheduledMonths: planSchedule.scheduledMonths } : {}),
+    ...(planSchedule?.dueDayOfMonth ? { dueDayOfMonth: planSchedule.dueDayOfMonth } : {}),
+    ...(planSchedule?.repeatAnnually ? { repeatAnnually: true } : {}),
     title: options.title ?? source.title,
     clientId: options.clientId,
-    frequency: source.frequency,
+    frequency,
     // The start floor, the half that stops a copy back-filling history: the
     // copy begins at its first cycle on or after today. A source's
     // `nextDueDate` is routinely months stale (a standard blueprint's weekly
     // ones sat at 2026-06-30), and copying it verbatim spawned a dozen
     // backdated instances on the next read (featreq-c133daf8).
-    nextDueDate: firstCycleOnOrAfter(
-      source.nextDueDate || localDateOnly(),
-      source.frequency,
-      localDateOnly(),
-      advanceChecklistFrequency,
-    ),
+    nextDueDate:
+      planSchedule?.nextDueDate ??
+      firstCycleOnOrAfter(source.nextDueDate || today, frequency, today, advanceChecklistFrequency),
     // The other half: the copy was created TODAY. Both materializers measure a
     // spawn against this stamp, so inheriting the source's would hand the copy
     // the source's months.
