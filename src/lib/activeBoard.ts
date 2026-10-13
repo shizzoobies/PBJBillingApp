@@ -249,100 +249,70 @@ export function boardChecklistStatus(
   return due < today ? { kind: 'overdue', due } : { kind: 'due', due }
 }
 
-/** One step line of the Board's "Current step only" view. */
-export type BoardStepLine = {
-  itemId: string
-  /** The step's label, as the checklist card shows it. */
-  label: string
-  /** The step's due date, else the checklist's (yyyy-mm-dd), else null. */
-  due: string | null
-  /** The step's assignee, else the checklist's, else null. */
-  assigneeId: string | null
-  /** The assignee's name; null when unknown. */
-  assigneeName: string | null
-  /** Why the step is waiting (the same reason the Waiting chip gives); null when it is not. */
-  waiting: string | null
-  /** `due` is before today (string compare, both yyyy-mm-dd). */
-  overdue: boolean
-}
-
-/** Where one checklist is: its current step, the next few, and its stage. */
+/**
+ * Where one checklist is, for the Board's "Current step only" view: the STEP
+ * (the stage) it is on, never its tasks.
+ */
 export type BoardStepSummary = {
-  /** The first OPEN step in saved order; null when there is none. */
-  active: BoardStepLine | null
-  /** Up to `coming` further open steps, in saved order, after `active`. */
-  coming: BoardStepLine[]
-  /** "Step N of M - <stage>" for one stage of a multi-stage case; null otherwise. */
-  stageLabel: string | null
-  /** The next stage's name when `active` is the last open step of a stage that is not the last; else null. */
-  nextStageName: string | null
-  /** The checklist has no steps at all. */
-  noSteps: boolean
+  /** Staged (stageCount >= 2): "Step N of M - <stage name>"; otherwise the checklist's own title. */
+  stepLabel: string
+  /** Staged with a later stage: "Then: Step N+1 - <next stage name>"; otherwise null. */
+  nextStepLabel: string | null
+  /** Top-level items (the step's tasks). */
+  taskCount: number
+  /** Top-level items that read done by the roll-up (`isChecklistItemDone`). */
+  taskDoneCount: number
+  /** The checklist's due date; the status chip already shows due / overdue / waiting. */
+  dueDate: string | null
+  /** Who the checklist is for; null when unknown. */
+  assigneeName: string | null
 }
 
 /**
  * The Board's "Current step only" reading of a checklist (featreq-338b1507:
- * "see what step we are on for each client"). "Open" is the roll-up
- * (`isChecklistItemDone`), the rule the Waiting count and the card use. Saved
- * order is the stored order of `checklist.items`: the card shows open steps in
- * exactly that order (it only moves done steps below them), so the first open
- * step here is the first unchecked step on the card.
+ * "see what step we are on for each client"). Brittany's follow-up: "I consider
+ * the main a step. And the items under it the task for that step. The
+ * open/unlocked step should show on the board not the task." A staged case
+ * materializes one checklist per stage, so the checklist on the board IS the
+ * open step and its items are that step's tasks: the summary names the step and
+ * counts the tasks, and lists none of them. "Done" is the roll-up
+ * (`isChecklistItemDone`), the rule the Waiting count and the card use.
  */
 export function boardStepSummary(
   checklist: Checklist,
   templates: readonly ChecklistTemplate[],
-  today: string,
   employeeNameById: Record<string, string> = {},
-  coming = 2,
 ): BoardStepSummary {
   const items = checklist.items ?? []
-  const openItems = items.filter((item) => !isChecklistItemDone(item))
 
-  const lineFor = (item: (typeof items)[number]): BoardStepLine => {
-    const due = item.dueDate || checklist.dueDate || null
-    const assigneeId = item.assigneeId || checklist.assigneeId || null
-    // The step's own wait first, else the first waiting open sub-step beneath
-    // it: either way the step cannot move, and the checklist chip says Waiting.
-    let waiting = waitingReasonFor(item, employeeNameById)
-    for (const sub of item.subItems ?? []) {
-      if (waiting !== null) break
-      if (isChecklistItemDone(sub)) continue
-      waiting = waitingReasonFor(sub, employeeNameById)
-      for (const subSub of sub.subItems ?? []) {
-        if (waiting !== null) break
-        if (isChecklistItemDone(subSub)) continue
-        waiting = waitingReasonFor({ waitingOns: subSub.waitingOns }, employeeNameById)
-      }
-    }
-    return {
-      itemId: item.id,
-      label: item.label,
-      due,
-      assigneeId,
-      assigneeName: assigneeId ? (employeeNameById[assigneeId] ?? null) : null,
-      waiting,
-      overdue: due !== null && due < today,
-    }
-  }
-
-  const active = openItems[0] ? lineFor(openItems[0]) : null
-  const comingLines = openItems.slice(1, 1 + Math.max(0, coming)).map(lineFor)
-
-  let stageLabel: string | null = null
-  let nextStageName: string | null = null
+  let stepLabel = checklist.title
+  let nextStepLabel: string | null = null
   const stageIndex = checklist.stageIndex
-  if (checklist.templateId && typeof stageIndex === 'number') {
+  const stageCount = checklist.stageCount ?? 0
+  // A one-stage recipe is not a staged case: "Step 1 of 1" would be noise. A
+  // stage whose template (or name) is gone reads as the checklist's own title.
+  const stageName =
+    stageCount >= 2 && typeof stageIndex === 'number' && stageIndex >= 0 && stageIndex < stageCount
+      ? stageNameFor(templates as ChecklistTemplate[], checklist)
+      : undefined
+  if (stageName && typeof stageIndex === 'number') {
+    stepLabel = `Step ${stageIndex + 1} of ${stageCount} - ${stageName}`
     const stages = templates.find((template) => template.id === checklist.templateId)?.stages ?? []
-    // A one-stage recipe is not a staged case: "Step 1 of 1" would be noise.
-    if (stages.length > 1 && stageIndex >= 0 && stageIndex < stages.length) {
-      const name = stageNameFor(templates as ChecklistTemplate[], checklist)
-      stageLabel = `Step ${stageIndex + 1} of ${stages.length}${name ? ` - ${name}` : ''}`
-      const next = stages[stageIndex + 1]
-      if (next && openItems.length === 1) nextStageName = next.name?.trim() || null
+    const next = stages[stageIndex + 1]
+    if (next) {
+      const nextName = next.name?.trim()
+      nextStepLabel = `Then: Step ${stageIndex + 2}${nextName ? ` - ${nextName}` : ''}`
     }
   }
 
-  return { active, coming: comingLines, stageLabel, nextStageName, noSteps: items.length === 0 }
+  return {
+    stepLabel,
+    nextStepLabel,
+    taskCount: items.length,
+    taskDoneCount: items.filter((item) => isChecklistItemDone(item)).length,
+    dueDate: checklist.dueDate ?? null,
+    assigneeName: checklist.assigneeId ? (employeeNameById[checklist.assigneeId] ?? null) : null,
+  }
 }
 
 export function buildActiveBoard({

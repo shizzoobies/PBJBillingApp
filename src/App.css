@@ -10299,7 +10299,7 @@ button.repeating-task-toggle-pill {
   background: transparent;
 }
 
-/* "Current step only": one checklist's stage, current step and next steps. */
+/* "Current step only": the step one checklist is on (never its tasks). */
 .board-step-block {
   display: flex;
   flex-direction: column;
@@ -10311,32 +10311,21 @@ button.repeating-task-toggle-pill {
   font-size: 0.85rem;
 }
 
-.board-step-stage,
-.board-step-next,
-.board-step-empty {
+.board-step-title,
+.board-step-meta,
+.board-step-next {
   color: var(--muted);
   font-size: 0.78rem;
 }
 
-.board-step-line {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 8px;
-}
-
-.board-step-active {
+.board-step-label {
   font-weight: 650;
 }
 
-.board-step-due,
-.board-step-who {
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.board-step-coming {
-  opacity: 0.6;
+.board-step-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
 }
 
 .board-step-open {

@@ -8,7 +8,6 @@ import {
   UNCATEGORIZED_ID,
   type BoardChecklistStatus,
   type BoardColumn,
-  type BoardStepLine,
   type BoardStepSummary,
 } from '../lib/activeBoard'
 import { useAppContext } from '../AppContext'
@@ -265,8 +264,8 @@ export function ActiveChecklistsBoardPage() {
 
   const totalOpen = board.columns.reduce((sum, col) => sum + col.openClientCount, 0)
 
-  // Where each real checklist on the board is (its current step and the next
-  // two), for the "Current step only" view and its search. Ghosts have none.
+  // Where each real checklist on the board is (the step it is on), for the
+  // "Current step only" view and its search. Ghosts have none.
   const stepSummaryById = useMemo(() => {
     const byId = new Map<string, BoardStepSummary>()
     if (!currentStepOnly) return byId
@@ -274,15 +273,12 @@ export function ActiveChecklistsBoardPage() {
       for (const clientRow of col.clients) {
         for (const checklist of clientRow.checklists) {
           if (checklist.projected) continue
-          byId.set(
-            checklist.id,
-            boardStepSummary(checklist, data.checklistTemplates, today, employeeNameById),
-          )
+          byId.set(checklist.id, boardStepSummary(checklist, data.checklistTemplates, employeeNameById))
         }
       }
     }
     return byId
-  }, [currentStepOnly, board.columns, data.checklistTemplates, today, employeeNameById])
+  }, [currentStepOnly, board.columns, data.checklistTemplates, employeeNameById])
 
   const filteredColumns = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -293,7 +289,7 @@ export function ActiveChecklistsBoardPage() {
     // is on (stepSummaryById is empty when the view is off).
     const checklistMatches = (c: Checklist) =>
       c.title.toLowerCase().includes(q) ||
-      (stepSummaryById.get(c.id)?.active?.label ?? '').toLowerCase().includes(q)
+      (stepSummaryById.get(c.id)?.stepLabel ?? '').toLowerCase().includes(q)
     return board.columns.map((col) => {
       const filteredClients = col.clients.filter((clientRow) => {
         if (inactiveIds.has(clientRow.clientId)) return false
@@ -788,53 +784,29 @@ function BoardClientRow({
   )
 }
 
-/** One step line: label, due date, who it is for, and a Waiting / Overdue chip. */
-function BoardStepLineView({ line, active }: { line: BoardStepLine; active: boolean }) {
-  return (
-    <div className={`board-step-line ${active ? 'board-step-active' : 'board-step-coming'}`}>
-      {active ? (
-        <strong className="board-step-label">{line.label}</strong>
-      ) : (
-        <span className="board-step-label">{line.label}</span>
-      )}
-      {line.due ? <span className="board-step-due">Due {shortDate(line.due)}</span> : null}
-      {line.assigneeName ? <span className="board-step-who">{line.assigneeName}</span> : null}
-      {active && line.waiting ? (
-        <span className="board-chip board-chip-pending" title={line.waiting}>
-          Waiting — {line.waiting}
-        </span>
-      ) : active && line.overdue ? (
-        <span className="board-chip board-chip-overdue">Overdue</span>
-      ) : null}
-    </div>
-  )
-}
-
 /**
- * "Current step only" (featreq-338b1507): where one checklist is - its stage on
- * a staged case, its current step in bold, the next two dimmed, the next stage
- * when this is the last open step - with a link to the full card.
+ * "Current step only" (featreq-338b1507): the STEP one checklist is on, in bold
+ * ("Step N of M - <stage>" on a staged case, else its name), who it is for, how
+ * many of its tasks are done and the next stage - never the tasks themselves
+ * (Brittany: the step is the unit, the items under it are its tasks). The
+ * status chip above already carries Due / Overdue / Waiting.
  */
 function BoardStepBlock({ checklist, summary }: { checklist: Checklist; summary: BoardStepSummary }) {
-  const stageIndex = checklist.stageIndex ?? 0
   return (
     <div className="board-step-block">
-      <strong className="board-step-title">{checklist.title}</strong>
-      {summary.stageLabel ? <span className="board-step-stage">{summary.stageLabel}</span> : null}
-      {summary.noSteps ? <span className="board-step-empty">No steps yet</span> : null}
-      {/* Steps exist but none is open (a stage that has not advanced yet). */}
-      {!summary.noSteps && !summary.active ? (
-        <span className="board-step-empty board-step-all-done">All steps done</span>
+      {summary.stepLabel !== checklist.title ? (
+        <span className="board-step-title">{checklist.title}</span>
       ) : null}
-      {summary.active ? <BoardStepLineView line={summary.active} active /> : null}
-      {summary.coming.map((line) => (
-        <BoardStepLineView key={line.itemId} line={line} active={false} />
-      ))}
-      {summary.nextStageName ? (
-        <span className="board-step-next">
-          Then: Step {stageIndex + 2} - {summary.nextStageName}
+      <strong className="board-step-label">{summary.stepLabel}</strong>
+      <span className="board-step-meta">
+        {summary.assigneeName ? <span className="board-step-who">{summary.assigneeName}</span> : null}
+        <span className="board-step-count">
+          {summary.taskCount === 0
+            ? 'No tasks yet'
+            : `${summary.taskDoneCount} of ${summary.taskCount} tasks done`}
         </span>
-      ) : null}
+      </span>
+      {summary.nextStepLabel ? <span className="board-step-next">{summary.nextStepLabel}</span> : null}
       <Link className="board-step-open" to={`/checklists?focus=${encodeURIComponent(checklist.id)}`}>
         Open checklist
       </Link>

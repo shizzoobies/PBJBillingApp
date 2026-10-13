@@ -472,10 +472,10 @@ describe('resolveChecklistCategoryId', () => {
   })
 })
 
-// featreq-338b1507: the Board shows each client's CURRENT step (plus the next
-// two) instead of the whole checklist. These pin the summary it renders from.
+// featreq-338b1507: the Board's "Current step only" view shows the STEP each
+// client is on (the stage; Brittany: "I consider the main a step. And the items
+// under it the task for that step."), never the tasks. These pin its summary.
 describe('boardStepSummary', () => {
-  const TODAY = '2026-06-16'
   const step = (id: string, over: Record<string, unknown> = {}) => ({ id, label: `Step ${id}`, done: false, ...over })
   const STAGED: ChecklistTemplate[] = [
     {
@@ -488,140 +488,78 @@ describe('boardStepSummary', () => {
     } as unknown as ChecklistTemplate,
   ]
 
-  it('the first open step is active, done steps are skipped, the next two open steps come, a fourth does not', () => {
+  const staged = (stageIndex: number, over: Partial<Checklist> = {}) =>
+    open({ title: 'Monthly close', templateId: 'tpl-close', stageIndex, stageCount: 3, ...over })
+
+  it('a staged checklist reads "Step N of M - <stage>" and names the next stage', () => {
+    const summary = boardStepSummary(staged(1), STAGED)
+    expect(summary.stepLabel).toBe('Step 2 of 3 - Review')
+    expect(summary.nextStepLabel).toBe('Then: Step 3 - Deliver')
+
+    const first = boardStepSummary(staged(0), STAGED)
+    expect(first.stepLabel).toBe('Step 1 of 3 - Prepare')
+    expect(first.nextStepLabel).toBe('Then: Step 2 - Review')
+  })
+
+  it('the last stage has no next step', () => {
+    const summary = boardStepSummary(staged(2), STAGED)
+    expect(summary.stepLabel).toBe('Step 3 of 3 - Deliver')
+    expect(summary.nextStepLabel).toBeNull()
+  })
+
+  it('a single-stage or unstaged checklist reads as its own title, with no next step', () => {
+    const single = boardStepSummary(staged(0, { stageCount: 1, title: 'Payroll' }), STAGED)
+    expect(single).toMatchObject({ stepLabel: 'Payroll', nextStepLabel: null })
+
+    const unstaged = boardStepSummary(open({ title: 'Sales tax filing' }), [])
+    expect(unstaged).toMatchObject({ stepLabel: 'Sales tax filing', nextStepLabel: null })
+  })
+
+  it('counts top-level tasks by the roll-up rule: a done task counts, an open one does not', () => {
     const summary = boardStepSummary(
       open({
         items: [
           step('a', { done: true }),
           step('b'),
-          step('c', { done: true }),
-          step('d'),
-          step('e'),
-          step('f'),
+          // Stored open, every sub-step done: the roll-up reads it done.
+          step('c', { subItems: [{ id: 'c1', label: 'sub', done: true }] }),
+          // Stored done, a sub-step still open: the roll-up reads it open.
+          step('d', { done: true, subItems: [{ id: 'd1', label: 'sub', done: false }] }),
         ],
       }),
       [],
-      TODAY,
     )
-    expect(summary.active?.itemId).toBe('b')
-    expect(summary.active?.label).toBe('Step b')
-    expect(summary.coming.map((line) => line.itemId)).toEqual(['d', 'e'])
-    expect(summary.noSteps).toBe(false)
-    expect(summary.stageLabel).toBeNull()
-    expect(summary.nextStageName).toBeNull()
+    expect(summary.taskCount).toBe(4)
+    expect(summary.taskDoneCount).toBe(2)
   })
 
-  it('a step stored done with an open sub-step is still open (the roll-up rule)', () => {
-    const summary = boardStepSummary(
-      open({ items: [step('a', { done: true, subItems: [{ id: 'sa', label: 'sub', done: false }] }), step('b')] }),
-      [],
-      TODAY,
-    )
-    expect(summary.active?.itemId).toBe('a')
+  it('zero tasks counts zero of zero', () => {
+    expect(boardStepSummary(open({ items: [] }), [])).toMatchObject({ taskCount: 0, taskDoneCount: 0 })
   })
 
-  it('the step due date and assignee override the checklist ones; names resolve', () => {
-    const summary = boardStepSummary(
-      open({
-        dueDate: '2026-06-30',
-        assigneeId: 'e1',
-        items: [step('a', { dueDate: '2026-06-20', assigneeId: 'e2' }), step('b')],
-      }),
-      [],
-      TODAY,
-      { e1: 'Avery', e2: 'Blake' },
-    )
-    expect(summary.active).toMatchObject({ due: '2026-06-20', assigneeId: 'e2', assigneeName: 'Blake' })
-    expect(summary.coming[0]).toMatchObject({ due: '2026-06-30', assigneeId: 'e1', assigneeName: 'Avery' })
+  it('names the assignee when known, null otherwise; carries the due date', () => {
+    const known = boardStepSummary(open({ assigneeId: 'e2', dueDate: '2026-06-30' }), [], { e2: 'Blake' })
+    expect(known).toMatchObject({ assigneeName: 'Blake', dueDate: '2026-06-30' })
+    expect(boardStepSummary(open({ assigneeId: 'ghost' }), [], {}).assigneeName).toBeNull()
   })
 
-  it('an unknown assignee has no name', () => {
-    const summary = boardStepSummary(open({ assigneeId: 'ghost' }), [], TODAY, {})
-    expect(summary.active).toMatchObject({ assigneeId: 'ghost', assigneeName: null })
-  })
-
-  it('a waiting active step carries the waiting reason (free text first, else the blocker)', () => {
-    const freeText = boardStepSummary(
-      open({ items: [step('a', { waiting: true, waitingOn: 'client bank statements' })] }),
-      [],
-      TODAY,
-    )
-    expect(freeText.active?.waiting).toBe('client bank statements')
-
-    const structured = boardStepSummary(
-      open({
-        items: [
-          step('a', {
-            waitingOns: [{ id: 'w', blockerId: 'e2', requestedBy: 'e1', createdAt: '2026-06-15T00:00:00Z' }],
-          }),
-        ],
-      }),
-      [],
-      TODAY,
-      { e2: 'Allison Lehmann' },
-    )
-    expect(structured.active?.waiting).toBe('waiting on Allison Lehmann')
-
-    const notWaiting = boardStepSummary(open({}), [], TODAY)
-    expect(notWaiting.active?.waiting).toBeNull()
-  })
-
-  it('overdue when the due date is before today, not when it is today', () => {
-    expect(boardStepSummary(open({ dueDate: '2026-06-15' }), [], TODAY).active?.overdue).toBe(true)
-    expect(boardStepSummary(open({ dueDate: TODAY }), [], TODAY).active?.overdue).toBe(false)
-  })
-
-  it('a staged checklist reads "Step N of M - <name>"; the next stage shows only when the active step is the last open one', () => {
-    const lastOpen = boardStepSummary(
-      open({ templateId: 'tpl-close', stageIndex: 1, items: [step('a', { done: true }), step('b')] }),
-      STAGED,
-      TODAY,
-    )
-    expect(lastOpen.stageLabel).toBe('Step 2 of 3 - Review')
-    expect(lastOpen.nextStageName).toBe('Deliver')
-
-    const moreOpen = boardStepSummary(
-      open({ templateId: 'tpl-close', stageIndex: 1, items: [step('a'), step('b')] }),
-      STAGED,
-      TODAY,
-    )
-    expect(moreOpen.stageLabel).toBe('Step 2 of 3 - Review')
-    expect(moreOpen.nextStageName).toBeNull()
-
-    const lastStage = boardStepSummary(
-      open({ templateId: 'tpl-close', stageIndex: 2, items: [step('a')] }),
-      STAGED,
-      TODAY,
-    )
-    expect(lastStage.stageLabel).toBe('Step 3 of 3 - Deliver')
-    expect(lastStage.nextStageName).toBeNull()
-  })
-
-  it('a checklist with no template stage has no stage label', () => {
-    const summary = boardStepSummary(open({ templateId: 'tpl-gone', stageIndex: 0 }), STAGED, TODAY)
-    expect(summary.stageLabel).toBeNull()
-    expect(summary.nextStageName).toBeNull()
-  })
-
-  it('zero steps: noSteps, nothing active', () => {
-    const summary = boardStepSummary(open({ items: [] }), [], TODAY)
-    expect(summary).toMatchObject({ noSteps: true, active: null, coming: [] })
-  })
-
-  it('every step done: nothing active, nothing coming', () => {
-    const summary = boardStepSummary(open({ items: [step('a', { done: true }), step('b', { done: true })] }), [], TODAY)
-    expect(summary).toMatchObject({ noSteps: false, active: null, coming: [] })
-  })
-
-  it('respects the `coming` count (0 and 5)', () => {
-    const items = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map((id) => step(id))
-    expect(boardStepSummary(open({ items }), [], TODAY, {}, 0).coming).toEqual([])
-    expect(boardStepSummary(open({ items }), [], TODAY, {}, 5).coming.map((line) => line.itemId)).toEqual([
-      'b',
-      'c',
-      'd',
-      'e',
-      'f',
+  it('does not list tasks: the summary carries no item-level fields', () => {
+    const summary = boardStepSummary(open({ items: [step('a'), step('b')] }), [])
+    expect(Object.keys(summary).sort()).toEqual([
+      'assigneeName',
+      'dueDate',
+      'nextStepLabel',
+      'stepLabel',
+      'taskCount',
+      'taskDoneCount',
     ])
+  })
+
+  it('a missing template falls back to the title and no next step; counts are still right', () => {
+    const summary = boardStepSummary(
+      staged(0, { templateId: 'tpl-gone', title: 'Old close', items: [step('a', { done: true }), step('b')] }),
+      STAGED,
+    )
+    expect(summary).toMatchObject({ stepLabel: 'Old close', nextStepLabel: null, taskCount: 2, taskDoneCount: 1 })
   })
 })

@@ -10,10 +10,12 @@ import type { AppData, Checklist, ChecklistTemplate, Client } from '../lib/types
 /**
  * featreq-338b1507: "On our board we only want the active checklist step
  * instead of the full checklist ... Should be easy to go to the board and see
- * what step we are on for each client." A "Current step only" checkbox, ON by
- * default and remembered per user, shows each checklist's first open step (bold,
- * with its due date, who it is for and a Waiting / Overdue chip) and the next two
- * open steps dimmed. Unticked, the board is exactly what it was.
+ * what step we are on for each client." Her follow-up: "I consider the main a
+ * step. And the items under it the task for that step. The open/unlocked step
+ * should show on the board not the task." A "Current step only" checkbox, ON by
+ * default and remembered per user, shows the STEP each checklist is on (the
+ * stage, bold), who it is for, "N of M tasks done" and the next stage - never
+ * the tasks themselves. Unticked, the board is exactly what it was.
  */
 
 vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
@@ -95,6 +97,8 @@ const CLOSE = {
   title: 'Monthly close',
   templateId: 'tpl-close',
   stageIndex: 1,
+  stageCount: 3,
+  assigneeId: AVERY,
   dueDate: addDays(TODAY, 10),
   items: [
     { id: 'a', label: 'Pull statements', done: true },
@@ -112,6 +116,7 @@ const PAYROLL = {
   title: 'Payroll setup',
   templateId: 'tpl-payroll',
   stageIndex: 0,
+  stageCount: 3,
   dueDate: addDays(TODAY, 12),
   items: [{ id: 'p', label: 'Collect W-4s', done: false, waiting: true, waitingOn: 'client paperwork' }],
 } as unknown as Checklist
@@ -125,7 +130,8 @@ const INTAKE = {
   items: [],
 } as unknown as Checklist
 
-// Bolt Co: the Overdue / Waiting precedence and the all-steps-done shape.
+// Bolt Co: Overdue / Waiting live on the status chip only, and a checklist whose
+// tasks all read done.
 const LATE = {
   ...base,
   id: 'cl-late',
@@ -147,7 +153,7 @@ const STUCK = {
 } as unknown as Checklist
 
 // Stored flag open, but every sub-step is done: the roll-up reads it done, so
-// the checklist stays on the board with no open step (a stage not yet advanced).
+// the checklist stays on the board with every task done (a stage not yet advanced).
 const DONE_STAGE = {
   ...base,
   id: 'cl-done-stage',
@@ -223,14 +229,20 @@ function renderBoard() {
   )
 }
 
+/** The step block of the checklist with this title (shown as its step line or above it). */
 const stepBlock = (checklistTitle: string) => {
-  const block = screen.getByText(checklistTitle, { selector: '.board-step-title' }).closest('.board-step-block')
+  const block = [...document.querySelectorAll<HTMLElement>('.board-step-block')].find((candidate) =>
+    candidate.textContent?.includes(checklistTitle),
+  )
   if (!block) throw new Error(`No step block for ${checklistTitle}`)
-  return block as HTMLElement
+  return block
 }
 
+// Every top-level task label on the board's checklists: none may be listed.
+const TASK_LABELS = CHECKLISTS.flatMap((checklist) => checklist.items.map((item) => item.label))
+
 describe('Board: Current step only (default ON)', () => {
-  it('opens every row and shows the current step in bold with due date and assignee, the next two dimmed, and a link', () => {
+  it('opens every row and shows the step in bold, who it is for, the task count, the next stage and a link', () => {
     renderBoard()
     const toggle = screen.getByRole('checkbox', { name: 'Current step only' })
     expect(toggle).toBeChecked()
@@ -242,20 +254,15 @@ describe('Board: Current step only (default ON)', () => {
     expect(acmeHead).toHaveTextContent('2')
 
     const close = stepBlock('Monthly close')
-    expect(close).toHaveTextContent('Step 2 of 3 - Review')
-    const active = within(close).getByText('Reconcile bank feed')
-    expect(active.tagName).toBe('STRONG')
-    const activeLine = active.closest('.board-step-active') as HTMLElement
-    expect(activeLine).toHaveTextContent(`Due ${shortMonthDay(STEP_DUE)}`)
-    expect(activeLine).toHaveTextContent('Avery Stone')
-
-    const coming = close.querySelectorAll('.board-step-coming')
-    expect([...coming].map((line) => line.querySelector('.board-step-label')?.textContent)).toEqual([
-      'Categorize expenses',
-      'Send reports',
-    ])
-    expect(within(close).queryByText('Archive workpapers')).not.toBeInTheDocument()
-    expect(within(close).queryByText('Pull statements')).not.toBeInTheDocument()
+    const label = within(close).getByText('Step 2 of 3 - Review')
+    expect(label.tagName).toBe('STRONG')
+    expect(label).toHaveClass('board-step-label')
+    // The checklist's name still says which case this is, as a quiet line.
+    expect(within(close).getByText('Monthly close')).toHaveClass('board-step-title')
+    const meta = close.querySelector('.board-step-meta') as HTMLElement
+    expect(meta).toHaveTextContent('Avery Stone')
+    expect(meta).toHaveTextContent('1 of 5 tasks done')
+    expect(within(close).getByText('Then: Step 3 - Deliver')).toHaveClass('board-step-next')
     expect(within(close).getByRole('link', { name: 'Open checklist' })).toHaveAttribute(
       'href',
       '/checklists?focus=cl-close',
@@ -265,55 +272,64 @@ describe('Board: Current step only (default ON)', () => {
     expect(document.querySelector('.checklist-block')).toBeNull()
   })
 
+  it('lists no tasks at all - the step is the unit, its items stay on the card', () => {
+    renderBoard()
+    expect(document.querySelectorAll('.board-step-block').length).toBe(CHECKLISTS.length)
+    for (const taskLabel of TASK_LABELS) {
+      expect(document.body).not.toHaveTextContent(taskLabel)
+    }
+    expect(document.querySelector('.board-step-active, .board-step-coming')).toBeNull()
+  })
+
+  it('an unstaged checklist reads as its own name in bold, not repeated', () => {
+    renderBoard()
+    const block = stepBlock('Sales tax filing')
+    const label = within(block).getByText('Sales tax filing')
+    expect(label.tagName).toBe('STRONG')
+    expect(label).toHaveClass('board-step-label')
+    expect(block.querySelector('.board-step-title')).toBeNull()
+    expect(block).toHaveTextContent('Owner')
+    expect(block).toHaveTextContent('0 of 1 tasks done')
+    expect(block).not.toHaveTextContent('Then:')
+  })
+
+  it('the first stage names the next one; a stage whose tasks all read done counts them', () => {
+    renderBoard()
+    const payroll = stepBlock('Payroll setup')
+    expect(within(payroll).getByText('Step 1 of 3 - Collect').tagName).toBe('STRONG')
+    expect(payroll).toHaveTextContent('0 of 1 tasks done')
+    expect(payroll).toHaveTextContent('Then: Step 2 - Enter')
+
+    const doneStage = stepBlock('Quarterly filing')
+    expect(doneStage).toHaveTextContent('1 of 1 tasks done')
+    expect(doneStage).not.toHaveTextContent('All steps done')
+  })
+
+  it('a checklist with no tasks reads "No tasks yet"', () => {
+    renderBoard()
+    const intake = stepBlock('Engagement intake')
+    expect(within(intake).getByText('No tasks yet')).toBeInTheDocument()
+    expect(intake).not.toHaveTextContent('tasks done')
+  })
+
   it('the checklist Due chip names the right month (MONTH_NAMES is 1-based)', () => {
     renderBoard()
     const wrapper = stepBlock('Monthly close').closest('.board-card-with-status') as HTMLElement
     expect(wrapper.querySelector('.board-chip-due')).toHaveTextContent(`Due ${shortMonthDay(STEP_DUE)}`)
   })
 
-  it('a waiting current step carries the Waiting chip on its line', () => {
+  it('Waiting and Overdue live on the status chip only, never inside the step block', () => {
     renderBoard()
-    const payroll = stepBlock('Payroll setup')
-    const activeLine = within(payroll).getByText('Collect W-4s').closest('.board-step-active') as HTMLElement
-    // The same em dash as the checklist's StatusChip, so one card reads one way.
-    expect(within(activeLine).getByText('Waiting — client paperwork')).toHaveClass('board-chip-pending')
-  })
-
-  it('a past-due current step shows the red Overdue chip on its line', () => {
-    renderBoard()
-    const activeLine = within(stepBlock('Sales tax filing'))
-      .getByText('File the return')
-      .closest('.board-step-active') as HTMLElement
-    expect(within(activeLine).getByText('Overdue')).toHaveClass('board-chip-overdue')
-    expect(activeLine.querySelector('.board-chip-pending')).toBeNull()
-  })
-
-  it('a current step that is both waiting and past due shows Waiting, not Overdue', () => {
-    renderBoard()
-    const activeLine = within(stepBlock('Year-end payroll'))
-      .getByText('Issue W-2s')
-      .closest('.board-step-active') as HTMLElement
-    expect(within(activeLine).getByText('Waiting — client approval')).toHaveClass('board-chip-pending')
-    expect(activeLine.querySelector('.board-chip-overdue')).toBeNull()
-    expect(activeLine).not.toHaveTextContent('Overdue')
-  })
-
-  it('a checklist with steps but none open reads "All steps done"', () => {
-    renderBoard()
-    const block = stepBlock('Quarterly filing')
-    expect(within(block).getByText('All steps done')).toHaveClass('board-step-empty')
-    expect(block.querySelector('.board-step-active')).toBeNull()
-    expect(block).not.toHaveTextContent('No steps yet')
-    expect(stepBlock('Engagement intake')).not.toHaveTextContent('All steps done')
-  })
-
-  it('shows "No steps yet" on an empty checklist and "Then: Step N+2 - <stage>" when the current step is the last open one', () => {
-    renderBoard()
-    expect(stepBlock('Engagement intake')).toHaveTextContent('No steps yet')
-    const payroll = stepBlock('Payroll setup')
-    expect(payroll).toHaveTextContent('Step 1 of 3 - Collect')
-    expect(payroll).toHaveTextContent('Then: Step 2 - Enter')
-    expect(stepBlock('Monthly close')).not.toHaveTextContent('Then:')
+    for (const [title, chipClass] of [
+      ['Payroll setup', 'board-chip-pending'],
+      ['Sales tax filing', 'board-chip-overdue'],
+      ['Year-end payroll', 'board-chip-pending'],
+    ] as const) {
+      const block = stepBlock(title)
+      const wrapper = block.closest('.board-card-with-status') as HTMLElement
+      expect(wrapper.querySelector(`.board-card-chips .${chipClass}`)).not.toBeNull()
+      expect(block.querySelector('.board-chip')).toBeNull()
+    }
   })
 
   it('unticking it restores the collapsible rows and the full checklist card', () => {
@@ -352,15 +368,19 @@ describe('Board: Current step only (default ON)', () => {
     expect(toggle).not.toBeChecked()
   })
 
-  it('the search box also matches the current step, but not a later one', () => {
+  it('the search box also matches the step a checklist is on, but not its tasks', () => {
     renderBoard()
     const search = screen.getByRole('searchbox', { name: /search board/i })
-    fireEvent.change(search, { target: { value: 'reconcile BANK' } })
+    fireEvent.change(search, { target: { value: 'REVIEW' } })
     expect(stepBlock('Monthly close')).toBeInTheDocument()
     expect(screen.queryByText('Zed Works')).not.toBeInTheDocument()
-    expect(screen.queryByText('Payroll setup', { selector: '.board-step-title' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Step 1 of 3 - Collect')).not.toBeInTheDocument()
 
-    fireEvent.change(search, { target: { value: 'archive workpapers' } })
+    fireEvent.change(search, { target: { value: 'step 1 of 3' } })
+    expect(stepBlock('Payroll setup')).toBeInTheDocument()
+    expect(screen.queryByText('Step 2 of 3 - Review')).not.toBeInTheDocument()
+
+    fireEvent.change(search, { target: { value: 'reconcile bank' } })
     expect(screen.getByText(/No clients or checklists match/)).toBeInTheDocument()
   })
 
