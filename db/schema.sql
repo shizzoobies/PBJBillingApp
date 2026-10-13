@@ -276,6 +276,8 @@ create table if not exists service_categories (
   sort_order int not null default 0,
   updated_at timestamptz not null default now()
 );
+-- A column's optional group on the Board (null = ungrouped, shown as "Other").
+alter table service_categories add column if not exists group_name text;
 
 create table if not exists invoice_drafts (
   id text primary key,

@@ -10180,6 +10180,64 @@ button.repeating-task-toggle-pill {
   font-size: 0.82rem;
 }
 
+/* Column groups (featreq-54bf39b6): an overview strip of group chips above
+   the board, then each group full width under its header, a thin divider
+   between groups, and the same wrap-grid of columns inside each group. */
+.board-group-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 2px;
+}
+
+.board-group-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--soft);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.board-group-chip:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.board-group {
+  grid-column: 1 / -1;
+}
+
+.board-group + .board-group {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.board-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 2px 10px;
+  scroll-margin-top: 12px;
+}
+
+.board-group-header strong {
+  font-size: 1rem;
+  color: var(--ink);
+}
+
+.board-group-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
 /* A collapsible client row inside a column. */
 .board-client {
   background: var(--surface);
