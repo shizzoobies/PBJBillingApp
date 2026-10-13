@@ -181,6 +181,22 @@ describe('the clearing line on a processing row', () => {
     expect(within(panel).queryByText(/Bank payment clearing since/)).toBeNull()
   })
 
+  // The acknowledgment goes out ONCE per invoice (hasLoggedPaymentEmail), so a
+  // second bank payment after a failed first one has no ack of its own. The old
+  // ack dates the failed payment; showing it would claim a week-old start.
+  it('gives no date when the newest acknowledgment belongs to a payment that later failed', async () => {
+    const failure = {
+      kind: 'payment' as const,
+      event: 'failed' as const,
+      at: ACK_FAILED_NEWER,
+      paymentIntentId: 'pi_1',
+    }
+    const panel = await openProcessing([invoice({ emailLog: [send, ack(ACK_NEW), failure] })])
+    await waitFor(() => expect(mockAttempts).toHaveBeenCalled())
+    expect(await within(panel).findByText('Bank payment clearing')).toBeInTheDocument()
+    expect(within(panel).queryByText(/Bank payment clearing since/)).toBeNull()
+  })
+
   it.each(['processing', 'succeeded'] as const)(
     'dates from the autopay attempt over an acknowledgment when the attempt is %s',
     async (status) => {

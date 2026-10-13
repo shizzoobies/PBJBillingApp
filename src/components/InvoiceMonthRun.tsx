@@ -121,6 +121,7 @@ import {
   formatInvoiceRecipient,
   formatSentOn,
   getBillingPeriodLabel,
+  isInvoicePaymentFailureEntry,
   latestInvoiceSend,
   localDateOnly,
   pastDueInvoice,
@@ -254,6 +255,10 @@ const RUN_TABS: ReadonlyArray<{ id: RunTabId; label: string; empty: string }> = 
  * Stripe said processing or succeeded). Otherwise the newest bank-payment
  * acknowledgment email that actually went out: the webhook sends it the moment
  * the debit is accepted. Never the invoice's `updatedAt` - any edit moves that.
+ *
+ * The ack goes out only ONCE per invoice (`hasLoggedPaymentEmail`), so when a
+ * payment failure is logged at or after it, that ack dated an earlier payment
+ * that failed - this one has no start date on record, and none is claimed.
  */
 function bankClearingSince(
   invoice: PersistedInvoice,
@@ -266,12 +271,18 @@ function bankClearingSince(
     return autopayAttempt.updatedAt
   }
   let latest: string | null = null
+  let latestFailure: string | null = null
   for (const entry of invoice.emailLog ?? []) {
+    if (isInvoicePaymentFailureEntry(entry)) {
+      if (latestFailure === null || entry.at >= latestFailure) latestFailure = entry.at
+      continue
+    }
     const sent = entry as { kind?: string; ok?: boolean; at?: string }
     if (sent.kind !== 'ack' || sent.ok !== true || typeof sent.at !== 'string') continue
     // `>=` so a later position wins a tie, as with the other log readers.
     if (latest === null || sent.at >= latest) latest = sent.at
   }
+  if (latest !== null && latestFailure !== null && latestFailure >= latest) return null
   return latest
 }
 
