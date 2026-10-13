@@ -3699,13 +3699,13 @@ export async function fetchServiceCategories() {
   return ((await response.json()) as { categories: ServiceCategory[] }).categories
 }
 
-/** Owner-only: create a new board column. */
-export async function createServiceCategory(name: string) {
+/** Owner-only: create a new board column, optionally in a group. */
+export async function createServiceCategory(name: string, groupName?: string | null) {
   const response = await apiFetch('/api/service-categories', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(groupName === undefined ? { name } : { name, groupName }),
   })
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { error?: string } | null
@@ -3714,10 +3714,10 @@ export async function createServiceCategory(name: string) {
   return ((await response.json()) as { category: ServiceCategory }).category
 }
 
-/** Owner-only: rename and/or reorder a board column. */
+/** Owner-only: rename, reorder and/or regroup a board column (groupName null or '' clears it). */
 export async function updateServiceCategory(
   id: string,
-  patch: { name?: string; sortOrder?: number },
+  patch: { name?: string; sortOrder?: number; groupName?: string | null },
 ) {
   const response = await apiFetch(`/api/service-categories/${encodeURIComponent(id)}`, {
     method: 'PUT',

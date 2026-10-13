@@ -327,7 +327,8 @@ export function buildActiveBoard({
   clientNameById = {},
 }: {
   checklists?: Checklist[]
-  categories?: ServiceCategory[]
+  /** The columns; a column's group plays no part in what lands in it. */
+  categories?: Pick<ServiceCategory, 'id' | 'name' | 'sortOrder'>[]
   /**
    * The workspace's checklist templates — used only to recover the board column
    * for instances generated before their template was categorized. Optional so
@@ -406,4 +407,54 @@ export function buildActiveBoard({
   }
 
   return { range, columns }
+}
+
+/** One group of Board columns (featreq-54bf39b6). */
+export type BoardGroup = {
+  /** The columns' shared group name; null = columns with no group ("Other"). */
+  name: string | null
+  /** In board order. */
+  columns: BoardColumn[]
+  /** DISTINCT clients across its columns' `clients` (one client in two columns counts once). */
+  openClientCount: number
+}
+
+/**
+ * Fold the board's columns into their groups. Group order is the order each
+ * group first appears walking `columns`; a column whose category has no group
+ * (or isn't a known category - the synthetic Uncategorized column) goes in the
+ * null group, which is always LAST. Pure: no filtering - an empty column stays
+ * in its group and a group of empty columns counts 0.
+ */
+export function groupBoardColumns(
+  columns: readonly BoardColumn[],
+  categories: readonly Pick<ServiceCategory, 'id' | 'groupName'>[],
+): BoardGroup[] {
+  const groupNameById = new Map<string, string>()
+  for (const category of categories) {
+    const name = category.groupName?.trim()
+    if (name) groupNameById.set(category.id, name)
+  }
+  const named = new Map<string, BoardColumn[]>()
+  const ungrouped: BoardColumn[] = []
+  for (const col of columns) {
+    const name = groupNameById.get(col.id)
+    if (!name) {
+      ungrouped.push(col)
+      continue
+    }
+    const list = named.get(name) ?? []
+    list.push(col)
+    named.set(name, list)
+  }
+  const toGroup = (name: string | null, groupColumns: BoardColumn[]): BoardGroup => ({
+    name,
+    columns: groupColumns,
+    openClientCount: new Set(
+      groupColumns.flatMap((col) => col.clients.map((clientRow) => clientRow.clientId)),
+    ).size,
+  })
+  const groups = [...named.entries()].map(([name, groupColumns]) => toGroup(name, groupColumns))
+  if (ungrouped.length > 0) groups.push(toGroup(null, ungrouped))
+  return groups
 }

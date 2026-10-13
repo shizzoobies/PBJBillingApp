@@ -1789,12 +1789,15 @@ export type PendingTaskEdit = {
  * A service category = one column on the Active Checklists board (e.g.
  * "Monthly Bookkeeping", "Sales Tax", "Payroll"). Owner-managed; templates and
  * checklists reference it by id via `categoryId`. `sortOrder` drives left-to-
- * right column order.
+ * right column order. `groupName` (featreq-54bf39b6) puts the column under a
+ * group header on the Board ("Year-End", "Core Accounting"...); null = no
+ * group, shown under "Other" when any group exists.
  */
 export type ServiceCategory = {
   id: string
   name: string
   sortOrder: number
+  groupName: string | null
 }
 
 /**

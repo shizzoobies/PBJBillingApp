@@ -555,8 +555,8 @@ function App() {
   )
 
   const addServiceCategory = useCallback(
-    async (name: string) => {
-      const created = await createServiceCategoryRequest(name)
+    async (name: string, groupName?: string | null) => {
+      const created = await createServiceCategoryRequest(name, groupName)
       await refreshServiceCategories()
       return created
     },
@@ -564,7 +564,7 @@ function App() {
   )
 
   const updateServiceCategory = useCallback(
-    async (id: string, patch: { name?: string; sortOrder?: number }) => {
+    async (id: string, patch: { name?: string; sortOrder?: number; groupName?: string | null }) => {
       await updateServiceCategoryRequest(id, patch)
       await refreshServiceCategories()
     },

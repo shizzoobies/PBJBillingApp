@@ -40,6 +40,7 @@ import {
   WorkspaceChangedError,
   isReservedEngagementLetterName,
 } from './db/store.js'
+import { serviceCategoryGroupRefusal } from './lib/service-category-group.js'
 import {
   allocateGroupMinutes,
   classifySplitTarget,
@@ -8927,7 +8928,15 @@ const server = createServer(async (request, response) => {
         return
       }
       const payload = await readJsonBody(request)
-      const category = await appDataStore.createServiceCategory(payload?.name)
+      // featreq-54bf39b6: an optional group (string or null; at most 80 chars).
+      const groupRefusal = serviceCategoryGroupRefusal(payload?.groupName)
+      if (groupRefusal) {
+        sendJson(response, 400, { error: groupRefusal })
+        return
+      }
+      const category = await appDataStore.createServiceCategory(payload?.name, {
+        groupName: payload?.groupName,
+      })
       if (!category) {
         sendJson(response, 400, { error: 'A column name is required' })
         return
@@ -8960,9 +8969,15 @@ const server = createServer(async (request, response) => {
         return
       }
       const payload = await readJsonBody(request)
+      const groupRefusal = serviceCategoryGroupRefusal(payload?.groupName)
+      if (groupRefusal) {
+        sendJson(response, 400, { error: groupRefusal })
+        return
+      }
       const updated = await appDataStore.updateServiceCategory(categoryId, {
         name: payload?.name,
         sortOrder: payload?.sortOrder,
+        groupName: payload?.groupName,
       })
       if (!updated) {
         sendJson(response, 400, { error: 'Nothing to update' })

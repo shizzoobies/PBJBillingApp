@@ -250,12 +250,12 @@ export type AppContextValue = {
    * fetch resolves.
    */
   serviceCategories: ServiceCategory[]
-  /** Owner-only: create a board column. Resolves to the created category. */
-  addServiceCategory: (name: string) => Promise<ServiceCategory>
-  /** Owner-only: rename and/or reorder a board column. */
+  /** Owner-only: create a board column, optionally in a group. Resolves to the created category. */
+  addServiceCategory: (name: string, groupName?: string | null) => Promise<ServiceCategory>
+  /** Owner-only: rename, reorder and/or regroup a board column (groupName null clears it). */
   updateServiceCategory: (
     id: string,
-    patch: { name?: string; sortOrder?: number },
+    patch: { name?: string; sortOrder?: number; groupName?: string | null },
   ) => Promise<void>
   /** Owner-only: delete a board column (its checklists become Uncategorized). */
   deleteServiceCategory: (id: string) => Promise<void>
