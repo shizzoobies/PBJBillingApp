@@ -76,13 +76,13 @@ const CHECKLISTS = [
   checklist('cl-5', BOLT.id, 'cat-call'),
 ]
 
-function setup(categories: ServiceCategory[]) {
+function setup(categories: ServiceCategory[], checklists: Checklist[] = CHECKLISTS) {
   updateServiceCategory = vi.fn(async () => {})
   addServiceCategory = vi.fn(async () => categories[0])
   const data = {
     clients: [ACME, BOLT, ZED],
     employees: [{ id: OWNER, name: 'Owner', role: 'Owner' }],
-    checklists: CHECKLISTS,
+    checklists,
     checklistTemplates: [],
     recycledChecklists: [],
     timeEntries: [],
@@ -95,7 +95,7 @@ function setup(categories: ServiceCategory[]) {
     activeEmployeeId: OWNER,
     effectiveUser: { id: OWNER, role: 'owner' },
     sessionUser: { id: OWNER, role: 'owner' },
-    visibleChecklists: checklistsVisibleTo(CHECKLISTS, { viewerId: OWNER, isOwner: true }),
+    visibleChecklists: checklistsVisibleTo(checklists, { viewerId: OWNER, isOwner: true }),
     visibleClients: [ACME, BOLT, ZED],
     visibleClientIds: new Set([ACME.id, BOLT.id, ZED.id]),
     serviceCategories: categories,
@@ -234,6 +234,25 @@ describe('Board column groups: grouped body and Hide empty columns', () => {
     expect(chipLabels()).toEqual(['Core Accounting 0', 'Accounting Operations 1', 'CFO & Advisory 0', 'Other 0'])
     fireEvent.change(screen.getByPlaceholderText('Search board…'), { target: { value: 'nobody-here' } })
     expect(screen.getByText('No clients or checklists match "nobody-here".')).toBeInTheDocument()
+    // One line, not two: the search's own message, not the hide-empty one.
+    expect(screen.queryByText(/Nothing open in this period - untick/)).not.toBeInTheDocument()
+  })
+
+  it('with every column hidden as empty, says so in one line until unticked', () => {
+    setup(GROUPED, [])
+    renderBoard()
+    expect(
+      screen.getByText('Nothing open in this period - untick Hide empty columns to see every column.'),
+    ).toBeInTheDocument()
+    expect(columnNames()).toEqual([])
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Hide empty columns' }))
+    expect(screen.queryByText(/Nothing open in this period - untick/)).not.toBeInTheDocument()
+    expect(columnNames()).toHaveLength(6)
+  })
+
+  it('shows no such line while any column has clients', () => {
+    renderBoard()
+    expect(screen.queryByText(/Nothing open in this period - untick/)).not.toBeInTheDocument()
   })
 
   it('remembers the choice per user', () => {
@@ -311,6 +330,24 @@ describe('Manage columns: a Group per column', () => {
     fireEvent.blur(input)
     expect(updateServiceCategory).toHaveBeenCalledTimes(1)
     expect(updateServiceCategory).toHaveBeenCalledWith('cat-call', { groupName: 'Consulting' })
+  })
+
+  it('a failed save is not remembered as saved: the next blur sends it again', async () => {
+    openManager()
+    updateServiceCategory.mockRejectedValueOnce(new Error('Failed to update column (500)'))
+    const input = screen.getByLabelText('Group for Payroll')
+    fireEvent.change(input, { target: { value: 'Year-End' } })
+    fireEvent.blur(input)
+    expect(updateServiceCategory).toHaveBeenCalledTimes(1)
+    // The panel frees up once the failed request settles.
+    await vi.waitFor(() => expect(input).not.toBeDisabled())
+    fireEvent.blur(input)
+    expect(updateServiceCategory).toHaveBeenCalledTimes(2)
+    expect(updateServiceCategory).toHaveBeenLastCalledWith('cat-payroll', { groupName: 'Year-End' })
+    // That one succeeded, so a third blur with the same text sends nothing.
+    await vi.waitFor(() => expect(input).not.toBeDisabled())
+    fireEvent.blur(input)
+    expect(updateServiceCategory).toHaveBeenCalledTimes(2)
   })
 
   it('the Add row takes an optional group', async () => {

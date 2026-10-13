@@ -566,6 +566,16 @@ export function ActiveChecklistsBoardPage() {
               {filteredColumns.every((col) => col.clients.length === 0) && query.trim() ? (
                 <p className="empty-state">No clients or checklists match "{query.trim()}".</p>
               ) : null}
+              {/* Every column hidden as empty: say so rather than show a blank board
+                  (a search that matches nothing has its own line above). */}
+              {hideEmpty &&
+              !query.trim() &&
+              filteredColumns.length > 0 &&
+              filteredColumns.every((col) => col.clients.length === 0) ? (
+                <p className="empty-state">
+                  Nothing open in this period - untick Hide empty columns to see every column.
+                </p>
+              ) : null}
               {hasGroups
                 ? boardGroups.map((group) => {
                     const shownColumns = group.columns.filter(isShown)
@@ -950,12 +960,15 @@ function ManageColumns({
     ...new Set(categories.map((category) => category.groupName?.trim() ?? '').filter(Boolean)),
   ]
 
-  const run = async (fn: () => Promise<unknown>) => {
+  /** Runs one change with the panel busy; resolves false when it failed. */
+  const run = async (fn: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true)
     try {
       await fn()
+      return true
     } catch {
       /* surfaced by the failed request; keep the panel usable */
+      return false
     } finally {
       setBusy(false)
     }
@@ -1011,7 +1024,7 @@ function ManageColumns({
             <ColumnGroupInput
               category={category}
               disabled={busy}
-              onSave={(groupName) => void run(() => updateServiceCategory(category.id, { groupName }))}
+              onSave={(groupName) => run(() => updateServiceCategory(category.id, { groupName }))}
             />
             <div className="manage-columns-actions">
               <button
@@ -1100,7 +1113,8 @@ function ManageColumns({
 /**
  * A column's Group (featreq-54bf39b6) in Manage columns: saves on blur or
  * Enter, trimmed; an empty box clears the group (null). The value last sent is
- * remembered so the blur that follows an Enter does not save it twice.
+ * remembered so the blur that follows an Enter does not save it twice; a
+ * failed save forgets it again, so the next blur or Enter retries.
  */
 function ColumnGroupInput({
   category,
@@ -1109,14 +1123,18 @@ function ColumnGroupInput({
 }: {
   category: ServiceCategory
   disabled: boolean
-  onSave: (groupName: string | null) => void
+  /** Resolves false when the save failed. */
+  onSave: (groupName: string | null) => Promise<boolean>
 }) {
   const lastSaved = useRef(category.groupName ?? '')
-  const save = (value: string) => {
+  const save = async (value: string) => {
     const next = value.trim()
-    if (next === lastSaved.current) return
+    const previous = lastSaved.current
+    if (next === previous) return
     lastSaved.current = next
-    onSave(next || null)
+    const saved = await onSave(next || null)
+    // Only undo our own attempt - a newer save may have moved it since.
+    if (!saved && lastSaved.current === next) lastSaved.current = previous
   }
   return (
     <input
@@ -1126,11 +1144,11 @@ function ColumnGroupInput({
       aria-label={`Group for ${category.name}`}
       list="board-group-names"
       disabled={disabled}
-      onBlur={(event) => save(event.target.value)}
+      onBlur={(event) => void save(event.target.value)}
       onKeyDown={(event) => {
         if (event.key === 'Enter') {
           event.preventDefault()
-          save(event.currentTarget.value)
+          void save(event.currentTarget.value)
         }
       }}
     />
