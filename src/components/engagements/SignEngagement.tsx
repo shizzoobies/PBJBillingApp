@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { AddModal } from '../AddModal'
-import { getEngagementRequest, signEngagementRequest } from '../../lib/api'
-import { ENGAGEMENT_STATUS_LABELS, engagementDayLabel, engagementPartyName } from '../../lib/engagements'
+import { getEngagementRequest, listEngagementsRequest, signEngagementRequest } from '../../lib/api'
+import {
+  ENGAGEMENT_STATUS_LABELS,
+  engagementDayLabel,
+  engagementInstantLabel,
+  engagementPartyName,
+} from '../../lib/engagements'
 import { engagementFeeChoices, signRefusalSentence, signingSentence } from '../../lib/engagementSigning'
+import { engagementIsPureRecord } from '../../../lib/engagement-record.js'
 import { firmToday } from '../../../lib/firm-time.js'
 import { formatProposalMoney } from '../../../lib/proposal-pricing.js'
 import { ApiError, type Engagement, type EngagementSignResult } from '../../lib/types'
@@ -48,15 +54,53 @@ export function SignEngagementForm({
   // "Signed as edited": sign a sent letter that changed after it went out.
   const [signedAsEdited, setSignedAsEdited] = useState(false)
 
+  // A superseding letter also replaces the client's open amendments (featreq-e5ae8279):
+  // the live ones are listed once, here, each with a "Keep in force" box that starts OFF.
+  // What is sent is the ids SHOWN minus the kept ones, so an amendment made after this
+  // list was read is never replaced unseen.
+  const supersedes = engagement.kind === 'superseding' && Boolean(engagement.supersedesId) && Boolean(engagement.clientId)
+  const clientId = engagement.clientId
+  const [amendments, setAmendments] = useState<Engagement[] | null>(null)
+  const [amendmentsFailed, setAmendmentsFailed] = useState(false)
+  const [kept, setKept] = useState<ReadonlySet<string>>(() => new Set())
+  useEffect(() => {
+    if (!supersedes || !clientId) return
+    let cancelled = false
+    void listEngagementsRequest({ clientId }).then(
+      (rows) => {
+        if (cancelled) return
+        setAmendments(
+          rows.filter(
+            (row) =>
+              row.kind === 'amendment' && (row.status === 'draft' || row.status === 'sent' || row.status === 'signed'),
+          ),
+        )
+      },
+      () => {
+        if (!cancelled) setAmendmentsFailed(true)
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [supersedes, clientId])
+  const amendmentsReady = !supersedes || amendments !== null || amendmentsFailed
+
   // The sent-hash guard: a sent letter edited since it went out signs only "as edited".
   const changed = engagement.status === 'sent' && changedSinceSent
   const canSign =
-    (engagement.status === 'sent' && (!changed || signedAsEdited)) || (engagement.status === 'draft' && inPerson)
+    amendmentsReady &&
+    ((engagement.status === 'sent' && (!changed || signedAsEdited)) || (engagement.status === 'draft' && inPerson))
 
   const sign = async () => {
     if (!canSign || !/^\d{4}-\d{2}-\d{2}$/.test(signedOn)) return
+    const replaceIds = supersedes ? (amendments ?? []).filter((row) => !kept.has(row.id)).map((row) => row.id) : []
+    const replacing =
+      replaceIds.length > 0
+        ? `${replaceIds.length} open amendment${replaceIds.length === 1 ? ' is' : 's are'} replaced too (marked Superseded; each can be restored from the client's Engagements list). `
+        : ''
     const ok = window.confirm(
-      `Mark the engagement letter for ${engagementPartyName(engagement)} as signed on ${engagementDayLabel(signedOn)}? ${signingSentence(engagement, feeLine)}A signed letter can no longer be edited, sent or voided.`,
+      `Mark the engagement letter for ${engagementPartyName(engagement)} as signed on ${engagementDayLabel(signedOn)}? ${signingSentence(engagement, feeLine)}${replacing}A signed letter can no longer be edited, sent or voided.`,
     )
     if (!ok) return
     onStart()
@@ -66,6 +110,7 @@ export function SignEngagementForm({
         ...(signNote.trim() ? { note: signNote.trim() } : {}),
         ...(engagement.status === 'draft' ? { allowUnsent: true } : {}),
         ...(changed && signedAsEdited ? { confirmChanged: true } : {}),
+        ...(replaceIds.length > 0 ? { replaceAmendmentIds: replaceIds } : {}),
       })
       await onSigned(result, signedOn)
     } catch (err) {
@@ -122,13 +167,57 @@ export function SignEngagementForm({
           </label>
         </>
       ) : null}
+      {supersedes && amendmentsFailed ? (
+        <p className="muted-text" role="status">
+          {"Could not read this client's amendments, so none will be replaced when this is signed."}
+        </p>
+      ) : null}
+      {supersedes && amendments !== null && amendments.length > 0 ? (
+        <fieldset className="engagement-replaced-amendments">
+          <legend>Open amendments this letter replaces</legend>
+          <p className="muted-text">
+            Signing this letter replaces these amendments along with the engagement it supersedes. Tick Keep in force
+            on any that should stay in effect.
+          </p>
+          {amendments.map((row) => {
+            const label = row.subject || 'Amendment'
+            const state = ENGAGEMENT_STATUS_LABELS[row.status] ?? row.status
+            const day = engagementInstantLabel(row.signedAt || row.sentAt || row.createdAt)
+            return (
+              <div key={row.id} className="engagement-replaced-amendment">
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    aria-label={`Keep in force: ${label}`}
+                    checked={kept.has(row.id)}
+                    onChange={(event) =>
+                      setKept((current) => {
+                        const next = new Set(current)
+                        if (event.target.checked) next.add(row.id)
+                        else next.delete(row.id)
+                        return next
+                      })
+                    }
+                  />
+                  <span>{`Keep in force - ${label} (${state}${day ? `, ${day}` : ''})`}</span>
+                </label>
+                {engagementIsPureRecord(row) ? null : (
+                  <p className="muted-text" role="note">
+                    Keeping it in force does not bring back its fee or plans; this letter sets those.
+                  </p>
+                )}
+              </div>
+            )
+          })}
+        </fieldset>
+      ) : null}
       <div className="button-row">
         <button type="button" className="primary-action" disabled={!canSign || disabled} onClick={() => void sign()}>
           Mark as signed
         </button>
         {actions}
       </div>
-      {!canSign && !changed ? <p className="muted-text">Send the letter first, or tick &quot;signed in person&quot;.</p> : null}
+      {!canSign && !changed && amendmentsReady ? <p className="muted-text">Send the letter first, or tick &quot;signed in person&quot;.</p> : null}
     </>
   )
 }
@@ -176,6 +265,11 @@ export function SigningSummary({
             {'The engagement this letter replaces is now marked Superseded ('}
             <Link to={`/engagements/${result.supersededId}`}>open it</Link>
             {').'}
+          </li>
+        ) : null}
+        {(result.supersededAmendmentIds ?? []).length > 0 ? (
+          <li>
+            {`${(result.supersededAmendmentIds ?? []).length} open amendment${(result.supersededAmendmentIds ?? []).length === 1 ? ' was' : 's were'} replaced too. Restore one from the client's Engagements list if it should stay in force.`}
           </li>
         ) : null}
         {checklists > 0 ? (

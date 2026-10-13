@@ -12233,7 +12233,9 @@ const server = createServer(async (request, response) => {
     // onboarding checklist at the Onboarding stage. Answers { engagement,
     // clientId, createdClient, clonedTemplateIds, retainerInvoiceId, retainerPeriod,
     // monthlyRate, addedPlanIds, softwareAdded, onboardingCaseId,
-    // onboardingChecklistId, skipped }.
+    // onboardingChecklistId, skipped }. A superseding letter's body may carry
+    // replaceAmendmentIds (featreq-e5ae8279): the client's amendments it replaces along
+    // with its predecessor; the answer's supersededAmendmentIds lists the ones that were.
     const engagementSignMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/sign$/)
     if (engagementSignMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
@@ -12262,6 +12264,18 @@ const server = createServer(async (request, response) => {
         })
         return
       }
+      if (
+        payload.replaceAmendmentIds !== undefined &&
+        (!Array.isArray(payload.replaceAmendmentIds) ||
+          payload.replaceAmendmentIds.length > 500 ||
+          !payload.replaceAmendmentIds.every((id) => typeof id === 'string'))
+      ) {
+        sendJson(response, 400, {
+          error: 'engagement_invalid',
+          message: 'Send the amendments to replace as a list of their ids.',
+        })
+        return
+      }
       let result
       try {
         result = await appDataStore.signEngagement(engagementSignMatch[1], {
@@ -12272,6 +12286,7 @@ const server = createServer(async (request, response) => {
           // "Signed as edited": sign a sent letter changed since it went out (409
           // engagement_refused reason changed_since_sent without it).
           confirmChanged: payload.confirmChanged === true,
+          replaceAmendmentIds: payload.replaceAmendmentIds ?? [],
         })
       } catch (error) {
         // A refusal after the store created a client (a lost race, a package
@@ -12309,6 +12324,18 @@ const server = createServer(async (request, response) => {
           )
         } catch (error) {
           console.error('[engagements] could not record the superseded letter:', error)
+        }
+      }
+      // And one line per amendment it replaced, each in its own try.
+      for (const amendmentId of result.supersededAmendmentIds ?? []) {
+        try {
+          await appDataStore.recordActivity(
+            session.user.id,
+            'engagement_amendment_superseded',
+            engagementActivityTarget({ party: result.engagement.party, id: amendmentId }),
+          )
+        } catch (error) {
+          console.error('[engagements] could not record the replaced amendment:', error)
         }
       }
       broadcastDataChanged()
@@ -12351,6 +12378,46 @@ const server = createServer(async (request, response) => {
       }
       broadcastDataChanged()
       sendJson(response, 200, { engagement: voided })
+      return
+    }
+
+    // POST /api/engagements/:id/restore - an amendment a superseding letter replaced goes
+    // back to the status its dates say (featreq-e5ae8279). Amendments only; it does not
+    // bring back a fee or plans the replacing letter took off.
+    const engagementRestoreMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/restore$/)
+    if (engagementRestoreMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can restore engagements' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      let restored
+      try {
+        restored = await appDataStore.restoreEngagement(engagementRestoreMatch[1], session.user.id)
+      } catch (error) {
+        sendEngagementRefusal(response, error)
+        return
+      }
+      if (!restored) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      try {
+        await appDataStore.recordActivity(session.user.id, 'engagement_restored', engagementActivityTarget(restored))
+      } catch (error) {
+        console.error('[engagements] could not record the restore:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { engagement: restored })
       return
     }
     // ---- end of the engagement routes ---------------------------------------

@@ -100,9 +100,10 @@ const ROUTES: Route[] = [
   { name: 'POST /api/engagements/:id/reassemble', pattern: /if \(engagementReassembleMatch && request\.method === 'POST'\)/, write: true },
   { name: 'GET /api/engagements/:id/preview(.pdf)', pattern: /if \(engagementPreviewMatch && request\.method === 'GET'\)/, write: false },
   { name: 'POST /api/engagements/:id/send', pattern: /if \(engagementSendMatch && request\.method === 'POST'\)/, write: true, broadcastLength: 4000 },
-  { name: 'POST /api/engagements/:id/sign', pattern: /if \(engagementSignMatch && request\.method === 'POST'\)/, write: true },
+  { name: 'POST /api/engagements/:id/sign', pattern: /if \(engagementSignMatch && request\.method === 'POST'\)/, write: true, broadcastLength: 5600 },
   { name: 'POST /api/engagements/:id/void', pattern: /if \(engagementVoidMatch && request\.method === 'POST'\)/, write: true },
   { name: 'POST /api/engagements', pattern: /normalizedPath === '\/api\/engagements' && request\.method === 'POST'/, write: true }, // stage 4: appended so the indexes above stay
+  { name: 'POST /api/engagements/:id/restore', pattern: /if \(engagementRestoreMatch && request\.method === 'POST'\)/, write: true }, // featreq-e5ae8279: appended, same reason
 ]
 
 describe('the engagement routes are owner-only, same-origin and above the catch-all', () => {
@@ -116,6 +117,7 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
     expect(block).toContain("normalizedPath.match(/^\\/api\\/engagements\\/([^/]+)\\/send$/)")
     expect(block).toContain("normalizedPath.match(/^\\/api\\/engagements\\/([^/]+)\\/sign$/)")
     expect(block).toContain("normalizedPath.match(/^\\/api\\/engagements\\/([^/]+)\\/void$/)")
+    expect(block).toContain("normalizedPath.match(/^\\/api\\/engagements\\/([^/]+)\\/restore$/)")
   })
 
   it('sit next to the letters, ahead of them, and outside their pinned block', () => {
@@ -173,7 +175,8 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
   // route answers the store's whole result (client, checklists, retainer, skips).
   it('sign broadcasts a created client before any refusal, maps client refusals to 409, and answers the result whole', () => {
     // 4000: the route grew by the engagement_superseded line's own try (stage 4, review round 2).
-    const block = routeBlock(ROUTES[8].pattern, 4000)
+    // 5600: and again by the replaced-amendments check and its per-id lines (featreq-e5ae8279).
+    const block = routeBlock(ROUTES[8].pattern, 5600)
     const broadcastAt = block.indexOf('if (error.createdClientId) broadcastDataChanged()')
     const masterAt = block.indexOf('error instanceof BillingMasterError || error instanceof PackageApplyError')
     const refusalAt = block.indexOf('sendEngagementRefusal(response, error)')
@@ -196,7 +199,7 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
     const comment = between('// POST /api/engagements/:id/sign', 'const engagementSignMatch')
     expect(comment).toContain('onboardingCaseId')
     expect(comment).toContain('onboardingChecklistId')
-    expect(routeBlock(ROUTES[8].pattern, 4000)).toContain('sendJson(response, 200, result)')
+    expect(routeBlock(ROUTES[8].pattern, 5600)).toContain('sendJson(response, 200, result)')
     const storeSource = readFileSync(path.resolve(here, '../../db/store.js'), 'utf8')
     const signBody = storeSource.slice(
       storeSource.indexOf('  async signEngagement('),
@@ -209,15 +212,15 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
   })
 
   it('sign and void record what happened', () => {
-    expect(routeBlock(ROUTES[8].pattern, 3000)).toContain("'engagement_signed'")
-    expect(routeBlock(ROUTES[8].pattern, 3000)).toContain('allowUnsent: payload.allowUnsent === true')
+    expect(routeBlock(ROUTES[8].pattern, 3600)).toContain("'engagement_signed'")
+    expect(routeBlock(ROUTES[8].pattern, 3600)).toContain('allowUnsent: payload.allowUnsent === true')
     expect(routeBlock(ROUTES[9].pattern, 3000)).toContain("'engagement_voided'")
   })
 
   // Stage 4, review round 1: the predecessor a superseding letter replaced is in the
   // activity feed too, recorded after the signature in the same try.
   it('sign records engagement_superseded for the predecessor the store flipped', () => {
-    const block = routeBlock(ROUTES[8].pattern, 4600)
+    const block = routeBlock(ROUTES[8].pattern, 5600)
     const signedAt = block.indexOf("'engagement_signed'")
     const supersededAt = block.indexOf("'engagement_superseded'")
     expect(supersededAt).toBeGreaterThan(signedAt)
@@ -227,6 +230,45 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
     expect(supersededAt).toBeGreaterThan(block.indexOf("console.error('[engagements] could not record the signature:'"))
     expect(block.indexOf("console.error('[engagements] could not record the superseded letter:'")).toBeGreaterThan(supersededAt)
     expect(supersededAt).toBeLessThan(block.indexOf('sendJson(response, 200, result)'))
+  })
+
+  // featreq-e5ae8279: a superseding letter replaces the open amendments she did not keep.
+  it('sign takes replaceAmendmentIds as a checked list of strings and hands it to the store', () => {
+    const block = routeBlock(ROUTES[8].pattern, 5600)
+    expect(block).toContain('payload.replaceAmendmentIds !== undefined')
+    expect(block).toContain('Array.isArray(payload.replaceAmendmentIds)')
+    expect(block).toContain("typeof id === 'string'")
+    expect(block).toContain("error: 'engagement_invalid'")
+    expect(block).toContain('replaceAmendmentIds: payload.replaceAmendmentIds ?? []')
+    // The list is checked before the store is called.
+    expect(block.indexOf('Array.isArray(payload.replaceAmendmentIds)')).toBeLessThan(block.indexOf('appDataStore.signEngagement('))
+  })
+
+  it('sign records one engagement_amendment_superseded line per replaced amendment, each in its own try', () => {
+    const block = routeBlock(ROUTES[8].pattern, 5600)
+    const loopAt = block.indexOf('for (const amendmentId of result.supersededAmendmentIds ?? [])')
+    expect(loopAt).toBeGreaterThan(block.indexOf("'engagement_superseded'"))
+    const loop = block.slice(loopAt)
+    expect(loop.indexOf('try {')).toBeGreaterThan(-1)
+    expect(loop.indexOf('try {')).toBeLessThan(loop.indexOf("'engagement_amendment_superseded'"))
+    expect(loop).toContain('engagementActivityTarget({ party: result.engagement.party, id: amendmentId })')
+    expect(loop.indexOf("console.error('[engagements] could not record the replaced amendment:'")).toBeGreaterThan(
+      loop.indexOf("'engagement_amendment_superseded'"),
+    )
+    expect(loopAt).toBeLessThan(block.indexOf('sendJson(response, 200, result)'))
+  })
+
+  it('restore is owner-only, amendments only through the store, and records engagement_restored', () => {
+    const block = routeBlock(ROUTES[11].pattern, 3000)
+    expect(block).toContain("sendJson(response, 403, { error: 'Only owners can restore engagements' })")
+    expect(block).toContain('appDataStore.restoreEngagement(engagementRestoreMatch[1], session.user.id)')
+    expect(block).toContain('sendEngagementRefusal(response, error)')
+    expect(block).toContain("sendJson(response, 404, { error: 'Engagement not found' })")
+    expect(block).toContain("'engagement_restored'")
+    expect(block).toContain('sendJson(response, 200, { engagement: restored })')
+    // Recorded in its own try, after the store has restored it.
+    expect(block.indexOf("'engagement_restored'")).toBeGreaterThan(block.indexOf('appDataStore.restoreEngagement('))
+    expect(block).toContain("console.error('[engagements] could not record the restore:'")
   })
 })
 

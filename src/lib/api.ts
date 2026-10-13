@@ -5446,17 +5446,38 @@ export function sendEngagementRequest(
  * Mark as signed on a firm day; `allowUnsent` = she handed it over in person;
  * `confirmChanged` = "signed as edited" (a sent letter changed since it went out).
  * The answer says what signing did: the client created or used, the checklists,
- * the retainer drafted, and what was skipped.
+ * the retainer drafted, and what was skipped. `replaceAmendmentIds` (a superseding
+ * letter only): the client's open amendments the letter replaces along with its
+ * predecessor - the ones the form showed, minus the ones she kept in force.
  */
 export async function signEngagementRequest(
   id: string,
-  input: { signedOn: string; note?: string; allowUnsent?: boolean; confirmChanged?: boolean },
+  input: {
+    signedOn: string
+    note?: string
+    allowUnsent?: boolean
+    confirmChanged?: boolean
+    replaceAmendmentIds?: string[]
+  },
 ): Promise<EngagementSignResult> {
   return engagementRequest<EngagementSignResult>(
     engagementPath(id, 'sign'),
     proposalJson('POST', input),
     'Failed to mark the engagement as signed',
   )
+}
+
+/**
+ * Restore an amendment a superseding letter replaced (owner only): it goes back to
+ * signed, sent or draft by its own dates. Does not bring back a fee or plans.
+ */
+export async function restoreEngagementRequest(id: string): Promise<Engagement> {
+  const body = await engagementRequest<{ engagement: Engagement }>(
+    engagementPath(id, 'restore'),
+    proposalJson('POST', {}),
+    'Failed to restore the amendment',
+  )
+  return body.engagement
 }
 
 /** Void a draft or sent engagement (it stays in the list). */

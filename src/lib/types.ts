@@ -2844,6 +2844,8 @@ export type EngagementSignResult = {
   removedPlanIds?: string[]
   /** A superseding letter (stage 4): the engagement its signing marked Superseded, or null. */
   supersededId?: string | null
+  /** A superseding letter: the open amendments it replaced too (marked Superseded; each can be restored). */
+  supersededAmendmentIds?: string[]
   softwareAdded: string[]
   /**
    * A prospect's signing (featreq-b2142264): the new client's onboarding case, opened at

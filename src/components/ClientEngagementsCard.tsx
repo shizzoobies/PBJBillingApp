@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { createAmendmentRequest, listEngagementsRequest, listLettersRequest } from '../lib/api'
+import { createAmendmentRequest, listEngagementsRequest, listLettersRequest, restoreEngagementRequest } from '../lib/api'
 import { ENGAGEMENT_KIND_LABELS, ENGAGEMENT_STATUS_LABELS, engagementInstantLabel } from '../lib/engagements'
 import { ApiError, type Engagement, type LetterSummary } from '../lib/types'
 import { SignEngagementDialog } from './engagements/SignEngagement'
@@ -12,8 +12,9 @@ import { SignEngagementDialog } from './engagements/SignEngagement'
  * newest first, each with its kind, status, sent and signed dates and an Open link.
  * "New amendment" starts a draft from one of the saved Letters and opens it in the
  * editor. A sent letter (or a draft signed in person) has **Mark as signed**, the
- * editor's own form in a dialog (featreq-b2142264). Owner only: the Billing tab is,
- * and the card renders nothing otherwise.
+ * editor's own form in a dialog (featreq-b2142264). An amendment a superseding letter
+ * replaced has **Restore** (featreq-e5ae8279). Owner only: the Billing tab is, and the
+ * card renders nothing otherwise.
  */
 export function ClientEngagementsCard({
   clientId,
@@ -42,6 +43,8 @@ export function ClientEngagementsCard({
   // The letter Mark as signed is open for, and a bump that reads the list again after it.
   const [signing, setSigning] = useState<Engagement | null>(null)
   const [reloads, setReloads] = useState(0)
+  // The replaced amendment being restored (one at a time).
+  const [restoringId, setRestoringId] = useState('')
 
   useEffect(() => {
     if (!ownerMode) return
@@ -93,6 +96,25 @@ export function ClientEngagementsCard({
     }
   }
 
+  const restore = async (engagement: Engagement) => {
+    // The status it goes back to is read off its own dates, like the server does.
+    const back = engagement.signedAt ? 'Signed' : engagement.sentAt ? 'Sent' : 'Draft'
+    const ok = window.confirm(
+      `Restore the amendment "${engagement.subject || engagement.id}"? It goes back to ${back}. A fee or plans the replacing letter changed are not brought back.`,
+    )
+    if (!ok) return
+    setRestoringId(engagement.id)
+    setError('')
+    try {
+      await restoreEngagementRequest(engagement.id)
+      setReloads((count) => count + 1)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not restore the amendment.')
+    } finally {
+      setRestoringId('')
+    }
+  }
+
   return (
     <div className="client-engagements" aria-label="Client engagements">
       {loadError ? (
@@ -138,6 +160,16 @@ export function ClientEngagementsCard({
                       {engagement.status === 'sent' || engagement.status === 'draft' ? (
                         <button type="button" className="ghost-action" onClick={() => setSigning(engagement)}>
                           Mark as signed
+                        </button>
+                      ) : null}
+                      {engagement.kind === 'amendment' && engagement.status === 'superseded' ? (
+                        <button
+                          type="button"
+                          className="ghost-action"
+                          disabled={restoringId !== ''}
+                          onClick={() => void restore(engagement)}
+                        >
+                          Restore
                         </button>
                       ) : null}
                     </div>

@@ -350,8 +350,10 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const supersedes = engagement.supersedesId
     ? (related.find((row) => row.id === engagement.supersedesId) ?? null)
     : null
+  // A superseded AMENDMENT names no successor: nothing points at it. It was replaced when
+  // a newer engagement was signed (featreq-e5ae8279), so its banner says that instead.
   const successor =
-    engagement.status === 'superseded'
+    engagement.status === 'superseded' && engagement.kind !== 'amendment'
       ? (related.find((row) => row.supersedesId === engagement.id && row.status === 'signed') ??
         related.find((row) => row.supersedesId === engagement.id) ??
         null)
@@ -556,7 +558,13 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
           {arrivalNotice}
         </p>
       ) : null}
-      {engagement.status === 'superseded' ? (
+      {engagement.status === 'superseded' && engagement.kind === 'amendment' ? (
+        <p className="empty-state" role="note" aria-label="Superseded">
+          {`Replaced when a newer engagement was signed. This amendment is kept as it was ${
+            engagement.signedAt ? 'signed' : engagement.sentAt ? 'sent' : 'drafted'
+          } and can no longer be changed here. Use Restore on the client's Engagements list to bring it back.`}
+        </p>
+      ) : engagement.status === 'superseded' ? (
         <p className="empty-state" role="note" aria-label="Superseded">
           {'Superseded by '}
           {successor ? (

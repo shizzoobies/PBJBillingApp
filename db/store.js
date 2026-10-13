@@ -45,6 +45,7 @@ import { proposalOutcomeAction, proposalOutcomeWords } from '../lib/proposal-out
 import { DEFAULT_ENGAGEMENT_SECTIONS, EMAIL_SECTION_KEY, sanitizeEngagementSections } from '../lib/engagement-sections.js'
 import { assembleEngagement } from '../lib/engagement-assemble.js'
 import { engagementChangedSinceSent, engagementHash } from '../lib/engagement-hash.js'
+import { engagementIsPureRecord } from '../lib/engagement-record.js'
 import { invoiceEmailAddressee, resolveInvoiceRecipients } from '../lib/invoice-recipients.js'
 import {
   QUESTIONNAIRE_EXPIRY_DAYS,
@@ -27900,14 +27901,28 @@ export class AppDataStore {
    *
    * @returns {Promise<null | {engagement, clientId, createdClient, clonedTemplateIds,
    *   retainerInvoiceId, retainerPeriod, monthlyRate, addedPlanIds, removedPlanIds,
-   *   supersededId, softwareAdded, onboardingCaseId, onboardingChecklistId,
-   *   skipped: {what: string, why: string}[]}>} null when there is no such engagement.
+   *   supersededId, supersededAmendmentIds, softwareAdded, onboardingCaseId,
+   *   onboardingChecklistId, skipped: {what: string, why: string}[]}>} null when there is
+   *   no such engagement.
    *   `onboardingCaseId` / `onboardingChecklistId` (its live Onboarding-stage
    *   checklist) are null unless signing created the client and its case is open.
+   *
+   * `replaceAmendmentIds` (featreq-e5ae8279): the ids of the client's amendments a
+   * SUPERSEDING letter replaces along with its predecessor - honored only when the
+   * letter being signed supersedes one, and only for this client's draft, sent or signed
+   * amendments; any other id is ignored. They flip to Superseded in the same unit as the
+   * predecessor (`supersededAmendmentIds` lists the ones that did).
    */
   async signEngagement(
     id,
-    { signedOn, note = '', userId = null, allowUnsent = false, confirmChanged = false } = {},
+    {
+      signedOn,
+      note = '',
+      userId = null,
+      allowUnsent = false,
+      confirmChanged = false,
+      replaceAmendmentIds = [],
+    } = {},
   ) {
     const current = await this.getEngagement(id)
     if (!current) return null
@@ -28163,7 +28178,20 @@ export class AppDataStore {
           allowed,
           { signedAt, userId, signedNote, templateHash: current.templateHash },
           figures.lines,
-          { fee, supersedesId: replacing ? current.supersedesId : null },
+          {
+            fee,
+            supersedesId: replacing ? current.supersedesId : null,
+            replaceAmendmentIds:
+              replacing && current.supersedesId
+                ? [
+                    ...new Set(
+                      (Array.isArray(replaceAmendmentIds) ? replaceAmendmentIds : []).filter(
+                        (value) => typeof value === 'string' && value,
+                      ),
+                    ),
+                  ].slice(0, ENGAGEMENT_LIST_LIMIT)
+                : [],
+          },
         )
       } catch (error) {
         if (error instanceof EngagementStateError) error.flipRefused = true
@@ -28173,6 +28201,7 @@ export class AppDataStore {
       // The letter this one supersedes, flipped to Superseded in the same unit; one that
       // was no longer signed by then is left as it is, and said.
       const supersededId = final.supersededId ?? null
+      const supersededAmendmentIds = final.supersededAmendmentIds ?? []
       if (replacing && current.supersedesId && !supersededId) {
         const old = await this.getEngagement(current.supersedesId)
         skipped.push({
@@ -28351,6 +28380,7 @@ export class AppDataStore {
         addedPlanIds,
         removedPlanIds,
         supersededId,
+        supersededAmendmentIds,
         softwareAdded: software.added,
         onboardingCaseId,
         onboardingChecklistId,
@@ -28393,17 +28423,7 @@ export class AppDataStore {
    * one records the signature only.
    */
   static _engagementIsPureRecord(engagement) {
-    if (engagement?.kind !== 'amendment') return false
-    const figures = engagement.figures && typeof engagement.figures === 'object' ? engagement.figures : {}
-    const totals = figures.totals && typeof figures.totals === 'object' ? figures.totals : {}
-    return (
-      !Object.values(totals).some((value) => Number(value) > 0) &&
-      !(Array.isArray(figures.lines) && figures.lines.length > 0) &&
-      (engagement.planIds ?? []).length === 0 &&
-      !engagement.packageId &&
-      !(Number(engagement.retainerAmount) > 0) &&
-      (engagement.feeMode ?? 'replace') === 'keep'
-    )
+    return engagementIsPureRecord(engagement)
   }
 
   /** The refusal for signing a letter in a status that cannot be signed. */
@@ -28528,8 +28548,12 @@ export class AppDataStore {
    * computed from the client row as it is inside the unit, so an 'add' can never
    * land twice. A superseding letter's predecessor (`supersedesId`) is flipped to
    * 'superseded' in the same unit, only while it is still this client's signed letter.
-   * Returns { engagement, software, monthlyRate, supersededId } - the fee after, and
-   * the predecessor flipped (null when none was).
+   * So are the amendments it replaces (`replaceAmendmentIds`, featreq-e5ae8279): this
+   * client's draft, sent or signed amendments among those ids, in one statement after the
+   * predecessor's flip - an amendment voided or already replaced meanwhile is simply not
+   * in the answer.
+   * Returns { engagement, software, monthlyRate, supersededId, supersededAmendmentIds } -
+   * the fee after, the predecessor flipped (null when none was) and the amendments flipped.
    *
    * Postgres: one transaction. The compare-and-set flip runs first - it takes
    * the row lock, and only while the status is one signing allows and the row
@@ -28545,7 +28569,7 @@ export class AppDataStore {
     allowed,
     { signedAt, userId, signedNote, templateHash },
     lines,
-    { fee = null, supersedesId = null } = {},
+    { fee = null, supersedesId = null, replaceAmendmentIds = [] } = {},
   ) {
     const refusal = (status, rowClientId, rowHash) =>
       !status || !allowed.includes(status)
@@ -28610,7 +28634,20 @@ export class AppDataStore {
             }
           }
         }
-        return { engagement: mapEngagementRow(rows[0]), software, monthlyRate, supersededId }
+        // The open amendments she chose to replace go in the same unit: one statement,
+        // this client's draft, sent or signed amendments among the ids sent.
+        let supersededAmendmentIds = []
+        if (supersedesId && replaceAmendmentIds.length > 0) {
+          const swept = await dbClient.query(
+            `update engagements set status = 'superseded', updated_at = now()
+              where client_id = $1 and kind = 'amendment' and status in ('draft', 'sent', 'signed')
+                and id = any($2::text[])
+              returning id`,
+            [clientId, replaceAmendmentIds],
+          )
+          supersededAmendmentIds = (swept.rows ?? []).map((row) => row.id)
+        }
+        return { engagement: mapEngagementRow(rows[0]), software, monthlyRate, supersededId, supersededAmendmentIds }
       })
     }
     // Raw fs calls only on the data file in here: `readJson` / `writeFile` would
@@ -28662,9 +28699,33 @@ export class AppDataStore {
             old.updatedAt = nowIso()
             supersededId = old.id
           }
-          return { result: { engagement: mapEngagementRow(row), supersededId }, changed: true }
+          // The amendments she chose to replace: the same rule as the Postgres statement.
+          const supersededAmendmentIds = []
+          if (supersedesId) {
+            const chosen = new Set(replaceAmendmentIds)
+            for (const entry of authState.engagements) {
+              if (
+                entry &&
+                chosen.has(entry.id) &&
+                entry.kind === 'amendment' &&
+                (entry.clientId ?? null) === clientId &&
+                ['draft', 'sent', 'signed'].includes(entry.status)
+              ) {
+                entry.status = 'superseded'
+                entry.updatedAt = nowIso()
+                supersededAmendmentIds.push(entry.id)
+              }
+            }
+          }
+          return { result: { engagement: mapEngagementRow(row), supersededId, supersededAmendmentIds }, changed: true }
         })
-        return { engagement: engagement.engagement, software, monthlyRate, supersededId: engagement.supersededId }
+        return {
+          engagement: engagement.engagement,
+          software,
+          monthlyRate,
+          supersededId: engagement.supersededId,
+          supersededAmendmentIds: engagement.supersededAmendmentIds,
+        }
       } catch (error) {
         // Refused: the rows (and the fee) written a moment ago never happened.
         if (wrote) await fsWriteFile(localDataPath, original)
@@ -28702,6 +28763,46 @@ export class AppDataStore {
       }
       const now = nowIso()
       Object.assign(row, { status: 'void', voidedAt: now, updatedAt: now })
+      return { result: mapEngagementRow(row), changed: true }
+    })
+  }
+
+  /**
+   * Put a replaced amendment back (featreq-e5ae8279): AMENDMENTS only, a compare-and-set
+   * on `status = 'superseded'`. The status it returns to comes from the row itself, no new
+   * column: signed when it has a signed date, else sent when it has a sent date, else
+   * draft. It does NOT bring back a fee or plans the replacing letter took off. Returns the
+   * engagement, or null when there is none; of two restores at once exactly one wins and
+   * the other is refused ('status').
+   */
+  async restoreEngagement(id, byUserId = null) {
+    void byUserId // who restored is the route's activity entry; the table has no column for it
+    const refusal = (row) =>
+      row.kind !== 'amendment'
+        ? new EngagementStateError('Only a superseded amendment can be restored; a replaced original or superseding letter stays replaced.', 'status')
+        : new EngagementStateError(`This amendment is ${row.status}, not superseded, so there is nothing to restore.`, 'status')
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update engagements
+            set status = case when signed_at is not null then 'signed' when sent_at is not null then 'sent' else 'draft' end,
+                updated_at = now()
+          where id = $1 and kind = 'amendment' and status = 'superseded'
+          returning ${ENGAGEMENT_COLUMNS}`,
+        [id],
+      )
+      if (rows[0]) return mapEngagementRow(rows[0])
+      const latest = await this.getEngagement(id)
+      if (!latest) return null
+      throw refusal(latest)
+    }
+    return this._mutateEngagementFile((authState) => {
+      const row = authState.engagements.find((entry) => entry?.id === id)
+      if (!row) return { result: null, changed: false }
+      if (row.kind !== 'amendment' || row.status !== 'superseded') throw refusal(row)
+      Object.assign(row, {
+        status: row.signedAt ? 'signed' : row.sentAt ? 'sent' : 'draft',
+        updatedAt: nowIso(),
+      })
       return { result: mapEngagementRow(row), changed: true }
     })
   }

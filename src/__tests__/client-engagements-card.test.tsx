@@ -18,6 +18,7 @@ vi.mock('../lib/api', () => ({
   createAmendmentRequest: (...args: unknown[]) => api.createAmendmentRequest(...args),
   getEngagementRequest: (...args: unknown[]) => api.getEngagementRequest(...args),
   signEngagementRequest: (...args: unknown[]) => api.signEngagementRequest(...args),
+  restoreEngagementRequest: (...args: unknown[]) => api.restoreEngagementRequest(...args),
 }))
 
 const api: Record<string, Mock> = {}
@@ -344,5 +345,241 @@ describe('ClientEngagementsCard: Mark as signed', () => {
     expect(within(dialog).queryByRole('radio')).toBeNull()
     fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
     expect(confirm.mock.calls[0][0]).toContain('Monthly fee: Add to it ($1,200.00 + $630.00 = $1,830.00). A signed letter')
+  })
+})
+
+// featreq-e5ae8279: a superseding letter replaces the client's open amendments unless she
+// keeps one in force; a replaced amendment can be restored from the card.
+describe('ClientEngagementsCard: Restore', () => {
+  const replaced = (over: Partial<Engagement> = {}) =>
+    engagementFixture({
+      id: 'eng-replaced',
+      kind: 'amendment',
+      status: 'superseded',
+      proposalId: null,
+      letterId: 'letter-1099',
+      subject: 'Your 2027 1099s',
+      sentAt: '2026-10-11T15:00:00.000Z',
+      signedAt: null,
+      signedBy: null,
+      ...over,
+    })
+  let confirm: Mock
+
+  beforeEach(() => {
+    confirm = vi.fn(() => true)
+    window.confirm = confirm as unknown as typeof window.confirm
+    api.restoreEngagementRequest = vi.fn(async () => replaced({ status: 'sent' }))
+  })
+
+  const rowsOf = async () => within(await screen.findByRole('table')).getAllByRole('row').slice(1)
+
+  it('only a superseded AMENDMENT has Restore; a superseded original and a live amendment do not', async () => {
+    api.listEngagementsRequest = vi.fn(async () => [
+      replaced(),
+      engagementFixture({ id: 'eng-orig', status: 'superseded' }),
+      engagementFixture({ id: 'eng-live', kind: 'amendment', status: 'sent' }),
+    ])
+    renderCard()
+    const [amendment, original, live] = await rowsOf()
+    expect(within(amendment).getByRole('button', { name: 'Restore' })).toBeInTheDocument()
+    expect(within(original).queryByRole('button', { name: 'Restore' })).toBeNull()
+    expect(within(live).queryByRole('button', { name: 'Restore' })).toBeNull()
+  })
+
+  it('asks first, says the status it goes back to, then restores and reads the list again', async () => {
+    api.listEngagementsRequest = vi.fn(async () => [replaced()])
+    renderCard()
+    const [row] = await rowsOf()
+    confirm.mockReturnValueOnce(false)
+    fireEvent.click(within(row).getByRole('button', { name: 'Restore' }))
+    expect(confirm.mock.calls[0][0]).toContain('Restore the amendment "Your 2027 1099s"? It goes back to Sent.')
+    expect(api.restoreEngagementRequest).not.toHaveBeenCalled()
+
+    const reads = api.listEngagementsRequest.mock.calls.length
+    fireEvent.click(within(row).getByRole('button', { name: 'Restore' }))
+    await waitFor(() => expect(api.restoreEngagementRequest).toHaveBeenCalledWith('eng-replaced'))
+    await waitFor(() => expect(api.listEngagementsRequest.mock.calls.length).toBeGreaterThan(reads))
+  })
+
+  it('reads the status it goes back to from the amendment\'s own dates: Signed, else Sent, else Draft', async () => {
+    api.listEngagementsRequest = vi.fn(async () => [
+      replaced({ id: 'a-signed', signedAt: '2026-10-12T15:00:00.000Z' }),
+      replaced({ id: 'a-draft', sentAt: null }),
+    ])
+    renderCard()
+    const [signed, draft] = await rowsOf()
+    confirm.mockReturnValue(false)
+    fireEvent.click(within(signed).getByRole('button', { name: 'Restore' }))
+    fireEvent.click(within(draft).getByRole('button', { name: 'Restore' }))
+    expect(confirm.mock.calls[0][0]).toContain('It goes back to Signed.')
+    expect(confirm.mock.calls[1][0]).toContain('It goes back to Draft.')
+  })
+
+  it('shows the server sentence when the restore is refused', async () => {
+    api.listEngagementsRequest = vi.fn(async () => [replaced()])
+    api.restoreEngagementRequest = vi.fn(async () => {
+      throw new ApiError(409, 'This amendment is sent, not superseded, so there is nothing to restore.', 'engagement_refused', 'status')
+    })
+    renderCard()
+    const [row] = await rowsOf()
+    fireEvent.click(within(row).getByRole('button', { name: 'Restore' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('This amendment is sent, not superseded, so there is nothing to restore.')
+  })
+})
+
+describe('ClientEngagementsCard: a superseding letter replaces the open amendments', () => {
+  const superseding = engagementFixture({
+    id: 'eng-super',
+    kind: 'superseding',
+    status: 'sent',
+    supersedesId: 'eng-1',
+    subject: 'Updated engagement letter',
+    signedAt: null,
+    signedBy: null,
+    feeMode: 'replace',
+  })
+  // A pure record (a Letters send): nothing to lose by keeping it in force.
+  const pureSent = engagementFixture({
+    id: 'am-pure',
+    kind: 'amendment',
+    status: 'sent',
+    proposalId: null,
+    letterId: 'letter-1099',
+    subject: 'Your 2027 1099s',
+    signedAt: null,
+    signedBy: null,
+    feeMode: 'keep',
+  })
+  // One that carried a fee and plans: keeping it does not bring them back.
+  const withFee = engagementFixture({
+    id: 'am-fee',
+    kind: 'amendment',
+    status: 'draft',
+    proposalId: 'prop-2',
+    subject: 'Payroll added',
+    sentAt: null,
+    signedAt: null,
+    signedBy: null,
+    feeMode: 'add',
+    planIds: ['plan-payroll'],
+    figures: { totals: { monthly: 150, annual: 0, oneTime: 0, cleanup: 0, software: 0 } },
+  })
+  const voided = engagementFixture({ id: 'am-void', kind: 'amendment', status: 'void', subject: 'Voided one', feeMode: 'keep' })
+  const signedAmendment = engagementFixture({
+    id: 'am-signed',
+    kind: 'amendment',
+    status: 'signed',
+    proposalId: null,
+    subject: 'Signed notice',
+    feeMode: 'keep',
+  })
+  const signResult = (): EngagementSignResult => ({
+    engagement: { ...superseding, status: 'signed' },
+    clientId: 'c-acme',
+    createdClient: false,
+    clonedTemplateIds: [],
+    retainerInvoiceId: null,
+    retainerPeriod: null,
+    monthlyRate: null,
+    addedPlanIds: [],
+    supersededId: 'eng-1',
+    supersededAmendmentIds: ['am-pure', 'am-fee'],
+    softwareAdded: [],
+    skipped: [],
+  })
+  const viewOf = (row: Engagement) => ({
+    engagement: row,
+    placeholders: [],
+    warnings: { unknown: [], retired: [] },
+    hash: 'hash-1',
+    sender: { from: '', replyTo: '' },
+    changedSinceSent: false,
+  })
+  let confirm: Mock
+
+  beforeEach(() => {
+    confirm = vi.fn(() => true)
+    window.confirm = confirm as unknown as typeof window.confirm
+    api.listEngagementsRequest = vi.fn(async () => [superseding, pureSent, withFee, voided, signedAmendment, engagementFixture()])
+    api.getEngagementRequest = vi.fn(async () => viewOf(superseding))
+    api.signEngagementRequest = vi.fn(async () => signResult())
+  })
+
+  const openDialog = async () => {
+    renderCard()
+    const table = await screen.findByRole('table')
+    const row = within(table).getAllByRole('row').slice(1)[0]
+    fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
+    const dialog = await screen.findByRole('dialog')
+    await within(dialog).findByRole('group', { name: 'Open amendments this letter replaces' })
+    return dialog
+  }
+
+  it('lists the live amendments (not void, not the original) each with Keep in force OFF, and warns only on one that is not a pure record', async () => {
+    const dialog = await openDialog()
+    const boxes = within(dialog).getAllByRole('checkbox', { name: /^Keep in force:/ })
+    expect(boxes.map((box) => box.getAttribute('aria-label'))).toEqual([
+      'Keep in force: Your 2027 1099s',
+      'Keep in force: Payroll added',
+      'Keep in force: Signed notice',
+    ])
+    for (const box of boxes) expect(box).not.toBeChecked()
+    const notes = within(dialog).getAllByRole('note')
+    expect(notes).toHaveLength(1)
+    expect(notes[0]).toHaveTextContent('Keeping it in force does not bring back its fee or plans; this letter sets those.')
+    // The warning sits under the row that carried the fee and plans.
+    expect(notes[0].parentElement).toContainElement(within(dialog).getByRole('checkbox', { name: 'Keep in force: Payroll added' }))
+  })
+
+  it('sends the ids it SHOWED minus the ones kept, and the confirm counts what is replaced', async () => {
+    const dialog = await openDialog()
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Keep in force: Signed notice' }))
+    // An amendment made after the list was read is not shown, so it is never sent.
+    api.listEngagementsRequest = vi.fn(async () => [superseding, pureSent, withFee, signedAmendment, { ...pureSent, id: 'am-late' }])
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
+    expect(confirm.mock.calls[0][0]).toContain('2 open amendments are replaced too (marked Superseded; each can be restored')
+    await waitFor(() =>
+      expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-super', {
+        signedOn: firmToday(),
+        replaceAmendmentIds: ['am-pure', 'am-fee'],
+      }),
+    )
+    const summary = await within(dialog).findByRole('status', { name: 'What signing did' })
+    expect(within(summary).getByText(/2 open amendments were replaced too\. Restore one from the client's Engagements list/)).toBeTruthy()
+  })
+
+  it('keeping every one in force sends no list at all', async () => {
+    const dialog = await openDialog()
+    for (const box of within(dialog).getAllByRole('checkbox', { name: /^Keep in force:/ })) fireEvent.click(box)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
+    expect(confirm.mock.calls[0][0]).not.toContain('replaced too')
+    await waitFor(() => expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-super', { signedOn: firmToday() }))
+  })
+
+  it('shows nothing and sends nothing for a letter that is not superseding, or for a client with no open amendment', async () => {
+    api.listEngagementsRequest = vi.fn(async () => [superseding, voided, engagementFixture()])
+    renderCard()
+    const row = within(await screen.findByRole('table')).getAllByRole('row').slice(1)[0]
+    fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
+    const dialog = await screen.findByRole('dialog')
+    await waitFor(() => expect(api.getEngagementRequest).toHaveBeenCalled())
+    expect(within(dialog).queryByRole('group', { name: 'Open amendments this letter replaces' })).toBeNull()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
+    await waitFor(() => expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-super', { signedOn: firmToday() }))
+  })
+
+  it('an unreadable amendment list says none will be replaced, and still signs', async () => {
+    api.listEngagementsRequest = vi
+      .fn()
+      .mockResolvedValueOnce([superseding])
+      .mockRejectedValue(new ApiError(500, 'nope', 'x'))
+    renderCard()
+    const row = within(await screen.findByRole('table')).getAllByRole('row').slice(1)[0]
+    fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByText(/Could not read this client's amendments, so none will be replaced/)).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
+    await waitFor(() => expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-super', { signedOn: firmToday() }))
   })
 })

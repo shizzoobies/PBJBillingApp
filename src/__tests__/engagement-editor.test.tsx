@@ -286,6 +286,55 @@ describe('loading', () => {
     expect(screen.queryByRole('button', { name: 'Mark as signed' })).toBeNull()
   })
 
+  // featreq-e5ae8279: nothing points at a replaced amendment, so it names no successor.
+  it('a superseded AMENDMENT says it was replaced when a newer engagement was signed, in words that fit how far it got', async () => {
+    api.listEngagementsRequest = vi.fn(async () => [
+      engagement({ id: 'eng-new', kind: 'superseding', status: 'signed', clientId: 'client-9', supersedesId: 'eng-0', signedAt: '2026-10-09T16:00:00.000Z' }),
+    ])
+    const states: [Partial<Engagement>, string][] = [
+      [{ sentAt: '2026-10-01T15:00:00.000Z', signedAt: '2026-10-02T15:00:00.000Z' }, 'kept as it was signed'],
+      [{ sentAt: '2026-10-01T15:00:00.000Z', signedAt: null }, 'kept as it was sent'],
+      [{ sentAt: null, signedAt: null }, 'kept as it was drafted'],
+    ]
+    for (const [dates, words] of states) {
+      api.getEngagementRequest = vi.fn(async () =>
+        view({ kind: 'amendment', status: 'superseded', proposalId: null, clientId: 'client-9', ...dates }),
+      )
+      await renderEditor()
+      const note = await screen.findByRole('note', { name: 'Superseded' })
+      expect(note.textContent).toContain('Replaced when a newer engagement was signed.')
+      expect(note.textContent).toContain(words)
+      expect(note.textContent).toContain('Restore')
+      // No successor link and no "a newer engagement" stand-in: nothing points at an amendment.
+      expect(within(note).queryByRole('link')).toBeNull()
+      expect(note.textContent).not.toContain('Superseded by')
+      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
+      cleanup()
+    }
+  })
+
+  it('the sign form of a superseding letter lists the live amendments, each Keep in force OFF', async () => {
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ kind: 'superseding', status: 'sent', clientId: 'client-9', supersedesId: 'eng-old', feeMode: 'replace' }),
+    )
+    api.listEngagementsRequest = vi.fn(async () => [
+      engagement({ id: 'eng-old', kind: 'original', status: 'signed', clientId: 'client-9', signedAt: '2026-09-15T16:00:00.000Z' }),
+      engagement({ id: 'am-1', kind: 'amendment', status: 'sent', clientId: 'client-9', proposalId: null, subject: 'Fee notice', figures: {}, retainerAmount: null, feeMode: 'keep', sentAt: '2026-10-01T15:00:00.000Z' }),
+      engagement({ id: 'am-2', kind: 'amendment', status: 'void', clientId: 'client-9', subject: 'Old voided' }),
+    ])
+    mockConfirm(true)
+    await renderEditor()
+    const group = await screen.findByRole('group', { name: 'Open amendments this letter replaces' })
+    const boxes = within(group).getAllByRole('checkbox')
+    expect(boxes).toHaveLength(1)
+    expect(boxes[0]).not.toBeChecked()
+    expect(boxes[0].getAttribute('aria-label')).toBe('Keep in force: Fee notice')
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    await waitFor(() =>
+      expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-1', { signedOn: firmToday(), replaceAmendmentIds: ['am-1'] }),
+    )
+  })
+
   it('after signing a superseding letter, says the plans taken off and links the engagement it superseded', async () => {
     api.getEngagementRequest = vi.fn(async () =>
       view({ kind: 'superseding', status: 'sent', clientId: 'client-9', supersedesId: 'eng-old', feeMode: 'replace' }),

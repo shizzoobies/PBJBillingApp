@@ -51964,3 +51964,369 @@ describe('plan cadence: a bulk save keeps the stored value unless it is sent a v
     expect((await store.read()).plans[0].effectiveCadence).toBe('monthly')
   })
 })
+
+// Brittany's answer on featreq-e5ae8279: a superseding letter replaces the client's open
+// amendments too, unless she keeps one in force; a replaced amendment can be restored.
+describe('engagements: a superseding letter replaces the open amendments (file backend)', () => {
+  beforeEach(async () => {
+    await clearProposals()
+    await clearEngagements()
+    await clearPackages()
+    await setProposalRates(store)
+    await store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 400 },
+          { id: 'c2', name: 'Other Co', billingMode: 'subscription', monthlyRate: 300 },
+        ],
+        timeEntries: [],
+        plans: [
+          { id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: [] },
+          { id: 'plan-payroll', name: 'Payroll', notes: '', templateIds: [] },
+        ],
+        checklistTemplates: [],
+      }),
+    )
+  })
+
+  const selections = [{ serviceId: 'monthly-weekly-transactions-basic' }]
+  const sign = (id, extra = {}) =>
+    store.signEngagement(id, { signedOn: firmToday(), userId: 'emp-patrice', allowUnsent: true, ...extra })
+  let sendCounter = 0
+
+  const signedClient = async () => {
+    const proposal = await store.createProposal({
+      prospect: { company: 'Acme Books', contactName: 'Pat Doe', email: 'pat@acme.test' },
+      inputs: { transactions: 120 },
+      selections,
+    })
+    const accepted = await store.acceptProposal(proposal.id, { actorUserId: 'emp-patrice', planIds: ['plan-books'] })
+    const signed = await sign(accepted.engagementId)
+    return { clientId: signed.clientId, original: signed.engagement }
+  }
+
+  /** A draft superseding letter for the client, naming its signed original. */
+  const supersedingDraft = async (clientId) => {
+    const proposal = await store.createProposal({ clientId, inputs: { transactions: 120 }, selections })
+    const result = await store.acceptProposal(proposal.id, {
+      actorUserId: 'emp-patrice',
+      mode: 'supersede',
+      planIds: ['plan-payroll'],
+    })
+    return store.getEngagement(result.engagementId)
+  }
+
+  /** A pure-record amendment, as a Letters send records it (status sent). */
+  const sentAmendment = (clientId) => {
+    sendCounter += 1
+    return store.recordAmendmentFromLetterSend({
+      letterSendId: `ls-replace-${sendCounter}`,
+      clientId,
+      party: { company: 'Acme Books' },
+      subject: 'Fee change',
+      emailBody: 'Hi',
+      letterBody: 'Body',
+      createdBy: 'emp-patrice',
+    })
+  }
+  const draftAmendment = async (clientId) => {
+    const proposal = await store.createProposal({ clientId, inputs: { transactions: 120 }, selections })
+    const result = await store.acceptProposal(proposal.id, { actorUserId: 'emp-patrice' })
+    expect(result.engagementKind).toBe('amendment')
+    return store.getEngagement(result.engagementId)
+  }
+  const signedAmendment = async (clientId) => {
+    const sent = await sentAmendment(clientId)
+    return (await sign(sent.id)).engagement
+  }
+  const statusOf = async (id) => (await store.getEngagement(id)).status
+
+  it('flips the draft, sent and signed amendments it is given, in the signing unit, and reports them', async () => {
+    const { clientId, original } = await signedClient()
+    const draft = await draftAmendment(clientId)
+    const sent = await sentAmendment(clientId)
+    const signedOne = await signedAmendment(clientId)
+    const superseding = await supersedingDraft(clientId)
+    const result = await sign(superseding.id, { replaceAmendmentIds: [draft.id, sent.id, signedOne.id] })
+    expect(result.supersededId).toBe(original.id)
+    expect([...result.supersededAmendmentIds].sort()).toEqual([draft.id, sent.id, signedOne.id].sort())
+    for (const id of [draft.id, sent.id, signedOne.id]) expect(await statusOf(id)).toBe('superseded')
+    expect(await statusOf(superseding.id)).toBe('signed')
+    expect(await statusOf(original.id)).toBe('superseded')
+  })
+
+  it('leaves a kept amendment, and one that was not in the list, exactly as they were', async () => {
+    const { clientId } = await signedClient()
+    const kept = await sentAmendment(clientId)
+    const replaced = await sentAmendment(clientId)
+    const superseding = await supersedingDraft(clientId)
+    // Made after the dialog opened: its id was never in the list the form sent.
+    const unseen = await sentAmendment(clientId)
+    const result = await sign(superseding.id, { replaceAmendmentIds: [replaced.id] })
+    expect(result.supersededAmendmentIds).toEqual([replaced.id])
+    expect(await statusOf(replaced.id)).toBe('superseded')
+    expect(await statusOf(kept.id)).toBe('sent')
+    expect(await statusOf(unseen.id)).toBe('sent')
+  })
+
+  it('reports none, and touches no amendment, when no ids are sent', async () => {
+    const { clientId } = await signedClient()
+    const amendment = await sentAmendment(clientId)
+    const superseding = await supersedingDraft(clientId)
+    const result = await sign(superseding.id)
+    expect(result.supersededAmendmentIds).toEqual([])
+    expect(await statusOf(amendment.id)).toBe('sent')
+  })
+
+  it("only touches this client's live amendments: not another client's, a void one, an original or the letter itself", async () => {
+    const { clientId, original } = await signedClient()
+    const voided = await sentAmendment(clientId)
+    await store.voidEngagement(voided.id)
+    const elsewhere = await sentAmendment('c2')
+    const superseding = await supersedingDraft(clientId)
+    const result = await sign(superseding.id, {
+      replaceAmendmentIds: [voided.id, elsewhere.id, original.id, superseding.id, 'eng-nope', voided.id],
+    })
+    expect(result.supersededAmendmentIds).toEqual([])
+    expect(await statusOf(voided.id)).toBe('void')
+    expect(await statusOf(elsewhere.id)).toBe('sent')
+    expect(await statusOf(superseding.id)).toBe('signed')
+    // The original was replaced as the predecessor, by its own rule.
+    expect(result.supersededId).toBe(original.id)
+  })
+
+  it('ignores the list on a letter that supersedes nothing', async () => {
+    const { clientId } = await signedClient()
+    const amendment = await sentAmendment(clientId)
+    const other = await draftAmendment(clientId)
+    const result = await sign(other.id, { replaceAmendmentIds: [amendment.id] })
+    expect(result.supersededAmendmentIds).toEqual([])
+    expect(await statusOf(amendment.id)).toBe('sent')
+  })
+
+  it('refuses a predecessor that was already replaced before touching any amendment', async () => {
+    const { clientId } = await signedClient()
+    const amendment = await sentAmendment(clientId)
+    const first = await supersedingDraft(clientId)
+    const second = await supersedingDraft(clientId)
+    await sign(first.id)
+    const error = await sign(second.id, { replaceAmendmentIds: [amendment.id] }).catch((caught) => caught)
+    expect(error).toBeInstanceOf(EngagementStateError)
+    expect(error.reason).toBe('predecessor_replaced')
+    expect(await statusOf(amendment.id)).toBe('sent')
+  })
+
+  describe('restore', () => {
+    const replaceWith = async (clientId, ids) => {
+      const superseding = await supersedingDraft(clientId)
+      return sign(superseding.id, { replaceAmendmentIds: ids })
+    }
+
+    it('puts a replaced amendment back to the status its own dates say: draft, sent or signed', async () => {
+      const { clientId } = await signedClient()
+      const draft = await draftAmendment(clientId)
+      const sent = await sentAmendment(clientId)
+      const signedOne = await signedAmendment(clientId)
+      await replaceWith(clientId, [draft.id, sent.id, signedOne.id])
+      const restoredDraft = await store.restoreEngagement(draft.id, 'emp-patrice')
+      const restoredSent = await store.restoreEngagement(sent.id, 'emp-patrice')
+      const restoredSigned = await store.restoreEngagement(signedOne.id, 'emp-patrice')
+      expect(restoredDraft).toMatchObject({ id: draft.id, status: 'draft', signedAt: null })
+      expect(restoredSent).toMatchObject({ id: sent.id, status: 'sent' })
+      expect(restoredSigned).toMatchObject({ id: signedOne.id, status: 'signed' })
+      expect(restoredSigned.signedAt).toBe(signedOne.signedAt)
+    })
+
+    it('refuses a second restore, a non-amendment and a row that is not superseded; null for no such row', async () => {
+      const { clientId, original } = await signedClient()
+      const sent = await sentAmendment(clientId)
+      const live = await sentAmendment(clientId)
+      await replaceWith(clientId, [sent.id])
+      expect(await statusOf(original.id)).toBe('superseded')
+      await store.restoreEngagement(sent.id, 'emp-patrice')
+      const again = await store.restoreEngagement(sent.id, 'emp-patrice').catch((caught) => caught)
+      expect(again).toBeInstanceOf(EngagementStateError)
+      expect(again.reason).toBe('status')
+      const notAmendment = await store.restoreEngagement(original.id, 'emp-patrice').catch((caught) => caught)
+      expect(notAmendment).toBeInstanceOf(EngagementStateError)
+      expect(notAmendment.message).toMatch(/Only a superseded amendment/)
+      expect(await statusOf(original.id)).toBe('superseded')
+      const notSuperseded = await store.restoreEngagement(live.id, 'emp-patrice').catch((caught) => caught)
+      expect(notSuperseded).toBeInstanceOf(EngagementStateError)
+      expect(await statusOf(live.id)).toBe('sent')
+      expect(await store.restoreEngagement('eng-nope', 'emp-patrice')).toBeNull()
+    })
+
+    it('of two restores at once exactly one wins', async () => {
+      const { clientId } = await signedClient()
+      const sent = await sentAmendment(clientId)
+      await replaceWith(clientId, [sent.id])
+      const settled = await Promise.allSettled([
+        store.restoreEngagement(sent.id, 'emp-patrice'),
+        store.restoreEngagement(sent.id, 'emp-patrice'),
+      ])
+      expect(settled.filter((entry) => entry.status === 'fulfilled')).toHaveLength(1)
+      const lost = settled.find((entry) => entry.status === 'rejected')
+      expect(lost.reason).toBeInstanceOf(EngagementStateError)
+      expect(await statusOf(sent.id)).toBe('sent')
+    })
+  })
+})
+
+describe('engagements: a superseding letter replaces the open amendments (Postgres statements)', () => {
+  const compact = (text) => String(text).replace(/\s+/g, ' ').trim()
+  /** A superseding letter (eng-new), its signed original (eng-old) and some amendments, in memory. */
+  function amendmentPool({ onFlip = null } = {}) {
+    const statements = []
+    const base = {
+      status: 'sent', proposal_id: null, client_id: 'c1', letter_id: null, supersedes_id: null,
+      party: { company: 'Acme' }, subject: 's', email_body: 'e', letter_body: 'l', section_keys: [],
+      figures: {}, retainer_amount: null, package_id: null, plan_ids: [], fee_mode: 'keep', email_log: [], template_hash: 'h',
+    }
+    const rows = new Map([
+      ['eng-new', { ...base, id: 'eng-new', kind: 'superseding', supersedes_id: 'eng-old', figures: { totals: { monthly: 700 }, lines: [] }, plan_ids: ['p2'], fee_mode: 'replace' }],
+      ['eng-old', { ...base, id: 'eng-old', kind: 'original', status: 'signed' }],
+      ['am-draft', { ...base, id: 'am-draft', kind: 'amendment', status: 'draft' }],
+      ['am-sent', { ...base, id: 'am-sent', kind: 'amendment', status: 'sent', sent_at: '2026-10-01T16:00:00.000Z' }],
+      ['am-signed', { ...base, id: 'am-signed', kind: 'amendment', status: 'signed', sent_at: '2026-10-01T16:00:00.000Z', signed_at: '2026-10-02T16:00:00.000Z' }],
+      ['am-void', { ...base, id: 'am-void', kind: 'amendment', status: 'void' }],
+      ['am-other', { ...base, id: 'am-other', kind: 'amendment', status: 'sent', client_id: 'c2' }],
+    ])
+    const query = async (text, params = []) => {
+      const t = compact(text)
+      statements.push({ text: t, params })
+      if (/^select .* from engagements where id = \$1$/i.test(t)) {
+        const row = rows.get(params[0])
+        return { rows: row ? [{ ...row }] : [] }
+      }
+      if (/^update engagements set status = 'signed'/i.test(t)) {
+        if (onFlip) onFlip(rows)
+        const row = rows.get(params[0])
+        if (!row || !params[4].includes(row.status) || row.client_id !== params[5] || row.template_hash !== params[6]) return { rows: [] }
+        row.status = 'signed'
+        return { rows: [{ ...row }] }
+      }
+      if (/^update engagements set status = 'superseded', updated_at = now\(\) where id = \$1/i.test(t)) {
+        const row = rows.get(params[0])
+        if (!row || row.status !== 'signed' || row.client_id !== params[1]) return { rows: [] }
+        row.status = 'superseded'
+        return { rows: [{ id: row.id }] }
+      }
+      if (/^update engagements set status = 'superseded', updated_at = now\(\) where client_id = \$1/i.test(t)) {
+        const hit = [...rows.values()].filter(
+          (row) => row.client_id === params[0] && row.kind === 'amendment' && ['draft', 'sent', 'signed'].includes(row.status) && params[1].includes(row.id),
+        )
+        for (const row of hit) row.status = 'superseded'
+        return { rows: hit.map((row) => ({ id: row.id })) }
+      }
+      if (/^select status from engagements where id = \$1$/i.test(t)) {
+        const row = rows.get(params[0])
+        return { rows: row ? [{ status: row.status }] : [] }
+      }
+      if (/^update engagements set status = case when signed_at is not null/i.test(t)) {
+        const row = rows.get(params[0])
+        if (!row || row.kind !== 'amendment' || row.status !== 'superseded') return { rows: [] }
+        row.status = row.signed_at ? 'signed' : row.sent_at ? 'sent' : 'draft'
+        return { rows: [{ ...row }] }
+      }
+      if (/^update clients set monthly_rate = \$2/i.test(t)) return { rows: [{ monthly_rate: String(params[1]) }], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    }
+    const pgStore = postgresStore({ pool: { query, connect: async () => ({ query, release() {} }) } })
+    pgStore.getClientById = async () => ({ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 400, lifecycleStage: 'active', planIds: ['p1'] })
+    pgStore.listPackages = async () => []
+    pgStore.read = async () => ({ clients: [{ id: 'c1', planIds: ['p1'] }], plans: [{ id: 'p1' }, { id: 'p2' }], checklistTemplates: [] })
+    pgStore.listEngagements = async () => [...rows.values()].map((row) => ({ id: row.id, supersedesId: row.supersedes_id, status: row.status, signedAt: null }))
+    pgStore.copyTemplatesToClient = async () => ({ copies: [] })
+    pgStore._grantTemplateCopiesVisibility = async () => {}
+    return { pgStore, statements, rows }
+  }
+
+  const CASCADE =
+    "update engagements set status = 'superseded', updated_at = now() where client_id = $1 and kind = 'amendment' and status in ('draft', 'sent', 'signed') and id = any($2::text[]) returning id"
+
+  it('flips the chosen amendments in ONE statement inside the sign transaction, after the predecessor and before the commit', async () => {
+    const { pgStore, statements, rows } = amendmentPool()
+    const ids = ['am-draft', 'am-sent', 'am-signed', 'am-void', 'am-other', 'eng-old', 'eng-new']
+    const result = await pgStore.signEngagement('eng-new', { signedOn: '2026-10-09', userId: 'u1', replaceAmendmentIds: [...ids, 'am-sent', 42, ''] })
+    expect(result.supersededId).toBe('eng-old')
+    // The statement itself is the guard: another client's, a void one and a non-amendment match nothing.
+    expect(result.supersededAmendmentIds).toEqual(['am-draft', 'am-sent', 'am-signed'])
+    expect(rows.get('am-void').status).toBe('void')
+    expect(rows.get('am-other').status).toBe('sent')
+
+    const texts = statements.map((s) => s.text)
+    const cascadeAt = texts.indexOf(CASCADE)
+    const predecessorAt = texts.findIndex((text) => /^update engagements set status = 'superseded', updated_at = now\(\) where id = \$1/i.test(text))
+    const commitAt = texts.findIndex((text, index) => index > cascadeAt && /^commit$/i.test(text))
+    expect(cascadeAt).toBeGreaterThan(predecessorAt)
+    expect(predecessorAt).toBeGreaterThan(texts.findIndex((text) => /^update engagements set status = 'signed'/i.test(text)))
+    expect(commitAt).toBeGreaterThan(cascadeAt)
+    expect(texts.filter((text) => text === CASCADE)).toHaveLength(1)
+    // The ids are de-duplicated and typed; the client comes from the signing, never the page.
+    expect(statements[cascadeAt].params).toEqual(['c1', ids])
+  })
+
+  it('runs no amendment statement when no ids are sent', async () => {
+    const { pgStore, statements } = amendmentPool()
+    const result = await pgStore.signEngagement('eng-new', { signedOn: '2026-10-09', userId: 'u1' })
+    expect(result.supersededAmendmentIds).toEqual([])
+    expect(statements.some((s) => s.text === CASCADE)).toBe(false)
+  })
+
+  it('ignores the ids on a letter that supersedes nothing', async () => {
+    const { pgStore, statements, rows } = amendmentPool()
+    rows.get('eng-new').kind = 'amendment'
+    rows.get('eng-new').supersedes_id = null
+    const result = await pgStore.signEngagement('eng-new', { signedOn: '2026-10-09', userId: 'u1', replaceAmendmentIds: ['am-sent'] })
+    expect(result.supersededAmendmentIds).toEqual([])
+    expect(statements.some((s) => s.text === CASCADE)).toBe(false)
+    expect(rows.get('am-sent').status).toBe('sent')
+  })
+
+  it('a predecessor replaced between the checks and the flip rolls the whole unit back: no amendment is touched', async () => {
+    const { pgStore, statements, rows } = amendmentPool({
+      onFlip: (map) => {
+        map.get('eng-old').status = 'superseded'
+      },
+    })
+    const error = await pgStore.signEngagement('eng-new', { signedOn: '2026-10-09', userId: 'u1', replaceAmendmentIds: ['am-sent'] }).catch((caught) => caught)
+    expect(error).toBeInstanceOf(EngagementStateError)
+    expect(error.reason).toBe('predecessor_replaced')
+    expect(statements.some((s) => s.text === CASCADE)).toBe(false)
+    expect(statements.filter((s) => /^rollback$/i.test(s.text))).toHaveLength(1)
+    expect(rows.get('am-sent').status).toBe('sent')
+  })
+
+  describe('restore', () => {
+    const RESTORE = /^update engagements set status = case when signed_at is not null then 'signed' when sent_at is not null then 'sent' else 'draft' end, updated_at = now\(\) where id = \$1 and kind = 'amendment' and status = 'superseded' returning /
+
+    it('is one compare-and-set on kind amendment and status superseded; the status comes from the row\'s own dates', async () => {
+      const { pgStore, statements, rows } = amendmentPool()
+      for (const id of ['am-draft', 'am-sent', 'am-signed']) rows.get(id).status = 'superseded'
+      expect((await pgStore.restoreEngagement('am-draft', 'u1')).status).toBe('draft')
+      expect((await pgStore.restoreEngagement('am-sent', 'u1')).status).toBe('sent')
+      expect((await pgStore.restoreEngagement('am-signed', 'u1')).status).toBe('signed')
+      const restores = statements.filter((s) => RESTORE.test(s.text))
+      expect(restores).toHaveLength(3)
+      expect(restores[0].params).toEqual(['am-draft'])
+    })
+
+    it('refuses a non-amendment and a row that is not superseded, and answers null for none; of two restores one wins', async () => {
+      const { pgStore, rows } = amendmentPool()
+      rows.get('eng-old').status = 'superseded'
+      const original = await pgStore.restoreEngagement('eng-old', 'u1').catch((caught) => caught)
+      expect(original).toBeInstanceOf(EngagementStateError)
+      expect(original.message).toMatch(/Only a superseded amendment/)
+      const live = await pgStore.restoreEngagement('am-sent', 'u1').catch((caught) => caught)
+      expect(live).toBeInstanceOf(EngagementStateError)
+      expect(live.reason).toBe('status')
+      expect(rows.get('am-sent').status).toBe('sent')
+      expect(await pgStore.restoreEngagement('eng-nope', 'u1')).toBeNull()
+      rows.get('am-signed').status = 'superseded'
+      const settled = await Promise.allSettled([pgStore.restoreEngagement('am-signed', 'u1'), pgStore.restoreEngagement('am-signed', 'u1')])
+      expect(settled.filter((entry) => entry.status === 'fulfilled')).toHaveLength(1)
+      expect(settled.find((entry) => entry.status === 'rejected').reason).toBeInstanceOf(EngagementStateError)
+    })
+  })
+})
