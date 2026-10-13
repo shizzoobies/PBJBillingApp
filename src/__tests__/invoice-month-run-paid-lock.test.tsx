@@ -140,7 +140,7 @@ describe('InvoiceMonthRun — a paid invoice is a record, not a draft', () => {
 describe('InvoiceMonthRun — an invoice mid-payment', () => {
   it('locks with its own wording while the money is still settling', async () => {
     mockList.mockResolvedValue([makeInvoice({ status: 'processing' })])
-    await openEditor(/Sent/)
+    await openEditor(/^Processing/)
     expect(await screen.findByText(/payment is going through/i)).toBeInTheDocument()
     expect(saveButton()).not.toBeInTheDocument()
   })

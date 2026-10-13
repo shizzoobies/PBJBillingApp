@@ -175,7 +175,7 @@ describe('Void asks first', () => {
 describe('Void while a bank payment is clearing', () => {
   it('is disabled, and says why', async () => {
     mockList.mockResolvedValue([makeInvoice({ status: 'processing' })])
-    await openEditor(/Sent/)
+    await openEditor(/^Processing/)
     const button = voidButton()
     expect(button).toBeDisabled()
     expect(button).toHaveAttribute('title', 'A bank payment is still clearing on this invoice')

@@ -159,6 +159,7 @@ type RunTabId =
   | 'to-review'
   | 'reviewed'
   | 'sent'
+  | 'processing'
   | 'past-due'
   | 'failed'
   | 'paid'
@@ -196,9 +197,14 @@ export type InvoiceMonthRunHandle = {
  * lookup with a fallback, so adding a status to `PersistedInvoice` fails the
  * build here instead of quietly dropping those invoices out of the run.
  *
- * Sent, Processing and Overdue share one tab: they are all "it has gone out",
- * and the row still shows its own status pill, so nothing is lost by grouping
- * them.
+ * Sent and Overdue share one tab: they are both "it has gone out", and the row
+ * still shows its own status pill, so nothing is lost by grouping them.
+ *
+ * Processing has its own tab (featreq-3f1d63b6): a bank payment is on its way
+ * and clears in about four business days, so it is neither "still owed" nor
+ * "paid" - Brittany wanted to see sent, processing and paid apart. The derived
+ * tabs below never take a processing invoice: both derivations only look at
+ * `sent` / `overdue`, so a clearing payment sits in exactly one tab.
  *
  * "Payment failed" is NOT a status — a failed attempt puts the invoice back to
  * `sent`, still owed. It is a derived tab: a sent invoice whose newest payment
@@ -219,7 +225,7 @@ const TAB_OF_STATUS: Record<PersistedInvoice['status'], RunTabId> = {
   draft: 'to-review',
   reviewed: 'reviewed',
   sent: 'sent',
-  processing: 'sent',
+  processing: 'processing',
   overdue: 'sent',
   paid: 'paid',
   void: 'voided',
@@ -229,6 +235,7 @@ const RUN_TABS: ReadonlyArray<{ id: RunTabId; label: string; empty: string }> = 
   { id: 'to-review', label: 'To review', empty: 'Nothing left to review this month.' },
   { id: 'reviewed', label: 'Reviewed', empty: 'Nothing reviewed and waiting to go out.' },
   { id: 'sent', label: 'Sent', empty: 'Nothing has gone out for this month yet.' },
+  { id: 'processing', label: 'Processing', empty: 'No bank payments clearing.' },
   { id: 'past-due', label: 'Past due', empty: 'Nothing is past its 30-day line.' },
   {
     id: 'failed',
@@ -238,6 +245,35 @@ const RUN_TABS: ReadonlyArray<{ id: RunTabId; label: string; empty: string }> = 
   { id: 'paid', label: 'Paid', empty: 'Nothing paid for this month yet.' },
   { id: 'voided', label: 'Voided', empty: 'Nothing voided this month.' },
 ]
+
+/**
+ * When a processing invoice's bank payment started clearing, as an event time -
+ * or null when nothing records it.
+ *
+ * The autopay attempt that drew the payment wins (its own `updatedAt` is when
+ * Stripe said processing or succeeded). Otherwise the newest bank-payment
+ * acknowledgment email that actually went out: the webhook sends it the moment
+ * the debit is accepted. Never the invoice's `updatedAt` - any edit moves that.
+ */
+function bankClearingSince(
+  invoice: PersistedInvoice,
+  autopayAttempt: AutopayAttemptSummary | null,
+): string | null {
+  if (
+    autopayAttempt?.updatedAt &&
+    (autopayAttempt.status === 'processing' || autopayAttempt.status === 'succeeded')
+  ) {
+    return autopayAttempt.updatedAt
+  }
+  let latest: string | null = null
+  for (const entry of invoice.emailLog ?? []) {
+    const sent = entry as { kind?: string; ok?: boolean; at?: string }
+    if (sent.kind !== 'ack' || sent.ok !== true || typeof sent.at !== 'string') continue
+    // `>=` so a later position wins a tie, as with the other log readers.
+    if (latest === null || sent.at >= latest) latest = sent.at
+  }
+  return latest
+}
 
 /**
  * What the owner can decide about one piece of ad hoc work, in the order the
@@ -1959,6 +1995,15 @@ function InvoiceRow({
   // Computed once here and handed to the editor, so the row's flag and the
   // notice inside it can never disagree about how late this invoice is.
   const pastDue = pastDueInvoice(invoice, today)
+  const clearingSince =
+    invoice.status === 'processing' ? bankClearingSince(invoice, autopayAttempt) : null
+  const clearingDate = clearingSince ? formatSentOn(clearingSince) : ''
+  const clearingLine =
+    invoice.status !== 'processing'
+      ? null
+      : clearingDate
+        ? `Bank payment clearing since ${clearingDate}`
+        : 'Bank payment clearing'
 
   const rowClass = [
     'invoice-run-row',
@@ -2154,6 +2199,9 @@ function InvoiceRow({
           <span className={`invoice-status is-${invoice.status}`}>
             {INVOICE_STATUS_LABELS[invoice.status] ?? invoice.status}
           </span>
+          {/* A bank payment is on its way (about 4 business days). Since when, so
+              a payment that has sat here a week stands out. */}
+          {clearingLine ? <span className="invoice-run-clearing">{clearingLine}</span> : null}
           {/* Paid and recorded by hand for money that arrived outside the app:
               it is already in QuickBooks, so Download for QBO skips it. */}
           {invoice.recordedOutsideApp === true ? (

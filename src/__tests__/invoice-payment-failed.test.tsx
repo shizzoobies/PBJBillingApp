@@ -100,6 +100,7 @@ describe('the Payment failed tab', () => {
       'To review',
       'Reviewed',
       'Sent',
+      'Processing',
       'Past due',
       'Payment failed',
       'Paid',

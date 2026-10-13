@@ -98,7 +98,7 @@ describe('the Payment link button', () => {
   const notOffered: ReadonlyArray<[PersistedInvoice['status'], RegExp | undefined]> = [
     ['draft', undefined],
     ['reviewed', /^Reviewed/],
-    ['processing', /^Sent/],
+    ['processing', /^Processing/],
     ['paid', /^Paid/],
     ['void', /^Voided/],
   ]

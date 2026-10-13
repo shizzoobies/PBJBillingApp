@@ -76,8 +76,9 @@ const attempt = (over: Partial<AutopayAttemptSummary> = {}): AutopayAttemptSumma
 async function renderRun(rows: PersistedInvoice[]) {
   mockList.mockResolvedValue(rows)
   render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
-  // Sent and processing invoices live on the Sent tab.
-  fireEvent.click(await screen.findByRole('tab', { name: /^Sent/ }))
+  // Sent invoices live on the Sent tab; a bank payment still clearing has its own.
+  const tab = rows[0]?.status === 'processing' ? /^Processing/ : /^Sent/
+  fireEvent.click(await screen.findByRole('tab', { name: tab }))
   await screen.findByText('INV-2026-08-031')
 }
 

@@ -12660,6 +12660,12 @@ tr.is-inactive-client .client-name-link {
   font-weight: 600;
 }
 
+/* "Bank payment clearing since Sep 4", under a Processing pill. */
+.invoice-run-clearing {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* ---- "Billed on": the invoices a sub appears on but does not own ----------
    Read-only by design, so this is a list rather than a table with actions. */
 .billed-on-note {

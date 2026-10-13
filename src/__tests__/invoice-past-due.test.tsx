@@ -103,13 +103,14 @@ beforeEach(() => {
 })
 
 describe('the Past due tab', () => {
-  it('sits between Sent and Payment failed, and holds the late invoice instead of Sent', async () => {
+  it('sits between Processing and Payment failed, and holds the late invoice instead of Sent', async () => {
     const run = await renderRun([invoice()])
     const tabs = (await screen.findAllByRole('tab')).map((tab) => tab.textContent ?? '')
     expect(tabs.map((text) => text.replace(/\d+$/, ''))).toEqual([
       'To review',
       'Reviewed',
       'Sent',
+      'Processing',
       'Past due',
       'Payment failed',
       'Paid',
@@ -172,7 +173,8 @@ describe('the Past due tab', () => {
   it('leaves an invoice mid-payment out of it', async () => {
     const run = await renderRun([invoice({ status: 'processing' })])
     expect(run.count(await run.tab(/^Past due/))).toBe('0')
-    expect(run.count(await run.tab(/^Sent/))).toBe('1')
+    expect(run.count(await run.tab(/^Sent/))).toBe('0')
+    expect(run.count(await run.tab(/^Processing/))).toBe('1')
   })
 
   it('tells her what to do when the invoice is opened', async () => {

@@ -390,7 +390,7 @@ describe('InvoiceMonthRun — a failure that arrives after the editor is gone is
 
   it('Verify with Stripe', async () => {
     const fail = pending(mockVerify)
-    await openEditor([makeInvoice({ status: 'processing' })], /^Sent/)
+    await openEditor([makeInvoice({ status: 'processing' })], /^Processing/)
     fireEvent.click(await screen.findByRole('button', { name: 'Verify with Stripe' }))
     collapseRow()
 
@@ -474,7 +474,7 @@ describe('InvoiceMonthRun — the same failures with the editor still open are u
 
   it('Verify with Stripe says it beside the buttons', async () => {
     mockVerify.mockRejectedValue(new Error(sentence))
-    await openEditor([makeInvoice({ status: 'processing' })], /^Sent/)
+    await openEditor([makeInvoice({ status: 'processing' })], /^Processing/)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Verify with Stripe' }))
 

@@ -135,7 +135,7 @@ describe('Mark paid', () => {
   // The webhook owns a settling debit; the button must not even be offered.
   it('is NOT offered while a payment is processing', async () => {
     mockList.mockResolvedValue([makeInvoice({ status: 'processing' })])
-    await openEditor(/Sent/)
+    await openEditor(/^Processing/)
     await waitFor(() => expect(screen.getByText(/going through/i)).toBeInTheDocument())
     expect(markButton()).not.toBeInTheDocument()
   })

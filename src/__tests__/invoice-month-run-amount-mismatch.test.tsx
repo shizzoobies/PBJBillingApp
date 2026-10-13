@@ -144,7 +144,7 @@ describe('a payment for a different amount than the invoice total', () => {
       makeInvoice({ status: 'processing', paidAt: null, emailLog: [marker] }),
     ])
     render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
-    fireEvent.click(await screen.findByRole('tab', { name: /^Sent/ }))
+    fireEvent.click(await screen.findByRole('tab', { name: /^Processing/ }))
     expect(await screen.findByText(/Paying \$350\.00, total \$400\.00/)).toBeInTheDocument()
     fireEvent.click(await screen.findByText('INV-2026-08-001'))
 
