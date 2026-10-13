@@ -51684,6 +51684,146 @@ describe('board column per step: tasks copy the step column (both backends)', ()
 })
 
 /**
+ * featreq-54bf39b6: a Board column carries an optional GROUP name (Year-End,
+ * Core Accounting, ...), so the Board can show group headers and an overview
+ * strip. The rule, the same on both backends: trimmed, an empty string clears
+ * it to null, at most 80 characters, and an absent key leaves it as it is.
+ */
+describe('board column groups: service_categories.group_name (both backends)', () => {
+  async function seedCategories(categories) {
+    const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    authState.serviceCategories = categories
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+
+  it('file backend: an old row without the field lists as groupName null', async () => {
+    await seedCategories([
+      { id: 'cat-a', name: 'Clear Feed', sortOrder: 0 },
+      { id: 'cat-b', name: 'Payroll', sortOrder: 1, groupName: 'Accounting Operations' },
+    ])
+    expect(await store.listServiceCategories()).toEqual([
+      { id: 'cat-a', name: 'Clear Feed', sortOrder: 0, groupName: null },
+      { id: 'cat-b', name: 'Payroll', sortOrder: 1, groupName: 'Accounting Operations' },
+    ])
+  })
+
+  it('file backend: a create carries a trimmed group; none or empty is null', async () => {
+    await seedCategories([{ id: 'cat-a', name: 'Clear Feed', sortOrder: 0 }])
+    const grouped = await store.createServiceCategory('Cash Flow', { groupName: '  CFO & Advisory  ' })
+    expect(grouped).toMatchObject({ name: 'Cash Flow', sortOrder: 1, groupName: 'CFO & Advisory' })
+    const plain = await store.createServiceCategory('Budget')
+    expect(plain.groupName).toBeNull()
+    const blank = await store.createServiceCategory('Forecast', { groupName: '   ' })
+    expect(blank.groupName).toBeNull()
+    const listed = await store.listServiceCategories()
+    expect(listed.map((c) => [c.name, c.groupName])).toEqual([
+      ['Clear Feed', null],
+      ['Cash Flow', 'CFO & Advisory'],
+      ['Budget', null],
+      ['Forecast', null],
+    ])
+  })
+
+  it('file backend: an update sets, keeps (key absent) and clears (empty or null) the group', async () => {
+    await seedCategories([{ id: 'cat-a', name: 'Clear Feed', sortOrder: 0 }])
+    expect(await store.updateServiceCategory('cat-a', { groupName: ' Core Accounting ' })).toEqual({
+      id: 'cat-a',
+      name: 'Clear Feed',
+      sortOrder: 0,
+      groupName: 'Core Accounting',
+    })
+    // A rename alone leaves the group as it is.
+    const renamed = await store.updateServiceCategory('cat-a', { name: 'Clear the Feed' })
+    expect(renamed.groupName).toBe('Core Accounting')
+    // A group-only patch is a real update (not "nothing to update").
+    expect((await store.updateServiceCategory('cat-a', { groupName: '' })).groupName).toBeNull()
+    await store.updateServiceCategory('cat-a', { groupName: 'Year-End' })
+    expect((await store.updateServiceCategory('cat-a', { groupName: null })).groupName).toBeNull()
+    const [listed] = await store.listServiceCategories()
+    expect(listed).toEqual({ id: 'cat-a', name: 'Clear the Feed', sortOrder: 0, groupName: null })
+  })
+
+  it('file backend: a group longer than 80 characters is cut to 80', async () => {
+    await seedCategories([{ id: 'cat-a', name: 'Clear Feed', sortOrder: 0 }])
+    const long = `${'G'.repeat(85)}`
+    expect((await store.updateServiceCategory('cat-a', { groupName: long })).groupName).toBe('G'.repeat(80))
+    const created = await store.createServiceCategory('Budget', { groupName: ` ${'H'.repeat(90)} ` })
+    expect(created.groupName).toBe('H'.repeat(80))
+  })
+
+  it('postgres: the list reads group_name and maps a missing one to null', async () => {
+    const statements = []
+    const pgStore = new AppDataStore()
+    pgStore.mode = 'postgres'
+    pgStore.pool = {
+      async query(text) {
+        statements.push(text)
+        return {
+          rows: [
+            { id: 'cat-a', name: 'Clear Feed', sort_order: 0, group_name: 'Core Accounting' },
+            { id: 'cat-b', name: 'Payroll', sort_order: 1, group_name: null },
+          ],
+        }
+      },
+    }
+    expect(await pgStore.listServiceCategories()).toEqual([
+      { id: 'cat-a', name: 'Clear Feed', sortOrder: 0, groupName: 'Core Accounting' },
+      { id: 'cat-b', name: 'Payroll', sortOrder: 1, groupName: null },
+    ])
+    expect(statements[0]).toMatch(/select id, name, sort_order, group_name from service_categories/)
+  })
+
+  it('postgres: a create inserts the cleaned group', async () => {
+    const fake = fakePostgres()
+    const created = await postgresStore(fake).createServiceCategory('Cash Flow', { groupName: ' CFO & Advisory ' })
+    expect(created.groupName).toBe('CFO & Advisory')
+    const [insert] = fake.matching(/^insert into service_categories \(id, name, sort_order, group_name, updated_at\)/i)
+    expect(insert).toBeDefined()
+    expect(insert.params.slice(1)).toEqual(['Cash Flow', 0, 'CFO & Advisory'])
+    await postgresStore(fake).createServiceCategory('Budget')
+    const inserts = fake.matching(/^insert into service_categories/i)
+    expect(inserts[1].params[3]).toBeNull()
+  })
+
+  it('postgres: an update sets, clears, or leaves group_name by a flag', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    await pgStore.updateServiceCategory('cat-a', { groupName: ' Year-End ' })
+    await pgStore.updateServiceCategory('cat-a', { groupName: '' })
+    await pgStore.updateServiceCategory('cat-a', { name: 'Renamed' })
+    const updates = fake.matching(/^update service_categories/i)
+    expect(updates).toHaveLength(3)
+    expect(updates[0].text).toMatch(/group_name = case when \$4::boolean then \$5::text else group_name end/)
+    expect(updates[0].text).toMatch(/returning id, name, sort_order, group_name/)
+    expect(updates[0].params).toEqual(['cat-a', null, null, true, 'Year-End'])
+    expect(updates[1].params).toEqual(['cat-a', null, null, true, null])
+    expect(updates[2].params).toEqual(['cat-a', 'Renamed', null, false, null])
+  })
+
+  it('postgres: initialize() adds the column look-first, and the reference schema mirrors it', async () => {
+    // A cheap tripwire that the Postgres branch was not forgotten: the boot
+    // ALTER, and group_name in the select / insert / update the store issues.
+    // (Checked with includes() so a failure names the missing string instead
+    // of printing the whole store.)
+    const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
+    for (const sql of [
+      'alter table service_categories add column if not exists group_name text',
+      'select id, name, sort_order, group_name from service_categories',
+      'insert into service_categories (id, name, sort_order, group_name, updated_at)',
+      'group_name = case when $4::boolean then $5::text else group_name end',
+      'returning id, name, sort_order, group_name',
+    ]) {
+      expect(source.includes(sql), `db/store.js is missing: ${sql}`).toBe(true)
+    }
+    const schema = await readFile(path.join(projectRoot, 'db', 'schema.sql'), 'utf8')
+    expect(
+      schema.includes('alter table service_categories add column if not exists group_name text'),
+      'db/schema.sql does not mirror the group_name column',
+    ).toBe(true)
+  })
+})
+
+/**
  * Board column per step: a tab still running the PREVIOUS bundle (whose stage
  * normalizer has no `categoryId` in its field list) must not erase every
  * step's column with its next autosave - the bulk save deletes and re-inserts

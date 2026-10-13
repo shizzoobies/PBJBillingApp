@@ -223,6 +223,26 @@ const SEED_SERVICE_CATEGORIES = [
   'Payroll',
 ]
 
+/** The longest a Board column's group name may be (featreq-54bf39b6). */
+export const SERVICE_CATEGORY_GROUP_MAX = 80
+
+/**
+ * A Board column's optional group name, cleaned the same way on both backends:
+ * trimmed, cut to SERVICE_CATEGORY_GROUP_MAX, an empty string (or null) clears
+ * it to null. Anything else - an absent key included - is `undefined`, which
+ * an update reads as "leave the stored group as it is".
+ */
+function cleanServiceCategoryGroup(value) {
+  if (value === null) return null
+  if (typeof value !== 'string') return undefined
+  return value.trim().slice(0, SERVICE_CATEGORY_GROUP_MAX).trim() || null
+}
+
+/** A stored group as the API returns it: a non-empty string, else null. */
+function storedServiceCategoryGroup(value) {
+  return typeof value === 'string' && value.trim() ? value : null
+}
+
 const demoPassword = process.env.AUTH_DEMO_PASSWORD || 'pbj-demo'
 
 const DEFAULT_FIRM_SETTINGS = {
@@ -6561,6 +6581,10 @@ export class AppDataStore {
           updated_at timestamptz not null default now()
         )
       `)
+      // featreq-54bf39b6: a column's optional group (Year-End, Core
+      // Accounting...) for the Board's group headers and overview strip.
+      // Null = ungrouped ("Other").
+      await this.pool.query(`alter table service_categories add column if not exists group_name text`)
       const existingCategories = await this.pool.query(
         `select count(*)::int as n from service_categories`,
       )
@@ -30876,12 +30900,13 @@ export class AppDataStore {
   async listServiceCategories() {
     if (this.pool) {
       const result = await this.pool.query(
-        `select id, name, sort_order from service_categories order by sort_order asc, name asc`,
+        `select id, name, sort_order, group_name from service_categories order by sort_order asc, name asc`,
       )
       return result.rows.map((row) => ({
         id: row.id,
         name: row.name,
         sortOrder: Number(row.sort_order) || 0,
+        groupName: storedServiceCategoryGroup(row.group_name),
       }))
     }
     const authState = await readJson(localAuthPath)
@@ -30895,24 +30920,38 @@ export class AppDataStore {
       }))
       authState.serviceCategories = seeded
       await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-      return seeded
+      return seeded.map((c) => ({ ...c, groupName: null }))
     }
     return [...list]
-      .map((c) => ({ id: c.id, name: c.name, sortOrder: Number(c.sortOrder) || 0 }))
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        sortOrder: Number(c.sortOrder) || 0,
+        // A row stored before groups existed has no field: ungrouped.
+        groupName: storedServiceCategoryGroup(c.groupName),
+      }))
       .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
   }
 
-  /** Create a category at the end of the column order. Returns it. */
-  async createServiceCategory(name) {
+  /**
+   * Create a category at the end of the column order, optionally in a group
+   * (`{ groupName }`, cleaned by cleanServiceCategoryGroup). Returns it.
+   */
+  async createServiceCategory(name, { groupName } = {}) {
     const clean = String(name ?? '').trim().slice(0, 80)
     if (!clean) return null
     const existing = await this.listServiceCategories()
     const sortOrder = existing.length
-    const category = { id: `cat-${randomUUID().slice(0, 8)}`, name: clean, sortOrder }
+    const category = {
+      id: `cat-${randomUUID().slice(0, 8)}`,
+      name: clean,
+      sortOrder,
+      groupName: cleanServiceCategoryGroup(groupName) ?? null,
+    }
     if (this.pool) {
       await this.pool.query(
-        `insert into service_categories (id, name, sort_order, updated_at) values ($1, $2, $3, now())`,
-        [category.id, category.name, category.sortOrder],
+        `insert into service_categories (id, name, sort_order, group_name, updated_at) values ($1, $2, $3, $4, now())`,
+        [category.id, category.name, category.sortOrder, category.groupName],
       )
       return category
     }
@@ -30923,7 +30962,11 @@ export class AppDataStore {
     return category
   }
 
-  /** Patch a category's name and/or sortOrder. Returns the updated category. */
+  /**
+   * Patch a category's name, sortOrder and/or groupName (a string sets it,
+   * '' or null clears it, an absent key leaves it). Returns the updated
+   * category.
+   */
   async updateServiceCategory(id, patch = {}) {
     if (!id) return null
     const nextName =
@@ -30932,20 +30975,29 @@ export class AppDataStore {
       typeof patch.sortOrder === 'number' && Number.isFinite(patch.sortOrder)
         ? Math.max(0, Math.floor(patch.sortOrder))
         : undefined
-    if (nextName === undefined && nextOrder === undefined) return null
+    const nextGroup = cleanServiceCategoryGroup(patch.groupName)
+    if (nextName === undefined && nextOrder === undefined && nextGroup === undefined) return null
     if (this.pool) {
+      // group_name can be CLEARED, so it can't ride coalesce() like the other
+      // two: $4 says whether the patch names it at all, $5 is the new value.
       const result = await this.pool.query(
         `update service_categories
             set name = coalesce($2, name),
                 sort_order = coalesce($3, sort_order),
+                group_name = case when $4::boolean then $5::text else group_name end,
                 updated_at = now()
           where id = $1
-        returning id, name, sort_order`,
-        [id, nextName ?? null, nextOrder ?? null],
+        returning id, name, sort_order, group_name`,
+        [id, nextName ?? null, nextOrder ?? null, nextGroup !== undefined, nextGroup ?? null],
       )
       if (!result.rowCount) return null
       const row = result.rows[0]
-      return { id: row.id, name: row.name, sortOrder: Number(row.sort_order) || 0 }
+      return {
+        id: row.id,
+        name: row.name,
+        sortOrder: Number(row.sort_order) || 0,
+        groupName: storedServiceCategoryGroup(row.group_name),
+      }
     }
     const authState = await readJson(localAuthPath)
     if (!Array.isArray(authState.serviceCategories)) {
@@ -30955,8 +31007,14 @@ export class AppDataStore {
     if (!existing) return null
     if (nextName !== undefined && nextName) existing.name = nextName
     if (nextOrder !== undefined) existing.sortOrder = nextOrder
+    if (nextGroup !== undefined) existing.groupName = nextGroup
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-    return { id: existing.id, name: existing.name, sortOrder: Number(existing.sortOrder) || 0 }
+    return {
+      id: existing.id,
+      name: existing.name,
+      sortOrder: Number(existing.sortOrder) || 0,
+      groupName: storedServiceCategoryGroup(existing.groupName),
+    }
   }
 
   /**
