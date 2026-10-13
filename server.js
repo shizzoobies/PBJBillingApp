@@ -8096,10 +8096,12 @@ const server = createServer(async (request, response) => {
         sendJson(response, 415, { error: 'application/json required' })
         return
       }
-      // The body carries nothing (a reminder goes to every address Send would);
-      // it is read so a malformed one is refused like Send refuses it.
+      // The body's one field is `to`: the addresses the owner's confirm SHOWED.
+      // The reminder goes to exactly those, and refuses if any is no longer on
+      // file (lib/invoice-reminder.js); omitted means everyone Send would email.
+      let remindPayload = null
       try {
-        await readJsonBody(request)
+        remindPayload = await readJsonBody(request)
       } catch {
         sendJson(response, 400, { error: 'Could not read the request body.' })
         return
@@ -8114,6 +8116,7 @@ const server = createServer(async (request, response) => {
             appUrl: getPublicAppUrl(request),
             stripeConfigured: isStripeConfigured(),
             userId: session.user.id,
+            ...(remindPayload && remindPayload.to !== undefined ? { to: remindPayload.to } : {}),
           },
           { store: appDataStore, sendEmail: sendInvoiceEmail },
         )

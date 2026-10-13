@@ -4936,12 +4936,14 @@ export async function sendInvoiceRequest(
  * `autopay_in_flight`, `changed_since_sent`, ...), and answers the invoice with
  * the new `kind: 'reminder'` log entry on it - same shape as the send request.
  */
-export async function remindInvoiceRequest(invoiceId: string) {
+export async function remindInvoiceRequest(invoiceId: string, to?: string[]) {
   const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/remind`, {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
+    // `to`: the addresses the confirm showed. The server sends to exactly those
+    // and refuses (`recipients_changed`) if any is no longer on file.
+    body: JSON.stringify(to ? { to } : {}),
   })
   if (!response.ok) {
     const { message, code } = await safeError(response)

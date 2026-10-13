@@ -58,6 +58,15 @@ describe('POST /api/invoices/:id/remind', () => {
     expect(body).toContain('userId: session.user.id')
   })
 
+  it('passes the posted `to` (the list the confirm showed) through, read before the work', () => {
+    const body = route()
+    const read = body.indexOf('remindPayload = await readJsonBody(request)')
+    const passed = body.indexOf('{ to: remindPayload.to }')
+    expect(read).toBeGreaterThan(-1)
+    expect(passed).toBeGreaterThan(read)
+    expect(passed).toBeLessThan(body.indexOf('{ store: appDataStore, sendEmail: sendInvoiceEmail }'))
+  })
+
   it('never touches Stripe, a checkout session or the send stamp itself', () => {
     const body = route()
     for (const forbidden of [
