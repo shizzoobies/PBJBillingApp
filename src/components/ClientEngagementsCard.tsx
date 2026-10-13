@@ -100,7 +100,7 @@ export function ClientEngagementsCard({
     // The status it goes back to is read off its own dates, like the server does.
     const back = engagement.signedAt ? 'Signed' : engagement.sentAt ? 'Sent' : 'Draft'
     const ok = window.confirm(
-      `Restore the amendment "${engagement.subject || engagement.id}"? It goes back to ${back}. A fee or plans the replacing letter changed are not brought back.`,
+      `Restore the amendment "${engagement.subject || engagement.id}"? It goes back to ${back}. A fee or plans the replacing letter changed are not brought back, and a restored draft or sent amendment applies its own fee and plans if it is signed later.`,
     )
     if (!ok) return
     setRestoringId(engagement.id)

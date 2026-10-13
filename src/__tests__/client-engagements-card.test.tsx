@@ -394,6 +394,9 @@ describe('ClientEngagementsCard: Restore', () => {
     confirm.mockReturnValueOnce(false)
     fireEvent.click(within(row).getByRole('button', { name: 'Restore' }))
     expect(confirm.mock.calls[0][0]).toContain('Restore the amendment "Your 2027 1099s"? It goes back to Sent.')
+    expect(confirm.mock.calls[0][0]).toContain(
+      'a restored draft or sent amendment applies its own fee and plans if it is signed later.',
+    )
     expect(api.restoreEngagementRequest).not.toHaveBeenCalled()
 
     const reads = api.listEngagementsRequest.mock.calls.length
@@ -527,7 +530,9 @@ describe('ClientEngagementsCard: a superseding letter replaces the open amendmen
     for (const box of boxes) expect(box).not.toBeChecked()
     const notes = within(dialog).getAllByRole('note')
     expect(notes).toHaveLength(1)
-    expect(notes[0]).toHaveTextContent('Keeping it in force does not bring back its fee or plans; this letter sets those.')
+    expect(notes[0]).toHaveTextContent(
+      "Keeping or replacing it does not change the client's fee or plans; signing this letter does, as set in Signing details.",
+    )
     // The warning sits under the row that carried the fee and plans.
     expect(notes[0].parentElement).toContainElement(within(dialog).getByRole('checkbox', { name: 'Keep in force: Payroll added' }))
   })
@@ -569,17 +574,48 @@ describe('ClientEngagementsCard: a superseding letter replaces the open amendmen
     await waitFor(() => expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-super', { signedOn: firmToday() }))
   })
 
-  it('an unreadable amendment list says none will be replaced, and still signs', async () => {
+  // Replacing too few has no undo (replacing too many is one Restore): a failed read is not "ready".
+  it('an unreadable amendment list keeps Mark as signed disabled, says so with a Retry, and only a good read enables it', async () => {
     api.listEngagementsRequest = vi
       .fn()
       .mockResolvedValueOnce([superseding])
-      .mockRejectedValue(new ApiError(500, 'nope', 'x'))
+      .mockRejectedValueOnce(new ApiError(500, 'nope', 'x'))
+      .mockResolvedValue([superseding, pureSent])
     renderCard()
     const row = within(await screen.findByRole('table')).getAllByRole('row').slice(1)[0]
     fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
     const dialog = await screen.findByRole('dialog')
-    expect(await within(dialog).findByText(/Could not read this client's amendments, so none will be replaced/)).toBeTruthy()
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent("Could not read this client's amendments.")
+    const sign = within(dialog).getByRole('button', { name: 'Mark as signed' })
+    expect(sign).toBeDisabled()
+    fireEvent.click(sign)
+    expect(api.signEngagementRequest).not.toHaveBeenCalled()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry' }))
+    await within(dialog).findByRole('group', { name: 'Open amendments this letter replaces' })
+    expect(within(dialog).queryByRole('alert')).toBeNull()
+    expect(within(dialog).getByRole('button', { name: 'Mark as signed' })).toBeEnabled()
     fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
-    await waitFor(() => expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-super', { signedOn: firmToday() }))
+    await waitFor(() =>
+      expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-super', { signedOn: firmToday(), replaceAmendmentIds: ['am-pure'] }),
+    )
+  })
+
+  it('keeps Mark as signed disabled, saying the amendments are being read, until the list has loaded', async () => {
+    let release: (rows: Engagement[]) => void = () => {}
+    api.listEngagementsRequest = vi
+      .fn()
+      .mockResolvedValueOnce([superseding])
+      .mockImplementationOnce(() => new Promise<Engagement[]>((resolve) => (release = resolve)))
+    renderCard()
+    const row = within(await screen.findByRole('table')).getAllByRole('row').slice(1)[0]
+    fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
+    const dialog = await screen.findByRole('dialog')
+    await waitFor(() => expect(api.getEngagementRequest).toHaveBeenCalled())
+    expect(within(dialog).getByText("Reading the client's amendments...")).toBeTruthy()
+    expect(within(dialog).getByRole('button', { name: 'Mark as signed' })).toBeDisabled()
+    release([superseding, pureSent])
+    await within(dialog).findByRole('group', { name: 'Open amendments this letter replaces' })
+    expect(within(dialog).queryByText("Reading the client's amendments...")).toBeNull()
+    expect(within(dialog).getByRole('button', { name: 'Mark as signed' })).toBeEnabled()
   })
 })

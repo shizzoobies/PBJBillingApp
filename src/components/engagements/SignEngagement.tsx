@@ -62,6 +62,8 @@ export function SignEngagementForm({
   const clientId = engagement.clientId
   const [amendments, setAmendments] = useState<Engagement[] | null>(null)
   const [amendmentsFailed, setAmendmentsFailed] = useState(false)
+  // A failed read is retried, never signed past: replacing too few has no undo.
+  const [amendmentsAttempt, setAmendmentsAttempt] = useState(0)
   const [kept, setKept] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => {
     if (!supersedes || !clientId) return
@@ -83,8 +85,9 @@ export function SignEngagementForm({
     return () => {
       cancelled = true
     }
-  }, [supersedes, clientId])
-  const amendmentsReady = !supersedes || amendments !== null || amendmentsFailed
+  }, [supersedes, clientId, amendmentsAttempt])
+  // Only a SUCCESSFUL read enables signing a superseding letter.
+  const amendmentsReady = !supersedes || amendments !== null
 
   // The sent-hash guard: a sent letter edited since it went out signs only "as edited".
   const changed = engagement.status === 'sent' && changedSinceSent
@@ -167,10 +170,27 @@ export function SignEngagementForm({
           </label>
         </>
       ) : null}
-      {supersedes && amendmentsFailed ? (
+      {supersedes && amendments === null && !amendmentsFailed ? (
         <p className="muted-text" role="status">
-          {"Could not read this client's amendments, so none will be replaced when this is signed."}
+          {"Reading the client's amendments..."}
         </p>
+      ) : null}
+      {supersedes && amendments === null && amendmentsFailed ? (
+        <div className="button-row">
+          <p className="form-error" role="alert">
+            {"Could not read this client's amendments."}
+          </p>
+          <button
+            type="button"
+            className="ghost-action"
+            onClick={() => {
+              setAmendmentsFailed(false)
+              setAmendmentsAttempt((count) => count + 1)
+            }}
+          >
+            Retry
+          </button>
+        </div>
       ) : null}
       {supersedes && amendments !== null && amendments.length > 0 ? (
         <fieldset className="engagement-replaced-amendments">
@@ -203,7 +223,7 @@ export function SignEngagementForm({
                 </label>
                 {engagementIsPureRecord(row) ? null : (
                   <p className="muted-text" role="note">
-                    Keeping it in force does not bring back its fee or plans; this letter sets those.
+                    {"Keeping or replacing it does not change the client's fee or plans; signing this letter does, as set in Signing details."}
                   </p>
                 )}
               </div>

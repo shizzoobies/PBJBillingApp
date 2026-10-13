@@ -28210,6 +28210,13 @@ export class AppDataStore {
             ? `The engagement this letter replaces is ${old.status} now, not signed, so it was left as it is.`
             : 'The engagement this letter replaces no longer exists.',
         })
+        // The amendments she chose to replace were still replaced: said, not silent.
+        if (supersededAmendmentIds.length > 0) {
+          skipped.push({
+            what: 'Replaced amendments',
+            why: `${supersededAmendmentIds.length} open amendment${supersededAmendmentIds.length === 1 ? ' was' : 's were'} still marked Superseded, as chosen. Restore ${supersededAmendmentIds.length === 1 ? 'it' : 'any'} from the client's Engagements list if that is not what you want.`,
+          })
+        }
       }
       for (const description of software.skipped) {
         skipped.push({

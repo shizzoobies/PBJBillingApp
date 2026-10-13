@@ -52104,6 +52104,24 @@ describe('engagements: a superseding letter replaces the open amendments (file b
     expect(await statusOf(amendment.id)).toBe('sent')
   })
 
+  it('a predecessor that is no longer signed signs as before, yet the chosen amendments are replaced and the summary says so', async () => {
+    const { clientId, original } = await signedClient()
+    const amendment = await sentAmendment(clientId)
+    const superseding = await supersedingDraft(clientId)
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    authState.engagements.find((row) => row.id === original.id).status = 'void'
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    const result = await sign(superseding.id, { replaceAmendmentIds: [amendment.id] })
+    expect(result.supersededId).toBeNull()
+    expect(result.supersededAmendmentIds).toEqual([amendment.id])
+    expect(await statusOf(amendment.id)).toBe('superseded')
+    const what = result.skipped.map((entry) => entry.what)
+    expect(what).toContain('Superseded letter')
+    expect(result.skipped.find((entry) => entry.what === 'Replaced amendments').why).toMatch(
+      /^1 open amendment was still marked Superseded, as chosen\. Restore it from the client's Engagements list/,
+    )
+  })
+
   it('refuses a predecessor that was already replaced before touching any amendment', async () => {
     const { clientId } = await signedClient()
     const amendment = await sentAmendment(clientId)
@@ -52265,6 +52283,18 @@ describe('engagements: a superseding letter replaces the open amendments (Postgr
     expect(texts.filter((text) => text === CASCADE)).toHaveLength(1)
     // The ids are de-duplicated and typed; the client comes from the signing, never the page.
     expect(statements[cascadeAt].params).toEqual(['c1', ids])
+  })
+
+  it('a voided predecessor still lets the chosen amendments be replaced, and the result says so in a skip line', async () => {
+    const { pgStore, rows } = amendmentPool()
+    rows.get('eng-old').status = 'void'
+    const result = await pgStore.signEngagement('eng-new', { signedOn: '2026-10-09', userId: 'u1', replaceAmendmentIds: ['am-sent', 'am-draft'] })
+    expect(result.supersededId).toBeNull()
+    expect(result.supersededAmendmentIds).toEqual(['am-draft', 'am-sent'])
+    expect(result.skipped.find((entry) => entry.what === 'Superseded letter').why).toMatch(/is void now, not signed/)
+    expect(result.skipped.find((entry) => entry.what === 'Replaced amendments').why).toMatch(
+      /^2 open amendments were still marked Superseded, as chosen\. Restore any from the client's Engagements list/,
+    )
   })
 
   it('runs no amendment statement when no ids are sent', async () => {
