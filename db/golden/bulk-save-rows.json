@@ -47,6 +47,7 @@
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
         },
+        "cadence": "quarterly",
         "updated_at": "now()"
       },
       {
@@ -57,6 +58,7 @@
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
         },
+        "cadence": null,
         "updated_at": "now()"
       }
     ],
@@ -1076,6 +1078,7 @@
         "notes": "",
         "template_ids": "::text[]",
         "created_at": "",
+        "cadence": "",
         "updated_at": "<now()>"
       },
       "tails": [

@@ -18,6 +18,7 @@ import {
   templateStartFloor,
 } from '../lib/checklist-start-floor.js'
 import { copiedTemplateSettings, copiedTemplateStages } from '../lib/checklist-template-copy.js'
+import { effectivePlanCadence, normalizePlanCadence, preservedPlanCadence } from '../lib/plan-cadence.js'
 import { dateOnlyInZone, firmTimeZone, firmToday } from '../lib/firm-time.js'
 import {
   CHECKLIST_INSTANCE_UNIQUE_INDEX,
@@ -434,7 +435,7 @@ export function timeEntryBulkRow(entry) {
  */
 export const BULK_INSERT_SHAPES = {
   subscription_plans: {
-    columns: ['id', 'name', 'notes', 'template_ids', 'created_at'],
+    columns: ['id', 'name', 'notes', 'template_ids', 'created_at', 'cadence'],
     casts: { template_ids: 'text[]' },
     literals: { updated_at: 'now()' },
   },
@@ -917,8 +918,19 @@ export function checklistItemBulkRows(checklist, { priorItemWaits, priorItemComp
   return rows
 }
 
+/**
+ * A plan's cadence as the workspace carries it (featreq-acdd0c84): `cadence` is
+ * the STORED value (null until somebody chooses one), `effectiveCadence` is what
+ * applies - stored, else read off the plan's name, else 'blueprint' (the
+ * checklist's own schedule). Never persisted: the save drops `effectiveCadence`.
+ */
+function planCadenceFields(storedCadence, name) {
+  const cadence = normalizePlanCadence(storedCadence)
+  return { cadence, effectiveCadence: effectivePlanCadence({ cadence, name }) }
+}
+
 /** A plan as a row of BULK_INSERT_SHAPES.subscription_plans. */
-export function subscriptionPlanBulkRow(plan, preservedCreatedAt) {
+export function subscriptionPlanBulkRow(plan, preservedCreatedAt, priorPlanCadences = new Map()) {
   // Pricing left the plan model — only name + notes are written now. The legacy
   // monthly_fee / included_hours columns keep their DB defaults (0) and are
   // otherwise ignored. template_ids is FK-free (a listed template may since have
@@ -934,6 +946,10 @@ export function subscriptionPlanBulkRow(plan, preservedCreatedAt) {
     plan.notes ?? '',
     planTemplateIds,
     snapshotCreatedAt(preservedCreatedAt, 'subscription_plans', plan.id),
+    // How often the plan's checklists run (featreq-acdd0c84): a valid payload
+    // value sets it; an omitted key, null or an invalid value keeps the stored
+    // one (`preservedPlanCadence`, the same helper the file backend uses).
+    preservedPlanCadence(plan, priorPlanCadences.get(plan.id)),
   ]
 }
 
@@ -6631,6 +6647,21 @@ export class AppDataStore {
         `alter table subscription_plans add column if not exists template_ids text[] not null default '{}'`,
       )
 
+      // How often a plan's checklists run (featreq-acdd0c84, stage B1). Nullable
+      // and never backfilled: NULL means "read it off the plan's name", so no
+      // existing row changes. Look-first, so a boot with the column in place
+      // takes no lock.
+      const planCadenceColumn = await this.pool.query(
+        `select 1 from information_schema.columns
+          where table_schema = current_schema() and table_name = 'subscription_plans' and column_name = 'cadence'`,
+      )
+      if ((planCadenceColumn.rows?.length ?? 0) === 0) {
+        await this.pool.query(
+          `alter table subscription_plans add column if not exists cadence text
+             check (cadence in ('weekly','monthly','quarterly','annual','blueprint'))`,
+        )
+      }
+
       // PACKAGES (featreq-f890f05b): a named bundle of EXISTING plans plus the
       // standard blueprint checklists that come with them, applied to a client
       // in one click. Deliberately NOT in the bulk-save payload — it is
@@ -9100,7 +9131,7 @@ export class AppDataStore {
             order by sort_order asc nulls last, name asc
           `),
           this.pool.query(`
-            select id, name, notes, template_ids
+            select id, name, notes, template_ids, cadence
             from subscription_plans
             order by name asc
           `),
@@ -9321,6 +9352,7 @@ export class AppDataStore {
           templateIds: Array.isArray(row.template_ids)
             ? row.template_ids.filter((id) => typeof id === 'string' && id)
             : [],
+          ...planCadenceFields(row.cadence, row.name),
         })),
         contacts: contactsResult.rows.map((row) => ({
           id: row.id,
@@ -9598,6 +9630,13 @@ export class AppDataStore {
     }
     if (Array.isArray(data.clients)) {
       data.clients = data.clients.map(normalizeClientProfile)
+    }
+    // Same two fields the Postgres read gives a plan; `write()` drops the
+    // derived one before anything reaches the file.
+    if (Array.isArray(data.plans)) {
+      data.plans = data.plans.map((plan) =>
+        plan && typeof plan === 'object' ? { ...plan, ...planCadenceFields(plan.cadence, plan.name) } : plan,
+      )
     }
     data.firmSettings = {
       ...DEFAULT_FIRM_SETTINGS,
@@ -10094,6 +10133,15 @@ export class AppDataStore {
           ),
         )
 
+        // Each plan's stored cadence (featreq-acdd0c84), for a payload plan that
+        // omits the key (an old tab), sends null, or sends something invalid.
+        // See `preservedPlanCadence`.
+        const priorPlanCadences = new Map(
+          (await client.query(`select id, cadence from subscription_plans`)).rows.map(
+            (row) => [row.id, row.cadence],
+          ),
+        )
+
         // The push stamps, by the same rule and for a sharper reason. These
         // five are endpoint-owned (POST /api/checklists/:id/push is the only
         // writer, for a plain move or for a split) and `cycle_due_date` is the
@@ -10256,7 +10304,7 @@ export class AppDataStore {
         await insertRowsBatched(client, {
           table: 'subscription_plans',
           ...BULK_INSERT_SHAPES.subscription_plans,
-          rows: data.plans.map((plan) => subscriptionPlanBulkRow(plan, preservedCreatedAt)),
+          rows: data.plans.map((plan) => subscriptionPlanBulkRow(plan, preservedCreatedAt, priorPlanCadences)),
         })
         lapTable('subscription_plans')
 
@@ -11009,6 +11057,29 @@ export class AppDataStore {
       } else if (Object.prototype.hasOwnProperty.call(data, 'firmSettings')) {
         const { firmSettings: _dropped, ...rest } = data
         toPersist = rest
+      }
+
+      // A plan's cadence (featreq-acdd0c84), Cardinal rule 1 mirror of
+      // `priorPlanCadences` in the Postgres branch: a payload plan that omits
+      // the key, sends null or sends something invalid keeps the cadence already
+      // on disk for that plan id (same helper). `effectiveCadence` is derived
+      // on every read and never persisted, and no key is written for "none".
+      // Built into `toPersist` so the caller's own `data` keeps what it was given.
+      if (Array.isArray(toPersist.plans)) {
+        const priorPlanCadenceById = new Map(
+          (Array.isArray(previous?.plans) ? previous.plans : [])
+            .filter((plan) => plan && typeof plan.id === 'string')
+            .map((plan) => [plan.id, plan.cadence]),
+        )
+        toPersist = {
+          ...toPersist,
+          plans: toPersist.plans.map((plan) => {
+            if (!plan || typeof plan !== 'object') return plan
+            const { cadence: _payloadCadence, effectiveCadence: _derived, ...rest } = plan
+            const cadence = preservedPlanCadence(plan, priorPlanCadenceById.get(plan.id))
+            return cadence ? { ...rest, cadence } : rest
+          }),
+        }
       }
 
       // Invoices and the Stripe event ledger are SERVER-OWNED and never ride the

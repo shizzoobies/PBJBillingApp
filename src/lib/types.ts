@@ -1,3 +1,4 @@
+import type { PlanCadence } from '../../lib/plan-cadence.js'
 import type { RateHistoryEntry } from '../../lib/rate-history.js'
 import type {
   HoursByRole,
@@ -337,6 +338,18 @@ export type SubscriptionPlan = {
    * checklists yet.
    */
   templateIds?: string[]
+  /**
+   * How often this plan's checklists run, as STORED: null (or absent) until
+   * somebody chooses one, in which case the plan's name decides (see
+   * {@link effectiveCadence}). 'blueprint' = use each checklist's own schedule.
+   */
+  cadence?: PlanCadence | null
+  /**
+   * What applies: the stored cadence, else read off the end of the name
+   * (" - Quarterly"), else 'blueprint'. Derived by the server on every read and
+   * never saved.
+   */
+  effectiveCadence?: PlanCadence
 }
 
 /**

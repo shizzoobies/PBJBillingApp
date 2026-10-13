@@ -19,6 +19,7 @@ import {
   type PackageChecklistProposal,
 } from '../lib/api'
 import { defaultPackageTemplateIds } from '../lib/packages'
+import type { PlanCadence } from '../../lib/plan-cadence.js'
 import {
   ApiError,
   type ChecklistTemplate,
@@ -328,6 +329,7 @@ function PlanLibrary({
                       ownerMode={ownerMode}
                       onUpdate={onUpdate}
                     />
+                    <PlanCadenceField plan={plan} ownerMode={ownerMode} onUpdate={onUpdate} />
                   </div>
                   {ownerMode ? (
                     <div className="plan-row-actions">
@@ -410,6 +412,62 @@ function PlanTemplatesField({
         }
       />
     </div>
+  )
+}
+
+// How often this plan's checklists run (featreq-acdd0c84). Shows the EFFECTIVE
+// value - the stored one, else the one the plan's name ends in - and says so when
+// it is read off the name. 'blueprint' is the old behavior: each checklist keeps
+// its own schedule. Saved with the rest of the workspace like name / notes.
+const PLAN_CADENCE_OPTIONS: Array<{ value: PlanCadence; label: string }> = [
+  { value: 'weekly', label: 'Weekly' },
+  { value: 'monthly', label: 'Monthly' },
+  { value: 'quarterly', label: 'Quarterly' },
+  { value: 'annual', label: 'Yearly' },
+  { value: 'blueprint', label: "Use the checklist's own schedule" },
+]
+
+function PlanCadenceField({
+  plan,
+  ownerMode,
+  onUpdate,
+}: {
+  plan: SubscriptionPlan
+  ownerMode: boolean
+  onUpdate: (planId: string, patch: Partial<SubscriptionPlan>) => void
+}) {
+  const effective: PlanCadence = plan.cadence ?? plan.effectiveCadence ?? 'blueprint'
+  const label = PLAN_CADENCE_OPTIONS.find((option) => option.value === effective)?.label ?? effective
+  const fromName = !plan.cadence && effective !== 'blueprint'
+  if (!ownerMode) {
+    return (
+      <span className="checklist-meta-line">
+        How often: {label}
+        {fromName ? ' (from the name)' : ''}
+      </span>
+    )
+  }
+  return (
+    <label className="field plan-cadence-field">
+      <span className="checklist-meta-line">
+        How often{fromName ? ' (from the name)' : ''}
+      </span>
+      <select
+        className="input"
+        aria-label={`How often ${plan.name}`}
+        value={effective}
+        onChange={(event) => {
+          const cadence = event.target.value as PlanCadence
+          onUpdate(plan.id, { cadence, effectiveCadence: cadence })
+        }}
+      >
+        {PLAN_CADENCE_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
   )
 }
 

@@ -1229,6 +1229,11 @@ function fakePostgres({
   // `select id, category_id from checklist_template_stages`: each step's stored
   // Board column, which a payload stage WITHOUT the key keeps.
   priorStageCategoryRows = [],
+  // `select id, cadence from subscription_plans`: each plan's stored cadence,
+  // which a payload plan that omits the key (or sends null / junk) keeps.
+  priorPlanCadenceRows = [],
+  // The plans read inside read() (`select id, name, notes, template_ids, cadence`).
+  planRows = [],
   priorItemRows = [],
   priorChecklistRows = [],
   templateRows = [],
@@ -1560,6 +1565,14 @@ function fakePostgres({
     const createdAtSnapshot = /^select id, created_at from (\w+)$/i.exec(trimmed)
     if (createdAtSnapshot) {
       return { rows: createdAtRows[createdAtSnapshot[1]] ?? [] }
+    }
+    // The bulk save's snapshot of each plan's stored cadence (featreq-acdd0c84).
+    if (/^select id, cadence from subscription_plans$/i.test(trimmed)) {
+      return { rows: priorPlanCadenceRows }
+    }
+    // The plans read inside read() - lets a test exercise the plan row mapper.
+    if (/^select id, name, notes, template_ids, cadence\s+from subscription_plans\s+order by name asc$/i.test(trimmed)) {
+      return { rows: planRows }
     }
     // The bulk save's snapshot of each step's stored Board column (featreq-3e81b386).
     if (/^select id, category_id from checklist_template_stages$/i.test(trimmed)) {
@@ -41312,8 +41325,17 @@ describe('bulk save golden parity (postgres branch)', () => {
       { id: 'emp-2', name: 'Priya Natarajan', role: 'bookkeeper' },
     ],
     plans: [
-      { id: 'plan-1', name: 'Essentials', notes: 'Monthly close', templateIds: ['tpl-1', 'tpl-2', 7, ''] },
-      { id: 'plan-2', name: 'Advisory' },
+      {
+        id: 'plan-1',
+        name: 'Essentials',
+        notes: 'Monthly close',
+        templateIds: ['tpl-1', 'tpl-2', 7, ''],
+        cadence: 'quarterly',
+        effectiveCadence: 'quarterly',
+      },
+      // An invalid cadence is not written (no stored value to keep -> null); the
+      // derived effectiveCadence is never a column.
+      { id: 'plan-2', name: 'Advisory', cadence: 'fortnightly', effectiveCadence: 'blueprint' },
     ],
     contacts: [
       {
@@ -42525,7 +42547,7 @@ describe('bulk save: clients, invoices and the small tables as multi-row inserts
   })
 
   it.each([
-    ['subscription_plans', 5, (index) => ({ plans: [{ id: `plan-${pad(index)}`, name: `Plan ${index}` }] })],
+    ['subscription_plans', 6, (index) => ({ plans: [{ id: `plan-${pad(index)}`, name: `Plan ${index}` }] })],
     ['contacts', 12, (index) => ({ contacts: [{ id: `contact-${pad(index)}`, name: `Contact ${index}` }] })],
     [
       'reimbursements',
@@ -51749,5 +51771,186 @@ describe('board column per step: a stage without the key keeps its stored column
     expect((await persistedStageTwo()).categoryId ?? null).toBeNull()
     await store.write(workspace({ checklistTemplates: [recipe({ categoryId: 'cat-send' })] }))
     expect((await persistedStageTwo()).categoryId).toBe('cat-send')
+  })
+})
+
+/**
+ * Plan cadence (featreq-acdd0c84, stage B1): `subscription_plans.cadence` is a
+ * nullable column; the READ derives `effectiveCadence` (stored, else the plan
+ * name's suffix, else 'blueprint'); and the bulk save keeps the stored value for
+ * a payload plan that omits the key, sends null or sends junk - on both backends.
+ */
+describe('plan cadence: the column and the look-first ALTER (Postgres statements)', () => {
+  it('adds subscription_plans.cadence look-first, with the CHECK, after template_ids', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)
+      .initialize()
+      .catch(() => {})
+    expect(fake.matching(/information_schema\.columns[\s\S]*'subscription_plans'[\s\S]*'cadence'/i)).toHaveLength(1)
+    const [alter] = fake.matching(/^alter table subscription_plans add column if not exists cadence\b/i)
+    expect(alter.text.replace(/\s+/g, ' ').trim()).toBe(
+      "alter table subscription_plans add column if not exists cadence text check (cadence in ('weekly','monthly','quarterly','annual','blueprint'))",
+    )
+    expect(alter.text).not.toMatch(/not null|default/i)
+    expect(fake.indexOf(/^alter table subscription_plans add column if not exists cadence\b/i)).toBeGreaterThan(
+      fake.indexOf(/^alter table subscription_plans add column if not exists template_ids\b/i),
+    )
+    expect(fake.indexOf(/information_schema\.columns[\s\S]*'subscription_plans'[\s\S]*'cadence'/i)).toBeLessThan(
+      fake.indexOf(/^alter table subscription_plans add column if not exists cadence\b/i),
+    )
+  })
+
+  it('a boot with the column in place asks and alters nothing', async () => {
+    const statements = []
+    const query = async (text) => {
+      const trimmed = String(text).replace(/\s+/g, ' ').trim()
+      statements.push(trimmed)
+      if (/information_schema\.columns[\s\S]*'subscription_plans'[\s\S]*'cadence'/i.test(trimmed)) {
+        return { rows: [{ '?column?': 1 }] }
+      }
+      return { rows: [] }
+    }
+    const pgStore = new AppDataStore()
+    pgStore.pool = { query, connect: async () => ({ query, release() {} }) }
+    pgStore.mode = 'postgres'
+    await pgStore.initialize().catch(() => {})
+    expect(statements.filter((text) => /^alter table subscription_plans add column if not exists cadence\b/i.test(text))).toEqual([])
+  })
+})
+
+describe('plan cadence: the read exposes cadence and effectiveCadence (both backends)', () => {
+  const planRow = (id, name, cadence) => ({ id, name, notes: '', template_ids: [], cadence })
+
+  it('postgres: stored wins, else the name, else blueprint; junk in the column reads as none', async () => {
+    const fake = fakePostgres({
+      planRows: [
+        planRow('p1', 'Client Meeting - Quarterly', null),
+        planRow('p2', 'Client Meeting - Quarterly', 'weekly'),
+        planRow('p3', 'Bookkeeping', null),
+        planRow('p4', 'Bookkeeping', 'blueprint'),
+        planRow('p5', 'Taxes - Yearly', 'bogus'),
+      ],
+    })
+    const data = await postgresStore(fake).read()
+    expect(data.plans.map((plan) => [plan.id, plan.cadence, plan.effectiveCadence])).toEqual([
+      ['p1', null, 'quarterly'],
+      ['p2', 'weekly', 'weekly'],
+      ['p3', null, 'blueprint'],
+      ['p4', 'blueprint', 'blueprint'],
+      ['p5', null, 'annual'],
+    ])
+    expect(fake.matching(/^select id, name, notes, template_ids, cadence\s+from subscription_plans/i).length).toBeGreaterThan(0)
+  })
+
+  it('file backend: the same two fields, and nothing is written to the file by reading', async () => {
+    await store.write(
+      workspace({
+        plans: [
+          { id: 'p1', name: 'Review and Prepare Reports - Quarterly ' },
+          { id: 'p2', name: 'Client Meeting - Quarterly', cadence: 'weekly' },
+          { id: 'p3', name: 'Bookkeeping' },
+        ],
+      }),
+    )
+    const data = await store.read()
+    expect(data.plans.map((plan) => [plan.id, plan.cadence, plan.effectiveCadence])).toEqual([
+      ['p1', null, 'quarterly'],
+      ['p2', 'weekly', 'weekly'],
+      ['p3', null, 'blueprint'],
+    ])
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(persisted.plans[0]).not.toHaveProperty('cadence')
+    expect(persisted.plans.some((plan) => 'effectiveCadence' in plan)).toBe(false)
+    expect(persisted.plans[1].cadence).toBe('weekly')
+  })
+
+  it('file backend: a read-then-save round trip (the browser sends both fields back) persists only the stored one', async () => {
+    await store.write(workspace({ plans: [{ id: 'p1', name: 'Close - Monthly' }] }))
+    const read = await store.read()
+    await store.write(workspace({ plans: read.plans }))
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(persisted.plans[0]).not.toHaveProperty('cadence')
+    expect(persisted.plans[0]).not.toHaveProperty('effectiveCadence')
+    expect((await store.read()).plans[0].effectiveCadence).toBe('monthly')
+  })
+})
+
+describe('plan cadence: a bulk save keeps the stored value unless it is sent a valid one (both backends)', () => {
+  const planWith = (extra) => workspace({ plans: [{ id: 'plan-1', name: 'Close - Monthly', ...extra }] })
+  const stored = [{ id: 'plan-1', cadence: 'quarterly' }]
+  const writtenCadence = async (extra, rows = stored) => {
+    const fake = fakePostgres({ priorPlanCadenceRows: rows })
+    await postgresStore(fake).write(planWith(extra))
+    expect(fake.matching(/^select id, cadence from subscription_plans$/i)).toHaveLength(1)
+    return insertedRows(fake.statements, 'subscription_plans').map((row) => row.cadence)
+  }
+
+  it('postgres: a payload plan that omits the key keeps the stored value', async () => {
+    expect(await writtenCadence({})).toEqual(['quarterly'])
+  })
+
+  it('postgres: an invalid value keeps the stored value', async () => {
+    expect(await writtenCadence({ cadence: 'fortnightly' })).toEqual(['quarterly'])
+    expect(await writtenCadence({ cadence: 7 })).toEqual(['quarterly'])
+  })
+
+  it('postgres: an explicit null is treated like omitted (the bulk save cannot clear)', async () => {
+    expect(await writtenCadence({ cadence: null })).toEqual(['quarterly'])
+  })
+
+  it('postgres: a valid value sets it, and effectiveCadence is never a column', async () => {
+    const fake = fakePostgres({ priorPlanCadenceRows: stored })
+    await postgresStore(fake).write(planWith({ cadence: 'weekly', effectiveCadence: 'monthly' }))
+    const [insert] = fake.matching(/^insert into subscription_plans\b/i)
+    expect(insert.text).toMatch(/\(id, name, notes, template_ids, created_at, cadence, updated_at\)/)
+    expect(insert.text).not.toMatch(/effective/i)
+    expect(insertedRows(fake.statements, 'subscription_plans').map((row) => row.cadence)).toEqual(['weekly'])
+  })
+
+  it('postgres: nothing stored and nothing valid sent writes null; a new plan with a value writes it', async () => {
+    expect(await writtenCadence({}, [])).toEqual([null])
+    expect(await writtenCadence({ cadence: 'annual' }, [])).toEqual(['annual'])
+    expect(await writtenCadence({ cadence: 'blueprint' }, [])).toEqual(['blueprint'])
+  })
+
+  it('postgres: the snapshot is taken before the plan rows are wiped', async () => {
+    const fake = fakePostgres({ priorPlanCadenceRows: stored })
+    await postgresStore(fake).write(planWith({}))
+    const snapshot = fake.indexOf(/^select id, cadence from subscription_plans$/i)
+    const wipe = fake.indexOf(/^delete from subscription_plans/i)
+    expect(snapshot).toBeGreaterThanOrEqual(0)
+    expect(wipe).toBeGreaterThan(snapshot)
+  })
+
+  const persistedCadence = async () => {
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    return persisted.plans[0].cadence ?? null
+  }
+
+  it('file backend: omitted, invalid and null all keep the stored value', async () => {
+    await store.write(planWith({ cadence: 'quarterly' }))
+    await store.write(planWith({}))
+    expect(await persistedCadence()).toBe('quarterly')
+    await store.write(planWith({ cadence: 'fortnightly' }))
+    expect(await persistedCadence()).toBe('quarterly')
+    await store.write(planWith({ cadence: null }))
+    expect(await persistedCadence()).toBe('quarterly')
+    expect((await store.read()).plans[0].effectiveCadence).toBe('quarterly')
+  })
+
+  it('file backend: a valid value sets it (including blueprint), and nothing derived is written', async () => {
+    await store.write(planWith({ cadence: 'quarterly' }))
+    await store.write(planWith({ cadence: 'weekly', effectiveCadence: 'monthly' }))
+    expect(await persistedCadence()).toBe('weekly')
+    await store.write(planWith({ cadence: 'blueprint' }))
+    expect(await persistedCadence()).toBe('blueprint')
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(persisted.plans[0]).not.toHaveProperty('effectiveCadence')
+  })
+
+  it('file backend: a brand-new plan with junk stores no cadence, so its name decides', async () => {
+    await store.write(planWith({ cadence: 'fortnightly' }))
+    expect(await persistedCadence()).toBeNull()
+    expect((await store.read()).plans[0].effectiveCadence).toBe('monthly')
   })
 })
