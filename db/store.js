@@ -103,6 +103,7 @@ import {
 } from '../lib/workspace-version.js'
 import { clientHistoryRefusal } from '../lib/client-delete-rule.js'
 import { insertRowsBatched } from '../lib/insert-rows-batched.js'
+import { cleanServiceCategoryGroup } from '../lib/service-category-group.js'
 import {
   periodLabelForInstance,
   sanitizeCoverageDate,
@@ -223,22 +224,10 @@ const SEED_SERVICE_CATEGORIES = [
   'Payroll',
 ]
 
-/** The longest a Board column's group name may be (featreq-54bf39b6). */
-export const SERVICE_CATEGORY_GROUP_MAX = 80
-
 /**
- * A Board column's optional group name, cleaned the same way on both backends:
- * trimmed, cut to SERVICE_CATEGORY_GROUP_MAX, an empty string (or null) clears
- * it to null. Anything else - an absent key included - is `undefined`, which
- * an update reads as "leave the stored group as it is".
+ * A stored Board column group as the API returns it: a non-empty string, else
+ * null (featreq-54bf39b6; writes go through cleanServiceCategoryGroup).
  */
-function cleanServiceCategoryGroup(value) {
-  if (value === null) return null
-  if (typeof value !== 'string') return undefined
-  return value.trim().slice(0, SERVICE_CATEGORY_GROUP_MAX).trim() || null
-}
-
-/** A stored group as the API returns it: a non-empty string, else null. */
 function storedServiceCategoryGroup(value) {
   return typeof value === 'string' && value.trim() ? value : null
 }

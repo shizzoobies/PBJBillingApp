@@ -327,7 +327,8 @@ export function buildActiveBoard({
   clientNameById = {},
 }: {
   checklists?: Checklist[]
-  categories?: ServiceCategory[]
+  /** The columns; a column's group plays no part in what lands in it. */
+  categories?: Pick<ServiceCategory, 'id' | 'name' | 'sortOrder'>[]
   /**
    * The workspace's checklist templates — used only to recover the board column
    * for instances generated before their template was categorized. Optional so
