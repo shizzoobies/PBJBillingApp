@@ -25,7 +25,27 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-13, ~15:50Z - READ THIS FIRST):** `main` = `f591269` (+ this handoff), deployed,
+**State right now (2026-10-13, ~18:10Z - READ THIS FIRST):** `main` = `a3944c7` (+ this handoff), deployed, `/health` 200,
+tree clean, only the primary worktree. **Seven ships today** (Fable orchestrating, Opus 5.5 implementers, Sonnet reviews;
+two rounds + a fix review on the email feature), one deploy each: `6703fc5` Processing tab; `f591269` Board current-step
+view (+ shortDate month fix); `1437cfd` the step view shows the STAGE, not its tasks (her "board question update" email);
+`7e224eb` Board column GROUPS (`service_categories.group_name`, look-first ALTER at boot) + overview strip + "Hide empty
+columns" (default ON, `pbj.boardHideEmpty.v1.<userId>`); `d2cef0e` + **APPLIED prod write** `scripts/prod/board-columns-2026-10.mjs`
+(Alex approved; snapshot `docs/prod-snapshots/2026-10-13-board-columns.json`): 8 renames, 10 new columns, 476 steps
+re-pointed across the 1040/1120S/1099/Monthly Recs/Payroll/Recs-with-Review family/Sales Tax templates and copies, 84
+defaults, 463 instances released to follow their step, her five groups set; `35d0fdc` plan cadence part 2 (mapper
+`cadenceSchedule` in lib/plan-cadence.js, every plan-driven copy site, `POST /api/checklist-templates/:id/match-plan-cadence`
++ "Match plan" button; Match plan to quarterly/yearly restamps createdAt so past months are not generated; manifest trimmed
+1.3 KB); `a3944c7` **Send reminder** (`POST /api/invoices/:id/remind`, lib/invoice-reminder.js + -rule.js, same pay token,
+no Checkout session, kind:'reminder' log entry, once per firm day, recipients bound to the confirm, Remind all past due
+continues past 409s, prepaid-month guard). **Tickets:** 54bf39b6 (her Board Adjustments email) Shipped; 338b1507 Shipped;
+acdd0c84 Shipped; af5391e2 done; 3f1d63b6 PLANNED with a question to her (should the app send the 15th/20th/25th/EOM
+follow-ups by itself?) - build the scheduler only on her yes. **Auto-mode classifier** blocked plain `git push`, one
+`ship.sh` run, one voice-provision and the --apply until Alex said "run it for me I approve" - ask him and retry.
+Manifest ~204,2xx-204,9xx of 205,000 - TRIM FIRST. Open: five unmatched step names on single client copies (on her
+ticket); voice re-provision after the a3944c7 deploy if the one in this session was blocked.
+
+**Earlier (2026-10-13, ~15:50Z):** `main` = `f591269` (+ this handoff), deployed,
 `/health` 200, voice re-provisioned, tree clean, only the primary worktree, nothing in flight. Items 1 and 2 of the
 plan below are LIVE, one deploy each, each with an independent Sonnet review (Fable orchestrating, Opus 5.5 implementers):
 `6703fc5` (3 commits) **Processing tab** on the invoice month run (`featreq-3f1d63b6` part a; ticket still needs_input
