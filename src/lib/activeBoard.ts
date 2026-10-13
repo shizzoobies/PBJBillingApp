@@ -298,7 +298,9 @@ export function boardStepSummary(
   if (stageName && typeof stageIndex === 'number') {
     stepLabel = `Step ${stageIndex + 1} of ${stageCount} - ${stageName}`
     const stages = templates.find((template) => template.id === checklist.templateId)?.stages ?? []
-    const next = stages[stageIndex + 1]
+    // Gated on the STORED count too: a template that gained a stage after this
+    // case materialized must not read "Step 3 of 3" then "Then: Step 4".
+    const next = stageIndex + 1 < stageCount ? stages[stageIndex + 1] : undefined
     if (next) {
       const nextName = next.name?.trim()
       nextStepLabel = `Then: Step ${stageIndex + 2}${nextName ? ` - ${nextName}` : ''}`

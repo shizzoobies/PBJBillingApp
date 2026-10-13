@@ -803,7 +803,7 @@ function BoardStepBlock({ checklist, summary }: { checklist: Checklist; summary:
         <span className="board-step-count">
           {summary.taskCount === 0
             ? 'No tasks yet'
-            : `${summary.taskDoneCount} of ${summary.taskCount} tasks done`}
+            : `${summary.taskDoneCount} of ${summary.taskCount} ${summary.taskCount === 1 ? 'task' : 'tasks'} done`}
         </span>
       </span>
       {summary.nextStepLabel ? <span className="board-step-next">{summary.nextStepLabel}</span> : null}

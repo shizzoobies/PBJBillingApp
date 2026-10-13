@@ -261,7 +261,7 @@ describe('Board: Current step only (default ON)', () => {
     expect(within(close).getByText('Monthly close')).toHaveClass('board-step-title')
     const meta = close.querySelector('.board-step-meta') as HTMLElement
     expect(meta).toHaveTextContent('Avery Stone')
-    expect(meta).toHaveTextContent('1 of 5 tasks done')
+    expect(meta.querySelector('.board-step-count')).toHaveTextContent(/^1 of 5 tasks done$/)
     expect(within(close).getByText('Then: Step 3 - Deliver')).toHaveClass('board-step-next')
     expect(within(close).getByRole('link', { name: 'Open checklist' })).toHaveAttribute(
       'href',
@@ -289,7 +289,8 @@ describe('Board: Current step only (default ON)', () => {
     expect(label).toHaveClass('board-step-label')
     expect(block.querySelector('.board-step-title')).toBeNull()
     expect(block).toHaveTextContent('Owner')
-    expect(block).toHaveTextContent('0 of 1 tasks done')
+    // Singular when the step has one task.
+    expect(block.querySelector('.board-step-count')).toHaveTextContent(/^0 of 1 task done$/)
     expect(block).not.toHaveTextContent('Then:')
   })
 
@@ -297,11 +298,11 @@ describe('Board: Current step only (default ON)', () => {
     renderBoard()
     const payroll = stepBlock('Payroll setup')
     expect(within(payroll).getByText('Step 1 of 3 - Collect').tagName).toBe('STRONG')
-    expect(payroll).toHaveTextContent('0 of 1 tasks done')
+    expect(payroll.querySelector('.board-step-count')).toHaveTextContent(/^0 of 1 task done$/)
     expect(payroll).toHaveTextContent('Then: Step 2 - Enter')
 
     const doneStage = stepBlock('Quarterly filing')
-    expect(doneStage).toHaveTextContent('1 of 1 tasks done')
+    expect(doneStage.querySelector('.board-step-count')).toHaveTextContent(/^1 of 1 task done$/)
     expect(doneStage).not.toHaveTextContent('All steps done')
   })
 
@@ -309,7 +310,7 @@ describe('Board: Current step only (default ON)', () => {
     renderBoard()
     const intake = stepBlock('Engagement intake')
     expect(within(intake).getByText('No tasks yet')).toBeInTheDocument()
-    expect(intake).not.toHaveTextContent('tasks done')
+    expect(intake).not.toHaveTextContent(/tasks? done/)
   })
 
   it('the checklist Due chip names the right month (MONTH_NAMES is 1-based)', () => {

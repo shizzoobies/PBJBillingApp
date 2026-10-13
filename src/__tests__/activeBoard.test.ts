@@ -507,6 +507,31 @@ describe('boardStepSummary', () => {
     expect(summary.nextStepLabel).toBeNull()
   })
 
+  it('the stored stage count gates the next step: a template that gained a stage later adds no "Then:"', () => {
+    const grown: ChecklistTemplate[] = [
+      {
+        id: 'tpl-close',
+        stages: [
+          { id: 's1', name: 'Prepare' },
+          { id: 's2', name: 'Review' },
+          { id: 's3', name: 'Deliver' },
+          { id: 's4', name: 'Archive' },
+        ],
+      } as unknown as ChecklistTemplate,
+    ]
+    const summary = boardStepSummary(staged(2), grown)
+    expect(summary.stepLabel).toBe('Step 3 of 3 - Deliver')
+    expect(summary.nextStepLabel).toBeNull()
+  })
+
+  it('a stage index past the stored count, or no stage index, falls back to the title with no next step', () => {
+    expect(boardStepSummary(staged(3), STAGED)).toMatchObject({ stepLabel: 'Monthly close', nextStepLabel: null })
+    expect(boardStepSummary(staged(5), STAGED)).toMatchObject({ stepLabel: 'Monthly close', nextStepLabel: null })
+    expect(
+      boardStepSummary(open({ title: 'Monthly close', templateId: 'tpl-close', stageCount: 3 }), STAGED),
+    ).toMatchObject({ stepLabel: 'Monthly close', nextStepLabel: null })
+  })
+
   it('a single-stage or unstaged checklist reads as its own title, with no next step', () => {
     const single = boardStepSummary(staged(0, { stageCount: 1, title: 'Payroll' }), STAGED)
     expect(single).toMatchObject({ stepLabel: 'Payroll', nextStepLabel: null })
