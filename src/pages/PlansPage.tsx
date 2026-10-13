@@ -19,7 +19,7 @@ import {
   type PackageChecklistProposal,
 } from '../lib/api'
 import { defaultPackageTemplateIds } from '../lib/packages'
-import type { PlanCadence } from '../../lib/plan-cadence.js'
+import { effectivePlanCadence, type PlanCadence } from '../../lib/plan-cadence.js'
 import {
   ApiError,
   type ChecklistTemplate,
@@ -436,7 +436,9 @@ function PlanCadenceField({
   ownerMode: boolean
   onUpdate: (planId: string, patch: Partial<SubscriptionPlan>) => void
 }) {
-  const effective: PlanCadence = plan.cadence ?? plan.effectiveCadence ?? 'blueprint'
+  // Computed here, not read off `plan.effectiveCadence`, so renaming a plan
+  // updates the "(from the name)" label before the next reload.
+  const effective: PlanCadence = effectivePlanCadence(plan)
   const label = PLAN_CADENCE_OPTIONS.find((option) => option.value === effective)?.label ?? effective
   const fromName = !plan.cadence && effective !== 'blueprint'
   if (!ownerMode) {

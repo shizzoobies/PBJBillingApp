@@ -51873,6 +51873,16 @@ describe('plan cadence: the read exposes cadence and effectiveCadence (both back
     expect(persisted.plans[0]).not.toHaveProperty('effectiveCadence')
     expect((await store.read()).plans[0].effectiveCadence).toBe('monthly')
   })
+
+  it('file backend: the derived fields are added AFTER the version is fingerprinted, so a guarded save of what was read is not stale', async () => {
+    await store.write(workspace({ plans: [{ id: 'p1', name: 'X - Monthly' }] }))
+    const { data, version } = await store.readWithVersion()
+    expect(data.plans[0].effectiveCadence).toBe('monthly')
+    // The version is the fingerprint of the file as it sits on disk (no plan
+    // carries a cadence key there), not of the decorated copy handed out.
+    expect(version).toBe(await store.computeWorkspaceVersion())
+    await expect(store.write(data, { expectedVersion: version })).resolves.toBeUndefined()
+  })
 })
 
 describe('plan cadence: a bulk save keeps the stored value unless it is sent a valid one (both backends)', () => {

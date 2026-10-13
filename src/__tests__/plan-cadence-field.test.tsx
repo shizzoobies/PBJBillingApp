@@ -35,6 +35,15 @@ const PLANS: SubscriptionPlan[] = [
     effectiveCadence: 'quarterly',
   },
   { id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: [], cadence: null, effectiveCadence: 'blueprint' },
+  // Renamed locally: the server's effectiveCadence is stale, the name now decides.
+  {
+    id: 'plan-renamed',
+    name: 'Payroll - Weekly',
+    notes: '',
+    templateIds: [],
+    cadence: null,
+    effectiveCadence: 'blueprint',
+  },
   {
     id: 'plan-reports',
     name: 'Reports - Quarterly',
@@ -89,8 +98,9 @@ describe('the plan cadence select', () => {
     expect((screen.getByLabelText('How often Client Meeting - Quarterly') as HTMLSelectElement).value).toBe('quarterly')
     expect((screen.getByLabelText('How often Bookkeeping') as HTMLSelectElement).value).toBe('blueprint')
     expect((screen.getByLabelText('How often Reports - Quarterly') as HTMLSelectElement).value).toBe('monthly')
-    // One plan is derived from its name; the blueprint one and the stored one are not.
-    expect(screen.getAllByText('How often (from the name)')).toHaveLength(1)
+    // Two plans are derived from their names; the blueprint one and the stored one are not.
+    expect((screen.getByLabelText('How often Payroll - Weekly') as HTMLSelectElement).value).toBe('weekly')
+    expect(screen.getAllByText('How often (from the name)')).toHaveLength(2)
     expect(screen.getAllByText('How often')).toHaveLength(2)
   })
 
