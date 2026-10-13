@@ -183,7 +183,7 @@ describe('the Send reminder button', () => {
   it('is disabled while the invoice is Changed since sent', async () => {
     await openRun([makeInvoice({ changedSinceSent: true })])
     expect(remindButton()).toBeDisabled()
-    expect(remindButton()).toHaveAttribute('title', 'Change since sent - use Send again')
+    expect(remindButton()).toHaveAttribute('title', 'Changed since sent - use Send again')
   })
 
   it('is disabled once reminded today', async () => {

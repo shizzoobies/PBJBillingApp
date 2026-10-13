@@ -4951,7 +4951,8 @@ export async function remindInvoiceRequest(invoiceId: string) {
       code,
     )
   }
-  return (await response.json()) as { invoice: PersistedInvoice }
+  // `logged: false`: the email left, but its log entry could not be written.
+  return (await response.json()) as { invoice: PersistedInvoice; logged?: false }
 }
 
 /**

@@ -8130,7 +8130,12 @@ const server = createServer(async (request, response) => {
         sendJson(response, reminded.status, reminded.body)
         return
       }
-      sendJson(response, 200, { invoice: await withCoverageChangeable(reminded.body.invoice) })
+      // `logged: false` rides along when the email left but its log entry could
+      // not be written (lib/invoice-reminder.js retries it once first).
+      sendJson(response, 200, {
+        ...reminded.body,
+        invoice: await withCoverageChangeable(reminded.body.invoice),
+      })
       return
     }
 

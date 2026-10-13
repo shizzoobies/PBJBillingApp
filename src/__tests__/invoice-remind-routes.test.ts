@@ -79,7 +79,12 @@ describe('POST /api/invoices/:id/remind', () => {
   it('answers a refusal as the function said it, and the reminded invoice with the editor marks', () => {
     const body = route()
     expect(body).toContain('sendJson(response, reminded.status, reminded.body)')
-    expect(body).toContain('sendJson(response, 200, { invoice: await withCoverageChangeable(reminded.body.invoice) })')
+    const ok = body.indexOf('sendJson(response, 200, {')
+    expect(ok).toBeGreaterThan(-1)
+    const answer = body.slice(ok, ok + 160)
+    // `logged: false` (emailed, but the log write failed twice) rides through.
+    expect(answer).toContain('...reminded.body,')
+    expect(answer).toContain('invoice: await withCoverageChangeable(reminded.body.invoice),')
   })
 
   it('answers a failed read with a sentence that says nothing was emailed', () => {
