@@ -4930,6 +4930,31 @@ export async function sendInvoiceRequest(
 }
 
 /**
+ * "Send reminder" (featreq-3f1d63b6): email the client a short reminder with
+ * the invoice's SAME pay link. The server picks the recipients (everyone Send
+ * would email), refuses with a plain sentence and a code (`reminded_today`,
+ * `autopay_in_flight`, `changed_since_sent`, ...), and answers the invoice with
+ * the new `kind: 'reminder'` log entry on it - same shape as the send request.
+ */
+export async function remindInvoiceRequest(invoiceId: string) {
+  const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/remind`, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(
+      response.status,
+      message || `Could not send the reminder (${response.status})`,
+      code,
+    )
+  }
+  return (await response.json()) as { invoice: PersistedInvoice }
+}
+
+/**
  * Every current AI confidence rating for one month — the latest per invoice,
  * superseded ones left behind.
  *

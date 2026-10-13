@@ -89,6 +89,7 @@ import {
   sendInvoicePaymentEmail,
 } from './lib/invoice-email.js'
 import { invoiceEmailAddressee, resolveSendRecipients } from './lib/invoice-recipients.js'
+import { remindInvoice } from './lib/invoice-reminder.js'
 import { invoiceContentChanged, totalsDiffer } from './lib/invoice-sent-change.js'
 import {
   clearDuplicatePaymentOnFailure,
@@ -8068,6 +8069,68 @@ const server = createServer(async (request, response) => {
       sendJson(response, 200, {
         reviews: await appDataStore.listInvoiceAiReviews({ period: reviewPeriod || null }),
       })
+      return
+    }
+
+    // POST /api/invoices/:id/remind - "Send reminder" (featreq-3f1d63b6): email
+    // the client a short reminder carrying the invoice's SAME pay link. Manual
+    // only; nothing schedules it. Owner-only, same preamble as Send. Every rule
+    // lives in lib/invoice-reminder.js (refusals, the send route's recipient
+    // resolver, the coalescing pay token, the last look before the provider call,
+    // the `kind: 'reminder'` log entry), which never touches Stripe: no Checkout
+    // session, no customer, no sent date, status, due date or autopay change.
+    const invoiceRemindMatch = normalizedPath.match(/^\/api\/invoices\/([^/]+)\/remind$/)
+    if (invoiceRemindMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can send a reminder' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const remindContentType = String(request.headers['content-type'] || '')
+      if (!remindContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      // The body carries nothing (a reminder goes to every address Send would);
+      // it is read so a malformed one is refused like Send refuses it.
+      try {
+        await readJsonBody(request)
+      } catch {
+        sendJson(response, 400, { error: 'Could not read the request body.' })
+        return
+      }
+
+      let reminded
+      try {
+        reminded = await remindInvoice(
+          {
+            invoiceId: decodeURIComponent(invoiceRemindMatch[1]),
+            now: new Date(),
+            appUrl: getPublicAppUrl(request),
+            stripeConfigured: isStripeConfigured(),
+            userId: session.user.id,
+          },
+          { store: appDataStore, sendEmail: sendInvoiceEmail },
+        )
+      } catch (error) {
+        // Only a read BEFORE the provider call can throw out of it: nothing left.
+        console.error('[invoices] reminder failed before sending:', error)
+        sendJson(response, 500, {
+          error: 'reminder_failed',
+          message: 'Could not send the reminder. Nothing was emailed. Try again.',
+        })
+        return
+      }
+      if (reminded.status !== 200) {
+        sendJson(response, reminded.status, reminded.body)
+        return
+      }
+      sendJson(response, 200, { invoice: await withCoverageChangeable(reminded.body.invoice) })
       return
     }
 

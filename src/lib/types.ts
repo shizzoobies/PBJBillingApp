@@ -868,8 +868,13 @@ export interface InvoiceEmailSendEntry {
    * stamp "Mark reviewed" writes for a client whose invoices are never emailed
    * (no recipients, nothing delivered). It is NOT a send - `latestInvoiceSend`
    * skips it - it only records that the invoice was marked sent, and when.
+   *
+   * `'reminder'` is the payment reminder the owner's "Send reminder" emails
+   * (featreq-3f1d63b6): the same pay link, a short email. Tagged, so it never
+   * marks the invoice sent or moves any of its dates; "Last reminded <date>"
+   * reads the newest ok one.
    */
-  kind?: 'ack' | 'receipt' | 'link' | 'not-emailed'
+  kind?: 'ack' | 'receipt' | 'link' | 'not-emailed' | 'reminder'
   /** Resend's own id for the message — the join key to its delivery events. */
   providerId?: string | null
   /**
