@@ -25,7 +25,65 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-13, 14:20Z - READ THIS FIRST):** `main` = `6a12629` (+ this handoff), deployed,
+**State right now (2026-10-13, ~15:00Z - READ THIS FIRST; Alex cleared context here):** `main` = `ed4ea75` (+ this
+handoff), deployed, `/health` 200, voice re-provisioned, tree clean, only the primary worktree, nothing in flight.
+Today so far: manifest trim `7f91ae8`; plan cadence part 1 `4910db0`; superseding-replaces-amendments `6a12629`
+(the 14:20Z paragraph below has the detail). **THE PLAN AGREED WITH ALEX FOR THE NEXT SESSION, in order:**
+
+1. **Processing tab** (part a of `featreq-3f1d63b6`, needs_input but this part needs no answer): in
+   `src/components/InvoiceMonthRun.tsx` add `'processing'` to `RunTabId` (~158), change `TAB_OF_STATUS` so
+   `processing` maps to its own tab (~222; today it maps to `sent`), insert a tab `{id:'processing', label:'Processing',
+   empty:'No bank payments clearing.'}` after Sent (~231); row copy "Bank payment clearing since <date of the newest ok
+   `kind:'ack'` log entry>" or "Bank payment clearing" when none (NEVER updated_at; use the autopay attempt date when
+   autopay paid); ~7 month-run tests that open a processing row from the Sent tab need re-pointing; one new tab test;
+   manifest line ~431 ("Sent and Processing both live under Sent") rewritten, ~+60 B. One lane, one Sonnet review,
+   verify, `bash scripts/prod/ship.sh <hash>`, `node scripts/prod/voice-provision.mjs`, note on the ticket.
+2. **Board: current step only** (`featreq-338b1507`, needs_input; her two answers only refine defaults - build with
+   the defaults, say so in the ship note): client-side only. Engine `boardStepSummary(checklist, templates, today,
+   names, coming=2)` in `src/lib/activeBoard.ts` -> {active|null, coming[], nextStageName?, stageLabel?}; active = first
+   open step in saved order via the `isChecklistItemDone` roll-up, due = item.dueDate ?? checklist.dueDate, assignee =
+   item.assigneeId ?? checklist.assigneeId, reuse the `stepIsWaiting` reason (~199-211) for a Waiting chip, Overdue when
+   due < today; a stage with no steps -> null -> "No steps yet"; if the active step is the last open one of a staged row
+   show "Then: Step N+2 - <template.stages[stageIndex+1].name>". UI in `src/pages/ActiveChecklistsBoardPage.tsx`: a
+   "Current step only" checkbox next to "Show upcoming" (~346-353), DEFAULT ON, persisted per user in localStorage
+   `pbj.boardStepView.v1.<userId>` in try/catch (pattern: report period, `src/App.tsx:253-275`); when on, every client row
+   is open and each checklist shows "Step N of M - stage" (staged only), the active step bold + due + assignee + chip, the
+   coming steps dimmed, an "Open checklist" link to `/checklists?focus=<id>`; ghosts keep ProjectedCard; search also
+   matches the active step label; off = today's view unchanged; scope/filters/accountant rules untouched. Tests:
+   activeBoard.test.ts cases listed on the ticket + a new board-current-step-ui.test.tsx. Manifest: REWRITE the "Each
+   client row is collapsible" bullet (~245), ~+350 B. One lane, one review, deploy.
+3. **Send reminder** (part b of `featreq-3f1d63b6`) AFTER Brittany answers her four questions on the ticket (cooldown
+   days, wording, Remind-all-past-due yes/no, whether a reminder clears Payment failed). Alex's decisions, already
+   made: refuse for autopay clients ONLY while an attempt is in flight (claimed/processing/succeeded), not for every
+   enrolled client; refuse while Changed-since-sent (Send again is the action); minting a first pay token on a
+   pre-token invoice is fine; no reminders on Processing. Design: `POST /api/invoices/:id/remind` (copy the send
+   route's preamble: owner, origin, JSON), refusals as above plus not sent/overdue, total <= 0, opted-out / never-email,
+   inside the cooldown (measured from the newer of last reminder / last send); token via `getOrCreateInvoicePayToken`
+   (coalesces - same link; mint NO Checkout session); re-read the invoice just before sending like the send route
+   (~7806-7824); log with `recordInvoiceSent(id, {kind:'reminder', to, subject, ok, error, providerId})` - both
+   backends already handle tagged entries and it never touches sent_at / status / due date / first-send rule / autopay;
+   add 'reminder' to the kind union (`src/lib/types.ts` ~872) and the tag JSDoc (`lib/notify.js` ~625); email = new
+   `buildInvoiceReminderEmail` on `paymentShell` (`lib/invoice-email.js` ~737) with a REMINDER_COPY block, subject
+   "Reminder: invoice INV-... from PB&J Strategic Accounting", rows Amount due / Invoice / Client, due-on-receipt via
+   the `customerNetDays` rule (~483), the pink Pay button + the /card link when card payments are on (small optional
+   `button` on paymentShell); UI: "Send reminder" beside Send again in the editor footer (~4887-4942), "Last reminded
+   <date>" on the row and in the editor from the newest ok reminder entry, disabled states; "Remind all past due" on
+   the Past due tab only, confirm lists invoices + recipients, loops the single route. Tests: every refusal; same token
+   + no Stripe call (mock asserts); sent_at/due unchanged; never a first send; file-backend log; email snapshot; row +
+   button states. Manifest ~+700 B (headroom ~1,134) - trim the history sentence at ~497 and the Send-again overlap at
+   ~433/435 first. Two review rounds (it emails clients).
+4. Then: her answers on `featreq-acdd0c84` (cadence part 2 - sizing on the ticket), `featreq-af5391e2` (starter lines,
+   re-asked), `featreq-e5ae8279` (retainer draft on a replaced amendment). Backlogs `featreq-9c29491a` (Letters, 11
+   items), `featreq-acb1b663` (Engagements, 34 items; 6/9/24 are DDL for Alex), `featreq-05e1610d` (Checklists, 9
+   items; 1 is DDL) stay parked until Alex wants a cleanup pass. `featreq-4caec5d3` backups = Alex.
+
+**Rules in force:** one item per lane (recreate lanes with `git worktree add` + a node_modules JUNCTION, remove the
+link before `git worktree remove`); TDD; both store backends; CRLF, never `sed -i`; one vitest per worktree; independent
+review before every ship (two rounds on money/email code); gate the push on the verify EXIT CODE; `ship.sh` from the
+primary tree then `voice-provision.mjs`; ticket note in Brittany's words, her questions on her ticket (never to Alex in
+chat); our follow-ups go to Done, hers stay Shipped; manifest is 203,866 of 205,000 - trim before adding.
+
+**Earlier (2026-10-13, 14:20Z):** `main` = `6a12629` (+ this handoff), deployed,
 `/health` 200, voice re-provisioned, tree clean, only the primary worktree. **Brittany answered all four needs_input
 questions this morning** and two builds shipped from them, one deploy each, each reviewed + fix round: `4910db0`
 (3 commits) **plan cadence, part 1** (`featreq-acdd0c84`, still needs_input): nullable `subscription_plans.cadence`
