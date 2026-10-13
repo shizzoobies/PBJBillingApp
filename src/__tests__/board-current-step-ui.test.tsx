@@ -32,6 +32,7 @@ const STEP_DUE = addDays(TODAY, 5)
 
 const ACME: Client = { id: 'client-acme', name: 'Acme Books', assignedBookkeeperIds: [] } as unknown as Client
 const ZED: Client = { id: 'client-zed', name: 'Zed Works', assignedBookkeeperIds: [] } as unknown as Client
+const BOLT: Client = { id: 'client-bolt', name: 'Bolt Co', assignedBookkeeperIds: [] } as unknown as Client
 const CATEGORIES = [{ id: 'cat-books', name: 'Bookkeeping', sortOrder: 0 }]
 
 const stage = (id: string, name: string) => ({
@@ -124,7 +125,39 @@ const INTAKE = {
   items: [],
 } as unknown as Checklist
 
-const CHECKLISTS = [CLOSE, PAYROLL, INTAKE]
+// Bolt Co: the Overdue / Waiting precedence and the all-steps-done shape.
+const LATE = {
+  ...base,
+  id: 'cl-late',
+  clientId: BOLT.id,
+  title: 'Sales tax filing',
+  dueDate: addDays(TODAY, 6),
+  items: [{ id: 'l', label: 'File the return', done: false, dueDate: addDays(TODAY, -2) }],
+} as unknown as Checklist
+
+const STUCK = {
+  ...base,
+  id: 'cl-stuck',
+  clientId: BOLT.id,
+  title: 'Year-end payroll',
+  dueDate: addDays(TODAY, 6),
+  items: [
+    { id: 's', label: 'Issue W-2s', done: false, dueDate: addDays(TODAY, -3), waiting: true, waitingOn: 'client approval' },
+  ],
+} as unknown as Checklist
+
+// Stored flag open, but every sub-step is done: the roll-up reads it done, so
+// the checklist stays on the board with no open step (a stage not yet advanced).
+const DONE_STAGE = {
+  ...base,
+  id: 'cl-done-stage',
+  clientId: BOLT.id,
+  title: 'Quarterly filing',
+  dueDate: addDays(TODAY, 6),
+  items: [{ id: 'q', label: 'Submit 941', done: false, subItems: [{ id: 'q1', label: 'Sign', done: true }] }],
+} as unknown as Checklist
+
+const CHECKLISTS = [CLOSE, PAYROLL, INTAKE, LATE, STUCK, DONE_STAGE]
 
 /** The same "Mon D" the board's Due chips use. */
 function shortMonthDay(iso: string) {
@@ -135,7 +168,7 @@ function shortMonthDay(iso: string) {
 beforeEach(() => {
   window.localStorage.clear()
   const data = {
-    clients: [ACME, ZED],
+    clients: [ACME, ZED, BOLT],
     employees: [
       { id: OWNER, name: 'Owner', role: 'Owner' },
       { id: AVERY, name: 'Avery Stone', role: 'Bookkeeper' },
@@ -155,8 +188,8 @@ beforeEach(() => {
     effectiveUser: { id: OWNER, role: 'owner' },
     sessionUser: { id: OWNER, role: 'owner' },
     visibleChecklists: checklistsVisibleTo(CHECKLISTS, { viewerId: OWNER, isOwner: true }),
-    visibleClients: [ACME, ZED],
-    visibleClientIds: new Set([ACME.id, ZED.id]),
+    visibleClients: [ACME, ZED, BOLT],
+    visibleClientIds: new Set([ACME.id, ZED.id, BOLT.id]),
     serviceCategories: CATEGORIES,
     checklistSkips: [],
     skipChecklistOccurrence: vi.fn(),
@@ -242,7 +275,36 @@ describe('Board: Current step only (default ON)', () => {
     renderBoard()
     const payroll = stepBlock('Payroll setup')
     const activeLine = within(payroll).getByText('Collect W-4s').closest('.board-step-active') as HTMLElement
-    expect(within(activeLine).getByText('Waiting - client paperwork')).toHaveClass('board-chip-pending')
+    // The same em dash as the checklist's StatusChip, so one card reads one way.
+    expect(within(activeLine).getByText('Waiting — client paperwork')).toHaveClass('board-chip-pending')
+  })
+
+  it('a past-due current step shows the red Overdue chip on its line', () => {
+    renderBoard()
+    const activeLine = within(stepBlock('Sales tax filing'))
+      .getByText('File the return')
+      .closest('.board-step-active') as HTMLElement
+    expect(within(activeLine).getByText('Overdue')).toHaveClass('board-chip-overdue')
+    expect(activeLine.querySelector('.board-chip-pending')).toBeNull()
+  })
+
+  it('a current step that is both waiting and past due shows Waiting, not Overdue', () => {
+    renderBoard()
+    const activeLine = within(stepBlock('Year-end payroll'))
+      .getByText('Issue W-2s')
+      .closest('.board-step-active') as HTMLElement
+    expect(within(activeLine).getByText('Waiting — client approval')).toHaveClass('board-chip-pending')
+    expect(activeLine.querySelector('.board-chip-overdue')).toBeNull()
+    expect(activeLine).not.toHaveTextContent('Overdue')
+  })
+
+  it('a checklist with steps but none open reads "All steps done"', () => {
+    renderBoard()
+    const block = stepBlock('Quarterly filing')
+    expect(within(block).getByText('All steps done')).toHaveClass('board-step-empty')
+    expect(block.querySelector('.board-step-active')).toBeNull()
+    expect(block).not.toHaveTextContent('No steps yet')
+    expect(stepBlock('Engagement intake')).not.toHaveTextContent('All steps done')
   })
 
   it('shows "No steps yet" on an empty checklist and "Then: Step N+2 - <stage>" when the current step is the last open one', () => {

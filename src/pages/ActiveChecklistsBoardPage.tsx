@@ -801,7 +801,7 @@ function BoardStepLineView({ line, active }: { line: BoardStepLine; active: bool
       {line.assigneeName ? <span className="board-step-who">{line.assigneeName}</span> : null}
       {active && line.waiting ? (
         <span className="board-chip board-chip-pending" title={line.waiting}>
-          Waiting - {line.waiting}
+          Waiting — {line.waiting}
         </span>
       ) : active && line.overdue ? (
         <span className="board-chip board-chip-overdue">Overdue</span>
@@ -822,6 +822,10 @@ function BoardStepBlock({ checklist, summary }: { checklist: Checklist; summary:
       <strong className="board-step-title">{checklist.title}</strong>
       {summary.stageLabel ? <span className="board-step-stage">{summary.stageLabel}</span> : null}
       {summary.noSteps ? <span className="board-step-empty">No steps yet</span> : null}
+      {/* Steps exist but none is open (a stage that has not advanced yet). */}
+      {!summary.noSteps && !summary.active ? (
+        <span className="board-step-empty board-step-all-done">All steps done</span>
+      ) : null}
       {summary.active ? <BoardStepLineView line={summary.active} active /> : null}
       {summary.coming.map((line) => (
         <BoardStepLineView key={line.itemId} line={line} active={false} />
