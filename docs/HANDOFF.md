@@ -25,7 +25,24 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-13, ~15:00Z - READ THIS FIRST; Alex cleared context here):** `main` = `ed4ea75` (+ this
+**State right now (2026-10-13, ~15:50Z - READ THIS FIRST):** `main` = `f591269` (+ this handoff), deployed,
+`/health` 200, voice re-provisioned, tree clean, only the primary worktree, nothing in flight. Items 1 and 2 of the
+plan below are LIVE, one deploy each, each with an independent Sonnet review (Fable orchestrating, Opus 5.5 implementers):
+`6703fc5` (3 commits) **Processing tab** on the invoice month run (`featreq-3f1d63b6` part a; ticket still needs_input
+for part b): processing invoices have their own tab between Sent and Past due, row reads "Bank payment clearing since
+<date>" from the autopay attempt (processing/succeeded) else the newest ok `kind:'ack'` log entry, and NO date once a
+payment-failure entry follows that ack (the ack is only ever sent once per invoice); nine test files re-pointed.
+`f591269` (4 commits) **Board: current step only** (`featreq-338b1507`, Shipped - built on the two defaults, she was
+told): `boardStepSummary` in `src/lib/activeBoard.ts` (shared `waitingReasonFor` helper), "Current step only" checkbox
+default ON persisted at `pbj.boardStepView.v1.<userId>`, rows open, "Step N of M - stage", active step bold + due +
+assignee + Waiting/Overdue chip, two dimmed coming steps, "Then: Step N - stage", "No steps yet", "All steps done",
+Open checklist link; OFF = old view. **Also fixed in that ship:** the board's `shortDate` had shown the PREVIOUS month on
+every Due / Overdue chip since `cd96a80` (1-based MONTH_NAMES indexed with month-1). Manifest 204,444 of 205,000 - TRIM
+FIRST. Verify flake seen once: `engagement-editor.test.tsx` superseding-letter case timed out at 10 s under full-suite
+load and passed alone and on the rerun; the ECONNREFUSED :3000 lines in a verify log are pre-existing jsdom fetch noise.
+**NEXT:** item 3 (Send reminder) the moment Brittany answers her four questions on `featreq-3f1d63b6`; then item 4 below.
+
+**Earlier (2026-10-13, ~15:00Z; Alex cleared context here):** `main` = `ed4ea75` (+ this
 handoff), deployed, `/health` 200, voice re-provisioned, tree clean, only the primary worktree, nothing in flight.
 Today so far: manifest trim `7f91ae8`; plan cadence part 1 `4910db0`; superseding-replaces-amendments `6a12629`
 (the 14:20Z paragraph below has the detail). **THE PLAN AGREED WITH ALEX FOR THE NEXT SESSION, in order:**
