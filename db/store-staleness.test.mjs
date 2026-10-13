@@ -91,6 +91,7 @@ import { buildCardCheckoutLineItems, buildCheckoutLineItems } from '../lib/strip
 import { paymentAmountMismatch, unhandledAmountMismatch } from '../lib/payment-amount-mismatch.js'
 import { latestInvoiceSend, unresolvedPaymentFailure } from '../lib/invoice-overdue.js'
 import { buildInvoiceEmail } from '../lib/invoice-email.js'
+import { remindInvoice } from '../lib/invoice-reminder.js'
 import { buildInvoicePdf } from '../lib/invoice-pdf.js'
 import {
   LAST_RECURRING_STEP_MESSAGE,
@@ -52358,5 +52359,182 @@ describe('engagements: a superseding letter replaces the open amendments (Postgr
       expect(settled.filter((entry) => entry.status === 'fulfilled')).toHaveLength(1)
       expect(settled.find((entry) => entry.status === 'rejected').reason).toBeInstanceOf(EngagementStateError)
     })
+  })
+})
+
+/**
+ * "Send reminder" (featreq-3f1d63b6) end to end on the FILE backend: the real
+ * store, a recording mail sender, no Stripe. The reminder is a tagged email-log
+ * entry, so it must never touch the sent date, the status, the due date or the
+ * pay token, and a second one the same firm day is refused.
+ */
+describe('Send reminder (file backend)', () => {
+  const SENT_AT = '2026-10-01T14:00:00.000Z'
+  const seed = async (overrides = {}) => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.clients = [{ id: 'c1', name: 'Acme', email: 'ann@acme.test', paymentTerms: '' }]
+    data.invoices = [
+      {
+        id: 'inv-remind',
+        clientId: 'c1',
+        period: '2026-09',
+        kind: 'monthly',
+        number: 'INV-2026-09-004',
+        status: 'sent',
+        lineItems: [{ kind: 'plan', label: 'Monthly service', detail: '', amount: 945 }],
+        subtotal: 945,
+        total: 945,
+        dueDate: '2026-10-31',
+        blurb: '',
+        scopeFlags: [],
+        sentAt: SENT_AT,
+        paidAt: null,
+        paymentMethod: null,
+        stripeCheckoutSessionId: 'cs_ach_sent',
+        stripeCardSessionId: null,
+        payToken: 'tok_from_the_send',
+        emailLog: [{ at: SENT_AT, to: ['ann@acme.test'], subject: 'Invoice INV-2026-09-004', ok: true, total: 945 }],
+        createdAt: '2026-09-30T12:00:00.000Z',
+        updatedAt: '2026-10-01T14:00:00.000Z',
+        ...overrides,
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const stored = async () =>
+    JSON.parse(await readFile(localDataPath, 'utf8')).invoices.find((invoice) => invoice.id === 'inv-remind')
+  const mailer = (result = { ok: true, error: null, providerId: 're_rem_1', status: 200 }) => {
+    const sent = []
+    return {
+      sent,
+      sendEmail: async (message) => {
+        sent.push(message)
+        return result
+      },
+    }
+  }
+  const remind = (sendEmail, now = new Date()) =>
+    remindInvoice(
+      { invoiceId: 'inv-remind', now, appUrl: 'https://app.pbjsa.com', stripeConfigured: true, userId: 'u-owner' },
+      { store, sendEmail },
+    )
+
+  it('logs a reminder entry, reuses the SAME token, and changes nothing else', async () => {
+    await seed()
+    const before = await stored()
+    const mail = mailer()
+
+    const result = await remind(mail.sendEmail)
+
+    expect(result.status).toBe(200)
+    expect(mail.sent).toHaveLength(1)
+    expect(mail.sent[0].html).toContain('https://app.pbjsa.com/pay/tok_from_the_send')
+    expect(mail.sent[0].kind).toBe('reminder')
+    const after = await stored()
+    // The same token: no new one minted, nothing at Stripe moved.
+    expect(after.payToken).toBe('tok_from_the_send')
+    expect(after.stripeCheckoutSessionId).toBe('cs_ach_sent')
+    expect(after.stripeCardSessionId).toBeNull()
+    // Never a send.
+    expect(after.sentAt).toBe(before.sentAt)
+    expect(after.status).toBe('sent')
+    expect(after.dueDate).toBe('2026-10-31')
+    expect(after.emailLog).toHaveLength(2)
+    expect(after.emailLog[1]).toMatchObject({
+      kind: 'reminder',
+      ok: true,
+      to: ['ann@acme.test'],
+      subject: 'Reminder: invoice INV-2026-09-004 from PB&J Strategic Accounting',
+      providerId: 're_rem_1',
+      total: 945,
+    })
+    expect(latestInvoiceSend(after.emailLog)).toEqual(before.emailLog[0])
+    expect(result.body.invoice.emailLog).toHaveLength(2)
+  })
+
+  it('refuses a second reminder the same firm day and writes nothing', async () => {
+    await seed()
+    const mail = mailer()
+    expect((await remind(mail.sendEmail)).status).toBe(200)
+
+    const again = await remind(mail.sendEmail)
+    expect(again.status).toBe(409)
+    expect(again.body.error).toBe('reminded_today')
+    expect(mail.sent).toHaveLength(1)
+    expect((await stored()).emailLog).toHaveLength(2)
+  })
+
+  it('logs a failed provider send as ok false with its error, and a retry the same day is still allowed', async () => {
+    await seed()
+    const before = await stored()
+    const failing = mailer({ ok: false, error: 'domain is not verified', providerId: null, status: 403 })
+
+    const result = await remind(failing.sendEmail)
+
+    expect(result.status).toBe(502)
+    const after = await stored()
+    expect(after.emailLog.at(-1)).toMatchObject({ kind: 'reminder', ok: false, error: 'domain is not verified' })
+    expect(after.sentAt).toBe(before.sentAt)
+    expect(after.status).toBe('sent')
+    expect(after.dueDate).toBe(before.dueDate)
+    expect(after.payToken).toBe(before.payToken)
+
+    const retry = mailer()
+    expect((await remind(retry.sendEmail)).status).toBe(200)
+  })
+
+  it('never counts as the first send: a sent invoice with no sent date keeps its provisional due date', async () => {
+    await seed({ sentAt: null, emailLog: [], dueDate: '2026-10-20' })
+    const mail = mailer()
+
+    expect((await remind(mail.sendEmail)).status).toBe(200)
+
+    const after = await stored()
+    expect(after.sentAt).toBeNull()
+    expect(after.dueDate).toBe('2026-10-20')
+    expect(after.status).toBe('sent')
+    expect(latestInvoiceSend(after.emailLog)).toBeNull()
+  })
+
+  it('mints a first token for an invoice that predates tokens, and keeps it', async () => {
+    await seed({ payToken: null })
+    const mail = mailer()
+
+    expect((await remind(mail.sendEmail)).status).toBe(200)
+
+    const token = (await stored()).payToken
+    expect(token).toMatch(/^[A-Za-z0-9_-]{20,64}$/)
+    expect(mail.sent[0].html).toContain(`/pay/${token}`)
+  })
+
+  it('leaves a Payment failed invoice in Payment failed', async () => {
+    await seed({
+      emailLog: [
+        { at: SENT_AT, to: ['ann@acme.test'], subject: 'Invoice', ok: true, total: 945 },
+        { kind: 'payment', event: 'failed', at: '2026-10-05T12:00:00.000Z', paymentIntentId: 'pi_1' },
+      ],
+    })
+    expect((await remind(mailer().sendEmail)).status).toBe(200)
+    expect(unresolvedPaymentFailure(await stored())).not.toBeNull()
+  })
+})
+
+describe('Send reminder (Postgres statement)', () => {
+  it('appends the reminder entry without marking the invoice sent', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      kind: 'reminder',
+      to: ['ann@acme.com'],
+      subject: 'Reminder: invoice INV-2026-08-001 from PB&J Strategic Accounting',
+      ok: true,
+      providerId: 're_rem_1',
+      stamp: '2026-10-13T14:00:00.000Z',
+    })
+
+    const update = fake.matching(/^update invoices/i)[0]
+    expect(JSON.parse(update.params[1])[0]).toMatchObject({ kind: 'reminder', ok: true, providerId: 're_rem_1' })
+    // $3 is "this marks the invoice sent": false for a reminder, so sent_at,
+    // status and due_date all keep the row's own values.
+    expect(update.params[2]).toBe(false)
   })
 })
