@@ -13251,6 +13251,48 @@ tr.is-inactive-client .client-name-link {
   margin: 0;
 }
 
+/* Send reminder's confirm, and Remind all past due's (featreq-3f1d63b6): the
+   same "asked right here" panel, listing who each reminder goes to. */
+.invoice-run-remind-confirm {
+  border-left: 2px solid color-mix(in srgb, var(--gold, #d39b2a) 55%, transparent);
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  padding-left: 10px;
+}
+
+.invoice-run-remind-confirm ul {
+  font-size: 12.5px;
+  margin: 0;
+  overflow-wrap: anywhere;
+  padding-left: 18px;
+}
+
+.invoice-run-remind-prompt {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+
+.invoice-run-remind-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.invoice-run-remind-all-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+/* The newest payment reminder that left. A record, as quiet as the send line. */
+.invoice-run-reminded {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+
 .invoice-run-editor-footer {
   align-items: center;
   display: flex;
