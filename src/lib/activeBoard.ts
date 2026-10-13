@@ -16,7 +16,7 @@
  */
 
 import { isWaitingOnOpen, type WaitingOnLike } from '../../lib/waiting-on-state.js'
-import { isChecklistItemDone, stepIsWaiting } from './utils'
+import { isChecklistItemDone, stageNameFor, stepIsWaiting } from './utils'
 import type { Checklist, ChecklistTemplate, ServiceCategory, TemplateStage } from './types'
 
 export type PeriodType = 'week' | 'month' | 'quarter'
@@ -185,6 +185,30 @@ export type BoardChecklistStatus =
   | { kind: 'overdue'; due: string }
   | { kind: 'due'; due: string }
 
+type WaitingNode = {
+  waiting?: boolean
+  waitingOn?: string
+  waitingOns?: (WaitingOnLike & { blockerId: string; note?: string })[]
+}
+
+/**
+ * The human "why" for one waiting step, or null when the step is not waiting.
+ * `stepIsWaiting` is the one definition of "waiting": a verified entry is a
+ * closed-out record, not a block, so it must not read as waiting. Precedence:
+ * the free-text waiting note, else the first open structured blocker's note,
+ * else "waiting on <name>", else plain "waiting".
+ */
+function waitingReasonFor(node: WaitingNode, employeeNameById: Record<string, string>): string | null {
+  if (!stepIsWaiting({ waiting: node.waiting, waitingOns: node.waitingOns })) return null
+  const nameOf = (id: string) => employeeNameById[id] ?? 'a teammate'
+  const structured = (node.waitingOns ?? []).filter(isWaitingOnOpen)
+  return (
+    (node.waitingOn ?? '').trim() ||
+    (structured[0] ? (structured[0].note ?? '').trim() || `waiting on ${nameOf(structured[0].blockerId)}` : '') ||
+    'waiting'
+  )
+}
+
 export function boardChecklistStatus(
   checklist: Checklist,
   today: string,
@@ -193,21 +217,14 @@ export function boardChecklistStatus(
   const reasons: string[] = []
   let waitingCount = 0
 
-  const nameOf = (id: string) => employeeNameById[id] ?? 'a teammate'
   const addWaiting = (
     waiting: boolean | undefined,
     waitingOn: string | undefined,
-    waitingOns: (WaitingOnLike & { blockerId: string; note?: string })[] | undefined,
+    waitingOns: WaitingNode['waitingOns'],
   ) => {
-    // `stepIsWaiting` is the one definition of "waiting": a verified entry is a
-    // closed-out record, not a block, so it must not hold the chip on Pending.
-    if (!stepIsWaiting({ waiting, waitingOns })) return
-    const structured = (waitingOns ?? []).filter(isWaitingOnOpen)
+    const reason = waitingReasonFor({ waiting, waitingOn, waitingOns }, employeeNameById)
+    if (reason === null) return
     waitingCount += 1
-    const reason =
-      (waitingOn ?? '').trim() ||
-      (structured[0] ? (structured[0].note ?? '').trim() || `waiting on ${nameOf(structured[0].blockerId)}` : '') ||
-      'waiting'
     reasons.push(reason)
   }
 
@@ -230,6 +247,102 @@ export function boardChecklistStatus(
   if (waitingCount > 0) return { kind: 'pending', reasons, waitingCount }
   const due = effectiveDue(checklist)
   return due < today ? { kind: 'overdue', due } : { kind: 'due', due }
+}
+
+/** One step line of the Board's "Current step only" view. */
+export type BoardStepLine = {
+  itemId: string
+  /** The step's label, as the checklist card shows it. */
+  label: string
+  /** The step's due date, else the checklist's (yyyy-mm-dd), else null. */
+  due: string | null
+  /** The step's assignee, else the checklist's, else null. */
+  assigneeId: string | null
+  /** The assignee's name; null when unknown. */
+  assigneeName: string | null
+  /** Why the step is waiting (the same reason the Waiting chip gives); null when it is not. */
+  waiting: string | null
+  /** `due` is before today (string compare, both yyyy-mm-dd). */
+  overdue: boolean
+}
+
+/** Where one checklist is: its current step, the next few, and its stage. */
+export type BoardStepSummary = {
+  /** The first OPEN step in saved order; null when there is none. */
+  active: BoardStepLine | null
+  /** Up to `coming` further open steps, in saved order, after `active`. */
+  coming: BoardStepLine[]
+  /** "Step N of M - <stage>" for one stage of a multi-stage case; null otherwise. */
+  stageLabel: string | null
+  /** The next stage's name when `active` is the last open step of a stage that is not the last; else null. */
+  nextStageName: string | null
+  /** The checklist has no steps at all. */
+  noSteps: boolean
+}
+
+/**
+ * The Board's "Current step only" reading of a checklist (featreq-338b1507:
+ * "see what step we are on for each client"). "Open" is the roll-up
+ * (`isChecklistItemDone`), the rule the Waiting count and the card use. Saved
+ * order is the stored order of `checklist.items`: the card shows open steps in
+ * exactly that order (it only moves done steps below them), so the first open
+ * step here is the first unchecked step on the card.
+ */
+export function boardStepSummary(
+  checklist: Checklist,
+  templates: readonly ChecklistTemplate[],
+  today: string,
+  employeeNameById: Record<string, string> = {},
+  coming = 2,
+): BoardStepSummary {
+  const items = checklist.items ?? []
+  const openItems = items.filter((item) => !isChecklistItemDone(item))
+
+  const lineFor = (item: (typeof items)[number]): BoardStepLine => {
+    const due = item.dueDate || checklist.dueDate || null
+    const assigneeId = item.assigneeId || checklist.assigneeId || null
+    // The step's own wait first, else the first waiting open sub-step beneath
+    // it: either way the step cannot move, and the checklist chip says Waiting.
+    let waiting = waitingReasonFor(item, employeeNameById)
+    for (const sub of item.subItems ?? []) {
+      if (waiting !== null) break
+      if (isChecklistItemDone(sub)) continue
+      waiting = waitingReasonFor(sub, employeeNameById)
+      for (const subSub of sub.subItems ?? []) {
+        if (waiting !== null) break
+        if (isChecklistItemDone(subSub)) continue
+        waiting = waitingReasonFor({ waitingOns: subSub.waitingOns }, employeeNameById)
+      }
+    }
+    return {
+      itemId: item.id,
+      label: item.label,
+      due,
+      assigneeId,
+      assigneeName: assigneeId ? (employeeNameById[assigneeId] ?? null) : null,
+      waiting,
+      overdue: due !== null && due < today,
+    }
+  }
+
+  const active = openItems[0] ? lineFor(openItems[0]) : null
+  const comingLines = openItems.slice(1, 1 + Math.max(0, coming)).map(lineFor)
+
+  let stageLabel: string | null = null
+  let nextStageName: string | null = null
+  const stageIndex = checklist.stageIndex
+  if (checklist.templateId && typeof stageIndex === 'number') {
+    const stages = templates.find((template) => template.id === checklist.templateId)?.stages ?? []
+    // A one-stage recipe is not a staged case: "Step 1 of 1" would be noise.
+    if (stages.length > 1 && stageIndex >= 0 && stageIndex < stages.length) {
+      const name = stageNameFor(templates as ChecklistTemplate[], checklist)
+      stageLabel = `Step ${stageIndex + 1} of ${stages.length}${name ? ` - ${name}` : ''}`
+      const next = stages[stageIndex + 1]
+      if (next && openItems.length === 1) nextStageName = next.name?.trim() || null
+    }
+  }
+
+  return { active, coming: comingLines, stageLabel, nextStageName, noSteps: items.length === 0 }
 }
 
 export function buildActiveBoard({
