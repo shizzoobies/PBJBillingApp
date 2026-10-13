@@ -10292,6 +10292,58 @@ button.repeating-task-toggle-pill {
   opacity: 0.85;
 }
 
+/* "Current step only": the row is always open, so its head is not a button. */
+.board-client-head,
+.board-client-head:hover {
+  cursor: default;
+  background: transparent;
+}
+
+/* "Current step only": one checklist's stage, current step and next steps. */
+.board-step-block {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+}
+
+.board-step-stage,
+.board-step-next,
+.board-step-empty {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.board-step-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.board-step-active {
+  font-weight: 650;
+}
+
+.board-step-due,
+.board-step-who {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.board-step-coming {
+  opacity: 0.6;
+}
+
+.board-step-open {
+  align-self: flex-start;
+  font-size: 0.78rem;
+}
+
 /* Owner-only column manager. */
 .manage-columns {
   border: 1px solid var(--line);

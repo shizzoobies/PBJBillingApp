@@ -1,11 +1,15 @@
 import { ChevronDown, ChevronRight, Filter, GripVertical, Plus, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import {
   boardChecklistStatus,
+  boardStepSummary,
   buildActiveBoard,
   UNCATEGORIZED_ID,
   type BoardChecklistStatus,
   type BoardColumn,
+  type BoardStepLine,
+  type BoardStepSummary,
 } from '../lib/activeBoard'
 import { useAppContext } from '../AppContext'
 import { inactiveClientIdSet } from '../lib/clientLifecycle'
@@ -19,6 +23,32 @@ import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
 import { ChecklistCard } from './ChecklistsPage'
 import { localDateOnly, MONTH_NAMES, stageNameFor } from '../lib/utils'
 import type { Checklist, ServiceCategory } from '../lib/types'
+
+// The Board's "Current step only" choice is a per-user UI preference, so it
+// lives in localStorage keyed by user id (the Report period's pattern in
+// App.tsx), never in the workspace data. v1 schema: { currentStepOnly }.
+const STEP_VIEW_KEY_PREFIX = 'pbj.boardStepView.v1.'
+
+/** The stored choice; ON when absent or when storage is unusable. */
+function readStoredCurrentStepOnly(userId: string): boolean {
+  try {
+    const raw = localStorage.getItem(`${STEP_VIEW_KEY_PREFIX}${userId}`)
+    if (!raw) return true
+    const parsed = JSON.parse(raw) as { currentStepOnly?: unknown } | null
+    return typeof parsed?.currentStepOnly === 'boolean' ? parsed.currentStepOnly : true
+  } catch {
+    // malformed JSON or unavailable storage - fall back to the default.
+    return true
+  }
+}
+
+function writeStoredCurrentStepOnly(userId: string, currentStepOnly: boolean) {
+  try {
+    localStorage.setItem(`${STEP_VIEW_KEY_PREFIX}${userId}`, JSON.stringify({ currentStepOnly }))
+  } catch {
+    // ignore storage failures (private mode / quota)
+  }
+}
 
 /**
  * The Active Checklists board: one column per service category (Monthly
@@ -50,6 +80,7 @@ export function ActiveChecklistsBoardPage() {
     role,
     activeEmployeeId,
     effectiveUser,
+    sessionUser,
     reportPeriod,
     setReportPeriod,
   } = ctx
@@ -70,6 +101,20 @@ export function ActiveChecklistsBoardPage() {
   // Team-member filter: empty = everyone; otherwise only checklists assigned
   // to the selected member(s).
   const [assigneeFilter, setAssigneeFilter] = useState<string[]>([])
+  // featreq-338b1507: "Current step only" - ON by default, remembered per
+  // signed-in user on this device (like the Report period). Read again when the
+  // user changes, without an effect: the stored pair says whose choice it is.
+  const stepViewUserId = sessionUser?.id ?? activeEmployeeId
+  const [stepView, setStepView] = useState(() => ({
+    userId: stepViewUserId,
+    currentStepOnly: readStoredCurrentStepOnly(stepViewUserId),
+  }))
+  const currentStepOnly =
+    stepView.userId === stepViewUserId ? stepView.currentStepOnly : readStoredCurrentStepOnly(stepViewUserId)
+  const setCurrentStepOnly = (next: boolean) => {
+    setStepView({ userId: stepViewUserId, currentStepOnly: next })
+    writeStoredCurrentStepOnly(stepViewUserId, next)
+  }
 
   const today = localDateOnly()
 
@@ -220,27 +265,48 @@ export function ActiveChecklistsBoardPage() {
 
   const totalOpen = board.columns.reduce((sum, col) => sum + col.openClientCount, 0)
 
+  // Where each real checklist on the board is (its current step and the next
+  // two), for the "Current step only" view and its search. Ghosts have none.
+  const stepSummaryById = useMemo(() => {
+    const byId = new Map<string, BoardStepSummary>()
+    if (!currentStepOnly) return byId
+    for (const col of board.columns) {
+      for (const clientRow of col.clients) {
+        for (const checklist of clientRow.checklists) {
+          if (checklist.projected) continue
+          byId.set(
+            checklist.id,
+            boardStepSummary(checklist, data.checklistTemplates, today, employeeNameById),
+          )
+        }
+      }
+    }
+    return byId
+  }, [currentStepOnly, board.columns, data.checklistTemplates, today, employeeNameById])
+
   const filteredColumns = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return board.columns
     // featreq-60f24838: a typed search must not surface a retired client's row.
     const inactiveIds = inactiveClientIdSet(data.clients)
+    // In "Current step only" the search also finds a checklist by the step it
+    // is on (stepSummaryById is empty when the view is off).
+    const checklistMatches = (c: Checklist) =>
+      c.title.toLowerCase().includes(q) ||
+      (stepSummaryById.get(c.id)?.active?.label ?? '').toLowerCase().includes(q)
     return board.columns.map((col) => {
       const filteredClients = col.clients.filter((clientRow) => {
         if (inactiveIds.has(clientRow.clientId)) return false
         const nameMatch = clientRow.name.toLowerCase().includes(q)
-        const titleMatch = clientRow.checklists.some((c) =>
-          c.title.toLowerCase().includes(q),
-        )
+        const titleMatch = clientRow.checklists.some(checklistMatches)
         return nameMatch || titleMatch
       }).map((clientRow) => {
-        const q2 = query.trim().toLowerCase()
-        const nameMatch = clientRow.name.toLowerCase().includes(q2)
+        const nameMatch = clientRow.name.toLowerCase().includes(q)
         return {
           ...clientRow,
           checklists: nameMatch
             ? clientRow.checklists
-            : clientRow.checklists.filter((c) => c.title.toLowerCase().includes(q2)),
+            : clientRow.checklists.filter(checklistMatches),
         }
       })
       return {
@@ -249,7 +315,7 @@ export function ActiveChecklistsBoardPage() {
         openClientCount: filteredClients.length,
       }
     })
-  }, [board.columns, query, data.clients])
+  }, [board.columns, query, data.clients, stepSummaryById])
 
   // The notes attached to the cards on the board, fetched ONCE for all of them
   // (a projected ghost has no id the server knows). Taken from the board BEFORE
@@ -351,6 +417,17 @@ export function ActiveChecklistsBoardPage() {
               />
               Show upcoming
             </label>
+            <label
+              className="upcoming-toggle"
+              title="Show each checklist's current step and the next two instead of the whole checklist."
+            >
+              <input
+                type="checkbox"
+                checked={currentStepOnly}
+                onChange={(event) => setCurrentStepOnly(event.target.checked)}
+              />
+              Current step only
+            </label>
             {teamMemberIds.length > 0 ? (
               <label
                 className="upcoming-toggle"
@@ -398,6 +475,8 @@ export function ActiveChecklistsBoardPage() {
                 renderCard={renderCard}
                 statusFor={statusFor}
                 teamTagFor={teamTagFor}
+                currentStepOnly={currentStepOnly}
+                stepSummaryFor={(checklist) => stepSummaryById.get(checklist.id) ?? null}
               />
             ))}
           </div>
@@ -531,11 +610,11 @@ function BoardFilter({
   )
 }
 
-/** "Jul 28" from a yyyy-mm-dd string, for the due/overdue chips. */
+/** "Jul 28" from a yyyy-mm-dd string, for the due/overdue chips. MONTH_NAMES is 1-based (index 0 unused). */
 function shortDate(iso: string): string {
   const month = Number(iso.slice(5, 7))
   const day = Number(iso.slice(8, 10))
-  return `${(MONTH_NAMES[month - 1] ?? '').slice(0, 3)} ${day}`
+  return `${(MONTH_NAMES[month] ?? '').slice(0, 3)} ${day}`
 }
 
 /** The due / overdue / waiting chip itself; reason text only for waiting (the same word the card's badge and the Waiting filter use). */
@@ -561,12 +640,17 @@ function BoardColumnView({
   renderCard,
   statusFor,
   teamTagFor,
+  currentStepOnly,
+  stepSummaryFor,
 }: {
   column: BoardColumn
   renderCard: (checklist: Checklist) => ReactNode
   statusFor: (checklist: Checklist) => BoardChecklistStatus
   /** Teammate's name when this card belongs to someone under the viewer. */
   teamTagFor: (checklist: Checklist) => string | null
+  currentStepOnly: boolean
+  /** Where a real checklist is; null for a projected ghost. */
+  stepSummaryFor: (checklist: Checklist) => BoardStepSummary | null
 }) {
   return (
     <div className="board-column" data-uncategorized={column.id === UNCATEGORIZED_ID}>
@@ -586,6 +670,8 @@ function BoardColumnView({
               renderCard={renderCard}
               statusFor={statusFor}
               teamTagFor={teamTagFor}
+              currentStepOnly={currentStepOnly}
+              stepSummaryFor={stepSummaryFor}
             />
           ))
         )}
@@ -600,12 +686,16 @@ function BoardClientRow({
   renderCard,
   statusFor,
   teamTagFor,
+  currentStepOnly,
+  stepSummaryFor,
 }: {
   name: string
   checklists: Checklist[]
   renderCard: (checklist: Checklist) => ReactNode
   statusFor: (checklist: Checklist) => BoardChecklistStatus
   teamTagFor: (checklist: Checklist) => string | null
+  currentStepOnly: boolean
+  stepSummaryFor: (checklist: Checklist) => BoardStepSummary | null
 }) {
   const [open, setOpen] = useState(false)
   // Collapsed roll-up: how many of this client's checklists are blocked vs
@@ -613,6 +703,54 @@ function BoardClientRow({
   const statuses = checklists.map(statusFor)
   const pendingCount = statuses.filter((status) => status.kind === 'pending').length
   const overdueCount = statuses.filter((status) => status.kind === 'overdue').length
+  const rollUp = (
+    <>
+      <span className="board-client-name">{name}</span>
+      {pendingCount > 0 ? (
+        <span className="board-chip board-chip-pending">{pendingCount} waiting</span>
+      ) : null}
+      {overdueCount > 0 ? (
+        <span className="board-chip board-chip-overdue">{overdueCount} overdue</span>
+      ) : null}
+      <span className="board-client-count">{checklists.length}</span>
+    </>
+  )
+
+  // "Current step only": the row is always open and each checklist shows where
+  // it is instead of its whole card. Ghosts keep their Upcoming card.
+  if (currentStepOnly) {
+    return (
+      <div className="board-client">
+        <div className="board-client-toggle board-client-head">{rollUp}</div>
+        <div className="board-client-cards">
+          {checklists.map((checklist, index) => {
+            const teamTag = teamTagFor(checklist)
+            const summary = checklist.projected ? null : stepSummaryFor(checklist)
+            return (
+              <div
+                className="board-card-with-status"
+                data-team={teamTag ? 'true' : undefined}
+                key={checklist.id}
+              >
+                <div className="board-card-chips">
+                  <StatusChip status={statuses[index]} />
+                  {teamTag ? (
+                    <span className="board-chip board-chip-team">{teamTag}’s</span>
+                  ) : null}
+                </div>
+                {summary ? (
+                  <BoardStepBlock checklist={checklist} summary={summary} />
+                ) : (
+                  renderCard(checklist)
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="board-client">
       <button
@@ -622,14 +760,7 @@ function BoardClientRow({
         aria-expanded={open}
       >
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        <span className="board-client-name">{name}</span>
-        {pendingCount > 0 ? (
-          <span className="board-chip board-chip-pending">{pendingCount} waiting</span>
-        ) : null}
-        {overdueCount > 0 ? (
-          <span className="board-chip board-chip-overdue">{overdueCount} overdue</span>
-        ) : null}
-        <span className="board-client-count">{checklists.length}</span>
+        {rollUp}
       </button>
       {open ? (
         <div className="board-client-cards">
@@ -653,6 +784,56 @@ function BoardClientRow({
           })}
         </div>
       ) : null}
+    </div>
+  )
+}
+
+/** One step line: label, due date, who it is for, and a Waiting / Overdue chip. */
+function BoardStepLineView({ line, active }: { line: BoardStepLine; active: boolean }) {
+  return (
+    <div className={`board-step-line ${active ? 'board-step-active' : 'board-step-coming'}`}>
+      {active ? (
+        <strong className="board-step-label">{line.label}</strong>
+      ) : (
+        <span className="board-step-label">{line.label}</span>
+      )}
+      {line.due ? <span className="board-step-due">Due {shortDate(line.due)}</span> : null}
+      {line.assigneeName ? <span className="board-step-who">{line.assigneeName}</span> : null}
+      {active && line.waiting ? (
+        <span className="board-chip board-chip-pending" title={line.waiting}>
+          Waiting - {line.waiting}
+        </span>
+      ) : active && line.overdue ? (
+        <span className="board-chip board-chip-overdue">Overdue</span>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * "Current step only" (featreq-338b1507): where one checklist is - its stage on
+ * a staged case, its current step in bold, the next two dimmed, the next stage
+ * when this is the last open step - with a link to the full card.
+ */
+function BoardStepBlock({ checklist, summary }: { checklist: Checklist; summary: BoardStepSummary }) {
+  const stageIndex = checklist.stageIndex ?? 0
+  return (
+    <div className="board-step-block">
+      <strong className="board-step-title">{checklist.title}</strong>
+      {summary.stageLabel ? <span className="board-step-stage">{summary.stageLabel}</span> : null}
+      {summary.noSteps ? <span className="board-step-empty">No steps yet</span> : null}
+      {summary.active ? <BoardStepLineView line={summary.active} active /> : null}
+      {summary.coming.map((line) => (
+        <BoardStepLineView key={line.itemId} line={line} active={false} />
+      ))}
+      {summary.nextStageName ? (
+        <span className="board-step-next">
+          Then: Step {stageIndex + 2} - {summary.nextStageName}
+        </span>
+      ) : null}
+      <Link className="board-step-open" to={`/checklists?focus=${encodeURIComponent(checklist.id)}`}>
+        Open checklist
+      </Link>
     </div>
   )
 }

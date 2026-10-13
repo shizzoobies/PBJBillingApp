@@ -41,6 +41,9 @@ const WAITING_CLOSE = {
 } as unknown as Checklist
 
 beforeEach(() => {
+  // This pins the full-card view (collapsible rows), which is "Current step
+  // only" unticked; board-current-step-ui.test.tsx covers the default view.
+  window.localStorage.setItem(`pbj.boardStepView.v1.${OWNER}`, JSON.stringify({ currentStepOnly: false }))
   const data = {
     clients: [ACME],
     employees: [{ id: OWNER, name: 'Owner', role: 'Owner' }],
