@@ -25,7 +25,26 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
-**State right now (2026-10-12, 22:00Z - READ THIS FIRST):** `main` = `8c197b6` (+ this handoff), deployed, `/health` 200,
+**State right now (2026-10-13, 14:20Z - READ THIS FIRST):** `main` = `6a12629` (+ this handoff), deployed,
+`/health` 200, voice re-provisioned, tree clean, only the primary worktree. **Brittany answered all four needs_input
+questions this morning** and two builds shipped from them, one deploy each, each reviewed + fix round: `4910db0`
+(3 commits) **plan cadence, part 1** (`featreq-acdd0c84`, still needs_input): nullable `subscription_plans.cadence`
+(CHECK weekly|monthly|quarterly|annual|blueprint, look-first ALTER, no backfill; read-time fallback from the plan
+name suffix incl. "Annually" and en/em dashes; carried through the batched bulk save with the preserve rule; a
+"How often" select on the Plans page) - part 2 (the mapper that makes a client copy follow the plan, quarterly =
+specific months, existing copies untouched + a Re-sync button) WAITS on her two questions on that ticket
+(Jan/Apr/Jul/Oct vs fiscal year; every bundled checklist or only the named one); `6a12629` (2 commits)
+**superseding replaces amendments** (`featreq-e5ae8279`, Shipped): signing a superseding letter also marks the
+client's open amendments Superseded unless Keep in force is ticked (off by default), Restore on the card, the
+dialog refuses to sign until the amendment list has loaded; one question to her on the ticket (void a replaced
+signed amendment's retainer draft?). Also: `featreq-dc992522` Terms = keep, Done; `featreq-af5391e2` starter
+lines re-asked in plain words (needs_input). The manifest was trimmed first (`7f91ae8`, -1.5 KB, no facts) and
+is now 203,866 bytes. A process explainer for another project is at `docs/process/update-system-handoff.md`.
+**Pick up:** her answers on the two cadence questions -> build part 2 per the sizing on the ticket; her answer on
+starter lines; the retainer question; then the backlogs below. Still unexercised in production: engagements,
+credits, billing periods, autopay (switch unset).
+
+**Earlier (2026-10-12, 22:00Z):** `main` = `8c197b6` (+ this handoff), deployed, `/health` 200,
 voice re-provisioned, working tree clean, only the primary worktree exists, nothing is Planned in the tracker. **Session
 summary:** every stage of Brittany's 2026-10-10 workflow email is live (engagements: proposal -> Won/Closed-Lost ->
 Original/Amendment/Superseding letter -> client created at Mark as signed with plans/package/checklists/software/retainer
