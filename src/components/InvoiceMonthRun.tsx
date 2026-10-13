@@ -319,8 +319,19 @@ function reminderBlock(
   })
 }
 
-/** One line of the "Remind all past due" confirm. */
-type RemindAllLine = { invoice: PersistedInvoice; label: string; detail: string }
+/**
+ * One line of the "Remind all past due" confirm. `to` is the list it SHOWS, and
+ * exactly what is posted: the server refuses if any of it is no longer on file.
+ */
+type RemindAllLine = { invoice: PersistedInvoice; label: string; detail: string; to: string[] }
+
+/**
+ * Said for the rest of the session after a reminder that LEFT but could not be
+ * written to the invoice's log (`logged: false`): "Last reminded" and the
+ * once-a-day guard both read that log, so without this the button would come
+ * straight back and invite a second reminder the same day.
+ */
+const REMINDER_UNRECORDED = 'Sent, but not recorded - do not send again today'
 
 /**
  * What the owner can decide about one piece of ad hoc work, in the order the
@@ -801,6 +812,17 @@ export function InvoiceMonthRun({
     null,
   )
   const [remindAllBusy, setRemindAllBusy] = useState(false)
+  // Invoices whose reminder left this session but could not be logged
+  // (`logged: false`). Session-only on purpose: it stands in for the log entry
+  // that is missing, until a reload shows whatever the log now says.
+  const [unrecordedReminders, setUnrecordedReminders] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  )
+  const markReminderUnrecorded = useCallback(
+    (invoiceId: string) =>
+      setUnrecordedReminders((current) => new Set(current).add(invoiceId)),
+    [],
+  )
 
   const clientName = useCallback(
     (clientId: string) => clients.find((c) => c.id === clientId)?.name ?? 'Unknown client',
@@ -978,6 +1000,10 @@ export function InvoiceMonthRun({
   const changePeriod = useCallback(
     (next: string) => {
       if (next === period) return true
+      // "Remind all past due" is sending: the month stays put until it finishes,
+      // so its "Reminded N of M" is always said over the month it is about. The
+      // controls are disabled too; this also holds History's "Open in month run".
+      if (remindAllBusy) return false
       if (
         openDirty &&
         !window.confirm(
@@ -999,7 +1025,7 @@ export function InvoiceMonthRun({
       setActiveTabId('to-review')
       return true
     },
-    [period, openDirty],
+    [period, openDirty, remindAllBusy],
   )
 
   // Land on a month History asked for. Goes through the same guarded path the
@@ -1579,12 +1605,15 @@ export function InvoiceMonthRun({
         autopayAttempt: autopay.byInvoice[invoice.id] ?? null,
       })
       const recipients = recipientsFor(invoice.clientId)
-      if (code) {
-        skip.push({ invoice, label, detail: REMINDER_REFUSAL_TIPS[code] })
+      const none: string[] = []
+      if (unrecordedReminders.has(invoice.id)) {
+        skip.push({ invoice, label, detail: REMINDER_UNRECORDED, to: none })
+      } else if (code) {
+        skip.push({ invoice, label, detail: REMINDER_REFUSAL_TIPS[code], to: none })
       } else if (recipients.to.length === 0) {
-        skip.push({ invoice, label, detail: recipients.reason ?? 'No email address on file' })
+        skip.push({ invoice, label, detail: recipients.reason ?? 'No email address on file', to: none })
       } else {
-        send.push({ invoice, label, detail: recipients.to.join(', ') })
+        send.push({ invoice, label, detail: recipients.to.join(', '), to: recipients.to })
       }
     }
     setRemindAll({ send, skip })
@@ -1592,29 +1621,42 @@ export function InvoiceMonthRun({
 
   /**
    * Step two: the single-invoice route, ONE invoice at a time, in the order the
-   * confirm listed them. The first failure stops the run (a provider refusing
-   * one is likely to refuse the next) and the banner says how far it got; the
-   * server still decides every one of them, so a refusal it makes is a failure
-   * here too.
+   * confirm listed them, each posting the addresses its line SHOWED.
+   *
+   * A 409 is the server refusing that one invoice (paid since the confirm, a
+   * contact changed, reminded from another tab): it is listed as skipped, with
+   * the server's sentence, and the run CONTINUES. Anything else - a provider
+   * refusal (5xx) or no answer at all - stops the run, since the next one would
+   * most likely fail the same way, and the banner says how far it got. The month
+   * cannot change while this runs (`changePeriod`), so the tally always lands.
    */
   const runRemindAll = async () => {
     if (!remindAll) return
     const target = period
     const queue = remindAll.send
-    const skipped = remindAll.skip.length
+    const skippedBefore = remindAll.skip.length
     setRemindAllBusy(true)
     let done = 0
+    let unrecorded = 0
     let failure: string | null = null
+    const refused: string[] = []
     try {
       for (const line of queue) {
         try {
-          const result = await remindInvoiceRequest(line.invoice.id)
+          const result = await remindInvoiceRequest(line.invoice.id, line.to)
           done += 1
-          if (shownPeriod.current === target) mergeInvoice(result.invoice)
+          if (result.logged === false) {
+            unrecorded += 1
+            markReminderUnrecorded(line.invoice.id)
+          }
+          mergeInvoice(result.invoice)
         } catch (err) {
-          failure = `${line.invoice.number ?? clientName(line.invoice.clientId)}: ${
-            err instanceof Error ? err.message : 'Could not send the reminder.'
-          }`
+          const message = err instanceof Error ? err.message : 'Could not send the reminder.'
+          if (err instanceof ApiError && err.status === 409) {
+            refused.push(`${line.label}: ${message}`)
+            continue
+          }
+          failure = `${line.invoice.number ?? clientName(line.invoice.clientId)}: ${message}`
           break
         }
       }
@@ -1623,13 +1665,21 @@ export function InvoiceMonthRun({
       setRemindAll(null)
     }
     if (shownPeriod.current !== target) return
-    const tally = `Reminded ${done} of ${queue.length}.`
-    if (failure) {
-      setError(`${tally} Stopped at ${failure}`)
-      void reloadMonth()
-      return
+    const parts = [`Reminded ${done} of ${queue.length}.`]
+    if (failure) parts.push(`Stopped at ${failure}`)
+    if (refused.length > 0) {
+      parts.push(`Skipped ${refused.length} the server refused: ${refused.join(' ')}`)
     }
-    setNote(`${tally}${skipped > 0 ? ` ${skipped} skipped.` : ''}`)
+    if (unrecorded > 0) {
+      parts.push(
+        `${unrecorded} sent but not recorded - do not send ${unrecorded === 1 ? 'it' : 'them'} again today.`,
+      )
+    }
+    if (skippedBefore > 0) parts.push(`${skippedBefore} skipped before sending.`)
+    // A refusal means a row moved under the list: read the month again.
+    if (failure || refused.length > 0) void reloadMonth()
+    if (failure) setError(parts.join(' '))
+    else setNote(parts.join(' '))
   }
 
   const patch = async (
@@ -1731,6 +1781,8 @@ export function InvoiceMonthRun({
               type="button"
               className="period-step"
               aria-label="Previous month"
+              // Held while Remind all past due is sending (see changePeriod).
+              disabled={remindAllBusy}
               onClick={() => changePeriod(shiftReviewPeriod('month', period, -1))}
             >
               <ChevronLeft size={16} />
@@ -1743,6 +1795,7 @@ export function InvoiceMonthRun({
                 type="month"
                 className="input"
                 value={period}
+                disabled={remindAllBusy}
                 // Controlled, so a refused change simply re-renders the old
                 // month back into the input — no stray value left behind.
                 onChange={(event) => changePeriod(event.target.value || currentPeriod())}
@@ -1752,6 +1805,7 @@ export function InvoiceMonthRun({
               type="button"
               className="period-step"
               aria-label="Next month"
+              disabled={remindAllBusy}
               onClick={() => changePeriod(shiftReviewPeriod('month', period, 1))}
             >
               <ChevronRight size={16} />
@@ -2057,6 +2111,8 @@ export function InvoiceMonthRun({
                     }
                     onPrint={() => onPrint(invoice)}
                     onDirtyChange={setOpenDirty}
+                    reminderUnrecorded={unrecordedReminders.has(invoice.id)}
+                    onReminderUnrecorded={() => markReminderUnrecorded(invoice.id)}
                   />
                 ))}
               </ul>
@@ -2100,9 +2156,15 @@ function InvoiceRow({
   onInvoiceMoved,
   onRefusal,
   onDirtyChange,
+  reminderUnrecorded,
+  onReminderUnrecorded,
 }: {
   invoice: PersistedInvoice
   clientName: string
+  /** A reminder for this invoice left this session but could not be logged. */
+  reminderUnrecorded: boolean
+  /** The reminder the editor sent left, but its log write failed (`logged: false`). */
+  onReminderUnrecorded: () => void
   /** The latest automatic-payment attempt on this invoice, if there was one. */
   autopayAttempt: AutopayAttemptSummary | null
   /** Automatic charging is switched on, so "Charge again" is offered. */
@@ -2280,6 +2342,8 @@ function InvoiceRow({
             {/* The newest payment reminder that left (featreq-3f1d63b6), so the
                 chase list says who has already been nudged and when. */}
             {!isVoid && lastReminder ? ` · Last reminded ${formatSentOn(lastReminder.at)}` : ''}
+            {/* A reminder that left but is not on the log (`logged: false`). */}
+            {!isVoid && reminderUnrecorded ? ` · ${REMINDER_UNRECORDED}` : ''}
           </span>
           {/* The client tried to pay and it failed. Louder than the amber
               scope flags because it is the one row here that needs a phone
@@ -2521,6 +2585,8 @@ function InvoiceRow({
           onInvoiceMoved={onInvoiceMoved}
           onRefusal={onRefusal}
           onDirtyChange={onDirtyChange}
+          reminderUnrecorded={reminderUnrecorded}
+          onReminderUnrecorded={onReminderUnrecorded}
         />
       ) : null}
     </li>
@@ -2983,9 +3049,15 @@ function InvoiceEditor({
   onInvoiceMoved,
   onRefusal,
   onDirtyChange,
+  reminderUnrecorded,
+  onReminderUnrecorded,
 }: {
   invoice: PersistedInvoice
   clientName: string
+  /** A reminder left this session but is not on the log: Send reminder stays off. */
+  reminderUnrecorded: boolean
+  /** Tell the run a reminder left without its log entry (`logged: false`). */
+  onReminderUnrecorded: () => void
   /** How far past the firm's line this invoice is, if it is. Computed by the row. */
   pastDue: PastDueInvoice | null
   /** This invoice's client is a billing master — group the lines by company. */
@@ -3503,8 +3575,13 @@ function InvoiceEditor({
     setSendError(null)
     setRemindBusy(true)
     try {
-      const result = await remindInvoiceRequest(invoice.id)
+      // Exactly the addresses the confirm showed; the server refuses if any of
+      // them is no longer on file, so nobody unseen is emailed.
+      const result = await remindInvoiceRequest(invoice.id, recipients.to)
       setReminding(false)
+      // It left, but its log entry did not land: the run keeps the button off
+      // and says so for the rest of the session.
+      if (result.logged === false) onReminderUnrecorded()
       onInvoiceChanged(result.invoice)
     } catch (err) {
       setReminding(false)
@@ -4910,6 +4987,11 @@ function InvoiceEditor({
           {recipientCountLabel(lastReminder.to.length)}
         </p>
       ) : null}
+      {reminderUnrecorded ? (
+        <p className="invoice-run-reminded" role="status">
+          {REMINDER_UNRECORDED}
+        </p>
+      ) : null}
 
       {/* What went wrong, in Stripe's words, and what to do about it. A bank
           attempt spends its Checkout session, so that link is dead; a card
@@ -5303,13 +5385,16 @@ function InvoiceEditor({
                 remindBusy ||
                 reminding ||
                 dirty ||
+                reminderUnrecorded ||
                 reminderCode !== null ||
                 recipients.to.length === 0
               }
               title={
                 dirty
                   ? 'Save your changes first'
-                  : reminderCode
+                  : reminderUnrecorded
+                    ? REMINDER_UNRECORDED
+                    : reminderCode
                     ? REMINDER_REFUSAL_TIPS[reminderCode]
                     : recipients.to.length === 0
                       ? (recipients.reason ?? 'No email address on file')

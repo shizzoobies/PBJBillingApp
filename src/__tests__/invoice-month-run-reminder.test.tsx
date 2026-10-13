@@ -241,7 +241,10 @@ describe('sending one reminder', () => {
     expect(within(confirm).getByText(/bo@acme\.test/)).toBeInTheDocument()
 
     fireEvent.click(within(confirm).getByRole('button', { name: 'Send reminder now' }))
-    await waitFor(() => expect(mockRemind).toHaveBeenCalledWith('inv-1'))
+    // Bound to what the confirm showed: exactly those addresses are posted.
+    await waitFor(() =>
+      expect(mockRemind).toHaveBeenCalledWith('inv-1', ['ann@acme.test', 'bo@acme.test']),
+    )
 
     // The editor remounts on the new invoice; the line is read off its log.
     const editor = await waitFor(() => {
@@ -388,5 +391,106 @@ describe('Remind all past due', () => {
     fireEvent.click(within(panel()).getByRole('button', { name: 'Cancel' }))
     expect(screen.queryByRole('group', { name: 'Remind all past due' })).not.toBeInTheDocument()
     expect(mockRemind).not.toHaveBeenCalled()
+  })
+
+  it('posts each invoice with the addresses its line showed', async () => {
+    await openPastDue()
+    mockRemind.mockImplementation(async (id: string) => ({
+      invoice: rows.find((row) => row.id === id) as PersistedInvoice,
+    }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all past due' }))
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Send 2 reminders' }))
+    await screen.findByText(/Reminded 2 of 2\./)
+    expect(mockRemind.mock.calls).toEqual([
+      ['inv-a', ['ann@acme.test', 'bo@acme.test']],
+      ['inv-b', ['cy@bolt.test']],
+    ])
+  })
+
+  it('lists a per-invoice refusal (409) as skipped and carries on', async () => {
+    const more = [...rows, pastDue({ id: 'inv-e', number: 'INV-2026-08-005', clientId: 'client-bolt' })]
+    await openRun(more, { clients, tab: /^Past due/, open: false })
+    mockRemind.mockImplementation(async (id: string) => {
+      if (id === 'inv-b') throw new ApiError(409, 'This invoice is paid, so no reminder was sent.', 'invoice_paid')
+      return { invoice: more.find((row) => row.id === id) as PersistedInvoice }
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all past due' }))
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Send 3 reminders' }))
+
+    const tally = await screen.findByText(/Reminded 2 of 3\./)
+    expect(tally).toHaveTextContent(
+      'Skipped 1 the server refused: INV-2026-08-002 · Bolt: This invoice is paid, so no reminder was sent.',
+    )
+    expect(tally).toHaveTextContent('2 skipped before sending.')
+    expect(tally).not.toHaveTextContent('Stopped')
+    expect(mockRemind.mock.calls.map((call) => call[0])).toEqual(['inv-a', 'inv-b', 'inv-e'])
+  })
+
+  it('holds the month while it sends, so the tally always lands', async () => {
+    await openPastDue()
+    let release: () => void = () => undefined
+    mockRemind.mockImplementation(
+      (id: string) =>
+        new Promise((resolve) => {
+          const answer = () => resolve({ invoice: rows.find((row) => row.id === id) as PersistedInvoice })
+          if (id === 'inv-a') release = answer
+          else answer()
+        }),
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all past due' }))
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Send 2 reminders' }))
+    await waitFor(() => expect(mockRemind).toHaveBeenCalledTimes(1))
+
+    // She tries to move the month mid-run: the controls are held.
+    const previous = screen.getByRole('button', { name: 'Previous month' })
+    const next = screen.getByRole('button', { name: 'Next month' })
+    expect(previous).toBeDisabled()
+    expect(next).toBeDisabled()
+    expect(screen.getByLabelText('Billing month')).toBeDisabled()
+    const shownMonths = new Set(mockList.mock.calls.map((call) => call[0]))
+    fireEvent.click(previous)
+    fireEvent.change(screen.getByLabelText('Billing month'), { target: { value: '2026-01' } })
+
+    release()
+    expect(await screen.findByText(/Reminded 2 of 2\./)).toBeInTheDocument()
+    // No other month was loaded, and the controls are free again.
+    expect(mockList.mock.calls.every((call) => shownMonths.has(call[0]))).toBe(true)
+    expect(screen.getByRole('button', { name: 'Previous month' })).toBeEnabled()
+  })
+
+  it('skips, in the confirm, an invoice whose reminder this session left unrecorded', async () => {
+    await openRun(rows, { clients, tab: /^Past due/ })
+    mockRemind.mockResolvedValueOnce({ invoice: rows[0], logged: false })
+    fireEvent.click(screen.getByRole('button', { name: 'Send reminder' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Send reminder now' }))
+    await screen.findAllByText(/Sent, but not recorded - do not send again today/)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remind all past due' }))
+    const skipped = within(panel()).getByRole('list', { name: 'Skipped' })
+    expect(within(skipped).getByText(/INV-2026-08-001 · Acme/)).toHaveTextContent(
+      'Sent, but not recorded - do not send again today',
+    )
+  })
+})
+
+describe('a reminder that left but could not be logged (logged: false)', () => {
+  it('says so on the row and in the editor, and keeps the button off for the session', async () => {
+    await openRun([makeInvoice()])
+    // The server answers the invoice as it was: no reminder entry on its log.
+    mockRemind.mockResolvedValue({ invoice: makeInvoice(), logged: false })
+
+    fireEvent.click(remindButton())
+    fireEvent.click(screen.getByRole('button', { name: 'Send reminder now' }))
+
+    const row = (await screen.findByText('INV-2026-08-001')).closest('li') as HTMLElement
+    await waitFor(() =>
+      expect(within(row).getAllByText(/Sent, but not recorded - do not send again today/).length).toBeGreaterThanOrEqual(2),
+    )
+    const editor = document.querySelector('.invoice-run-editor') as HTMLElement
+    expect(within(editor).getByText('Sent, but not recorded - do not send again today')).toBeInTheDocument()
+    expect(remindButton()).toBeDisabled()
+    expect(remindButton()).toHaveAttribute('title', 'Sent, but not recorded - do not send again today')
+    // "Last reminded" cannot show - there is no entry - and that is accepted.
+    expect(screen.queryByText(/Last reminded/)).not.toBeInTheDocument()
   })
 })
