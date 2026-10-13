@@ -5,6 +5,7 @@ import {
   boardChecklistStatus,
   boardStepSummary,
   buildActiveBoard,
+  groupBoardColumns,
   UNCATEGORIZED_ID,
   type BoardChecklistStatus,
   type BoardColumn,
@@ -48,6 +49,35 @@ function writeStoredCurrentStepOnly(userId: string, currentStepOnly: boolean) {
     // ignore storage failures (private mode / quota)
   }
 }
+
+// featreq-54bf39b6: "Hide empty columns" - the same per-user localStorage
+// pattern as the step view. v1 schema: { hideEmpty }.
+const HIDE_EMPTY_KEY_PREFIX = 'pbj.boardHideEmpty.v1.'
+
+/** The stored choice; ON when absent or when storage is unusable. */
+function readStoredHideEmpty(userId: string): boolean {
+  try {
+    const raw = localStorage.getItem(`${HIDE_EMPTY_KEY_PREFIX}${userId}`)
+    if (!raw) return true
+    const parsed = JSON.parse(raw) as { hideEmpty?: unknown } | null
+    return typeof parsed?.hideEmpty === 'boolean' ? parsed.hideEmpty : true
+  } catch {
+    // malformed JSON or unavailable storage - fall back to the default.
+    return true
+  }
+}
+
+function writeStoredHideEmpty(userId: string, hideEmpty: boolean) {
+  try {
+    localStorage.setItem(`${HIDE_EMPTY_KEY_PREFIX}${userId}`, JSON.stringify({ hideEmpty }))
+  } catch {
+    // ignore storage failures (private mode / quota)
+  }
+}
+
+/** A Board group's key and label: the null group (ungrouped columns) is "Other". */
+const OTHER_GROUP_KEY = '__other__'
+const OTHER_GROUP_LABEL = 'Other'
 
 /**
  * The Active Checklists board: one column per service category (Monthly
@@ -114,6 +144,19 @@ export function ActiveChecklistsBoardPage() {
     setStepView({ userId: stepViewUserId, currentStepOnly: next })
     writeStoredCurrentStepOnly(stepViewUserId, next)
   }
+  // featreq-54bf39b6: "Hide empty columns" - ON by default, remembered the same way.
+  const [hideEmptyView, setHideEmptyView] = useState(() => ({
+    userId: stepViewUserId,
+    hideEmpty: readStoredHideEmpty(stepViewUserId),
+  }))
+  const hideEmpty =
+    hideEmptyView.userId === stepViewUserId ? hideEmptyView.hideEmpty : readStoredHideEmpty(stepViewUserId)
+  const setHideEmpty = (next: boolean) => {
+    setHideEmptyView({ userId: stepViewUserId, hideEmpty: next })
+    writeStoredHideEmpty(stepViewUserId, next)
+  }
+  // Each group's header, for the overview strip's scroll-to.
+  const groupHeaderRefs = useRef(new Map<string, HTMLElement>())
 
   const today = localDateOnly()
 
@@ -313,6 +356,21 @@ export function ActiveChecklistsBoardPage() {
     })
   }, [board.columns, query, data.clients, stepSummaryById])
 
+  // featreq-54bf39b6: columns grouped by their category's group, counted AFTER
+  // the filters and the search. With no group on any column there is no strip
+  // and no header - the board is exactly what it was.
+  const hasGroups = serviceCategories.some((category) => Boolean(category.groupName?.trim()))
+  const boardGroups = useMemo(
+    () => (hasGroups ? groupBoardColumns(filteredColumns, serviceCategories) : []),
+    [hasGroups, filteredColumns, serviceCategories],
+  )
+  // "Hide empty columns": a column with nobody on it right now is left out.
+  const isShown = (col: BoardColumn) => !hideEmpty || col.clients.length > 0
+  const groupKey = (name: string | null) => name ?? OTHER_GROUP_KEY
+  const scrollToGroup = (key: string) => {
+    groupHeaderRefs.current.get(key)?.scrollIntoView?.({ block: 'nearest', inline: 'start' })
+  }
+
   // The notes attached to the cards on the board, fetched ONCE for all of them
   // (a projected ghost has no id the server knows). Taken from the board BEFORE
   // the search box narrows it, so typing in it does not refetch.
@@ -367,6 +425,18 @@ export function ActiveChecklistsBoardPage() {
     />
     )
   }
+
+  const renderColumn = (column: BoardColumn): ReactNode => (
+    <BoardColumnView
+      key={column.id}
+      column={column}
+      renderCard={renderCard}
+      statusFor={statusFor}
+      teamTagFor={teamTagFor}
+      currentStepOnly={currentStepOnly}
+      stepSummaryFor={(checklist) => stepSummaryById.get(checklist.id) ?? null}
+    />
+  )
 
   return (
     <section className="content-grid one-column" id="active-board">
@@ -424,6 +494,17 @@ export function ActiveChecklistsBoardPage() {
               />
               Current step only
             </label>
+            <label
+              className="upcoming-toggle"
+              title="Leave out the columns with nothing on them right now. Untick to see every column."
+            >
+              <input
+                type="checkbox"
+                checked={hideEmpty}
+                onChange={(event) => setHideEmpty(event.target.checked)}
+              />
+              Hide empty columns
+            </label>
             {teamMemberIds.length > 0 ? (
               <label
                 className="upcoming-toggle"
@@ -460,22 +541,56 @@ export function ActiveChecklistsBoardPage() {
             {ownerMode ? ' Use “Manage columns” to add one.' : ''}
           </p>
         ) : (
-          <div className="board-scroll">
-            {filteredColumns.every((col) => col.clients.length === 0) && query.trim() ? (
-              <p className="empty-state">No clients or checklists match "{query.trim()}".</p>
+          <>
+            {hasGroups ? (
+              <nav className="board-group-strip" aria-label="Board groups">
+                {boardGroups.map((group) => {
+                  const key = groupKey(group.name)
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      className="board-group-chip"
+                      // A group with every column hidden has no header to go to.
+                      disabled={!group.columns.some(isShown)}
+                      onClick={() => scrollToGroup(key)}
+                    >
+                      <span>{group.name ?? OTHER_GROUP_LABEL}</span>{' '}
+                      <span className="status-pill">{group.openClientCount}</span>
+                    </button>
+                  )
+                })}
+              </nav>
             ) : null}
-            {filteredColumns.map((column) => (
-              <BoardColumnView
-                key={column.id}
-                column={column}
-                renderCard={renderCard}
-                statusFor={statusFor}
-                teamTagFor={teamTagFor}
-                currentStepOnly={currentStepOnly}
-                stepSummaryFor={(checklist) => stepSummaryById.get(checklist.id) ?? null}
-              />
-            ))}
-          </div>
+            <div className="board-scroll">
+              {filteredColumns.every((col) => col.clients.length === 0) && query.trim() ? (
+                <p className="empty-state">No clients or checklists match "{query.trim()}".</p>
+              ) : null}
+              {hasGroups
+                ? boardGroups.map((group) => {
+                    const shownColumns = group.columns.filter(isShown)
+                    if (shownColumns.length === 0) return null
+                    const key = groupKey(group.name)
+                    const label = group.name ?? OTHER_GROUP_LABEL
+                    return (
+                      <section key={key} className="board-group" aria-label={label}>
+                        <div
+                          className="board-group-header"
+                          ref={(element) => {
+                            if (element) groupHeaderRefs.current.set(key, element)
+                            else groupHeaderRefs.current.delete(key)
+                          }}
+                        >
+                          <strong>{label}</strong>
+                          <span className="status-pill">{group.openClientCount}</span>
+                        </div>
+                        <div className="board-group-columns">{shownColumns.map(renderColumn)}</div>
+                      </section>
+                    )
+                  })
+                : filteredColumns.filter(isShown).map(renderColumn)}
+            </div>
+          </>
         )}
       </section>
     </section>
@@ -828,7 +943,12 @@ function ManageColumns({
 }) {
   const { addServiceCategory, updateServiceCategory, deleteServiceCategory } = useAppContext()
   const [newName, setNewName] = useState('')
+  const [newGroup, setNewGroup] = useState('')
   const [busy, setBusy] = useState(false)
+  // The group names already in use, offered by every Group input.
+  const groupNames = [
+    ...new Set(categories.map((category) => category.groupName?.trim() ?? '').filter(Boolean)),
+  ]
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true)
@@ -844,9 +964,12 @@ function ManageColumns({
   const handleAdd = async () => {
     const name = newName.trim()
     if (!name) return
+    const group = newGroup.trim()
     await run(async () => {
-      await addServiceCategory(name)
+      if (group) await addServiceCategory(name, group)
+      else await addServiceCategory(name)
       setNewName('')
+      setNewGroup('')
     })
   }
 
@@ -884,6 +1007,11 @@ function ManageColumns({
                   void run(() => updateServiceCategory(category.id, { name: next }))
                 }
               }}
+            />
+            <ColumnGroupInput
+              category={category}
+              disabled={busy}
+              onSave={(groupName) => void run(() => updateServiceCategory(category.id, { groupName }))}
             />
             <div className="manage-columns-actions">
               <button
@@ -936,6 +1064,21 @@ function ManageColumns({
             }
           }}
         />
+        <input
+          className="input"
+          placeholder="Group (optional)"
+          aria-label="Group for the new column"
+          list="board-group-names"
+          value={newGroup}
+          disabled={busy}
+          onChange={(event) => setNewGroup(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              void handleAdd()
+            }
+          }}
+        />
         <button
           type="button"
           className="primary-action"
@@ -945,6 +1088,51 @@ function ManageColumns({
           <Plus size={14} /> Add column
         </button>
       </div>
+      <datalist id="board-group-names">
+        {groupNames.map((name) => (
+          <option key={name} value={name} />
+        ))}
+      </datalist>
     </div>
+  )
+}
+
+/**
+ * A column's Group (featreq-54bf39b6) in Manage columns: saves on blur or
+ * Enter, trimmed; an empty box clears the group (null). The value last sent is
+ * remembered so the blur that follows an Enter does not save it twice.
+ */
+function ColumnGroupInput({
+  category,
+  disabled,
+  onSave,
+}: {
+  category: ServiceCategory
+  disabled: boolean
+  onSave: (groupName: string | null) => void
+}) {
+  const lastSaved = useRef(category.groupName ?? '')
+  const save = (value: string) => {
+    const next = value.trim()
+    if (next === lastSaved.current) return
+    lastSaved.current = next
+    onSave(next || null)
+  }
+  return (
+    <input
+      className="input"
+      defaultValue={category.groupName ?? ''}
+      placeholder="Group"
+      aria-label={`Group for ${category.name}`}
+      list="board-group-names"
+      disabled={disabled}
+      onBlur={(event) => save(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          save(event.currentTarget.value)
+        }
+      }}
+    />
   )
 }
