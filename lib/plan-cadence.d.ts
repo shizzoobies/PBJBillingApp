@@ -10,7 +10,7 @@ export declare const PLAN_CADENCES: readonly PlanCadence[]
 /** A valid stored value, or null for anything else. */
 export declare function normalizePlanCadence(value: unknown): PlanCadence | null
 
-/** The cadence a plan name ends in (" - Weekly" ... " - Yearly"), or null. */
+/** The cadence a plan name ends in (" - Weekly" ... " - Yearly" / " - Annually"), or null. */
 export declare function cadenceFromPlanName(name: unknown): Exclude<PlanCadence, 'blueprint'> | null
 
 /** stored ?? parsed from the name ?? 'blueprint'. */
