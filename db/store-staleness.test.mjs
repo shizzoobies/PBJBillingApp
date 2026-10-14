@@ -48991,6 +48991,40 @@ describe('signing an engagement creates the client (file backend)', () => {
       })
     })
 
+    // Engagements leftovers 10 [32]: the template is saved (one workspace write); no compensation delete.
+    it('a stage that fails after the template was saved says what exists, and leaves the template in place', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      vi.spyOn(store, 'createChecklist').mockRejectedValueOnce(new Error('disk full'))
+      const { engagement } = await wonEngagement()
+      const result = await sign(engagement.id)
+      expect(result.engagement.status).toBe('signed')
+      expect(result.onboardingCaseId).toBeNull()
+      expect(result.skipped).toContainEqual({
+        what: 'Onboarding checklist',
+        why: 'The letter is signed and Acme Books is in Onboarding. The onboarding template was saved but its first stage could not be created - open Checklists > Repeating, find "Onboarding · Acme Books" and use Start now, then tick off its Proposal stage to open the Onboarding stage.',
+      })
+      // Nothing was deleted to make up for it: the case's template is still there.
+      const data = await store.read()
+      expect(data.checklistTemplates.filter((template) => template.onboardingForClientId === result.clientId)).toHaveLength(1)
+      expect(data.checklists.filter((checklist) => checklist.onboardingForClientId === result.clientId)).toHaveLength(0)
+    })
+
+    it('a second stage that fails after the first was created says so', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const realCreate = store.createChecklist.bind(store)
+      vi.spyOn(store, 'createChecklist')
+        .mockImplementationOnce((...args) => realCreate(...args))
+        .mockRejectedValueOnce(new Error('disk full'))
+      const { engagement } = await wonEngagement()
+      const result = await sign(engagement.id)
+      expect(result.skipped).toContainEqual({
+        what: 'Onboarding checklist',
+        why: 'The letter is signed and Acme Books is in Onboarding. The onboarding template was saved and its Proposal stage was created; the Onboarding stage could not be - add the onboarding steps on the Checklists page.',
+      })
+      const data = await store.read()
+      expect(data.checklists.filter((checklist) => checklist.onboardingForClientId === result.clientId)).toHaveLength(1)
+    })
+
     it('a case that cannot be opened is a skipped line, never a refusal', async () => {
       vi.spyOn(console, 'error').mockImplementation(() => {})
       vi.spyOn(store, '_openOnboardingCaseAtSigning').mockRejectedValueOnce(new Error('disk full'))

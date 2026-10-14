@@ -22187,29 +22187,39 @@ export class AppDataStore {
     // the signing instant (the signed day's firm noon), never later than now: a
     // morning signing must not stamp the future.
     const completedAt = new Date(Math.min(Date.parse(signedAt), Date.now())).toISOString()
-    await this.createChecklist(
-      buildChecklistFromStage({
-        template,
-        stage: stages[0],
-        stageIndex: 0,
-        stageCount: stages.length,
-        caseId,
-        dueDate: signedOn,
-        completed: true,
-      }),
-      { completedAt },
-    )
-    // Stage 1 (Onboarding): the live checklist.
-    const live = await this.createChecklist(
-      buildChecklistFromStage({
-        template,
-        stage: stages[1],
-        stageIndex: 1,
-        stageCount: stages.length,
-        caseId,
-        dueDate: resolveStageDueDate(stages[1], today),
-      }),
-    )
+    // The template is saved by now. A stage that then fails to insert is NOT undone (no
+    // compensation delete): the error carries how far it got, so signing can say what exists.
+    let stageFailing = 'first'
+    let live
+    try {
+      await this.createChecklist(
+        buildChecklistFromStage({
+          template,
+          stage: stages[0],
+          stageIndex: 0,
+          stageCount: stages.length,
+          caseId,
+          dueDate: signedOn,
+          completed: true,
+        }),
+        { completedAt },
+      )
+      // Stage 1 (Onboarding): the live checklist.
+      stageFailing = 'second'
+      live = await this.createChecklist(
+        buildChecklistFromStage({
+          template,
+          stage: stages[1],
+          stageIndex: 1,
+          stageCount: stages.length,
+          caseId,
+          dueDate: resolveStageDueDate(stages[1], today),
+        }),
+      )
+    } catch (error) {
+      if (error && typeof error === 'object') error.onboardingStageFailed = stageFailing
+      throw error
+    }
     await this.grantClientVisibility(clientId, live.assigneeId)
     return { caseId, checklistId: live.id, opened: true }
   }
@@ -28564,9 +28574,16 @@ export class AppDataStore {
           }
         } catch (error) {
           console.error('[engagements] signing could not open the onboarding checklist for', id, error)
+          // Worded by what exists: a failure after the template was saved leaves the case's
+          // template (and perhaps its Proposal stage) behind, and the line says so.
           skipped.push({
             what: 'Onboarding checklist',
-            why: `The letter is signed and ${clientName()} is in Onboarding, but the onboarding checklist could not be opened. Add the onboarding steps on the Checklists page.`,
+            why:
+              error?.onboardingStageFailed === 'first'
+                ? `The letter is signed and ${clientName()} is in Onboarding. The onboarding template was saved but its first stage could not be created - open Checklists > Repeating, find "Onboarding · ${clientName()}" and use Start now, then tick off its Proposal stage to open the Onboarding stage.`
+                : error?.onboardingStageFailed === 'second'
+                  ? `The letter is signed and ${clientName()} is in Onboarding. The onboarding template was saved and its Proposal stage was created; the Onboarding stage could not be - add the onboarding steps on the Checklists page.`
+                  : `The letter is signed and ${clientName()} is in Onboarding, but the onboarding checklist could not be opened. Add the onboarding steps on the Checklists page.`,
           })
         }
       }

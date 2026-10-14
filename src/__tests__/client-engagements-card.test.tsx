@@ -243,6 +243,40 @@ describe('ClientEngagementsCard: Mark as signed', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
+  // Engagements leftovers 10 [34]: the outcome of a signing still running must not be hidden.
+  it('ignores every way of closing the dialog while a signing is in flight, and closes again once it answers', async () => {
+    renderCard()
+    let finish: (value: ReturnType<typeof signResult>) => void = () => {}
+    api.signEngagementRequest = vi.fn(
+      () =>
+        new Promise<ReturnType<typeof signResult>>((resolve) => {
+          finish = resolve
+        }),
+    )
+    const [row] = await rowsOf()
+    fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
+    await waitFor(() => expect(api.signEngagementRequest).toHaveBeenCalled())
+
+    // The X, a click outside the panel, Escape and Cancel: all ignored while it runs.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog')).not.toBeNull()
+    const overlay = dialog.parentElement as HTMLElement
+    fireEvent.click(overlay)
+    expect(screen.queryByRole('dialog')).not.toBeNull()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).not.toBeNull()
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeDisabled()
+
+    finish(signResult())
+    const summary = await within(dialog).findByRole('status', { name: 'What signing did' })
+    expect(summary).toBeTruthy()
+    // Answered: the dialog closes as usual.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
   it('a draft row signs only once "signed in person" is ticked, and posts allowUnsent', async () => {
     const draft = engagementFixture({ id: 'eng-draft', status: 'draft', sentAt: null, signedAt: null, signedBy: null })
     api.listEngagementsRequest = vi.fn(async () => [draft])

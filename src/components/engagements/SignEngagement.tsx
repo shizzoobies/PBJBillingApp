@@ -397,9 +397,14 @@ export function SignEngagementDialog({
   const feeChoices = engagement.clientId ? engagementFeeChoices(engagement, client) : null
   const feeLine = feeChoices ? feeChoices[engagement.feeMode ?? 'replace'] : null
   const signable = engagement.status === 'sent' || engagement.status === 'draft'
+  // Closing mid-signing would hide the outcome of a signing that is still running: every way
+  // out (the X, a click outside, Escape) waits until it answers.
+  const close = useCallback(() => {
+    if (!busy) onClose()
+  }, [busy, onClose])
 
   return (
-    <AddModal title={`Mark as signed: ${partyName}`} onClose={onClose}>
+    <AddModal title={`Mark as signed: ${partyName}`} onClose={close}>
       {error ? (
         <p className="form-error" role="alert">
           {error}
@@ -416,7 +421,7 @@ export function SignEngagementDialog({
             showClientLink={false}
           />
           <div className="button-row">
-            <button type="button" className="secondary-action" onClick={onClose}>
+            <button type="button" className="secondary-action" onClick={close}>
               Done
             </button>
           </div>
@@ -435,7 +440,7 @@ export function SignEngagementDialog({
             feeLine={feeLine}
             disabled={busy}
             actions={
-              <button type="button" className="ghost-action" disabled={busy} onClick={onClose}>
+              <button type="button" className="ghost-action" disabled={busy} onClick={close}>
                 Cancel
               </button>
             }

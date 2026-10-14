@@ -981,6 +981,16 @@ function ClientTable({
   // Client id currently mid reactivate, for the same reason.
   const [lifecycleId, setLifecycleId] = useState<string | null>(null)
 
+  // Clients that already have an onboarding case - opened at signing, or by Start onboarding
+  // before. The server opens one case per client, so offering the button again is a dead end.
+  const hasOnboardingCase = useMemo(() => {
+    const ids = new Set<string>()
+    for (const row of [...(data.checklistTemplates ?? []), ...(data.checklists ?? [])]) {
+      if (row.onboardingForClientId) ids.add(row.onboardingForClientId)
+    }
+    return ids
+  }, [data.checklistTemplates, data.checklists])
+
   const handleStartOnboarding = async (clientId: string) => {
     if (!onStartOnboarding) return
     setOnboardingId(clientId)
@@ -1124,11 +1134,13 @@ function ClientTable({
                   <div className="client-row-actions">
                     {/* Only for clients who haven't finished onboarding — an Active
                         client is already onboarded, so the button is just noise,
-                        and a retired one is finished, not starting. */}
+                        and a retired one is finished, not starting. One that already
+                        has an onboarding case (signing opens it) has nothing to start. */}
                     {ownerMode &&
                     onStartOnboarding &&
                     !retired &&
-                    lifecycleOf(client) !== 'active' ? (
+                    lifecycleOf(client) !== 'active' &&
+                    !hasOnboardingCase.has(client.id) ? (
                       <button
                         type="button"
                         className="secondary-action compact-action"
