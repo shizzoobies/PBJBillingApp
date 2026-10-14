@@ -5472,18 +5472,21 @@ export function reassembleEngagementRequest(id: string): Promise<EngagementView>
   )
 }
 
-/** What the party would receive, from the STORED engagement. Nothing is sent or saved. */
+/**
+ * What the party would receive, from the STORED engagement. Nothing is sent or saved.
+ * The address she typed for this send rides in the body, never in the URL.
+ */
 export function previewEngagementRequest(id: string, to?: string): Promise<EngagementPreview> {
   return engagementRequest<EngagementPreview>(
-    `${engagementPath(id, 'preview')}${to ? `?to=${encodeURIComponent(to)}` : ''}`,
-    {},
+    engagementPath(id, 'preview'),
+    proposalJson('POST', to ? { to } : {}),
     'Could not build the preview',
   )
 }
 
-/** The PDF half of the preview, streamed by the server for an embedded frame. */
-export function engagementPreviewPdfUrl(id: string, to?: string) {
-  return `${engagementPath(id, 'preview.pdf')}${to ? `?to=${encodeURIComponent(to)}` : ''}`
+/** The PDF half of the preview, streamed by the server for an embedded frame (the same for any recipient). */
+export function engagementPreviewPdfUrl(id: string) {
+  return engagementPath(id, 'preview.pdf')
 }
 
 /**

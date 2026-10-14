@@ -1049,7 +1049,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         <DocumentPreviewModal<EngagementPreview>
           loadKey={`${engagementId}|${view.hash}|${previewTo ?? ''}`}
           load={() => previewEngagementRequest(engagementId, previewTo)}
-          pdfUrl={engagementPreviewPdfUrl(engagementId, previewTo)}
+          pdfUrl={engagementPreviewPdfUrl(engagementId)}
           title={`What ${partyName} receives`}
           ariaLabel={`Preview of the engagement letter for ${partyName}`}
           notes={engagementPreviewNotes}

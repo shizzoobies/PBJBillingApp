@@ -85,7 +85,7 @@ const serverHelpers = () =>
 /** Every line of the engagement code that could send or copy anything. */
 const allCode = () => routesBlock() + serverHelpers() + libSource
 const previewRoute = () =>
-  between('// GET /api/engagements/:id/preview[?to=]', '// POST /api/engagements/:id/send')
+  between('// POST /api/engagements/:id/preview - { to? }', '// POST /api/engagements/:id/send')
 const sendRoute = () => between('// POST /api/engagements/:id/send', '// POST /api/engagements/:id/sign')
 const previewAssembly = () =>
   between('export async function assembleEngagementPreview(', 'const refuse = ', libSource)
@@ -98,7 +98,8 @@ const ROUTES: Route[] = [
   { name: 'GET /api/engagements/:id', pattern: /if \(engagementMatch && request\.method === 'GET'\)/, write: false },
   { name: 'PATCH /api/engagements/:id', pattern: /if \(engagementMatch && request\.method === 'PATCH'\)/, write: true },
   { name: 'POST /api/engagements/:id/reassemble', pattern: /if \(engagementReassembleMatch && request\.method === 'POST'\)/, write: true },
-  { name: 'GET /api/engagements/:id/preview(.pdf)', pattern: /if \(engagementPreviewMatch && request\.method === 'GET'\)/, write: false },
+  // The JSON preview is a POST (the typed address rides in the body); its guards are pinned in 'the preview routes'.
+  { name: 'GET|POST /api/engagements/:id/preview(.pdf)', pattern: /engagementPreviewMatch &&\s+\(request\.method === 'GET'/, write: false },
   { name: 'POST /api/engagements/:id/send', pattern: /if \(engagementSendMatch && request\.method === 'POST'\)/, write: true, broadcastLength: 4000 },
   { name: 'POST /api/engagements/:id/sign', pattern: /if \(engagementSignMatch && request\.method === 'POST'\)/, write: true, broadcastLength: 5600 },
   { name: 'POST /api/engagements/:id/void', pattern: /if \(engagementVoidMatch && request\.method === 'POST'\)/, write: true },
@@ -350,6 +351,25 @@ describe('the preview routes', () => {
   it('check a typed address before anything is read', () => {
     const body = previewRoute()
     expect(body.indexOf('isOneEmailAddress(typedTo)')).toBeLessThan(body.indexOf('appDataStore.getEngagement('))
+  })
+
+  // The typed recipient leaves the URL (engagements leftovers 6): the JSON preview is a POST.
+  it('take the typed address from a POST body, behind the origin and JSON guards, owner gate first', () => {
+    const body = previewRoute()
+    expect(body).toContain("(request.method === 'POST' && !engagementPreviewMatch[2])")
+    expect(body).toContain("typedTo = typeof payload.to === 'string' ? payload.to.trim() : ''")
+    const gate = body.indexOf("session.user.role !== 'owner'")
+    const origin = body.indexOf('isCrossSiteOrigin(request)')
+    const json = body.indexOf('isJsonContentType(request)')
+    const readBody = body.indexOf('await readJsonBody(request)')
+    expect(gate).toBeGreaterThan(-1)
+    expect(gate).toBeLessThan(origin)
+    expect(origin).toBeLessThan(json)
+    expect(json).toBeLessThan(readBody)
+    expect(readBody).toBeLessThan(body.indexOf('appDataStore.getEngagement('))
+    expect(body).toContain("sendJson(response, 415, { error: 'application/json required' })")
+    // The PDF is the same for any recipient: no POST form of it.
+    expect(body).toContain("request.method === 'POST' && !engagementPreviewMatch[2]")
   })
 })
 

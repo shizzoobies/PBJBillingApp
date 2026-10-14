@@ -12212,18 +12212,36 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // GET /api/engagements/:id/preview[?to=] - what the party would receive, from the
-    // STORED engagement and the same builder as Send. Read-only, uncached.
-    // GET /api/engagements/:id/preview.pdf[?to=] - the PDF Send would attach, inline.
+    // POST /api/engagements/:id/preview - { to? } - what the party would receive, from the
+    // STORED engagement and the same builder as Send. Read-only, uncached. The address she
+    // typed rides in the body, never in a URL (history, logs); the GET form with ?to= still
+    // answers the same preview.
+    // GET /api/engagements/:id/preview.pdf - the PDF Send would attach, inline (it does not
+    // depend on the recipient, so it takes no address).
     const engagementPreviewMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/preview(\.pdf)?$/)
-    if (engagementPreviewMatch && request.method === 'GET') {
+    if (
+      engagementPreviewMatch &&
+      (request.method === 'GET' || (request.method === 'POST' && !engagementPreviewMatch[2]))
+    ) {
       const session = await requireSession(request, response)
       if (!session) return
       if (session.user.role !== 'owner') {
         sendJson(response, 403, { error: 'Only owners can preview an engagement' })
         return
       }
-      const typedTo = requestUrl.searchParams.get('to') || ''
+      let typedTo = requestUrl.searchParams.get('to') || ''
+      if (request.method === 'POST') {
+        if (isCrossSiteOrigin(request)) {
+          sendJson(response, 403, { error: 'Origin not allowed' })
+          return
+        }
+        if (!isJsonContentType(request)) {
+          sendJson(response, 415, { error: 'application/json required' })
+          return
+        }
+        const payload = (await readJsonBody(request)) ?? {}
+        typedTo = typeof payload.to === 'string' ? payload.to.trim() : ''
+      }
       if (typedTo && !isOneEmailAddress(typedTo)) {
         sendJson(response, 400, { error: 'engagement_invalid', message: 'Type one email address to send to.' })
         return

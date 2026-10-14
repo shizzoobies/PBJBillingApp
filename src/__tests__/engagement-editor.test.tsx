@@ -651,6 +651,14 @@ describe('Preview', () => {
     expect(api.previewEngagementRequest).toHaveBeenCalledWith('eng-1', undefined)
     expect(within(dialog).getByRole('tab', { name: 'PDF attachment' })).toBeTruthy()
   })
+
+  it('hands a typed address to the preview call (which puts it in the request body, not the URL)', async () => {
+    await renderEditor()
+    fireEvent.change(screen.getByLabelText('Send to'), { target: { value: 'typed@client.test' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }))
+    await screen.findByRole('dialog', { name: 'Preview of the engagement letter for Acme Books' })
+    await waitFor(() => expect(api.previewEngagementRequest).toHaveBeenCalledWith('eng-1', 'typed@client.test'))
+  })
 })
 
 describe('Mark as signed', () => {
