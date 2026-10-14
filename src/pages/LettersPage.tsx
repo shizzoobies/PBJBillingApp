@@ -121,6 +121,9 @@ export function LettersPage() {
   const subjectRef = useRef<HTMLInputElement>(null)
   const emailBodyRef = useRef<HTMLTextAreaElement>(null)
   const letterBodyRef = useRef<HTMLTextAreaElement>(null)
+  // The box she last put the cursor in (null once she is in the subject): the B buttons act on
+  // the box that holds her selection, not only on the box their own toolbar sits above.
+  const lastFocusedRef = useRef<BodyField | null>(null)
 
   // The stored letter behind the boxes, only once it is the letter chosen (an answer for
   // a letter she has since left is not it).
@@ -326,8 +329,17 @@ export function LettersPage() {
   const insertToken = (field: Field, key: string) =>
     insertPlaceholder(() => refs[field].current, values[field], key, setters[field])
 
-  /** The B button and Ctrl/Cmd+B: `**` around the selection (lib/letter-bold.js), or off again. */
-  const applyBold = (field: BodyField) => toggleBold(() => refs[field].current, values[field], setters[field])
+  /**
+   * The B button and Ctrl/Cmd+B: `**` around the selection (lib/letter-bold.js), or off again.
+   * The box that was focused last wins when words are selected in it; otherwise the box the
+   * button belongs to.
+   */
+  const applyBold = (field: BodyField) => {
+    const last = lastFocusedRef.current
+    const lastBox = last && last !== field ? refs[last].current : null
+    const target: BodyField = last && lastBox && lastBox.selectionStart !== lastBox.selectionEnd ? last : field
+    toggleBold(() => refs[target].current, values[target], setters[target])
+  }
 
   const boldShortcut = (event: KeyboardEvent<HTMLTextAreaElement>, field: BodyField) => {
     if (isBoldShortcut(event)) {
@@ -717,6 +729,9 @@ export function LettersPage() {
                 maxLength={200}
                 disabled={editorLocked}
                 value={subject}
+                onFocus={() => {
+                  lastFocusedRef.current = null
+                }}
                 onChange={(event) => setSubject(event.target.value)}
               />
             </label>
@@ -735,6 +750,9 @@ export function LettersPage() {
                 maxLength={20000}
                 disabled={editorLocked}
                 value={emailBody}
+                onFocus={() => {
+                  lastFocusedRef.current = 'emailBody'
+                }}
                 onChange={(event) => setEmailBody(event.target.value)}
                 onKeyDown={(event) => boldShortcut(event, 'emailBody')}
               />
@@ -755,6 +773,9 @@ export function LettersPage() {
                 maxLength={20000}
                 disabled={editorLocked}
                 value={letterBody}
+                onFocus={() => {
+                  lastFocusedRef.current = 'letterBody'
+                }}
                 onChange={(event) => setLetterBody(event.target.value)}
                 onKeyDown={(event) => boldShortcut(event, 'letterBody')}
               />

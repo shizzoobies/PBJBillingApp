@@ -319,6 +319,43 @@ describe('bold (the B button and Ctrl+B)', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
   })
 
+  // The toolbar's B used to wrap its own box, not the box whose text was selected.
+  it('the email\'s B acts on the letter when the words selected are in the letter', async () => {
+    await renderPage()
+    const letter = screen.getByLabelText('Letter body') as HTMLTextAreaElement
+    const at = letter.value.indexOf('{{fee}}')
+    letter.focus()
+    letter.setSelectionRange(at, at + '{{fee}}'.length)
+    fireEvent.click(screen.getByRole('button', { name: 'Bold in the email' }))
+    expect(letter).toHaveValue('Dear {{client_name}},\n\nOur fee is **{{fee}}**.')
+    expect(screen.getByLabelText('Email body')).toHaveValue('Hi {{client_name}},\n\nThe letter is attached.')
+  })
+
+  it('a B falls back to its own box when the box last used has no selection', async () => {
+    await renderPage()
+    const letter = screen.getByLabelText('Letter body') as HTMLTextAreaElement
+    const email = screen.getByLabelText('Email body') as HTMLTextAreaElement
+    letter.focus()
+    letter.setSelectionRange(3, 3)
+    email.setSelectionRange(0, 2)
+    fireEvent.click(screen.getByRole('button', { name: 'Bold in the email' }))
+    expect(email).toHaveValue('**Hi** {{client_name}},\n\nThe letter is attached.')
+    expect(letter).toHaveValue('Dear {{client_name}},\n\nOur fee is {{fee}}.')
+  })
+
+  it('a B does not reach back to a box she left for the subject', async () => {
+    await renderPage()
+    const letter = screen.getByLabelText('Letter body') as HTMLTextAreaElement
+    const email = screen.getByLabelText('Email body') as HTMLTextAreaElement
+    letter.focus()
+    letter.setSelectionRange(0, 4)
+    screen.getByLabelText('Subject').focus()
+    email.setSelectionRange(0, 2)
+    fireEvent.click(screen.getByRole('button', { name: 'Bold in the email' }))
+    expect(email).toHaveValue('**Hi** {{client_name}},\n\nThe letter is attached.')
+    expect(letter).toHaveValue('Dear {{client_name}},\n\nOur fee is {{fee}}.')
+  })
+
   it('Ctrl+B in the email does the same, and again takes it off', async () => {
     await renderPage()
     const email = screen.getByLabelText('Email body') as HTMLTextAreaElement
