@@ -2901,6 +2901,8 @@ export type EngagementPatch = {
   planIds?: string[]
   feeMode?: EngagementFeeMode
   party?: Partial<EngagementParty>
+  /** The `updatedAt` the page loaded: a letter saved since then is refused (409 engagement_changed). */
+  expectedUpdatedAt?: string | null
 }
 
 /** What the party would receive, built by the server with the same code as Send. */

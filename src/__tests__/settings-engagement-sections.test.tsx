@@ -37,6 +37,10 @@ const LIBRARY: EngagementSection[] = [
   section({ key: 'payroll', title: 'Payroll', body: 'We run payroll.', trigger: { groups: ['Payroll'] }, sortOrder: 3 }),
 ]
 
+const STAMPED_LIBRARY: EngagementSection[] = LIBRARY.map((entry, index) =>
+  ({ ...entry, updatedAt: `2026-10-11T15:00:0${index}.000Z` }),
+)
+
 /** The list the last Save all sent. */
 const lastSaved = () => api.saveEngagementSectionsRequest.mock.calls.at(-1)?.[0] as Array<Record<string, unknown>>
 
@@ -136,6 +140,37 @@ describe('Engagement sections in Settings', () => {
       target: { value: 'We run {{payroll_magic}}.' },
     })
     expect(screen.getByText(/\{\{payroll_magic\}\} is not a placeholder the app fills in/)).toBeTruthy()
+  })
+
+  it('hands the newest stamp it loaded to Save all, and a stale refusal says so and offers Reload', async () => {
+    api.listEngagementSectionsRequest = vi.fn(async () => STAMPED_LIBRARY)
+    api.saveEngagementSectionsRequest = vi.fn(async () => {
+      throw new ApiError(409, 'stale', 'stale')
+    })
+    await renderSection()
+    fireEvent.change(screen.getByLabelText('Title of Payroll'), { target: { value: 'Payroll!' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save all' }))
+    expect(
+      await screen.findByText(
+        'Someone saved these sections after you opened this page - reload and redo your change. Nothing was saved.',
+      ),
+    ).toBeTruthy()
+    expect(api.saveEngagementSectionsRequest.mock.calls.at(-1)?.[1]).toBe('2026-10-11T15:00:02.000Z')
+    // Reload reads the library again and clears the message; the edit is gone.
+    api.listEngagementSectionsRequest = vi.fn(async () =>
+      STAMPED_LIBRARY.map((entry) => ({ ...entry, updatedAt: '2026-10-11T16:00:00.000Z' })),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Reload' })).toBeNull())
+    expect(screen.queryByText(/Someone saved these sections/)).toBeNull()
+    expect(screen.getByLabelText('Title of Payroll')).toHaveValue('Payroll')
+    fireEvent.change(screen.getByLabelText('Title of Payroll'), { target: { value: 'Payroll!' } })
+    api.saveEngagementSectionsRequest = vi.fn(async (sections: EngagementSection[]) =>
+      sections.map((entry) => section({ ...entry, id: `esec-${entry.key}` })),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Save all' }))
+    await waitFor(() => expect(api.saveEngagementSectionsRequest).toHaveBeenCalledTimes(1))
+    expect(api.saveEngagementSectionsRequest.mock.calls[0][1]).toBe('2026-10-11T16:00:00.000Z')
   })
 
   it('shows the server sentence when the save is refused', async () => {

@@ -5413,13 +5413,18 @@ export async function listEngagementSectionsRequest(): Promise<EngagementSection
   return Array.isArray(body.sections) ? body.sections : []
 }
 
-/** Save the whole library; a section left out is deactivated, never deleted. */
+/**
+ * Save the whole library; a section left out is deactivated, never deleted.
+ * `expectedUpdatedAt` is the newest `updatedAt` the page loaded: a library saved since
+ * then is refused (409, code `stale`) and nothing is written.
+ */
 export async function saveEngagementSectionsRequest(
   sections: Array<Pick<EngagementSection, 'key' | 'title' | 'body' | 'trigger' | 'sortOrder' | 'active'>>,
+  expectedUpdatedAt?: string | null,
 ): Promise<EngagementSection[]> {
   const body = await engagementRequest<{ sections?: EngagementSection[] }>(
     '/api/engagement-sections',
-    proposalJson('PUT', { sections }),
+    proposalJson('PUT', { sections, ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}) }),
     'Failed to save the engagement sections',
   )
   return Array.isArray(body.sections) ? body.sections : []

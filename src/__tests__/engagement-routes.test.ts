@@ -141,6 +141,9 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
     expect(helper).toContain('if (!(error instanceof EngagementStateError)) throw error')
     expect(helper).toContain("sendJson(response, 400, { error: 'engagement_invalid', message: error.message })")
     expect(helper).toContain("sendJson(response, 409, { error: 'engagement_refused', reason: error.reason, message: error.message })")
+    // A save from a stale page (the stamp it loaded no longer matches) is 409 engagement_changed.
+    expect(helper).toContain("if (error.reason === 'changed') {")
+    expect(helper).toContain("sendJson(response, 409, { error: 'engagement_changed', message: error.message })")
     for (const route of ['PATCH', 'reassemble', 'sign', 'void']) {
       const pattern = ROUTES.find((entry) => entry.name.includes(route))!.pattern
       expect(routeBlock(pattern, 3000), route).toContain('sendEngagementRefusal(response, error)')
@@ -148,17 +151,30 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
   })
 
   it('the library PUT answers 400 sections_invalid before or from the store, and records the save', () => {
-    const block = routeBlock(ROUTES[1].pattern, 2600)
+    const block = routeBlock(ROUTES[1].pattern, 3600)
     expect(block).toContain("error: 'sections_invalid'")
     expect(block.indexOf("error: 'sections_invalid'")).toBeLessThan(block.indexOf('saveEngagementSections('))
-    expect(block).toContain('appDataStore.saveEngagementSections(payload.sections, { updatedBy: session.user.id })')
+    expect(block).toContain('updatedBy: session.user.id,')
     expect(block).toContain("'engagement_sections_saved'")
+  })
+
+  it('the library PUT refuses a page whose stamp is stale with 409 stale / sections_changed, before it records anything', () => {
+    const block = routeBlock(ROUTES[1].pattern, 3600)
+    expect(block).toContain('expectedUpdatedAt: loadedAt || null')
+    expect(block).toContain("if (error.reason === 'stale') {")
+    expect(block).toContain("sendJson(response, 409, { error: 'stale', code: 'sections_changed', message: error.message })")
+    expect(block.indexOf("code: 'sections_changed'")).toBeLessThan(block.indexOf("'engagement_sections_saved'"))
+    // A stamp that is not a date is a 400, not a database error.
+    expect(block).toContain('Number.isNaN(Date.parse(loadedAt))')
   })
 
   it('PATCH passes only the editable fields to the store', () => {
     const block = routeBlock(ROUTES[4].pattern, 2600)
     expect(block).toContain("for (const key of ['subject', 'emailBody', 'letterBody', 'retainerAmount', 'packageId', 'planIds', 'feeMode', 'party']) {")
-    expect(block).toContain('appDataStore.updateEngagement(engagementMatch[1], patch)')
+    expect(block).toContain('appDataStore.updateEngagement(engagementMatch[1], patch, { expectedUpdatedAt: loadedAt || null })')
+    // The stamp the editor loaded is not a field of the patch: it only conditions the write.
+    expect(block).not.toMatch(/'expectedUpdatedAt'\]/)
+    expect(block).toContain("error: 'engagement_invalid', message: 'Send the time the engagement was loaded as a date.'")
   })
 
   it('the editor read hands the engagement placeholders, the warnings, the hash and the sender', () => {

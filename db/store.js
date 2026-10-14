@@ -26939,7 +26939,7 @@ export class AppDataStore {
    * 'invalid' and nothing is written (nothing is silently cut short).
    * Returns the whole library, as `listEngagementSections` does.
    */
-  async saveEngagementSections(list, { updatedBy = null } = {}) {
+  async saveEngagementSections(list, { updatedBy = null, expectedUpdatedAt = null } = {}) {
     void updatedBy // who saved is the route's activity entry; the table has no column for it
     if (!Array.isArray(list)) {
       throw new EngagementStateError('Send the sections as a list.', 'invalid')
@@ -26969,8 +26969,24 @@ export class AppDataStore {
       )
     }
     const keys = clean.map((section) => section.key)
+    // Stale-tab guard: `expectedUpdatedAt` is the newest stamp the page loaded. Every save
+    // (and every deactivation) stamps updated_at, so a library saved since then has a newer
+    // one. The rows are locked first, so the check and the write are one step.
+    const staleSections = () =>
+      new EngagementStateError(
+        'Someone saved these sections after you opened this page. Nothing was saved: reload and redo your change.',
+        'stale',
+      )
     if (this.pool) {
       await this._withTransaction(async (dbClient) => {
+        if (expectedUpdatedAt) {
+          const { rows: checked } = await dbClient.query(
+            `select coalesce(abs(extract(epoch from (max(updated_at) - $1::timestamptz))) < 0.002, false) as same
+               from (select updated_at from engagement_sections for update) locked`,
+            [expectedUpdatedAt],
+          )
+          if (checked[0]?.same !== true) throw staleSections()
+        }
         for (const section of clean) {
           await dbClient.query(
             `insert into engagement_sections (id, key, title, body, trigger, sort_order, active)
@@ -27001,6 +27017,10 @@ export class AppDataStore {
       return this.listEngagementSections()
     }
     await this._mutateEngagementFile((authState) => {
+      if (expectedUpdatedAt) {
+        const newest = Math.max(0, ...authState.engagementSections.map((row) => Date.parse(row?.updatedAt) || 0))
+        if (!(Math.abs(newest - Date.parse(expectedUpdatedAt)) < 2)) throw staleSections()
+      }
       const now = nowIso()
       for (const section of clean) {
         const at = authState.engagementSections.findIndex((row) => row?.key === section.key)
@@ -27638,7 +27658,7 @@ export class AppDataStore {
    * void one, and ('invalid') a value it cannot take. Returns the engagement,
    * or null when there is none.
    */
-  async updateEngagement(id, patch = {}) {
+  async updateEngagement(id, patch = {}, { expectedUpdatedAt = null } = {}) {
     const current = await this.getEngagement(id)
     if (!current) return null
     if (!ENGAGEMENT_EDITABLE_STATUSES.includes(current.status)) {
@@ -27646,12 +27666,20 @@ export class AppDataStore {
     }
     const next = await this._engagementPatched(current, patch ?? {})
     const templateHash = engagementHash(next)
+    // Stale-tab guard: with `expectedUpdatedAt` (the stamp the page loaded) the write
+    // happens only if the row still carries it - checked in the same statement.
+    const staleEngagement = () =>
+      new EngagementStateError(
+        'Someone saved this engagement after you opened it. Nothing was saved: reload and redo your change.',
+        'changed',
+      )
     if (this.pool) {
       const { rows } = await this.pool.query(
         `update engagements
             set subject = $2, email_body = $3, letter_body = $4, retainer_amount = $5, package_id = $6,
                 plan_ids = $7::text[], party = $8::jsonb, template_hash = $9, fee_mode = $10, updated_at = now()
           where id = $1 and status in ('draft', 'sent')
+            and ($11::timestamptz is null or abs(extract(epoch from (updated_at - $11::timestamptz))) < 0.002)
           returning ${ENGAGEMENT_COLUMNS}`,
         [
           id,
@@ -27664,11 +27692,13 @@ export class AppDataStore {
           JSON.stringify(next.party),
           templateHash,
           next.feeMode,
+          expectedUpdatedAt || null,
         ],
       )
       if (rows[0]) return mapEngagementRow(rows[0])
       const latest = await this.getEngagement(id)
       if (!latest) return null
+      if (ENGAGEMENT_EDITABLE_STATUSES.includes(latest.status) && expectedUpdatedAt) throw staleEngagement()
       throw AppDataStore._engagementStatusRefusal(latest.status, 'edited')
     }
     return this._mutateEngagementFile((authState) => {
@@ -27676,6 +27706,9 @@ export class AppDataStore {
       if (!row) return { result: null, changed: false }
       if (!ENGAGEMENT_EDITABLE_STATUSES.includes(row.status)) {
         throw AppDataStore._engagementStatusRefusal(row.status, 'edited')
+      }
+      if (expectedUpdatedAt && !(Math.abs(Date.parse(row.updatedAt) - Date.parse(expectedUpdatedAt)) < 2)) {
+        throw staleEngagement()
       }
       Object.assign(row, next, { templateHash, updatedAt: nowIso() })
       return { result: mapEngagementRow(row), changed: true }
@@ -27903,13 +27936,11 @@ export class AppDataStore {
       const { rows } = await this.pool.query(
         probe
           ? `update engagements
-                set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
-                    updated_at = now()
+                set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb
               where id = $1 and not (coalesce(email_log, '[]'::jsonb) @> $3::jsonb)
               returning ${ENGAGEMENT_COLUMNS}`
           : `update engagements
-                set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
-                    updated_at = now()
+                set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb
               where id = $1
               returning ${ENGAGEMENT_COLUMNS}`,
         probe ? [id, JSON.stringify([clean]), JSON.stringify([probe])] : [id, JSON.stringify([clean])],
@@ -27923,8 +27954,8 @@ export class AppDataStore {
       if (!row) return { result: null, changed: false }
       const log = Array.isArray(row.emailLog) ? row.emailLog : []
       if (providerId !== null && log.some(sameAs)) return { result: mapEngagementRow(row), changed: false }
+      // Log only: a delivery event is not an edit, so the stamp an open editor holds stays valid.
       row.emailLog = [...log, clean]
-      row.updatedAt = nowIso()
       return { result: mapEngagementRow(row), changed: true }
     })
   }

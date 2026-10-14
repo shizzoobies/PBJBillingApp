@@ -2753,6 +2753,10 @@ function sendEngagementRefusal(response, error) {
     sendJson(response, 400, { error: 'engagement_invalid', message: error.message })
     return
   }
+  if (error.reason === 'changed') {
+    sendJson(response, 409, { error: 'engagement_changed', message: error.message })
+    return
+  }
   sendJson(response, 409, { error: 'engagement_refused', reason: error.reason, message: error.message })
 }
 
@@ -11999,11 +12003,24 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: 'sections_invalid', message: 'Send the sections as a list.' })
         return
       }
+      // The newest stamp the page loaded: a library saved since then is refused (409), unwritten.
+      const loadedAt = payload.expectedUpdatedAt
+      if (loadedAt !== undefined && loadedAt !== null && (typeof loadedAt !== 'string' || Number.isNaN(Date.parse(loadedAt)))) {
+        sendJson(response, 400, { error: 'sections_invalid', message: 'Send the time the sections were loaded as a date.' })
+        return
+      }
       let sections
       try {
-        sections = await appDataStore.saveEngagementSections(payload.sections, { updatedBy: session.user.id })
+        sections = await appDataStore.saveEngagementSections(payload.sections, {
+          updatedBy: session.user.id,
+          expectedUpdatedAt: loadedAt || null,
+        })
       } catch (error) {
         if (error instanceof EngagementStateError) {
+          if (error.reason === 'stale') {
+            sendJson(response, 409, { error: 'stale', code: 'sections_changed', message: error.message })
+            return
+          }
           sendJson(response, 400, { error: 'sections_invalid', message: error.message })
           return
         }
@@ -12133,9 +12150,15 @@ const server = createServer(async (request, response) => {
       for (const key of ['subject', 'emailBody', 'letterBody', 'retainerAmount', 'packageId', 'planIds', 'feeMode', 'party']) {
         if (payload[key] !== undefined) patch[key] = payload[key]
       }
+      // The stamp the editor loaded: a letter saved since then is refused (409 engagement_changed), unwritten.
+      const loadedAt = payload.expectedUpdatedAt
+      if (loadedAt !== undefined && loadedAt !== null && (typeof loadedAt !== 'string' || Number.isNaN(Date.parse(loadedAt)))) {
+        sendJson(response, 400, { error: 'engagement_invalid', message: 'Send the time the engagement was loaded as a date.' })
+        return
+      }
       let updated
       try {
-        updated = await appDataStore.updateEngagement(engagementMatch[1], patch)
+        updated = await appDataStore.updateEngagement(engagementMatch[1], patch, { expectedUpdatedAt: loadedAt || null })
       } catch (error) {
         sendEngagementRefusal(response, error)
         return

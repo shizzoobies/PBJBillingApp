@@ -422,12 +422,42 @@ describe('Save', () => {
         retainerAmount: 1000,
         packageId: 'pkg-1',
         planIds: ['plan-2'],
+        // The stamp the page loaded: a letter saved from another tab since is refused.
+        expectedUpdatedAt: '2026-10-11T15:00:00.000Z',
       }),
     )
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled())
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() =>
       expect(api.sendEngagementRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-2', to: 'pat@acme.test' }),
+    )
+  })
+
+  it('a save refused because the letter changed elsewhere says so, writes nothing, and Reload brings the stored one', async () => {
+    api.updateEngagementRequest = vi.fn(async () => {
+      throw new ApiError(409, 'changed', 'engagement_changed')
+    })
+    await renderEditor()
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'My subject' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(
+      await screen.findByText(
+        'Someone saved this engagement after you opened it - reload and redo your change. Nothing was saved.',
+      ),
+    ).toBeTruthy()
+    api.getEngagementRequest = vi.fn(async () => view({ subject: 'Their subject', updatedAt: '2026-10-11T16:00:00.000Z' }, 'hash-9'))
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }))
+    await waitFor(() => expect(screen.getByLabelText('Subject')).toHaveValue('Their subject'))
+    expect(screen.queryByRole('button', { name: 'Reload' })).toBeNull()
+    // The next save carries the stamp of the version just loaded.
+    api.updateEngagementRequest = vi.fn(async (_id: string, patch: Partial<Engagement>) => view(patch, 'hash-10'))
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Mine again' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(api.updateEngagementRequest).toHaveBeenCalledWith(
+        'eng-1',
+        expect.objectContaining({ expectedUpdatedAt: '2026-10-11T16:00:00.000Z' }),
+      ),
     )
   })
 
@@ -572,6 +602,41 @@ describe('Send', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() =>
       expect(api.sendEngagementRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-9', to: 'pat@acme.test' }),
+    )
+  })
+})
+
+describe('Save after a Send', () => {
+  it('takes the stamp the send left even while she typed during "Sending...", so the next Save is not refused as stale', async () => {
+    mockConfirm(true)
+    let finish: (value: { engagement: Engagement; ok: boolean; error: null }) => void = () => {}
+    api.sendEngagementRequest = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve as typeof finish
+        }),
+    )
+    await renderEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(api.sendEngagementRequest).toHaveBeenCalled())
+    // Typing while it sends makes the page dirty.
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Typed while sending' } })
+    // The send moved the stamp; the page reads the stored letter once it answers.
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ status: 'sent', sentAt: '2026-10-11T17:00:00.000Z', updatedAt: '2026-10-11T17:00:00.000Z' }, 'hash-9'),
+    )
+    finish({ engagement: engagement({ status: 'sent' }), ok: true, error: null })
+    await waitFor(() => expect(api.getEngagementRequest).toHaveBeenCalled())
+    // Her unsaved text stays...
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled())
+    expect(screen.getByLabelText('Subject')).toHaveValue('Typed while sending')
+    // ...and its Save carries the post-send stamp.
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(api.updateEngagementRequest).toHaveBeenCalledWith(
+        'eng-1',
+        expect.objectContaining({ subject: 'Typed while sending', expectedUpdatedAt: '2026-10-11T17:00:00.000Z' }),
+      ),
     )
   })
 })

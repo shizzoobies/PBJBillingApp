@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CollapsibleSection, SaveBadge } from './SectionKit'
 import { BoldBar, PlaceholderChipsToggle } from './letters/LetterEditorKit'
 import { insertPlaceholder, isBoldShortcut, toggleBold, unknownPlaceholderSentence } from './letters/letterEditing'
@@ -57,6 +57,20 @@ function toPayload(rows: Row[]) {
 
 const ENGAGEMENT_PLACEHOLDERS = placeholdersFor('engagement')
 
+const STALE_SENTENCE =
+  'Someone saved these sections after you opened this page - reload and redo your change. Nothing was saved.'
+
+/** The newest `updatedAt` in the library as loaded (the stamp Save all hands back), or null. */
+function newestStamp(sections: EngagementSection[]): string | null {
+  let newest: string | null = null
+  for (const section of sections) {
+    if (section.updatedAt && (newest === null || Date.parse(section.updatedAt) > Date.parse(newest))) {
+      newest = section.updatedAt
+    }
+  }
+  return newest
+}
+
 /**
  * Settings > Engagement sections (docs/plans/engagements-2026-10.md, stage 2C): the
  * library an engagement letter is assembled from when a proposal is accepted. Each
@@ -67,20 +81,32 @@ const ENGAGEMENT_PLACEHOLDERS = placeholdersFor('engagement')
 export function EngagementSectionsSection({ pricing }: { pricing: ProposalPricing }) {
   const [rows, setRows] = useState<Row[] | null>(null)
   const [savedRows, setSavedRows] = useState<Row[] | null>(null)
+  // The newest stamp the page loaded: sent with Save all so a library saved from another
+  // tab since then is refused instead of overwritten.
+  const [loadedAt, setLoadedAt] = useState<string | null>(null)
+  const [stale, setStale] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [saveState, setSaveState] = useState<SaveFlashState>('idle')
   const [saveError, setSaveError] = useState('')
   const bodyRefs = useRef(new Map<string, HTMLTextAreaElement>())
   const nextNumber = useRef(1)
 
+  const adopt = useCallback((sections: EngagementSection[]) => {
+    const loaded = sections.map(toRow)
+    setRows(loaded)
+    setSavedRows(loaded)
+    setLoadedAt(newestStamp(sections))
+    setStale(false)
+  }, [])
+  const [reloads, setReloads] = useState(0)
   useEffect(() => {
     let cancelled = false
     void listEngagementSectionsRequest()
       .then((sections) => {
         if (cancelled) return
-        const loaded = sections.map(toRow)
-        setRows(loaded)
-        setSavedRows(loaded)
+        adopt(sections)
+        setSaveError('')
+        setSaveState('idle')
       })
       .catch((err) => {
         if (!cancelled) setLoadError(err instanceof ApiError ? err.message : 'Could not load the engagement sections.')
@@ -88,7 +114,7 @@ export function EngagementSectionsSection({ pricing }: { pricing: ProposalPricin
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [reloads, adopt])
 
   const services = useMemo(
     () =>
@@ -148,15 +174,17 @@ export function EngagementSectionsSection({ pricing }: { pricing: ProposalPricin
     setSaveState('saving')
     setSaveError('')
     try {
-      const sections = await saveEngagementSectionsRequest(toPayload(rows))
-      const loaded = sections.map(toRow)
-      setRows(loaded)
-      setSavedRows(loaded)
+      adopt(await saveEngagementSectionsRequest(toPayload(rows), loadedAt))
       setSaveState('saved')
       window.setTimeout(() => setSaveState('idle'), 1800)
     } catch (err) {
       setSaveState('error')
-      setSaveError(err instanceof ApiError ? err.message : 'Could not save the engagement sections.')
+      if (err instanceof ApiError && err.status === 409 && err.code === 'stale') {
+        setStale(true)
+        setSaveError(STALE_SENTENCE)
+      } else {
+        setSaveError(err instanceof ApiError ? err.message : 'Could not save the engagement sections.')
+      }
     }
   }
 
@@ -377,6 +405,13 @@ export function EngagementSectionsSection({ pricing }: { pricing: ProposalPricin
         <p className="form-error" role="alert">
           {saveError}
         </p>
+      ) : null}
+      {stale ? (
+        <div className="button-row">
+          <button type="button" className="secondary-action" onClick={() => setReloads((count) => count + 1)}>
+            Reload
+          </button>
+        </div>
       ) : null}
       {keyProblems.length > 0 ? (
         <p className="form-error" role="alert">

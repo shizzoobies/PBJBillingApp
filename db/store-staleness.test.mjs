@@ -47307,6 +47307,70 @@ describe('engagements (file backend)', () => {
     ])
   })
 
+  // A delivery event (Resend, seconds after a send) is not an edit: it must not move the stamp an
+  // open editor holds, or the next Save would be refused as "saved elsewhere".
+  it('a delivery event after a send leaves the stamp alone, so the post-send stamp still saves', async () => {
+    const draft = await draftFromProspect()
+    const sent = await store.markEngagementSent(draft.id, { to: ['pat@acme.test'], ok: true, providerId: 're_1' })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await store.appendEngagementEmailEvent(draft.id, { kind: 'delivery', event: 'delivered', providerId: 're_1', to: 'pat@acme.test' })
+    const after = await store.getEngagement(draft.id)
+    expect(after.emailLog.some((entry) => entry.event === 'delivered')).toBe(true)
+    expect(after.updatedAt).toBe(sent.updatedAt)
+    const saved = await store.updateEngagement(draft.id, { subject: 'Edited after the send' }, { expectedUpdatedAt: sent.updatedAt })
+    expect(saved.subject).toBe('Edited after the send')
+  })
+
+  // Stale-tab guard (engagements leftovers 1): Save all carries the newest stamp the page loaded.
+  it('refuses a sections save from a stale page with reason stale, writing nothing; the loaded stamp saves', async () => {
+    const library = await store.listEngagementSections()
+    const stamp = library.map((section) => section.updatedAt).sort().at(-1)
+    // Another tab saves first: every row it touches is stamped later.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await store.saveEngagementSections(
+      library.map((section) => (section.key === 'intro' ? { ...section, body: 'Their edit' } : section)),
+    )
+    const before = (await readAuth()).engagementSections
+    const error = await store
+      .saveEngagementSections(
+        library.map((section) => (section.key === 'intro' ? { ...section, body: 'My edit' } : section)),
+        { expectedUpdatedAt: stamp },
+      )
+      .catch((caught) => caught)
+    expect(error).toBeInstanceOf(EngagementStateError)
+    expect(error.reason).toBe('stale')
+    expect((await readAuth()).engagementSections).toEqual(before)
+    expect((await store.listEngagementSections()).find((section) => section.key === 'intro')?.body).toBe('Their edit')
+
+    const fresh = await store.listEngagementSections()
+    const freshStamp = fresh.map((section) => section.updatedAt).sort().at(-1)
+    const saved = await store.saveEngagementSections(
+      fresh.map((section) => (section.key === 'intro' ? { ...section, body: 'My edit' } : section)),
+      { expectedUpdatedAt: freshStamp },
+    )
+    expect(saved.find((section) => section.key === 'intro')?.body).toBe('My edit')
+  })
+
+  it('refuses an engagement edit from a stale page with reason changed, writing nothing; the loaded stamp saves', async () => {
+    const draft = await draftFromProspect()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await store.updateEngagement(draft.id, { subject: 'Their subject' })
+    const error = await store
+      .updateEngagement(draft.id, { subject: 'My subject' }, { expectedUpdatedAt: draft.updatedAt })
+      .catch((caught) => caught)
+    expect(error).toBeInstanceOf(EngagementStateError)
+    expect(error.reason).toBe('changed')
+    expect((await store.getEngagement(draft.id)).subject).toBe('Their subject')
+
+    const current = await store.getEngagement(draft.id)
+    const saved = await store.updateEngagement(
+      draft.id,
+      { subject: 'My subject' },
+      { expectedUpdatedAt: current.updatedAt },
+    )
+    expect(saved.subject).toBe('My subject')
+  })
+
   // Round-2 review M3: the cover email is never switched off, and an empty list is refused.
   it('keeps the email section in use whatever the list says, and refuses an empty list', async () => {
     const library = await store.listEngagementSections()
@@ -48822,6 +48886,10 @@ describe('engagements (Postgres statements)', () => {
             .map((row) => ({ ...row })),
         }
       }
+      if (/^select coalesce\(abs\(extract\(epoch from \(max\(updated_at\) - \$1::timestamptz\)\)\) < 0\.002, false\) as same from \(select updated_at from engagement_sections for update\) locked$/i.test(trimmed)) {
+        const newest = Math.max(0, ...sections.map((row) => new Date(row.updated_at).getTime()))
+        return { rows: [{ same: Math.abs(newest - Date.parse(params[0])) < 2 }] }
+      }
       if (/^insert into engagement_sections /i.test(trimmed)) {
         const at = sections.findIndex((row) => row.key === params[1])
         if (at >= 0) {
@@ -48893,6 +48961,7 @@ describe('engagements (Postgres statements)', () => {
       if (/^update engagements set subject = \$2, email_body = \$3, letter_body = \$4, retainer_amount/i.test(trimmed)) {
         const row = find()
         if (!row || !['draft', 'sent'].includes(row.status)) return { rows: [] }
+        if (params[10] && Math.abs(new Date(row.updated_at).getTime() - Date.parse(params[10])) >= 2) return { rows: [] }
         Object.assign(row, {
           subject: params[1],
           email_body: params[2],
@@ -48914,7 +48983,7 @@ describe('engagements (Postgres statements)', () => {
         if (params[2] && !row.sent_at) row.sent_at = params[3]
         return { rows: [{ ...row }] }
       }
-      if (/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb, updated_at = now\(\) where id = \$1 and not/i.test(trimmed)) {
+      if (/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb where id = \$1 and not/i.test(trimmed)) {
         const row = find()
         const probe = JSON.parse(params[2])[0]
         const contains = row?.email_log.some((entry) => Object.entries(probe).every(([key, value]) => entry[key] === value))
@@ -49122,7 +49191,7 @@ describe('engagements (Postgres statements)', () => {
     const edited = await pgStore.updateEngagement(draft.id, { subject: 'New', planIds: ['p1', 'p-gone'], packageId: 'pkg-1' })
     const [update] = fake.matching(/^update engagements set subject = \$2/i)
     expect(update.text).toMatch(
-      /^update engagements set subject = \$2, email_body = \$3, letter_body = \$4, retainer_amount = \$5, package_id = \$6, plan_ids = \$7::text\[\], party = \$8::jsonb, template_hash = \$9, fee_mode = \$10, updated_at = now\(\) where id = \$1 and status in \('draft', 'sent'\) returning /i,
+      /^update engagements set subject = \$2, email_body = \$3, letter_body = \$4, retainer_amount = \$5, package_id = \$6, plan_ids = \$7::text\[\], party = \$8::jsonb, template_hash = \$9, fee_mode = \$10, updated_at = now\(\) where id = \$1 and status in \('draft', 'sent'\) and \(\$11::timestamptz is null or abs\(extract\(epoch from \(updated_at - \$11::timestamptz\)\)\) < 0\.002\) returning /i,
     )
     expect(update.params[6]).toEqual(['p1'])
     expect(edited).toMatchObject({ subject: 'New', planIds: ['p1'], packageId: 'pkg-1' })
@@ -49140,6 +49209,49 @@ describe('engagements (Postgres statements)', () => {
     expect(error.reason).toBe('status')
     expect(error.message).toMatch(/signed/)
     expect(fake.engagements[0].subject).not.toBe('Late')
+  })
+
+  it('checks the loaded stamp under a row lock before a sections save, and writes nothing when it is stale', async () => {
+    const fake = engagementPool()
+    const pgStore = engagementStore(fake)
+    const library = await pgStore.listEngagementSections()
+    const loaded = new Date(fake.sections[0].updated_at).toISOString()
+    fake.statements.length = 0
+    await pgStore.saveEngagementSections(library, { expectedUpdatedAt: loaded })
+    const texts = fake.statements.map((s) => s.text)
+    expect(texts[0]).toMatch(/^begin$/i)
+    expect(texts[1]).toMatch(/from \(select updated_at from engagement_sections for update\) locked$/i)
+    expect(fake.matching(/^insert into engagement_sections /i)).toHaveLength(library.length)
+
+    // Another tab saved since: every row carries a later stamp, so nothing is written.
+    for (const row of fake.sections) row.updated_at = new Date('2026-10-09T15:05:00Z')
+    fake.statements.length = 0
+    const error = await pgStore.saveEngagementSections(library, { expectedUpdatedAt: loaded }).catch((caught) => caught)
+    expect(error).toBeInstanceOf(EngagementStateError)
+    expect(error.reason).toBe('stale')
+    expect(fake.matching(/^(insert into|update) engagement_sections /i)).toEqual([])
+    expect(fake.statements.map((s) => s.text).at(-1)).toMatch(/^rollback$/i)
+  })
+
+  it('edits with the loaded stamp in the same statement; a changed row matches nothing and is refused as changed', async () => {
+    const fake = engagementPool()
+    const pgStore = engagementStore(fake)
+    const draft = await pgStore.createEngagementFromProposal(proposal(), {})
+    const saved = await pgStore.updateEngagement(draft.id, { subject: 'Mine' }, { expectedUpdatedAt: draft.updatedAt })
+    expect(saved.subject).toBe('Mine')
+    const [update] = fake.matching(/^update engagements set subject = \$2/i)
+    expect(update.params[10]).toBe(draft.updatedAt)
+
+    // Saved from another tab since the page loaded.
+    fake.engagements[0].updated_at = new Date('2026-10-09T15:05:00Z')
+    const error = await pgStore
+      .updateEngagement(draft.id, { subject: 'Late' }, { expectedUpdatedAt: draft.updatedAt })
+      .catch((caught) => caught)
+    expect(error).toBeInstanceOf(EngagementStateError)
+    expect(error.reason).toBe('changed')
+    expect(fake.engagements[0].subject).toBe('Mine')
+    // No stamp sent: the write is unconditional, as before.
+    expect((await pgStore.updateEngagement(draft.id, { subject: 'Any' })).subject).toBe('Any')
   })
 
   it('marks sent in one statement: the log appended in the row, draft -> sent, sent_at kept once set', async () => {
@@ -49162,7 +49274,9 @@ describe('engagements (Postgres statements)', () => {
     const event = { kind: 'delivery', event: 'delivered', providerId: 're_1', to: 'pat@acme.test' }
     await pgStore.appendEngagementEmailEvent(draft.id, event)
     await pgStore.appendEngagementEmailEvent(draft.id, event)
-    const appends = fake.matching(/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb, updated_at = now\(\) where id = \$1 and not/i)
+    const appends = fake.matching(/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb where id = \$1 and not/i)
+    // Log only: the stamp an open editor holds is not moved by a delivery event.
+    expect(appends[0].text).not.toMatch(/updated_at = /)
     expect(appends[0].text).toMatch(/where id = \$1 and not \(coalesce\(email_log, '\[\]'::jsonb\) @> \$3::jsonb\)/i)
     expect(JSON.parse(appends[0].params[2])).toEqual([{ kind: 'delivery', providerId: 're_1', event: 'delivered' }])
     expect(fake.engagements[0].email_log).toHaveLength(1)

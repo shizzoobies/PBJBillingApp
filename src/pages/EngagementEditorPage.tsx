@@ -159,6 +159,10 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const [feeMode, setFeeMode] = useState<EngagementFeeMode>('replace')
   const [saveState, setSaveState] = useState<SaveFlashState>('idle')
   const [saveError, setSaveError] = useState('')
+  // The `updatedAt` the boxes were filled from: Save sends it, and a letter saved from
+  // another tab since then is refused (409 engagement_changed) instead of overwritten.
+  const [loadedAt, setLoadedAt] = useState<string | null>(null)
+  const [savedElsewhere, setSavedElsewhere] = useState(false)
 
   const [packages, setPackages] = useState<Package[]>([])
   const [sectionTitles, setSectionTitles] = useState<Record<string, string>>({})
@@ -199,8 +203,12 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   }, [dirty])
 
   /** Take the server's answer; the boxes follow it unless she has unsaved edits (or `overwrite`). */
-  const adopt = useCallback((next: EngagementView, { overwrite }: { overwrite: boolean }) => {
+  const adopt = useCallback(
+    (next: EngagementView, { overwrite, advanceStamp = false }: { overwrite: boolean; advanceStamp?: boolean }) => {
     setView(next)
+    // After a Send the stamp moves although no editable field did: take it even over unsaved edits,
+    // or the next Save would be refused as "saved elsewhere" for typing while it was sending.
+    if (advanceStamp) setLoadedAt(next.engagement.updatedAt ?? null)
     if (overwrite || !dirtyRef.current) {
       const row = next.engagement
       setSubject(row.subject ?? '')
@@ -210,13 +218,17 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
       setPackageId(row.packageId ?? '')
       setPlanIds(row.planIds ?? [])
       setFeeMode(row.feeMode ?? 'replace')
+      setLoadedAt(row.updatedAt ?? null)
+      setSavedElsewhere(false)
     }
-  }, [])
+    },
+    [],
+  )
 
   const refresh = useCallback(
-    async ({ overwrite }: { overwrite: boolean }) => {
+    async ({ overwrite, advanceStamp }: { overwrite: boolean; advanceStamp?: boolean }) => {
       try {
-        adopt(await getEngagementRequest(engagementId), { overwrite })
+        adopt(await getEngagementRequest(engagementId), { overwrite, advanceStamp })
         setLoadError('')
       } catch (err) {
         setLoadError(err instanceof ApiError ? err.message : 'Could not load the engagement.')
@@ -392,13 +404,21 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         ...(packageChanged ? { packageId: packageId || null } : {}),
         planIds,
         ...(feeMode !== (engagement.feeMode ?? 'replace') ? { feeMode } : {}),
+        ...(loadedAt ? { expectedUpdatedAt: loadedAt } : {}),
       })
       adopt(next, { overwrite: true })
       setSaveState('saved')
       window.setTimeout(() => setSaveState('idle'), 1800)
     } catch (err) {
       setSaveState('error')
-      setSaveError(err instanceof ApiError ? err.message : 'Could not save the engagement.')
+      if (err instanceof ApiError && err.code === 'engagement_changed') {
+        setSavedElsewhere(true)
+        setSaveError(
+          'Someone saved this engagement after you opened it - reload and redo your change. Nothing was saved.',
+        )
+      } else {
+        setSaveError(err instanceof ApiError ? err.message : 'Could not save the engagement.')
+      }
     }
   }
 
@@ -438,7 +458,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
       const result = await sendEngagementRequest(engagementId, { templateHash: view.hash, to })
       if (result.ok) setNotice(`Sent to ${to}.`)
       else setActionError(`Not sent: ${result.error ?? 'the email provider refused the message.'}`)
-      await refresh({ overwrite: false })
+      await refresh({ overwrite: false, advanceStamp: true })
     } catch (err) {
       setActionError(engagementSendRefusalSentence(err))
       // The engagement changed under the page (or went out a moment ago): show the stored one.
@@ -588,6 +608,21 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         <p className="form-error" role="alert">
           {saveError}
         </p>
+      ) : null}
+      {savedElsewhere ? (
+        <div className="button-row">
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => {
+              setSaveError('')
+              setSaveState('idle')
+              void refresh({ overwrite: true })
+            }}
+          >
+            Reload
+          </button>
+        </div>
       ) : null}
 
       <div className="engagement-layout">
