@@ -32,7 +32,7 @@ vi.mock('../lib/api', () => ({
   listInvoicesRequest: vi.fn(),
 }))
 
-import { listInvoicesRequest } from '../lib/api'
+import { fetchGlobalActivity, listInvoicesRequest } from '../lib/api'
 
 const mockList = vi.mocked(listInvoicesRequest)
 
@@ -236,6 +236,29 @@ describe('what the owner sees', () => {
 
     await waitFor(() => expect(mockList).toHaveBeenCalled())
     expect(section()).not.toBeInTheDocument()
+  })
+
+  // The app's own activity (the automatic invoice reminders) is filed under the
+  // 'system' actor; the feed says so in words rather than showing an id.
+  it('labels the system actor "Automatic reminder" in the recent activity', async () => {
+    mockList.mockResolvedValue([])
+    vi.mocked(fetchGlobalActivity).mockResolvedValueOnce({
+      entries: [
+        {
+          id: 'act-1',
+          userId: 'system',
+          action: 'invoice_reminded',
+          target: 'INV-2026-09-004 (cleared Payment failed)',
+          timestamp: '2026-10-15T14:00:00.000Z',
+        },
+      ],
+    })
+    signInAs(OWNER, true)
+    renderDashboard()
+
+    expect(await screen.findByText('Automatic reminder')).toBeInTheDocument()
+    expect(screen.getByText('sent a payment reminder for')).toBeInTheDocument()
+    expect(screen.getByText('INV-2026-09-004 (cleared Payment failed)')).toBeInTheDocument()
   })
 
   // The rest of the dashboard is not allowed to go down with it.

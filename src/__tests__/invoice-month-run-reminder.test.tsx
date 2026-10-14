@@ -279,6 +279,68 @@ describe('sending one reminder', () => {
   })
 })
 
+describe('a reminder on a Payment failed invoice', () => {
+  const failedAt = '2026-09-05T10:00:00.000Z'
+  const failure = {
+    kind: 'payment' as const,
+    event: 'failed' as const,
+    at: failedAt,
+    paymentIntentId: 'pi_1',
+    detail: 'The bank refused the debit',
+  }
+  const failedInvoice = (over: Partial<PersistedInvoice> = {}) =>
+    makeInvoice({
+      emailLog: [{ at: SENT_AT, to: ['ann@acme.test', 'bo@acme.test'], subject: 'Invoice', ok: true }, failure],
+      ...over,
+    })
+  const clearedLog = (remindedAt: string): PersistedInvoice['emailLog'] => [
+    { at: SENT_AT, to: ['ann@acme.test', 'bo@acme.test'], subject: 'Invoice', ok: true },
+    failure,
+    { ...reminderEntry(remindedAt), clearedPaymentFailed: true, clearedFailureAt: failedAt },
+  ]
+
+  it('is offered, and the confirm says it also clears Payment failed and where the invoice goes back to', async () => {
+    await openRun([failedInvoice()], { tab: /^Payment failed/ })
+    expect(remindButton()).toBeEnabled()
+    fireEvent.click(remindButton())
+    const confirm = screen.getByRole('group', { name: 'Send reminder' })
+    expect(within(confirm).getByText('This also clears Payment failed - the invoice goes back to Sent.')).toBeInTheDocument()
+  })
+
+  it('says Past due in the confirm when the invoice is past its own due date', async () => {
+    await openRun([failedInvoice({ dueDate: '2026-09-30' })], { tab: /^Payment failed/ })
+    fireEvent.click(remindButton())
+    expect(
+      screen.getByText('This also clears Payment failed - the invoice goes back to Past due.'),
+    ).toBeInTheDocument()
+  })
+
+  it('leaves out the clearing sentence on an invoice that has not failed', async () => {
+    await openRun([makeInvoice()])
+    fireEvent.click(remindButton())
+    expect(screen.queryByText(/This also clears Payment failed/)).not.toBeInTheDocument()
+  })
+
+  it('moves the row off the Payment failed tab once the reminder is recorded', async () => {
+    await openRun([failedInvoice()], { tab: /^Payment failed/ })
+    mockRemind.mockResolvedValue({ invoice: failedInvoice({ emailLog: clearedLog('2026-10-09T16:00:00.000Z') }) })
+
+    fireEvent.click(remindButton())
+    fireEvent.click(screen.getByRole('button', { name: 'Send reminder now' }))
+    await waitFor(() => expect(mockRemind).toHaveBeenCalledWith('inv-1', ['ann@acme.test', 'bo@acme.test']))
+
+    await waitFor(() => expect(screen.queryByText('INV-2026-08-001')).not.toBeInTheDocument())
+    expect(within(screen.getByRole('tab', { name: /^Payment failed/ })).getByText('0')).toBeInTheDocument()
+    expect(within(screen.getByRole('tab', { name: /^Sent/ })).getByText('1')).toBeInTheDocument()
+  })
+
+  it('keeps the history in the editor: failed on one date, cleared by a reminder on another', async () => {
+    await openRun([failedInvoice({ emailLog: clearedLog('2026-10-09T16:00:00.000Z') })], { tab: /^Sent/ })
+    expect(screen.getByText(/Payment failed Sep 5; cleared by a reminder Oct 9\./)).toBeInTheDocument()
+    expect(screen.queryByText(/The client's Pay link still works for a retry/)).not.toBeInTheDocument()
+  })
+})
+
 describe('Last reminded on the row', () => {
   it('shows the newest ok reminder date before anything is opened', async () => {
     await openRun(

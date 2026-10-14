@@ -303,6 +303,7 @@ export function isInvoicePaymentFailureEntry(
  * UTC day. See that module’s header for why there is no clock inside it.
  */
 export {
+  clearedPaymentFailure,
   daysPastDueLabel,
   latestInvoiceSend,
   pastDueInvoice,
@@ -1898,6 +1899,8 @@ export function stageAdvanceFailedNotice(message: string): string {
 
 export function describeActivityAction(action: string): string {
   switch (action) {
+    case 'invoice_reminded':
+      return 'sent a payment reminder for'
     case 'login_password':
       return 'logged in with password'
     case 'login_via_magic_link':

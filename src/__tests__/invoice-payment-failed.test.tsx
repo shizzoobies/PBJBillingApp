@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoiceMonthRun } from '../components/InvoiceMonthRun'
 import type { Client, PersistedInvoice } from '../lib/types'
-import { latestInvoiceSend, unresolvedPaymentFailure } from '../lib/utils'
+import { clearedPaymentFailure, latestInvoiceSend, unresolvedPaymentFailure } from '../lib/utils'
 
 /**
  * The "Payment failed" tab in the month run.
@@ -191,6 +191,50 @@ describe('unresolvedPaymentFailure', () => {
       send({ at: '2026-09-11T00:00:00.000Z', ok: false, error: 'refused', providerId: 'ee-2' }),
     ]
     expect(unresolvedPaymentFailure({ status: 'sent', emailLog: log })).not.toBeNull()
+  })
+
+  // Brittany, 2026-10-14: a reminder clears Payment failed. The reminder's own
+  // log entry names the failure it answered, so a NEWER failure still shows.
+  describe('answered by a payment reminder', () => {
+    const reminder = (over = {}) => ({
+      at: '2026-09-11T10:00:00.000Z',
+      to: ['ann@acme.com'],
+      subject: 'Reminder',
+      ok: true,
+      kind: 'reminder' as const,
+      clearedPaymentFailed: true as const,
+      clearedFailureAt: '2026-09-10T10:00:00.000Z',
+      ...over,
+    })
+
+    it('is cleared by a reminder that says it cleared that failure, and the history line reads both dates', () => {
+      const invoice = { status: 'sent' as const, emailLog: [send(), failure(), reminder()] }
+      expect(unresolvedPaymentFailure(invoice)).toBeNull()
+      expect(clearedPaymentFailure(invoice)).toMatchObject({
+        failedAt: '2026-09-10T10:00:00.000Z',
+        clearedAt: '2026-09-11T10:00:00.000Z',
+      })
+      expect(clearedPaymentFailure(invoice)?.detail).toMatch(/Microdeposit/)
+    })
+
+    it('is not cleared by a plain reminder, or by one that did not go out', () => {
+      const plain = reminder({ clearedPaymentFailed: undefined, clearedFailureAt: undefined })
+      expect(unresolvedPaymentFailure({ status: 'sent', emailLog: [send(), failure(), plain] })).not.toBeNull()
+      const failed = reminder({ ok: false })
+      expect(unresolvedPaymentFailure({ status: 'sent', emailLog: [send(), failure(), failed] })).not.toBeNull()
+    })
+
+    it('comes back when the client fails again after the reminder', () => {
+      const again = failure({ at: '2026-09-12T10:00:00.000Z', paymentIntentId: 'pi_2' })
+      const invoice = { status: 'sent' as const, emailLog: [send(), failure(), reminder(), again] }
+      expect(unresolvedPaymentFailure(invoice)?.paymentIntentId).toBe('pi_2')
+      expect(clearedPaymentFailure(invoice)).toBeNull()
+    })
+
+    it('says nothing on a paid invoice, or one that never failed', () => {
+      expect(clearedPaymentFailure({ status: 'paid', emailLog: [send(), failure(), reminder()] })).toBeNull()
+      expect(clearedPaymentFailure({ status: 'sent', emailLog: [send()] })).toBeNull()
+    })
   })
 
   it('counts an overdue invoice as still owed, and nothing else', () => {

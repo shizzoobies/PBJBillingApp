@@ -118,6 +118,7 @@ import {
   INVOICE_NOTE_MAX_LENGTH,
   INVOICE_STATUS_LABELS,
   currency,
+  clearedPaymentFailure,
   daysPastDueLabel,
   formatInvoiceRecipient,
   formatSentOn,
@@ -3431,6 +3432,19 @@ function InvoiceEditor({
   const reminderCode = reminderBlock(invoice, { optedOut, noEmail, autopayAttempt })
   // A failed payment attempt nobody has answered yet — same source, same reason.
   const paymentFailure = unresolvedPaymentFailure(invoice)
+  // A failure a reminder already cleared: the history says both dates.
+  const clearedFailure = clearedPaymentFailure(invoice)
+  // Where the invoice goes when a reminder clears its Payment failed: Past due when
+  // its own due date has passed, otherwise Sent. Read the way the tabs read it,
+  // with the failure out of the way.
+  const backToTab = paymentFailure
+    ? pastDueInvoice(
+        { ...invoice, emailLog: (invoice.emailLog ?? []).filter((entry) => entry.kind !== 'payment') },
+        localDateOnly(),
+      )
+      ? 'Past due'
+      : 'Sent'
+    : null
   // A payment for a different amount than the total, not yet marked handled.
   const amountMismatch = unhandledAmountMismatch(invoice)
   const [handledBusy, setHandledBusy] = useState(false)
@@ -4992,6 +5006,12 @@ function InvoiceEditor({
           {REMINDER_UNRECORDED}
         </p>
       ) : null}
+      {clearedFailure ? (
+        <p className="invoice-run-reminded">
+          Payment failed {formatSentOn(clearedFailure.failedAt)}; cleared by a reminder{' '}
+          {formatSentOn(clearedFailure.clearedAt)}.
+        </p>
+      ) : null}
 
       {/* What went wrong, in Stripe's words, and what to do about it. A bank
           attempt spends its Checkout session, so that link is dead; a card
@@ -5123,6 +5143,11 @@ function InvoiceEditor({
               <li key={detail.email}>{formatInvoiceRecipient(detail)}</li>
             ))}
           </ul>
+          {backToTab ? (
+            <p className="invoice-run-remind-prompt">
+              This also clears Payment failed - the invoice goes back to {backToTab}.
+            </p>
+          ) : null}
           <div className="invoice-run-remind-actions">
             <button
               type="button"

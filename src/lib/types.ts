@@ -875,6 +875,11 @@ export interface InvoiceEmailSendEntry {
    * reads the newest ok one.
    */
   kind?: 'ack' | 'receipt' | 'link' | 'not-emailed' | 'reminder'
+  /** On a reminder: it took the invoice out of Payment failed (answering the failure at `clearedFailureAt`). */
+  clearedPaymentFailed?: true
+  clearedFailureAt?: string
+  /** On a reminder: the app sent it by itself on a reminder day. */
+  auto?: true
   /** Resend's own id for the message — the join key to its delivery events. */
   providerId?: string | null
   /**

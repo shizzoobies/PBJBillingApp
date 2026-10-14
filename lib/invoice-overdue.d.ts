@@ -18,6 +18,12 @@ export interface InvoiceSendLogEntry {
   total?: number
   error?: string
   kind?: 'ack' | 'receipt' | 'link' | 'not-emailed' | 'reminder'
+  /** A reminder that took the invoice out of Payment failed. */
+  clearedPaymentFailed?: true
+  /** The `at` of the failure that reminder answered. */
+  clearedFailureAt?: string
+  /** A reminder the app sent by itself on a reminder day (not the owner's button). */
+  auto?: true
   providerId?: string | null
   /** The addresses in `to` typed for this send only; absent when there were none. */
   oneTime?: string[]
@@ -118,6 +124,11 @@ export declare function recordedRetainerNeverSent(invoice: {
 export declare function unresolvedPaymentFailure(
   invoice: InvoiceSignalSource | null | undefined,
 ): InvoicePaymentFailureLogEntry | null
+
+/** A payment failure that a reminder cleared, for the history line; null when none applies. */
+export declare function clearedPaymentFailure(
+  invoice: InvoiceSignalSource | null | undefined,
+): { failedAt: string; detail: string; clearedAt: string } | null
 
 /** `todayDateOnly` is YYYY-MM-DD: the SPA's `localDateOnly()`, the server's `todayIso()`. */
 export declare function pastDueInvoice(

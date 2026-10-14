@@ -90,7 +90,7 @@ import { applyScopeRetag } from '../lib/invoice-scope-retag.js'
 import { buildInvoiceLines, cardProcessingFeeLine } from '../lib/invoice-lines.js'
 import { buildCardCheckoutLineItems, buildCheckoutLineItems } from '../lib/stripe-rail.js'
 import { paymentAmountMismatch, unhandledAmountMismatch } from '../lib/payment-amount-mismatch.js'
-import { latestInvoiceSend, unresolvedPaymentFailure } from '../lib/invoice-overdue.js'
+import { clearedPaymentFailure, latestInvoiceSend, unresolvedPaymentFailure } from '../lib/invoice-overdue.js'
 import { buildInvoiceEmail } from '../lib/invoice-email.js'
 import { remindInvoice } from '../lib/invoice-reminder.js'
 import { buildInvoicePdf } from '../lib/invoice-pdf.js'
@@ -53214,6 +53214,31 @@ describe('Send reminder (file backend)', () => {
     expect(result.body.invoice.emailLog).toHaveLength(2)
   })
 
+  it('files an automatic clearing of Payment failed in the activity log under the system actor', async () => {
+    await seed({
+      emailLog: [
+        { at: SENT_AT, to: ['ann@acme.test'], subject: 'Invoice', ok: true, total: 945 },
+        { kind: 'payment', event: 'failed', at: '2026-10-05T12:00:00.000Z', paymentIntentId: 'pi_1' },
+      ],
+    })
+    const result = await remindInvoice(
+      {
+        invoiceId: 'inv-remind',
+        now: new Date(),
+        appUrl: 'https://app.pbjsa.com',
+        stripeConfigured: true,
+        userId: null,
+        auto: true,
+      },
+      { store, sendEmail: mailer().sendEmail },
+    )
+    expect(result.status).toBe(200)
+    const row = (await store.getGlobalActivity(50)).find(
+      (entry) => entry.userId === 'system' && entry.action === 'invoice_reminded',
+    )
+    expect(row?.target).toBe('INV-2026-09-004 (cleared Payment failed)')
+  })
+
   it('refuses a second reminder the same firm day and writes nothing', async () => {
     await seed()
     const mail = mailer()
@@ -53269,15 +53294,47 @@ describe('Send reminder (file backend)', () => {
     expect(mail.sent[0].html).toContain(`/pay/${token}`)
   })
 
-  it('leaves a Payment failed invoice in Payment failed', async () => {
+  it('clears Payment failed in the same write that logs the reminder, and keeps the history', async () => {
+    await seed({
+      emailLog: [
+        { at: SENT_AT, to: ['ann@acme.test'], subject: 'Invoice', ok: true, total: 945 },
+        { kind: 'payment', event: 'failed', at: '2026-10-05T12:00:00.000Z', paymentIntentId: 'pi_1', detail: 'declined' },
+      ],
+    })
+    expect(unresolvedPaymentFailure(await stored())).not.toBeNull()
+
+    const result = await remind(mailer().sendEmail)
+
+    expect(result.status).toBe(200)
+    const after = await stored()
+    expect(after.emailLog).toHaveLength(3)
+    expect(after.emailLog[2]).toMatchObject({
+      kind: 'reminder',
+      ok: true,
+      clearedPaymentFailed: true,
+      clearedFailureAt: '2026-10-05T12:00:00.000Z',
+    })
+    expect(unresolvedPaymentFailure(after)).toBeNull()
+    expect(unresolvedPaymentFailure(result.body.invoice)).toBeNull()
+    // Still Sent underneath; the failure entry stays on the log as history.
+    expect(after.status).toBe('sent')
+    expect(after.emailLog[1]).toMatchObject({ kind: 'payment', event: 'failed' })
+    expect(clearedPaymentFailure(after)).toMatchObject({ failedAt: '2026-10-05T12:00:00.000Z', detail: 'declined' })
+  })
+
+  it('does not clear a Payment failed when the provider refused the reminder', async () => {
     await seed({
       emailLog: [
         { at: SENT_AT, to: ['ann@acme.test'], subject: 'Invoice', ok: true, total: 945 },
         { kind: 'payment', event: 'failed', at: '2026-10-05T12:00:00.000Z', paymentIntentId: 'pi_1' },
       ],
     })
-    expect((await remind(mailer().sendEmail)).status).toBe(200)
-    expect(unresolvedPaymentFailure(await stored())).not.toBeNull()
+    const failing = mailer({ ok: false, error: 'domain is not verified', providerId: null, status: 403 })
+    expect((await remind(failing.sendEmail)).status).toBe(502)
+    const after = await stored()
+    expect(after.emailLog.at(-1)).toMatchObject({ kind: 'reminder', ok: false })
+    expect(after.emailLog.at(-1).clearedPaymentFailed).toBeUndefined()
+    expect(unresolvedPaymentFailure(after)).not.toBeNull()
   })
 })
 
@@ -53298,6 +53355,44 @@ describe('Send reminder (Postgres statement)', () => {
     // $3 is "this marks the invoice sent": false for a reminder, so sent_at,
     // status and due_date all keep the row's own values.
     expect(update.params[2]).toBe(false)
+  })
+
+  it('carries the Payment failed it cleared on the appended entry (one statement, same parameters)', async () => {
+    const fake = fakePostgres({ invoices: [existingInvoice] })
+    await postgresStore(fake).recordInvoiceSent('inv-1', {
+      kind: 'reminder',
+      to: ['ann@acme.com'],
+      subject: 'Reminder',
+      ok: true,
+      providerId: 're_rem_2',
+      stamp: '2026-10-13T14:00:00.000Z',
+      clearedPaymentFailure: '2026-10-05T12:00:00.000Z',
+      auto: true,
+    })
+
+    const updates = fake.matching(/^update invoices/i)
+    expect(updates).toHaveLength(1)
+    expect(JSON.parse(updates[0].params[1])[0]).toMatchObject({
+      kind: 'reminder',
+      clearedPaymentFailed: true,
+      clearedFailureAt: '2026-10-05T12:00:00.000Z',
+      auto: true,
+    })
+    expect(updates[0].params[2]).toBe(false)
+  })
+
+  it('writes neither field on an ordinary reminder, and never on a failed one or an invoice send', async () => {
+    for (const extra of [
+      { kind: 'reminder', ok: true },
+      { kind: 'reminder', ok: false, clearedPaymentFailure: '2026-10-05T12:00:00.000Z' },
+      { ok: true, clearedPaymentFailure: '2026-10-05T12:00:00.000Z', auto: true },
+    ]) {
+      const fake = fakePostgres({ invoices: [existingInvoice] })
+      await postgresStore(fake).recordInvoiceSent('inv-1', { to: ['a@b.com'], subject: 'S', ...extra })
+      const entry = JSON.parse(fake.matching(/^update invoices/i)[0].params[1])[0]
+      expect(entry.clearedPaymentFailed).toBeUndefined()
+      expect(entry.auto).toBeUndefined()
+    }
   })
 })
 

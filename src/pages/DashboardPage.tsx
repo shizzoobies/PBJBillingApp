@@ -731,7 +731,9 @@ function OwnerDashboardView() {
           <ul className="dashboard-activity">
             {activity.map((entry) => {
               const actor = data.employees.find((e) => e.id === entry.userId)
-              const actorName = actor?.name ?? entry.userId
+              // 'system' is the app itself (the automatic invoice reminders).
+              const actorName =
+                actor?.name ?? (entry.userId === 'system' ? 'Automatic reminder' : entry.userId)
               return (
                 <li key={entry.id}>
                   <span className="dashboard-activity-actor">{actorName}</span>

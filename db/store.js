@@ -20134,6 +20134,8 @@ export class AppDataStore {
       stamp = null,
       oneTime = [],
       notEmailed = false,
+      clearedPaymentFailure = null,
+      auto = false,
     } = {},
   ) {
     const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
@@ -20186,6 +20188,15 @@ export class AppDataStore {
       ...(kind ? { kind: String(kind) } : notEmailed ? { kind: 'not-emailed' } : {}),
       ...(providerId ? { providerId: String(providerId) } : {}),
       ...(error ? { error: String(error).slice(0, 300) } : {}),
+      // A payment REMINDER that went out answers the Payment failed the invoice
+      // was sitting in: the entry itself names the failure it cleared (its `at`),
+      // so the clearing is part of this one log append on both backends and
+      // there is no second write to lose. `unresolvedPaymentFailure` reads it.
+      ...(kind === 'reminder' && ok && typeof clearedPaymentFailure === 'string' && clearedPaymentFailure
+        ? { clearedPaymentFailed: true, clearedFailureAt: clearedPaymentFailure }
+        : {}),
+      // The reminder the app sent by itself on a reminder day (not the button).
+      ...(kind === 'reminder' && auto === true ? { auto: true } : {}),
       // Which of those addresses were typed for this one send. They are in `to`
       // like the rest (the log records everyone it went to) and are NOT on the
       // client or its contacts; this is the only place that says so.
