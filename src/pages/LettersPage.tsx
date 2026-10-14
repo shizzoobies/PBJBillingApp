@@ -19,6 +19,7 @@ import {
 import type { SaveFlashState } from '../lib/useSaveFlash'
 import { firmToday } from '../../lib/firm-time.js'
 import { reconcileCoveredResults } from '../../lib/letter-batch-cover.js'
+import { LETTER_IN_FLIGHT_MS } from '../../lib/letter-in-flight.js'
 import { invoiceEmailAddressee, resolveInvoiceRecipients } from '../../lib/invoice-recipients.js'
 import { retiredSentence, templateWarnings } from '../../lib/letter-template.js'
 import { withoutTeamAddresses } from '../../lib/recipient-addresses.js'
@@ -41,9 +42,6 @@ const SEND_CHUNK = 10
  * clients sit behind the checkbox.
  */
 const SHOWN_BY_DEFAULT = new Set(['active', 'onboarding'])
-
-/** A claim still "sending" after this long was not closed: the send was interrupted. */
-const UNFINISHED_AFTER_MS = 10 * 60 * 1000
 
 /** The longest name a letter may have (the server refuses longer). */
 const NAME_MAX = 80
@@ -392,7 +390,8 @@ export function LettersPage() {
       } else if (newest?.status === 'sending') {
         const startedAt = Date.parse(newest.createdAt ?? '')
         lastSent =
-          Number.isFinite(startedAt) && nowMs - startedAt > UNFINISHED_AFTER_MS
+          // The same two minutes the server uses to tell a send still running from one that died.
+          Number.isFinite(startedAt) && nowMs - startedAt >= LETTER_IN_FLIGHT_MS
             ? 'Did not finish - check before sending again'
             : 'Sending...'
       }

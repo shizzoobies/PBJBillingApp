@@ -2690,6 +2690,7 @@ export type LetterSendResult = {
     | 'already_sent'
     | 'unfinished'
     | 'master_in_batch'
+    | 'sending_now'
     | 'provider'
     | 'unexpected'
   message?: string

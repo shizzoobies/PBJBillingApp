@@ -782,14 +782,17 @@ describe('Last sent', () => {
 })
 
 describe('a send that never finished', () => {
-  it('reads "Sending..." while recent and "Did not finish" once it is over ten minutes old', async () => {
+  // The same two minutes the server uses to answer "sending now" or "unfinished", so the list and a result agree.
+  it('reads "Sending..." while recent and "Did not finish" once it is over two minutes old', async () => {
     api.listLetterSendsRequest = vi.fn(async () => [
-      sendRecord({ id: 'els-old', clientId: 'c-acme', status: 'sending', completedAt: null, createdAt: '2026-10-08T12:00:00.000Z' }),
-      sendRecord({ id: 'els-new', clientId: 'c-onb', status: 'sending', completedAt: null, createdAt: new Date().toISOString() }),
+      sendRecord({ id: 'els-old', clientId: 'c-acme', status: 'sending', completedAt: null, createdAt: new Date(Date.now() - 3 * 60_000).toISOString() }),
+      sendRecord({ id: 'els-new', clientId: 'c-onb', status: 'sending', completedAt: null, createdAt: new Date(Date.now() - 30_000).toISOString() }),
     ])
     await renderPage()
     expect(await screen.findByText('Did not finish - check before sending again')).toBeInTheDocument()
-    expect(screen.getByText('Sending...')).toBeInTheDocument()
+    expect(screen.getAllByText('Sending...')).toHaveLength(1)
+    const row = screen.getByText('Onboarding Co').closest('tr') as HTMLElement
+    expect(within(row).getByText('Sending...')).toBeInTheDocument()
   })
 
   it('shows the unfinished sentence and offers Send again anyway, with its own confirm', async () => {
@@ -823,6 +826,29 @@ describe('a send that never finished', () => {
     await waitFor(() =>
       expect(api.sendLettersRequest).toHaveBeenLastCalledWith('default', { clientIds: ['c-acme'], templateHash: 'hash-1', resendToday: true }),
     )
+  })
+
+  it('shows the server\'s sending_now skip like any other skipped reason', async () => {
+    mockConfirm(true)
+    api.sendLettersRequest = vi.fn(async () => ({
+      results: [
+        {
+          clientId: 'c-acme',
+          clientName: 'Acme Books',
+          status: 'skipped' as const,
+          code: 'sending_now' as const,
+          message: 'A send to Acme Books is running right now (started Oct 8, 2:05 PM) - it will show in the sends list when it finishes.',
+        },
+      ],
+      sent: 0,
+      failed: 0,
+      skipped: 1,
+    }))
+    await renderPage()
+    fireEvent.click(screen.getByLabelText('Select Acme Books'))
+    fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 1 client' }))
+    expect(await screen.findByText(/Not sent: A send to Acme Books is running right now/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Send again anyway' })).not.toBeInTheDocument()
   })
 })
 
