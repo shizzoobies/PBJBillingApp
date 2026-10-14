@@ -5315,9 +5315,10 @@ export async function deleteLetterRequest(letterId: string): Promise<void> {
 }
 
 /** What one client would receive, from the STORED letter. Nothing is sent or saved. */
-export function previewLetterRequest(letterId: string, clientId: string): Promise<LetterPreview> {
+export function previewLetterRequest(letterId: string, clientId: string, batchIds: string[] = []): Promise<LetterPreview> {
+  const batch = batchIds.length > 0 ? `&batch=${encodeURIComponent(batchIds.join(','))}` : ''
   return proposalRequest<LetterPreview>(
-    `${letterPath(letterId, 'preview')}?clientId=${encodeURIComponent(clientId)}`,
+    `${letterPath(letterId, 'preview')}?clientId=${encodeURIComponent(clientId)}${batch}`,
     {},
     'Could not build the preview',
   )
@@ -5350,6 +5351,8 @@ export function sendLettersRequest(
     clientIds: string[]
     templateHash: string
     resendToday?: boolean
+    /** Every client in the whole send, when it is split into several requests. */
+    batch?: string[]
   },
 ): Promise<LetterSendResponse> {
   return proposalRequest<LetterSendResponse>(

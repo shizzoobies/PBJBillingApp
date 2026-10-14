@@ -18,6 +18,7 @@ import {
 } from '../lib/api'
 import type { SaveFlashState } from '../lib/useSaveFlash'
 import { firmToday } from '../../lib/firm-time.js'
+import { reconcileCoveredResults } from '../../lib/letter-batch-cover.js'
 import { invoiceEmailAddressee, resolveInvoiceRecipients } from '../../lib/invoice-recipients.js'
 import { retiredSentence, templateWarnings } from '../../lib/letter-template.js'
 import { withoutTeamAddresses } from '../../lib/recipient-addresses.js'
@@ -110,6 +111,8 @@ export function LettersPage() {
   const [query, setQuery] = useState('')
   const [includeInactive, setIncludeInactive] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  // Why a tick was refused or what a master's tick unticked out of sight.
+  const [coveredNote, setCoveredNote] = useState('')
   const [previewId, setPreviewId] = useState<string | null>(null)
 
   const [sending, setSending] = useState(false)
@@ -431,13 +434,55 @@ export function LettersPage() {
   const hiddenChosen = chosen.filter((id) => !shownIds.has(id))
   const hiddenNote = hiddenChosen.length > 0 ? ` (${hiddenChosen.length} hidden)` : ''
 
-  const toggle = (id: string) =>
-    setSelected((currentSet) => {
-      const next = new Set(currentSet)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
+  // A billing master's letter covers its sub-companies (their invoices go to the master's mailbox):
+  // while the master is chosen, its subs cannot be, and ticking the master unticks them.
+  const chosenSet = new Set(chosen)
+  const coveredBy = (client: Client) =>
+    client.billToClientId && chosenSet.has(client.billToClientId)
+      ? (clients.find((entry) => entry.id === client.billToClientId) ?? null)
+      : null
+  /** Drops from `ids` each sub-company whose master is ticked and pickable (never `keep`); how many of them were out of sight. */
+  const dropCovered = (ids: Set<string>, keep: string | null) => {
+    let hidden = 0
+    for (const client of clients) {
+      const master = client.billToClientId
+      if (!master || client.id === keep || !ids.has(client.id)) continue
+      if (ids.has(master) && selectableIds.has(master)) {
+        ids.delete(client.id)
+        if (!shownIds.has(client.id)) hidden += 1
+      }
+    }
+    return hidden
+  }
+  const droppedNote = (hidden: number) =>
+    hidden > 0 ? `Unticked ${hidden} covered sub-compan${hidden === 1 ? 'y' : 'ies'}` : ''
+
+  /** One tick or untick on `current`: the new set and the note to show (pure, so it can run inside a state update). */
+  const pick = (current: Set<string>, id: string): { next: Set<string>; note: string } => {
+    const next = new Set(current)
+    if (next.has(id)) {
+      next.delete(id)
+      return { next, note: '' }
+    }
+    // Backstop: a sub whose master is ticked is refused, not ticked and then dropped (its box is
+    // disabled, so this only matters if a click gets through anyway).
+    const master = clients.find((client) => client.id === id)?.billToClientId
+    const masterClient = master && next.has(master) && selectableIds.has(master) ? clients.find((client) => client.id === master) : null
+    if (masterClient) return { next, note: `Covered by ${masterClient.name}'s letter` }
+    next.add(id)
+    return { next, note: droppedNote(dropCovered(next, id)) }
+  }
+
+  const toggle = (id: string) => {
+    setSelected((current) => pick(current, id).next)
+    setCoveredNote(pick(selected, id).note)
+  }
+
+  const selectAllShown = (current: Set<string>) => {
+    const next = new Set(current)
+    for (const row of shown) if (row.blocked === null) next.add(row.client.id)
+    return { next, note: droppedNote(dropCovered(next, null)) }
+  }
 
   /* ---- sending ------------------------------------------------------------ */
 
@@ -456,12 +501,17 @@ export function LettersPage() {
           clientIds: chunk,
           templateHash: state.hash,
           ...(resend ? { resendToday: true } : {}),
+          // Split into requests of ten: tell the server the whole send, so a master and its
+          // sub in different requests are still seen together.
+          ...(ids.length > SEND_CHUNK ? { batch: ids } : {}),
         })
         done += chunk.length
-        setResults((currentResults) => [
-          ...currentResults.filter((result) => !chunk.includes(result.clientId)),
-          ...answer.results,
-        ])
+        setResults((currentResults) =>
+          reconcileCoveredResults([
+            ...currentResults.filter((result) => !chunk.includes(result.clientId)),
+            ...answer.results,
+          ]),
+        )
         await refreshSends()
       }
     } catch (err) {
@@ -473,6 +523,9 @@ export function LettersPage() {
           // The sentence below still tells her to reload.
         }
       }
+      // A request that failed leaves the masters still waiting in it without a result: a sub that
+      // was skipped for their letter must not read "covered" when that letter never went.
+      setResults((currentResults) => reconcileCoveredResults(currentResults, { missingMasterDidNotGo: true }))
       if (err instanceof ApiError && err.code === 'letter_not_found') void refreshList()
       setSendError(err instanceof ApiError ? err.message : 'Could not send the letters.')
     } finally {
@@ -787,20 +840,29 @@ export function LettersPage() {
           <button
             type="button"
             className="ghost-action"
-            onClick={() =>
-              setSelected((currentSet) => {
-                const next = new Set(currentSet)
-                for (const row of shown) if (row.blocked === null) next.add(row.client.id)
-                return next
-              })
-            }
+            onClick={() => {
+              setSelected((current) => selectAllShown(current).next)
+              setCoveredNote(selectAllShown(selected).note)
+            }}
           >
             Select all shown
           </button>
-          <button type="button" className="ghost-action" onClick={() => setSelected(new Set())}>
+          <button
+            type="button"
+            className="ghost-action"
+            onClick={() => {
+              setSelected(new Set())
+              setCoveredNote('')
+            }}
+          >
             Clear
           </button>
           <span className="muted-text">{`${chosen.length} selected${hiddenNote}`}</span>
+          {coveredNote ? (
+            <span className="muted-text" role="status">
+              {coveredNote}
+            </span>
+          ) : null}
           {hiddenChosen.length > 0 ? (
             <button
               type="button"
@@ -845,13 +907,16 @@ export function LettersPage() {
                       type="checkbox"
                       aria-label={`Select ${row.client.name}`}
                       checked={row.blocked === null && selected.has(row.client.id)}
-                      disabled={row.blocked !== null || sending}
+                      disabled={row.blocked !== null || sending || coveredBy(row.client) !== null}
                       onChange={() => toggle(row.client.id)}
                     />
                   </td>
                   <td>
                     <strong>{row.client.name}</strong>
                     {row.contactName ? <div className="muted-text">{row.contactName}</div> : null}
+                    {coveredBy(row.client) ? (
+                      <div className="muted-text">{`Covered by ${coveredBy(row.client)?.name}'s letter`}</div>
+                    ) : null}
                   </td>
                   <td>
                     {row.to.length > 0 ? (
@@ -997,6 +1062,7 @@ export function LettersPage() {
           letterId={letterId}
           clientId={previewId}
           clientName={previewClient.name}
+          batchIds={previewClient.billToClientId && chosenSet.has(previewClient.billToClientId) ? [previewClient.billToClientId] : []}
           onClose={() => setPreviewId(null)}
         />
       ) : null}

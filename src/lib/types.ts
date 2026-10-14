@@ -2651,6 +2651,8 @@ export type LetterPreview = {
   }
   /** The sentence that would stop Send for this client, or null. */
   refusal: string | null
+  /** Set when this client's billing master is ticked in the same batch: Send skips it with this sentence. */
+  batchNote?: string | null
 }
 
 /** One row of the send log. */
@@ -2687,9 +2689,13 @@ export type LetterSendResult = {
     | 'pdf_failed'
     | 'already_sent'
     | 'unfinished'
+    | 'master_in_batch'
     | 'provider'
     | 'unexpected'
   message?: string
+  /** `master_in_batch`: the billing master whose letter covers this client. */
+  masterId?: string
+  masterName?: string
   to?: string[]
   sendId?: string
   /** The amendment this send was recorded as on the client's engagements (stage 4); null when recording failed. */

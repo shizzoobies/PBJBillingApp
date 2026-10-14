@@ -12776,7 +12776,13 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'letter_not_found', message: 'This letter is no longer on file.' })
         return
       }
-      const preview = await assembleLetterPreview(context, clientId)
+      // `batch` (optional, comma-separated client ids): the clients ticked together with this one,
+      // so the preview can say a billing master's letter covers it.
+      const batchClientIds = (requestUrl.searchParams.get('batch') || '')
+        .split(',')
+        .slice(0, LETTER_MAX_CLIENTS_PER_SEND)
+        .filter((id) => /^[A-Za-z0-9_-]+$/.test(id))
+      const preview = await assembleLetterPreview({ ...context, batchClientIds }, clientId)
       if (preview.notFound) {
         sendJson(response, 404, { error: 'Client not found' })
         return
@@ -12799,6 +12805,7 @@ const server = createServer(async (request, response) => {
           retired: preview.retired,
           flags: preview.flags,
           refusal: preview.refusal,
+          batchNote: preview.batchNote,
         },
         { 'Cache-Control': 'no-store' },
       )
@@ -12970,6 +12977,10 @@ const server = createServer(async (request, response) => {
           firmDay: firmToday(context.now),
           resend: payload.resendToday === true,
           userId: session.user.id,
+          // The whole send when the page splits it into requests of ten (ids only, capped).
+          batch: (Array.isArray(payload.batch) ? payload.batch : [])
+            .filter((id) => typeof id === 'string' && /^[A-Za-z0-9_-]+$/.test(id))
+            .slice(0, 1000),
         },
         { store: appDataStore, sendMail: sendInvoiceEmail, pause: letterPause },
       )

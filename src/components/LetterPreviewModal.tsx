@@ -34,6 +34,7 @@ function letterNotes(preview: LetterPreview): string[] {
   if (preview.flags.billingMasterSub) {
     notes.push(`This client is billed through ${preview.flags.billingMasterSub}.`)
   }
+  if (preview.batchNote) notes.push(`${preview.batchNote} Send skips this client.`)
   if (!preview.pdfAvailable) {
     notes.push('The PDF could not be built, so Send would skip this client.')
   }
@@ -51,17 +52,20 @@ export function LetterPreviewModal({
   letterId,
   clientId,
   clientName,
+  batchIds,
   onClose,
 }: {
   letterId: string
   clientId: string
   clientName: string
+  /** The clients ticked together with this one: the preview says when a billing master's letter covers it. */
+  batchIds?: string[]
   onClose: () => void
 }) {
   return (
     <DocumentPreviewModal<LetterPreview>
       loadKey={`${letterId}|${clientId}`}
-      load={() => previewLetterRequest(letterId, clientId)}
+      load={() => previewLetterRequest(letterId, clientId, batchIds)}
       pdfUrl={letterPreviewPdfUrl(letterId, clientId)}
       title={`What ${clientName} receives`}
       ariaLabel={`Preview of the letter for ${clientName}`}

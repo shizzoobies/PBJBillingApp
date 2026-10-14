@@ -384,7 +384,7 @@ describe('the letters list', () => {
 
     const row = screen.getByText('Acme Books').closest('tr') as HTMLElement
     fireEvent.click(within(row).getByRole('button', { name: 'Preview' }))
-    await waitFor(() => expect(api.previewLetterRequest).toHaveBeenCalledWith('letter-2', 'c-acme'))
+    await waitFor(() => expect(api.previewLetterRequest).toHaveBeenCalledWith('letter-2', 'c-acme', []))
     fireEvent.click(screen.getByRole('button', { name: 'Close' }))
 
     fireEvent.click(screen.getByLabelText('Select Acme Books'))
@@ -608,6 +608,148 @@ describe('the client picker', () => {
     await waitFor(() =>
       expect(api.sendLettersRequest).toHaveBeenCalledWith('default', { clientIds: ['c-old'], templateHash: 'hash-1' }),
     )
+  })
+
+  // A billing master's letter covers its sub-companies: both ticked would reach one mailbox twice.
+  describe('a billing master and its sub-company', () => {
+    beforeEach(() => {
+      setClients([
+        { id: 'c-master', name: 'KLC Holdings', contact: '', email: 'master@klc.test', contactIds: [], lifecycleStage: 'active', isBillingMaster: true, invoiceRecipientClientId: 'c-north' },
+        { id: 'c-north', name: 'KLC North', contact: '', email: 'north@klc.test', contactIds: [], lifecycleStage: 'active', billToClientId: 'c-master' },
+        { id: 'c-south', name: 'KLC South', contact: '', email: 'south@klc.test', contactIds: [], lifecycleStage: 'active', billToClientId: 'c-master' },
+        { id: 'c-acme', name: 'Acme Books', contact: '', email: 'pat@acme.test', contactIds: [], lifecycleStage: 'active' },
+      ])
+    })
+
+    it('ticking the master unticks its subs and disables them with the hint', async () => {
+      await renderPage()
+      fireEvent.click(screen.getByLabelText('Select KLC North'))
+      expect(screen.getByText('1 selected')).toBeInTheDocument()
+      // A ticked sub leaves the master's box enabled.
+      expect(screen.getByLabelText('Select KLC Holdings')).toBeEnabled()
+
+      fireEvent.click(screen.getByLabelText('Select KLC Holdings'))
+      expect(screen.getByText('1 selected')).toBeInTheDocument()
+      expect(screen.getByLabelText('Select KLC North')).not.toBeChecked()
+      expect(screen.getByLabelText('Select KLC North')).toBeDisabled()
+      expect(screen.getByLabelText('Select KLC South')).toBeDisabled()
+      expect(screen.getAllByText("Covered by KLC Holdings's letter")).toHaveLength(2)
+      expect(screen.getByLabelText('Select Acme Books')).toBeEnabled()
+
+      // Select all shown does not tick the covered subs either.
+      fireEvent.click(screen.getByRole('button', { name: 'Select all shown' }))
+      expect(screen.getByText('2 selected')).toBeInTheDocument()
+
+      // Unticking the master frees the subs again.
+      fireEvent.click(screen.getByLabelText('Select KLC Holdings'))
+      expect(screen.getByLabelText('Select KLC North')).toBeEnabled()
+      expect(screen.queryByText(/Covered by/)).not.toBeInTheDocument()
+    })
+
+    it('asks the preview with the ticked clients, so it can say the master covers a sub', async () => {
+      api.previewLetterRequest = vi.fn(async () => {
+        throw new ApiError(404, 'stop here')
+      })
+      await renderPage()
+      fireEvent.click(screen.getByLabelText('Select KLC Holdings'))
+      fireEvent.click(screen.getByLabelText('Select Acme Books'))
+      const row = screen.getByText('KLC North').closest('tr') as HTMLElement
+      fireEvent.click(within(row).getByRole('button', { name: 'Preview' }))
+      // Only the sub's own master is asked about, not the whole ticked list (the server keeps 50).
+      await waitFor(() => expect(api.previewLetterRequest).toHaveBeenCalledWith('default', 'c-north', ['c-master']))
+    })
+
+    it('refuses to tick a sub whose master is ticked, with the hint, if a click gets past the disabled box', async () => {
+      await renderPage()
+      fireEvent.click(screen.getByLabelText('Select KLC Holdings'))
+      const north = screen.getByLabelText('Select KLC North') as HTMLInputElement
+      expect(north).toBeDisabled()
+      north.removeAttribute('disabled')
+      fireEvent.click(north)
+      expect(screen.getByText('1 selected')).toBeInTheDocument()
+      expect(screen.getByText("Covered by KLC Holdings's letter", { selector: '[role="status"]' })).toBeInTheDocument()
+    })
+
+    it('rewrites a sub that was skipped for a master whose request then failed', async () => {
+      mockConfirm(true)
+      setClients(
+        Array.from({ length: 11 }, (_, i) => ({ id: `c-${i}`, name: `Client ${String(i).padStart(2, '0')}`, contact: '', email: `c${i}@x.test`, contactIds: [], lifecycleStage: 'active' })),
+      )
+      let call = 0
+      api.sendLettersRequest = vi.fn(async () => {
+        call += 1
+        if (call === 1) {
+          return {
+            results: [{ clientId: 's1', clientName: 'KLC North', status: 'skipped' as const, code: 'master_in_batch' as const, masterId: 'm1', masterName: 'KLC Holdings', message: 'covered' }],
+            sent: 0,
+            failed: 0,
+            skipped: 1,
+          }
+        }
+        throw new ApiError(500, 'The server is down.')
+      })
+      await renderPage()
+      fireEvent.click(screen.getByRole('button', { name: 'Select all shown' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 11 clients' }))
+      expect(await screen.findByText('The server is down.')).toBeInTheDocument()
+      expect(screen.getByText(/KLC North was skipped because KLC Holdings was in this batch, but KLC Holdings's letter did not go/)).toBeInTheDocument()
+    })
+
+    it('says so when the master ticked unticked a sub-company that was out of sight', async () => {
+      await renderPage()
+      fireEvent.click(screen.getByLabelText('Select KLC North'))
+      fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'holdings' } })
+      expect(screen.queryByText('KLC North')).not.toBeInTheDocument()
+      expect(screen.getByText('1 selected (1 hidden)')).toBeInTheDocument()
+      fireEvent.click(screen.getByLabelText('Select KLC Holdings'))
+      expect(screen.getByText('Unticked 1 covered sub-company')).toBeInTheDocument()
+      expect(screen.getByText('1 selected')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+      expect(screen.queryByText(/Unticked/)).not.toBeInTheDocument()
+    })
+
+    it('sends the whole list as batch with every request of ten, and rewrites a sub whose master failed in an earlier request', async () => {
+      mockConfirm(true)
+      setClients([
+        ...Array.from({ length: 11 }, (_, i) => ({ id: `c-${i}`, name: `Client ${String(i).padStart(2, '0')}`, contact: '', email: `c${i}@x.test`, contactIds: [], lifecycleStage: 'active' })),
+      ])
+      const answers = [
+        [{ clientId: 'm1', clientName: 'KLC Holdings', status: 'skipped' as const, code: 'missing_placeholder' as const, message: 'no fee' }],
+        [{ clientId: 's1', clientName: 'KLC North', status: 'skipped' as const, code: 'master_in_batch' as const, masterId: 'm1', masterName: 'KLC Holdings', message: 'covered' }],
+      ]
+      api.sendLettersRequest = vi.fn(async () => ({ results: answers.shift() ?? [], sent: 0, failed: 0, skipped: 1 }))
+      await renderPage()
+      fireEvent.click(screen.getByRole('button', { name: 'Select all shown' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 11 clients' }))
+      expect(
+        await screen.findByText(/KLC North was skipped because KLC Holdings was in this batch, but KLC Holdings's letter did not go/),
+      ).toBeInTheDocument()
+      const calls = (api.sendLettersRequest as Mock).mock.calls
+      expect(calls).toHaveLength(2)
+      for (const call of calls) expect((call[1] as { batch: string[] }).batch).toHaveLength(11)
+    })
+
+    it('shows the server\'s master_in_batch skip like any other skipped reason', async () => {
+      mockConfirm(true)
+      api.sendLettersRequest = vi.fn(async () => ({
+        results: [
+          {
+            clientId: 'c-north',
+            clientName: 'KLC North',
+            status: 'skipped' as const,
+            code: 'master_in_batch' as const,
+            message: "KLC North bills through KLC Holdings, which is in this batch - the master's letter covers it.",
+          },
+        ],
+        sent: 0,
+        failed: 0,
+        skipped: 1,
+      }))
+      await renderPage()
+      fireEvent.click(screen.getByLabelText('Select KLC North'))
+      fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 1 client' }))
+      expect(await screen.findByText(/Not sent: KLC North bills through KLC Holdings, which is in this batch/)).toBeInTheDocument()
+    })
   })
 
   it('Select all shown respects the search', async () => {
@@ -930,7 +1072,7 @@ describe('Preview', () => {
     const row = screen.getByText('Acme Books').closest('tr') as HTMLElement
     fireEvent.click(within(row).getByRole('button', { name: 'Preview' }))
     expect(await screen.findByRole('dialog', { name: 'Preview of the letter for Acme Books' })).toBeInTheDocument()
-    expect(api.previewLetterRequest).toHaveBeenCalledWith('default', 'c-acme')
+    expect(api.previewLetterRequest).toHaveBeenCalledWith('default', 'c-acme', [])
   })
 })
 
