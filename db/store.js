@@ -13752,6 +13752,10 @@ export class AppDataStore {
     // client and nothing for a prospect (signing fills it in).
     let engagementId = null
     let engagement = null
+    // Why it failed, in words for the proposal page ("Accepted - the engagement could not
+    // be drafted: <reason>"): the store's own sentence, else a plain stand-in (never raw
+    // database or system text).
+    let engagementError = null
     try {
       engagement = await this.createEngagementFromProposal(proposal, {
         kind,
@@ -13763,6 +13767,8 @@ export class AppDataStore {
       engagementId = engagement?.id ?? null
     } catch (error) {
       console.error('[engagements] Accept could not draft the engagement for', id, error)
+      engagementError =
+        error instanceof EngagementStateError ? error.message : 'something went wrong while saving it'
     }
     // The same entry the recovery route (POST /api/proposals/:id/engagement) records.
     if (engagementId && actorUserId) {
@@ -13782,6 +13788,7 @@ export class AppDataStore {
       packageApplied: false,
       engagementId,
       engagementKind: engagementId ? kind : null,
+      engagementError: engagementId ? null : engagementError,
     }
   }
 

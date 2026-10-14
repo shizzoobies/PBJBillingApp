@@ -80,7 +80,7 @@ export function ProposalEditorPage() {
  * from a stale render.
  */
 function ProposalEditor({ proposalId }: { proposalId: string }) {
-  const { data } = useAppContext()
+  const { data, dataRefreshCount } = useAppContext()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const [proposal, setProposal] = useState<Proposal | null>(null)
@@ -178,7 +178,9 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     return () => {
       cancelled = true
     }
-  }, [won, proposalId])
+    // dataRefreshCount: read again whenever another tab or session changes data (the letter
+    // was drafted, sent or signed there), so the links here never show a stale answer.
+  }, [won, proposalId, dataRefreshCount])
 
   // An upsell (engagements stage 4): the client's CURRENT signed engagement - its newest
   // signed original or superseding letter - which Accept can amend or supersede. Null
@@ -509,13 +511,15 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
    * that says when the client side happens (engagements stage 3: at signing). With
    * no engagement drafted, the page stays and says so ("Draft the engagement").
    */
-  const afterAccept = (result: { engagementId?: string | null }, signingNotice: string) => {
+  const afterAccept = (result: { engagementId?: string | null; engagementError?: string | null }, signingNotice: string) => {
     if (result.engagementId) {
       navigate(`/engagements/${result.engagementId}`, { state: { notice: `Marked Won. ${signingNotice}` } })
       return
     }
+    // The proposal is Won either way; say plainly that the letter is missing and why.
+    const reason = (result.engagementError ?? '').trim().replace(/[.\s]+$/, '') || 'it could not be saved'
     setNotice(
-      `Marked Won, but the engagement letter could not be drafted - use Draft the engagement (the package and plans you picked are kept). ${signingNotice}`,
+      `Accepted - the engagement could not be drafted: ${reason}. Use Draft the engagement at the top of the page. The package and plans you picked are kept. ${signingNotice}`,
     )
     setNoticeEngagementId(null)
   }

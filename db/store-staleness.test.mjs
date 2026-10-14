@@ -26024,7 +26024,26 @@ describe('accepting a proposal (file backend)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const result = await store.acceptProposal(proposal.id, {})
     expect(result.engagementId).toBeNull()
+    // Raw system text never reaches her screen: a plain stand-in for an unexpected failure.
+    expect(result.engagementError).toBe('something went wrong while saving it')
     expect((await store.getProposal(proposal.id)).status).toBe('accepted')
+  })
+
+  it("a refusal from the engagement draft is passed on in the store's own sentence", async () => {
+    const proposal = await prospectProposal()
+    vi.spyOn(store, 'createEngagementFromProposal').mockRejectedValueOnce(
+      new EngagementStateError('The library has no email section.', 'invalid'),
+    )
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const result = await store.acceptProposal(proposal.id, {})
+    expect(result).toMatchObject({ engagementId: null, engagementError: 'The library has no email section.' })
+  })
+
+  it('a successful draft carries no error', async () => {
+    const proposal = await prospectProposal()
+    const result = await store.acceptProposal(proposal.id, {})
+    expect(result.engagementId).toMatch(/^eng-/)
+    expect(result.engagementError).toBeNull()
   })
 
   it('never accepts twice', async () => {

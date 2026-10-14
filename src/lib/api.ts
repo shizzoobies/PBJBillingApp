@@ -1074,6 +1074,8 @@ export type AcceptProposalResult = {
   engagementId?: string | null
   /** The kind of letter drafted (stage 4): original for a prospect, amendment or superseding for an upsell. */
   engagementKind?: EngagementKind | null
+  /** Why no letter was drafted (a plain sentence), when Accept drafted none. */
+  engagementError?: string | null
 }
 
 /**

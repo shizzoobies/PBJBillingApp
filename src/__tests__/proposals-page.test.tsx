@@ -2162,11 +2162,56 @@ describe('the engagement a Won proposal drafts', () => {
     expect(link.getAttribute('href')).toBe('/clients/client-1')
   })
 
-  it('when no letter could be drafted, the notice says the package and plans were kept', async () => {
+  it('when no letter could be drafted, the proposal says so with the reason, and the package and plans were kept', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    api.acceptProposalRequest = vi.fn(async () => ({
+      proposal: WON,
+      clientId: null,
+      packageApplied: false,
+      engagementId: null,
+      engagementError: 'The library has no email section. Nothing was drafted.',
+    }))
+    renderEditorWithEngagements()
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
+    expect(
+      await screen.findByText(
+        /^Accepted - the engagement could not be drafted: The library has no email section\. Nothing was drafted\. Use Draft the engagement at the top of the page\. The package and plans you picked are kept\./,
+      ),
+    ).toBeTruthy()
+    // The way to draft it by hand stays on the page.
+    expect(await screen.findByRole('button', { name: 'Draft the engagement' })).toBeTruthy()
+  })
+
+  it('when Accept gave no reason, the line still says why in plain words', async () => {
     vi.stubGlobal('confirm', vi.fn(() => true))
     renderEditorWithEngagements()
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }))
-    expect(await screen.findByText(/\(the package and plans you picked are kept\)/)).toBeTruthy()
+    expect(
+      await screen.findByText(/^Accepted - the engagement could not be drafted: it could not be saved\. Use Draft the engagement at the top of the page\./),
+    ).toBeTruthy()
+  })
+
+  it('looks the engagement up again when another tab or session changes data', async () => {
+    api.getProposalRequest = vi.fn(async () => WON)
+    api.listEngagementsRequest = vi.fn(async () => [])
+    // A new element each time: the same one would let React skip the re-render.
+    const tree = () => (
+      <MemoryRouter initialEntries={['/proposals/prop-1']}>
+        <Routes>
+          <Route path="/proposals/:proposalId" element={<ProposalEditorPage />} />
+        </Routes>
+      </MemoryRouter>
+    )
+    const { rerender } = render(tree())
+    expect(await screen.findByRole('button', { name: 'Draft the engagement' })).toBeTruthy()
+    expect(api.listEngagementsRequest).toHaveBeenCalledTimes(1)
+    // The letter is drafted from another tab; the broadcast bumps dataRefreshCount.
+    api.listEngagementsRequest = vi.fn(async () => [{ id: 'eng-5', status: 'draft' }])
+    contextValue = { ...contextValue, dataRefreshCount: 1 } as typeof contextValue
+    rerender(tree())
+    const link = await screen.findByRole('link', { name: 'Open the engagement' })
+    expect(link.getAttribute('href')).toBe('/engagements/eng-5')
+    expect(screen.queryByRole('button', { name: 'Draft the engagement' })).toBeNull()
   })
 
   it('a proposal Won before engagements, with none drafted, still opens the client it created', async () => {
