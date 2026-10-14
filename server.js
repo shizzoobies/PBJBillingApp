@@ -284,7 +284,12 @@ import {
   waitingOnActionRefusal,
   waitingOnStage,
 } from './lib/waiting-on-state.js'
-import { caseAllDone, nextStageRefusalMessage, stageHasOpenWait } from './lib/open-next-stage.js'
+import {
+  caseAllDone,
+  nextStageRefusalMessage,
+  skipCompletesCase,
+  stageHasOpenWait,
+} from './lib/open-next-stage.js'
 import {
   generateBackupCodes,
   generateSecret,
@@ -14833,6 +14838,34 @@ const server = createServer(async (request, response) => {
         }
       } catch (err) {
         console.error('[notify] checklist_skipped dispatch failed:', err?.message || err)
+      }
+
+      // Skipping the last unfinished stage of a staged case (the earlier stage
+      // that was waiting, after the final stage already finished) is what ends
+      // the case: the tick path never runs for it, so the same check runs here,
+      // said once per case. Best effort - the skip is already saved.
+      try {
+        // Only a staged case can end this way; a single-stage skip (most of them)
+        // does not pay for a workspace read.
+        const staged = typeof skipped.stageCount === 'number' && skipped.stageCount > 1
+        const after = staged ? await appDataStore.read() : null
+        const caseId = skipped.caseId || skipped.id
+        if (staged && skipCompletesCase(after, skipped) && !(await appDataStore.hasCaseCompletedActivity(caseId))) {
+          await appDataStore.recordActivity(session.user.id, 'case_completed', `${skipped.title} · case ${caseId}`)
+          const template = (after.checklistTemplates ?? []).find((entry) => entry.id === skipped.templateId)
+          const openerId = template?.stages?.[0]?.assigneeId || template?.assigneeId
+          if (openerId && openerId !== session.user.id) {
+            await notify(appDataStore, openerId, 'case_completed', {
+              checklistId: skipped.id,
+              caseId,
+              message: `Workflow completed: ${skipped.title}`,
+              link: `/cases/${caseId}`,
+              appPublicUrl: getPublicAppUrl(request),
+            })
+          }
+        }
+      } catch (err) {
+        console.error('[checklist-skip] case_completed check failed:', err?.message || err)
       }
 
       sendJson(response, 200, { checklist: skipped, skip: record })

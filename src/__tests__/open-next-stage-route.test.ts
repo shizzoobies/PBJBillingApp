@@ -114,6 +114,42 @@ describe('case_completed waits for every stage of the case', () => {
   })
 })
 
+describe('the skip route runs the same completion check', () => {
+  const skipRoute = () => {
+    const start = serverSource.indexOf('const checklistSkipMatch = normalizedPath.match(')
+    expect(start).toBeGreaterThan(-1)
+    const end = serverSource.indexOf('const checklistPushMatch = normalizedPath.match(', start)
+    expect(end).toBeGreaterThan(start)
+    return serverSource.slice(start, end)
+  }
+
+  it('after the skip is saved, reads the workspace, checks skipCompletesCase and says it once per case', () => {
+    const route = skipRoute()
+    const saved = route.indexOf('await appDataStore.skipChecklistInstance(')
+    const check = route.indexOf('skipCompletesCase(after, skipped)')
+    const once = route.indexOf('hasCaseCompletedActivity(caseId)')
+    const recorded = route.indexOf("'case_completed'")
+    expect(saved).toBeGreaterThan(-1)
+    expect(check).toBeGreaterThan(saved)
+    expect(once).toBeGreaterThan(check)
+    expect(recorded).toBeGreaterThan(once)
+    expect(route.indexOf('sendJson(response, 200, { checklist: skipped, skip: record })')).toBeGreaterThan(recorded)
+  })
+
+  it('checks the case is staged BEFORE the workspace read', () => {
+    const route = skipRoute()
+    const staged = route.indexOf("typeof skipped.stageCount === 'number' && skipped.stageCount > 1")
+    const read = route.indexOf('const after = staged ? await appDataStore.read() : null')
+    expect(staged).toBeGreaterThan(-1)
+    expect(read).toBeGreaterThan(staged)
+    expect(route).toContain('if (staged && skipCompletesCase(after, skipped)')
+  })
+
+  it('a failure in the check is logged, never a 500 for a saved skip', () => {
+    expect(skipRoute()).toContain("console.error('[checklist-skip] case_completed check failed:'")
+  })
+})
+
 describe('the Activity feed wording', () => {
   it('says "opened the next step early:"', () => {
     expect(describeActivityAction('case_advanced_early')).toBe('opened the next step early:')
