@@ -25,6 +25,30 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
+**PICK UP HERE (2026-10-13 evening, ~18:40Z; next session is the same day):** `main` = `f8a692d` (+ this handoff), deployed,
+`/health` 200, voice re-provisioned at a3944c7, tree clean, ONLY the primary worktree, nothing in flight, no subagents.
+Everything in the 18:10Z paragraph below is live and noted on Brittany's tickets; the reminder note (part b) is on
+`featreq-3f1d63b6` and that ticket stays PLANNED with her open question. **Do in this order:**
+1. `node scripts/prod/tracker-list.mjs --all` - look for new `sent` items and for ANSWERS on `featreq-3f1d63b6` (auto
+   follow-ups on the 15th/20th/25th/last day: yes -> build the scheduler; the manual button is live and is the building
+   block: a nightly job on the firm day that calls the same remind path for every invoice the rule allows, with the
+   once-per-day guard; two review rounds, it emails clients), `featreq-54bf39b6` (where the five unmatched steps belong:
+   "Check Insurance" x2 Payroll copies, "Clear Deposit" + "Send Client report" one Sales Tax copy, "c" one 1099 copy -
+   re-point with a tiny approved UPDATE or let her fix them on the client page), `featreq-acdd0c84` (if she rejects the two
+   defaults: every bundled checklist, yearly = January), `featreq-338b1507` / `featreq-e5ae8279` send-backs.
+2. Check her inbox the way this session did (Gmail connector, from:Bferguson@pbjsa.com newer_than:2d) - she sends
+   answers by email as often as on the ticket; her Chrome screenshots are not readable without the Chrome extension.
+3. Verify her Board looks right in production (read-only): instances per column after the write - the script's after-state
+   is in the snapshot; a quick `select category_id, count(*) from checklists where deleted_at is null group by 1`.
+4. Backlogs stay parked: `featreq-acb1b663` (engagements, 6/9/24 DDL for Alex), `featreq-05e1610d` (checklists, 1 DDL),
+   `featreq-9c29491a` (letters), `featreq-4caec5d3` backups = Alex.
+**Rules that bit today:** the auto-mode classifier blocks `git push`, sometimes `ship.sh`, voice-provision, prod
+--apply and even a local commit - ask Alex ("run it for me I approve" unblocked all of them) rather than retrying blind;
+read the `VERIFY EXIT` line, not the background task exit; parallel lanes each add ~500 B to the manifest (now ~204,2xx
+of 205,000 - TRIM FIRST); merge the sibling lane before verify; a Sonnet review + one fix round caught a real defect on
+every item; the ship chain is ship.sh from the primary tree (it pushes and polls), then voice-provision, then the ticket
+note in her words.
+
 **State right now (2026-10-13, ~18:10Z - READ THIS FIRST):** `main` = `a3944c7` (+ this handoff), deployed, `/health` 200,
 tree clean, only the primary worktree. **Seven ships today** (Fable orchestrating, Opus 5.5 implementers, Sonnet reviews;
 two rounds + a fix review on the email feature), one deploy each: `6703fc5` Processing tab; `f591269` Board current-step
