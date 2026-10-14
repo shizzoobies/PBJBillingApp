@@ -19,6 +19,7 @@ import { ClientTimeModal } from '../components/ClientTimeModal'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { ClientStatementsPanel } from '../components/ClientStatementsPanel'
 import { FloatingAddButton } from '../components/FloatingAddButton'
+import { emailShapeProblem } from '../lib/emailShape'
 import { highlightMatch } from '../lib/highlight'
 import {
   isInactiveClient,
@@ -490,6 +491,8 @@ function ClientBuilder({
   const hasPrimaryContact = addingNewContact
     ? newContactName.trim().length > 0
     : primaryContactId.length > 0
+  // The new contact's email is typed here, so any odd shape is a change: show why and keep Add off.
+  const newContactEmailProblem = addingNewContact ? emailShapeProblem(newContactEmail) : null
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -498,7 +501,7 @@ function ClientBuilder({
     // `hourlyRate` (the firm default) for back-compat with the stored column.
     const rate = Number(hourlyRate)
     const hourlyForStore = Number.isFinite(rate) && rate > 0 ? rate : 0
-    if (!name || !hasPrimaryContact || assignedEmployeeIds.length === 0) {
+    if (!name || !hasPrimaryContact || assignedEmployeeIds.length === 0 || newContactEmailProblem) {
       return
     }
 
@@ -628,6 +631,11 @@ function ClientBuilder({
               type="email"
               value={newContactEmail}
             />
+            {newContactEmailProblem ? (
+              <p className="form-error" role="alert">
+                {newContactEmailProblem}
+              </p>
+            ) : null}
             <input
               className="input"
               placeholder="Phone (optional)"
@@ -795,7 +803,12 @@ function ClientBuilder({
         <button
           className="primary-action"
           type="submit"
-          disabled={!name || !hasPrimaryContact || assignedEmployeeIds.length === 0}
+          disabled={
+            !name ||
+            !hasPrimaryContact ||
+            assignedEmployeeIds.length === 0 ||
+            newContactEmailProblem !== null
+          }
         >
           <Plus size={16} />
           Add client

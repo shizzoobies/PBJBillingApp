@@ -24,6 +24,7 @@ import {
   listPackagesRequest,
   restoreSetupIssueRequest,
 } from '../lib/api'
+import { emailShapeProblem } from '../lib/emailShape'
 import type { Package } from '../lib/types'
 import { cloneChecklistTemplate, planCadenceFor } from '../lib/cloneChecklistTemplate'
 import {
@@ -386,6 +387,11 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
   const [textValue, setTextValue] = useState(() =>
     fix.kind === 'clientText' ? String(client?.[fix.field] ?? '') : '',
   )
+  // Only a value touched in this dialog is judged: an address already on file is left as it is.
+  const textProblem =
+    fix.kind === 'clientText' && fix.field === 'email' && textValue.trim() !== String(client?.[fix.field] ?? '').trim()
+      ? emailShapeProblem(textValue)
+      : null
   const [teamIds, setTeamIds] = useState<string[]>(() =>
     fix.kind === 'clientTeam' ? getAssignedTeamIds(client) : [],
   )
@@ -398,6 +404,7 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
   )
 
   const save = async () => {
+    if (textProblem) return
     setError('')
     try {
       setBusy(true)
@@ -496,6 +503,11 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
               value={textValue}
               onChange={(event) => setTextValue(event.target.value)}
             />
+            {textProblem ? (
+              <span className="form-error" role="alert">
+                {textProblem}
+              </span>
+            ) : null}
           </label>
         ) : null}
 
@@ -550,7 +562,7 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
           <button
             type="button"
             className="primary-action"
-            disabled={busy || waitingForSave}
+            disabled={busy || waitingForSave || textProblem !== null}
             onClick={() => void save()}
           >
             {busy

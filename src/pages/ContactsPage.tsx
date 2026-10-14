@@ -1,5 +1,5 @@
 import { Archive, ArchiveRestore, Lock, Plus, Trash2, Unlock, Upload } from 'lucide-react'
-import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
+import { useId, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { AddModal } from '../components/AddModal'
@@ -9,6 +9,7 @@ import { FloatingAddButton } from '../components/FloatingAddButton'
 import { ListSearch } from '../components/ListSearch'
 import { CollapsibleSection, SavingTextInput, SavingTextarea } from '../components/SectionKit'
 import type { Client, Contact } from '../lib/types'
+import { emailShapeProblem } from '../lib/emailShape'
 import { distinctGroupNames, groupContacts, unlinkedContacts } from '../lib/utils'
 import {
   applyMerge,
@@ -84,10 +85,14 @@ function ContactBuilder({
   const [notes, setNotes] = useState('')
   const [group, setGroup] = useState('')
 
+  // A value that is still being typed: the reason shows under the field and Add stays off.
+  const emailProblem = emailShapeProblem(email)
+  const emailProblemId = useId()
+
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const trimmed = name.trim()
-    if (!trimmed) {
+    if (!trimmed || emailProblem) {
       return
     }
 
@@ -128,8 +133,15 @@ function ContactBuilder({
             type="email"
             onChange={(event) => setEmail(event.target.value)}
             value={email}
+            aria-invalid={emailProblem ? true : undefined}
+            aria-describedby={emailProblem ? emailProblemId : undefined}
           />
         </label>
+        {emailProblem ? (
+          <span className="form-error" id={emailProblemId} role="alert">
+            {emailProblem}
+          </span>
+        ) : null}
         <label className="field">
           <span>Phone</span>
           <input
@@ -157,7 +169,7 @@ function ContactBuilder({
             value={notes}
           />
         </label>
-        <button className="primary-action" type="submit">
+        <button className="primary-action" type="submit" disabled={Boolean(emailProblem)}>
           <Plus size={16} />
           Add contact
         </button>
@@ -530,6 +542,7 @@ function ContactRow({
               ariaLabel={`${contact.name} email`}
               canonical={contact.email ?? ''}
               placeholder="Email (default)"
+              validate={emailShapeProblem}
               onCommit={(value) => onUpdate(contact.id, { email: value })}
             />
             <ContactTextInput
@@ -607,6 +620,7 @@ function ContactRow({
                           ? `Default: ${contact.email.trim()}`
                           : 'Email for this company'
                       }
+                      validate={emailShapeProblem}
                       onCommit={(value) => setCompanyEmail(client.id, value)}
                     />
                   </label>
@@ -685,12 +699,14 @@ function ContactTextInput({
   placeholder,
   onCommit,
   list,
+  validate,
 }: {
   ariaLabel: string
   canonical: string
   placeholder?: string
   onCommit: (value: string) => void
   list?: string
+  validate?: (value: string) => string | null
 }) {
   return (
     <SavingTextInput
@@ -699,6 +715,7 @@ function ContactTextInput({
       placeholder={placeholder}
       onCommit={onCommit}
       list={list}
+      validate={validate}
     />
   )
 }

@@ -205,6 +205,7 @@ export function SavingTextInput({
   className = 'input',
   ariaLabel,
   list,
+  validate,
 }: {
   canonical: string
   onCommit: (value: string) => void
@@ -214,6 +215,12 @@ export function SavingTextInput({
   ariaLabel?: string
   /** Optional id of a <datalist> to surface existing-value suggestions. */
   list?: string
+  /**
+   * A reason a CHANGED value is not acceptable, or null. While it holds, the reason is shown under
+   * the field and the value is not committed; the value already stored is never judged, so an old
+   * odd value does not get in the way of editing something else.
+   */
+  validate?: (value: string) => string | null
 }) {
   const [draft, setDraft] = useState(canonical)
   const [prev, setPrev] = useState(canonical)
@@ -231,34 +238,45 @@ export function SavingTextInput({
     }
   }, [])
 
+  const problemFor = (value: string) => (validate && value !== canonical ? validate(value) : null)
+  const problem = problemFor(draft)
+
   const fire = (value: string) => {
-    if (value !== canonical) onCommit(value)
+    if (value !== canonical && !problemFor(value)) onCommit(value)
   }
 
   return (
-    <input
-      aria-label={ariaLabel}
-      className={className}
-      type={type}
-      list={list}
-      placeholder={placeholder}
-      value={draft}
-      onFocus={() => setFocused(true)}
-      onChange={(event) => {
-        const next = event.target.value
-        setDraft(next)
-        if (timerRef.current) window.clearTimeout(timerRef.current)
-        timerRef.current = window.setTimeout(() => fire(next), COMMIT_DEBOUNCE_MS)
-      }}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter') event.currentTarget.blur()
-      }}
-      onBlur={() => {
-        setFocused(false)
-        if (timerRef.current) window.clearTimeout(timerRef.current)
-        fire(draft)
-      }}
-    />
+    <>
+      <input
+        aria-label={ariaLabel}
+        aria-invalid={problem ? true : undefined}
+        className={className}
+        type={type}
+        list={list}
+        placeholder={placeholder}
+        value={draft}
+        onFocus={() => setFocused(true)}
+        onChange={(event) => {
+          const next = event.target.value
+          setDraft(next)
+          if (timerRef.current) window.clearTimeout(timerRef.current)
+          timerRef.current = window.setTimeout(() => fire(next), COMMIT_DEBOUNCE_MS)
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') event.currentTarget.blur()
+        }}
+        onBlur={() => {
+          setFocused(false)
+          if (timerRef.current) window.clearTimeout(timerRef.current)
+          fire(draft)
+        }}
+      />
+      {problem ? (
+        <span className="form-error" role="alert">
+          {problem}
+        </span>
+      ) : null}
+    </>
   )
 }
 
