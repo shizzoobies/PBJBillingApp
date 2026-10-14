@@ -141,7 +141,7 @@ import { PrepaymentHoldNotice } from './PrepaymentHoldNotice'
 import { hasBillingPeriod } from '../../lib/billing-period.js'
 import { canOverridePrepayment, prepaymentHoldOf } from '../lib/prepaymentHold'
 import { customerNetDays } from '../../lib/invoice-draft.js'
-import { firmToday } from '../../lib/firm-time.js'
+import { dateOnlyInZone, firmToday } from '../../lib/firm-time.js'
 import {
   REMINDER_REFUSAL_TIPS,
   latestInvoiceReminder,
@@ -231,6 +231,22 @@ export type InvoiceMonthRunHandle = {
  * failure is the thing somebody has to act on, and one invoice must not be
  * chased twice out of two tabs.
  */
+/**
+ * The tab an invoice sits in: Payment failed wins, then Past due, then its
+ * status. ONE function, so the tabs and "Remind all <tab>" cannot disagree about
+ * which invoices a tab holds.
+ */
+function runTabOf(invoice: PersistedInvoice, today: string): RunTabId {
+  // A money document must never vanish from the run. If the server ever
+  // answers with a status this build does not know, it lands in To review
+  // rather than nowhere — that tab forces eyes on it.
+  return unresolvedPaymentFailure(invoice)
+    ? 'failed'
+    : pastDueInvoice(invoice, today)
+      ? 'past-due'
+      : (TAB_OF_STATUS[invoice.status] ?? 'to-review')
+}
+
 const TAB_OF_STATUS: Record<PersistedInvoice['status'], RunTabId> = {
   draft: 'to-review',
   reviewed: 'reviewed',
@@ -333,6 +349,147 @@ type RemindAllLine = { invoice: PersistedInvoice; label: string; detail: string;
  * straight back and invite a second reminder the same day.
  */
 const REMINDER_UNRECORDED = 'Sent, but not recorded - do not send again today'
+
+/**
+ * The tabs that offer "Remind all <name>", with the words each one uses. One
+ * table, so the two buttons are the same code with different names.
+ */
+const REMIND_ALL_TABS = {
+  'past-due': {
+    button: 'Remind all past due',
+    allSkipped: 'every past-due invoice',
+    hint: 'Email every past-due client a short reminder with their same pay link',
+  },
+  sent: {
+    button: 'Remind all sent',
+    allSkipped: 'every sent invoice',
+    hint: 'Email every client with a sent invoice a short reminder with their same pay link',
+  },
+} as const
+type RemindAllTabId = keyof typeof REMIND_ALL_TABS
+
+/**
+ * " · sent 3 days ago": how long ago the invoice itself last went out, in firm
+ * days. Shown in the Remind all sent confirm so a blast at invoices that went
+ * out yesterday is plain to see before it is pressed.
+ */
+function sentAgeLabel(invoice: PersistedInvoice): string {
+  const send = latestInvoiceSend(invoice.emailLog)
+  const sentDay = send ? dateOnlyInZone(new Date(send.at)) : null
+  const today = firmToday()
+  if (!sentDay || !today) return ' · no send on record'
+  const days = Math.round(
+    (Date.parse(`${today}T00:00:00Z`) - Date.parse(`${sentDay}T00:00:00Z`)) / 86400000,
+  )
+  return days <= 0 ? ' · sent today' : ` · sent ${days} day${days === 1 ? '' : 's'} ago`
+}
+
+/**
+ * Where an invoice sitting in Payment failed goes back to when a reminder clears
+ * it - Past due when its own due date has passed, otherwise Sent - or null when
+ * it is not in Payment failed. Read the way the tabs read it, with the failure
+ * out of the way.
+ */
+function paymentFailedGoesBackTo(invoice: PersistedInvoice): 'Sent' | 'Past due' | null {
+  if (!unresolvedPaymentFailure(invoice)) return null
+  const withoutFailure = {
+    ...invoice,
+    emailLog: (invoice.emailLog ?? []).filter((entry) => entry.kind !== 'payment'),
+  }
+  return pastDueInvoice(withoutFailure, localDateOnly()) ? 'Past due' : 'Sent'
+}
+
+/**
+ * Sending ONE reminder, for the editor's button and the row's alike. The server
+ * picks nothing: it is given exactly the addresses the confirm SHOWED, refuses
+ * if any is no longer on file, re-sends the SAME pay link and logs a
+ * `kind: 'reminder'` entry; the invoice it answers with carries that entry, so
+ * "Last reminded" survives a remount. A refusal means the row was out of date
+ * (another tab reminded or sent today, a payment started, an edit), so the month
+ * is re-read before the sentence is said.
+ */
+function useReminderSend({
+  invoice,
+  to,
+  onInvoiceChanged,
+  onInvoiceMoved,
+  onReminderUnrecorded,
+  onError,
+}: {
+  invoice: PersistedInvoice
+  to: string[]
+  onInvoiceChanged: (invoice: PersistedInvoice) => void
+  onInvoiceMoved: () => Promise<void>
+  onReminderUnrecorded: () => void
+  onError: (message: string) => void
+}) {
+  // "Send reminder" (featreq-3f1d63b6): its confirm is up, and its request is out.
+  const [reminding, setReminding] = useState(false)
+  const [remindBusy, setRemindBusy] = useState(false)
+  const send = async () => {
+    setRemindBusy(true)
+    try {
+      const result = await remindInvoiceRequest(invoice.id, to)
+      setReminding(false)
+      // It left, but its log entry did not land: the run keeps the button off
+      // and says so for the rest of the session.
+      if (result.logged === false) onReminderUnrecorded()
+      onInvoiceChanged(result.invoice)
+    } catch (err) {
+      setReminding(false)
+      if (err instanceof ApiError && err.status === 409) await onInvoiceMoved()
+      onError(err instanceof Error ? err.message : 'Could not send the reminder.')
+    } finally {
+      setRemindBusy(false)
+    }
+  }
+  return { reminding, setReminding, remindBusy, send }
+}
+
+/** Send reminder's confirm: who it goes to, before anything leaves. */
+function ReminderConfirm({
+  invoice,
+  details,
+  busy,
+  sending,
+  onSend,
+  onCancel,
+}: {
+  invoice: PersistedInvoice
+  details: ResolvedInvoiceRecipients['details']
+  busy: boolean
+  sending: boolean
+  onSend: () => void
+  onCancel: () => void
+}) {
+  const backTo = paymentFailedGoesBackTo(invoice)
+  return (
+    <div className="invoice-run-remind-confirm" role="group" aria-label="Send reminder">
+      <p className="invoice-run-remind-prompt">
+        Email a payment reminder for {invoice.number ? `invoice ${invoice.number}` : 'this invoice'},
+        with the same pay link, to:
+      </p>
+      <ul>
+        {details.map((detail) => (
+          <li key={detail.email}>{formatInvoiceRecipient(detail)}</li>
+        ))}
+      </ul>
+      {backTo ? (
+        <p className="invoice-run-remind-prompt">
+          This also clears Payment failed - the invoice goes back to {backTo}.
+        </p>
+      ) : null}
+      <div className="invoice-run-remind-actions">
+        <button type="button" className="primary-action" disabled={sending || busy} onClick={onSend}>
+          {sending ? 'Sending…' : 'Send reminder now'}
+        </button>
+        <button type="button" className="ghost-action" disabled={sending} onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
 
 /**
  * What the owner can decide about one piece of ad hoc work, in the order the
@@ -807,11 +964,13 @@ export function InvoiceMonthRun({
   // unmounts that row, so this is the only warning she would get before losing
   // them. Only one editor is ever open, so one flag is enough.
   const [openDirty, setOpenDirty] = useState(false)
-  // "Remind all past due" (featreq-3f1d63b6): the confirm's two lists while it
-  // is up, and whether the one-at-a-time loop is running.
-  const [remindAll, setRemindAll] = useState<{ send: RemindAllLine[]; skip: RemindAllLine[] } | null>(
-    null,
-  )
+  // "Remind all past due" / "Remind all sent" (featreq-3f1d63b6): which tab's
+  // confirm is up and its two lists, and whether the one-at-a-time loop is running.
+  const [remindAll, setRemindAll] = useState<{
+    tab: RemindAllTabId
+    send: RemindAllLine[]
+    skip: RemindAllLine[]
+  } | null>(null)
   const [remindAllBusy, setRemindAllBusy] = useState(false)
   // Invoices whose reminder left this session but could not be logged
   // (`logged: false`). Session-only on purpose: it stands in for the log entry
@@ -1223,15 +1382,7 @@ export function InvoiceMonthRun({
     const map = new Map<RunTabId, PersistedInvoice[]>()
     for (const tab of RUN_TABS) map.set(tab.id, [])
     for (const invoice of visible) {
-      // A money document must never vanish from the run. If the server ever
-      // answers with a status this build does not know, it lands in To review
-      // rather than nowhere — that tab forces eyes on it.
-      const tabId: RunTabId = unresolvedPaymentFailure(invoice)
-        ? 'failed'
-        : pastDueInvoice(invoice, today)
-          ? 'past-due'
-          : (TAB_OF_STATUS[invoice.status] ?? 'to-review')
-      map.get(tabId)?.push(invoice)
+      map.get(runTabOf(invoice, today))?.push(invoice)
     }
     return map
   }, [visible, today])
@@ -1266,7 +1417,7 @@ export function InvoiceMonthRun({
       return
     }
     setOpenDirty(false)
-    // The "Remind all past due" confirm belongs to that tab; leaving closes it
+    // A "Remind all <tab>" confirm belongs to that tab; leaving closes it
     // (unless its loop is running, which finishes and closes it itself).
     if (!remindAllBusy) setRemindAll(null)
     setActiveTabId(tabId)
@@ -1279,6 +1430,8 @@ export function InvoiceMonthRun({
   // Whole-month, like every other figure in the strip — the search narrows the
   // tabs, never this.
   const pastDue = live.filter((invoice) => pastDueInvoice(invoice, today)).length
+  // The Sent tab's whole-month count, for "Remind all sent" (not narrowed by the search).
+  const sentCount = live.filter((invoice) => runTabOf(invoice, today) === 'sent').length
   const monthTotal = live.reduce((sum, invoice) => sum + invoice.total, 0)
 
   // What a poll is waiting for: a live monthly invoice with no rating yet.
@@ -1584,21 +1737,21 @@ export function InvoiceMonthRun({
   }
 
   /**
-   * "Remind all past due" (featreq-3f1d63b6), step one: the confirm. Every
-   * invoice in this month's Past due tab - the whole month, whatever the search
-   * box says - split by the same rule each row's Send reminder reads into the
+   * "Remind all past due" / "Remind all sent" (featreq-3f1d63b6), step one: the
+   * confirm. Every invoice in this month's tab - the whole month, whatever the
+   * search box says - split by the same rule each row's Send reminder reads into the
    * ones a reminder would go to (with their addresses) and the ones the server
    * would refuse (with the reason), so the list is honest before anything is
    * sent. Nothing is sent here.
    */
-  const startRemindAll = () => {
+  const startRemindAll = (tab: RemindAllTabId) => {
     setError(null)
     setNote(null)
     const send: RemindAllLine[] = []
     const skip: RemindAllLine[] = []
     for (const invoice of ordered) {
-      // Exactly the tab's own test: Payment failed wins over Past due.
-      if (unresolvedPaymentFailure(invoice) || !pastDueInvoice(invoice, today)) continue
+      // Exactly the tab's own test (Payment failed wins over Past due).
+      if (runTabOf(invoice, today) !== tab) continue
       const label = `${invoice.number ?? '—'} · ${clientName(invoice.clientId)}`
       const code = reminderBlock(invoice, {
         optedOut: optedOut(invoice.clientId),
@@ -1614,10 +1767,15 @@ export function InvoiceMonthRun({
       } else if (recipients.to.length === 0) {
         skip.push({ invoice, label, detail: recipients.reason ?? 'No email address on file', to: none })
       } else {
-        send.push({ invoice, label, detail: recipients.to.join(', '), to: recipients.to })
+        send.push({
+          invoice,
+          label,
+          detail: recipients.to.join(', ') + (tab === 'sent' ? sentAgeLabel(invoice) : ''),
+          to: recipients.to,
+        })
       }
     }
-    setRemindAll({ send, skip })
+    setRemindAll({ tab, send, skip })
   }
 
   /**
@@ -1981,11 +2139,13 @@ export function InvoiceMonthRun({
             id={`invoice-run-panel-${activeTab.id}`}
             aria-labelledby={`invoice-run-tab-${activeTab.id}`}
           >
-            {/* Remind all past due (featreq-3f1d63b6): on this tab only. It asks
-                first, listing who each reminder goes to and what is skipped and
-                why, then sends them one at a time. Manual only: nothing here
-                is scheduled. */}
-            {activeTab.id === 'past-due' && pastDue > 0 ? (
+            {/* Remind all past due / Remind all sent (featreq-3f1d63b6): on those
+                tabs only, one piece of code. It asks first, listing who each
+                reminder goes to and what is skipped and why, then sends them one
+                at a time. The app also sends them by itself on the 15th, 20th,
+                25th and last day (lib/invoice-auto-reminders.js). */}
+            {activeTab.id in REMIND_ALL_TABS &&
+            (activeTab.id === 'past-due' ? pastDue : sentCount) > 0 ? (
               <div className="invoice-run-remind-all-bar">
                 <button
                   type="button"
@@ -1994,20 +2154,20 @@ export function InvoiceMonthRun({
                   title={
                     openDirty
                       ? 'Save or discard the open invoice’s edits first'
-                      : 'Email every past-due client a short reminder with their same pay link'
+                      : REMIND_ALL_TABS[activeTab.id as RemindAllTabId].hint
                   }
-                  onClick={startRemindAll}
+                  onClick={() => startRemindAll(activeTab.id as RemindAllTabId)}
                 >
                   <Mail size={15} />
-                  {remindAllBusy ? 'Reminding…' : 'Remind all past due'}
+                  {remindAllBusy ? 'Reminding…' : REMIND_ALL_TABS[activeTab.id as RemindAllTabId].button}
                 </button>
               </div>
             ) : null}
-            {activeTab.id === 'past-due' && remindAll ? (
+            {remindAll && remindAll.tab === activeTab.id ? (
               <div
                 className="invoice-run-remind-confirm"
                 role="group"
-                aria-label="Remind all past due"
+                aria-label={REMIND_ALL_TABS[remindAll.tab].button}
               >
                 {remindAll.send.length > 0 ? (
                   <>
@@ -2022,7 +2182,7 @@ export function InvoiceMonthRun({
                   </>
                 ) : (
                   <p className="invoice-run-remind-prompt">
-                    Nothing to remind: every past-due invoice here is skipped.
+                    Nothing to remind: {REMIND_ALL_TABS[remindAll.tab].allSkipped} here is skipped.
                   </p>
                 )}
                 {remindAll.skip.length > 0 ? (
@@ -2114,6 +2274,13 @@ export function InvoiceMonthRun({
                     onDirtyChange={setOpenDirty}
                     reminderUnrecorded={unrecordedReminders.has(invoice.id)}
                     onReminderUnrecorded={() => markReminderUnrecorded(invoice.id)}
+                    remindHeld={
+                      remindAllBusy
+                        ? 'Reminders are being sent'
+                        : openDirty
+                          ? 'Save or discard the open invoice’s edits first'
+                          : null
+                    }
                   />
                 ))}
               </ul>
@@ -2159,9 +2326,12 @@ function InvoiceRow({
   onDirtyChange,
   reminderUnrecorded,
   onReminderUnrecorded,
+  remindHeld,
 }: {
   invoice: PersistedInvoice
   clientName: string
+  /** Why the row's Send reminder is held right now (a Remind all is sending, an editor has unsaved edits), or null. */
+  remindHeld: string | null
   /** A reminder for this invoice left this session but could not be logged. */
   reminderUnrecorded: boolean
   /** The reminder the editor sent left, but its log write failed (`logged: false`). */
@@ -2269,6 +2439,25 @@ function InvoiceRow({
   const amountMismatch = unhandledAmountMismatch(invoice)
   // The newest payment reminder that actually left, for "Last reminded <date>".
   const lastReminder = latestInvoiceReminder(invoice.emailLog)
+  // The row's own Send reminder (Sent and Past due rows): the same rule, confirm
+  // and request as the editor's button, so nobody has to open the invoice.
+  const rowReminderCode = reminderBlock(invoice, { optedOut, noEmail, autopayAttempt })
+  const rowReminder = useReminderSend({
+    invoice,
+    to: recipients.to,
+    onInvoiceChanged,
+    onInvoiceMoved,
+    onReminderUnrecorded,
+    onError: onRefusal,
+  })
+  // Opening the row hides this confirm (the editor has its own), so it is also
+  // put away: otherwise it would come back armed when the row is closed again.
+  // Adjusted while rendering, the way React asks for state that follows a prop.
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) rowReminder.setReminding(false)
+  }
   // Computed once here and handed to the editor, so the row's flag and the
   // notice inside it can never disagree about how late this invoice is.
   const pastDue = pastDueInvoice(invoice, today)
@@ -2498,6 +2687,58 @@ function InvoiceRow({
           ) : null}
         </span>
       </button>
+      {/* Send reminder, on the row (Sent and Past due; a Payment failed row has the
+          editor's). A small button beside the amount rather than inside the
+          summary button, and gone while the row is open, where the editor has its
+          own. Off with the server's own reason wherever it would refuse, like the
+          editor's; not offered to a never-email client. */}
+      {!open &&
+      !isVoid &&
+      !noEmail &&
+      !paymentFailure &&
+      (invoice.status === 'sent' || invoice.status === 'overdue') ? (
+        <div className="invoice-run-row-actions">
+          <button
+            type="button"
+            className="ghost-action invoice-run-row-remind"
+            aria-label={`Send reminder for ${invoice.number ?? clientName}`}
+            disabled={
+              rowReminder.remindBusy ||
+              rowReminder.reminding ||
+              remindHeld !== null ||
+              reminderUnrecorded ||
+              rowReminderCode !== null ||
+              recipients.to.length === 0
+            }
+            title={
+              remindHeld
+                ? remindHeld
+                : reminderUnrecorded
+                  ? REMINDER_UNRECORDED
+                  : rowReminderCode
+                    ? REMINDER_REFUSAL_TIPS[rowReminderCode]
+                    : recipients.to.length === 0
+                      ? (recipients.reason ?? 'No email address on file')
+                      : 'Email the client a short reminder with the same pay link'
+            }
+            onClick={() => rowReminder.setReminding(true)}
+          >
+            <Mail size={14} />
+            {rowReminder.remindBusy ? 'Reminding…' : 'Send reminder'}
+          </button>
+        </div>
+      ) : null}
+      {!open && rowReminder.reminding ? (
+        <ReminderConfirm
+          invoice={invoice}
+          details={recipients.details}
+          busy={busy || remindHeld !== null}
+          sending={rowReminder.remindBusy}
+          onSend={() => void rowReminder.send()}
+          onCancel={() => rowReminder.setReminding(false)}
+        />
+      ) : null}
+
       {/* An automatic payment failed. Nothing was collected. The three moves are
           named: follow up, send the invoice again (it then carries a Pay link and
           never charges), or - behind the charging switch, and only while the
@@ -3146,9 +3387,6 @@ function InvoiceEditor({
   } | null>(null)
   // Open only when there is a choice to make — see `startSend`.
   const [picking, setPicking] = useState(false)
-  // "Send reminder" (featreq-3f1d63b6): its confirm is up, and its request is out.
-  const [reminding, setReminding] = useState(false)
-  const [remindBusy, setRemindBusy] = useState(false)
   // Why the last save's retainer credit was refused. Kept here rather than on
   // the run, because it is about the lines on this screen and it arrives with
   // the credit line being removed from them.
@@ -3436,17 +3674,6 @@ function InvoiceEditor({
   const paymentFailure = unresolvedPaymentFailure(invoice)
   // A failure a reminder already cleared: the history says both dates.
   const clearedFailure = clearedPaymentFailure(invoice)
-  // Where the invoice goes when a reminder clears its Payment failed: Past due when
-  // its own due date has passed, otherwise Sent. Read the way the tabs read it,
-  // with the failure out of the way.
-  const backToTab = paymentFailure
-    ? pastDueInvoice(
-        { ...invoice, emailLog: (invoice.emailLog ?? []).filter((entry) => entry.kind !== 'payment') },
-        localDateOnly(),
-      )
-      ? 'Past due'
-      : 'Sent'
-    : null
   // A payment for a different amount than the total, not yet marked handled.
   const amountMismatch = unhandledAmountMismatch(invoice)
   const [handledBusy, setHandledBusy] = useState(false)
@@ -3579,34 +3806,21 @@ function InvoiceEditor({
     setPicking(true)
   }
 
-  /**
-   * Send the payment reminder the confirm asked about. The server picks the
-   * recipients (everyone Send would email), re-sends the SAME pay link and logs
-   * a `kind: 'reminder'` entry; the invoice it answers with carries that entry,
-   * so "Last reminded" survives the remount. A refusal means the row was out of
-   * date (another tab reminded or sent today, a payment started, an edit), so
-   * the month is re-read before the sentence is said.
-   */
-  const sendReminder = async () => {
-    setSendError(null)
-    setRemindBusy(true)
-    try {
-      // Exactly the addresses the confirm showed; the server refuses if any of
-      // them is no longer on file, so nobody unseen is emailed.
-      const result = await remindInvoiceRequest(invoice.id, recipients.to)
-      setReminding(false)
-      // It left, but its log entry did not land: the run keeps the button off
-      // and says so for the rest of the session.
-      if (result.logged === false) onReminderUnrecorded()
-      onInvoiceChanged(result.invoice)
-    } catch (err) {
-      setReminding(false)
-      if (err instanceof ApiError && err.status === 409) await onInvoiceMoved()
-      sayRefusal(err instanceof Error ? err.message : 'Could not send the reminder.', setSendError)
-    } finally {
-      setRemindBusy(false)
-    }
-  }
+  // Send reminder: the confirm and the request are the row button's too (see
+  // `useReminderSend`). Exactly the addresses the confirm showed are posted.
+  const {
+    reminding,
+    setReminding,
+    remindBusy,
+    send: sendReminder,
+  } = useReminderSend({
+    invoice,
+    to: recipients.to,
+    onInvoiceChanged,
+    onInvoiceMoved,
+    onReminderUnrecorded,
+    onError: (message) => sayRefusal(message, setSendError),
+  })
 
   /**
    * The lines as the staged scope tags would leave them — what Save will send.
@@ -5134,41 +5348,17 @@ function InvoiceEditor({
 
       {/* Send reminder's confirm: who it goes to, before anything leaves. */}
       {reminding ? (
-        <div className="invoice-run-remind-confirm" role="group" aria-label="Send reminder">
-          <p className="invoice-run-remind-prompt">
-            Email a payment reminder for{' '}
-            {invoice.number ? `invoice ${invoice.number}` : 'this invoice'}, with the same pay
-            link, to:
-          </p>
-          <ul>
-            {recipients.details.map((detail) => (
-              <li key={detail.email}>{formatInvoiceRecipient(detail)}</li>
-            ))}
-          </ul>
-          {backToTab ? (
-            <p className="invoice-run-remind-prompt">
-              This also clears Payment failed - the invoice goes back to {backToTab}.
-            </p>
-          ) : null}
-          <div className="invoice-run-remind-actions">
-            <button
-              type="button"
-              className="primary-action"
-              disabled={remindBusy || busy}
-              onClick={() => void sendReminder()}
-            >
-              {remindBusy ? 'Sending…' : 'Send reminder now'}
-            </button>
-            <button
-              type="button"
-              className="ghost-action"
-              disabled={remindBusy}
-              onClick={() => setReminding(false)}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
+        <ReminderConfirm
+          invoice={invoice}
+          details={recipients.details}
+          busy={busy}
+          sending={remindBusy}
+          onSend={() => {
+            setSendError(null)
+            void sendReminder()
+          }}
+          onCancel={() => setReminding(false)}
+        />
       ) : null}
 
       {picking ? (

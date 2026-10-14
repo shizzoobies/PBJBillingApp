@@ -13356,6 +13356,25 @@ tr.is-inactive-client .client-name-link {
   margin-bottom: 8px;
 }
 
+/* The row's own Send reminder (Sent and Past due rows): small, under the summary. */
+.invoice-run-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 12px 8px;
+}
+
+.invoice-run-row-remind {
+  align-items: center;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  padding: 4px 10px;
+}
+
+.invoice-run-row > .invoice-run-remind-confirm {
+  margin: 0 12px 10px;
+}
+
 /* The newest payment reminder that left. A record, as quiet as the send line. */
 .invoice-run-reminded {
   color: var(--muted);

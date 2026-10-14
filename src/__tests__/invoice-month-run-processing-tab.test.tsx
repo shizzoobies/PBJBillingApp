@@ -152,11 +152,15 @@ describe('the Processing tab', () => {
     ])
     fireEvent.click(screen.getByRole('tab', { name: /^Sent/ }))
     await screen.findByText('INV-2026-08-032')
-    // The month run has no Sent-tab bulk control today; if one is ever added it
-    // must not reach the Processing tab's invoices. Pinned here so that change
-    // has to face this test.
-    expect(screen.queryByRole('button', { name: /send all|remind all|select all/i })).toBeNull()
+    // The Sent tab's one bulk control is "Remind all sent" (Alex, 2026-10-14).
+    // It lists the Sent tab's invoices and must never reach the Processing
+    // tab's: a clearing bank payment is not chased.
+    expect(screen.queryByRole('button', { name: /send all|select all/i })).toBeNull()
     expect(screen.queryByText('INV-2026-08-031')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Remind all sent' }))
+    const confirm = screen.getByRole('group', { name: 'Remind all sent' })
+    expect(within(confirm).getByText(/INV-2026-08-032/)).toBeInTheDocument()
+    expect(within(confirm).queryByText(/INV-2026-08-031/)).toBeNull()
   })
 })
 

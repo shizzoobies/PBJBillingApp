@@ -574,6 +574,344 @@ describe('Remind all past due', () => {
   })
 })
 
+/**
+ * Commit 3 (Alex, 2026-10-14): a small Send reminder on each Sent and Past due
+ * row, and "Remind all sent" on the Sent tab - the same code as "Remind all past due".
+ */
+describe('the Send reminder button on a row', () => {
+  const rowButton = (number = 'INV-2026-08-001') =>
+    screen.getByRole('button', { name: `Send reminder for ${number}` })
+  const pastDueRow = (over: Partial<PersistedInvoice> = {}) => makeInvoice({ dueDate: '2026-09-30', ...over })
+
+  it('sits on a Sent row without opening the invoice', async () => {
+    await openRun([makeInvoice()], { open: false })
+    await screen.findByText('INV-2026-08-001')
+    expect(rowButton()).toBeEnabled()
+    expect(document.querySelector('.invoice-run-editor')).toBeNull()
+  })
+
+  it('sends through the same request as the editor button, after the same confirm', async () => {
+    await openRun([makeInvoice()], { open: false })
+    const remindedAt = '2026-10-09T16:00:00.000Z'
+    mockRemind.mockResolvedValue({
+      invoice: makeInvoice({
+        updatedAt: remindedAt,
+        emailLog: [
+          { at: SENT_AT, to: ['ann@acme.test', 'bo@acme.test'], subject: 'Invoice', ok: true },
+          reminderEntry(remindedAt),
+        ],
+      }),
+    })
+
+    fireEvent.click(await waitFor(() => rowButton()))
+    // Nothing is sent by the first press: it asks, naming who it goes to.
+    expect(mockRemind).not.toHaveBeenCalled()
+    const confirm = screen.getByRole('group', { name: 'Send reminder' })
+    expect(within(confirm).getByText(/ann@acme\.test/)).toBeInTheDocument()
+    expect(within(confirm).getByText(/bo@acme\.test/)).toBeInTheDocument()
+    expect(within(confirm).queryByText(/This also clears Payment failed/)).not.toBeInTheDocument()
+
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send reminder now' }))
+    // Exactly the editor button's request: the invoice id and the addresses shown.
+    await waitFor(() =>
+      expect(mockRemind).toHaveBeenCalledWith('inv-1', ['ann@acme.test', 'bo@acme.test']),
+    )
+    const row = (await screen.findByText('INV-2026-08-001')).closest('li') as HTMLElement
+    await waitFor(() => expect(within(row).getByText(/Last reminded Oct 9/)).toBeInTheDocument())
+    expect(screen.queryByRole('group', { name: 'Send reminder' })).not.toBeInTheDocument()
+  })
+
+  it('puts its confirm away when the row is opened, and does not bring it back armed when the row is closed', async () => {
+    await openRun([makeInvoice()], { open: false })
+    fireEvent.click(await waitFor(() => rowButton()))
+    expect(screen.getByRole('group', { name: 'Send reminder' })).toBeInTheDocument()
+
+    // Open the row: the confirm is gone and the editor has its own button.
+    fireEvent.click(screen.getByText('INV-2026-08-001'))
+    await waitFor(() => expect(document.querySelector('.invoice-run-editor')).not.toBeNull())
+    expect(screen.queryByRole('group', { name: 'Send reminder' })).not.toBeInTheDocument()
+
+    // Close it again: nothing is armed.
+    fireEvent.click(screen.getByText('INV-2026-08-001'))
+    await waitFor(() => expect(document.querySelector('.invoice-run-editor')).toBeNull())
+    expect(screen.queryByRole('group', { name: 'Send reminder' })).not.toBeInTheDocument()
+    expect(rowButton()).toBeEnabled()
+    expect(mockRemind).not.toHaveBeenCalled()
+  })
+
+  it('Cancel sends nothing', async () => {
+    await openRun([makeInvoice()], { open: false })
+    fireEvent.click(await waitFor(() => rowButton()))
+    fireEvent.click(within(screen.getByRole('group', { name: 'Send reminder' })).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('group', { name: 'Send reminder' })).not.toBeInTheDocument()
+    expect(mockRemind).not.toHaveBeenCalled()
+  })
+
+  it('is on a Past due row too', async () => {
+    await openRun([pastDueRow()], { tab: /^Past due/, open: false })
+    await screen.findByText('INV-2026-08-001')
+    expect(rowButton()).toBeEnabled()
+  })
+
+  it.each([
+    ['Changed since sent', { changedSinceSent: true }, 'Changed since sent - use Send again'],
+    [
+      'reminded today',
+      {
+        emailLog: [
+          { at: SENT_AT, to: ['ann@acme.test'], subject: 'Invoice', ok: true },
+          reminderEntry(new Date().toISOString()),
+        ],
+      },
+      'Already reminded today',
+    ],
+  ])('is disabled with the reason as its title: %s', async (_name, over, reason) => {
+    await openRun([makeInvoice(over as Partial<PersistedInvoice>)], { open: false })
+    await screen.findByText('INV-2026-08-001')
+    expect(rowButton()).toBeDisabled()
+    expect(rowButton()).toHaveAttribute('title', reason)
+  })
+
+  it('is disabled while autopay is collecting, and for an opted-out client', async () => {
+    mockAttempts.mockResolvedValue({
+      chargingEnabled: true,
+      attempts: [
+        { invoiceId: 'inv-1', attemptNo: 1, status: 'processing', errorCode: null, error: null, updatedAt: SENT_AT },
+      ],
+    } as never)
+    await openRun([makeInvoice()], { open: false })
+    await waitFor(() => expect(rowButton()).toBeDisabled())
+    expect(rowButton()).toHaveAttribute('title', 'Autopay is collecting this one')
+  })
+
+  it('is disabled for an opted-out client, with the reason', async () => {
+    await openRun([makeInvoice()], { clients: makeClients({ platformInvoicingOptOut: true }), open: false })
+    await screen.findByText('INV-2026-08-001')
+    expect(rowButton()).toBeDisabled()
+    expect(rowButton()).toHaveAttribute('title', 'Client is not emailed')
+  })
+
+  it("is not offered to a never-email client, like the editor's", async () => {
+    await openRun([makeInvoice()], { clients: makeClients({ invoiceNoEmail: true }), open: false })
+    await screen.findByText('INV-2026-08-001')
+    expect(screen.queryByRole('button', { name: /^Send reminder for/ })).toBeNull()
+  })
+
+  it("gives way to the editor's own button when the row is open", async () => {
+    await openRun([makeInvoice()], { open: true })
+    expect(screen.queryByRole('button', { name: /^Send reminder for/ })).toBeNull()
+    expect(remindButton()).toBeEnabled()
+  })
+
+  it("on the row, says the server's refusal and re-reads the month", async () => {
+    await openRun([makeInvoice()], { open: false })
+    mockRemind.mockRejectedValue(
+      new ApiError(409, 'This client already heard about this invoice today.', 'reminded_today'),
+    )
+    const listsBefore = mockList.mock.calls.length
+
+    fireEvent.click(await waitFor(() => rowButton()))
+    fireEvent.click(screen.getByRole('button', { name: 'Send reminder now' }))
+
+    expect(await screen.findByText(/already heard about this invoice today/)).toBeInTheDocument()
+    expect(mockList.mock.calls.length).toBeGreaterThan(listsBefore)
+  })
+
+  it('holds an already open row confirm when a Remind all starts sending', async () => {
+    const rows = [makeInvoice(), makeInvoice({ id: 'inv-2', number: 'INV-2026-08-002' })]
+    await openRun(rows, { open: false })
+    let release: () => void = () => undefined
+    mockRemind.mockImplementation(
+      (id: string) =>
+        new Promise((resolve) => {
+          const answer = () => resolve({ invoice: rows.find((row) => row.id === id) as PersistedInvoice })
+          if (id === 'inv-1') release = answer
+          else answer()
+        }),
+    )
+    // Arm the second row's own confirm first...
+    fireEvent.click(await waitFor(() => rowButton('INV-2026-08-002')))
+    const rowConfirm = screen.getByRole('group', { name: 'Send reminder' })
+    expect(within(rowConfirm).getByRole('button', { name: 'Send reminder now' })).toBeEnabled()
+    // ...then start Remind all sent.
+    fireEvent.click(screen.getByRole('button', { name: 'Remind all sent' }))
+    fireEvent.click(within(screen.getByRole('group', { name: 'Remind all sent' })).getByRole('button', { name: 'Send 2 reminders' }))
+    await waitFor(() => expect(mockRemind).toHaveBeenCalledTimes(1))
+    expect(within(rowConfirm).getByRole('button', { name: 'Send reminder now' })).toBeDisabled()
+    release()
+    await screen.findByText(/Reminded 2 of 2\./)
+  })
+
+  it('is held while a Remind all is sending', async () => {
+    const rows = [makeInvoice(), makeInvoice({ id: 'inv-2', number: 'INV-2026-08-002' })]
+    await openRun(rows, { open: false })
+    let release: () => void = () => undefined
+    mockRemind.mockImplementation(
+      (id: string) =>
+        new Promise((resolve) => {
+          const answer = () => resolve({ invoice: rows.find((row) => row.id === id) as PersistedInvoice })
+          if (id === 'inv-1') release = answer
+          else answer()
+        }),
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all sent' }))
+    fireEvent.click(within(screen.getByRole('group', { name: 'Remind all sent' })).getByRole('button', { name: 'Send 2 reminders' }))
+    await waitFor(() => expect(mockRemind).toHaveBeenCalledTimes(1))
+    expect(rowButton('INV-2026-08-002')).toBeDisabled()
+    expect(rowButton('INV-2026-08-002')).toHaveAttribute('title', 'Reminders are being sent')
+    release()
+    await screen.findByText(/Reminded 2 of 2\./)
+  })
+})
+
+describe('Remind all sent', () => {
+  const clients = makeClients({}, [
+    { id: 'client-bolt', name: 'Bolt', contactIds: ['contact-cy'], planIds: [] } as unknown as Client,
+    { id: 'client-cove', name: 'Cove', contactIds: ['contact-di'], planIds: [], invoiceNoEmail: true } as unknown as Client,
+    { id: 'client-dune', name: 'Dune', contactIds: ['contact-di'], planIds: [] } as unknown as Client,
+  ])
+  const rows = [
+    makeInvoice({ id: 'inv-a', number: 'INV-2026-08-001', clientId: 'client-acme' }),
+    makeInvoice({ id: 'inv-b', number: 'INV-2026-08-002', clientId: 'client-bolt' }),
+    // Skipped: never emailed.
+    makeInvoice({ id: 'inv-c', number: 'INV-2026-08-003', clientId: 'client-cove' }),
+    // Skipped: reminded today already.
+    makeInvoice({
+      id: 'inv-d',
+      number: 'INV-2026-08-004',
+      clientId: 'client-dune',
+      emailLog: [
+        { at: SENT_AT, to: ['di@cove.test'], subject: 'Invoice', ok: true },
+        reminderEntry(new Date().toISOString()),
+      ],
+    }),
+    // Past due: lives on the Past due tab, never on this list.
+    makeInvoice({ id: 'inv-e', number: 'INV-2026-08-005', clientId: 'client-bolt', dueDate: '2026-09-30' }),
+  ]
+  const openSent = async () => {
+    await openRun(rows, { clients, tab: /^Sent/, open: false })
+  }
+  const panel = () => screen.getByRole('group', { name: 'Remind all sent' })
+
+  it('is offered on the Sent tab only, and Past due keeps its own', async () => {
+    await openRun(rows, { clients, tab: /^Sent/, open: false })
+    expect(await screen.findByRole('button', { name: 'Remind all sent' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Remind all past due' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: /^Past due/ }))
+    expect(await screen.findByRole('button', { name: 'Remind all past due' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Remind all sent' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: /^Paid/ }))
+    expect(screen.queryByRole('button', { name: /^Remind all/ })).not.toBeInTheDocument()
+  })
+
+  it('lists every sent invoice with its recipients, and what it skips and why - before sending anything', async () => {
+    await openSent()
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all sent' }))
+
+    expect(mockRemind).not.toHaveBeenCalled()
+    const list = panel()
+    const willSend = within(list).getByRole('list', { name: 'Will be reminded' })
+    expect(within(willSend).getAllByRole('listitem')).toHaveLength(2)
+    expect(within(willSend).getByText(/INV-2026-08-001 · Acme/)).toHaveTextContent('ann@acme.test')
+    expect(within(willSend).getByText(/INV-2026-08-002 · Bolt/)).toHaveTextContent('cy@bolt.test')
+    // The past-due invoice is not on the Sent list.
+    expect(within(list).queryByText(/INV-2026-08-005/)).not.toBeInTheDocument()
+    const skipped = within(list).getByRole('list', { name: 'Skipped' })
+    expect(within(skipped).getByText(/INV-2026-08-003 · Cove/)).toHaveTextContent('Client is not emailed')
+    expect(within(skipped).getByText(/INV-2026-08-004 · Dune/)).toHaveTextContent('Already reminded today')
+  })
+
+  it('sends one call per invoice and reports "Reminded N of M"', async () => {
+    await openSent()
+    mockRemind.mockImplementation(async (id: string) => ({
+      invoice: rows.find((row) => row.id === id) as PersistedInvoice,
+    }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all sent' }))
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Send 2 reminders' }))
+
+    expect(await screen.findByText(/Reminded 2 of 2\./)).toHaveTextContent('2 skipped before sending.')
+    expect(mockRemind.mock.calls).toEqual([
+      ['inv-a', ['ann@acme.test', 'bo@acme.test']],
+      ['inv-b', ['cy@bolt.test']],
+    ])
+  })
+
+  it('lists a per-invoice refusal (409) as skipped and carries on', async () => {
+    await openSent()
+    mockRemind.mockImplementation(async (id: string) => {
+      if (id === 'inv-a') throw new ApiError(409, 'This invoice is paid, so no reminder was sent.', 'invoice_paid')
+      return { invoice: rows.find((row) => row.id === id) as PersistedInvoice }
+    })
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all sent' }))
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Send 2 reminders' }))
+
+    const tally = await screen.findByText(/Reminded 1 of 2\./)
+    expect(tally).toHaveTextContent(
+      'Skipped 1 the server refused: INV-2026-08-001 · Acme: This invoice is paid, so no reminder was sent.',
+    )
+    expect(mockRemind.mock.calls.map((call) => call[0])).toEqual(['inv-a', 'inv-b'])
+  })
+
+  it('Cancel sends nothing, and leaving the tab closes the confirm', async () => {
+    await openSent()
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all sent' }))
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('group', { name: 'Remind all sent' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Remind all sent' }))
+    fireEvent.click(screen.getByRole('tab', { name: /^Past due/ }))
+    expect(screen.queryByRole('group', { name: 'Remind all sent' })).not.toBeInTheDocument()
+    expect(mockRemind).not.toHaveBeenCalled()
+  })
+
+  it('shows how long ago each was sent, so a blast at yesterday\'s invoices is plain to see', async () => {
+    // Noon Eastern on October 14th, pinned: the clock decides "1 day ago", and a
+    // real clock between midnight and 2 am Eastern would read 26 hours as 2 days.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-14T12:00:00-04:00'))
+    const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3600 * 1000).toISOString()
+    const log = (at: string) => [{ at, to: ['ann@acme.test'], subject: 'Invoice', ok: true }]
+    try {
+      await openRunThenCheckAges(hoursAgo, log)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  const openRunThenCheckAges = async (
+    hoursAgo: (hours: number) => string,
+    log: (at: string) => PersistedInvoice['emailLog'],
+  ) => {
+    await openRun(
+      [
+        makeInvoice({ id: 'inv-y', number: 'INV-2026-08-010', emailLog: log(hoursAgo(26)) }),
+        makeInvoice({ id: 'inv-o', number: 'INV-2026-08-012', emailLog: log('2026-08-31T16:00:00.000Z') }),
+        makeInvoice({ id: 'inv-n', number: 'INV-2026-08-013', emailLog: [] }),
+      ],
+      { tab: /^Sent/, open: false },
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all sent' }))
+    const willSend = within(panel()).getByRole('list', { name: 'Will be reminded' })
+    expect(within(willSend).getByText(/INV-2026-08-010/)).toHaveTextContent('sent 1 day ago')
+    expect(within(willSend).getByText(/INV-2026-08-012/)).toHaveTextContent(/sent \d+ days ago/)
+    expect(within(willSend).getByText(/INV-2026-08-013/)).toHaveTextContent('no send on record')
+  }
+
+  it('does not add an age to the Past due list', async () => {
+    await openRun([makeInvoice({ dueDate: '2026-09-30' })], { tab: /^Past due/, open: false })
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all past due' }))
+    const group = within(screen.getByRole('group', { name: 'Remind all past due' }))
+    // The line is there (its recipients), so the absence of an age is not just an absent line.
+    expect(group.getByText(/INV-2026-08-001/)).toHaveTextContent('ann@acme.test')
+    expect(group.queryByText(/sent .* ago|sent today|no send on record/)).toBeNull()
+  })
+
+  it('says so when every sent invoice is skipped', async () => {
+    await openRun([rows[2]], { clients, tab: /^Sent/, open: false })
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all sent' }))
+    expect(within(panel()).getByText(/Nothing to remind: every sent invoice here is skipped\./)).toBeInTheDocument()
+  })
+})
+
 describe('a reminder that left but could not be logged (logged: false)', () => {
   it('says so on the row and in the editor, and keeps the button off for the session', async () => {
     await openRun([makeInvoice()])
