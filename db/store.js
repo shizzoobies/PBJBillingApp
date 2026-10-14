@@ -26736,7 +26736,9 @@ export class AppDataStore {
    * provider call; `{ claimed: false, send }` means a non-failed claim already
    * exists for the same (letter, client, template, firm day, attempt) - already
    * sent, or being sent - and `send` is that row. A failed row never blocks a
-   * retry.
+   * retry. `{ claimed: false, reason: 'letter_deleted' }` means the letter itself is
+   * gone (deleted between Send loading it and this claim): no row is written, so the
+   * send log never names a letter that does not exist.
    */
   async claimEngagementLetterSend({
     letterId = 'default',
@@ -26751,10 +26753,15 @@ export class AppDataStore {
     const id = `els-${randomUUID().slice(0, 8)}`
     const list = (Array.isArray(recipients) ? recipients : []).map(String)
     if (this.pool) {
+      // `insert ... select ... where exists`: the row is written only while the letter still
+      // is, in the same statement (the partial unique index still decides duplicates). `for key
+      // share` takes the lock a delete needs, so a delete already in flight makes this claim wait
+      // for it and then see the letter gone.
       const inserted = await this.pool.query(
         `insert into engagement_letter_sends
            (id, letter_id, client_id, template_hash, firm_day, attempt, status, recipients, subject, created_by)
-         values ($1, $2, $3, $4, $5, $6, 'sending', $7::jsonb, $8, $9)
+         select $1::text, $2::text, $3::text, $4::text, $5::text, $6::int, 'sending', $7::jsonb, $8::text, $9::text
+          where exists (select 1 from engagement_letters where id = $2 for key share)
          on conflict do nothing
          returning ${ENGAGEMENT_SEND_COLUMNS}`,
         [id, letterId, clientId, templateHash, firmDay, attempt, JSON.stringify(list), subject, createdBy],
@@ -26766,12 +26773,16 @@ export class AppDataStore {
             and attempt = $5 and status <> 'failed'`,
         [letterId, clientId, templateHash, firmDay, attempt],
       )
-      return {
-        claimed: false,
-        send: existing.rows.length > 0 ? mapEngagementSendRow(existing.rows[0]) : null,
-      }
+      if (existing.rows.length > 0) return { claimed: false, send: mapEngagementSendRow(existing.rows[0]) }
+      // Nothing inserted and nothing blocking: the letter is gone (or a blocker failed in between).
+      const letter = await this.pool.query(`select id from engagement_letters where id = $1`, [letterId])
+      if (letter.rows.length === 0) return { claimed: false, reason: 'letter_deleted' }
+      return { claimed: false, send: null }
     }
     return this._mutateLetterFile((authState) => {
+      if (!authState.engagementLetters.some((row) => row?.id === letterId)) {
+        return { result: { claimed: false, reason: 'letter_deleted' }, changed: false }
+      }
       const blocker = authState.engagementLetterSends.find(
         (row) =>
           row?.letterId === letterId &&

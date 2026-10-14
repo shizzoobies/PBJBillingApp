@@ -46592,6 +46592,7 @@ describe('engagement letters (file backend)', () => {
   })
 
   it('claims a send once: the second claim for the same key is refused and names the first', async () => {
+    await seedLegacyLetter()
     const first = await store.claimEngagementLetterSend(claimArgs())
     expect(first.claimed).toBe(true)
     expect(first.send).toMatchObject({
@@ -46616,13 +46617,28 @@ describe('engagement letters (file backend)', () => {
     expect((await readAuth()).engagementLetterSends).toHaveLength(1)
   })
 
+  // A delete can land between Send loading the letter and the first claim.
+  it('claims nothing for a letter that is gone: letter_deleted, and no row names it', async () => {
+    const gone = await store.createEngagementLetter({ name: 'Gone' })
+    expect(await store.deleteEngagementLetter(gone.id)).toEqual({ deleted: true })
+    expect(await store.claimEngagementLetterSend(claimArgs({ letterId: gone.id }))).toEqual({ claimed: false, reason: 'letter_deleted' })
+    expect(await store.claimEngagementLetterSend(claimArgs({ letterId: 'never-was' }))).toEqual({ claimed: false, reason: 'letter_deleted' })
+    expect((await readAuth()).engagementLetterSends).toEqual([])
+    // A letter that still exists is claimed as before.
+    await seedLegacyLetter()
+    expect((await store.claimEngagementLetterSend(claimArgs())).claimed).toBe(true)
+  })
+
   it('lets exactly one of several simultaneous claims through', async () => {
+    await seedLegacyLetter()
     const results = await Promise.all(Array.from({ length: 6 }, () => store.claimEngagementLetterSend(claimArgs())))
     expect(results.filter((result) => result.claimed)).toHaveLength(1)
     expect((await readAuth()).engagementLetterSends).toHaveLength(1)
   })
 
   it('treats a different client, template, firm day or attempt as a different claim', async () => {
+    await seedLegacyLetter()
+    await seedLegacyLetter({ id: 'other' })
     await store.claimEngagementLetterSend(claimArgs())
     for (const over of [
       { clientId: 'c2' },
@@ -46636,6 +46652,7 @@ describe('engagement letters (file backend)', () => {
   })
 
   it('completes a claim as sent with the provider id, and will not complete it twice', async () => {
+    await seedLegacyLetter()
     const { send } = await store.claimEngagementLetterSend(claimArgs())
     const done = await store.completeEngagementLetterSend(send.id, { ok: true, providerId: 're_1' })
     expect(done).toMatchObject({ id: send.id, status: 'sent', providerId: 're_1', error: null })
@@ -46647,6 +46664,7 @@ describe('engagement letters (file backend)', () => {
   })
 
   it('a failed claim never blocks a retry of the same attempt', async () => {
+    await seedLegacyLetter()
     const { send } = await store.claimEngagementLetterSend(claimArgs())
     const failed = await store.completeEngagementLetterSend(send.id, { ok: false, error: 'Email provider refused the message (422).' })
     expect(failed).toMatchObject({ status: 'failed', error: 'Email provider refused the message (422).', providerId: null })
@@ -46660,6 +46678,7 @@ describe('engagement letters (file backend)', () => {
   })
 
   it('"Send again" claims the next attempt: 1 with nothing logged, then one past the highest, failed rows included', async () => {
+    await seedLegacyLetter()
     const key = { letterId: 'default', clientId: 'c1', templateHash: 'hash-1', firmDay: '2026-10-08' }
     expect(await store.nextEngagementLetterAttempt(key)).toBe(1)
     const first = await store.claimEngagementLetterSend(claimArgs())
@@ -46673,6 +46692,7 @@ describe('engagement letters (file backend)', () => {
   })
 
   it('lists sends newest first, optionally for one client', async () => {
+    await seedLegacyLetter()
     const a = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c1' }))
     const b = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c2' }))
     const c = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c1', attempt: 2 }))
@@ -46684,6 +46704,7 @@ describe('engagement letters (file backend)', () => {
   // The route reads the blocking row's status: a row still `sending` (the process died between the
   // claim and the close) must not be told apart from `sent` by wording alone.
   it('a refused claim answers the blocking row with its CURRENT status', async () => {
+    await seedLegacyLetter()
     const first = await store.claimEngagementLetterSend(claimArgs())
     const whileSending = await store.claimEngagementLetterSend(claimArgs())
     expect(whileSending).toMatchObject({ claimed: false, send: { id: first.send.id, status: 'sending' } })
@@ -46695,6 +46716,7 @@ describe('engagement letters (file backend)', () => {
   })
 
   it('lists sends newest first by their own timestamps, however they were inserted', async () => {
+    await seedLegacyLetter()
     const a = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c1' }))
     const b = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c2' }))
     const c = await store.claimEngagementLetterSend(claimArgs({ clientId: 'c3' }))
@@ -46837,6 +46859,10 @@ describe('engagement letters (Postgres statements)', () => {
           created_at: new Date('2026-10-08T15:00:00Z'),
           completed_at: null,
         }
+        // `insert ... select ... where exists (select 1 from engagement_letters where id = $2 for key share)`: no letter, no row.
+        if (trimmed.includes('where exists (select 1 from engagement_letters where id = $2 for key share)') && !letters.some((row) => row.id === candidate.letter_id)) {
+          return { rows: [], rowCount: 0 }
+        }
         if (sends.some((row) => blocks(row, [null, candidate.letter_id, candidate.client_id, candidate.template_hash, candidate.firm_day, candidate.attempt]))) {
           return { rows: [], rowCount: 0 }
         }
@@ -46869,6 +46895,18 @@ describe('engagement letters (Postgres statements)', () => {
     return { pool, statements, matching, sends, letters }
   }
   const letterStore = (fake) => postgresStore(fake)
+  /** The v1 letter, which a claim on id 'default' needs to find. */
+  const withDefaultLetter = (fake) =>
+    fake.letters.push({
+      id: 'default',
+      name: '1099 Filing',
+      subject: 's',
+      email_body: 'e',
+      letter_body: 'l',
+      updated_by: 'u',
+      created_at: new Date('2026-10-08T12:00:00Z'),
+      updated_at: new Date('2026-10-08T12:00:00Z'),
+    })
 
   it('creates both tables with NO foreign keys, exactly the planned columns, and the planned indexes', async () => {
     const fake = fakePostgres()
@@ -47011,6 +47049,7 @@ describe('engagement letters (Postgres statements)', () => {
 
   it('claims with one insert ... on conflict do nothing returning, and reports claimed:false with the first row', async () => {
     const fake = letterPool()
+    withDefaultLetter(fake)
     const store2 = letterStore(fake)
     const args = { clientId: 'c1', templateHash: 'h1', firmDay: '2026-10-08', attempt: 1, subject: 's', recipients: ['a@b.test'], createdBy: 'u' }
     const first = await store2.claimEngagementLetterSend(args)
@@ -47026,8 +47065,30 @@ describe('engagement letters (Postgres statements)', () => {
     expect(fake.sends).toHaveLength(1)
   })
 
+  // A delete can land between Send loading the letter and the first claim.
+  it('claims only while the letter exists, in the same statement, and says letter_deleted when it does not', async () => {
+    const fake = letterPool()
+    withDefaultLetter(fake)
+    const store2 = letterStore(fake)
+    const args = { clientId: 'c1', templateHash: 'h1', firmDay: '2026-10-08', attempt: 1 }
+    const [first] = [await store2.claimEngagementLetterSend(args)]
+    expect(first.claimed).toBe(true)
+    const [insert] = fake.matching(/^insert into engagement_letter_sends /i)
+    expect(insert.text).toContain("select $1::text, $2::text, $3::text, $4::text, $5::text, $6::int, 'sending', $7::jsonb, $8::text, $9::text where exists (select 1 from engagement_letters where id = $2 for key share) on conflict do nothing returning ")
+
+    const gone = await store2.createEngagementLetter({ name: 'Gone' })
+    expect(await store2.deleteEngagementLetter(gone.id)).toEqual({ deleted: true })
+    const refused = await store2.claimEngagementLetterSend({ ...args, letterId: gone.id })
+    expect(refused).toEqual({ claimed: false, reason: 'letter_deleted' })
+    // No row names the deleted letter.
+    expect(fake.sends.map((row) => row.letter_id)).toEqual(['default'])
+    // A duplicate on a letter that still exists is still the blocking row, not letter_deleted.
+    expect(await store2.claimEngagementLetterSend(args)).toMatchObject({ claimed: false, send: { id: first.send.id } })
+  })
+
   it('completes only an open claim, and a failed row can be claimed again', async () => {
     const fake = letterPool()
+    withDefaultLetter(fake)
     const store2 = letterStore(fake)
     const args = { clientId: 'c1', templateHash: 'h1', firmDay: '2026-10-08', attempt: 1 }
     const { send } = await store2.claimEngagementLetterSend(args)
@@ -47041,6 +47102,7 @@ describe('engagement letters (Postgres statements)', () => {
 
   it('numbers the next attempt and lists newest first', async () => {
     const fake = letterPool()
+    withDefaultLetter(fake)
     const store2 = letterStore(fake)
     const key = { clientId: 'c1', templateHash: 'h1', firmDay: '2026-10-08' }
     expect(await store2.nextEngagementLetterAttempt(key)).toBe(1)
@@ -47055,6 +47117,7 @@ describe('engagement letters (Postgres statements)', () => {
 
   it('answers a refused claim with the blocking row and its status, sending or sent', async () => {
     const fake = letterPool()
+    withDefaultLetter(fake)
     const store2 = letterStore(fake)
     const args = { clientId: 'c1', templateHash: 'h1', firmDay: '2026-10-08', attempt: 1 }
     const first = await store2.claimEngagementLetterSend(args)

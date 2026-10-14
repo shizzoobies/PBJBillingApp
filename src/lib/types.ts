@@ -2691,6 +2691,7 @@ export type LetterSendResult = {
     | 'unfinished'
     | 'master_in_batch'
     | 'sending_now'
+    | 'letter_deleted'
     | 'provider'
     | 'unexpected'
   message?: string
