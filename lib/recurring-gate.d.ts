@@ -23,6 +23,16 @@ export type RecurringGateReason =
 /** Things that don't stop generation but make the result land badly. */
 export type RecurringGateWarning = 'no-assignee' | 'no-board-column'
 
+/** A step (stage) that names no Board column while the recipe has no default. */
+export interface RecurringGateStepWarning {
+  /** 1-based step number. */
+  step: number
+  /** The stage's id (stable when steps are reordered); null on an id-less stage. */
+  stageId: string | null
+  name: string
+  message: string
+}
+
 export interface RecurringGateVerdict {
   /** True for standard blueprints: never scheduled, so never a fault. */
   skipped: boolean
@@ -30,6 +40,8 @@ export interface RecurringGateVerdict {
   reason: RecurringGateReason | null
   /** Only populated when `reason` is null. */
   warnings: RecurringGateWarning[]
+  /** Only populated when `reason` is null: one per column-less step; the generate still runs. */
+  stepWarnings?: RecurringGateStepWarning[]
 }
 
 export declare function evaluateRecurringTemplate(
@@ -37,7 +49,7 @@ export declare function evaluateRecurringTemplate(
     isStandard?: boolean
     clientId?: string
     active?: boolean
-    stages?: { items?: unknown[]; assigneeId?: string; categoryId?: string | null }[]
+    stages?: { id?: string; name?: string; items?: unknown[]; assigneeId?: string; categoryId?: string | null }[]
     frequency?: string
     scheduledMonths?: number[]
     repeatAnnually?: boolean

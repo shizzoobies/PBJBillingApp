@@ -752,6 +752,17 @@ describe('computeSetupIssues — Board column check', () => {
     expect(issues[0].severity).toBe('low')
   })
 
+  it('flags each later step with no column of its own, once per step, not per client', () => {
+    const stages = [
+      { id: 's1', name: 'Prep', assigneeId: 'emp-1', categoryId: 'cat-1', items: [{ id: 'i1', label: 'Do it' }] },
+      { id: 's2', name: 'Review', assigneeId: 'emp-1', items: [{ id: 'i2', label: 'Check it' }] },
+    ]
+    const issues = boardIssues(template({ stages }))
+    expect(issues.map((issue) => issue.id)).toEqual(['board:no-column:tmpl-1:s2'])
+    expect(issues[0].detail).toContain("Step 2 'Review' has no Board column")
+    expect(boardIssues(template({ stages, categoryId: 'cat-9' }))).toEqual([])
+  })
+
   it('says nothing when a column is set, and skips standard blueprints', () => {
     expect(boardIssues(template({ categoryId: 'cat-1' }))).toEqual([])
     expect(boardIssues(template({ isStandard: true }))).toEqual([])

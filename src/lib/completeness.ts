@@ -474,6 +474,18 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
         severity: 'low',
       })
     }
+    // One per later step with no column of its own (Step 1 is the issue above).
+    for (const stepWarning of verdict.stepWarnings ?? []) {
+      if (stepWarning.step === 1) continue
+      issues.push({
+        id: `board:no-column:${template.id}:${stepWarning.stageId ?? `step-${stepWarning.step}`}`,
+        category: 'Board',
+        title: `Pick a Board column for step ${stepWarning.step} of "${name}"`,
+        detail: `${stepWarning.message}.`,
+        to,
+        severity: 'low',
+      })
+    }
   }
 
   // Team members without a bill rate can't have their billable hours invoiced.

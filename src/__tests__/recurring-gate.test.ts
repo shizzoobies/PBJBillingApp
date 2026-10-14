@@ -110,6 +110,56 @@ describe('evaluateRecurringTemplate — retired clients', () => {
 // featreq-3e81b386: the Board column is set per step, with the recipe's as the
 // default. Step 1 is what generates, so a recipe with no default whose Step 1
 // names a column still lands somewhere - no warning.
+describe('evaluateRecurringTemplate: stepWarnings for steps with no Board column', () => {
+  const step = (name: string, categoryId?: string) => ({
+    id: `st-${name}`,
+    name,
+    assigneeId: 'emp-1',
+    ...(categoryId ? { categoryId } : {}),
+    items: [{ id: `i-${name}`, label: name }],
+  })
+
+  it('one recipe step with no column and no recipe default -> one warning naming the step', () => {
+    const verdict = evaluateRecurringTemplate(
+      makeTemplate({ categoryId: null, stages: [step('Prep', 'cat-prep'), step('Review'), step('File', 'cat-file')] }),
+    )
+    expect(verdict.reason).toBeNull()
+    expect(verdict.stepWarnings).toEqual([
+      {
+        step: 2,
+        stageId: 'st-Review',
+        name: 'Review',
+        message: `Step 2 'Review' has no Board column - its tasks will land in "Uncategorized"`,
+      },
+    ])
+  })
+
+  it('an unnamed stage reads as the bare step number, not a quoted generated name', () => {
+    const verdict = evaluateRecurringTemplate(
+      makeTemplate({ categoryId: null, stages: [step('Stage 1'), step('')] }),
+    )
+    expect(verdict.stepWarnings?.map((warning) => warning.message)).toEqual([
+      'Step 1 has no Board column - its tasks will land in "Uncategorized"',
+      'Step 2 has no Board column - its tasks will land in "Uncategorized"',
+    ])
+  })
+
+  it('every step named, or a recipe default column -> no step warnings', () => {
+    const named = evaluateRecurringTemplate(
+      makeTemplate({ categoryId: null, stages: [step('Prep', 'cat-a'), step('Review', 'cat-b')] }),
+    )
+    expect(named.stepWarnings).toEqual([])
+    const defaulted = evaluateRecurringTemplate(makeTemplate({ stages: [step('Prep'), step('Review')] }))
+    expect(defaulted.stepWarnings).toEqual([])
+  })
+
+  it('a recipe that will not generate carries none (it cannot land anywhere)', () => {
+    const verdict = evaluateRecurringTemplate(makeTemplate({ categoryId: null, active: false, stages: [step('Prep')] }))
+    expect(verdict.reason).toBe('inactive')
+    expect(verdict.stepWarnings).toBeUndefined()
+  })
+})
+
 describe('evaluateRecurringTemplate: no-board-column with per-step columns', () => {
   it('warns when neither the recipe nor Step 1 has a column', () => {
     const verdict = evaluateRecurringTemplate(makeTemplate({ categoryId: null }))
