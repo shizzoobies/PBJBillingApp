@@ -569,6 +569,7 @@ describe('Send', () => {
     ['engagement_empty', new ApiError(409, 'x', 'engagement_empty'), /Write the subject, the email and the letter before sending/],
     ['engagement_refused', new ApiError(409, 'This engagement is signed, so it cannot be sent.', 'engagement_refused', 'signed'), /This engagement is signed, so it cannot be sent. Nothing was sent./],
     ['just_sent', new ApiError(409, 'x', 'engagement_refused', 'just_sent'), /This letter went out a moment ago - check the Activity list before sending again./],
+    ['sending', new ApiError(409, 'x', 'engagement_refused', 'sending'), /A send of this letter is already under way - wait a minute, then check Activity./],
     ['team_address', new ApiError(409, 'x', 'team_address'), /belongs to someone on your team/],
     ['no_recipient', new ApiError(409, 'x', 'no_recipient'), /There is no email address to send to/],
     ['pdf_failed', new ApiError(502, 'x', 'pdf_failed'), /The PDF could not be built, so nothing was sent/],
@@ -998,6 +999,33 @@ describe('Activity', () => {
       'Sent to pat@acme.test',
       'Delivered (pat@acme.test)',
     ])
+  })
+
+  // A "sending" claim is the send's mark; one that never got a send entry after it and is older
+  // than the in-flight window means the send died: say so, so nobody guesses whether it went.
+  it('shows a claim that never finished as "did not finish", and nothing for one still running or one a send followed', async () => {
+    const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60000).toISOString()
+    const send = (at: string) => ({ kind: 'send' as const, at, providerId: 're_1', to: ['pat@acme.test'], ok: true, error: null })
+    api.getEngagementRequest = vi.fn(async () =>
+      view({
+        status: 'sent',
+        sentAt: minutesAgo(30),
+        emailLog: [
+          { kind: 'sending', at: minutesAgo(40) },
+          send(minutesAgo(39)),
+          { kind: 'sending', at: minutesAgo(10) },
+          { kind: 'sending', at: minutesAgo(0.2) },
+        ],
+      }),
+    )
+    await renderEditor()
+    const texts = within(screen.getByRole('list', { name: 'Activity' }))
+      .getAllByRole('listitem')
+      .map((item) => item.lastElementChild?.textContent ?? '')
+    const unfinished = texts.filter((text) => /did not finish/.test(text))
+    // Only the 10-minute-old claim after the send: the first was followed by a send, the last is still running.
+    expect(unfinished).toHaveLength(1)
+    expect(unfinished[0]).toMatch(/^A send started at .+ did not finish - check with the client before sending again\.$/)
   })
 })
 

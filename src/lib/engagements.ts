@@ -74,6 +74,9 @@ export function engagementSendRefusalSentence(err: unknown): string {
     case 'engagement_empty':
       return 'Write the subject, the email and the letter before sending. Nothing was sent.'
     case 'engagement_refused':
+      if (err.reason === 'sending') {
+        return 'A send of this letter is already under way - wait a minute, then check Activity. Nothing more was sent.'
+      }
       return err.reason === 'just_sent'
         ? 'This letter went out a moment ago - check the Activity list before sending again.'
         : /Nothing was sent\.?$/.test(err.message)

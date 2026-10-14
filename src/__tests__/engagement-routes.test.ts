@@ -379,10 +379,29 @@ describe('the send refuses before the provider is called', () => {
       "'no_recipient'",
       "'pdf_failed'",
       "'engagement_send_failed'",
+      // The last gate: the "sending" mark, one compare-and-set on the stamp this send loaded.
+      'await deps.store.claimEngagementSend(engagement.id, engagement.updatedAt)',
       'sendResult = await deps.sendMail(mail)',
       'await deps.store.markEngagementSent(engagement.id, {',
     ].map((needle) => at(body, needle))
     expect([...order].sort((a, b) => a - b)).toEqual(order)
+  })
+
+  // Two tabs: a second Send that reads the letter while the first is between its claim and its log.
+  it('refuses a Send for a letter already being sent in this process, and always lets go in a finally', () => {
+    const body = sendRoute()
+    const at = (needle: string) => {
+      const index = body.indexOf(needle)
+      expect(index, needle).toBeGreaterThan(-1)
+      return index
+    }
+    expect(at('engagementsBeingSent.has(engagement.id)')).toBeLessThan(at('engagementsBeingSent.add(engagement.id)'))
+    expect(at('engagementsBeingSent.add(engagement.id)')).toBeLessThan(at('await sendEngagement('))
+    expect(at('await sendEngagement(')).toBeLessThan(at('} finally {'))
+    expect(at('} finally {')).toBeLessThan(at('engagementsBeingSent.delete(engagement.id)'))
+    expect(body).toContain("reason: 'sending'")
+    expect(body).toContain('A send of this letter is already under way - wait a minute, then check Activity.')
+    expect(serverHelpers()).toContain('const engagementsBeingSent = new Set()')
   })
 
   it('compares the page hash with the STORED engagement, and says nothing was sent', () => {

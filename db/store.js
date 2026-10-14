@@ -27911,6 +27911,42 @@ export class AppDataStore {
   }
 
   /**
+   * Take the "sending" mark for one Send: stamps updated_at, but only if the row still
+   * carries the stamp the send loaded (a compare-and-set in ONE statement). Two Sends
+   * that loaded the same letter at once cannot both win: the loser matches nothing and
+   * gets null, which Send answers as just_sent. A write between the read and the claim
+   * (a delivery event, an edit) also loses it - the safe side for a letter that emails a
+   * client. Returns the engagement, or null when the stamp no longer matches (or none).
+   */
+  async claimEngagementSend(id, expectedUpdatedAt) {
+    if (!id || !expectedUpdatedAt) return null
+    if (this.pool) {
+      // The claim also appends {kind:'sending', at} to the existing email_log (no new column):
+      // a second Send that reads the letter AFTER this claim sees it and is refused as just_sent.
+      const sending = JSON.stringify([{ kind: 'sending', at: nowIso() }])
+      const { rows } = await this.pool.query(
+        `update engagements
+            set email_log = coalesce(email_log, '[]'::jsonb) || $3::jsonb,
+                updated_at = greatest(now(), updated_at + interval '5 milliseconds')
+          where id = $1 and abs(extract(epoch from (updated_at - $2::timestamptz))) < 0.002
+          returning ${ENGAGEMENT_COLUMNS}`,
+        [id, expectedUpdatedAt, sending],
+      )
+      return rows[0] ? mapEngagementRow(rows[0]) : null
+    }
+    return this._mutateEngagementFile((authState) => {
+      const row = authState.engagements.find((candidate) => candidate?.id === id)
+      if (!row || !(Math.abs(Date.parse(row.updatedAt) - Date.parse(expectedUpdatedAt)) < 2)) {
+        return { result: null, changed: false }
+      }
+      // Always at least 5 ms past the old stamp, so a second claim on the old one loses.
+      row.updatedAt = new Date(Math.max(Date.now(), Date.parse(row.updatedAt) + 5)).toISOString()
+      row.emailLog = [...(Array.isArray(row.emailLog) ? row.emailLog : []), { kind: 'sending', at: nowIso() }]
+      return { result: mapEngagementRow(row), changed: true }
+    })
+  }
+
+  /**
    * Append a provider delivery event (or a send) to the email log - the
    * webhook path. NEVER touches status: a bounce does not un-send a letter.
    * Idempotent on (kind, event, providerId), like `appendProposalEmailEvent`,

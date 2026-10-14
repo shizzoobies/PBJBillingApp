@@ -2806,6 +2806,8 @@ export type EngagementEmailLogEntry =
       event: string
       detail?: string | null
     }
+  /** A Send claimed the letter (the "sending" mark); a send entry after it ends the claim. */
+  | { kind: 'sending'; at: string }
 
 export type Engagement = {
   id: string

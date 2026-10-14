@@ -2698,6 +2698,12 @@ async function loadLetterContext(session, letterId) {
 // replies go to the invoice mailbox (Brittany's), never to a team member's address.
 
 const engagementPause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+/**
+ * Engagement ids with a Send in flight in THIS process (one Node process serves the app):
+ * a second Send for the same letter is refused as "sending" while the first is between its
+ * claim and its log. The stored "sending" log entry covers a restart or a second process.
+ */
+const engagementsBeingSent = new Set()
 
 /** A single address typed at Send: the same shape check the proposal send uses. */
 function isOneEmailAddress(value) {
@@ -12303,23 +12309,37 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'Engagement not found' })
         return
       }
-      const result = await sendEngagement(
-        await loadEngagementContext(session),
-        engagement,
-        {
-          to: typeof payload.to === 'string' && payload.to.trim() ? payload.to.trim() : undefined,
-          templateHash: payload.templateHash,
-          userId: session.user.id,
-        },
-        {
-          store: appDataStore,
-          sendMail: sendInvoiceEmail,
-          pause: engagementPause,
-          configured: Boolean(
-            process.env.RESEND_API_KEY && (process.env.INVOICE_EMAIL_FROM || process.env.EMAIL_FROM),
-          ),
-        },
-      )
+      if (engagementsBeingSent.has(engagement.id)) {
+        sendJson(response, 409, {
+          error: 'engagement_refused',
+          reason: 'sending',
+          message: 'A send of this letter is already under way - wait a minute, then check Activity. Nothing more was sent.',
+        })
+        return
+      }
+      engagementsBeingSent.add(engagement.id)
+      let result
+      try {
+        result = await sendEngagement(
+          await loadEngagementContext(session),
+          engagement,
+          {
+            to: typeof payload.to === 'string' && payload.to.trim() ? payload.to.trim() : undefined,
+            templateHash: payload.templateHash,
+            userId: session.user.id,
+          },
+          {
+            store: appDataStore,
+            sendMail: sendInvoiceEmail,
+            pause: engagementPause,
+            configured: Boolean(
+              process.env.RESEND_API_KEY && (process.env.INVOICE_EMAIL_FROM || process.env.EMAIL_FROM),
+            ),
+          },
+        )
+      } finally {
+        engagementsBeingSent.delete(engagement.id)
+      }
       if (result.refused) {
         const { status, ...body } = result.refused
         sendJson(response, status, body)

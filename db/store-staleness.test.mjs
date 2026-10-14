@@ -47321,6 +47321,37 @@ describe('engagements (file backend)', () => {
     expect(saved.subject).toBe('Edited after the send')
   })
 
+  // Two Sends at once (engagements leftovers 3): the "sending" mark is a compare-and-set on the stamp.
+  it('claims the sending mark once per loaded stamp: the first wins, the second (same stamp) and a stale one get null', async () => {
+    const draft = await draftFromProspect()
+    const first = await store.claimEngagementSend(draft.id, draft.updatedAt)
+    expect(first?.id).toBe(draft.id)
+    expect(first.updatedAt).not.toBe(draft.updatedAt)
+    expect(await store.claimEngagementSend(draft.id, draft.updatedAt)).toBeNull()
+    // The next send loads the new stamp and takes it.
+    expect((await store.claimEngagementSend(draft.id, first.updatedAt))?.id).toBe(draft.id)
+    expect(await store.claimEngagementSend('eng-missing', draft.updatedAt)).toBeNull()
+    expect(await store.claimEngagementSend(draft.id, null)).toBeNull()
+  })
+
+  it('a claim leaves a sending entry in the log, which a later send entry follows', async () => {
+    const draft = await draftFromProspect()
+    const claimed = await store.claimEngagementSend(draft.id, draft.updatedAt)
+    expect(claimed.emailLog.map((entry) => entry.kind)).toEqual(['sending'])
+    expect(Number.isNaN(Date.parse(claimed.emailLog[0].at))).toBe(false)
+    const sent = await store.markEngagementSent(draft.id, { to: ['pat@acme.test'], ok: true, providerId: 're_1' })
+    expect(sent.emailLog.map((entry) => entry.kind)).toEqual(['sending', 'send'])
+  })
+
+  it('two claims racing on one stamp: exactly one wins', async () => {
+    const draft = await draftFromProspect()
+    const results = await Promise.all([
+      store.claimEngagementSend(draft.id, draft.updatedAt),
+      store.claimEngagementSend(draft.id, draft.updatedAt),
+    ])
+    expect(results.filter(Boolean)).toHaveLength(1)
+  })
+
   // Stale-tab guard (engagements leftovers 1): Save all carries the newest stamp the page loaded.
   it('refuses a sections save from a stale page with reason stale, writing nothing; the loaded stamp saves', async () => {
     const library = await store.listEngagementSections()
@@ -48975,6 +49006,13 @@ describe('engagements (Postgres statements)', () => {
         })
         return { rows: [{ ...row }] }
       }
+      if (/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$3::jsonb, updated_at = greatest\(now\(\)/i.test(trimmed)) {
+        const row = find()
+        if (!row || Math.abs(new Date(row.updated_at).getTime() - Date.parse(params[1])) >= 2) return { rows: [] }
+        row.updated_at = new Date(now.getTime() + 1000)
+        row.email_log = [...row.email_log, ...JSON.parse(params[2])]
+        return { rows: [{ ...row }] }
+      }
       if (/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$2::jsonb, status = case/i.test(trimmed)) {
         const row = find()
         if (!row) return { rows: [] }
@@ -49252,6 +49290,25 @@ describe('engagements (Postgres statements)', () => {
     expect(fake.engagements[0].subject).toBe('Mine')
     // No stamp sent: the write is unconditional, as before.
     expect((await pgStore.updateEngagement(draft.id, { subject: 'Any' })).subject).toBe('Any')
+  })
+
+  it('claims the sending mark with one UPDATE keyed on the stamp the send loaded; a changed stamp matches nothing', async () => {
+    const fake = engagementPool()
+    const pgStore = engagementStore(fake)
+    const draft = await pgStore.createEngagementFromProposal(proposal(), {})
+    const claimed = await pgStore.claimEngagementSend(draft.id, draft.updatedAt)
+    expect(claimed?.id).toBe(draft.id)
+    const [claim] = fake.matching(/^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$3::jsonb, updated_at = greatest\(now\(\)/i)
+    expect(claim.text).toMatch(
+      /^update engagements set email_log = coalesce\(email_log, '\[\]'::jsonb\) \|\| \$3::jsonb, updated_at = greatest\(now\(\), updated_at \+ interval '5 milliseconds'\) where id = \$1 and abs\(extract\(epoch from \(updated_at - \$2::timestamptz\)\)\) < 0\.002 returning /i,
+    )
+    expect(claim.params.slice(0, 2)).toEqual([draft.id, draft.updatedAt])
+    // The claim leaves a "sending" entry in the existing log (no new column).
+    expect(JSON.parse(claim.params[2])).toEqual([{ kind: 'sending', at: expect.any(String) }])
+    expect(fake.engagements[0].email_log.at(-1)).toMatchObject({ kind: 'sending' })
+    // Another Send took it first: the stamp moved, this one matches nothing.
+    fake.engagements[0].updated_at = new Date('2026-10-09T15:00:09Z')
+    expect(await pgStore.claimEngagementSend(draft.id, draft.updatedAt)).toBeNull()
   })
 
   it('marks sent in one statement: the log appended in the row, draft -> sent, sent_at kept once set', async () => {

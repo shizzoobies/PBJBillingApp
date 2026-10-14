@@ -28,6 +28,7 @@ import {
   engagementSendRefusalSentence,
 } from '../lib/engagements'
 import type { SaveFlashState } from '../lib/useSaveFlash'
+import { ENGAGEMENT_SENDING_MS } from '../../lib/engagement-sending.js'
 import { skippedEngagementLines } from '../../lib/engagement-values.js'
 import { retiredSentence, templateWarnings } from '../../lib/letter-template.js'
 import { formatProposalMoney } from '../../lib/proposal-pricing.js'
@@ -90,8 +91,20 @@ function activityRows(engagement: Engagement, nameOf: (userId: string | null) =>
             : 'Drafted',
     })
   }
-  for (const entry of engagement.emailLog ?? []) {
-    if (!entry || !entry.at) continue
+  const log = engagement.emailLog ?? []
+  log.forEach((entry, index) => {
+    if (!entry || !entry.at) return
+    if (entry.kind === 'sending') {
+      // A claim with no send after it: still running inside the window (nothing to show), else it died.
+      const finished = log.slice(index + 1).some((later) => later?.kind === 'send')
+      if (!finished && Date.now() - Date.parse(entry.at) >= ENGAGEMENT_SENDING_MS) {
+        rows.push({
+          at: entry.at,
+          text: `A send started at ${stamp(entry.at)} did not finish - check with the client before sending again.`,
+        })
+      }
+      return
+    }
     const to = (entry.to ?? []).join(', ')
     if (entry.kind === 'send') {
       rows.push({
@@ -102,7 +115,7 @@ function activityRows(engagement: Engagement, nameOf: (userId: string | null) =>
       const label = DELIVERY_LABELS[entry.event] ?? entry.event
       rows.push({ at: entry.at, text: `${label}${to ? ` (${to})` : ''}${entry.detail ? `: ${entry.detail}` : ''}` })
     }
-  }
+  })
   // The sent stamp, when the log holds no successful send (a row written before the log).
   if (engagement.sentAt && !(engagement.emailLog ?? []).some((entry) => entry?.kind === 'send' && entry.ok)) {
     rows.push({ at: engagement.sentAt, text: 'Sent' })
