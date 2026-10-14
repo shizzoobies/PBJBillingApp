@@ -48594,6 +48594,23 @@ describe('signing an engagement creates the client (file backend)', () => {
     expect((await store.read()).clients.find((row) => row.id === 'c1').monthlyRate).toBe(400)
   })
 
+  // Engagements leftovers 9 [28]: the flip also checks the plans, package and fee mode it decided from.
+  it('a fee mode, plans or package changed between the checks and the flip refuse (changed_since_sent) and sign nothing', async () => {
+    for (const change of [{ feeMode: 'keep' }, { planIds: ['plan-books'] }]) {
+      const { engagement } = await wonEngagement({ proposal: { clientId: 'c1' } })
+      const realLink = store.linkProposalClient.bind(store)
+      vi.spyOn(store, 'linkProposalClient').mockImplementationOnce(async (...args) => {
+        await store.updateEngagement(engagement.id, change)
+        return realLink(...args)
+      })
+      const err = await sign(engagement.id).catch((caught) => caught)
+      expect(err.reason, JSON.stringify(change)).toBe('changed_since_sent')
+      expect((await store.getEngagement(engagement.id)).status).toBe('sent')
+      vi.restoreAllMocks()
+    }
+    expect((await store.read()).clients.find((row) => row.id === 'c1').monthlyRate).toBe(400)
+  })
+
   it('after the flip nothing refuses: a checklist copy that fails, or a retainer that fails, is a skipped entry', async () => {
     const { engagement } = await wonEngagement({ accept: { planIds: ['plan-books'] } })
     vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -49126,6 +49143,14 @@ describe('engagements (Postgres statements)', () => {
         if (!row || !params[4].includes(row.status) || row.client_id !== params[5] || row.template_hash !== params[6]) {
           return { rows: [] }
         }
+        // The signing details the pure-record decision was read from ($8 plans, $9 package, $10 fee mode).
+        if (
+          JSON.stringify(row.plan_ids ?? []) !== JSON.stringify(params[7] ?? []) ||
+          (row.package_id ?? null) !== (params[8] ?? null) ||
+          (row.fee_mode ?? 'replace') !== (params[9] ?? 'replace')
+        ) {
+          return { rows: [] }
+        }
         Object.assign(row, { status: 'signed', signed_at: params[1], signed_by: params[2], signed_note: params[3] })
         return { rows: [{ ...row }] }
       }
@@ -49447,8 +49472,21 @@ describe('engagements (Postgres statements)', () => {
     })
     vi.restoreAllMocks()
     const [sign] = fake.matching(/^update engagements set status = 'signed'/i)
-    expect(sign.text).toMatch(/where id = \$1 and status = any\(\$5::text\[\]\) and client_id = \$6 and template_hash = \$7 returning /i)
-    expect(sign.params).toEqual([draft.id, '2026-10-09T16:00:00.000Z', 'u1', null, ['sent', 'draft'], 'c1', draft.templateHash])
+    expect(sign.text).toMatch(
+      /where id = \$1 and status = any\(\$5::text\[\]\) and client_id = \$6 and template_hash = \$7 and coalesce\(plan_ids, '\{\}'\) = \$8::text\[\] and package_id is not distinct from \$9 and coalesce\(fee_mode, 'replace'\) = \$10 returning /i,
+    )
+    expect(sign.params).toEqual([
+      draft.id,
+      '2026-10-09T16:00:00.000Z',
+      'u1',
+      null,
+      ['sent', 'draft'],
+      'c1',
+      draft.templateHash,
+      [],
+      null,
+      draft.feeMode,
+    ])
     expect(signed.status).toBe('signed')
 
     const other = await pgStore.createEngagementFromProposal(proposal({ id: 'prop-2' }), {})
@@ -49660,8 +49698,15 @@ describe('engagements (Postgres statements)', () => {
       expect(fake.statements[claimAt].params).toEqual([draft.id, result.clientId, ['sent', 'draft']])
       expect(fake.statements[linkAt].text).toMatch(/where id = \$1 and status = 'accepted' and \(client_id is null or client_id = \$2\)/i)
       expect(fake.statements[linkAt].params).toEqual(['prop-1', result.clientId])
-      expect(fake.statements[flipAt].text).toMatch(/where id = \$1 and status = any\(\$5::text\[\]\) and client_id = \$6 and template_hash = \$7 returning /i)
-      expect(fake.statements[flipAt].params.slice(-2)).toEqual([result.clientId, draft.templateHash])
+      expect(fake.statements[flipAt].text).toMatch(/where id = \$1 and status = any\(\$5::text\[\]\) and client_id = \$6 and template_hash = \$7 and coalesce\(plan_ids/i)
+      expect(fake.statements[flipAt].params.slice(5, 7)).toEqual([result.clientId, draft.templateHash])
+      // The client row is locked FIRST in the transaction (engagements leftovers 9 [19]): two
+      // letters for one client signed at once flip two different engagement rows, so only
+      // this lock makes the second read the first one's software rows.
+      const lockAt = indexOf(fake, /^select 1 from clients where id = \$1 for update$/i)
+      expect(lockAt).toBe(beginAt + 1)
+      expect(lockAt).toBeLessThan(flipAt)
+      expect(fake.statements[lockAt].params).toEqual([result.clientId])
 
       // The client row: Onboarding, Monthly at the total, hours by role (controller -> CFO).
       const [inserted] = insertedRows(fake.statements, 'clients')
@@ -49680,6 +49725,56 @@ describe('engagements (Postgres statements)', () => {
         ['QBO Plus', 98, 'software'],
         ['QB Time Elite', 70.6, 'software'],
       ])
+    })
+
+    // Engagements leftovers 9 [28]: plans, package and fee mode are not in the template hash, so
+    // the flip's compare-and-set carries them; an edit of them between the read and the flip refuses.
+    it('a fee mode changed between the read and the flip refuses the signing as changed (the existing stale code) and writes nothing', async () => {
+      const fake = signingPool({
+        onSign: (row) => {
+          row.fee_mode = 'keep'
+        },
+      })
+      const pgStore = signingStore(fake)
+      const draft = await pgStore.createEngagementFromProposal(wonProposal(), { createdBy: 'emp-patrice' })
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const error = await pgStore
+        .signEngagement(draft.id, { signedOn: '2026-10-09', allowUnsent: true, userId: 'u1' })
+        .catch((caught) => caught)
+      vi.restoreAllMocks()
+      expect(error).toBeInstanceOf(EngagementStateError)
+      expect(error.reason).toBe('changed_since_sent')
+      expect(error.message).toMatch(/edited while it was being marked signed/)
+      expect(fake.recurring).toEqual([])
+      expect(fake.engagements[0].status).toBe('draft')
+      // The refusal reads the plan, package and fee mode back to tell a changed row from a lost race.
+      expect(
+        fake.statements.some((statement) =>
+          /^select status, client_id, template_hash, plan_ids, package_id, fee_mode from engagements where id = \$1$/i.test(statement.text),
+        ),
+      ).toBe(true)
+    })
+
+    it('plans or a package changed between the read and the flip refuse it too', async () => {
+      for (const change of [
+        (row) => {
+          row.plan_ids = ['p1']
+        },
+        (row) => {
+          row.package_id = 'pkg-1'
+        },
+      ]) {
+        const fake = signingPool({ onSign: change })
+        const pgStore = signingStore(fake)
+        const draft = await pgStore.createEngagementFromProposal(wonProposal(), { createdBy: 'emp-patrice' })
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        const error = await pgStore
+          .signEngagement(draft.id, { signedOn: '2026-10-09', allowUnsent: true, userId: 'u1' })
+          .catch((caught) => caught)
+        vi.restoreAllMocks()
+        expect(error.reason).toBe('changed_since_sent')
+        expect(fake.recurring).toEqual([])
+      }
     })
 
     // featreq-b2142264: a prospect's signing opens its onboarding case after everything

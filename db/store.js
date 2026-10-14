@@ -28360,7 +28360,15 @@ export class AppDataStore {
           id,
           clientId,
           allowed,
-          { signedAt, userId, signedNote, templateHash: current.templateHash },
+          {
+            signedAt,
+            userId,
+            signedNote,
+            templateHash: current.templateHash,
+            planIds: current.planIds ?? [],
+            packageId: current.packageId ?? null,
+            feeMode: current.feeMode ?? 'replace',
+          },
           figures.lines,
           {
             fee,
@@ -28779,16 +28787,33 @@ export class AppDataStore {
     id,
     clientId,
     allowed,
-    { signedAt, userId, signedNote, templateHash },
+    { signedAt, userId, signedNote, templateHash, planIds, packageId, feeMode },
     lines,
     { fee = null, supersedesId = null, replaceAmendmentIds = [] } = {},
   ) {
-    const refusal = (status, rowClientId, rowHash) =>
+    // The signing details the pure-record decision, the plans and the package were read from:
+    // they are not part of the template hash, so the flip checks them itself (an edit of
+    // them between the read and the flip refuses the signing instead of signing past it).
+    const detailsOf = (row) => ({
+      planIds: JSON.stringify(row?.planIds ?? row?.plan_ids ?? []),
+      packageId: row?.packageId ?? row?.package_id ?? null,
+      feeMode: (row?.feeMode ?? row?.fee_mode ?? 'replace') || 'replace',
+    })
+    const wantedDetails = detailsOf({ planIds, packageId, feeMode })
+    const sameDetails = (row) => {
+      const found = detailsOf(row)
+      return (
+        found.planIds === wantedDetails.planIds &&
+        found.packageId === wantedDetails.packageId &&
+        found.feeMode === wantedDetails.feeMode
+      )
+    }
+    const refusal = (status, rowClientId, rowHash, row) =>
       !status || !allowed.includes(status)
         ? AppDataStore._engagementSignRefusal(status)
         : rowClientId !== clientId
           ? new EngagementStateError('Someone else is already marking this letter signed.', 'status')
-          : rowHash !== templateHash
+          : rowHash !== templateHash || !sameDetails(row)
             ? new EngagementStateError(
                 'The letter was edited while it was being marked signed, so nothing was signed. Check it, then mark it signed again.',
                 'changed_since_sent',
@@ -28796,20 +28821,28 @@ export class AppDataStore {
             : AppDataStore._engagementSignRefusal(status)
     if (this.pool) {
       return this._withTransaction(async (dbClient) => {
+        // Lock the client first. Two letters for one client signed at the same moment each
+        // flip their OWN engagement row, so nothing else would make the second wait: both
+        // would read the client's recurring expenses before either wrote and insert the same
+        // software row twice. Held to the end of the transaction, the second one reads the
+        // first one's rows.
+        await dbClient.query(`select 1 from clients where id = $1 for update`, [clientId])
         const { rows } = await dbClient.query(
           `update engagements
               set status = 'signed', signed_at = $2, signed_by = $3, signed_note = $4, updated_at = now()
             where id = $1 and status = any($5::text[]) and client_id = $6 and template_hash = $7
+              and coalesce(plan_ids, '{}') = $8::text[] and package_id is not distinct from $9
+              and coalesce(fee_mode, 'replace') = $10
             returning ${ENGAGEMENT_COLUMNS}`,
-          [id, signedAt, userId, signedNote, allowed, clientId, templateHash],
+          [id, signedAt, userId, signedNote, allowed, clientId, templateHash, planIds ?? [], packageId ?? null, feeMode ?? 'replace'],
         )
         if (!rows[0]) {
           const latest = await dbClient.query(
-            `select status, client_id, template_hash from engagements where id = $1`,
+            `select status, client_id, template_hash, plan_ids, package_id, fee_mode from engagements where id = $1`,
             [id],
           )
           const row = latest.rows?.[0]
-          throw refusal(row?.status ?? null, row?.client_id ?? null, row?.template_hash ?? null)
+          throw refusal(row?.status ?? null, row?.client_id ?? null, row?.template_hash ?? null, row)
         }
         const software = await this._addSoftwareExpenseRows(dbClient, clientId, lines)
         let monthlyRate = null
@@ -28888,9 +28921,10 @@ export class AppDataStore {
             !row ||
             !allowed.includes(row.status) ||
             (row.clientId ?? null) !== clientId ||
-            (row.templateHash ?? null) !== templateHash
+            (row.templateHash ?? null) !== templateHash ||
+            !sameDetails(row)
           ) {
-            throw refusal(row?.status ?? null, row?.clientId ?? null, row?.templateHash ?? null)
+            throw refusal(row?.status ?? null, row?.clientId ?? null, row?.templateHash ?? null, row)
           }
           // The superseded predecessor, in the same slot (see the Postgres branch); one
           // replaced by another letter since the checks refuses the whole signing - checked
