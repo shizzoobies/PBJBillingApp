@@ -75,6 +75,18 @@ export function engagementFeeChoices(
     : null
 }
 
+/**
+ * Whether "Add to it" is not offered: the client was made by this very letter (an original
+ * with a client has one only because signing created it, so its fee is already the letter's
+ * - the retry after a signing that did not finish). Adding there would double the fee.
+ * An upsell that genuinely adds a fee equal to the current one is NOT hidden: Add stays
+ * offered, with its amounts in the label.
+ */
+export function addFeeChoiceHidden(engagement: Engagement): boolean {
+  const monthly = Number(engagement.figures?.totals?.monthly ?? 0)
+  return engagement.kind === 'original' && Boolean(engagement.clientId) && monthly > 0
+}
+
 /** The sentence a failed Mark as signed shows: the server's own, or a plain fallback. */
 export function signRefusalSentence(error: unknown): string {
   return error instanceof ApiError ? error.message : 'Could not mark the engagement as signed.'

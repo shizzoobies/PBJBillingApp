@@ -913,10 +913,10 @@ describe('Mark as signed', () => {
     const confirm = mockConfirm(true)
     contextValue.data.clients = [{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 1200 }] as never
     api.getEngagementRequest = vi.fn(async () =>
-      view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z', clientId: 'c1', feeMode: 'add', retainerAmount: null }),
+      view({ kind: 'amendment', status: 'sent', sentAt: '2026-10-11T16:00:00.000Z', clientId: 'c1', feeMode: 'add', retainerAmount: null }),
     )
     api.updateEngagementRequest = vi.fn(async (_id: string, patch: Partial<Engagement>) =>
-      view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z', clientId: 'c1', retainerAmount: null, ...patch }, 'hash-2'),
+      view({ kind: 'amendment', status: 'sent', sentAt: '2026-10-11T16:00:00.000Z', clientId: 'c1', retainerAmount: null, ...patch }, 'hash-2'),
     )
     await renderEditor()
     const replace = screen.getByRole('radio', { name: 'Replace the current fee ($1,200.00 -> $630.00)' })
@@ -934,6 +934,43 @@ describe('Mark as signed', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as signed' })).toBeEnabled())
     fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
     expect(confirm.mock.calls.at(-1)?.[0]).toContain('Monthly fee: Keep $1,200.00. A signed letter can no longer be edited')
+  })
+
+  // Engagements leftovers 8 [17]: "Add to it" would double a fee that is already the letter's.
+  it('does not offer "Add to it" for a client this letter made (an original), unless the letter is already saved as add - which is shown, checked and warned about, never rewritten', async () => {
+    contextValue.data.clients = [{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 630 }] as never
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ kind: 'original', status: 'sent', sentAt: '2026-10-11T16:00:00.000Z', clientId: 'c1', feeMode: 'replace', retainerAmount: null }),
+    )
+    await renderEditor()
+    expect(screen.queryByRole('radio', { name: /^Add to it/ })).toBeNull()
+    expect(screen.getByRole('radio', { name: 'Keep $630.00' })).toBeTruthy()
+    cleanup()
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ kind: 'original', status: 'sent', sentAt: '2026-10-11T16:00:00.000Z', clientId: 'c1', feeMode: 'add', retainerAmount: null }),
+    )
+    await renderEditor()
+    expect(screen.getByRole('radio', { name: /^Add to it/ })).toBeChecked()
+    expect(screen.getByText(/An original letter replaces or keeps the fee; it cannot add\./)).toBeTruthy()
+    // Nothing was rewritten on read: the page is not asking to be saved.
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+  })
+
+  // A $300 upsell on a $300 client really does make $600; the stored choice must stand.
+  it('keeps "Add to it" for an upsell whose fee equals the current fee, and never rewrites a stored add to replace', async () => {
+    contextValue.data.clients = [{ id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 630 }] as never
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ kind: 'amendment', status: 'sent', sentAt: '2026-10-11T16:00:00.000Z', clientId: 'c1', feeMode: 'add', retainerAmount: null }),
+    )
+    await renderEditor()
+    const add = screen.getByRole('radio', { name: 'Add to it ($630.00 + $630.00 = $1,260.00)' })
+    expect(add).toBeChecked()
+    expect(screen.queryByText(/it cannot add\./)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Edited subject' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(api.updateEngagementRequest).toHaveBeenCalled())
+    expect(api.updateEngagementRequest.mock.calls[0][1]).not.toHaveProperty('feeMode')
   })
 
   it('offers no fee choice for a prospect, or for a client not billed monthly', async () => {

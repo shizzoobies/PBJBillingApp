@@ -19,7 +19,7 @@ import {
   updateEngagementRequest,
   voidEngagementRequest,
 } from '../lib/api'
-import { engagementFeeChoices } from '../lib/engagementSigning'
+import { addFeeChoiceHidden, engagementFeeChoices } from '../lib/engagementSigning'
 import {
   ENGAGEMENT_KIND_LABELS,
   ENGAGEMENT_STATUS_LABELS,
@@ -203,6 +203,11 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const letterBodyRef = useRef<HTMLTextAreaElement>(null)
 
   const engagement = view?.engagement ?? null
+  // An existing monthly client: signing replaces its fee, adds to it, or keeps it (her choice).
+  const linkedClient = engagement?.clientId ? data.clients.find((entry) => entry.id === engagement.clientId) : undefined
+  // "Add to it" is not offered for a client this letter made (it would double the fee). A stored
+  // choice is never rewritten on read: a letter already saved as "add" keeps showing it, checked.
+  const addHidden = engagement !== null && addFeeChoiceHidden(engagement) && feeMode !== 'add'
   const parsedRetainer = parseRetainer(retainer)
   const savedPlanIds = engagement?.planIds ?? []
   const dirty =
@@ -377,8 +382,6 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const monthly = Number(totals.monthly ?? 0)
   const hours = figures.hoursByRole ?? {}
   const skipped = skippedEngagementLines(figures)
-  // An existing monthly client: signing replaces its fee, adds to it, or keeps it (her choice).
-  const linkedClient = engagement.clientId ? data.clients.find((entry) => entry.id === engagement.clientId) : undefined
   // An amendment from a saved letter (stage 4) has no proposal figures or sections to show.
   const fromLetter = Boolean(engagement.letterId) && !engagement.proposalId
   const supersedes = engagement.supersedesId
@@ -886,7 +889,12 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
             {feeChoices ? (
               <fieldset className="field" disabled={!editable}>
                 <legend>{`${linkedClient?.name ?? 'The client'}'s monthly fee, when signed`}</legend>
-                {(['replace', 'add', 'keep'] as const).map((mode) => (
+                {engagement.kind === 'original' && feeMode === 'add' ? (
+                  <p className="form-error" role="status">
+                    An original letter replaces or keeps the fee; it cannot add. Choose Replace or Keep.
+                  </p>
+                ) : null}
+                {(['replace', 'add', 'keep'] as const).filter((mode) => mode !== 'add' || !addHidden).map((mode) => (
                   <label key={mode} className="check-row">
                     <input
                       type="radio"

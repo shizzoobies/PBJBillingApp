@@ -27921,7 +27921,7 @@ export class AppDataStore {
    * Take the "sending" mark for one Send: stamps updated_at, but only if the row still
    * carries the stamp the send loaded (a compare-and-set in ONE statement). Two Sends
    * that loaded the same letter at once cannot both win: the loser matches nothing and
-   * gets null, which Send answers as just_sent. A write between the read and the claim
+   * gets null, which Send answers as "sending". A write between the read and the claim
    * (a delivery event, an edit) also loses it - the safe side for a letter that emails a
    * client. Returns the engagement, or null when the stamp no longer matches (or none).
    */
@@ -27929,7 +27929,7 @@ export class AppDataStore {
     if (!id || !expectedUpdatedAt) return null
     if (this.pool) {
       // The claim also appends {kind:'sending', at} to the existing email_log (no new column):
-      // a second Send that reads the letter AFTER this claim sees it and is refused as just_sent.
+      // a second Send that reads the letter AFTER this claim sees it and is refused as "sending".
       const sending = JSON.stringify([{ kind: 'sending', at: nowIso() }])
       const { rows } = await this.pool.query(
         `update engagements
@@ -28135,6 +28135,20 @@ export class AppDataStore {
     } else if (!(current.party?.company || current.party?.contactName)) {
       throw refuse('Give the party a company or contact name first - it becomes the client when the letter is signed.', 'no_name')
     }
+    // An original letter's client is the one its own signing created (a retry after a signing
+    // that did not finish): its fee is already the letter's, so "add" would double it. The editor
+    // does not offer it; this refuses a stored "add" that got here anyway, before anything is written.
+    // Only where "add" would apply: an hourly or annual client skips the monthly fee, shows no fee
+    // choice in the editor, and a stored "add" must not leave her stuck there.
+    if (
+      current.kind === 'original' &&
+      current.clientId &&
+      monthly > 0 &&
+      (current.feeMode ?? 'replace') === 'add' &&
+      (client?.billingMode ?? 'hourly') === 'subscription'
+    ) {
+      throw refuse('An original letter cannot add to an existing fee - choose Replace or Keep.', 'invalid')
+    }
     let pkg = null
     if (current.packageId) {
       pkg = (await this.listPackages()).find((row) => row.id === current.packageId) ?? null
@@ -28305,11 +28319,21 @@ export class AppDataStore {
           why: `This letter has no monthly fee, so ${clientName()}'s ${money(Number(client.monthlyRate))} per month was left as it is - change it on the client page if it no longer applies.`,
         })
       }
-      // Totals signing never bills by itself.
+      // Totals signing never bills by itself. An annual-only prospect's client is made WITH
+      // its annual fee, so on a retry (the client exists from a first attempt that did not
+      // finish) the line says what exists instead of "not put on billing".
       if (annual > 0 && !(createdClient && monthly === 0)) {
+        const onBillingAlready =
+          current.kind === 'original' &&
+          monthly === 0 &&
+          !createdClient &&
+          client.billingMode === 'annual' &&
+          Number(client.annualRate) === annual
         skipped.push({
           what: 'Annual fees',
-          why: `The letter's annual fees (${money(annual)}) were not put on ${clientName()}'s billing - set them on the client page if they apply.`,
+          why: onBillingAlready
+            ? `Annual fees were already on billing from the first attempt (${money(annual)} a year).`
+            : `The letter's annual fees (${money(annual)}) were not put on ${clientName()}'s billing - set them on the client page if they apply.`,
         })
       }
       if (Number(totals.oneTime) > 0) {

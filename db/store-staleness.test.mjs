@@ -48482,6 +48482,36 @@ describe('signing an engagement creates the client (file backend)', () => {
     expect(await clientsNamed('Acme Books')).toHaveLength(1)
   })
 
+  // Engagements leftovers 8 [18]: an annual-only prospect's client is made with its annual fee.
+  it('a retry for an annual-only prospect says the annual fees were already on billing, not that they were not put there', async () => {
+    const { engagement } = await wonEngagement()
+    await patchStored(engagement.id, {
+      figures: { ...engagement.figures, totals: { monthly: 0, annual: 1200, oneTime: 0, cleanup: 0, software: 0 } },
+    })
+    // The first attempt: no annual line at all (the client was made with the fee) ...
+    vi.spyOn(store, 'linkProposalClient').mockRejectedValueOnce(new Error('connection reset'))
+    const err = await sign(engagement.id).catch((caught) => caught)
+    expect(err.message).toBe('connection reset')
+    // ... and the retry, which finds the client, says what exists.
+    const retry = await sign(engagement.id)
+    expect(retry.createdClient).toBe(false)
+    expect(retry.skipped.find((entry) => entry.what === 'Annual fees')).toEqual({
+      what: 'Annual fees',
+      why: 'Annual fees were already on billing from the first attempt ($1,200.00 a year).',
+    })
+  })
+
+  it('a monthly prospect with annual fees keeps the "not put on billing" line on a retry too', async () => {
+    const { engagement } = await wonEngagement()
+    await patchStored(engagement.id, {
+      figures: { ...engagement.figures, totals: { monthly: 630, annual: 1200, oneTime: 0, cleanup: 0, software: 0 } },
+    })
+    vi.spyOn(store, 'linkProposalClient').mockRejectedValueOnce(new Error('connection reset'))
+    await sign(engagement.id).catch(() => null)
+    const retry = await sign(engagement.id)
+    expect(retry.skipped.find((entry) => entry.what === 'Annual fees')?.why).toMatch(/were not put on Acme Books's billing/)
+  })
+
   it('a prospect letter voided mid-signing: the client it created is released, unlinked, retired, and the refusal says so', async () => {
     const { proposal, engagement } = await wonEngagement()
     const realLink = store.linkProposalClient.bind(store)
@@ -48899,6 +48929,49 @@ describe('signing an engagement creates the client (file backend)', () => {
       const teamed = await store.startOnboarding('c2', { fallbackAssigneeId: 'emp-patrice' })
       expect(teamed.template.assigneeId).toBe('emp-1')
       expect(teamed.checklist.assigneeId).toBe('emp-1')
+    })
+
+    // Engagements leftovers (polish 6): the server backstop for the "Add to it" the editor hides.
+    it('refuses an original letter saved as add once it has a client (the retry that would double the fee), changing nothing', async () => {
+      const { proposal, engagement } = await wonEngagement()
+      vi.spyOn(store, 'linkProposalClient').mockRejectedValueOnce(new Error('connection reset'))
+      const failed = await sign(engagement.id).catch((caught) => caught)
+      expect(failed.message).toBe('connection reset')
+      const mid = await store.getEngagement(engagement.id)
+      expect(mid.clientId).toBeTruthy()
+      await patchStored(engagement.id, { feeMode: 'add' })
+      const before = (await store.read()).clients.find((row) => row.id === mid.clientId).monthlyRate
+
+      const error = await sign(engagement.id).catch((caught) => caught)
+      expect(error).toBeInstanceOf(EngagementStateError)
+      expect(error.reason).toBe('invalid')
+      expect(error.message).toBe('An original letter cannot add to an existing fee - choose Replace or Keep.')
+      expect((await store.getEngagement(engagement.id)).status).toBe('sent')
+      expect((await store.read()).clients.find((row) => row.id === mid.clientId).monthlyRate).toBe(before)
+      expect((await store.getProposal(proposal.id)).clientId).toBeNull()
+
+      // Replace (the default) finishes the signing as before.
+      await patchStored(engagement.id, { feeMode: 'replace' })
+      expect((await sign(engagement.id)).engagement.status).toBe('signed')
+    })
+
+    // Where the fee is skipped anyway (no fee radios in the editor) a stored "add" must not block signing.
+    it('lets a stored add through for an hourly client, whose monthly fee is skipped anyway', async () => {
+      const { engagement } = await wonEngagement()
+      vi.spyOn(store, 'linkProposalClient').mockRejectedValueOnce(new Error('connection reset'))
+      await sign(engagement.id).catch(() => null)
+      const mid = await store.getEngagement(engagement.id)
+      const data = await store.read()
+      data.clients = data.clients.map((row) => (row.id === mid.clientId ? { ...row, billingMode: 'hourly' } : row))
+      await store.write(data)
+      await patchStored(engagement.id, { feeMode: 'add' })
+
+      const result = await sign(engagement.id)
+      expect(result.engagement.status).toBe('signed')
+      expect(result.skipped).toContainEqual({
+        what: 'Monthly fee',
+        why: "Acme Books is billed hourly, so the letter's monthly fee was not put on them.",
+      })
     })
 
     it('a case that cannot be opened is a skipped line, never a refusal', async () => {
@@ -49366,7 +49439,7 @@ describe('engagements (Postgres statements)', () => {
     })
     pgStore.createRetainerInvoice = async () => null
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    const draft = await pgStore.createEngagementFromProposal(proposal(), { clientId: 'c1' })
+    const draft = await pgStore.createEngagementFromProposal(proposal(), { clientId: 'c1', kind: 'amendment' })
     const { engagement: signed } = await pgStore.signEngagement(draft.id, {
       signedOn: '2026-10-09',
       allowUnsent: true,
@@ -49706,7 +49779,7 @@ describe('engagements (Postgres statements)', () => {
       const fake = signingPool()
       const client = { id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 400, lifecycleStage: 'active' }
       const pgStore = signingStore(fake, { client })
-      const draft = await pgStore.createEngagementFromProposal(wonProposal({ clientId: 'c1' }), {})
+      const draft = await pgStore.createEngagementFromProposal(wonProposal({ clientId: 'c1' }), { kind: 'amendment' })
       expect(draft.clientId).toBe('c1')
       fake.statements.length = 0
       const result = await pgStore.signEngagement(draft.id, { signedOn: '2026-10-09', allowUnsent: true })
@@ -49835,7 +49908,7 @@ describe('engagements (Postgres statements)', () => {
       const fake = signingPool({ onSign: (row) => Object.assign(row, { status: 'void' }) })
       const client = { id: 'c1', name: 'Acme', billingMode: 'subscription', monthlyRate: 630, lifecycleStage: 'active' }
       const pgStore = signingStore(fake, { client })
-      const draft = await pgStore.createEngagementFromProposal(wonProposal({ clientId: 'c1' }), {})
+      const draft = await pgStore.createEngagementFromProposal(wonProposal({ clientId: 'c1' }), { kind: 'amendment' })
       const err = await pgStore
         .signEngagement(draft.id, { signedOn: '2026-10-09', allowUnsent: true })
         .catch((caught) => caught)
