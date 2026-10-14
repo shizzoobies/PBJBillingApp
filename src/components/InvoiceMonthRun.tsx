@@ -2342,7 +2342,9 @@ function InvoiceRow({
             {!isVoid && noEmail ? ` · ${NOT_EMAILED_NOTE}` : ''}
             {/* The newest payment reminder that left (featreq-3f1d63b6), so the
                 chase list says who has already been nudged and when. */}
-            {!isVoid && lastReminder ? ` · Last reminded ${formatSentOn(lastReminder.at)}` : ''}
+            {!isVoid && lastReminder
+              ? ` · Last reminded ${formatSentOn(lastReminder.at)}${lastReminder.auto ? ' (automatic)' : ''}`
+              : ''}
             {/* A reminder that left but is not on the log (`logged: false`). */}
             {!isVoid && reminderUnrecorded ? ` · ${REMINDER_UNRECORDED}` : ''}
           </span>
@@ -4997,8 +4999,8 @@ function InvoiceEditor({
           like the send line above: quiet, and read off the invoice. */}
       {lastReminder ? (
         <p className="invoice-run-reminded">
-          Last reminded {formatSentOn(lastReminder.at)} to{' '}
-          {recipientCountLabel(lastReminder.to.length)}
+          Last reminded {formatSentOn(lastReminder.at)}
+          {lastReminder.auto ? ' (automatic)' : ''} to {recipientCountLabel(lastReminder.to.length)}
         </p>
       ) : null}
       {reminderUnrecorded ? (

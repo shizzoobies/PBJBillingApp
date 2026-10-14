@@ -53239,6 +53239,27 @@ describe('Send reminder (file backend)', () => {
     expect(row?.target).toBe('INV-2026-09-004 (cleared Payment failed)')
   })
 
+  it('marks a reminder the scheduler sent as automatic on the log, and the manual one is not', async () => {
+    await seed()
+    const result = await remindInvoice(
+      {
+        invoiceId: 'inv-remind',
+        now: new Date(),
+        appUrl: 'https://app.pbjsa.com',
+        stripeConfigured: true,
+        userId: null,
+        auto: true,
+      },
+      { store, sendEmail: mailer().sendEmail },
+    )
+    expect(result.status).toBe(200)
+    expect((await stored()).emailLog.at(-1)).toMatchObject({ kind: 'reminder', ok: true, auto: true })
+
+    await seed()
+    expect((await remind(mailer().sendEmail)).status).toBe(200)
+    expect((await stored()).emailLog.at(-1).auto).toBeUndefined()
+  })
+
   it('refuses a second reminder the same firm day and writes nothing', async () => {
     await seed()
     const mail = mailer()

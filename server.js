@@ -92,6 +92,7 @@ import {
 } from './lib/invoice-email.js'
 import { invoiceEmailAddressee, resolveSendRecipients } from './lib/invoice-recipients.js'
 import { remindInvoice } from './lib/invoice-reminder.js'
+import { AUTO_REMINDER_EVENT, runAutoInvoiceReminders } from './lib/invoice-auto-reminders.js'
 import { invoiceContentChanged, totalsDiffer } from './lib/invoice-sent-change.js'
 import {
   clearDuplicatePaymentOnFailure,
@@ -19142,4 +19143,78 @@ async function maybeNotifyPastDueInvoices() {
 const pastDueTimer = setInterval(maybeNotifyPastDueInvoices, 60 * 60 * 1000)
 pastDueTimer.unref?.()
 setTimeout(() => void maybeNotifyPastDueInvoices(), 30 * 1000).unref?.()
+
+// ---- Automatic invoice reminders (featreq-3f1d63b6) ----
+// On the 15th, 20th, 25th and the last day of the month (the firm's day), at or
+// after 9 am firm time, every client with an unpaid invoice gets the same short
+// reminder the "Send reminder" button sends - same email, same pay link, same
+// log entry, and a Payment failed invoice is cleared by it - until the invoice
+// is paid. All of it lives in lib/invoice-auto-reminders.js; this is the timer
+// and the owner summary. ONE send per invoice per firm day comes from the
+// reminder rule itself (`reminded_today`), so the hourly ticks and a restart
+// are safe with no marker of their own.
+//
+// Default ON (Brittany said yes). INVOICE_AUTO_REMINDERS=off (or false, 0, no,
+// disabled; any case) switches it off; =preview plans the day and files ONLY the
+// owner summary "Would remind: ...", emailing no client. A no-op without
+// RESEND_API_KEY and a sending address (INVOICE_EMAIL_FROM or EMAIL_FROM).
+// INVOICE_AUTO_REMINDER_MIN_DAYS (default 5) is how many firm days after an
+// invoice's last real send the scheduler leaves it alone.
+let autoReminderRunning = false
+async function maybeSendAutoInvoiceReminders() {
+  if (autoReminderRunning) return
+  autoReminderRunning = true
+  try {
+    const appUrl = (process.env.APP_PUBLIC_URL || '').replace(/\/$/, '')
+    const ownerList = async () =>
+      (await appDataStore.getTeamMembers()).filter((member) => member.role === 'owner')
+    await runAutoInvoiceReminders({
+      store: appDataStore,
+      sendEmail: sendInvoiceEmail,
+      env: process.env,
+      appUrl,
+      stripeConfigured: isStripeConfigured(),
+      // ONE ordinary notification per owner: names and amounts, no documents.
+      notifyOwners: async (message) => {
+        for (const owner of await ownerList()) {
+          try {
+            await notify(appDataStore, owner.id, AUTO_REMINDER_EVENT, {
+              message,
+              link: '/invoices',
+              appPublicUrl: appUrl,
+            })
+          } catch (error) {
+            console.error(`[auto-remind] summary to ${owner.id} failed:`, error?.message || error)
+          }
+        }
+      },
+      // A run that only had skips worth seeing (or is a preview) says so once a
+      // day: a summary already filed for ANY owner today is the record.
+      summaryAlreadySent: async (day) => {
+        for (const owner of await ownerList()) {
+          const recent = await appDataStore.listNotifications(owner.id, { limit: 100 })
+          if (
+            recent.some(
+              (entry) =>
+                entry.event === AUTO_REMINDER_EVENT &&
+                String(entry.message).startsWith(`Automatic invoice reminders - ${day}`),
+            )
+          ) {
+            return true
+          }
+        }
+        return false
+      },
+    })
+  } catch (error) {
+    console.error('[auto-remind] run failed:', error?.message || error)
+  } finally {
+    autoReminderRunning = false
+  }
+}
+// Hourly; the first check shortly after boot so a restart on a reminder day
+// still delivers. Unref'd so it can never hold the process open.
+const autoReminderTimer = setInterval(maybeSendAutoInvoiceReminders, 60 * 60 * 1000)
+autoReminderTimer.unref?.()
+setTimeout(() => void maybeSendAutoInvoiceReminders(), 30 * 1000).unref?.()
 

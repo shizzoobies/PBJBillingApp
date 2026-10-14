@@ -360,6 +360,45 @@ describe('Last reminded on the row', () => {
     expect(within(row).getByText(/Last reminded Oct 9/)).toBeInTheDocument()
   })
 
+  it('says "(automatic)" for a reminder the app sent by itself, on the row and in the editor', async () => {
+    await openRun(
+      [
+        makeInvoice({
+          emailLog: [
+            { at: SENT_AT, to: ['ann@acme.test'], subject: 'Invoice', ok: true },
+            { ...reminderEntry('2026-10-05T16:00:00.000Z'), auto: true },
+          ],
+        }),
+      ],
+      { open: false },
+    )
+    const row = (await screen.findByText('INV-2026-08-001')).closest('li') as HTMLElement
+    expect(within(row).getByText(/Last reminded Oct 5 \(automatic\)/)).toBeInTheDocument()
+    fireEvent.click(screen.getByText('INV-2026-08-001'))
+    const editor = await waitFor(() => {
+      const node = document.querySelector('.invoice-run-editor')
+      expect(node).not.toBeNull()
+      return node as HTMLElement
+    })
+    expect(within(editor).getByText(/Last reminded Oct 5 \(automatic\) to/)).toBeInTheDocument()
+  })
+
+  it('a reminder the owner pressed has no "(automatic)"', async () => {
+    await openRun(
+      [
+        makeInvoice({
+          emailLog: [
+            { at: SENT_AT, to: ['ann@acme.test'], subject: 'Invoice', ok: true },
+            reminderEntry('2026-10-05T16:00:00.000Z'),
+          ],
+        }),
+      ],
+      { open: false },
+    )
+    await screen.findByText(/Last reminded Oct 5/)
+    expect(screen.queryByText(/automatic\)/)).not.toBeInTheDocument()
+  })
+
   it('says nothing on a row never reminded', async () => {
     await openRun([makeInvoice()], { open: false })
     await screen.findByText('INV-2026-08-001')
