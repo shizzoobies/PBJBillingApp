@@ -25,6 +25,18 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
+**2026-10-14 (midday) - one send-back shipped; the 10-13 pick-up list below still applies minus item 54bf39b6.** `main` =
+`762efc9` (+ this handoff), deployed, `/health` 200, voice re-provisioned, manifest 204,462. Brittany's send-back on
+`featreq-54bf39b6` ("collapse individual columns as the way before") was INTERPRETATION: the Board never had a
+column-level fold; she meant the per-client row arrow, which the "Current step only" view (default since 10-13)
+had dropped. `762efc9` restores the same toggle in that view (rows start open there, folded in the full view;
+each view keeps its own in-memory fold state); the ticket is Shipped with a note that says so and offers a
+column fold if that is what she meant. Her inbox had nothing new after the 10-13 board emails. STILL WAITING
+ON HER: the auto follow-ups question on `featreq-3f1d63b6` (build the scheduler only on her yes), the five
+unmatched step names, the cadence defaults (acdd0c84), the retainer-on-replaced-amendment question.
+Worktree `AP-laneB` (fix/board-column-collapse) is merged and removable; the chip worktree
+`.claude/worktrees/jolly-boyd-9b5f3b` (ff46ed7, merged) belongs to another session.
+
 **PICK UP HERE (2026-10-13 evening, ~18:40Z; next session is the same day):** `main` = `f8a692d` (+ this handoff), deployed,
 `/health` 200, voice re-provisioned at a3944c7, tree clean, ONLY the primary worktree, nothing in flight, no subagents.
 Everything in the 18:10Z paragraph below is live and noted on Brittany's tickets; the reminder note (part b) is on
