@@ -289,6 +289,85 @@ describe('Board column groups: grouped body and Hide empty columns', () => {
   })
 })
 
+// Brittany 2026-10-14: "collapse individual columns as the way before". The
+// board has only ever folded the CLIENT ROW inside a column (the roll-up line is
+// the glance); "Current step only" had left those rows permanently open.
+const rowIn = (columnName: string, clientName: string) => {
+  const column = [...document.querySelectorAll<HTMLElement>('.board-column')].find(
+    (node) => node.querySelector('.board-column-header strong')?.textContent === columnName,
+  ) as HTMLElement
+  const toggle = within(column).getByRole('button', { name: new RegExp(clientName) })
+  return { toggle, cards: () => toggle.closest('.board-client')!.querySelector('.board-client-cards') }
+}
+
+describe('Board: folding a client row inside the group layout', () => {
+  it('folds one row without touching its neighbors, the group headers or the strip', () => {
+    renderBoard()
+    const headersBefore = groupHeaders()
+    const chipsBefore = chipLabels()
+    const feed = rowIn('Clear Feed', 'Acme Books')
+    const recon = rowIn('Reconciliations', 'Acme Books')
+    const reconBolt = rowIn('Reconciliations', 'Bolt Co')
+    expect(feed.cards()).not.toBeNull()
+
+    fireEvent.click(feed.toggle)
+    expect(feed.toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(feed.cards()).toBeNull()
+    expect(feed.toggle).toHaveTextContent('Acme Books')
+    expect(feed.toggle).toHaveTextContent('1')
+    expect(recon.cards()).not.toBeNull()
+    expect(reconBolt.cards()).not.toBeNull()
+    expect(groupHeaders()).toEqual(headersBefore)
+    expect(chipLabels()).toEqual(chipsBefore)
+    expect(columnNames()).toEqual(['Clear Feed', 'Reconciliations', 'Payroll', 'Client Call'])
+
+    fireEvent.click(feed.toggle)
+    expect(feed.toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(feed.cards()).not.toBeNull()
+  })
+
+  it('a folded row stays folded when Hide empty columns is toggled', () => {
+    renderBoard()
+    const feed = rowIn('Clear Feed', 'Acme Books')
+    fireEvent.click(feed.toggle)
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Hide empty columns' }))
+    expect(columnNames()).toHaveLength(6)
+    expect(rowIn('Clear Feed', 'Acme Books').cards()).toBeNull()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Hide empty columns' }))
+    expect(rowIn('Clear Feed', 'Acme Books').cards()).toBeNull()
+  })
+
+  it('each view keeps its own fold state while the other is shown', () => {
+    renderBoard()
+    const stepToggle = screen.getByRole('checkbox', { name: 'Current step only' })
+    fireEvent.click(rowIn('Clear Feed', 'Acme Books').toggle)
+    fireEvent.click(stepToggle)
+    // The full view's row is on its own state: still its default (folded). Open it.
+    expect(rowIn('Clear Feed', 'Acme Books').toggle).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(rowIn('Clear Feed', 'Acme Books').toggle)
+    expect(rowIn('Clear Feed', 'Acme Books').cards()).not.toBeNull()
+    fireEvent.click(stepToggle)
+    // Back in the step view the row is still folded, and the full view's open row is not touched.
+    expect(rowIn('Clear Feed', 'Acme Books').toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(rowIn('Clear Feed', 'Acme Books').cards()).toBeNull()
+    expect(rowIn('Reconciliations', 'Acme Books').cards()).not.toBeNull()
+    fireEvent.click(stepToggle)
+    expect(rowIn('Clear Feed', 'Acme Books').toggle).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('in the full view the rows start folded and open one at a time', () => {
+    renderBoard()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Current step only' }))
+    const feed = rowIn('Clear Feed', 'Acme Books')
+    const recon = rowIn('Reconciliations', 'Acme Books')
+    expect(feed.toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(feed.cards()).toBeNull()
+    fireEvent.click(feed.toggle)
+    expect(feed.cards()).not.toBeNull()
+    expect(recon.cards()).toBeNull()
+  })
+})
+
 describe('Manage columns: a Group per column', () => {
   const openManager = () => {
     renderBoard()

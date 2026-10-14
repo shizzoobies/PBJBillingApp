@@ -247,9 +247,9 @@ describe('Board: Current step only (default ON)', () => {
     const toggle = screen.getByRole('checkbox', { name: 'Current step only' })
     expect(toggle).toBeChecked()
 
-    // No collapse toggle: the rows are open, the roll-up still reads in the header.
-    expect(screen.queryByRole('button', { name: /Acme Books/ })).not.toBeInTheDocument()
-    const acmeHead = screen.getByText('Acme Books').closest('.board-client-head') as HTMLElement
+    // The rows start open; the roll-up reads in the toggle that folds each one.
+    const acmeHead = screen.getByRole('button', { name: /Acme Books/ })
+    expect(acmeHead).toHaveAttribute('aria-expanded', 'true')
     expect(acmeHead).toHaveTextContent('1 waiting')
     expect(acmeHead).toHaveTextContent('2')
 
@@ -270,6 +270,22 @@ describe('Board: Current step only (default ON)', () => {
 
     // The full card is not rendered.
     expect(document.querySelector('.checklist-block')).toBeNull()
+  })
+
+  it('folds one client row on its own and opens it again, keeping the roll-up line', () => {
+    renderBoard()
+    const acmeHead = screen.getByRole('button', { name: /Acme Books/ })
+    const zedHead = screen.getByRole('button', { name: /Zed Works/ })
+    expect(stepBlock('Monthly close')).toBeInTheDocument()
+    fireEvent.click(acmeHead)
+    expect(acmeHead).toHaveAttribute('aria-expanded', 'false')
+    expect(acmeHead).toHaveTextContent('1 waiting')
+    expect(screen.queryByText('Step 2 of 3 - Review')).not.toBeInTheDocument()
+    // Another client's row is untouched.
+    expect(zedHead).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.click(acmeHead)
+    expect(acmeHead).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('Step 2 of 3 - Review')).toBeInTheDocument()
   })
 
   it('lists no tasks at all - the step is the unit, its items stay on the card', () => {

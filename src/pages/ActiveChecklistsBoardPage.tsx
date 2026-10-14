@@ -818,7 +818,13 @@ function BoardClientRow({
   currentStepOnly: boolean
   stepSummaryFor: (checklist: Checklist) => BoardStepSummary | null
 }) {
+  // Each client row folds on its own. Full view: starts folded (the roll-up
+  // line is the glance). Step view: starts open (the step is the point of that
+  // view) and each mode keeps its own choice. In memory only, as it always was.
   const [open, setOpen] = useState(false)
+  const [stepFolded, setStepFolded] = useState(false)
+  const expanded = currentStepOnly ? !stepFolded : open
+  const toggleRow = () => (currentStepOnly ? setStepFolded((value) => !value) : setOpen((value) => !value))
   // Collapsed roll-up: how many of this client's checklists are blocked vs
   // overdue, so the row reads at a glance without expanding.
   const statuses = checklists.map(statusFor)
@@ -837,16 +843,19 @@ function BoardClientRow({
     </>
   )
 
-  // "Current step only": the row is always open and each checklist shows where
-  // it is instead of its whole card. Ghosts keep their Upcoming card.
-  if (currentStepOnly) {
-    return (
-      <div className="board-client">
-        <div className="board-client-toggle board-client-head">{rollUp}</div>
+  return (
+    <div className="board-client">
+      <button type="button" className="board-client-toggle" onClick={toggleRow} aria-expanded={expanded}>
+        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        {rollUp}
+      </button>
+      {expanded ? (
         <div className="board-client-cards">
           {checklists.map((checklist, index) => {
             const teamTag = teamTagFor(checklist)
-            const summary = checklist.projected ? null : stepSummaryFor(checklist)
+            // "Current step only": each checklist shows where it is instead of
+            // its whole card. Ghosts keep their Upcoming card.
+            const summary = currentStepOnly && !checklist.projected ? stepSummaryFor(checklist) : null
             return (
               <div
                 className="board-card-with-status"
@@ -864,42 +873,6 @@ function BoardClientRow({
                 ) : (
                   renderCard(checklist)
                 )}
-              </div>
-            )
-          })}
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="board-client">
-      <button
-        type="button"
-        className="board-client-toggle"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-      >
-        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        {rollUp}
-      </button>
-      {open ? (
-        <div className="board-client-cards">
-          {checklists.map((checklist, index) => {
-            const teamTag = teamTagFor(checklist)
-            return (
-              <div
-                className="board-card-with-status"
-                data-team={teamTag ? 'true' : undefined}
-                key={checklist.id}
-              >
-                <div className="board-card-chips">
-                  <StatusChip status={statuses[index]} />
-                  {teamTag ? (
-                    <span className="board-chip board-chip-team">{teamTag}’s</span>
-                  ) : null}
-                </div>
-                {renderCard(checklist)}
               </div>
             )
           })}

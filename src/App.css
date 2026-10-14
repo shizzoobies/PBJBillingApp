@@ -10350,13 +10350,6 @@ button.repeating-task-toggle-pill {
   opacity: 0.85;
 }
 
-/* "Current step only": the row is always open, so its head is not a button. */
-.board-client-head,
-.board-client-head:hover {
-  cursor: default;
-  background: transparent;
-}
-
 /* "Current step only": the step one checklist is on (never its tasks). */
 .board-step-block {
   display: flex;
