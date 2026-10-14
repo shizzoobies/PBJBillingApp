@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-10-12. Everything below is committed on
+Written 2026-07-21, last updated 2026-10-14. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -24,6 +24,34 @@ developer you talk to; Brittany (user id `emp-patrice`!) is the client whose
 requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
+
+**2026-10-14 (evening, ~22:30Z) - FIVE SHIPS; READ THIS FIRST. The automatic invoice reminders go out for the first
+time on 2026-10-15 at the first hourly tick at or after 09:00 Eastern.** `main` = `242be1d` (+ this handoff), deployed,
+`/health` 200, voice re-provisioned, manifest 204,949 (51 bytes under the cap - TRIM FIRST). Planned is EMPTY; her
+Shipped queue holds `featreq-338b1507` (Board), `featreq-3f1d63b6` (reminders), `featreq-fd985378` (Sent-list buttons).
+What shipped today, each its own deploy, every push approved by Alex (the auto-mode classifier blocks `ship.sh`):
+`799ae7f` checklists stage-advance leftovers (featreq-05e1610d, done) · `89519e1` letters leftovers (featreq-9c29491a,
+done) · `8091b22` engagements leftovers (featreq-acb1b663, done) · `e870e12` Board THREE-LEVEL fold (featreq-338b1507:
+columns start folded with counts "Clear Feed (7)" -> client rows folded -> the step summary; Expand all / Collapse all;
+in-memory only) · `242be1d` invoices: a reminder CLEARS Payment failed; AUTOMATIC reminders on the 15th/20th/25th/last
+day (lib/invoice-auto-reminders.js, hourly tick, firm hour 9-17, same `remindInvoice` path and email as the button,
+only to the addresses the invoice was actually sent to, skips never-emailed-from-app rows and anything sent < 5 firm
+days ago, once-per-day via the log + an in-process per-day set + a Resend `Idempotency-Key`, owner summary per run,
+`INVOICE_AUTO_REMINDERS=off|preview` switch - UNSET in production = ON, Alex's call "ship tonight and let it run at 9");
+a row "Send reminder" on Sent/Past due rows + "Remind all sent". A read-only dry run of the 10-15 plan against prod
+(session scratchpad `prod-auto-reminders-dryrun.mjs`, run from the primary tree with `LANE`+`DAY`; pass `contacts`)
+listed 7 invoices, each to its original send-to address. **Two lessons:** (1) my 762efc9 reading of her Board send-back
+was WRONG (she meant a column fold - she re-sent it the same day); (2) featreq-3f1d63b6's four answers belonged to the
+CURRENT question (3 = yes, send by itself; 4 = clear Payment failed) - an earlier dev note had called them answers to an
+older question and I trusted it. Read the tracker's Q/A as the UI shows it, never a note about it. **Open for Alex
+(DDL, exact statements in `.superpowers/sdd/*-report.md` on this machine):** unique index on checklist stage rows
+(case_id, stage_index); one Original engagement per proposal; letter-name uniqueness; plus bounce notices to every
+owner (14) and boot DDL lock_timeout (24). **Open for Brittany (on her tickets):** the 5-day gap and weekend sends for
+the automatic reminders; whether the Addressed-to card should also show on upsell letters. **Still waiting on her:**
+the five unmatched step names, the cadence defaults (acdd0c84), the retainer-on-replaced-amendment question. On
+2026-10-15 morning: check the owners' "Automatic invoice reminders - 2026-10-15" summary and the `[auto-remind]` log
+lines; if anything looks wrong, `INVOICE_AUTO_REMINDERS=off` on the Railway service stops the next run. Worktrees:
+none (B-F all merged and removed); branches `main` + `hold/july-security-p3` only.
 
 **2026-10-14 (midday) - one send-back shipped; the 10-13 pick-up list below still applies minus item 54bf39b6.** `main` =
 `762efc9` (+ this handoff), deployed, `/health` 200, voice re-provisioned, manifest 204,462. Brittany's send-back on
@@ -1202,6 +1230,48 @@ with instructions rather than failing. Run it by hand after any print change.
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-14 - five ships: three leftovers tickets, the Board three-level fold, automatic invoice reminders.**
+
+- **Checklists stage-advance leftovers (`featreq-05e1610d`, done, `799ae7f`):** plain spawn-failure phrase in one
+  module (`lib/stage-advance-phrase.js`, "untick and tick this step again to retry"; raw error stays in the log; a
+  failed visibility grant no longer reads as "not created"); the file backend refuses a staged case on a billing
+  master inside `maybeSpawnNextStage` like Postgres (do NOT call `_refuseBillingMasterWrite` there - readJson behind
+  the held slot deadlocks); skipping the last stage records `case_completed` (staged cases only, read after the
+  stageCount check); recurring gate `stepWarnings` per step with no Board column (ids keyed on stage id, Step 1 stays
+  the recipe-level issue); Copy to client / Duplicate rebase a past `scheduleYear`; generate never flashes "All
+  changes saved" over a failed pass. Left: the (case_id, stage_index) unique index (DDL), ~60 other unconditional
+  `setDataSyncState('synced')` handlers (follow-up: one `markSyncedIfClean()`), the tick/skip same-instant race.
+- **Letters leftovers (`featreq-9c29491a`, done, `89519e1`):** picker "N selected (M hidden)" + Untick hidden; a sub
+  is skipped when its billing master is in the batch (`lib/letter-batch-cover.js`, server + page, message rebuilt
+  both ways from the master's result); `sending_now` under `LETTER_IN_FLIGHT_MS` (2 min, shared with the page);
+  `src/lib/emailShape.ts` UI-only validation on client/contact forms (changed values only; IDN ok); a refund/dispute
+  the app cannot match now notifies the owners, and one known only through a duplicate / on-voided marker gets the
+  matched wording (`findInvoiceByPaymentMarker`, in-memory); claim insert `where exists (... for key share)` (prod
+  trial passed); the B button acts on the box with the selection. Left: PDF bold wrap, adopt-while-dirty, letter-name
+  unique index (DDL), v1.5 delivery status.
+- **Engagements leftovers (`featreq-acb1b663`, done, `8091b22`):** stale-tab 409 on sections Save all and on the
+  letter PATCH (`expectedUpdatedAt`, one statement; file backend same); the delivery webhook append is LOG-ONLY (it
+  used to move `updated_at` - every send caused a false 409 on the next Save); `sending` refusal = in-process set +
+  `{kind:'sending'}` log entry + stamp-keyed claim; Mark as signed WARNS on a changed letter ("Mark signed anyway");
+  Addressed-to card on prospect letters (email required); normalized team-address guard (+tag, Gmail dots; shared);
+  signing locks the client row first (fixes a lock-order inversion with the bulk save) and the flip CAS includes
+  plan_ids/package_id/fee_mode; server backstop refuses `original` + subscription client + `add`; server-side list
+  filters + "newest 500" line; `lib/engagement-list-limit.js`. Six statements passed a rolled-back prod trial. Left:
+  one-Original-per-proposal index (DDL), startMonth column, bounce notices to every owner (Alex), boot DDL
+  lock_timeout (Alex), one save per signing (perf).
+- **Board three-level fold (`featreq-338b1507`, Shipped, `e870e12`):** her re-send-back of the 54bf39b6 item. Columns
+  start folded with counts, rows start folded in both views, the step summary unchanged; Expand all / Collapse all;
+  no localStorage for the column fold. The morning's `762efc9` (row arrow only) was my misreading.
+- **Invoice reminders, the rest (`featreq-3f1d63b6` + `featreq-fd985378`, Shipped, `242be1d`):** see section 0.
+  Three review rounds found: every address on file would have been emailed (now only the sent-to subset, intersected
+  with what is on file; empty -> `recipients_changed`, shown); a reminder the morning after a send (5-day gap);
+  double-send on `logged:false` / timeout / deploy overlap (per-day set + Idempotency-Key); automatic clearing of
+  Payment failed invisible (summary line + `userId:'system'` activity row shown as "Automatic reminder"); 422 halting
+  the day (now per invoice; only 401/403 halt). `preview` mode files only a "Would remind" summary.
+- **Process notes:** the Railway CLI is linked only in the primary tree - run prod trials from there with
+  `LANE=<worktree>`; `$TMP` in the Bash tool is the system temp, not the scratchpad; a reviewer's dry run without
+  `contacts` skipped everything as recipients_changed - pass `store.read().contacts`.
 
 **2026-10-08 - four Planned items shipped, Letters under Engagements built and shipped, the agent handoff.**
 
