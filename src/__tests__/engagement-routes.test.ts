@@ -204,7 +204,7 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
     expect(block).toContain('engagementActivityTarget(result.engagement)')
     expect(block).not.toContain('appDataStore.createClient(')
     expect(block).not.toContain('createRetainerInvoice(')
-    // The sent-hash guard: "signed as edited" is the only way past a changed letter.
+    // The sent-hash guard: "Mark signed anyway" is the only way past a changed letter.
     expect(block).toContain('confirmChanged: payload.confirmChanged === true')
   })
 

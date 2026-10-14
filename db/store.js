@@ -27966,7 +27966,7 @@ export class AppDataStore {
    * stage 3, docs/plans/engagements-2026-10.md). `signedOn` is the firm day it was
    * signed ('YYYY-MM-DD', not in the future), stored as that day's firm noon. A
    * sent letter changed since it last went out is refused ('changed_since_sent')
-   * unless `confirmChanged: true` (she ticked "signed as edited").
+   * unless `confirmChanged: true` (she chose "Mark signed anyway").
    *
    * Branches on the engagement's CLIENT, never its kind. With no client yet (a
    * prospect's Original) signing CREATES the client and its contact from the party
@@ -28052,7 +28052,7 @@ export class AppDataStore {
     // signing the edited version (`confirmChanged`) - or she sends it again first.
     if (current.status === 'sent' && confirmChanged !== true && engagementChangedSinceSent(current)) {
       throw new EngagementStateError(
-        "The letter changed since it was sent - send it again, or tick 'signed as edited' to sign this version",
+        "The letter changed since it was sent - send it again, or mark it signed anyway",
         'changed_since_sent',
       )
     }

@@ -177,7 +177,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const [notice, setNotice] = useState('')
 
   // What the last Mark as signed did (the client, checklists, retainer, skips). The form
-  // itself (day, note, in person, signed as edited) is the shared SignEngagementForm.
+  // itself (day, note, in person, the changed-since-sent warning) is the shared SignEngagementForm.
   const [signSummary, setSignSummary] = useState<EngagementSignResult | null>(null)
 
   const subjectRef = useRef<HTMLInputElement>(null)
@@ -473,7 +473,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
     }
   }
 
-  // The sent-hash guard: a sent letter edited since it went out signs only "as edited".
+  // The sent-hash guard: a sent letter edited since it went out warns first (Mark signed anyway).
   const changedSinceSent = engagement.status === 'sent' && view.changedSinceSent === true
   // Mark as signed's outcome, from the shared form: shown at the top of Send and sign.
   const signHandlers = {
@@ -491,7 +491,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
     onFailed: async (message: string) => {
       setActionError(message)
       // Whatever went wrong, show the stored engagement: it may have changed since it
-      // was sent (the "signed as edited" choice then appears), or a client may already
+      // was sent (the changed-since-sent warning then appears), or a client may already
       // be on it from a signing that did not finish (a retry finishes it).
       await refresh({ overwrite: !dirtyRef.current })
     },

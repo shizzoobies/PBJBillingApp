@@ -829,22 +829,36 @@ describe('Mark as signed', () => {
     ).toBeTruthy()
   })
 
-  // The sent-hash guard: a sent letter edited since it went out signs only "as edited".
-  it('a letter changed since it was sent warns, and signs only once "Signed as edited" is ticked', async () => {
-    mockConfirm(true)
+  // The sent-hash guard: a sent letter edited since it went out warns first (not a refusal).
+  it('a letter changed since it was sent warns with the day it was last sent, and signs only on "Mark signed anyway"', async () => {
+    const confirm = mockConfirm(true)
     api.getEngagementRequest = vi.fn(async () => ({
-      ...view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z' }),
+      ...view({
+        status: 'sent',
+        sentAt: '2026-10-11T16:00:00.000Z',
+        emailLog: [{ kind: 'send', ok: true, at: '2026-10-11T16:00:00.000Z', to: ['pat@acme.test'], providerId: 're_1', error: null }],
+      }),
       changedSinceSent: true,
     }))
     await renderEditor()
+    // Nothing is said until she asks to sign.
+    expect(screen.queryByRole('button', { name: 'Mark signed anyway' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
     expect(
-      screen.getByText('The letter changed since it was sent. Send it again, or tick "Signed as edited" if they signed this version.'),
+      screen.getByText(
+        'This letter changed after it was last sent on Oct 11, 2026. The client signed the earlier version. Send it again first, or mark it signed anyway.',
+      ),
     ).toBeTruthy()
-    const signButton = screen.getByRole('button', { name: 'Mark as signed' })
-    expect(signButton).toBeDisabled()
-    fireEvent.click(screen.getByRole('checkbox', { name: /Signed as edited/ }))
-    expect(signButton).toBeEnabled()
-    fireEvent.click(signButton)
+    expect(api.signEngagementRequest).not.toHaveBeenCalled()
+    expect(confirm).not.toHaveBeenCalled()
+
+    // Cancel drops the warning and signs nothing.
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('button', { name: 'Mark signed anyway' })).toBeNull()
+    expect(api.signEngagementRequest).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Mark signed anyway' }))
     await waitFor(() =>
       expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-1', { signedOn: firmToday(), confirmChanged: true }),
     )
@@ -857,12 +871,12 @@ describe('Mark as signed', () => {
       changedSinceSent: false,
     }))
     await renderEditor()
-    expect(screen.queryByRole('checkbox', { name: /Signed as edited/ })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    expect(screen.queryByRole('button', { name: 'Mark signed anyway' })).toBeNull()
     await waitFor(() => expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-1', { signedOn: firmToday() }))
   })
 
-  it('a changed_since_sent refusal shows the sentence and reloads, so the choice appears', async () => {
+  it('a changed_since_sent refusal shows the sentence and reloads, so the warning appears on the next try', async () => {
     mockConfirm(true)
     let reads = 0
     api.getEngagementRequest = vi.fn(async () => ({
@@ -880,7 +894,9 @@ describe('Mark as signed', () => {
     await renderEditor()
     fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
     expect(await screen.findByText(/The letter changed since it was sent - send it again/)).toBeTruthy()
-    expect(await screen.findByRole('checkbox', { name: /Signed as edited/ })).toBeTruthy()
+    await waitFor(() => expect(api.getEngagementRequest).toHaveBeenCalledTimes(2))
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark as signed' }))
+    expect(await screen.findByRole('button', { name: 'Mark signed anyway' })).toBeTruthy()
   })
 
   // Review round 1: an existing monthly client's fee is replaced, added to or kept.

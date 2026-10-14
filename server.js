@@ -2737,7 +2737,7 @@ async function engagementView(engagement) {
     warnings: engagementWarnings(engagement),
     hash: engagementHash(engagement),
     sender: letterSender(firmSettings),
-    // A sent letter edited since it last went out: Mark as signed needs "signed as edited".
+    // A sent letter edited since it last went out: Mark as signed warns first ("Mark signed anyway").
     changedSinceSent: engagement.status === 'sent' && engagementChangedSinceSent(engagement),
   }
 }
@@ -12398,7 +12398,7 @@ const server = createServer(async (request, response) => {
           note: payload.note ?? '',
           userId: session.user.id,
           allowUnsent: payload.allowUnsent === true,
-          // "Signed as edited": sign a sent letter changed since it went out (409
+          // "Mark signed anyway": sign a sent letter changed since it went out (409
           // engagement_refused reason changed_since_sent without it).
           confirmChanged: payload.confirmChanged === true,
           replaceAmendmentIds: payload.replaceAmendmentIds ?? [],

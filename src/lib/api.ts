@@ -5502,7 +5502,7 @@ export function sendEngagementRequest(
 
 /**
  * Mark as signed on a firm day; `allowUnsent` = she handed it over in person;
- * `confirmChanged` = "signed as edited" (a sent letter changed since it went out).
+ * `confirmChanged` = "Mark signed anyway" (a sent letter changed since it went out).
  * The answer says what signing did: the client created or used, the checklists,
  * the retainer drafted, and what was skipped. `replaceAmendmentIds` (a superseding
  * letter only): the client's open amendments the letter replaces along with its

@@ -17,8 +17,8 @@ import { ApiError, type Engagement, type EngagementSignResult } from '../../lib/
 /**
  * Mark as signed, shared by the engagement editor and the client's Engagements card
  * (featreq-b2142264) so the two never drift: the form (the day, the note, "signed in
- * person" for a draft, "signed as edited" for a sent letter changed since it went out),
- * the confirm and the call, and the summary of what signing did.
+ * person" for a draft, the changed-since-sent warning for a sent letter edited after it went
+ * out), the confirm and the call, and the summary of what signing did.
  */
 
 /**
@@ -51,8 +51,8 @@ export function SignEngagementForm({
   const [signedOn, setSignedOn] = useState(() => firmToday())
   const [signNote, setSignNote] = useState('')
   const [inPerson, setInPerson] = useState(false)
-  // "Signed as edited": sign a sent letter that changed after it went out.
-  const [signedAsEdited, setSignedAsEdited] = useState(false)
+  // The warning shown when a sent letter changed after it went out (a warning, not a refusal).
+  const [warnChanged, setWarnChanged] = useState(false)
 
   // A superseding letter also replaces the client's open amendments (featreq-e5ae8279):
   // the live ones are listed once, here, each with a "Keep in force" box that starts OFF.
@@ -89,14 +89,20 @@ export function SignEngagementForm({
   // Only a SUCCESSFUL read enables signing a superseding letter.
   const amendmentsReady = !supersedes || amendments !== null
 
-  // The sent-hash guard: a sent letter edited since it went out signs only "as edited".
+  // The sent-hash guard: a sent letter edited since it went out warns first. She may have
+  // fixed a typo, so it is a warning she can sign past ("Mark signed anyway"), not a refusal.
   const changed = engagement.status === 'sent' && changedSinceSent
-  const canSign =
-    amendmentsReady &&
-    ((engagement.status === 'sent' && (!changed || signedAsEdited)) || (engagement.status === 'draft' && inPerson))
+  const canSign = amendmentsReady && (engagement.status === 'sent' || (engagement.status === 'draft' && inPerson))
+  const lastSent = [...(engagement.emailLog ?? [])].reverse().find((entry) => entry?.kind === 'send' && entry.ok)
+  const lastSentDay = engagementInstantLabel(lastSent?.at ?? engagement.sentAt)
 
-  const sign = async () => {
+  const sign = async ({ anyway = false } = {}) => {
     if (!canSign || !/^\d{4}-\d{2}-\d{2}$/.test(signedOn)) return
+    if (changed && !anyway) {
+      setWarnChanged(true)
+      return
+    }
+    setWarnChanged(false)
     const replaceIds = supersedes ? (amendments ?? []).filter((row) => !kept.has(row.id)).map((row) => row.id) : []
     const replacing =
       replaceIds.length > 0
@@ -112,7 +118,7 @@ export function SignEngagementForm({
         signedOn,
         ...(signNote.trim() ? { note: signNote.trim() } : {}),
         ...(engagement.status === 'draft' ? { allowUnsent: true } : {}),
-        ...(changed && signedAsEdited ? { confirmChanged: true } : {}),
+        ...(changed ? { confirmChanged: true } : {}),
         ...(replaceIds.length > 0 ? { replaceAmendmentIds: replaceIds } : {}),
       })
       await onSigned(result, signedOn)
@@ -154,21 +160,22 @@ export function SignEngagementForm({
           <span>This letter was signed in person (it was never sent from here)</span>
         </label>
       ) : null}
-      {changed ? (
-        <>
-          <p className="form-error" role="status">
-            The letter changed since it was sent. Send it again, or tick &quot;Signed as edited&quot; if they signed
-            this version.
+      {changed && warnChanged ? (
+        <div className="engagement-changed-warning">
+          <p className="form-error" role="alert">
+            {'This letter changed after it was last sent' +
+              (lastSentDay ? ' on ' + lastSentDay : '') +
+              '. The client signed the earlier version. Send it again first, or mark it signed anyway.'}
           </p>
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={signedAsEdited}
-              onChange={(event) => setSignedAsEdited(event.target.checked)}
-            />
-            <span>Signed as edited (they signed this version, not the one sent)</span>
-          </label>
-        </>
+          <div className="button-row">
+            <button type="button" className="primary-action" disabled={disabled} onClick={() => void sign({ anyway: true })}>
+              Mark signed anyway
+            </button>
+            <button type="button" className="ghost-action" onClick={() => setWarnChanged(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
       ) : null}
       {supersedes && amendments === null && !amendmentsFailed ? (
         <p className="muted-text" role="status">
@@ -237,7 +244,7 @@ export function SignEngagementForm({
         </button>
         {actions}
       </div>
-      {!canSign && !changed && amendmentsReady ? <p className="muted-text">Send the letter first, or tick &quot;signed in person&quot;.</p> : null}
+      {!canSign && amendmentsReady ? <p className="muted-text">Send the letter first, or tick &quot;signed in person&quot;.</p> : null}
     </>
   )
 }
@@ -335,7 +342,7 @@ export function SigningSummary({
 /**
  * Mark as signed from the client's Engagements card: the editor's form in a dialog. It
  * reads the stored letter first (and again after ANY failed try, like the editor) so
- * "signed as edited" appears when the letter changed since it was sent. An existing
+ * the changed-since-sent warning appears when the letter changed since it was sent. An existing
  * monthly client's fee choice is shown as it is saved on the letter, read-only, with a
  * link to the letter to change it. On success it shows the editor's summary and calls
  * `onSigned` (the card reads its list again; the server tells every tab the data changed).
@@ -442,12 +449,11 @@ export function SignEngagementDialog({
             }}
             onFailed={async (message, failure) => {
               setError(message)
-              // The server's own word that the letter changed since it went out shows the
-              // "signed as edited" choice even when the read below cannot be made.
+              // The server's own word that the letter changed since it went out brings up the
+              // changed-since-sent warning even when the read below cannot be made.
               if (failure instanceof ApiError && failure.reason === 'changed_since_sent') setChangedSinceSent(true)
               // Whatever went wrong, read the stored letter again: it may have changed since
-              // it was sent (the "signed as edited" choice then appears), or been signed
-              // or voided meanwhile.
+              // it was sent (the warning then appears), or been signed or voided meanwhile.
               await reload()
             }}
             onDone={() => setBusy(false)}

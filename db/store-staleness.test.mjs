@@ -48603,7 +48603,7 @@ describe('signing an engagement creates the client (file backend)', () => {
     expect(err).toBeInstanceOf(EngagementStateError)
     expect(err.reason).toBe('changed_since_sent')
     expect(err.message).toBe(
-      "The letter changed since it was sent - send it again, or tick 'signed as edited' to sign this version",
+      "The letter changed since it was sent - send it again, or mark it signed anyway",
     )
     expect(await clientsNamed('Acme Books')).toHaveLength(0)
     expect((await store.getEngagement(engagement.id)).status).toBe('sent')

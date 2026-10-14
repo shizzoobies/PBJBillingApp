@@ -282,14 +282,14 @@ describe('ClientEngagementsCard: Mark as signed', () => {
     )
   })
 
-  it('a refusal is its plain sentence; changed since sent reads the letter again and offers "Signed as edited"', async () => {
+  it('a refusal is its plain sentence; changed since sent reads the letter again, and the next try warns first', async () => {
     renderCard()
     let reads = 0
     api.getEngagementRequest = vi.fn(async () => viewOf(ROWS[0], reads++ > 0))
     api.signEngagementRequest = vi.fn(async () => {
       throw new ApiError(
         409,
-        "The letter changed since it was sent - send it again, or tick 'signed as edited' to sign this version",
+        'The letter changed since it was sent - send it again, or mark it signed anyway',
         'engagement_refused',
         'changed_since_sent',
       )
@@ -298,14 +298,16 @@ describe('ClientEngagementsCard: Mark as signed', () => {
     fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
     const dialog = await screen.findByRole('dialog')
     await waitFor(() => expect(api.getEngagementRequest).toHaveBeenCalledTimes(1))
-    expect(within(dialog).queryByRole('checkbox', { name: /Signed as edited/ })).toBeNull()
+    expect(within(dialog).queryByRole('button', { name: 'Mark signed anyway' })).toBeNull()
     fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(/The letter changed since it was sent - send it again/)
-    const asEdited = await within(dialog).findByRole('checkbox', { name: /Signed as edited/ })
-    expect(within(dialog).getByRole('button', { name: 'Mark as signed' })).toBeDisabled()
-    fireEvent.click(asEdited)
+    await waitFor(() => expect(api.getEngagementRequest).toHaveBeenCalledTimes(2))
     api.signEngagementRequest = vi.fn(async () => signResult())
     fireEvent.click(within(dialog).getByRole('button', { name: 'Mark as signed' }))
+    // A warning first, not a refusal: nothing is sent until she chooses.
+    expect(await within(dialog).findByText(/The client signed the earlier version/)).toBeTruthy()
+    expect(api.signEngagementRequest).not.toHaveBeenCalled()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mark signed anyway' }))
     await waitFor(() =>
       expect(api.signEngagementRequest).toHaveBeenCalledWith('eng-amend', { signedOn: firmToday(), confirmChanged: true }),
     )

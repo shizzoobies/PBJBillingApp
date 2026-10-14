@@ -2883,7 +2883,7 @@ export type EngagementView = {
   sender: { from: string; replyTo: string }
   /**
    * A sent letter edited since it last went out: Mark as signed is refused (409
-   * engagement_refused, reason changed_since_sent) unless she ticks "signed as edited".
+   * engagement_refused, reason changed_since_sent) unless she chooses "Mark signed anyway".
    */
   changedSinceSent?: boolean
 }
