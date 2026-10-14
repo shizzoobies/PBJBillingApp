@@ -31645,7 +31645,7 @@ export class AppDataStore {
       // here landed with no months and never ran - plus the due day, lead
       // days, Board column, skip and period-label settings, sub-steps and step
       // due days. FIRST, so the copy's own identity below always wins.
-      ...copiedTemplateSettings(source),
+      ...copiedTemplateSettings(source, { currentYear: Number(today.slice(0, 4)) }),
       // The plan's months (and, when the blueprint had no due day, the day of its
       // next due date) over the blueprint's.
       ...(planSchedule?.scheduledMonths ? { scheduledMonths: planSchedule.scheduledMonths } : {}),

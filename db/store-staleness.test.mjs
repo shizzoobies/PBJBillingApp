@@ -21881,6 +21881,28 @@ describe('copyTemplateToClient starts the copy today, not at the blueprint’s s
     expect(copy.nextDueDate).toBe(today)
   })
 
+  it('rebases a past scheduleYear on a one-year blueprint to the copy year; repeatAnnually stays', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-03-10T15:00:00.000Z'))
+    const oneYear = (overrides) =>
+      blueprint({ frequency: 'specific-months', scheduledMonths: [3], repeatAnnually: false, ...overrides })
+    await store.write(
+      workspace({
+        checklistTemplates: [
+          oneYear({ id: 'tpl-2025', scheduleYear: 2025 }),
+          oneYear({ id: 'tpl-2026', scheduleYear: 2026 }),
+          oneYear({ id: 'tpl-2027', scheduleYear: 2027 }),
+          oneYear({ id: 'tpl-annual', scheduleYear: 2025, repeatAnnually: true }),
+        ],
+      }),
+    )
+    const copy = (id) => store.copyTemplateToClient(id, { clientId: 'c1' })
+    expect(await copy('tpl-2025')).toMatchObject({ scheduleYear: 2026, repeatAnnually: false })
+    expect(await copy('tpl-2026')).toMatchObject({ scheduleYear: 2026, repeatAnnually: false })
+    expect(await copy('tpl-2027')).toMatchObject({ scheduleYear: 2027, repeatAnnually: false })
+    expect(await copy('tpl-annual')).toMatchObject({ scheduleYear: 2025, repeatAnnually: true })
+  })
+
   it('keeps the cadence’s phase rather than snapping to today', async () => {
     // 68 days back is NOT a whole number of weeks, so the first cycle on or
     // after today is two days out — the recipe keeps its own weekday.

@@ -52,6 +52,33 @@ function makeTemplate(overrides: Partial<ChecklistTemplate> = {}): ChecklistTemp
   }
 }
 
+describe('a copy of a one-year recipe rebases a past scheduleYear', () => {
+  const yearNow = Number(localDateOnly().slice(0, 4))
+  const oneYear = (overrides: Partial<ChecklistTemplate>) =>
+    makeTemplate({ frequency: 'specific-months', scheduledMonths: [3], repeatAnnually: false, ...overrides })
+  const copyOf = (source: ChecklistTemplate) =>
+    cloneChecklistTemplate(source, { clientId: 'client-i95', active: false })
+
+  it('a past year becomes the current year, repeatAnnually unchanged', () => {
+    expect(copyOf(oneYear({ scheduleYear: yearNow - 1 }))).toMatchObject({
+      scheduleYear: yearNow,
+      repeatAnnually: false,
+    })
+  })
+
+  it('the current or a future year stays as it is', () => {
+    expect(copyOf(oneYear({ scheduleYear: yearNow })).scheduleYear).toBe(yearNow)
+    expect(copyOf(oneYear({ scheduleYear: yearNow + 1 })).scheduleYear).toBe(yearNow + 1)
+  })
+
+  it('a recipe that repeats every year is untouched', () => {
+    expect(copyOf(oneYear({ scheduleYear: yearNow - 1, repeatAnnually: true }))).toMatchObject({
+      scheduleYear: yearNow - 1,
+      repeatAnnually: true,
+    })
+  })
+})
+
 function makeData(templates: ChecklistTemplate[]): AppData {
   return {
     employees: [{ id: 'emp-1', name: 'Avery', role: 'Bookkeeper' }],

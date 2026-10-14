@@ -4,7 +4,13 @@
  */
 
 /** The template-level settings a copy keeps (schedule, column, labels, access). */
-export declare function copiedTemplateSettings<T extends object>(source: T): {
+export declare function copiedTemplateSettings<T extends object>(
+  source: T,
+  options?: {
+    /** The firm year at copy time: a past `scheduleYear` on a one-year recipe rebases to it. */
+    currentYear?: number
+  },
+): {
   assigneeId: string
   categoryId: string | null
   leadDays: number | undefined

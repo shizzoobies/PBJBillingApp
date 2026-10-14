@@ -72,7 +72,7 @@ export function cloneChecklistTemplate(
     // period-label settings, access - comes from the ONE list the server's copy
     // uses too (lib/checklist-template-copy.js), so the two paths cannot drift.
     // FIRST, so the copy's own identity below can never be overridden by it.
-    ...copiedTemplateSettings(source),
+    ...copiedTemplateSettings(source, { currentYear: Number(today.slice(0, 4)) }),
     ...(planSchedule?.scheduledMonths ? { scheduledMonths: planSchedule.scheduledMonths } : {}),
     ...(planSchedule?.dueDayOfMonth ? { dueDayOfMonth: planSchedule.dueDayOfMonth } : {}),
     ...(planSchedule?.repeatAnnually ? { repeatAnnually: true } : {}),
