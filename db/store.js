@@ -2708,6 +2708,13 @@ export class BillingMasterError extends Error {
   }
 }
 
+/** The refusal for a write aimed at a billing master, worded once for every path that raises it. */
+function billingMasterRefusal(name, what) {
+  return new BillingMasterError(
+    `${name || 'That client'} is a billing master — it holds no ${what} of its own. Use one of its sub clients instead.`,
+  )
+}
+
 /**
  * A rate version that may not be deleted.
  *
@@ -11239,9 +11246,7 @@ export class AppDataStore {
       row = { name: stored.name, isBillingMaster: stored.isBillingMaster === true }
     }
     if (!row.isBillingMaster) return
-    throw new BillingMasterError(
-      `${row.name || 'That client'} is a billing master — it holds no ${what} of its own. Use one of its sub clients instead.`,
-    )
+    throw billingMasterRefusal(row.name, what)
   }
 
   /**
@@ -21836,7 +21841,13 @@ export class AppDataStore {
     if (!spawn) return skip('next_stage_empty')
 
     if (fileMode) {
-      // Caller persists; just return the new instance.
+      // Caller persists; just return the new instance. Postgres refuses a
+      // checklist on a billing master inside createChecklist; the file backend
+      // never reaches it, so refuse here from the open snapshot (not
+      // _refuseBillingMasterWrite: its file branch reads through the file queue,
+      // which is held by the caller's slot and would deadlock).
+      const owner = (data.clients ?? []).find((entry) => entry?.id === spawn.clientId)
+      if (owner?.isBillingMaster === true) throw billingMasterRefusal(owner.name, 'tasks')
       return { spawned: spawn, reason: null }
     }
 

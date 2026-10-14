@@ -19225,6 +19225,60 @@ describe('consolidated billing: a billing master refuses work of its own', () =>
     ).rejects.toBeInstanceOf(BillingMasterError)
   })
 
+  it('refuses a checklist with the same error class and sentence on both backends', async () => {
+    const sentence = 'KLC Master is a billing master — it holds no tasks of its own. Use one of its sub clients instead.'
+    const checklist = { title: 'Close', clientId: 'klc-master', assigneeId: 'emp-1', items: [] }
+    // File backend.
+    const fileError = await store.createChecklist(checklist).catch((error) => error)
+    expect(fileError).toBeInstanceOf(BillingMasterError)
+    expect(fileError.name).toBe('BillingMasterError')
+    expect(fileError.message).toBe(sentence)
+    expect((await store.read()).checklists.filter((entry) => entry.clientId === 'klc-master')).toEqual([])
+    // Postgres: the same guard answers from the clients row, before any insert.
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    const inner = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      if (/^select name, is_billing_master from clients where id = \$1$/i.test(String(text).trim())) {
+        return { rows: [{ name: 'KLC Master', is_billing_master: true }], rowCount: 1 }
+      }
+      return inner(text, params)
+    }
+    const pgError = await pgStore.createChecklist(checklist).catch((error) => error)
+    expect(pgError).toBeInstanceOf(BillingMasterError)
+    expect(pgError.name).toBe(fileError.name)
+    expect(pgError.message).toBe(sentence)
+    expect(fake.matching(/^insert into checklists/i)).toEqual([])
+  })
+
+  it('a staged case on a master does not advance on the file backend either', async () => {
+    const stage = (id, index) => ({ id, name: id, assigneeId: 'emp-1', offsetDays: 0, viewerIds: [], editorIds: [], items: [{ id: `ti-${index}`, label: `Step ${index}` }] })
+    const current = await store.read()
+    await store.write(
+      workspace({
+        clients: current.clients,
+        timeEntries: [],
+        checklistTemplates: [
+          ...current.checklistTemplates,
+          { id: 'tmpl-staged', title: 'Staged close', clientId: 'klc-master', assigneeId: 'emp-1', frequency: 'monthly', viewerIds: [], editorIds: [], stages: [stage('st-0', 0), stage('st-1', 1)] },
+        ],
+        checklists: [
+          {
+            id: 'cl-m1', title: 'Staged close', clientId: 'klc-master', assigneeId: 'emp-1', templateId: 'tmpl-staged',
+            dueDate: '2026-10-31', caseId: 'case-m', stageId: 'st-0', stageIndex: 0, stageCount: 2, viewerIds: [], editorIds: [],
+            items: [{ id: 'item-m', label: 'Step 0', done: false }],
+          },
+        ],
+      }),
+    )
+    const result = await store.toggleChecklistItem('cl-m1', 'item-m')
+    expect(result.spawned).toBeNull()
+    expect(result.spawnError).toBe(
+      'KLC Master is a billing master — it holds no tasks of its own. Use one of its sub clients instead.',
+    )
+    expect((await store.read()).checklists.filter((entry) => entry.caseId === 'case-m' && entry.stageIndex === 1)).toEqual([])
+  })
+
   it('refuses a recurring recipe copied onto it', async () => {
     await expect(
       store.copyTemplateToClient('tpl-1', { clientId: 'klc-master' }),
