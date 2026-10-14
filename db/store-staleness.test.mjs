@@ -47890,6 +47890,12 @@ describe('engagements (file backend)', () => {
     expect((await store.listEngagements({ proposalId: a.proposalId })).map((row) => row.id)).toEqual([a.id])
     expect((await store.listEngagements({ status: 'void' })).map((row) => row.id)).toEqual([c.id])
     expect(await store.listEngagements({ status: 'bogus' })).toEqual([])
+    // Engagements leftovers 11: the kind filter, alone and with the others.
+    expect(await store.listEngagements({ kind: 'amendment' })).toEqual([])
+    expect((await store.listEngagements({ kind: 'original' })).map((row) => row.id)).toEqual([b.id, a.id, c.id])
+    expect((await store.listEngagements({ kind: 'original', status: 'void' })).map((row) => row.id)).toEqual([c.id])
+    expect(await store.listEngagements({ kind: 'superseding' })).toEqual([])
+    expect(await store.listEngagements({ kind: 'bogus' })).toEqual([])
   })
 
   it('a bulk save leaves the library and every engagement intact', async () => {
@@ -49541,6 +49547,19 @@ describe('engagements (Postgres statements)', () => {
     ])
     expect(lists[1].params).toEqual(['c1', 'prop-1', 'sent'])
     expect(lists[0].text).not.toMatch(/email_body|letter_body|email_log/)
+  })
+
+  it('filters by kind and status in the statement itself, so a filter reaches rows past the 500 cap', async () => {
+    const fake = engagementPool()
+    const pgStore = engagementStore(fake)
+    await pgStore.listEngagements({ kind: 'amendment', status: 'signed' })
+    expect(await pgStore.listEngagements({ kind: 'bogus' })).toEqual([])
+    const lists = fake.matching(/^select .* from engagements/i)
+    expect(lists).toHaveLength(1)
+    expect(lists[0].text.replace(/^select .* from /i, 'select ... from ')).toBe(
+      'select ... from engagements where status = $1 and kind = $2 order by created_at desc, id desc limit 500',
+    )
+    expect(lists[0].params).toEqual(['signed', 'amendment'])
   })
 
   it('is never deleted from: not in write(), not in the lock list, not anywhere in the store', async () => {

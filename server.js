@@ -12042,7 +12042,9 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // GET /api/engagements?clientId=&proposalId=&status= - the list (no bodies).
+    // GET /api/engagements?clientId=&proposalId=&status=&kind= - the list (no bodies), newest
+    // first, the newest 500 of whatever the filters leave. status and kind are filtered in the
+    // store's query, so a filter reaches rows past the cap.
     if (normalizedPath === '/api/engagements' && request.method === 'GET') {
       const session = await requireSession(request, response)
       if (!session) return
@@ -12054,6 +12056,7 @@ const server = createServer(async (request, response) => {
         clientId: requestUrl.searchParams.get('clientId') || null,
         proposalId: requestUrl.searchParams.get('proposalId') || null,
         status: requestUrl.searchParams.get('status') || null,
+        kind: requestUrl.searchParams.get('kind') || null,
       })
       sendJson(response, 200, { engagements }, { 'Cache-Control': 'no-store' })
       return

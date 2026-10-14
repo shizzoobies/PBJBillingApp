@@ -5432,14 +5432,18 @@ export async function saveEngagementSectionsRequest(
   return Array.isArray(body.sections) ? body.sections : []
 }
 
-/** The engagements, newest first (no bodies), optionally for one client, proposal or status. */
+/**
+ * The engagements, newest first (no bodies), optionally for one client, proposal, status or
+ * kind. The server filters and then keeps the newest 500.
+ */
 export async function listEngagementsRequest(
-  filter: { clientId?: string; proposalId?: string; status?: EngagementStatus } = {},
+  filter: { clientId?: string; proposalId?: string; status?: EngagementStatus; kind?: EngagementKind } = {},
 ): Promise<Engagement[]> {
   const params = new URLSearchParams()
   if (filter.clientId) params.set('clientId', filter.clientId)
   if (filter.proposalId) params.set('proposalId', filter.proposalId)
   if (filter.status) params.set('status', filter.status)
+  if (filter.kind) params.set('kind', filter.kind)
   const query = params.toString()
   const body = await engagementRequest<{ engagements?: Engagement[] }>(
     `/api/engagements${query ? `?${query}` : ''}`,

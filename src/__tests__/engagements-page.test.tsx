@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { AppContextValue } from '../AppContext'
@@ -161,6 +161,42 @@ describe('the Engagements list', () => {
     api.listEngagementsRequest = vi.fn(async () => [])
     renderPage()
     expect(await screen.findByText(/An engagement letter is drafted for you when you Accept a proposal/)).toBeTruthy()
+  })
+
+  // Engagements leftovers 11: the server filters (so a filter reaches past the newest 500).
+  it('asks the server for the chosen status and kind, and reads again when they change', async () => {
+    renderPage()
+    await screen.findByRole('link', { name: 'Acme Books' })
+    expect(api.listEngagementsRequest).toHaveBeenLastCalledWith({})
+    fireEvent.change(screen.getByLabelText('Status filter'), { target: { value: 'signed' } })
+    await waitFor(() => expect(api.listEngagementsRequest).toHaveBeenLastCalledWith({ status: 'signed' }))
+    fireEvent.change(screen.getByLabelText('Kind filter'), { target: { value: 'amendment' } })
+    await waitFor(() =>
+      expect(api.listEngagementsRequest).toHaveBeenLastCalledWith({ status: 'signed', kind: 'amendment' }),
+    )
+    fireEvent.change(screen.getByLabelText('Status filter'), { target: { value: 'all' } })
+    await waitFor(() => expect(api.listEngagementsRequest).toHaveBeenLastCalledWith({ kind: 'amendment' }))
+  })
+
+  it('a filter that matches nothing says no engagements match, not that there are none yet', async () => {
+    api.listEngagementsRequest = vi.fn(async (filter: { status?: string }) => (filter.status ? [] : ROWS))
+    renderPage()
+    await screen.findByRole('link', { name: 'Acme Books' })
+    fireEvent.change(screen.getByLabelText('Status filter'), { target: { value: 'void' } })
+    expect(await screen.findByText('No engagements match.')).toBeTruthy()
+    expect(screen.queryByText(/An engagement letter is drafted for you/)).toBeNull()
+  })
+
+  it('says the list stops at the newest 500 when exactly 500 come back, and says nothing under 500', async () => {
+    renderPage()
+    await screen.findByRole('link', { name: 'Acme Books' })
+    expect(screen.queryByText(/Showing the newest 500/)).toBeNull()
+    cleanup()
+    api.listEngagementsRequest = vi.fn(async () =>
+      Array.from({ length: 500 }, (_, index) => engagementFixture({ id: `eng-${index}` })),
+    )
+    renderPage()
+    expect(await screen.findByText('Showing the newest 500 - narrow the filter to see older ones')).toBeTruthy()
   })
 
   it('shows nothing to staff', () => {

@@ -19,6 +19,7 @@ import {
 } from '../lib/checklist-start-floor.js'
 import { copiedTemplateSettings, copiedTemplateStages } from '../lib/checklist-template-copy.js'
 import { STAGE_ADVANCE_FAILED_PHRASE } from '../lib/stage-advance-phrase.js'
+import { ENGAGEMENT_LIST_LIMIT } from '../lib/engagement-list-limit.js'
 import {
   bundlingPlan,
   cadenceSchedule,
@@ -1613,7 +1614,6 @@ const ENGAGEMENT_EDITABLE_STATUSES = Object.freeze(['draft', 'sent'])
 const ENGAGEMENT_SUBJECT_MAX = 200
 const ENGAGEMENT_BODY_MAX = 20000
 const ENGAGEMENT_NOTE_MAX = 2000
-const ENGAGEMENT_LIST_LIMIT = 500
 const ENGAGEMENT_PLAN_IDS_MAX = 50
 /**
  * What signing does to an EXISTING monthly client's fee (stage 3): 'replace' it with
@@ -27077,12 +27077,13 @@ export class AppDataStore {
   }
 
   /**
-   * Engagements, newest first; one client's, one proposal's or one status's
+   * Engagements, newest first; one client's, one proposal's, one status's or one kind's
    * when asked. List rows carry no bodies and no email log. Postgres caps the
    * answer at 500.
    */
-  async listEngagements({ clientId = null, proposalId = null, status = null } = {}) {
+  async listEngagements({ clientId = null, proposalId = null, status = null, kind = null } = {}) {
     if (status && !ENGAGEMENT_STATUSES.includes(status)) return []
+    if (kind && !ENGAGEMENT_KINDS.includes(kind)) return []
     if (this.pool) {
       const params = []
       const where = []
@@ -27097,6 +27098,10 @@ export class AppDataStore {
       if (status) {
         params.push(status)
         where.push(`status = $${params.length}`)
+      }
+      if (kind) {
+        params.push(kind)
+        where.push(`kind = $${params.length}`)
       }
       const { rows } = await this.pool.query(
         `select ${ENGAGEMENT_LIST_COLUMNS} from engagements
@@ -27115,7 +27120,8 @@ export class AppDataStore {
           row &&
           (!clientId || row.clientId === clientId) &&
           (!proposalId || row.proposalId === proposalId) &&
-          (!status || row.status === status),
+          (!status || row.status === status) &&
+          (!kind || row.kind === kind),
       )
       .sort((a, b) => String(b.row.createdAt).localeCompare(String(a.row.createdAt)) || b.index - a.index)
       .slice(0, ENGAGEMENT_LIST_LIMIT)

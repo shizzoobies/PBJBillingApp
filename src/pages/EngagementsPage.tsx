@@ -10,6 +10,7 @@ import {
   engagementMonthlyFee,
   engagementPartyName,
 } from '../lib/engagements'
+import { ENGAGEMENT_LIST_LIMIT } from '../../lib/engagement-list-limit.js'
 import { ApiError, type Engagement, type EngagementKind, type EngagementStatus } from '../lib/types'
 
 /**
@@ -28,11 +29,15 @@ export function EngagementsPage() {
   const [kind, setKind] = useState<'all' | EngagementKind>('all')
   const [query, setQuery] = useState('')
 
-  // The list; again when another tab or session changes data.
+  // The list for the chosen status and kind (the server filters, then keeps the newest 500, so
+  // a filter reaches letters older than the 500th); again when another tab or session changes data.
   useEffect(() => {
     if (!ownerMode) return
     let cancelled = false
-    void listEngagementsRequest()
+    void listEngagementsRequest({
+      ...(status === 'all' ? {} : { status }),
+      ...(kind === 'all' ? {} : { kind }),
+    })
       .then((rows) => {
         if (cancelled) return
         setEngagements(rows)
@@ -47,7 +52,7 @@ export function EngagementsPage() {
     return () => {
       cancelled = true
     }
-  }, [ownerMode, dataRefreshCount])
+  }, [ownerMode, dataRefreshCount, status, kind])
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -131,9 +136,15 @@ export function EngagementsPage() {
           </p>
         ) : null}
 
+        {engagements.length >= ENGAGEMENT_LIST_LIMIT ? (
+          <p className="muted-text" role="status">
+            {`Showing the newest ${ENGAGEMENT_LIST_LIMIT} - narrow the filter to see older ones`}
+          </p>
+        ) : null}
+
         {loaded && !error && visible.length === 0 ? (
           <p className="empty-state">
-            {engagements.length === 0
+            {engagements.length === 0 && status === 'all' && kind === 'all'
               ? "No engagements yet. An engagement letter is drafted for you when you Accept a proposal, each Letters send is recorded as an amendment, and an amendment can be started from a client's Billing tab; open one here to edit and send it."
               : 'No engagements match.'}
           </p>

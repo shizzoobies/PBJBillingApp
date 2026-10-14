@@ -169,6 +169,27 @@ describe('the engagement routes are owner-only, same-origin and above the catch-
     expect(block).toContain('Number.isNaN(Date.parse(loadedAt))')
   })
 
+  it('the list passes client, proposal, status and kind to the store, which filters them in its query', () => {
+    const block = routeBlock(ROUTES[2].pattern, 1500)
+    for (const key of ['clientId', 'proposalId', 'status', 'kind']) {
+      expect(block).toContain(`${key}: requestUrl.searchParams.get('${key}') || null,`)
+    }
+  })
+
+  it('the list cap is one constant, imported by the store and by the page', () => {
+    const storeSource = readFileSync(path.resolve(here, '../../db/store.js'), 'utf8')
+    const pageSource = readFileSync(path.resolve(here, '../pages/EngagementsPage.tsx'), 'utf8')
+    expect(readFileSync(path.resolve(here, '../../lib/engagement-list-limit.js'), 'utf8')).toContain(
+      'export const ENGAGEMENT_LIST_LIMIT = 500',
+    )
+    for (const source of [storeSource, pageSource]) {
+      expect(source).toMatch(/import \{ ENGAGEMENT_LIST_LIMIT \} from '(\.\.\/)+lib\/engagement-list-limit\.js'/)
+    }
+    // No second copy of the number.
+    expect(storeSource).not.toMatch(/const ENGAGEMENT_LIST_LIMIT = /)
+    expect(pageSource).not.toMatch(/const ENGAGEMENT_LIST_LIMIT = /)
+  })
+
   it('PATCH passes only the editable fields to the store', () => {
     const block = routeBlock(ROUTES[4].pattern, 2600)
     expect(block).toContain("for (const key of ['subject', 'emailBody', 'letterBody', 'retainerAmount', 'packageId', 'planIds', 'feeMode', 'party']) {")
