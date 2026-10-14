@@ -3836,7 +3836,14 @@ function App() {
         ...current,
         checklists: upsertChecklistById(current.checklists, created),
       }))
-      setDataSyncState('synced')
+      // Synced only when every save pass has resolved. Edits still unsaved are
+      // handed back to the save loop, which sets `synced` itself when it drains
+      // (or `error` when a pass fails), so this request finishing cannot hide the
+      // "not saved" banner. A tab latched as stale never saves again (saveNow
+      // returns early), so it says `error` here rather than "Saving…" forever.
+      if (!dirtyRef.current) setDataSyncState((s) => (s === 'offline' ? s : 'synced'))
+      else if (staleWorkspaceRef.current) setDataSyncState('error')
+      else void saveNow()
       return created
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
