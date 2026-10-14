@@ -1084,3 +1084,96 @@ describe('after QA', () => {
     expect(screen.getAllByRole('button', { name: 'Save' })).toHaveLength(1)
   })
 })
+
+// Engagements leftovers 5: a letter with no client yet can change who it is addressed to.
+describe('Addressed to', () => {
+  it('shows the name, email and company of a letter with no client, and hides the card once it has one', async () => {
+    await renderEditor()
+    const card = screen.getByRole('group', { name: 'Addressed to' })
+    expect(within(card).getByLabelText('Addressed to name')).toHaveValue('Pat Doe')
+    expect(within(card).getByLabelText('Addressed to email')).toHaveValue('pat@acme.test')
+    expect(within(card).getByLabelText('Addressed to company')).toHaveValue('Acme Books')
+    expect(within(card).getByRole('button', { name: 'Save address' })).toBeDisabled()
+    cleanup()
+    api.getEngagementRequest = vi.fn(async () => view({ clientId: 'c1' }))
+    await renderEditor()
+    expect(screen.queryByRole('group', { name: 'Addressed to' })).toBeNull()
+  })
+
+  it('is hidden on a letter that can no longer be edited', async () => {
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'void' }))
+    await renderEditor()
+    expect(screen.queryByRole('group', { name: 'Addressed to' })).toBeNull()
+  })
+
+  it('saves an edited email as a party patch carrying the loaded stamp, and leaves the letter text alone', async () => {
+    await renderEditor()
+    const card = screen.getByRole('group', { name: 'Addressed to' })
+    fireEvent.change(within(card).getByLabelText('Addressed to email'), { target: { value: ' owner@acme.test ' } })
+    api.updateEngagementRequest = vi.fn(async (_id: string, patch: { party?: Partial<Engagement['party']> }) =>
+      view({ party: { ...engagement().party, ...patch.party }, updatedAt: '2026-10-11T17:00:00.000Z' }, 'hash-5'),
+    )
+    fireEvent.click(within(card).getByRole('button', { name: 'Save address' }))
+    await waitFor(() =>
+      expect(api.updateEngagementRequest).toHaveBeenCalledWith('eng-1', {
+        party: { contactName: 'Pat Doe', email: 'owner@acme.test', company: 'Acme Books' },
+        expectedUpdatedAt: '2026-10-11T15:00:00.000Z',
+      }),
+    )
+    // The card starts clean on the stored values, and Send now addresses the new email.
+    await waitFor(() => expect(screen.getByLabelText('Addressed to email')).toHaveValue('owner@acme.test'))
+    expect(screen.getByRole('button', { name: 'Save address' })).toBeDisabled()
+    await waitFor(() => expect(screen.getByLabelText('Send to')).toHaveValue('owner@acme.test'))
+    // The next text save carries the stamp that save returned.
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Later subject' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(api.updateEngagementRequest).toHaveBeenLastCalledWith(
+        'eng-1',
+        expect.objectContaining({ expectedUpdatedAt: '2026-10-11T17:00:00.000Z' }),
+      ),
+    )
+  })
+
+  it('refuses an email that is not one address, and Send waits for an unsaved address', async () => {
+    await renderEditor()
+    const card = screen.getByRole('group', { name: 'Addressed to' })
+    fireEvent.change(within(card).getByLabelText('Addressed to email'), { target: { value: 'not an email' } })
+    expect(within(card).getByText('Type one email address, like name@company.com.')).toBeTruthy()
+    expect(within(card).getByRole('button', { name: 'Save address' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+    expect(screen.getByText('Save the engagement to preview, send or sign it.')).toBeTruthy()
+    fireEvent.change(within(card).getByLabelText('Addressed to email'), { target: { value: 'pat@acme.test' } })
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
+    expect(api.updateEngagementRequest).not.toHaveBeenCalled()
+  })
+
+  it("shows the server's sentence when the address could not be saved", async () => {
+    await renderEditor()
+    const card = screen.getByRole('group', { name: 'Addressed to' })
+    fireEvent.change(within(card).getByLabelText('Addressed to company'), { target: { value: 'Acme Inc' } })
+    api.updateEngagementRequest = vi.fn(async () => {
+      throw new ApiError(409, 'Someone saved this engagement after you opened it. Nothing was saved: reload and redo your change.', 'engagement_changed')
+    })
+    fireEvent.click(within(card).getByRole('button', { name: 'Save address' }))
+    expect(await within(card).findByText(/Someone saved this engagement after you opened it/)).toBeTruthy()
+    // The page offers Reload, as for a refused text save.
+    expect(screen.getByRole('button', { name: 'Reload' })).toBeTruthy()
+    // Reload re-reads the letter, and the card's old failure goes with it.
+    api.getEngagementRequest = vi.fn(async () => view({ updatedAt: '2026-10-11T18:00:00.000Z' }, 'hash-7'))
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Reload' })).toBeNull())
+    expect(within(screen.getByRole('group', { name: 'Addressed to' })).queryByText(/Someone saved this engagement/)).toBeNull()
+  })
+
+  it('requires an email: a blank one says so and cannot be saved', async () => {
+    await renderEditor()
+    const card = screen.getByRole('group', { name: 'Addressed to' })
+    fireEvent.change(within(card).getByLabelText('Addressed to email'), { target: { value: '   ' } })
+    expect(within(card).getByText('The letter needs an email address to go to.')).toBeTruthy()
+    expect(within(card).getByRole('button', { name: 'Save address' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+    fireEvent.click(within(card).getByRole('button', { name: 'Save address' }))
+    expect(api.updateEngagementRequest).not.toHaveBeenCalled()
+  })
+})

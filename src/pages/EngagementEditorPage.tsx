@@ -5,6 +5,7 @@ import { BoldBar, PlaceholderChipsToggle } from '../components/letters/LetterEdi
 import { DocumentPreviewModal } from '../components/letters/DocumentPreviewModal'
 import { insertPlaceholder, isBoldShortcut, toggleBold, unknownPlaceholderSentence } from '../components/letters/letterEditing'
 import { SaveBadge } from '../components/SectionKit'
+import { AddressedTo, type AddressedToFields } from '../components/engagements/AddressedTo'
 import { SignEngagementForm, SigningSummary } from '../components/engagements/SignEngagement'
 import {
   engagementPreviewPdfUrl,
@@ -176,6 +177,10 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   // another tab since then is refused (409 engagement_changed) instead of overwritten.
   const [loadedAt, setLoadedAt] = useState<string | null>(null)
   const [savedElsewhere, setSavedElsewhere] = useState(false)
+  // Counts the times the boxes were refilled from the server: the Addressed-to card drops an old failure.
+  const [reloadToken, setReloadToken] = useState(0)
+  // The "Addressed to" card has edits not yet saved (its own Save address button).
+  const [partyDirty, setPartyDirty] = useState(false)
 
   const [packages, setPackages] = useState<Package[]>([])
   const [sectionTitles, setSectionTitles] = useState<Record<string, string>>({})
@@ -233,6 +238,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
       setFeeMode(row.feeMode ?? 'replace')
       setLoadedAt(row.updatedAt ?? null)
       setSavedElsewhere(false)
+      setReloadToken((count) => count + 1)
     }
     },
     [],
@@ -361,6 +367,9 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   }
 
   const editable = EDITABLE.has(engagement.status)
+  // A letter with no client yet has nowhere else to change who it is addressed to.
+  const showAddressedTo = editable && !engagement.clientId
+  const unsaved = dirty || (showAddressedTo && partyDirty)
   const partyName = engagementPartyName(engagement)
   const replyTo = view.sender.replyTo || 'the reply address'
   const figures = engagement.figures ?? {}
@@ -433,6 +442,24 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         setSaveError(err instanceof ApiError ? err.message : 'Could not save the engagement.')
       }
     }
+  }
+
+  /** Save Address: only the party's name, email and company, merged over the stored party by the server. */
+  const saveAddressedTo = async (fields: AddressedToFields) => {
+    let next: EngagementView
+    try {
+      next = await updateEngagementRequest(engagementId, {
+        party: fields,
+        ...(loadedAt ? { expectedUpdatedAt: loadedAt } : {}),
+      })
+    } catch (err) {
+      // Saved from another tab since this page loaded: offer Reload (the card shows the sentence).
+      if (err instanceof ApiError && err.code === 'engagement_changed') setSavedElsewhere(true)
+      throw err
+    }
+    // The boxes keep any unsaved text; the stamp moves because this save changed nothing but the party.
+    adopt(next, { overwrite: false })
+    setLoadedAt(next.engagement.updatedAt ?? null)
   }
 
   /* ---- actions ------------------------------------------------------------- */
@@ -530,7 +557,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
     }
   }
 
-  const blockedReason = dirty ? 'Save the engagement to preview, send or sign it.' : ''
+  const blockedReason = unsaved ? 'Save the engagement to preview, send or sign it.' : ''
   const previewTo = sendTo.trim() && sendTo.trim() !== partyEmail ? sendTo.trim() : undefined
   const activity = activityRows(
     engagement,
@@ -771,7 +798,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                   <button
                     type="button"
                     className="secondary-action"
-                    disabled={dirty}
+                    disabled={unsaved}
                     title={blockedReason || undefined}
                     onClick={() => setPreviewOpen(true)}
                   >
@@ -780,7 +807,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                   <button
                     type="button"
                     className="primary-action"
-                    disabled={dirty || busy !== '' || !sendTo.trim()}
+                    disabled={unsaved || busy !== '' || !sendTo.trim()}
                     onClick={() => void send()}
                   >
                     {busy === 'send' ? 'Sending...' : engagement.status === 'sent' ? 'Send again' : 'Send'}
@@ -792,7 +819,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                   engagement={engagement}
                   changedSinceSent={changedSinceSent}
                   feeLine={feeChoices ? feeChoices[engagement.feeMode ?? 'replace'] : null}
-                  disabled={dirty || busy !== ''}
+                  disabled={unsaved || busy !== ''}
                   actions={
                     <button type="button" className="ghost-action" disabled={busy !== ''} onClick={() => void voidIt()}>
                       Void
@@ -815,6 +842,17 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         </div>
 
         <aside className="engagement-rail">
+          {showAddressedTo ? (
+            <AddressedTo
+              // Keyed on the stored values: a fresh read (or a save) starts the card clean.
+              key={[engagement.party.contactName, engagement.party.email, engagement.party.company].join('|')}
+              party={engagement.party}
+              disabled={busy !== ''}
+              onSave={saveAddressedTo}
+              onDirtyChange={setPartyDirty}
+              resetToken={reloadToken}
+            />
+          ) : null}
           <div className="panel">
             <h3>Signing details</h3>
             <p className="muted-text">
