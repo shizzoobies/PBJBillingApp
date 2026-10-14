@@ -18,6 +18,7 @@ import {
   templateStartFloor,
 } from '../lib/checklist-start-floor.js'
 import { copiedTemplateSettings, copiedTemplateStages } from '../lib/checklist-template-copy.js'
+import { STAGE_ADVANCE_FAILED_PHRASE } from '../lib/stage-advance-phrase.js'
 import {
   bundlingPlan,
   cadenceSchedule,
@@ -5602,15 +5603,18 @@ const STAGE_ADVANCE_LOGGED_SKIPS = new Set([
 
 /**
  * A next-stage spawn that threw after the tick was saved: log one
- * `[stage-advance] FAILED` line naming the checklist and case, and answer the
- * message the toggle reports as `spawnError`.
+ * `[stage-advance] FAILED` line naming the checklist and case (the raw error
+ * text stays in the server log only), and answer the phrase the toggle reports
+ * as `spawnError` - the Activity row and the page notice carry it. An error
+ * that is already a worded refusal (a billing master) keeps its own sentence;
+ * anything else - a Postgres message, a stack fragment - becomes the plain phrase.
  */
 function stageAdvanceFailure(checklist, error) {
   const message = (error && error.message) || String(error) || 'unknown error'
-  console.error(
-    `[stage-advance] FAILED ${checklist?.id ?? '?'} case ${checklist?.caseId || checklist?.id || '?'}: ${message}`,
-  )
-  return message
+  const caseId = checklist?.caseId || checklist?.id || '?'
+  console.error(`[stage-advance] FAILED ${checklist?.id ?? '?'} case ${caseId}: ${message}`)
+  if (error instanceof BillingMasterError) return message
+  return STAGE_ADVANCE_FAILED_PHRASE
 }
 
 /**
@@ -21851,8 +21855,16 @@ export class AppDataStore {
       if (landed) return skip('already_spawned')
       throw error
     }
-    // Auto-grant the new stage's assignee visibility into the client.
-    await this.grantClientVisibility(created.clientId, created.assigneeId)
+    // Auto-grant the new stage's assignee visibility into the client. The stage
+    // exists by now: a grant that throws is logged, never "the step was not
+    // created" (the caller would report a failed advance for a created stage).
+    try {
+      await this.grantClientVisibility(created.clientId, created.assigneeId)
+    } catch (error) {
+      console.error(
+        `[stage-advance] visibility grant FAILED ${created.id} client ${created.clientId}: ${error?.message || error}`,
+      )
+    }
     return { spawned: created, reason: null }
   }
 

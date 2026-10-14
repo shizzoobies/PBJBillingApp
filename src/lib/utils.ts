@@ -596,6 +596,7 @@ import {
   type WaitingOnLike,
 } from '../../lib/waiting-on-state.js'
 import { inactiveClientIds } from '../../lib/recurring-gate.js'
+import { isStageAdvanceFailedPhrase, STAGE_ADVANCE_FAILED_PHRASE } from '../../lib/stage-advance-phrase.js'
 import { flooredCycleStart, templateStartFloor } from '../../lib/checklist-start-floor.js'
 import { rollUpItemDone } from '../../lib/checklist-step-done.js'
 
@@ -1889,6 +1890,8 @@ export function formatActivityTimestamp(value: string): string {
  * retries the advance, so the notice says how.
  */
 export function stageAdvanceFailedNotice(message: string): string {
+  // The server's plain phrase for an unknown failure already says it saved and what to do.
+  if (isStageAdvanceFailedPhrase(message)) return STAGE_ADVANCE_FAILED_PHRASE
   const reason = String(message ?? '').trim().replace(/\.+$/, '') || 'unknown error'
   return `Saved. The next stage could not be created: ${reason}. Untick and tick this step again, or tell Alex.`
 }

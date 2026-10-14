@@ -55,6 +55,12 @@ describe('the page keeps the tick and says the next stage failed', () => {
     expect(stageAdvanceFailedNotice('Connection reset')).toBe(expected)
   })
 
+  it('the plain phrase for an unknown failure is shown as it is', () => {
+    const phrase =
+      'The next step could not be created. The tick was saved - untick and tick this step again to retry, or tell Alex (the server log has the detail).'
+    expect(stageAdvanceFailedNotice(phrase)).toBe(phrase)
+  })
+
   it('every tick handler applies the saved checklist, then shows the notice', () => {
     const handlers = [
       'const toggleChecklistItem = async',

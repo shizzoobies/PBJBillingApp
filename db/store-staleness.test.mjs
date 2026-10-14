@@ -50617,6 +50617,10 @@ describe('engagements stage 4: review round 1 (Postgres statements)', () => {
  * into a 500: the toggle resolves with `spawnError` and the tick stands, so a
  * second tick retries the advance.
  */
+/** The plain phrase a failed next-stage spawn answers (raw error text stays in the server log). */
+const PLAIN_FAILURE = () =>
+  'The next step could not be created. The tick was saved - untick and tick this step again to retry, or tell Alex (the server log has the detail).'
+
 describe('stage advance explains itself (file backend)', () => {
   const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
 
@@ -50743,12 +50747,35 @@ describe('stage advance explains itself (file backend)', () => {
     }
     const result = await store.toggleChecklistItem('cl-stage', 'item-a')
     expect(result.spawned).toBeNull()
-    expect(result.spawnError).toBe('disk hiccup')
+    expect(result.spawnError).toBe(PLAIN_FAILURE())
+    expect(result.spawnError).not.toContain('disk hiccup')
     expect(result.checklist.items[0].done).toBe(true)
     const row = (await persisted()).checklists.find((entry) => entry.id === 'cl-stage')
     expect(row.items[0].done).toBe(true)
     expect(await stageOnes()).toHaveLength(0)
     expect(stageLines(errorSpy)).toEqual(['[stage-advance] FAILED cl-stage case case-1: disk hiccup'])
+  })
+
+  it('a thrown relation error reaches the caller as the plain phrase; the raw text stays in the log', async () => {
+    await seed([stageChecklist()])
+    store.maybeSpawnNextStage = async () => {
+      throw new Error('relation "x" does not exist')
+    }
+    const result = await store.toggleChecklistItem('cl-stage', 'item-a')
+    expect(result.spawnError).toBe(PLAIN_FAILURE())
+    expect(result.spawnError).not.toContain('relation')
+    expect(stageLines(errorSpy)).toEqual([
+      '[stage-advance] FAILED cl-stage case case-1: relation "x" does not exist',
+    ])
+  })
+
+  it('an already-worded refusal (a billing master) keeps its own sentence', async () => {
+    await seed([stageChecklist()])
+    store.maybeSpawnNextStage = async () => {
+      throw new BillingMasterError('KLC Master is a billing master - it holds no tasks of its own.')
+    }
+    const result = await store.toggleChecklistItem('cl-stage', 'item-a')
+    expect(result.spawnError).toBe('KLC Master is a billing master - it holds no tasks of its own.')
   })
 
   it('a second tick after a failed spawn retries the advance', async () => {
@@ -50900,7 +50927,7 @@ describe('stage advance explains itself (Postgres statements)', () => {
     const result = await pgStore.toggleChecklistItem('cl-1', 'it-1')
 
     expect(result.spawned).toBeNull()
-    expect(result.spawnError).toBe('Connection terminated unexpectedly')
+    expect(result.spawnError).toBe(PLAIN_FAILURE())
     expect(result.checklist.items[0].done).toBe(true)
     // The item update ran inside its own transaction and was committed BEFORE
     // the spawn was attempted; nothing rolled it back afterward.
@@ -50911,6 +50938,20 @@ describe('stage advance explains itself (Postgres statements)', () => {
     expect(granted).toBe(0)
     expect(errorSpy.mock.calls.map((call) => String(call[0]))).toContain(
       '[stage-advance] FAILED cl-1 case case-1: Connection terminated unexpectedly',
+    )
+  })
+
+  it('a visibility grant that throws after the stage was created still answers spawned', async () => {
+    const { pgStore } = pgStageStore()
+    pgStore.createChecklist = async (checklist) => ({ ...checklist })
+    pgStore.grantClientVisibility = async () => {
+      throw new Error('lock timeout')
+    }
+    const result = await pgStore.toggleChecklistItem('cl-1', 'it-1')
+    expect(result.spawned).toMatchObject({ caseId: 'case-1', stageIndex: 1 })
+    expect(result.spawnError).toBeUndefined()
+    expect(errorSpy.mock.calls.map((call) => String(call[0]))).toContainEqual(
+      expect.stringMatching(/^\[stage-advance\] visibility grant FAILED .* client c1: lock timeout$/),
     )
   })
 
