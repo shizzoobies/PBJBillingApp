@@ -152,6 +152,7 @@ import {
   PAYMENT_ON_VOIDED_EVENT,
   creditReversalHolds,
   duplicatePaymentWaiting,
+  paymentMarkerFor,
   unhandledAmountMismatches,
 } from '../lib/payment-amount-mismatch.js'
 import { editChangesWhatClientSees, totalsDiffer } from '../lib/invoice-sent-change.js'
@@ -20850,6 +20851,20 @@ export class AppDataStore {
         (invoice.emailLog ?? []).some((entry) => entry?.providerId === id && entry?.kind !== 'delivery'),
       ) ?? null
     )
+  }
+
+  /**
+   * The invoice whose email log carries a payment marker for this PaymentIntent - the payments
+   * the app recorded on an invoice without applying them (a duplicate second payment, a payment
+   * for a voided invoice) - and that marker: `{ invoice, marker }`, or null.
+   */
+  async findInvoiceByPaymentMarker(paymentIntentId) {
+    if (typeof paymentIntentId !== 'string' || !paymentIntentId) return null
+    for (const invoice of await this.listInvoices()) {
+      const marker = paymentMarkerFor(invoice.emailLog, paymentIntentId)
+      if (marker) return { invoice, marker }
+    }
+    return null
   }
 
   /**

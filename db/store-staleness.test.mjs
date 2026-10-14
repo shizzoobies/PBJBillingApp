@@ -5422,6 +5422,19 @@ describe('recordInvoiceAmountMismatch and acknowledgeInvoiceAmountMismatch (file
     ...over,
   })
 
+  it('finds the invoice whose log carries a duplicate or on-voided marker for a PaymentIntent, and nothing else', async () => {
+    await seed()
+    await store.recordInvoiceAmountMismatch('inv-1', mismatch({ paymentIntentId: 'pi_dup', reason: 'duplicate' }))
+    await store.recordInvoiceAmountMismatch('inv-1', mismatch({ paymentIntentId: 'pi_diff' }))
+    const found = await store.findInvoiceByPaymentMarker('pi_dup')
+    expect(found.invoice.id).toBe('inv-1')
+    expect(found.marker).toMatchObject({ event: 'amount-mismatch', reason: 'duplicate', paymentIntentId: 'pi_dup' })
+    // A different-amount marker is a payment the app applied; an unknown id matches nothing.
+    expect(await store.findInvoiceByPaymentMarker('pi_diff')).toBeNull()
+    expect(await store.findInvoiceByPaymentMarker('pi_unknown')).toBeNull()
+    expect(await store.findInvoiceByPaymentMarker('')).toBeNull()
+  })
+
   it('appends a payment entry beside the send, tagged so it is neither a send nor a failure', async () => {
     await seed()
     const updated = await store.recordInvoiceAmountMismatch('inv-1', mismatch())
