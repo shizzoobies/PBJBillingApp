@@ -10149,21 +10149,40 @@ button.repeating-task-toggle-pill {
 }
 
 .board-column-header {
+  width: 100%;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   padding: 12px 14px;
+  border: 0;
   border-bottom: 1px solid var(--line);
+  font: inherit;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
   position: sticky;
   top: 0;
   z-index: 1;
   background: inherit;
 }
 
+.board-column-header:hover {
+  background: color-mix(in srgb, var(--soft) 80%, var(--line));
+}
+
+.board-column-header[data-open='false'] {
+  border-bottom-color: transparent;
+}
+
 .board-column-header strong {
+  flex: 1;
   font-size: 0.95rem;
   color: var(--ink);
+}
+
+.board-column-count {
+  color: var(--muted);
+  font-size: 0.85rem;
 }
 
 .board-column-body {

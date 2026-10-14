@@ -366,6 +366,15 @@ export function ActiveChecklistsBoardPage() {
   )
   // "Hide empty columns": a column with nobody on it right now is left out.
   const isShown = (col: BoardColumn) => !hideEmpty || col.clients.length > 0
+  // Which columns are unfolded (Brittany 2026-10-14: every column starts folded
+  // to its name and client count). In memory only, so a refresh folds them all.
+  const [openColumnIds, setOpenColumnIds] = useState<ReadonlySet<string>>(() => new Set())
+  const toggleColumn = (id: string) =>
+    setOpenColumnIds((current) => {
+      const next = new Set(current)
+      if (!next.delete(id)) next.add(id)
+      return next
+    })
   const groupKey = (name: string | null) => name ?? OTHER_GROUP_KEY
   const scrollToGroup = (key: string) => {
     groupHeaderRefs.current.get(key)?.scrollIntoView?.({ block: 'nearest', inline: 'start' })
@@ -430,6 +439,8 @@ export function ActiveChecklistsBoardPage() {
     <BoardColumnView
       key={column.id}
       column={column}
+      open={openColumnIds.has(column.id)}
+      onToggle={() => toggleColumn(column.id)}
       renderCard={renderCard}
       statusFor={statusFor}
       teamTagFor={teamTagFor}
@@ -505,6 +516,16 @@ export function ActiveChecklistsBoardPage() {
               />
               Hide empty columns
             </label>
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => setOpenColumnIds(new Set(filteredColumns.filter(isShown).map((col) => col.id)))}
+            >
+              Expand all
+            </button>
+            <button type="button" className="secondary-action" onClick={() => setOpenColumnIds(new Set())}>
+              Collapse all
+            </button>
             {teamMemberIds.length > 0 ? (
               <label
                 className="upcoming-toggle"
@@ -758,6 +779,8 @@ function StatusChip({ status }: { status: BoardChecklistStatus }) {
 
 function BoardColumnView({
   column,
+  open,
+  onToggle,
   renderCard,
   statusFor,
   teamTagFor,
@@ -765,6 +788,9 @@ function BoardColumnView({
   stepSummaryFor,
 }: {
   column: BoardColumn
+  /** Unfolded: the client rows show. Folded, only the header and its count. */
+  open: boolean
+  onToggle: () => void
   renderCard: (checklist: Checklist) => ReactNode
   statusFor: (checklist: Checklist) => BoardChecklistStatus
   /** Teammate's name when this card belongs to someone under the viewer. */
@@ -775,28 +801,37 @@ function BoardColumnView({
 }) {
   return (
     <div className="board-column" data-uncategorized={column.id === UNCATEGORIZED_ID}>
-      <div className="board-column-header">
-        <strong>{column.name}</strong>
-        <span className="status-pill">{column.openClientCount}</span>
-      </div>
-      <div className="board-column-body">
-        {column.clients.length === 0 ? (
-          <p className="board-column-empty">No open clients.</p>
-        ) : (
-          column.clients.map((clientRow) => (
-            <BoardClientRow
-              key={clientRow.clientId}
-              name={clientRow.name}
-              checklists={clientRow.checklists}
-              renderCard={renderCard}
-              statusFor={statusFor}
-              teamTagFor={teamTagFor}
-              currentStepOnly={currentStepOnly}
-              stepSummaryFor={stepSummaryFor}
-            />
-          ))
-        )}
-      </div>
+      <button
+        type="button"
+        className="board-column-header"
+        data-open={open}
+        onClick={onToggle}
+        aria-expanded={open}
+      >
+        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <strong>{column.name}</strong>{' '}
+        <span className="board-column-count">({column.clients.length})</span>
+      </button>
+      {open ? (
+        <div className="board-column-body">
+          {column.clients.length === 0 ? (
+            <p className="board-column-empty">No open clients.</p>
+          ) : (
+            column.clients.map((clientRow) => (
+              <BoardClientRow
+                key={clientRow.clientId}
+                name={clientRow.name}
+                checklists={clientRow.checklists}
+                renderCard={renderCard}
+                statusFor={statusFor}
+                teamTagFor={teamTagFor}
+                currentStepOnly={currentStepOnly}
+                stepSummaryFor={stepSummaryFor}
+              />
+            ))
+          )}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -818,13 +853,13 @@ function BoardClientRow({
   currentStepOnly: boolean
   stepSummaryFor: (checklist: Checklist) => BoardStepSummary | null
 }) {
-  // Each client row folds on its own. Full view: starts folded (the roll-up
-  // line is the glance). Step view: starts open (the step is the point of that
-  // view) and each mode keeps its own choice. In memory only, as it always was.
+  // Each client row folds on its own and starts folded in both views (the
+  // roll-up line is the glance; opening it shows the card or the current step).
+  // Each mode keeps its own choice. In memory only, as it always was.
   const [open, setOpen] = useState(false)
-  const [stepFolded, setStepFolded] = useState(false)
-  const expanded = currentStepOnly ? !stepFolded : open
-  const toggleRow = () => (currentStepOnly ? setStepFolded((value) => !value) : setOpen((value) => !value))
+  const [stepOpen, setStepOpen] = useState(false)
+  const expanded = currentStepOnly ? stepOpen : open
+  const toggleRow = () => (currentStepOnly ? setStepOpen((value) => !value) : setOpen((value) => !value))
   // Collapsed roll-up: how many of this client's checklists are blocked vs
   // overdue, so the row reads at a glance without expanding.
   const statuses = checklists.map(statusFor)

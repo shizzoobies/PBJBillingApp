@@ -229,6 +229,20 @@ function renderBoard() {
   )
 }
 
+/** Every column unfolded (Expand all), then every client row (all start folded). */
+function openAll() {
+  fireEvent.click(screen.getByRole('button', { name: 'Expand all' }))
+  for (const row of document.querySelectorAll<HTMLElement>('.board-client-toggle[aria-expanded="false"]')) {
+    fireEvent.click(row)
+  }
+}
+
+function renderOpenBoard() {
+  const view = renderBoard()
+  openAll()
+  return view
+}
+
 /** The step block of the checklist with this title (shown as its step line or above it). */
 const stepBlock = (checklistTitle: string) => {
   const block = [...document.querySelectorAll<HTMLElement>('.board-step-block')].find((candidate) =>
@@ -242,16 +256,21 @@ const stepBlock = (checklistTitle: string) => {
 const TASK_LABELS = CHECKLISTS.flatMap((checklist) => checklist.items.map((item) => item.label))
 
 describe('Board: Current step only (default ON)', () => {
-  it('opens every row and shows the step in bold, who it is for, the task count, the next stage and a link', () => {
+  it('opens a row to show the step in bold, who it is for, the task count, the next stage and a link', () => {
     renderBoard()
     const toggle = screen.getByRole('checkbox', { name: 'Current step only' })
     expect(toggle).toBeChecked()
 
-    // The rows start open; the roll-up reads in the toggle that folds each one.
+    // Columns and rows start folded; the roll-up reads in the toggle that opens each row.
+    expect(document.querySelector('.board-client-toggle')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }))
     const acmeHead = screen.getByRole('button', { name: /Acme Books/ })
-    expect(acmeHead).toHaveAttribute('aria-expanded', 'true')
+    expect(acmeHead).toHaveAttribute('aria-expanded', 'false')
+    expect(document.querySelector('.board-step-block')).toBeNull()
     expect(acmeHead).toHaveTextContent('1 waiting')
     expect(acmeHead).toHaveTextContent('2')
+    fireEvent.click(acmeHead)
+    expect(acmeHead).toHaveAttribute('aria-expanded', 'true')
 
     const close = stepBlock('Monthly close')
     const label = within(close).getByText('Step 2 of 3 - Review')
@@ -273,7 +292,7 @@ describe('Board: Current step only (default ON)', () => {
   })
 
   it('folds one client row on its own and opens it again, keeping the roll-up line', () => {
-    renderBoard()
+    renderOpenBoard()
     const acmeHead = screen.getByRole('button', { name: /Acme Books/ })
     const zedHead = screen.getByRole('button', { name: /Zed Works/ })
     expect(stepBlock('Monthly close')).toBeInTheDocument()
@@ -289,7 +308,7 @@ describe('Board: Current step only (default ON)', () => {
   })
 
   it('lists no tasks at all - the step is the unit, its items stay on the card', () => {
-    renderBoard()
+    renderOpenBoard()
     expect(document.querySelectorAll('.board-step-block').length).toBe(CHECKLISTS.length)
     for (const taskLabel of TASK_LABELS) {
       expect(document.body).not.toHaveTextContent(taskLabel)
@@ -298,7 +317,7 @@ describe('Board: Current step only (default ON)', () => {
   })
 
   it('an unstaged checklist reads as its own name in bold, not repeated', () => {
-    renderBoard()
+    renderOpenBoard()
     const block = stepBlock('Sales tax filing')
     const label = within(block).getByText('Sales tax filing')
     expect(label.tagName).toBe('STRONG')
@@ -311,7 +330,7 @@ describe('Board: Current step only (default ON)', () => {
   })
 
   it('the first stage names the next one; a stage whose tasks all read done counts them', () => {
-    renderBoard()
+    renderOpenBoard()
     const payroll = stepBlock('Payroll setup')
     expect(within(payroll).getByText('Step 1 of 3 - Collect').tagName).toBe('STRONG')
     expect(payroll.querySelector('.board-step-count')).toHaveTextContent(/^0 of 1 task done$/)
@@ -323,20 +342,20 @@ describe('Board: Current step only (default ON)', () => {
   })
 
   it('a checklist with no tasks reads "No tasks yet"', () => {
-    renderBoard()
+    renderOpenBoard()
     const intake = stepBlock('Engagement intake')
     expect(within(intake).getByText('No tasks yet')).toBeInTheDocument()
     expect(intake).not.toHaveTextContent(/tasks? done/)
   })
 
   it('the checklist Due chip names the right month (MONTH_NAMES is 1-based)', () => {
-    renderBoard()
+    renderOpenBoard()
     const wrapper = stepBlock('Monthly close').closest('.board-card-with-status') as HTMLElement
     expect(wrapper.querySelector('.board-chip-due')).toHaveTextContent(`Due ${shortMonthDay(STEP_DUE)}`)
   })
 
   it('Waiting and Overdue live on the status chip only, never inside the step block', () => {
-    renderBoard()
+    renderOpenBoard()
     for (const [title, chipClass] of [
       ['Payroll setup', 'board-chip-pending'],
       ['Sales tax filing', 'board-chip-overdue'],
@@ -351,6 +370,7 @@ describe('Board: Current step only (default ON)', () => {
 
   it('unticking it restores the collapsible rows and the full checklist card', () => {
     renderBoard()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }))
     fireEvent.click(screen.getByRole('checkbox', { name: 'Current step only' }))
     expect(document.querySelector('.board-step-block')).toBeNull()
     const row = screen.getByRole('button', { name: /Acme Books/ })
@@ -368,6 +388,7 @@ describe('Board: Current step only (default ON)', () => {
 
     renderBoard()
     expect(screen.getByRole('checkbox', { name: 'Current step only' })).not.toBeChecked()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }))
     expect(screen.getByRole('button', { name: /Acme Books/ })).toBeInTheDocument()
   })
 
@@ -386,7 +407,7 @@ describe('Board: Current step only (default ON)', () => {
   })
 
   it('the search box also matches the step a checklist is on, but not its tasks', () => {
-    renderBoard()
+    renderOpenBoard()
     const search = screen.getByRole('searchbox', { name: /search board/i })
     fireEvent.change(search, { target: { value: 'REVIEW' } })
     expect(stepBlock('Monthly close')).toBeInTheDocument()
@@ -402,9 +423,12 @@ describe('Board: Current step only (default ON)', () => {
   })
 
   it('a projected ghost still renders the Upcoming card', async () => {
-    renderBoard()
+    renderOpenBoard()
     fireEvent.click(screen.getByRole('checkbox', { name: 'Show upcoming' }))
-    await waitFor(() => expect(document.querySelector('.checklist-card.projected')).not.toBeNull())
+    await waitFor(() => {
+      openAll()
+      expect(document.querySelector('.checklist-card.projected')).not.toBeNull()
+    })
     expect(screen.getAllByText('Upcoming').length).toBeGreaterThan(0)
     expect(screen.getByRole('checkbox', { name: 'Current step only' })).toBeChecked()
   })

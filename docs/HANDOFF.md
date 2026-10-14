@@ -29,7 +29,7 @@ actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 `762efc9` (+ this handoff), deployed, `/health` 200, voice re-provisioned, manifest 204,462. Brittany's send-back on
 `featreq-54bf39b6` ("collapse individual columns as the way before") was INTERPRETATION: the Board never had a
 column-level fold; she meant the per-client row arrow, which the "Current step only" view (default since 10-13)
-had dropped. `762efc9` restores the same toggle in that view (rows start open there, folded in the full view;
+had dropped. `762efc9` restores the same toggle in that view (rows start folded; columns start folded with counts (featreq-338b1507);
 each view keeps its own in-memory fold state); the ticket is Shipped with a note that says so and offers a
 column fold if that is what she meant. Her inbox had nothing new after the 10-13 board emails. STILL WAITING
 ON HER: the auto follow-ups question on `featreq-3f1d63b6` (build the scheduler only on her yes), the five
@@ -90,7 +90,7 @@ for part b): processing invoices have their own tab between Sent and Past due, r
 payment-failure entry follows that ack (the ack is only ever sent once per invoice); nine test files re-pointed.
 `f591269` (4 commits) **Board: current step only** (`featreq-338b1507`, Shipped - built on the two defaults, she was
 told): `boardStepSummary` in `src/lib/activeBoard.ts` (shared `waitingReasonFor` helper), "Current step only" checkbox
-default ON persisted at `pbj.boardStepView.v1.<userId>`, rows open, "Step N of M - stage", active step bold + due +
+default ON persisted at `pbj.boardStepView.v1.<userId>`, rows start folded; columns start folded with counts (featreq-338b1507), "Step N of M - stage", active step bold + due +
 assignee + Waiting/Overdue chip, two dimmed coming steps, "Then: Step N - stage", "No steps yet", "All steps done",
 Open checklist link; OFF = old view. **Also fixed in that ship:** the board's `shortDate` had shown the PREVIOUS month on
 every Due / Overdue chip since `cd96a80` (1-based MONTH_NAMES indexed with month-1). Manifest 204,444 of 205,000 - TRIM

@@ -92,6 +92,7 @@ describe('the Board says "Waiting" for a waiting checklist', () => {
         <ActiveChecklistsBoardPage />
       </MemoryRouter>,
     )
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand all' }))
     const toggle = await screen.findByRole('button', { name: /Acme Books/ })
     expect(toggle).toHaveTextContent('1 waiting')
     expect(toggle).not.toHaveTextContent(/pending/i)

@@ -289,9 +289,25 @@ describe('Board column groups: grouped body and Hide empty columns', () => {
   })
 })
 
-// Brittany 2026-10-14: "collapse individual columns as the way before". The
-// board has only ever folded the CLIENT ROW inside a column (the roll-up line is
-// the glance); "Current step only" had left those rows permanently open.
+// Brittany 2026-10-14: three levels - every column folded to "Name (N)", then its
+// client rows folded, then the current-step summary. The client row fold is the
+// old one; the column fold sits on top of it. All in memory: a refresh folds all.
+const expandAll = () => fireEvent.click(screen.getByRole('button', { name: 'Expand all' }))
+const openRows = () => {
+  for (const row of document.querySelectorAll<HTMLElement>('.board-client-toggle[aria-expanded="false"]')) {
+    fireEvent.click(row)
+  }
+}
+const columnNode = (columnName: string) =>
+  [...document.querySelectorAll<HTMLElement>('.board-column')].find(
+    (node) => node.querySelector('.board-column-header strong')?.textContent === columnName,
+  ) as HTMLElement
+const headerOf = (columnName: string) =>
+  columnNode(columnName).querySelector('.board-column-header') as HTMLElement
+const headerNames = () =>
+  [...document.querySelectorAll<HTMLElement>('.board-column-header')].map((header) =>
+    header.textContent?.replace(/\s+/g, ' ').trim(),
+  )
 const rowIn = (columnName: string, clientName: string) => {
   const column = [...document.querySelectorAll<HTMLElement>('.board-column')].find(
     (node) => node.querySelector('.board-column-header strong')?.textContent === columnName,
@@ -303,6 +319,8 @@ const rowIn = (columnName: string, clientName: string) => {
 describe('Board: folding a client row inside the group layout', () => {
   it('folds one row without touching its neighbors, the group headers or the strip', () => {
     renderBoard()
+    expandAll()
+    openRows()
     const headersBefore = groupHeaders()
     const chipsBefore = chipLabels()
     const feed = rowIn('Clear Feed', 'Acme Books')
@@ -328,6 +346,8 @@ describe('Board: folding a client row inside the group layout', () => {
 
   it('a folded row stays folded when Hide empty columns is toggled', () => {
     renderBoard()
+    expandAll()
+    openRows()
     const feed = rowIn('Clear Feed', 'Acme Books')
     fireEvent.click(feed.toggle)
     fireEvent.click(screen.getByRole('checkbox', { name: 'Hide empty columns' }))
@@ -339,24 +359,28 @@ describe('Board: folding a client row inside the group layout', () => {
 
   it('each view keeps its own fold state while the other is shown', () => {
     renderBoard()
+    expandAll()
     const stepToggle = screen.getByRole('checkbox', { name: 'Current step only' })
+    // Step view: rows start folded; open one.
+    expect(rowIn('Clear Feed', 'Acme Books').toggle).toHaveAttribute('aria-expanded', 'false')
     fireEvent.click(rowIn('Clear Feed', 'Acme Books').toggle)
+    expect(rowIn('Clear Feed', 'Acme Books').toggle).toHaveAttribute('aria-expanded', 'true')
     fireEvent.click(stepToggle)
     // The full view's row is on its own state: still its default (folded). Open it.
     expect(rowIn('Clear Feed', 'Acme Books').toggle).toHaveAttribute('aria-expanded', 'false')
     fireEvent.click(rowIn('Clear Feed', 'Acme Books').toggle)
     expect(rowIn('Clear Feed', 'Acme Books').cards()).not.toBeNull()
     fireEvent.click(stepToggle)
-    // Back in the step view the row is still folded, and the full view's open row is not touched.
-    expect(rowIn('Clear Feed', 'Acme Books').toggle).toHaveAttribute('aria-expanded', 'false')
-    expect(rowIn('Clear Feed', 'Acme Books').cards()).toBeNull()
-    expect(rowIn('Reconciliations', 'Acme Books').cards()).not.toBeNull()
+    // Back in the step view the row is still open, and the one never opened is still folded.
+    expect(rowIn('Clear Feed', 'Acme Books').toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(rowIn('Reconciliations', 'Acme Books').cards()).toBeNull()
     fireEvent.click(stepToggle)
     expect(rowIn('Clear Feed', 'Acme Books').toggle).toHaveAttribute('aria-expanded', 'true')
   })
 
   it('in the full view the rows start folded and open one at a time', () => {
     renderBoard()
+    expandAll()
     fireEvent.click(screen.getByRole('checkbox', { name: 'Current step only' }))
     const feed = rowIn('Clear Feed', 'Acme Books')
     const recon = rowIn('Reconciliations', 'Acme Books')
@@ -365,6 +389,119 @@ describe('Board: folding a client row inside the group layout', () => {
     fireEvent.click(feed.toggle)
     expect(feed.cards()).not.toBeNull()
     expect(recon.cards()).toBeNull()
+  })
+})
+
+describe('Board: the three-level fold (columns, client rows, current step)', () => {
+  it('starts with every column folded to "Name (N)" and no client row showing', () => {
+    renderBoard()
+    expect(headerNames()).toEqual(['Clear Feed (1)', 'Reconciliations (2)', 'Payroll (1)', 'Client Call (1)'])
+    for (const header of document.querySelectorAll('.board-column-header')) {
+      expect(header.tagName).toBe('BUTTON')
+      expect(header).toHaveAttribute('aria-expanded', 'false')
+    }
+    expect(document.querySelector('.board-client, .board-column-body')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Clear Feed (1)' })).toBeInTheDocument()
+  })
+
+  it('opening a column lists only its clients, folded; opening a client shows the current step', () => {
+    renderBoard()
+    fireEvent.click(screen.getByRole('button', { name: 'Reconciliations (2)' }))
+    expect(headerOf('Reconciliations')).toHaveAttribute('aria-expanded', 'true')
+    expect(headerOf('Reconciliations')).toHaveTextContent('Reconciliations (2)')
+    expect(columnNode('Reconciliations').querySelectorAll('.board-client')).toHaveLength(2)
+    expect(document.querySelectorAll('.board-client')).toHaveLength(2)
+    const acme = rowIn('Reconciliations', 'Acme Books')
+    expect(acme.toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(document.querySelector('.board-step-block')).toBeNull()
+
+    fireEvent.click(acme.toggle)
+    const block = columnNode('Reconciliations').querySelector('.board-step-block') as HTMLElement
+    expect(block).toHaveTextContent('Task cl-2')
+    expect(within(block).getByRole('link', { name: 'Open checklist' })).toBeInTheDocument()
+    expect(document.querySelectorAll('.board-step-block')).toHaveLength(1)
+  })
+
+  it('folds one column on its own: the others, the groups, the strip and Hide empty columns stay', () => {
+    renderBoard()
+    fireEvent.click(headerOf('Clear Feed'))
+    fireEvent.click(headerOf('Reconciliations'))
+    const headersBefore = groupHeaders()
+    const chipsBefore = chipLabels()
+    fireEvent.click(headerOf('Clear Feed'))
+    expect(headerOf('Clear Feed')).toHaveAttribute('aria-expanded', 'false')
+    expect(columnNode('Clear Feed').querySelector('.board-client')).toBeNull()
+    expect(headerOf('Reconciliations')).toHaveAttribute('aria-expanded', 'true')
+    expect(columnNode('Reconciliations').querySelectorAll('.board-client')).toHaveLength(2)
+    expect(groupHeaders()).toEqual(headersBefore)
+    expect(chipLabels()).toEqual(chipsBefore)
+    expect(columnNames()).toEqual(['Clear Feed', 'Reconciliations', 'Payroll', 'Client Call'])
+    expect(screen.getByRole('checkbox', { name: 'Hide empty columns' })).toBeChecked()
+
+    // Unhiding the empty columns adds them folded, with (0); Reconciliations stays open.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Hide empty columns' }))
+    expect(headerNames()).toContain('Sales Tax (0)')
+    expect(headerOf('Sales Tax')).toHaveAttribute('aria-expanded', 'false')
+    expect(headerOf('Reconciliations')).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('the count follows the search', () => {
+    renderBoard()
+    fireEvent.change(screen.getByPlaceholderText('Search board…'), { target: { value: 'Bolt' } })
+    expect(headerNames()).toEqual(['Reconciliations (1)', 'Client Call (1)'])
+    fireEvent.change(screen.getByPlaceholderText('Search board…'), { target: { value: 'Zed' } })
+    expect(headerNames()).toEqual(['Payroll (1)'])
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Hide empty columns' }))
+    expect(headerNames()).toContain('Clear Feed (0)')
+  })
+
+  it('a fresh mount (a refresh) is all folded again, and nothing is remembered', () => {
+    const first = renderBoard()
+    const storedBefore = window.localStorage.length
+    fireEvent.click(headerOf('Clear Feed'))
+    expect(headerOf('Clear Feed')).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.click(rowIn('Clear Feed', 'Acme Books').toggle)
+    expandAll()
+    expect(window.localStorage.length).toBe(storedBefore)
+    first.unmount()
+    renderBoard()
+    expect(headerOf('Clear Feed')).toHaveAttribute('aria-expanded', 'false')
+    expect(document.querySelector('.board-client')).toBeNull()
+    expect(window.localStorage.length).toBe(storedBefore)
+  })
+
+  it('Expand all leaves out a column Hide empty columns hides, which then appears folded', () => {
+    renderBoard()
+    expandAll()
+    expect(headerNames()).not.toContain('Sales Tax (0)')
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Hide empty columns' }))
+    expect(headerNames()).toContain('Sales Tax (0)')
+    expect(headerOf('Sales Tax')).toHaveAttribute('aria-expanded', 'false')
+    expect(headerOf('Clear Feed')).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('in the full-cards view a column header opens folded client rows too', () => {
+    renderBoard()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Current step only' }))
+    expect(document.querySelector('.board-client')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Reconciliations (2)' }))
+    expect(columnNode('Reconciliations').querySelectorAll('.board-client')).toHaveLength(2)
+    expect(rowIn('Reconciliations', 'Acme Books').toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(document.querySelector('.board-client-cards, .checklist-block')).toBeNull()
+  })
+
+  it('Expand all and Collapse all open and fold every column', () => {
+    renderBoard()
+    expandAll()
+    for (const header of document.querySelectorAll('.board-column-header')) {
+      expect(header).toHaveAttribute('aria-expanded', 'true')
+    }
+    expect(document.querySelectorAll('.board-client')).toHaveLength(5)
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse all' }))
+    for (const header of document.querySelectorAll('.board-column-header')) {
+      expect(header).toHaveAttribute('aria-expanded', 'false')
+    }
+    expect(document.querySelector('.board-client')).toBeNull()
   })
 })
 
