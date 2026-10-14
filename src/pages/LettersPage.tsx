@@ -426,6 +426,10 @@ export function LettersPage() {
     [rows],
   )
   const chosen = [...selected].filter((id) => selectableIds.has(id))
+  // Ticked earlier, then a search or a list filter took the row off the screen: still chosen, still sent.
+  const shownIds = new Set(shown.map((row) => row.client.id))
+  const hiddenChosen = chosen.filter((id) => !shownIds.has(id))
+  const hiddenNote = hiddenChosen.length > 0 ? ` (${hiddenChosen.length} hidden)` : ''
 
   const toggle = (id: string) =>
     setSelected((currentSet) => {
@@ -482,8 +486,10 @@ export function LettersPage() {
     if (chosen.length === 0) return
     const replyAddress = state?.sender.replyTo || 'the reply address'
     const count = chosen.length
+    const hiddenNames = hiddenChosen.map((id) => clients.find((client) => client.id === id)?.name ?? id)
     const ok = window.confirm(
-      `Send "${letterName}" to ${count} client${count === 1 ? '' : 's'}? Each gets your email with the letter attached as a PDF. Replies go to ${replyAddress}.`,
+      `Send "${letterName}" to ${count} client${count === 1 ? '' : 's'}${hiddenNote}? Each gets your email with the letter attached as a PDF. Replies go to ${replyAddress}.` +
+        (hiddenNames.length > 0 ? ` Also sending to (not in the list right now): ${hiddenNames.join(', ')}.` : ''),
     )
     if (!ok) return
     // A fresh Send starts a fresh list; the retry buttons below merge into it instead.
@@ -794,7 +800,22 @@ export function LettersPage() {
           <button type="button" className="ghost-action" onClick={() => setSelected(new Set())}>
             Clear
           </button>
-          <span className="muted-text">{chosen.length} selected</span>
+          <span className="muted-text">{`${chosen.length} selected${hiddenNote}`}</span>
+          {hiddenChosen.length > 0 ? (
+            <button
+              type="button"
+              className="ghost-action"
+              onClick={() =>
+                setSelected((currentSet) => {
+                  const next = new Set(currentSet)
+                  for (const id of hiddenChosen) next.delete(id)
+                  return next
+                })
+              }
+            >
+              Untick hidden
+            </button>
+          ) : null}
         </div>
 
         <div className="table-scroll">
@@ -895,7 +916,7 @@ export function LettersPage() {
             disabled={sending || dirty || chosen.length === 0 || !saved}
             onClick={() => void sendSelected()}
           >
-            {`Send "${letterName}" to ${chosen.length} client${chosen.length === 1 ? '' : 's'}`}
+            {`Send "${letterName}" to ${chosen.length} client${chosen.length === 1 ? '' : 's'}${hiddenNote}`}
           </button>
           {progress ? <span className="muted-text">{progress}</span> : null}
         </div>

@@ -568,6 +568,48 @@ describe('the client picker', () => {
     expect(screen.getByRole('button', { name: 'Send "1099 Filing" to 0 clients' })).toBeDisabled()
   })
 
+  // Brittany's leftovers: a row ticked, then hidden by a search or a filter, is still sent.
+  it('counts a ticked row that a search hid, names it in the confirm, and Untick hidden clears it', async () => {
+    const confirm = mockConfirm(false)
+    await renderPage()
+    fireEvent.click(screen.getByLabelText('Select Acme Books'))
+    fireEvent.click(screen.getByLabelText('Select Onboarding Co'))
+    expect(screen.getByText('2 selected')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Untick hidden' })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'onboarding' } })
+    expect(screen.queryByText('Acme Books')).not.toBeInTheDocument()
+    expect(screen.getByText('2 selected (1 hidden)')).toBeInTheDocument()
+    const send = screen.getByRole('button', { name: 'Send "1099 Filing" to 2 clients (1 hidden)' })
+    fireEvent.click(send)
+    expect(confirm).toHaveBeenCalledWith(
+      'Send "1099 Filing" to 2 clients (1 hidden)? Each gets your email with the letter attached as a PDF. Replies go to brittany@pbjsa.com. Also sending to (not in the list right now): Acme Books.',
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Untick hidden' }))
+    expect(screen.getByText('1 selected')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Untick hidden' })).not.toBeInTheDocument()
+    // The row that was on screen stays ticked; the cleared one is not ticked when it comes back.
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: '' } })
+    expect(screen.getByLabelText('Select Onboarding Co')).toBeChecked()
+    expect(screen.getByLabelText('Select Acme Books')).not.toBeChecked()
+  })
+
+  it('counts a ticked inactive client as hidden once the inactive checkbox is turned off', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByLabelText('Include inactive and proposal-stage clients'))
+    fireEvent.click(screen.getByLabelText('Select Old Co'))
+    expect(screen.getByText('1 selected')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Include inactive and proposal-stage clients'))
+    expect(screen.getByText('1 selected (1 hidden)')).toBeInTheDocument()
+    // Send still sends it: she may have hidden it on purpose.
+    mockConfirm(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 1 client (1 hidden)' }))
+    await waitFor(() =>
+      expect(api.sendLettersRequest).toHaveBeenCalledWith('default', { clientIds: ['c-old'], templateHash: 'hash-1' }),
+    )
+  })
+
   it('Select all shown respects the search', async () => {
     await renderPage()
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'acme' } })
