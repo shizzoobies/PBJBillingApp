@@ -2869,6 +2869,12 @@ export type EngagementSignResult = {
   clientId: string
   createdClient: boolean
   clonedTemplateIds: string[]
+  /** Checklists the client already had that signing tied to the package / plans instead of copying. */
+  linkedTemplateIds?: string[]
+  /** Blueprints left for the owner to choose (more than one existing match, or one on a differing schedule). */
+  ambiguousTemplateIds?: string[]
+  /** The part of `ambiguousTemplateIds` whose one match runs on a schedule the plan does not give. */
+  scheduleDiffersTemplateIds?: string[]
   retainerInvoiceId: string | null
   retainerPeriod: string | null
   monthlyRate: number | null

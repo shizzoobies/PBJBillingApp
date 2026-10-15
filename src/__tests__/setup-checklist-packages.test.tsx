@@ -228,6 +228,41 @@ describe('the plan checklists fix dialog offers Link existing', () => {
       active: true,
     })
   })
+  it('Set them up links her checklist and copies only the rest, then says what it did', async () => {
+    mockPackages.mockResolvedValue([{ ...PACKAGE, templateIds: ['t1', 't3'] }])
+    const updateChecklistTemplate = vi.fn()
+    const addChecklistTemplate = vi.fn()
+    const base = contextValue
+    const hers = { ...template('h1', 'Monthly Close'), clientId: 'client-1', isStandard: false }
+    contextValue = {
+      ...base,
+      data: { ...base.data, checklistTemplates: [...base.data.checklistTemplates, hers] },
+      updateChecklistTemplate,
+      addChecklistTemplate,
+      workspaceSaving: false,
+    } as unknown as AppContextValue
+    renderPage()
+    await act(async () => {})
+    openClients()
+    fireEvent.click(screen.getAllByRole('button', { name: 'Fix' })[0])
+
+    // The dialog says what each row will do before anything happens.
+    expect(screen.getByText(/Will link "Monthly Close" that the client already has\./)).toBeTruthy()
+    expect(screen.getByText(/Will be created\./)).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Set them up' }))
+    })
+
+    expect(updateChecklistTemplate).toHaveBeenCalledTimes(1)
+    const [linkedId, updater] = updateChecklistTemplate.mock.calls[0]
+    expect(linkedId).toBe('h1')
+    expect(updater(hers).sourceTemplateId).toBe('t1')
+    expect(addChecklistTemplate).toHaveBeenCalledTimes(1)
+    expect(addChecklistTemplate.mock.calls[0][0]).toMatchObject({ sourceTemplateId: 't3', title: 'Client Meeting' })
+    expect(screen.getByText('1 linked, 1 created.')).toBeTruthy()
+  })
+
   it('waits for a pending save before setting anything up', async () => {
     mockPackages.mockResolvedValue([{ ...PACKAGE, templateIds: ['t1', 't3'] }])
     contextValue = { ...contextValue, workspaceSaving: true, addChecklistTemplate: vi.fn() } as unknown as AppContextValue

@@ -70,9 +70,13 @@ import {
 } from '../lib/api'
 import {
   applyPackageConfirmText,
+  chooseReasonText,
   chosenPackagesOf,
   defaultPackageTemplateIds,
   packagesForClient,
+  setUpConfirmText,
+  setUpResultText,
+  type SetUpStep,
 } from '../lib/packages'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
@@ -137,6 +141,7 @@ import {
   uniqueByTitle,
   MONTH_NAMES,
   normalizeBillingMonth,
+  planSetUpSteps,
   planTemplates,
   sessionMinutes,
   shortDate,
@@ -575,7 +580,7 @@ export function ClientDetailPage() {
           ) : null}
 
           <CollapsibleSection id="client-section-plan-checklists" kicker="Billing" title="Plan checklists" lockable>
-            <PlanChecklistsBody client={client} data={data} />
+            <PlanChecklistsBody key={client.id} client={client} data={data} />
           </CollapsibleSection>
 
           {/* A billing master collects nothing of its own — "no data entered or
@@ -1241,7 +1246,7 @@ export function PlanServicesField({
   packages?: Package[]
   onCommit: (patch: Partial<Client>) => void
 }) {
-  const { data, ownerMode, addChecklistTemplate } = useAppContext()
+  const { data, ownerMode, addChecklistTemplate, updateChecklistTemplate } = useAppContext()
   // The "already in <package>" note belongs to the client it was said for.
   const [hintState, setHintState] = useState<{ clientId: string; text: string }>({ clientId: '', text: '' })
   const hint = hintState.clientId === client.id ? hintState.text : ''
@@ -1285,16 +1290,19 @@ export function PlanServicesField({
       ),
     )
     if (missing.length === 0) return
-    const titles = missing.map((template) => template.title).join(', ')
-    if (!window.confirm(`Also set up these checklists for ${client.name}: ${titles}?`)) return
+    // A checklist the client already has under its own title is LINKED, not
+    // copied next to it; a row several existing ones match is left for her.
     // Each copy follows the "How often" of the added plan that bundles it
-    // (featreq-acdd0c84 B2).
+    // (featreq-acdd0c84 B2), and a link must agree with it.
     const addedPlans = added.map((id) => plans.find((plan) => plan.id === id))
-    for (const template of missing) {
-      addChecklistTemplate(
-        cloneTemplateForClient(template, client.id, planCadenceFor(template.id, addedPlans)),
-      )
-    }
+    const steps = planSetUpSteps(missing, client.id, data.checklistTemplates, (blueprint) =>
+      planCadenceFor(blueprint.id, addedPlans),
+    )
+    const plain = steps.every((step) => step.kind === 'create')
+    const heading = `Also set up these checklists for ${client.name}: ${missing.map((template) => template.title).join(', ')}?`
+    if (!window.confirm(plain ? heading : setUpConfirmText(`Also set up checklists for ${client.name}?`, steps))) return
+    runSetUpSteps(steps, client.id, addedPlans, { addChecklistTemplate, updateChecklistTemplate })
+    if (!plain) setHint(setUpResultText(steps))
   }
   return (
     <>
@@ -1655,10 +1663,26 @@ export function ApplyPackageField({
     const attached = planTemplates(wanted, data.checklistTemplates)
     // Two blueprints with one title make one copy (the server skips the second
     // as same-titled), so the preview counts them once.
-    const newChecklistTitles = uniqueByTitle(
+    const missing = uniqueByTitle(
       missingPlanTemplatesForClient(wanted, data.checklistTemplates, client.id, data.checklistTemplates),
-    ).map((template) => template.title)
-    const skippedCount = attached.length - newChecklistTitles.length
+    )
+    // The server links a checklist the client already has under its own title
+    // instead of copying next to it, and leaves a row several match - the same
+    // rule as Set up (lib/checklist-link-match.js).
+    const steps = planSetUpSteps(missing, client.id, data.checklistTemplates, (blueprint) =>
+      planCadenceFor(blueprint.id, [
+        ...addedPlans,
+        ...pkg.planIds.map((planId) => data.plans.find((plan) => plan.id === planId)),
+      ]),
+    )
+    const newChecklistTitles = steps.filter((step) => step.kind === 'create').map((step) => step.blueprint.title)
+    const linkLines = steps.flatMap((step) =>
+      step.kind === 'link' ? [`${step.blueprint.title} -> ${step.copy.title}`] : [],
+    )
+    const chooseLines = steps.flatMap((step) =>
+      step.kind === 'choose' ? [`${step.blueprint.title} (${chooseReasonText(step)})`] : [],
+    )
+    const skippedCount = attached.length - missing.length
 
     const confirmed = window.confirm(
       applyPackageConfirmText({
@@ -1667,6 +1691,8 @@ export function ApplyPackageField({
         addedPlanNames,
         newChecklistTitles,
         skippedCount,
+        linkLines,
+        chooseLines,
       }),
     )
     if (!confirmed) return
@@ -1682,6 +1708,14 @@ export function ApplyPackageField({
         } added, ${applied.clonedTemplateIds.length} checklist${
           applied.clonedTemplateIds.length === 1 ? '' : 's'
         } created${
+          (applied.linkedTemplateIds?.length ?? 0) > 0
+            ? `, ${applied.linkedTemplateIds?.length} linked to checklists already here`
+            : ''
+        }${
+          (applied.ambiguousTemplateIds?.length ?? 0) > 0
+            ? `, ${applied.ambiguousTemplateIds?.length} left for you to choose`
+            : ''
+        }${
           applied.skippedTemplateIds.length > 0
             ? `, ${applied.skippedTemplateIds.length} already set up and skipped`
             : ''
@@ -2334,6 +2368,38 @@ function cloneTemplateForClient(
 }
 
 /**
+ * Carry out Set up's steps in the browser (they ride the bulk save): LINK the
+ * checklist the client already has by stamping it with the blueprint's id - the
+ * same link "Link existing" makes - or copy the blueprint when nothing the client
+ * has stands for it. A row several existing checklists match is left alone.
+ */
+function runSetUpSteps(
+  steps: readonly SetUpStep[],
+  clientId: string,
+  plans: readonly (SubscriptionPlan | null | undefined)[],
+  actions: {
+    addChecklistTemplate: (template: Omit<ChecklistTemplate, 'id'>) => unknown
+    updateChecklistTemplate: (
+      templateId: string,
+      updater: (template: ChecklistTemplate) => ChecklistTemplate,
+    ) => void
+  },
+) {
+  for (const step of steps) {
+    if (step.kind === 'link') {
+      actions.updateChecklistTemplate(step.copy.id, (current) => ({
+        ...current,
+        sourceTemplateId: step.blueprint.id,
+      }))
+    } else if (step.kind === 'create') {
+      actions.addChecklistTemplate(
+        cloneTemplateForClient(step.blueprint, clientId, planCadenceFor(step.blueprint.id, plans)),
+      )
+    }
+  }
+}
+
+/**
  * "Match plan: Quarterly" (featreq-acdd0c84 B3): owner-only, on each client copy
  * of a plan checklist whose schedule is not the one its plan's "How often" gives
  * a new copy. The server re-syncs it; future due dates move, nothing already
@@ -2386,6 +2452,10 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
   const { ownerMode, addChecklistTemplate, updateChecklistTemplate } = useAppContext()
   const [packages, setPackages] = useState<Package[]>([])
   const [loaded, setLoaded] = useState(false)
+  // What each group's last Set up did ("2 linked, 1 created."), by group key.
+  // (keyed by client too, so a result said for one client never shows on the next)
+  const [setUpResults, setSetUpResults] = useState<Record<string, string>>({})
+  const resultKey = (groupKey: string) => `${client.id}:${groupKey}`
 
   // Packages are endpoint-managed (not in AppData), so they are fetched here,
   // the way ApplyPackageField does. The panel paints nothing until the fetch
@@ -2539,17 +2609,33 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
               type="button"
               className="secondary-action"
               onClick={() => {
-                for (const template of missing) {
-                  addChecklistTemplate(
-                    cloneTemplateForClient(template, client.id, planCadenceFor(template.id, groupPlans)),
+                // Match first: a checklist the client already has stands in for
+                // the blueprint (linked, not copied); several that match leave the
+                // row Not set up for her to choose; only the rest are copied.
+                const steps = planSetUpSteps(uniqueByTitle(missing), client.id, data.checklistTemplates, (blueprint) =>
+                  planCadenceFor(blueprint.id, groupPlans),
+                )
+                if (
+                  steps.some((step) => step.kind !== 'create') &&
+                  !window.confirm(
+                    setUpConfirmText(`Set up ${kind} checklists for ${client.name}?`, steps),
                   )
+                ) {
+                  return
                 }
+                runSetUpSteps(steps, client.id, groupPlans, { addChecklistTemplate, updateChecklistTemplate })
+                setSetUpResults((previous) => ({ ...previous, [resultKey(key)]: setUpResultText(steps) }))
               }}
             >
               <Plus size={14} /> Set up {kind} checklists ({missing.length})
             </button>
           ) : null}
         </div>
+        {setUpResults[resultKey(key)] ? (
+          <p className="muted-text" role="status">
+            {setUpResults[resultKey(key)]}
+          </p>
+        ) : null}
         {templates.length === 0 ? (
           <p className="muted-text">
             {handledElsewhere

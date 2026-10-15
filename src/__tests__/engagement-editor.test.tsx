@@ -729,6 +729,30 @@ describe('Mark as signed', () => {
     )
   })
 
+  it('says how many existing checklists signing linked, and how many it left for her to choose', async () => {
+    mockConfirm(true)
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z' }))
+    api.signEngagementRequest = vi.fn(async () =>
+      signResult({
+        linkedTemplateIds: ['tpl-close'],
+        ambiguousTemplateIds: ['tpl-a', 'tpl-b'],
+        scheduleDiffersTemplateIds: ['tpl-b'],
+      }),
+    )
+    await renderEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    const summary = await screen.findByRole('status', { name: 'What signing did' })
+    expect(within(summary).getByText('1 checklist the client already had was linked instead of copied.')).toBeTruthy()
+    expect(
+      within(summary).getByText('1 left for you to choose on the client page: more than one existing checklist matches.'),
+    ).toBeTruthy()
+    expect(
+      within(summary).getByText(
+        `1 left for you to choose on the client page: the existing checklist runs on a different schedule than the plan's "How often".`,
+      ),
+    ).toBeTruthy()
+  })
+
   it('shows what signing did, with links to the client and the retainer', async () => {
     mockConfirm(true)
     api.getEngagementRequest = vi.fn(async () => view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z' }))

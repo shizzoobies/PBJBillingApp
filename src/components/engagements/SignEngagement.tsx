@@ -267,6 +267,9 @@ export function SigningSummary({
   showClientLink?: boolean
 }) {
   const checklists = result.clonedTemplateIds.length
+  // Rows left for her to choose: a differing schedule, or more than one match.
+  const scheduleLeft = (result.scheduleDiffersTemplateIds ?? []).length
+  const severalLeft = (result.ambiguousTemplateIds ?? []).length - scheduleLeft
   const onboardingChecklistId = result.onboardingChecklistId ?? null
   const onboardingOpened =
     Boolean(result.onboardingCaseId) && !result.skipped.some((entry) => entry.what === 'Onboarding checklist')
@@ -301,6 +304,15 @@ export function SigningSummary({
         ) : null}
         {checklists > 0 ? (
           <li>{`${checklists} recurring checklist${checklists === 1 ? '' : 's'} copied from the plans and package.`}</li>
+        ) : null}
+        {(result.linkedTemplateIds ?? []).length > 0 ? (
+          <li>{`${(result.linkedTemplateIds ?? []).length} checklist${(result.linkedTemplateIds ?? []).length === 1 ? '' : 's'} the client already had ${(result.linkedTemplateIds ?? []).length === 1 ? 'was' : 'were'} linked instead of copied.`}</li>
+        ) : null}
+        {severalLeft > 0 ? (
+          <li>{`${severalLeft} left for you to choose on the client page: more than one existing checklist matches.`}</li>
+        ) : null}
+        {scheduleLeft > 0 ? (
+          <li>{`${scheduleLeft} left for you to choose on the client page: the existing ${scheduleLeft === 1 ? 'checklist runs' : 'checklists run'} on a different schedule than the plan's "How often".`}</li>
         ) : null}
         {onboardingOpened ? (
           <li>Onboarding checklist opened at the Onboarding stage - the Proposal stage is marked done.</li>

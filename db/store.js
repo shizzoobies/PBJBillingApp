@@ -18,6 +18,7 @@ import {
   templateStartFloor,
 } from '../lib/checklist-start-floor.js'
 import { copiedTemplateSettings, copiedTemplateStages } from '../lib/checklist-template-copy.js'
+import { planSetUpSteps } from '../lib/checklist-link-match.js'
 import { STAGE_ADVANCE_FAILED_PHRASE } from '../lib/stage-advance-phrase.js'
 import { ENGAGEMENT_LIST_LIMIT } from '../lib/engagement-list-limit.js'
 import {
@@ -14187,11 +14188,10 @@ export class AppDataStore {
     // with that package should come over").
     // Each copy follows the "How often" of the plan that bundles it - an added
     // plan first, then the package's others (featreq-acdd0c84 B2).
-    const { copies, skippedTemplateIds } = await this.copyTemplatesToClient(
-      clientId,
-      [...pkg.templateIds],
-      { cadenceByTemplateId: AppDataStore._planBundleCadences(data.plans, [...addedPlanIds, ...pkg.planIds]) },
-    )
+    const { copies, skippedTemplateIds, linkedTemplateIds, ambiguousTemplateIds, scheduleDiffersTemplateIds } =
+      await this.copyTemplatesToClient(clientId, [...pkg.templateIds], {
+        cadenceByTemplateId: AppDataStore._planBundleCadences(data.plans, [...addedPlanIds, ...pkg.planIds]),
+      })
     await this._grantTemplateCopiesVisibility(clientId, copies)
     const clonedTemplateIds = copies.map((copy) => copy.sourceTemplateId)
 
@@ -14205,6 +14205,9 @@ export class AppDataStore {
       addedPlanIds,
       clonedTemplateIds,
       skippedTemplateIds,
+      linkedTemplateIds,
+      ambiguousTemplateIds,
+      scheduleDiffersTemplateIds,
     }
   }
 
@@ -28581,6 +28584,9 @@ export class AppDataStore {
       const addedPlanIds = []
       const removedPlanIds = []
       let clonedTemplateIds = []
+      let linkedTemplateIds = []
+      let ambiguousTemplateIds = []
+      let scheduleDiffersTemplateIds = []
       // A pure record brings no plans, package or checklists: nothing to read or add.
       if (!pure) try {
         const workspace = await this.read()
@@ -28652,7 +28658,7 @@ export class AppDataStore {
         // comes back. One save.
         // Each copy follows the "How often" of the plan that bundles it - an added
         // plan first, then the letter's others (featreq-acdd0c84 B2).
-        const { copies } = await this.copyTemplatesToClient(
+        const copied = await this.copyTemplatesToClient(
           clientId,
           [
             ...(pkgNow?.templateIds ?? []),
@@ -28663,6 +28669,10 @@ export class AppDataStore {
           ],
           { cadenceByTemplateId: AppDataStore._planBundleCadences(workspace.plans, [...addedPlanIds, ...lettered]) },
         )
+        const { copies } = copied
+        linkedTemplateIds = copied.linkedTemplateIds ?? []
+        ambiguousTemplateIds = copied.ambiguousTemplateIds ?? []
+        scheduleDiffersTemplateIds = copied.scheduleDiffersTemplateIds ?? []
         await this._grantTemplateCopiesVisibility(clientId, copies)
         clonedTemplateIds = copies.map((copy) => copy.sourceTemplateId)
         if (pkgNow) await this._recordSigningActivity(userId, 'package_applied', `${pkgNow.name} · ${client.name || ''}`)
@@ -28769,6 +28779,9 @@ export class AppDataStore {
         clientId,
         createdClient,
         clonedTemplateIds,
+        linkedTemplateIds,
+        ambiguousTemplateIds,
+        scheduleDiffersTemplateIds,
         retainerInvoiceId,
         retainerPeriod,
         monthlyRate,
@@ -31928,7 +31941,18 @@ export class AppDataStore {
    * every attempt, and against the copies made in this same call) gets one copy.
    * A stale workspace retries the whole read-decide-write, so two callers at once
    * produce one copy each, never two. Sources that no longer exist are left out.
-   * Returns { copies, skippedTemplateIds } - skipped = already on the client.
+   *
+   * MATCH FIRST (featreq-8bdc5ec5, the 2026-10-10 duplicates): a source the client
+   * lacks a stamped or same-titled copy of is still not copied when one of the
+   * client's own checklists stands for it (lib/checklist-link-match.js - the rule
+   * the client page's Set up uses). Exactly one such checklist is LINKED -
+   * stamped with the source's id in the same save - and several are left alone
+   * for the owner to choose. Only a source nothing stands for is copied.
+   *
+   * Returns { copies, skippedTemplateIds, linkedTemplateIds, ambiguousTemplateIds,
+   * scheduleDiffersTemplateIds } - skipped = already on the client; linked /
+   * ambiguous are source ids; scheduleDiffers is the part of ambiguous whose one
+   * match runs on a schedule the plan does not give.
    *
    * `cadenceByTemplateId` ({ [sourceId]: plan cadence }, from `_planBundleCadences`)
    * makes a copy follow the plan that brought it (featreq-acdd0c84 B2): see
@@ -31937,7 +31961,15 @@ export class AppDataStore {
    */
   async copyTemplatesToClient(clientId, templateIds, { cadenceByTemplateId = {} } = {}) {
     const wanted = [...new Set((Array.isArray(templateIds) ? templateIds : []).filter((id) => typeof id === 'string' && id))]
-    if (!clientId || wanted.length === 0) return { copies: [], skippedTemplateIds: [] }
+    if (!clientId || wanted.length === 0) {
+      return {
+        copies: [],
+        skippedTemplateIds: [],
+        linkedTemplateIds: [],
+        ambiguousTemplateIds: [],
+        scheduleDiffersTemplateIds: [],
+      }
+    }
     return this._retryOnStaleWorkspace(() => this._copyTemplatesToClientOnce(clientId, wanted, cadenceByTemplateId))
   }
 
@@ -31947,18 +31979,45 @@ export class AppDataStore {
     const existing = data.checklistTemplates ?? []
     const copies = []
     const skippedTemplateIds = []
+    const missing = []
+    const missingTitles = new Set()
     for (const templateId of templateIds) {
       const source = existing.find((template) => template.id === templateId)
       if (!source) continue
-      if (AppDataStore._clientHasTemplateCopy([...existing, ...copies], clientId, source)) {
+      // Already on the client (stamped or same-titled), or a twin of a source taken
+      // earlier in this call: two blueprints with one title make one copy.
+      const title = String(source.title ?? '').trim().toLowerCase()
+      if (AppDataStore._clientHasTemplateCopy(existing, clientId, source) || missingTitles.has(title)) {
         skippedTemplateIds.push(templateId)
         continue
       }
-      const cadence = Object.hasOwn(cadenceByTemplateId ?? {}, templateId) ? cadenceByTemplateId[templateId] : null
-      copies.push(this._clientTemplateCopy(source, templateId, { clientId, cadence }))
+      missingTitles.add(title)
+      missing.push(source)
     }
-    await this._writeTemplateCopies(data, version, copies)
-    return { copies, skippedTemplateIds }
+    // Match first: link the one checklist the client already has that stands for a
+    // source, leave several to the owner, copy only what nothing stands for.
+    const linkedTemplateIds = []
+    const ambiguousTemplateIds = []
+    const scheduleDiffersTemplateIds = []
+    const links = new Map()
+    const steps = planSetUpSteps(missing, clientId, existing, (blueprint) =>
+      Object.hasOwn(cadenceByTemplateId ?? {}, blueprint.id) ? cadenceByTemplateId[blueprint.id] : null,
+    )
+    for (const step of steps) {
+      const templateId = step.blueprint.id
+      if (step.kind === 'link') {
+        links.set(step.copy.id, templateId)
+        linkedTemplateIds.push(templateId)
+      } else if (step.kind === 'choose') {
+        ambiguousTemplateIds.push(templateId)
+        if (step.reason === 'schedule') scheduleDiffersTemplateIds.push(templateId)
+      } else {
+        const cadence = Object.hasOwn(cadenceByTemplateId ?? {}, templateId) ? cadenceByTemplateId[templateId] : null
+        copies.push(this._clientTemplateCopy(step.blueprint, templateId, { clientId, cadence }))
+      }
+    }
+    await this._writeTemplateCopies(data, version, copies, links)
+    return { copies, skippedTemplateIds, linkedTemplateIds, ambiguousTemplateIds, scheduleDiffersTemplateIds }
   }
 
   /**
@@ -32169,11 +32228,18 @@ export class AppDataStore {
     return (after.checklistTemplates ?? []).find((row) => row.id === templateId) ?? updated
   }
 
-  /** One workspace save appending `copies` to the templates read at `version`. */
-  async _writeTemplateCopies(data, version, copies) {
-    if (copies.length === 0) return copies
+  /**
+   * One workspace save appending `copies` to the templates read at `version`.
+   * `links` ({ clientChecklistId -> sourceTemplateId }) stamps checklists the client
+   * already has with the blueprint they stand for, in the SAME save.
+   */
+  async _writeTemplateCopies(data, version, copies, links = new Map()) {
+    if (copies.length === 0 && links.size === 0) return copies
+    const linked = (data.checklistTemplates ?? []).map((template) =>
+      links.has(template.id) ? { ...template, sourceTemplateId: links.get(template.id) } : template,
+    )
     await this.write(
-      { ...data, checklistTemplates: [...(data.checklistTemplates ?? []), ...copies] },
+      { ...data, checklistTemplates: [...linked, ...copies] },
       { expectedVersion: version },
     )
     return copies

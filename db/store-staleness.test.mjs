@@ -22988,6 +22988,113 @@ describe('packages (file backend)', () => {
       )
       expect(payrollCopies.map((t) => t.id)).toEqual(['tpl-hers'])
     })
+
+    // MATCH FIRST (featreq-8bdc5ec5): her own checklist under her own cadence-worded
+    // title stands for the blueprint - linked, not copied beside.
+    const quarterly = (id, title) => ({
+      ...blueprint(id, title),
+      clientId: 'c1',
+      isStandard: false,
+      active: true,
+      frequency: 'specific-months',
+      scheduledMonths: [1, 4, 7, 10],
+    })
+    const quarterlyPackage = () =>
+      store.createPackage({
+        name: 'Quarterly Accounting',
+        planIds: ['plan-books', 'plan-payroll'],
+        templateIds: ['bp-close', 'bp-payroll'],
+      })
+    // The Payroll plan's "How often" is Quarterly: the schedule its copy would get.
+    const payrollQuarterly = (workspaceData) => ({
+      ...workspaceData,
+      plans: workspaceData.plans.map((plan) => (plan.id === 'plan-payroll' ? { ...plan, cadence: 'quarterly' } : plan)),
+    })
+
+    it('LINKS a checklist the client already has under its own cadence-worded title instead of copying beside it', async () => {
+      const base = payrollQuarterly(withReview())
+      await store.write({
+        ...base,
+        checklistTemplates: [...base.checklistTemplates, quarterly('tpl-hers', 'Quarterly Payroll Run - Quarterly')],
+      })
+      const pkg = await quarterlyPackage()
+      const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+
+      expect(result.linkedTemplateIds).toEqual(['bp-payroll'])
+      expect(result.ambiguousTemplateIds).toEqual([])
+      expect(result.clonedTemplateIds).toEqual(['bp-close'])
+      const mine = (await store.read()).checklistTemplates.filter((t) => t.clientId === 'c1')
+      // Hers is the Payroll run now (stamped), and no second one was made.
+      expect(mine.find((t) => t.id === 'tpl-hers').sourceTemplateId).toBe('bp-payroll')
+      expect(mine.map((t) => t.title).sort()).toEqual(['Monthly close', 'Quarterly Payroll Run - Quarterly'])
+      // And pressing it again changes nothing: hers now counts as set up.
+      const again = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+      expect(again.clonedTemplateIds).toEqual([])
+      expect(again.linkedTemplateIds).toEqual([])
+      expect((await store.read()).checklistTemplates.filter((t) => t.clientId === 'c1')).toHaveLength(2)
+    })
+
+    it('leaves a lone quarterly checklist for her when the plan gives the copy a monthly schedule', async () => {
+      const base = withReview()
+      await store.write({
+        ...base,
+        checklistTemplates: [...base.checklistTemplates, quarterly('tpl-hers', 'Payroll Run - Quarterly')],
+      })
+      const pkg = await quarterlyPackage()
+      const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+
+      // Payroll's plan has no "How often" (the blueprint is monthly): linking a quarterly one
+      // would leave it running on a schedule the plan does not give.
+      expect(result.linkedTemplateIds).toEqual([])
+      expect(result.ambiguousTemplateIds).toEqual(['bp-payroll'])
+      expect(result.scheduleDiffersTemplateIds).toEqual(['bp-payroll'])
+      const mine = (await store.read()).checklistTemplates.filter((t) => t.clientId === 'c1')
+      expect(mine.find((t) => t.id === 'tpl-hers').sourceTemplateId).toBeUndefined()
+      expect(mine.filter((t) => t.sourceTemplateId === 'bp-payroll')).toEqual([])
+    })
+
+    it('leaves a blueprint alone when several of the client’s checklists match it', async () => {
+      const base = withReview()
+      await store.write({
+        ...base,
+        checklistTemplates: [
+          ...base.checklistTemplates,
+          quarterly('tpl-a', 'Quarterly Payroll Run'),
+          quarterly('tpl-b', 'Payroll Run - Quarterly'),
+        ],
+      })
+      const pkg = await quarterlyPackage()
+      const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+
+      expect(result.ambiguousTemplateIds).toEqual(['bp-payroll'])
+      expect(result.linkedTemplateIds).toEqual([])
+      expect(result.clonedTemplateIds).toEqual(['bp-close'])
+      const mine = (await store.read()).checklistTemplates.filter((t) => t.clientId === 'c1')
+      // Neither was stamped, and no Payroll copy was made: she chooses.
+      expect(mine.filter((t) => t.sourceTemplateId === 'bp-payroll')).toEqual([])
+      expect(mine.map((t) => t.title).sort()).toEqual([
+        'Monthly close',
+        'Payroll Run - Quarterly',
+        'Quarterly Payroll Run',
+      ])
+    })
+
+    it('still copies a blueprint nothing the client has stands for, and ignores a cadence that disagrees', async () => {
+      const base = withReview()
+      await store.write({
+        ...base,
+        checklistTemplates: [
+          ...base.checklistTemplates,
+          // Weekly says weekly, but this schedule is monthly: not a Payroll run copy.
+          { ...quarterly('tpl-w', 'Weekly Payroll Run'), frequency: 'monthly', scheduledMonths: undefined },
+        ],
+      })
+      const pkg = await quarterlyPackage()
+      const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+
+      expect(result.linkedTemplateIds).toEqual([])
+      expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-payroll'])
+    })
   })
 
   /**
@@ -23421,6 +23528,89 @@ describe("applying a package copies only the package's own checklists (postgres)
 
     const [planWrite] = fake.matching(/^update clients set plan_ids = \$2, plan_id = \$3/i)
     expect(planWrite.params).toEqual(['c1', ['plan-books', 'plan-payroll'], 'plan-books', 'pkg-qa', null])
+  })
+
+  it('writes the LINK of a checklist the client already has into the same save, and copies only the rest', async () => {
+    const templateRow = (id, title, overrides = {}) => ({
+      id,
+      title,
+      client_id: null,
+      assignee_id: 'emp-1',
+      frequency: 'monthly',
+      next_due_date: new Date('2026-01-31T00:00:00.000Z'),
+      active: false,
+      is_standard: true,
+      category_id: null,
+      skip_allowed: false,
+      onboarding_for_client_id: null,
+      source_template_id: null,
+      viewer_ids: [],
+      editor_ids: [],
+      scheduled_months: null,
+      due_day_of_month: null,
+      monthly_due_days: null,
+      repeat_annually: true,
+      schedule_year: null,
+      lead_days: null,
+      ...overrides,
+    })
+    const fake = fakePostgres({
+      clientRows: [
+        {
+          id: 'c1',
+          name: 'Acme',
+          contact: 'Pat',
+          billing_mode: 'subscription',
+          hourly_rate: 0,
+          plan_id: 'plan-books',
+          plan_ids: ['plan-books'],
+          package_ids: [],
+          contact_ids: [],
+          assigned_bookkeeper_ids: [],
+          lifecycle_stage: 'active',
+        },
+      ],
+      templateRows: [
+        templateRow('bp-close', 'Monthly close'),
+        templateRow('bp-payroll', 'Payroll run'),
+        templateRow('tpl-hers', 'Quarterly Payroll Run', {
+          client_id: 'c1',
+          is_standard: false,
+          active: true,
+          frequency: 'specific-months',
+          scheduled_months: [1, 4, 7, 10],
+        }),
+      ],
+    })
+    const pgStore = postgresStore(fake)
+    const plans = [
+      { id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: ['bp-close'] },
+      { id: 'plan-payroll', name: 'Payroll', notes: '', templateIds: ['bp-payroll'], cadence: 'quarterly' },
+    ]
+    const readWorkspace = pgStore._readPostgresWorkspace.bind(pgStore)
+    pgStore._readPostgresWorkspace = async (...args) => ({ ...(await readWorkspace(...args)), plans })
+    pgStore.listPackages = async () => [
+      {
+        id: 'pkg-qa',
+        name: 'Quarterly Accounting',
+        planIds: ['plan-books', 'plan-payroll'],
+        templateIds: ['bp-close', 'bp-payroll'],
+      },
+    ]
+
+    const result = await pgStore.applyPackageToClient('c1', 'pkg-qa', { actorUserId: 'emp-1' })
+
+    expect(result.linkedTemplateIds).toEqual(['bp-payroll'])
+    expect(result.clonedTemplateIds).toEqual(['bp-close'])
+    const rows = insertedRows(fake.statements, 'checklist_templates')
+    // The workspace is re-written more than once around the apply (reads write
+    // back); the save that copies is the one that carries the link too: hers
+    // stamped with the blueprint, and the only new copy is the close.
+    expect(
+      rows.some((row) => row.id === 'tpl-hers' && row.source_template_id === 'bp-payroll'),
+    ).toBe(true)
+    const created = rows.filter((row) => row.client_id === 'c1' && row.id !== 'tpl-hers')
+    expect(created.map((row) => row.source_template_id)).toEqual(['bp-close'])
   })
 })
 
@@ -51229,6 +51419,47 @@ describe('engagements stage 4: superseding (file backend)', () => {
     expect(result.skipped.map((entry) => entry.what)).toContain('Package')
     // Alone, the letter's plans would have dropped "Both" (Payroll leaves); the deleted package leaves the list as it was.
     expect(await clientPackages(clientId)).toEqual([both.id])
+  })
+
+  // ---- signing links before it copies, and says so ----
+  const quarterlyPayrollRun = (cadence) => async () => {
+    const { clientId } = await signedClient()
+    const now = await store.read()
+    await store.write({
+      ...now,
+      plans: now.plans.map((plan) => (plan.id === 'plan-payroll' && cadence ? { ...plan, cadence } : plan)),
+      checklistTemplates: [
+        ...now.checklistTemplates,
+        {
+          ...blueprint('tpl-hers', 'Payroll Run - Quarterly'),
+          clientId,
+          isStandard: false,
+          active: true,
+          frequency: 'specific-months',
+          scheduledMonths: [1, 4, 7, 10],
+        },
+      ],
+    })
+    const pkg = await store.createPackage({ name: 'Both', planIds: ['plan-books', 'plan-payroll'], templateIds: ['bp-payroll'] })
+    const { engagement } = await upsell(clientId, { packageId: pkg.id })
+    return { clientId, result: await sign(engagement.id) }
+  }
+
+  it('signing LINKS the checklist the client already has when it agrees with the plan, and reports it', async () => {
+    const { clientId, result } = await quarterlyPayrollRun('quarterly')()
+    expect(result.linkedTemplateIds).toEqual(['bp-payroll'])
+    expect(result.ambiguousTemplateIds).toEqual([])
+    expect(result.clonedTemplateIds).toEqual([])
+    const hers = (await store.read()).checklistTemplates.find((t) => t.id === 'tpl-hers')
+    expect(hers).toMatchObject({ clientId, sourceTemplateId: 'bp-payroll' })
+  })
+
+  it('signing leaves a checklist whose schedule the plan does not give for her to choose, and reports it', async () => {
+    const { result } = await quarterlyPayrollRun(null)()
+    expect(result.linkedTemplateIds).toEqual([])
+    expect(result.ambiguousTemplateIds).toEqual(['bp-payroll'])
+    expect(result.scheduleDiffersTemplateIds).toEqual(['bp-payroll'])
+    expect(result.clonedTemplateIds).toEqual([])
   })
 
   it('an old letter voided meanwhile is left as it is, the new one still signs, and it is said', async () => {

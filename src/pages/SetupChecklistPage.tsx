@@ -26,10 +26,12 @@ import {
 } from '../lib/api'
 import { emailShapeProblem } from '../lib/emailShape'
 import type { Package } from '../lib/types'
+import { setUpResultText } from '../lib/packages'
 import { cloneChecklistTemplate, planCadenceFor } from '../lib/cloneChecklistTemplate'
 import {
   getAssignedTeamIds,
   missingPlanTemplatesForClient,
+  planSetUpSteps,
   planTemplates,
   uniqueByTitle,
 } from '../lib/utils'
@@ -377,6 +379,36 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
       : [],
   )
 
+  // Match first: a still-missing checklist the client already has under its own
+  // title is LINKED, not copied next to it; several that match are left for her.
+  // One copy per title, as before.
+  // The group's plans give each copy its "How often", and a link must agree with it.
+  const fixPlans =
+    fix.kind === 'planChecklists'
+      ? (fix.planIds ?? []).map((planId) => data.plans.find((plan) => plan.id === planId))
+      : []
+  const setUpSteps =
+    fix.kind === 'planChecklists'
+      ? planSetUpSteps(
+          uniqueByTitle(fixBlueprints.filter((b) => stillMissingIds.has(b.id))),
+          fix.clientId,
+          data.checklistTemplates,
+          (blueprint) => planCadenceFor(blueprint.id, fixPlans),
+        )
+      : []
+  const stepNote = (blueprintId: string) => {
+    const step = setUpSteps.find((entry) => entry.blueprint.id === blueprintId)
+    if (!step) return ''
+    if (step.kind === 'link') return `Will link "${step.copy.title}" that the client already has.`
+    if (step.kind === 'choose') {
+      return step.reason === 'schedule'
+        ? `The existing checklist runs on a different schedule than the plan's "How often" - link it below if it is the same one.`
+        : 'More than one existing checklist matches - choose one below.'
+    }
+    return 'Will be created.'
+  }
+  const [setUpResult, setSetUpResult] = useState('')
+
   const [numberValue, setNumberValue] = useState(() => {
     if (fix.kind === 'clientNumber') {
       const current = client?.[fix.field]
@@ -445,16 +477,30 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
         // the link.
         // Each copy follows the "How often" of the group's plan that bundles it
         // (featreq-acdd0c84 B2), as the client page's Set up does.
-        const fixPlans = (fix.planIds ?? []).map((planId) => data.plans.find((plan) => plan.id === planId))
-        for (const blueprint of uniqueByTitle(fixBlueprints.filter((b) => stillMissingIds.has(b.id)))) {
-          addChecklistTemplate(
-            cloneChecklistTemplate(blueprint, {
-              clientId: fix.clientId,
-              active: true,
-              cadence: planCadenceFor(blueprint.id, fixPlans),
-            }),
-          )
+        if (setUpSteps.length === 0) {
+          onClose()
+          return
         }
+        for (const step of setUpSteps) {
+          if (step.kind === 'link') {
+            updateChecklistTemplate(step.copy.id, (current) => ({
+              ...current,
+              sourceTemplateId: step.blueprint.id,
+            }))
+          } else if (step.kind === 'create') {
+            addChecklistTemplate(
+              cloneChecklistTemplate(step.blueprint, {
+                clientId: fix.clientId,
+                active: true,
+                cadence: planCadenceFor(step.blueprint.id, fixPlans),
+              }),
+            )
+          }
+        }
+        // Stays open to say what happened ("2 linked, 1 created."); Done closes it.
+        setSetUpResult(setUpResultText(setUpSteps))
+        setBusy(false)
+        return
       }
       onClose()
     } catch {
@@ -533,7 +579,9 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
                   {blueprint.title}
                   {stillMissingIds.has(blueprint.id) ? (
                     <>
-                      {' '}
+                      {stepNote(blueprint.id) ? (
+                        <span className="muted-text"> {stepNote(blueprint.id)}</span>
+                      ) : null}{' '}
                       <LinkExistingChecklist
                         blueprint={blueprint}
                         clientId={fix.clientId}
@@ -555,6 +603,11 @@ function QuickFixModal({ issue, onClose }: { issue: SetupIssue; onClose: () => v
           </div>
         ) : null}
 
+        {setUpResult ? (
+          <p className="muted-text" role="status">
+            {setUpResult}
+          </p>
+        ) : null}
         {waitingForSave ? <p className="muted-text">Saving…</p> : null}
         {error ? <p className="auth-error">{error}</p> : null}
 

@@ -903,6 +903,12 @@ export type ApplyPackageResult = {
   addedPlanIds: string[]
   clonedTemplateIds: string[]
   skippedTemplateIds: string[]
+  /** Checklists the client already had that the apply tied to the package's blueprints. */
+  linkedTemplateIds?: string[]
+  /** Blueprints left alone (more than one existing match, or one on a differing schedule). */
+  ambiguousTemplateIds?: string[]
+  /** The part of `ambiguousTemplateIds` whose one match runs on a differing schedule. */
+  scheduleDiffersTemplateIds?: string[]
 }
 
 /**

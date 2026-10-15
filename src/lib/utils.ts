@@ -751,87 +751,15 @@ export function missingPlanTemplatesForClient(
   )
 }
 
-/**
- * The client's own checklists "Link existing" can attach to a blueprint
- * (featreq-2b067744), sorted by title: on this client, not a blueprint, not an
- * onboarding checklist (that one drives the client's lifecycle), and not
- * already tied to a LIVE standard blueprint. A stamp that points anywhere else
- * does not count: Duplicate and Copy-to-client stamp a copy with the SOURCE
- * checklist's id (often another client's recipe), and a stamp whose template
- * is gone ties it to nothing - both stay linkable, and the link overwrites the
- * stamp with the blueprint's id. Pure.
- */
-export function linkableClientChecklists(
-  clientId: string,
-  templates: readonly ChecklistTemplate[],
-): ChecklistTemplate[] {
-  const byId = new Map(templates.map((template) => [template.id, template]))
-  return templates
-    .filter(
-      (template) =>
-        template.clientId === clientId &&
-        !template.isStandard &&
-        !template.onboardingForClientId &&
-        !(template.sourceTemplateId && byId.get(template.sourceTemplateId)?.isStandard),
-    )
-    .sort((a, b) => a.title.trim().localeCompare(b.title.trim(), undefined, { sensitivity: 'base' }))
-}
-
-const LINK_CADENCE_WORD = /^(weekly|monthly|quarterly|annually|annual)\s+/i
-
-/** A title as "Link existing" compares it: no leading cadence word, any case. */
-function linkTitleKey(title: string): string {
-  return title.trim().replace(LINK_CADENCE_WORD, '').replace(/\s+/g, ' ').trim().toLowerCase()
-}
-
-/** The leading cadence word of a title, as a frequency, or null when there is none. */
-function linkCadenceWord(title: string): ChecklistFrequency | null {
-  const word = LINK_CADENCE_WORD.exec(title.trim())?.[1]?.toLowerCase()
-  if (!word) return null
-  return word === 'annual' ? 'annually' : (word as ChecklistFrequency)
-}
-
-/**
- * Whether a checklist's schedule says what a title's cadence word says. A
- * specific-months schedule counts by its month count (4 = quarterly, 12 =
- * monthly, 1 = annually). No word agrees with anything.
- */
-function cadenceAgrees(word: ChecklistFrequency | null, template: ChecklistTemplate): boolean {
-  if (!word || template.frequency === word) return true
-  if (template.frequency !== 'specific-months') return false
-  const months = template.scheduledMonths?.length ?? 0
-  return (
-    (word === 'quarterly' && months === 4) ||
-    (word === 'monthly' && months === 12) ||
-    (word === 'annually' && months === 1)
-  )
-}
-
-/**
- * The client's linkable checklists SUGGESTED (one press) for a blueprint: the
- * same title once a leading Weekly/Monthly/Quarterly/Annual(ly) is dropped -
- * her "Quarterly Reconciliations with Review" for "Reconciliations with Review"
- * - provided any cadence word in either title agrees with the checklist's own
- * schedule, and the checklist is switched on. Anything else stays in the
- * "Choose another" list. Only a suggestion: the automatic "Set up" match
- * (`clientHasPlanTemplate`) stays exact, because the loose rule would call
- * "Monthly Transactions" a copy of "Weekly Transactions". Pure.
- */
-export function linkCandidatesForPlanTemplate(
-  blueprint: ChecklistTemplate,
-  clientId: string,
-  templates: readonly ChecklistTemplate[],
-): ChecklistTemplate[] {
-  const want = linkTitleKey(blueprint.title)
-  const blueprintWord = linkCadenceWord(blueprint.title)
-  return linkableClientChecklists(clientId, templates).filter(
-    (template) =>
-      template.active !== false &&
-      linkTitleKey(template.title) === want &&
-      cadenceAgrees(linkCadenceWord(template.title), template) &&
-      cadenceAgrees(blueprintWord, template),
-  )
-}
+// "Link existing" and the match-first Set up share ONE implementation with the
+// server's apply (lib/checklist-link-match.js): which of a client's own checklists
+// stand for a blueprint. See that file for the rules.
+export {
+  linkableClientChecklists,
+  linkCandidatesForPlanTemplate,
+  planSetUpSteps,
+  type PlanSetUpStep,
+} from '../../lib/checklist-link-match.js'
 
 /**
  * The first template of each title (trimmed, any case). Two blueprints with one
