@@ -7,7 +7,7 @@
  * page applies one) and because both are worth testing without rendering
  * anything.
  */
-import type { Package, SubscriptionPlan } from './types'
+import type { Client, Package, SubscriptionPlan } from './types'
 
 /**
  * A package's default checklist set: the union of its plans' own blueprints, in
@@ -34,9 +34,10 @@ export function defaultPackageTemplateIds(
 
 /**
  * The packages that COVER a client's plans: every one of the package's plans is
- * on the client (and it has at least one). A package is not stored on the
- * client - applying one unions its plans in - so coverage is how the client page
- * recognizes "this client is on that package". A covering package whose plans
+ * on the client (and it has at least one). Before a package was stored on the
+ * client (`client.packageIds`), coverage was how the client page recognized "this
+ * client is on that package"; it is now the FALLBACK for a client with none chosen
+ * (`packagesForClient`). A covering package whose plans
  * are a strict subset of another covering package's is dropped, and of several
  * with identical plans only the first by name is kept; the dropped package's
  * checklist ids are folded into the kept one. Sorted by name. Pure.
@@ -71,6 +72,36 @@ export function packagesCoveringPlans(
     const templateIds = [...new Set([...pkg.templateIds, ...folded])]
     return templateIds.length === pkg.templateIds.length ? pkg : { ...pkg, templateIds }
   })
+}
+
+/**
+ * The packages the owner CHOSE for a client (`client.packageIds`, in that order),
+ * leaving out an id whose package no longer exists. Empty when none is chosen.
+ * Pure.
+ */
+export function chosenPackagesOf(
+  client: Pick<Client, 'packageIds'>,
+  packages: readonly Package[],
+): Package[] {
+  const byId = new Map(packages.map((pkg) => [pkg.id, pkg]))
+  return (client.packageIds ?? [])
+    .map((id) => byId.get(id))
+    .filter((pkg): pkg is Package => Boolean(pkg))
+}
+
+/**
+ * The packages that group a client's checklists (the Plan checklists panel and To
+ * 100%): the CHOSEN ones once the client has a list (even an empty one - she chose
+ * none, so no fallback), and only while it was NEVER chosen (`packageIds` null or
+ * absent) the packages its plans cover (`packagesCoveringPlans`), so a client
+ * nobody has picked a package for reads exactly as it did before. Pure.
+ */
+export function packagesForClient(
+  client: Pick<Client, 'planIds' | 'packageIds'>,
+  packages: readonly Package[],
+): Package[] {
+  if (Array.isArray(client.packageIds)) return chosenPackagesOf(client, packages)
+  return packagesCoveringPlans(client.planIds ?? [], packages)
 }
 
 /**

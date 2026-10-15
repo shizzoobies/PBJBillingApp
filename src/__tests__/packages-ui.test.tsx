@@ -437,6 +437,16 @@ describe('"+ Add package" on a client', () => {
     expect(sentence).toContain('(1 already exists and will be skipped)')
   })
 
+  it('uses the list its parent already fetched: no second fetch, the parent\u2019s failure shown, loading said', async () => {
+    const { rerender } = render(<ApplyPackageField client={ACME} packages={[]} loading />)
+    fireEvent.click(screen.getByRole('button', { name: '+ Add package' }))
+    expect(screen.getByText('Loading packages…')).toBeTruthy()
+
+    rerender(<ApplyPackageField client={ACME} packages={[FULL_SERVICE]} loadError="Could not load packages." />)
+    expect(screen.getByText('Could not load packages.')).toBeTruthy()
+    expect(listPackagesRequest).not.toHaveBeenCalled()
+  })
+
   it('waits while this tab still has edits on their way to the server', async () => {
     contextValue = { ...contextValue, workspaceSaving: true } as AppContextValue
     render(<ApplyPackageField client={ACME} />)

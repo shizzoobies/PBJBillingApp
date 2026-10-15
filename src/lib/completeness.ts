@@ -21,7 +21,7 @@ import type {
 } from './types'
 import { resolveInvoiceRecipients } from '../../lib/invoice-recipients.js'
 import { evaluateRecurringTemplate } from '../../lib/recurring-gate.js'
-import { packagesCoveringPlans } from './packages'
+import { packagesForClient } from './packages'
 import {
   getAssignedTeamIds,
   missingPlanTemplatesForClient,
@@ -283,7 +283,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
       planIds: string[]
     }[] = []
     const covered = new Set<string>()
-    for (const pkg of packagesCoveringPlans(client.planIds ?? [], input.packages ?? [])) {
+    for (const pkg of packagesForClient(client, input.packages ?? [])) {
       for (const planId of pkg.planIds) covered.add(planId)
       groups.push({
         id: `pkg-${pkg.id}`,

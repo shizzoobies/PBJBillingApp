@@ -9,8 +9,9 @@ import {
   RotateCcw,
   Timer,
   Trash2,
+  X,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ClientEngagementsCard } from '../components/ClientEngagementsCard'
 import { useAppContext } from '../AppContext'
@@ -69,8 +70,9 @@ import {
 } from '../lib/api'
 import {
   applyPackageConfirmText,
+  chosenPackagesOf,
   defaultPackageTemplateIds,
-  packagesCoveringPlans,
+  packagesForClient,
 } from '../lib/packages'
 import { ClientNotesPanel } from '../components/ClientNotesPanel'
 import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
@@ -561,7 +563,7 @@ export function ClientDetailPage() {
           ) : null}
 
           <CollapsibleSection id="client-section-billing" kicker="Billing" title="Rate and services" lockable>
-            <BillingSectionBody client={client} plans={data.plans} onCommit={commit} />
+            <BillingSectionBody key={client.id} client={client} plans={data.plans} onCommit={commit} />
           </CollapsibleSection>
 
           {/* Subscription clients only (hourly and the old annual mode ignore it), and
@@ -1126,6 +1128,30 @@ function BillingSectionBody({
 }) {
   const isMonthly = client.billingMode === 'subscription'
   const isAnnual = client.billingMode === 'annual'
+  // The Packages row and the Plans / services chips read the same list of packages
+  // (what is chosen decides which plans each one shows), so it is fetched once here.
+  // Same conditions ApplyPackageField hides itself under; null until it arrives.
+  const { ownerMode } = useAppContext()
+  const packagesHidden = !ownerMode || client.isBillingMaster === true || isInactiveClient(client)
+  const [packages, setPackages] = useState<Package[] | null>(null)
+  const [packagesError, setPackagesError] = useState('')
+  useEffect(() => {
+    if (packagesHidden) return
+    let cancelled = false
+    void listPackagesRequest()
+      .then((rows) => {
+        if (!cancelled) setPackages(rows)
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setPackages([])
+          setPackagesError(err instanceof ApiError ? err.message : 'Could not load packages.')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [packagesHidden])
 
   return (
     <div className="form-grid two-col">
@@ -1184,8 +1210,14 @@ function BillingSectionBody({
       ) : null}
       <HourlyRatesField client={client} />
       <EstimatedRoleHours client={client} onCommit={onCommit} />
-      <PlanServicesField client={client} plans={plans} onCommit={onCommit} />
-      <ApplyPackageField client={client} />
+      <PlanServicesField client={client} plans={plans} packages={packages ?? []} onCommit={onCommit} />
+      <ApplyPackageField
+        client={client}
+        packages={packages ?? []}
+        loading={packages === null}
+        loadError={packagesError}
+        onCommit={onCommit}
+      />
     </div>
   )
 }
@@ -1201,17 +1233,45 @@ function BillingSectionBody({
 export function PlanServicesField({
   client,
   plans,
+  packages = [],
   onCommit,
 }: {
   client: Client
   plans: SubscriptionPlan[]
+  packages?: Package[]
   onCommit: (patch: Partial<Client>) => void
 }) {
   const { data, ownerMode, addChecklistTemplate } = useAppContext()
+  // The "already in <package>" note belongs to the client it was said for.
+  const [hintState, setHintState] = useState<{ clientId: string; text: string }>({ clientId: '', text: '' })
+  const hint = hintState.clientId === client.id ? hintState.text : ''
+  const setHint = (text: string) => setHintState({ clientId: client.id, text })
+  // The plans a CHOSEN package lists are shown under that package (the Packages
+  // row), so these chips are only the plans outside every chosen package.
+  const coveredBy = new Map<string, string>()
+  for (const pkg of chosenPackagesOf(client, packages)) {
+    for (const planId of pkg.planIds) if (!coveredBy.has(planId)) coveredBy.set(planId, pkg.name)
+  }
+  const before = client.planIds ?? []
+  const shownIds = before.filter((id) => !coveredBy.has(id))
   const commit = (nextIds: string[]) => {
-    const before = client.planIds ?? []
-    onCommit({ planIds: nextIds })
-    const added = nextIds.filter((id) => !before.includes(id))
+    setHint('')
+    // A plan one of the client's chosen packages already lists is not added as a
+    // second chip: it says so instead.
+    const picked = nextIds.filter((id) => !shownIds.includes(id))
+    const alreadyThere = picked.filter((id) => coveredBy.has(id) && before.includes(id))
+    if (alreadyThere.length > 0) {
+      setHint(
+        alreadyThere
+          .map((id) => `${plans.find((plan) => plan.id === id)?.name ?? id} is already in ${coveredBy.get(id)}.`)
+          .join(' '),
+      )
+    }
+    const fresh = picked.filter((id) => !alreadyThere.includes(id))
+    const nextFull = [...before.filter((id) => coveredBy.has(id) || nextIds.includes(id)), ...fresh]
+    if (nextFull.length === before.length && nextFull.every((id, index) => id === before[index])) return
+    onCommit({ planIds: nextFull })
+    const added = nextFull.filter((id) => !before.includes(id))
     if (!ownerMode || added.length === 0) return
     if (client.isBillingMaster === true || isInactiveClient(client)) return
     // One copy per title: two blueprints both called "Monthly Close" would
@@ -1237,14 +1297,25 @@ export function PlanServicesField({
     }
   }
   return (
-    <ChipField
-      label="Plans / services"
-      selectedIds={client.planIds ?? []}
-      options={plans.map((plan) => ({ id: plan.id, label: plan.name }))}
-      onCommit={commit}
-      addLabel="+ Add plan / service"
-      emptyHelper="No plans/services selected yet."
-    />
+    <>
+      <ChipField
+        label="Plans / services"
+        selectedIds={shownIds}
+        options={plans.map((plan) => ({ id: plan.id, label: plan.name }))}
+        onCommit={commit}
+        addLabel="+ Add plan / service"
+        emptyHelper={
+          coveredBy.size > 0
+            ? 'No plans outside the chosen package.'
+            : 'No plans/services selected yet.'
+        }
+      />
+      {hint ? (
+        <p className="muted-text full-row" role="status">
+          {hint}
+        </p>
+      ) : null}
+    </>
   )
 }
 
@@ -1461,23 +1532,46 @@ export function HourlyRatesField({ client }: { client: Client }) {
  * Packages are endpoint-managed, so they are fetched here rather than read off
  * the workspace snapshot.
  */
-export function ApplyPackageField({ client }: { client: Client }) {
+export function ApplyPackageField({
+  client,
+  packages: packagesProp,
+  loading = false,
+  loadError = '',
+  onCommit,
+}: {
+  client: Client
+  /** The list the parent already fetched (it never fetches a second time); absent, this field fetches its own. */
+  packages?: Package[]
+  /** The parent's fetch has not answered yet. */
+  loading?: boolean
+  /** The parent's fetch failed: the sentence to show. */
+  loadError?: string
+  /** Saves a change to the client (removing a chosen package). Absent: no remove. */
+  onCommit?: (patch: Partial<Client>) => void
+}) {
   const { data, ownerMode, workspaceSaving } = useAppContext()
   // Apply writes on the server from what the server holds. While this tab still
   // has edits on their way there (a Link existing, a new plan), it waits: an
   // apply in that window would not see them and would move the workspace under
   // the pending save, which then lands stale and is lost.
   const waitingForSave = workspaceSaving === true
-  const [packages, setPackages] = useState<Package[]>([])
+  const [ownPackages, setPackages] = useState<Package[]>([])
+  const packages = packagesProp ?? ownPackages
   const [menuOpen, setMenuOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [outcome, setOutcome] = useState('')
   const [error, setError] = useState('')
+  // The package just taken off THIS client, while the question about its plans is open.
+  const [removedState, setRemovedState] = useState<{ clientId: string; pkg: Package } | null>(null)
+  const removedPackage = removedState && removedState.clientId === client.id ? removedState.pkg : null
+  const setRemovedPackage = (pkg: Package | null) =>
+    setRemovedState(pkg ? { clientId: client.id, pkg } : null)
 
   const hidden = !ownerMode || client.isBillingMaster === true || isInactiveClient(client)
+  const fetchesOwn = packagesProp === undefined
 
   useEffect(() => {
-    if (hidden) return
+    if (hidden || !fetchesOwn) return
     let cancelled = false
     void listPackagesRequest()
       .then((rows) => {
@@ -1491,9 +1585,60 @@ export function ApplyPackageField({ client }: { client: Client }) {
     return () => {
       cancelled = true
     }
-  }, [hidden])
+  }, [hidden, fetchesOwn])
 
   if (hidden) return null
+
+  const chosen = chosenPackagesOf(client, packages)
+  const planName = (planId: string) => data.plans.find((plan) => plan.id === planId)?.name ?? planId
+  // The chip counts the CLIENT's plans of the package: "2 of 3 plans" when it lacks one.
+  const onClient = new Set(client.planIds ?? [])
+  const planCount = (pkg: Package) => {
+    const own = pkg.planIds.filter((id) => onClient.has(id)).length
+    const noun = pkg.planIds.length === 1 ? 'plan' : 'plans'
+    return own === pkg.planIds.length ? `${own} ${noun}` : `${own} of ${pkg.planIds.length} ${noun}`
+  }
+  // A package's plans by name; one the client lacks is grayed and says so.
+  const planList = (pkg: Package) =>
+    pkg.planIds.length === 0
+      ? 'No plans'
+      : pkg.planIds.map((id, index) => (
+          <Fragment key={id}>
+            {index > 0 ? ', ' : null}
+            {onClient.has(id) ? (
+              planName(id)
+            ) : (
+              <span className="muted-text">{`${planName(id)} (not on this client)`}</span>
+            )}
+          </Fragment>
+        ))
+
+  // Taking a package off the client never drops its plans on its own: the plans
+  // stay (and show under Plans / services) unless she says to remove them too.
+  const removePackage = (pkg: Package) => {
+    if (!onCommit) return
+    setOutcome('')
+    onCommit({ packageIds: (client.packageIds ?? []).filter((id) => id !== pkg.id) })
+    setRemovedPackage(pkg)
+  }
+  // Undo puts the package back (it was only taken off a moment ago).
+  const undoRemove = () => {
+    if (!onCommit || !removedPackage) return
+    onCommit({ packageIds: [...new Set([...(client.packageIds ?? []), removedPackage.id])] })
+    setRemovedPackage(null)
+  }
+  const removeItsPlans = () => {
+    if (!onCommit || !removedPackage) return
+    // A plan another chosen package still lists stays.
+    const stillListed = new Set(
+      chosenPackagesOf(client, packages)
+        .filter((pkg) => pkg.id !== removedPackage.id)
+        .flatMap((pkg) => pkg.planIds),
+    )
+    const drop = new Set(removedPackage.planIds.filter((id) => !stillListed.has(id)))
+    onCommit({ planIds: (client.planIds ?? []).filter((id) => !drop.has(id)) })
+    setRemovedPackage(null)
+  }
 
   const apply = async (pkg: Package) => {
     if (waitingForSave) return
@@ -1560,6 +1705,23 @@ export function ApplyPackageField({ client }: { client: Client }) {
           control. It picks ONE package and acts, so it is not a chip list. */}
       <div className="sharing-control">
         <div className="sharing-chips">
+          {chosen.map((pkg) => (
+            <span className="sharing-chip" key={pkg.id} title={pkg.planIds.map(planName).join(', ')}>
+              <strong>
+                {pkg.name} - {planCount(pkg)}
+              </strong>
+              {onCommit ? (
+                <button
+                  type="button"
+                  className="chip-remove"
+                  onClick={() => removePackage(pkg)}
+                  aria-label={`Remove ${pkg.name}`}
+                >
+                  <X size={12} />
+                </button>
+              ) : null}
+            </span>
+          ))}
           <div className="sharing-add">
             <button
               type="button"
@@ -1571,7 +1733,9 @@ export function ApplyPackageField({ client }: { client: Client }) {
             </button>
             {menuOpen ? (
               <div className="sharing-add-menu" role="menu">
-                {packages.length === 0 ? (
+                {loading ? (
+                  <p className="sharing-add-empty">Loading packages…</p>
+                ) : packages.length === 0 ? (
                   <p className="sharing-add-empty">
                     No packages yet — build one on the{' '}
                     <Link to="/plans?tab=packages">Plans page</Link>.
@@ -1594,9 +1758,35 @@ export function ApplyPackageField({ client }: { client: Client }) {
           </div>
         </div>
       </div>
+      {chosen.length > 0 ? (
+        <ul className="recap-list package-chosen-plans">
+          {chosen.map((pkg) => (
+            <li key={pkg.id}>
+              <span>{pkg.name}</span>
+              <span>{planList(pkg)}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {removedPackage ? (
+        <div className="package-remove-plans" role="group" aria-label={`Plans of ${removedPackage.name}`}>
+          <p className="muted-text">
+            Removed {removedPackage.name}. Also remove its plans from this client? ({removedPackage.planIds.map(planName).join(', ')})
+          </p>
+          <button type="button" className="secondary-action" onClick={removeItsPlans}>
+            Yes, remove its plans
+          </button>{' '}
+          <button type="button" className="secondary-action" onClick={() => setRemovedPackage(null)}>
+            Keep the plans
+          </button>{' '}
+          <button type="button" className="secondary-action" onClick={undoRemove}>
+            Undo
+          </button>
+        </div>
+      ) : null}
       {waitingForSave ? <p className="muted-text">Saving… packages can be applied once your changes are saved.</p> : null}
       {outcome ? <p className="muted-text">{outcome}</p> : null}
-      {error ? <p className="field-error">{error}</p> : null}
+      {error || loadError ? <p className="field-error">{error || loadError}</p> : null}
     </div>
   )
 }
@@ -2231,8 +2421,8 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
   // its plans then fold into one group instead of one group per plan
   // (featreq-3ce2d75d). Plans no package covers keep their own group.
   const coveringPackages = useMemo(
-    () => packagesCoveringPlans(client.planIds ?? [], packages),
-    [client.planIds, packages],
+    () => packagesForClient(client, packages),
+    [client, packages],
   )
 
   // What each group lists. A package group mirrors the package exactly: only
@@ -2269,7 +2459,7 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
         templateIds,
         handledElsewhere: own.length > 0 && templateIds.length === 0,
         plans: pkg.planIds
-          .map((planId) => clientPlans.find((plan) => plan.id === planId))
+          .map((planId) => data.plans.find((plan) => plan.id === planId))
           .filter((plan): plan is SubscriptionPlan => Boolean(plan)),
       })
     }
@@ -2287,11 +2477,11 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
       })
     }
     return result
-  }, [clientPlans, coveringPackages, data.checklistTemplates])
+  }, [clientPlans, coveringPackages, data.checklistTemplates, data.plans])
 
   if (!ownerMode) return null
 
-  if (clientPlans.length === 0) {
+  if (clientPlans.length === 0 && coveringPackages.length === 0) {
     return (
       <p className="muted-text">
         This client isn&apos;t on any plan yet. Add a plan under{' '}

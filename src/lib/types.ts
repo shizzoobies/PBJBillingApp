@@ -142,6 +142,16 @@ export type Client = {
    */
   planIds: string[]
   /**
+   * The packages the owner CHOSE for this client (the Packages row on the client
+   * page). A chosen package lists its plans there, and the Plans / services chips
+   * show only the plans outside every chosen package. Optional: absent or null
+   * means NEVER chosen: the page falls back to the packages the client's
+   * plans cover (`packagesCoveringPlans`) until one is chosen. An empty array means
+   * she chose none (removed the last): no fallback. No foreign key, so the store
+   * drops an id whose package was deleted, like a dangling plan id.
+   */
+  packageIds?: string[] | null
+  /**
    * The client's own monthly rate (dollars). The single source of truth for
    * a Monthly (subscription-mode) client's invoice amount — it replaces the
    * old plan-derived fee + per-client override. Only meaningful when

@@ -87,6 +87,10 @@ alter table clients add column if not exists invoice_no_email boolean not null d
 -- default to "monthly, as today" for every existing client.
 alter table clients add column if not exists billing_period_months integer not null default 1;
 alter table clients add column if not exists period_anchor_month text;
+-- The packages the owner chose for a client (the Packages row on the client page).
+-- FK-free like plan_ids. NULL = never chosen (falls back to the packages the plans
+-- cover); {} = chosen none (no fallback).
+alter table clients add column if not exists package_ids text[];
 -- The Stripe customer a client's payments are filed under, remembered so the
 -- next invoice reuses it instead of creating a second customer for the same
 -- company. Null until they have paid once.

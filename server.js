@@ -1588,6 +1588,7 @@ function scopeAppDataForSession(session, data) {
       customMonthlyFee: null,
       planId: null,
       planIds: [],
+      packageIds: null,
       annualRate: undefined,
       annualBillingMonth: undefined,
       monthlyServiceTier: undefined,

@@ -589,6 +589,39 @@ describe('computeSetupIssues — plan checklists group by package like the clien
     ])
   })
 
+  it('groups by the package the owner CHOSE, even when the plans do not cover it, and by coverage only when none is chosen', () => {
+    const chosen = beach()
+    // Only one of the package's plans is on the client, but the package is chosen.
+    chosen.clients = [makeClient({ planIds: ['plan-a'], packageIds: ['pk-1'] })]
+    expect(nudges(chosen).map((i) => i.id)).toEqual(['client:plan-checklists:client-1:pkg-pk-1'])
+
+    // Both plans are on the client and pk-1 would cover them, but the client chose
+    // another package: the chosen one wins, and the plans it does not list keep
+    // their own nudge.
+    const other = beach()
+    other.clients = [makeClient({ planIds: ['plan-a', 'plan-b'], packageIds: ['pk-2'] })]
+    other.packages = [
+      ...(other.packages ?? []),
+      pkg('pk-2', 'Just Accounting', ['plan-a'], ['t1']),
+    ]
+    expect(nudges(other).map((i) => i.id)).toEqual([
+      'client:plan-checklists:client-1:pkg-pk-2',
+      'client:plan-checklists:client-1:plan-b',
+    ])
+
+    // Never chosen (null) falls back to the coverage; chosen none ([]) does not: the
+    // plans nudge one by one. (A deleted package is stripped from the list by the store.)
+    const never = beach()
+    never.clients = [makeClient({ planIds: ['plan-a', 'plan-b'], packageIds: null })]
+    expect(nudges(never).map((i) => i.id)).toEqual(['client:plan-checklists:client-1:pkg-pk-1'])
+    const none = beach()
+    none.clients = [makeClient({ planIds: ['plan-a', 'plan-b'], packageIds: [] })]
+    expect(nudges(none).map((i) => i.id)).toEqual([
+      'client:plan-checklists:client-1:plan-a',
+      'client:plan-checklists:client-1:plan-b',
+    ])
+  })
+
   it('folds a dropped subset package into the kept one, like the panel', () => {
     const input = beach()
     input.clients = [makeClient({ planIds: ['plan-a', 'plan-b', 'plan-c'] })]

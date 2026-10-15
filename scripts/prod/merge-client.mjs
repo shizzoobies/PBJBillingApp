@@ -49,6 +49,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { arrayUnionAssignment } from '../../lib/merge-client-sql.js'
 
 const require = createRequire(import.meta.url)
 const { Client } = require('pg')
@@ -134,6 +135,7 @@ const NUMERIC_FILL_COLUMNS = [
 
 const ARRAY_UNIONS = [
   { column: 'plan_ids', validates: 'subscription_plans' },
+  { column: 'package_ids', validates: 'packages' },
   { column: 'contact_ids', validates: 'contacts' },
   { column: 'assigned_bookkeeper_ids', validates: 'users' },
 ]
@@ -614,13 +616,7 @@ async function mergeClientRow(before, dupId, survId) {
 
   for (const { column, validates } of ARRAY_UNIONS) {
     if (!hasColumn('clients', column) || !hasTable(validates)) continue
-    assignments.push(
-      `${column} = s.${column} || array(
-          select e from unnest(d.${column}) e
-           where not (e = any(s.${column}))
-             and exists (select 1 from ${validates} p where p.id = e)
-        )`,
-    )
+    assignments.push(arrayUnionAssignment(column, validates))
   }
   for (const c of TEXT_FILL_COLUMNS) {
     if (!hasColumn('clients', c)) {
@@ -821,7 +817,9 @@ async function forward() {
     const dup = before.duplicateRow[column] ?? []
     const surv = before.survivorRow[column] ?? []
     const added = dup.filter((e) => !surv.includes(e) && !dropped[column].includes(e))
-    console.log(`  ${column}: ${JSON.stringify(surv)} + ${JSON.stringify(added)}`)
+    // A never-chosen (null) list reads as null, not as an empty one.
+    const survText = before.survivorRow[column] == null ? 'null' : JSON.stringify(surv)
+    console.log(`  ${column}: ${survText} + ${JSON.stringify(added)}`)
     if (dropped[column].length) console.log(`    DROPPED (unvalidated): ${dropped[column].join(', ')}`)
   }
 

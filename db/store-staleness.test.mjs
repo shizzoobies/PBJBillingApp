@@ -47,6 +47,8 @@ import {
   checklistBulkRow,
   checklistItemBulkRows,
   checklistTemplateBulkRows,
+  clientBulkRow,
+  sanitizeClientPackageRefs,
   mapChecklistItemRow,
   mapClientRow,
   mapInvoiceRow,
@@ -10174,7 +10176,9 @@ describe('generateChecklistFromTemplate runs the pending-notes attach pass (file
     clientId: 'c1',
     assigneeId: 'emp-1',
     frequency: 'monthly',
-    nextDueDate: '2026-10-15',
+    // Far future so the read-time materializer never spawns its own instance
+    // (a fixed date that was "next" in October 2026 made it spawn on 10-15).
+    nextDueDate: '2099-10-15',
     active: true,
     isStandard: false,
     viewerIds: [],
@@ -22748,6 +22752,97 @@ describe('packages (file backend)', () => {
     expect(copies.every((t) => t.isStandard === false)).toBe(true)
   })
 
+  it('applying records the package as one of the client’s CHOSEN packages, once', async () => {
+    const pkg = await makePackage()
+    // Never chosen is null, not [] - the page falls back to the plans' coverage only on null.
+    expect((await store.read()).clients.find((c) => c.id === 'c1').packageIds).toBeNull()
+    const first = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+    expect(first.client.packageIds).toEqual([pkg.id])
+    // A second press adds no plan but must not list the package twice.
+    const again = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+    expect(again.addedPlanIds).toEqual([])
+    expect(again.client.packageIds).toEqual([pkg.id])
+    // And it is stored, not derived: a fresh read sees it.
+    expect((await store.read()).clients.find((c) => c.id === 'c1').packageIds).toEqual([pkg.id])
+  })
+
+  it('a bulk save keeps a chosen package and drops an id with no package behind it', async () => {
+    const pkg = await makePackage()
+    await store.write(
+      roster({
+        clients: [
+          { id: 'c1', name: 'Acme', planIds: ['plan-books'], packageIds: [pkg.id, 'pkg-gone', pkg.id] },
+        ],
+      }),
+    )
+    expect((await store.read()).clients.find((c) => c.id === 'c1').packageIds).toEqual([pkg.id])
+  })
+
+  it('keeps "never chosen" (null) and "chosen none" ([]) apart through a bulk save and a package delete', async () => {
+    const pkg = await makePackage()
+    await store.write(
+      roster({
+        clients: [
+          { id: 'c1', name: 'Acme', planIds: ['plan-books'], packageIds: null },
+          { id: 'c2', name: 'Beta', planIds: ['plan-books'], packageIds: [] },
+          { id: 'c3', name: 'Gamma', planIds: ['plan-books'] },
+          { id: 'c4', name: 'Delta', planIds: ['plan-books'], packageIds: [pkg.id] },
+        ],
+      }),
+    )
+    const byId = async () => new Map((await store.read()).clients.map((c) => [c.id, c.packageIds]))
+    expect(await byId()).toEqual(
+      new Map([
+        ['c1', null],
+        ['c2', []],
+        ['c3', null],
+        ['c4', [pkg.id]],
+      ]),
+    )
+    // Taking the package away empties c4's list (she had one; now none) and leaves null alone.
+    await store.deletePackage(pkg.id)
+    expect(await byId()).toEqual(
+      new Map([
+        ['c1', null],
+        ['c2', []],
+        ['c3', null],
+        ['c4', []],
+      ]),
+    )
+  })
+
+  it('creating a client drops a package id with no package behind it, and keeps none-given as null', async () => {
+    const pkg = await makePackage()
+    const made = await store.createClient({
+      name: 'New Co',
+      contact: '',
+      billingMode: 'hourly',
+      hourlyRate: 0,
+      packageIds: [pkg.id, 'pkg-gone'],
+    })
+    expect(made.packageIds).toEqual([pkg.id])
+    const plain = await store.createClient({ name: 'Plain Co', contact: '', billingMode: 'hourly', hourlyRate: 0 })
+    expect(plain.packageIds).toBeNull()
+    // Every id given was dangling: nothing was chosen (null), not "chosen none" ([]).
+    const dangling = await store.createClient({
+      name: 'Dangling Co',
+      contact: '',
+      billingMode: 'hourly',
+      hourlyRate: 0,
+      packageIds: ['pkg-gone'],
+    })
+    expect(dangling.packageIds).toBeNull()
+  })
+
+  it('deleting a package takes it off every client and leaves their plans alone', async () => {
+    const pkg = await makePackage()
+    await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
+    expect(await store.deletePackage(pkg.id)).toBe(true)
+    const client = (await store.read()).clients.find((c) => c.id === 'c1')
+    expect(client.packageIds).toEqual([])
+    expect(client.planIds).toEqual(['plan-books', 'plan-payroll'])
+  })
+
   it('files ONE activity entry naming the package', async () => {
     // The activity log lives in the auth-state file, which this suite's
     // beforeEach does not reset — so count the delta rather than the total.
@@ -23284,12 +23379,48 @@ describe("applying a package copies only the package's own checklists (postgres)
     expect(result.addedPlanIds).toEqual(['plan-payroll'])
     expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-payroll'])
     const [planWrite] = fake.matching(/^update clients set plan_ids = \$2, plan_id = \$3/i)
-    expect(planWrite.params).toEqual(['c1', ['plan-books', 'plan-payroll'], 'plan-books'])
+    // The package is added to the client's chosen packages in the same statement.
+    expect(planWrite.params).toEqual(['c1', ['plan-books', 'plan-payroll'], 'plan-books', 'pkg-qa', null])
+    expect(planWrite.text).toMatch(/package_ids = case/)
     const copyRows = insertedRows(fake.statements, 'checklist_templates').filter((row) => row.client_id === 'c1')
     expect(copyRows.map((row) => row.source_template_id)).toEqual(['bp-close', 'bp-payroll'])
     // Neither the added plan's Client Meeting nor the kept plan's review comes.
     expect(copyRows.some((row) => row.source_template_id === 'bp-meeting')).toBe(false)
     expect(copyRows.some((row) => row.source_template_id === 'bp-review')).toBe(false)
+  })
+
+  it('writes back only plans that still exist, so a dangling first plan id cannot become the scalar plan_id', async () => {
+    const fake = fakePostgres({
+      clientRows: [
+        {
+          id: 'c1',
+          name: 'Acme',
+          contact: 'Pat',
+          billing_mode: 'subscription',
+          hourly_rate: 0,
+          plan_id: null,
+          plan_ids: ['plan-dangling', 'plan-books'],
+          contact_ids: [],
+          assigned_bookkeeper_ids: [],
+          lifecycle_stage: 'active',
+        },
+      ],
+    })
+    const pgStore = postgresStore(fake)
+    const plans = [
+      { id: 'plan-books', name: 'Bookkeeping', notes: '', templateIds: [] },
+      { id: 'plan-payroll', name: 'Payroll', notes: '', templateIds: [] },
+    ]
+    const readWorkspace = pgStore._readPostgresWorkspace.bind(pgStore)
+    pgStore._readPostgresWorkspace = async (...args) => ({ ...(await readWorkspace(...args)), plans })
+    pgStore.listPackages = async () => [
+      { id: 'pkg-qa', name: 'Quarterly Accounting', planIds: ['plan-books', 'plan-payroll'], templateIds: [] },
+    ]
+
+    await pgStore.applyPackageToClient('c1', 'pkg-qa', { actorUserId: 'emp-1' })
+
+    const [planWrite] = fake.matching(/^update clients set plan_ids = \$2, plan_id = \$3/i)
+    expect(planWrite.params).toEqual(['c1', ['plan-books', 'plan-payroll'], 'plan-books', 'pkg-qa', null])
   })
 })
 
@@ -23334,6 +23465,135 @@ describe('packages (postgres branch)', () => {
     expect(fake.matching(/^delete from packages where id = \$1/i)).toHaveLength(1)
   })
 
+  it('strips a deleted package from every client’s package_ids', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    // The fake answers a delete with no rows; make it find one.
+    const query = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      const result = await query(text, params)
+      return /^delete from packages/i.test(String(text).trim())
+        ? { ...result, rowCount: 1, rows: [{ id: 'pkg-1' }] }
+        : result
+    }
+    expect(await pgStore.deletePackage('pkg-1')).toBe(true)
+    const [strip] = fake.matching(/^update clients\s+set package_ids = array_remove\(package_ids, \$1\)/i)
+    expect(strip, 'no package_ids UPDATE was issued').toBeTruthy()
+    expect(strip.params).toEqual(['pkg-1'])
+  })
+
+  it('reads package_ids into packageIds and selects the column', () => {
+    expect(CLIENT_SELECT_COLUMNS).toMatch(/package_ids/)
+    expect(mapClientRow({ id: 'c1', name: 'Acme', package_ids: ['pkg-1', '', 7, 'pkg-2'] }).packageIds).toEqual([
+      'pkg-1',
+      'pkg-2',
+    ])
+    // No column value = never chosen (null); an empty array = chosen none. Different answers.
+    expect(mapClientRow({ id: 'c1', name: 'Acme' }).packageIds).toBeNull()
+    expect(mapClientRow({ id: 'c1', name: 'Acme', package_ids: null }).packageIds).toBeNull()
+    expect(mapClientRow({ id: 'c1', name: 'Acme', package_ids: [] }).packageIds).toEqual([])
+  })
+
+  it('client create binds package_ids ($46): the ids that exist, null when none were given', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    pgStore.listPackages = async () => [{ id: 'pkg-1' }]
+    await pgStore.createClient({
+      name: 'Chemtrex',
+      contact: '',
+      billingMode: 'hourly',
+      hourlyRate: 100,
+      packageIds: ['pkg-1', 'pkg-gone'],
+    })
+    await pgStore.createClient({ name: 'Plain', contact: '', billingMode: 'hourly', hourlyRate: 100 })
+    await pgStore.createClient({
+      name: 'Dangling',
+      contact: '',
+      billingMode: 'hourly',
+      hourlyRate: 100,
+      packageIds: ['pkg-gone'],
+    })
+    const inserts = fake.matching(/^insert into clients/i)
+    expect(inserts).toHaveLength(3)
+    expect(inserts[2].params[45]).toBeNull()
+    expect(inserts[0].text).toMatch(/period_anchor_month, package_ids, updated_at/)
+    expect(inserts[0].params).toHaveLength(46)
+    expect(inserts[0].params[45]).toEqual(['pkg-1'])
+    expect(inserts[1].params[45]).toBeNull()
+  })
+
+  it('a bulk save keeps the ids as sent when the packages read fails, and keeps null apart from []', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const fake = fakePostgres({ failOn: { pattern: /^select id from packages/i, error: new Error('boom') } })
+    await postgresStore(fake).write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 0, packageIds: ['pkg-1'] },
+          { id: 'c2', name: 'Beta', billingMode: 'hourly', hourlyRate: 0, packageIds: [] },
+          { id: 'c3', name: 'Gamma', billingMode: 'hourly', hourlyRate: 0 },
+        ],
+      }),
+    )
+    const rows = new Map(insertedRows(fake.statements, 'clients').map((row) => [row.id, row.package_ids]))
+    expect(rows.get('c1')).toEqual(['pkg-1'])
+    expect(rows.get('c2')).toEqual([])
+    expect(rows.get('c3')).toBeNull()
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('clientBulkRow writes package_ids in its column slot and drops dangling ids', () => {
+    const columns = BULK_INSERT_SHAPES.clients.columns
+    const options = {
+      validPlanIds: new Set(),
+      validPackageIds: new Set(['pkg-1']),
+      priorClients: new Map(),
+      currentRatePeriod: '2026-10',
+      preservedCreatedAt: new Map(),
+    }
+    const row = clientBulkRow({ id: 'c1', name: 'Acme', packageIds: ['pkg-1', 'pkg-gone'] }, options)
+    expect(row).toHaveLength(columns.length)
+    expect(row[columns.indexOf('package_ids')]).toEqual(['pkg-1'])
+    // No set to check against: ids are kept as strings.
+    expect(sanitizeClientPackageRefs({ packageIds: ['a', '', 3, 'a'] }, null)).toEqual(['a'])
+    // No list at all is "never chosen" (null); an empty list is "chosen none".
+    expect(sanitizeClientPackageRefs({}, new Set(['a']))).toBeNull()
+    expect(sanitizeClientPackageRefs({ packageIds: [] }, new Set(['a']))).toEqual([])
+  })
+
+  it('a bulk save reads the packages that exist and writes only those ids', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).write(
+      workspace({ clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 0, packageIds: ['pkg-1'] }] }),
+    )
+    expect(fake.matching(/^select id from packages/i)).toHaveLength(1)
+    // The fake holds no packages, so the id has nothing behind it.
+    const [row] = insertedRows(fake.statements, 'clients')
+    expect(row.package_ids).toEqual([])
+  })
+
+  it('a targeted plan write can replace the chosen packages outright (a superseding letter)', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake)._setClientPlanIds('c1', ['plan-books'], { packageIds: ['pkg-2', 'pkg-2'] })
+    const [update] = fake.matching(/^update clients set plan_ids/i)
+    expect(update.params).toEqual(['c1', ['plan-books'], 'plan-books', null, ['pkg-2']])
+  })
+
+  it('"chosen none" is stored as an empty array, and an append onto a null list makes a one-element array', async () => {
+    const fake = fakePostgres()
+    const pgStore = postgresStore(fake)
+    await pgStore._setClientPlanIds('c1', ['plan-books'], { packageIds: [] })
+    await pgStore._setClientPlanIds('c1', ['plan-books'], { addPackageId: 'pkg-9' })
+    const [none, append] = fake.matching(/^update clients set plan_ids/i)
+    // [] is bound as an array (not null), so the CASE takes the replace branch and stores {}.
+    expect(none.params[4]).toEqual([])
+    expect(none.text).toMatch(/when \$5::text\[\] is not null then \$5::text\[\]/)
+    // The append works on a NULL list: coalesce before both the membership test and the append.
+    expect(append.params).toEqual(['c1', ['plan-books'], 'plan-books', 'pkg-9', null])
+    expect(append.text).toMatch(/any\(coalesce\(package_ids, '\{\}'\)\)/)
+    expect(append.text).toMatch(/array_append\(coalesce\(package_ids, '\{\}'\), \$4::text\)/)
+  })
+
   /**
    * The rule-4 half. A package apply must touch ONE column on ONE client row —
    * if this ever becomes a bulk save, applying a package from a tab that has
@@ -23347,7 +23607,7 @@ describe('packages (postgres branch)', () => {
     expect(update.text).toMatch(/where id = \$1/)
     // The legacy scalar is re-derived from the first id, exactly as the bulk
     // save derives it, so the two links can never disagree.
-    expect(update.params).toEqual(['c1', ['plan-books', 'plan-payroll'], 'plan-books'])
+    expect(update.params).toEqual(['c1', ['plan-books', 'plan-payroll'], 'plan-books', null, null])
     expect(fake.matching(/^delete from clients/i)).toHaveLength(0)
   })
 
@@ -42554,11 +42814,11 @@ describe('bulk save: clients, invoices and the small tables as multi-row inserts
     [500, [500]],
     [501, [500, 1]],
     [1001, [500, 500, 1]],
-  ])('sends %i clients as statements of %j rows (49 parameters a row)', async (count, sizes) => {
+  ])('sends %i clients as statements of %j rows (50 parameters a row)', async (count, sizes) => {
     const fake = fakePostgres()
     await postgresStore(fake).write(workspace({ clients: clientsOf(count), timeEntries: [] }))
 
-    expect(rowsPer(fake, 'clients', 49)).toEqual(sizes)
+    expect(rowsPer(fake, 'clients', 50)).toEqual(sizes)
     expect(insertedRows(fake.statements, 'clients').map((row) => row.id)).toEqual(
       clientsOf(count).map((client) => client.id),
     )
@@ -42598,7 +42858,7 @@ describe('bulk save: clients, invoices and the small tables as multi-row inserts
       }),
     )
 
-    expect(rowsPer(fake, 'clients', 49)).toEqual([500, 101])
+    expect(rowsPer(fake, 'clients', 50)).toEqual([500, 101])
     const rows = new Map(insertedRows(fake.statements, 'clients').map((row) => [row.id, row]))
     for (const index of [0, 499, 500, 600]) {
       const row = rows.get(`c-${pad(index)}`)
@@ -50873,6 +51133,104 @@ describe('engagements stage 4: superseding (file backend)', () => {
     expect((await store.read()).clients.find((row) => row.id === clientId).planIds).toEqual(['plan-books'])
   })
 
+  // ---- the client's chosen packages through signing (featreq-8bdc5ec5 part 2) ----
+  const clientPackages = async (clientId) =>
+    (await store.read()).clients.find((row) => row.id === clientId).packageIds
+
+  /** A client on Bookkeeping + Payroll with the package "Both" chosen. */
+  const clientOnBoth = async () => {
+    const made = await signedClient()
+    const both = await store.createPackage({ name: 'Both', planIds: ['plan-books', 'plan-payroll'], templateIds: [] })
+    await store.applyPackageToClient(made.clientId, both.id)
+    expect(await clientPackages(made.clientId)).toEqual([both.id])
+    return { ...made, both }
+  }
+
+  it("an amendment's package is appended to the client's chosen packages", async () => {
+    const { clientId } = await signedClient()
+    const pkg = await store.createPackage({ name: 'Both', planIds: ['plan-books', 'plan-payroll'], templateIds: [] })
+    expect(await clientPackages(clientId)).toBeNull()
+    const { engagement } = await upsell(clientId, { packageId: pkg.id })
+    await sign(engagement.id)
+    expect(await clientPackages(clientId)).toEqual([pkg.id])
+  })
+
+  it('a superseding letter keeps a chosen package whose plans all survive, even when the letter names no package', async () => {
+    const { clientId, both } = await clientOnBoth()
+    const { engagement } = await upsell(clientId, { mode: 'supersede', planIds: ['plan-books', 'plan-payroll'] })
+    await sign(engagement.id)
+    expect(await clientPackages(clientId)).toEqual([both.id])
+  })
+
+  it('a superseding letter on a never-chosen client with no package leaves it never chosen (null)', async () => {
+    const { clientId } = await signedClient()
+    const { engagement } = await upsell(clientId, { mode: 'supersede', planIds: ['plan-payroll'] })
+    await sign(engagement.id)
+    expect(await clientPackages(clientId)).toBeNull()
+  })
+
+  it('a superseding letter on a never-chosen client with a package chooses just that package', async () => {
+    const { clientId } = await signedClient()
+    const pkg = await store.createPackage({ name: 'Both', planIds: ['plan-books', 'plan-payroll'], templateIds: [] })
+    const { engagement } = await upsell(clientId, { mode: 'supersede', packageId: pkg.id })
+    await sign(engagement.id)
+    expect(await clientPackages(clientId)).toEqual([pkg.id])
+  })
+
+  it('a superseding letter whose package the client already has chosen lists it once', async () => {
+    const { clientId, both } = await clientOnBoth()
+    const { engagement } = await upsell(clientId, { mode: 'supersede', packageId: both.id })
+    await sign(engagement.id)
+    expect(await clientPackages(clientId)).toEqual([both.id])
+  })
+
+  it('signing an amendment writes back only plans that still exist on the client', async () => {
+    const { clientId } = await signedClient()
+    const raw = JSON.parse(await readFile(localDataPath, 'utf8'))
+    raw.clients.find((row) => row.id === clientId).planIds = ['plan-gone', 'plan-books']
+    await writeFile(localDataPath, JSON.stringify(raw, null, 2))
+    const { engagement } = await upsell(clientId, { planIds: ['plan-payroll'] })
+    await sign(engagement.id)
+    const client = (await store.read()).clients.find((row) => row.id === clientId)
+    expect(client.planIds).toEqual(['plan-books', 'plan-payroll'])
+    expect(client.planId).toBe('plan-books')
+  })
+
+  it('a superseding letter drops a chosen package one of whose plans it takes off, and adds its own package', async () => {
+    const { clientId, both } = await clientOnBoth()
+    const alone = await store.createPackage({ name: 'Payroll+', planIds: ['plan-payroll', 'plan-gone-ok'], templateIds: [] })
+    // Payroll+ names a plan that does not exist, so only its surviving plans count for "all survive".
+    const { engagement } = await upsell(clientId, { mode: 'supersede', planIds: ['plan-payroll'], packageId: alone.id })
+    const result = await sign(engagement.id)
+    expect(result.removedPlanIds).toEqual(['plan-books'])
+    expect(await clientPackages(clientId)).toEqual([alone.id])
+    expect(await clientPackages(clientId)).not.toContain(both.id)
+  })
+
+  it('a superseding letter with no package takes off a chosen package whose plan it removes', async () => {
+    const { clientId } = await clientOnBoth()
+    const { engagement } = await upsell(clientId, { mode: 'supersede', planIds: ['plan-payroll'] })
+    await sign(engagement.id)
+    expect(await clientPackages(clientId)).toEqual([])
+  })
+
+  it('a superseding letter whose package was deleted while it was being signed leaves the chosen packages alone', async () => {
+    const { clientId, both } = await clientOnBoth()
+    const gone = await store.createPackage({ name: 'Gone', planIds: ['plan-books', 'plan-payroll'], templateIds: [] })
+    const { engagement } = await upsell(clientId, { mode: 'supersede', planIds: ['plan-books'], packageId: gone.id })
+    // Deleted in the window after the flip: the pre-flip check passed, the re-read does not.
+    const flip = store._signEngagementWithSoftware.bind(store)
+    vi.spyOn(store, '_signEngagementWithSoftware').mockImplementation(async (...args) => {
+      const done = await flip(...args)
+      await store.deletePackage(gone.id)
+      return done
+    })
+    const result = await sign(engagement.id)
+    expect(result.skipped.map((entry) => entry.what)).toContain('Package')
+    // Alone, the letter's plans would have dropped "Both" (Payroll leaves); the deleted package leaves the list as it was.
+    expect(await clientPackages(clientId)).toEqual([both.id])
+  })
+
   it('an old letter voided meanwhile is left as it is, the new one still signs, and it is said', async () => {
     const { clientId, original } = await signedClient()
     const { engagement } = await upsell(clientId, { mode: 'supersede', planIds: ['plan-books'] })
@@ -53089,6 +53447,23 @@ describe('engagements: a superseding letter replaces the open amendments (Postgr
     expect(texts.filter((text) => text === CASCADE)).toHaveLength(1)
     // The ids are de-duplicated and typed; the client comes from the signing, never the page.
     expect(statements[cascadeAt].params).toEqual(['c1', ids])
+  })
+
+  it('sets the chosen packages in the one targeted plan write: kept ones plus the letter\u2019s (params[4])', async () => {
+    const { pgStore, statements } = amendmentPool()
+    pgStore.read = async () => ({
+      clients: [{ id: 'c1', planIds: ['p1'], packageIds: ['pkg-old', 'pkg-keep'] }],
+      plans: [{ id: 'p1' }, { id: 'p2' }],
+      checklistTemplates: [],
+    })
+    // Payroll-only letter (plans [p2]): pkg-old needs p1 (taken off) so it goes; pkg-keep survives.
+    pgStore.listPackages = async () => [
+      { id: 'pkg-old', planIds: ['p1', 'p2'], templateIds: [] },
+      { id: 'pkg-keep', planIds: ['p2'], templateIds: [] },
+    ]
+    await pgStore.signEngagement('eng-new', { signedOn: '2026-10-09', userId: 'u1' })
+    const update = statements.find((statement) => /^update clients set plan_ids/i.test(statement.text))
+    expect(update.params).toEqual(['c1', ['p2'], 'p2', null, ['pkg-keep']])
   })
 
   it('a voided predecessor still lets the chosen amendments be replaced, and the result says so in a skip line', async () => {

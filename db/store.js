@@ -526,6 +526,7 @@ export const BULK_INSERT_SHAPES = {
       'invoice_no_email',
       'billing_period_months',
       'period_anchor_month',
+      'package_ids',
       'created_at',
     ],
     casts: { hourly_rate_history: 'jsonb' },
@@ -1007,9 +1008,13 @@ export function contactBulkRow(contact, preservedCreatedAt) {
  * snapshot of the four endpoint-owned columns (id -> { stripeCustomerId,
  * invoiceNote, ratePeriod, rateHistory }): what is stored wins outright and the
  * payload is not consulted for any of them. `currentRatePeriod` is the month an
- * hourly client with no stored pin falls back to.
+ * hourly client with no stored pin falls back to. `validPackageIds` is the set
+ * of packages that exist (absent: nothing to check against, ids are kept).
  */
-export function clientBulkRow(clientRecord, { validPlanIds, priorClients, currentRatePeriod, preservedCreatedAt }) {
+export function clientBulkRow(
+  clientRecord,
+  { validPlanIds, validPackageIds, priorClients, currentRatePeriod, preservedCreatedAt },
+) {
   // FK-safe plan references: drop any plan id not present in this payload's
   // plans (see sanitizeClientPlanRefs).
   const planRefs = sanitizeClientPlanRefs(clientRecord, validPlanIds)
@@ -1103,6 +1108,9 @@ export function clientBulkRow(clientRecord, { validPlanIds, priorClients, curren
     // leave them out and the next autosave puts a quarterly client back on monthly.
     normalizeBillingPeriodMonths(clientRecord.billingPeriodMonths),
     normalizePeriodAnchorMonth(clientRecord.periodAnchorMonth),
+    // The packages the owner chose for this client (FK-free, like plan_ids): a
+    // package deleted while still listed is dropped here, not stored.
+    sanitizeClientPackageRefs(clientRecord, validPackageIds),
     snapshotCreatedAt(preservedCreatedAt, 'clients', clientRecord.id),
   ]
 }
@@ -2284,6 +2292,7 @@ export function normalizeClientProfile(client) {
     // Billing period (stage 2): monthly (1) and no anchor unless someone set one.
     // The same shape the Postgres read map produces - cardinal rule 1.
     billingPeriodMonths: normalizeBillingPeriodMonths(client.billingPeriodMonths),
+    packageIds: sanitizeClientPackageRefs(client, null),
     periodAnchorMonth: normalizePeriodAnchorMonth(client.periodAnchorMonth),
     // Consolidated billing (featreq-65f5eac1). `billToClientId` names the
     // BILLING MASTER this client's work is invoiced on; `isBillingMaster` marks
@@ -3757,7 +3766,7 @@ export const CLIENT_SELECT_COLUMNS = `id, name, contact, billing_mode, hourly_ra
           annual_rate, annual_billing_month, lifecycle_stage,
           bill_to_client_id, is_billing_master, invoice_recipient_client_id,
           hourly_rate_period, hourly_rate_history, invoice_note,
-          invoice_no_email, billing_period_months, period_anchor_month`
+          invoice_no_email, billing_period_months, period_anchor_month, package_ids`
 
 /** One `clients` row -> the camelCase shape the app and the API speak. */
 export function mapClientRow(row) {
@@ -3843,6 +3852,7 @@ export function mapClientRow(row) {
     // the file backend - cardinal rule 1.
     billingPeriodMonths: normalizeBillingPeriodMonths(row.billing_period_months),
     periodAnchorMonth: normalizePeriodAnchorMonth(row.period_anchor_month),
+    packageIds: sanitizeClientPackageRefs({ packageIds: row.package_ids }, null),
     // The client's Stripe customer, written by `setClientStripeCustomerId` at
     // first send. It was written and never read back on Postgres, so every
     // send, payment link and pay click minted a BRAND NEW Stripe customer for
@@ -5136,6 +5146,30 @@ export function sanitizeClientPlanRefs(client, validPlanIds) {
       : client?.planId ?? null
   const planId = typeof legacy === 'string' && validPlanIds.has(legacy) ? legacy : null
   return { planId, planIds }
+}
+
+/**
+ * A client's chosen packages (`clients.package_ids[]`) as strings, with any id
+ * that names a package that no longer exists dropped. SAME DANGER AS `plan_ids`:
+ * the column has no foreign key, so a package deleted while still listed leaves
+ * a dangling id behind (`deletePackage` also strips it from every client).
+ * `validPackageIds` is a Set of the packages that exist; when it is not a Set
+ * there is nothing to check against and the ids are only cleaned to strings.
+ *
+ * NULL and [] ARE DIFFERENT: null (no list at all) = the owner never chose, so the
+ * page falls back to the packages the client's plans cover; [] = she chose none
+ * (removed the last), and there is no fallback. Anything that is not an array is null.
+ *
+ * @param {{ packageIds?: unknown }} client
+ * @param {Set<string> | null | undefined} validPackageIds
+ * @returns {string[] | null}
+ */
+export function sanitizeClientPackageRefs(client, validPackageIds) {
+  if (!Array.isArray(client?.packageIds)) return null
+  const ids = client.packageIds.filter(
+    (id) => typeof id === 'string' && id && (!(validPackageIds instanceof Set) || validPackageIds.has(id)),
+  )
+  return [...new Set(ids)]
 }
 
 /**
@@ -6931,6 +6965,14 @@ export class AppDataStore {
       )
       await this.pool.query(
         `alter table clients add column if not exists period_anchor_month text`,
+      )
+      // The packages the owner CHOSE for this client (the Packages row on the client
+      // page). FK-free like plan_ids: deletePackage strips the id, the bulk save drops
+      // an id with no package behind it. NULLABLE on purpose, no default, no backfill:
+      // null = never chosen (the page falls back to the packages the client's plans
+      // cover), {} = chosen none (no fallback).
+      await this.pool.query(
+        `alter table clients add column if not exists package_ids text[]`,
       )
       await this.pool.query(
         `alter table clients add column if not exists assigned_bookkeeper_ids text[] not null default '{}'`,
@@ -9977,6 +10019,19 @@ export class AppDataStore {
           .filter((id) => typeof id === 'string' && id),
       )
 
+      // Packages that exist, for `clients.package_ids[]` (FK-free, the plan_ids
+      // idiom): a dangling id is dropped on the way in. Packages are not in the
+      // payload, so they are read here. A failed read checks nothing (null) rather
+      // than strip every client's packages on a transient error.
+      let validPackageIds = null
+      try {
+        validPackageIds = new Set(
+          (await this.pool.query('select id from packages')).rows.map((row) => row.id),
+        )
+      } catch (error) {
+        console.warn('[bulk-save] could not read packages to check clients.package_ids:', error?.message)
+      }
+
       // Valid user ids for FK-bearing user references. The bulk write NEVER
       // deletes users (it upserts), so the live set is everyone already in
       // `users` plus everyone in this payload's employees. A client_assignment
@@ -10366,7 +10421,7 @@ export class AppDataStore {
           table: 'clients',
           ...BULK_INSERT_SHAPES.clients,
           rows: safeClients.map((clientRecord) =>
-            clientBulkRow(clientRecord, { validPlanIds, priorClients, currentRatePeriod, preservedCreatedAt }),
+            clientBulkRow(clientRecord, { validPlanIds, validPackageIds, priorClients, currentRatePeriod, preservedCreatedAt }),
           ),
         })
         lapTable('clients')
@@ -10717,6 +10772,28 @@ export class AppDataStore {
       const planRefs = sanitizeClientPlanRefs(clientRecord, fileValidPlanIds)
       clientRecord.planIds = planRefs.planIds
       clientRecord.planId = planRefs.planId
+    }
+
+    // Package references, resolved against the packages that exist (they live in
+    // the auth-state file, not in this payload). Unreadable: nothing is checked.
+    // Guarded on PRESENCE like the plan references above.
+    let fileValidPackageIds = null
+    try {
+      if (existsSync(localAuthPath)) {
+        const authState = await readJson(localAuthPath)
+        fileValidPackageIds = new Set(
+          (Array.isArray(authState.packages) ? authState.packages : [])
+            .map((pkg) => pkg?.id)
+            .filter((id) => typeof id === 'string' && id),
+        )
+      }
+    } catch {
+      fileValidPackageIds = null
+    }
+    for (const clientRecord of Array.isArray(data.clients) ? data.clients : []) {
+      if (!clientRecord || typeof clientRecord !== 'object') continue
+      if (!('packageIds' in clientRecord)) continue
+      clientRecord.packageIds = sanitizeClientPackageRefs(clientRecord, fileValidPackageIds)
     }
 
     // Staleness guard, file backend. Same contract as the Postgres branch
@@ -12861,7 +12938,16 @@ export class AppDataStore {
     if (!id) return false
     if (this.pool) {
       const result = await this.pool.query(`delete from packages where id = $1 returning id`, [id])
-      return (result.rowCount ?? 0) > 0
+      if ((result.rowCount ?? 0) === 0) return false
+      // `clients.package_ids[]` has no foreign key (the plan_ids idiom): strip the
+      // id so no client is left listing a package that is gone. Plans stay.
+      await this.pool.query(
+        `update clients
+            set package_ids = array_remove(package_ids, $1), updated_at = now()
+          where $1 = any(package_ids)`,
+        [id],
+      )
+      return true
     }
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.packages) ? authState.packages : []
@@ -12869,6 +12955,15 @@ export class AppDataStore {
     authState.packages = list.filter((row) => !row || row.id !== id)
     if (authState.packages.length === before) return false
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    const data = await readJson(localDataPath)
+    if ((data.clients ?? []).some((client) => Array.isArray(client?.packageIds) && client.packageIds.includes(id))) {
+      data.clients = data.clients.map((client) =>
+        Array.isArray(client?.packageIds) && client.packageIds.includes(id)
+          ? { ...client, packageIds: client.packageIds.filter((packageId) => packageId !== id) }
+          : client,
+      )
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
     return true
   }
 
@@ -14064,13 +14159,22 @@ export class AppDataStore {
     // Plans: union with what is already there, in that order, so the client's
     // first plan (and therefore the legacy scalar `plan_id` derived from it)
     // does not move underneath them.
-    const existingPlanIds = Array.isArray(client.planIds) ? [...client.planIds] : []
+    // Only plans that still exist are written back: a dangling first id would be
+    // re-derived into the scalar `plan_id` (a foreign key) and refuse the apply.
     const knownPlanIds = new Set((data.plans ?? []).map((plan) => plan.id))
+    const existingPlanIds = (Array.isArray(client.planIds) ? client.planIds : []).filter((id) =>
+      knownPlanIds.has(id),
+    )
     const addedPlanIds = pkg.planIds.filter(
       (id) => knownPlanIds.has(id) && !existingPlanIds.includes(id),
     )
-    if (addedPlanIds.length > 0) {
-      await this._setClientPlanIds(clientId, [...existingPlanIds, ...addedPlanIds])
+    // The package becomes one of the client's CHOSEN packages in the SAME write that
+    // adds its plans (a re-apply that adds nothing still records the choice).
+    const alreadyChosen = Array.isArray(client.packageIds) && client.packageIds.includes(pkg.id)
+    if (addedPlanIds.length > 0 || !alreadyChosen) {
+      await this._setClientPlanIds(clientId, [...existingPlanIds, ...addedPlanIds], {
+        addPackageId: pkg.id,
+      })
     }
 
     // Checklists: one copy per blueprint the client does not already have (a copy
@@ -14111,16 +14215,31 @@ export class AppDataStore {
    *
    * The legacy scalar `plan_id` is re-derived from the first id, exactly as the
    * bulk save derives it, so the two links can never disagree.
+   *
+   * The client's CHOSEN packages (`package_ids`) move in the same statement:
+   * `addPackageId` appends one (once), `packageIds` replaces the list outright
+   * (a superseding letter), and neither leaves it as it is. The caller passes ids
+   * of packages it has just seen exist.
    */
-  async _setClientPlanIds(clientId, planIds) {
+  async _setClientPlanIds(clientId, planIds, { addPackageId = null, packageIds = null } = {}) {
     const safe = [...new Set((planIds ?? []).filter((id) => typeof id === 'string' && id))]
     const scalar = safe[0] ?? null
+    const addId = typeof addPackageId === 'string' && addPackageId ? addPackageId : null
+    const setIds = Array.isArray(packageIds)
+      ? [...new Set(packageIds.filter((id) => typeof id === 'string' && id))]
+      : null
     if (this.pool) {
       const result = await this.pool.query(
-        `update clients set plan_ids = $2, plan_id = $3, updated_at = now()
+        `update clients set plan_ids = $2, plan_id = $3, updated_at = now(),
+                package_ids = case
+                  when $5::text[] is not null then $5::text[]
+                  when $4::text is not null and not ($4::text = any(coalesce(package_ids, '{}')))
+                    then array_append(coalesce(package_ids, '{}'), $4::text)
+                  else package_ids
+                end
           where id = $1
           returning id`,
-        [clientId, safe, scalar],
+        [clientId, safe, scalar, addId, setIds],
       )
       return (result.rowCount ?? 0) > 0
     }
@@ -14129,7 +14248,10 @@ export class AppDataStore {
     data.clients = (data.clients ?? []).map((client) => {
       if (client.id !== clientId) return client
       found = true
-      return { ...client, planId: scalar, planIds: safe }
+      const have = Array.isArray(client.packageIds) ? client.packageIds : null
+      const nextPackageIds =
+        setIds ?? (addId && !(have ?? []).includes(addId) ? [...(have ?? []), addId] : have)
+      return { ...client, planId: scalar, planIds: safe, packageIds: nextPackageIds }
     })
     if (!found) return false
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
@@ -21218,6 +21340,14 @@ export class AppDataStore {
       hourlyRateHistory: [],
     })
 
+    // Chosen packages that still exist (FK-free column, the plan_ids idiom).
+    if (Array.isArray(record.packageIds) && record.packageIds.length > 0) {
+      const existingPackages = new Set((await this.listPackages()).map((pkg) => pkg.id))
+      const kept = record.packageIds.filter((packageId) => existingPackages.has(packageId))
+      // Every id given was dangling: nothing was chosen, which is null, not "chosen none".
+      record.packageIds = kept.length > 0 ? kept : null
+    }
+
     // Consolidated billing, checked OUT LOUD. A create is one deliberate act
     // with a person waiting on the answer, so a link that does not hold is a
     // sentence rather than a silently-nulled field — the opposite call from the
@@ -21304,9 +21434,9 @@ export class AppDataStore {
              invoice_time_breakdown_mode, invoice_time_breakdown_amounts,
              bill_to_client_id, is_billing_master, invoice_recipient_client_id,
              hourly_rate_period, hourly_rate_history, invoice_no_email,
-             billing_period_months, period_anchor_month, updated_at
+             billing_period_months, period_anchor_month, package_ids, updated_at
            )
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42::jsonb,$43,$44,$45, now())`,
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42::jsonb,$43,$44,$45,$46, now())`,
           [
             record.id,
             record.name,
@@ -21360,6 +21490,7 @@ export class AppDataStore {
             record.invoiceNoEmail === true,
             normalizeBillingPeriodMonths(record.billingPeriodMonths),
             normalizePeriodAnchorMonth(record.periodAnchorMonth),
+            record.packageIds,
           ],
         )
         await dbClient.query('commit')
@@ -28455,7 +28586,9 @@ export class AppDataStore {
         const workspace = await this.read()
         const row = (workspace.clients ?? []).find((entry) => entry.id === clientId)
         const known = new Set((workspace.plans ?? []).map((plan) => plan.id))
-        const existing = Array.isArray(row?.planIds) ? row.planIds : []
+        // Only plans that still exist are written back (a dangling first id would be
+        // re-derived into the scalar `plan_id`, a foreign key), as apply does.
+        const existing = (Array.isArray(row?.planIds) ? row.planIds : []).filter((planId) => known.has(planId))
         // The package as it is NOW: one deleted since the checks above is said, not applied.
         let pkgNow = null
         if (pkg) {
@@ -28485,15 +28618,33 @@ export class AppDataStore {
         } else if (replacing) {
           // SET, not added to: the client's plans become exactly the letter's.
           removedPlanIds.push(...existing.filter((planId) => !lettered.includes(planId)))
-          if (addedPlanIds.length > 0 || removedPlanIds.length > 0) await this._setClientPlanIds(clientId, lettered)
+          // The chosen packages keep every one whose plans ALL survive in the letter's
+          // plans, and gain the letter's package. A letter with no package never removes
+          // a package whose plans it keeps; one whose package was deleted mid-signing
+          // leaves the list alone (null).
+          let nextPackageIds = null
+          if (!(pkg && !pkgNow) && (Array.isArray(row?.packageIds) || pkgNow)) {
+            const allPackages = await this.listPackages()
+            const kept = (Array.isArray(row?.packageIds) ? row.packageIds : []).filter((packageId) => {
+              const chosen = allPackages.find((entry) => entry.id === packageId)
+              return (
+                chosen &&
+                chosen.planIds.filter((planId) => known.has(planId)).every((planId) => lettered.includes(planId))
+              )
+            })
+            nextPackageIds = [...new Set([...kept, ...(pkgNow ? [pkgNow.id] : [])])]
+          }
+          await this._setClientPlanIds(clientId, lettered, { packageIds: nextPackageIds })
           if (removedPlanIds.length > 0) {
             skipped.push({
               what: 'Checklists',
               why: `The plans the letter no longer names were taken off ${clientName()}; their checklists already on the client were kept - remove them from the client's page if they no longer apply.`,
             })
           }
-        } else if (addedPlanIds.length > 0) {
-          await this._setClientPlanIds(clientId, [...existing, ...addedPlanIds])
+        } else if (addedPlanIds.length > 0 || (pkgNow && !(row?.packageIds ?? []).includes(pkgNow.id))) {
+          await this._setClientPlanIds(clientId, [...existing, ...addedPlanIds], {
+            addPackageId: pkgNow ? pkgNow.id : null,
+          })
         }
         // The package's own checklists, plus the standard ones of each ADDED plan the
         // package does not cover - a plan inside the package brings nothing beyond its
