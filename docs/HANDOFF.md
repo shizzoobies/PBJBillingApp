@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-10-14. Everything below is committed on
+Written 2026-07-21, last updated 2026-10-15. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -24,6 +24,35 @@ developer you talk to; Brittany (user id `emp-patrice`!) is the client whose
 requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
+
+**2026-10-15 (afternoon, ~17:40Z) - two more ships; the automatic reminders ran for the first time; READ THIS FIRST.**
+`main` = `f78092c` (+ this handoff), deployed, `/health` 200, voice re-provisioned, manifest 204,978 (22 bytes under the
+cap - TRIM FIRST). Planned is EMPTY; her Shipped queue: `featreq-338b1507` (Board), `featreq-3f1d63b6` (reminders),
+`featreq-fd985378` (Sent-list buttons), `featreq-8bdc5ec5` (packages, two parts). **First automatic reminder run:**
+at 09:23 ET someone sent six reminders by hand with the new Sent-list buttons; the scheduler's first tick at 09:53 sent
+only the one invoice left (INV-2026-08-014) and skipped the six as reminded today - the once-per-day guard held on
+its first live run. **Shipped today:** `d354ce6` a package brings only its OWN recipes (the 10-12 `08e6404` had
+offered a covered plan's extra checklist on purpose - that was her send-back; the server apply and the signing apply
+were copying it too, not just the panel) · `f78092c` featreq-8bdc5ec5 part 2 from her 10-14 email: NEW COLUMN
+`clients.package_ids text[]` NULLABLE (Alex's yes; null = never chosen -> the page/panel/To 100% keep inferring a package
+from the plans; `[]` = chosen none -> no inference), "+ Add package" puts the package on the client as a chip with its
+plans ("Quarterly Accounting - 4 of 4 plans"), Plans/services shows only OUTSIDE plans, removing a package asks about
+its plans (Undo), a superseding letter keeps chosen packages whose plans all survive; Set up / To 100% / package apply /
+signing MATCH an existing client checklist first (same recipe, else same title ignoring a trailing cadence word, and
+only when the plan's cadence agrees with its schedule) and create only what has no match ("1 linked, 1 created";
+2+ candidates = left for her); `scripts/prod/merge-client.mjs` unions package_ids NULL-safely (`lib/merge-client-sql.js`).
+Production: 55 clients, all `package_ids` null (nothing changes until she picks a package). **Lessons:** read the
+tracker Q/A as the UI shows it; a Brittany email can carry asks the ticket does not (her screenshot showed the package
+was never applied - the four plans were individual chips); the lane H builder's hand-back got lost twice - when a
+builder goes quiet, read its report file and `git log` in the lane. **Open for Brittany (on her tickets):** should
+adding the LAST plan of a package count as choosing the package (today only "+ Add package" does); the 5-day gap and
+weekend sends for automatic reminders; the Addressed-to card on upsell letters. **Open for Alex:** DDL asks (checklist
+stage unique index, one Original per proposal, letter-name uniqueness), bounce notices to every owner, boot DDL
+lock_timeout; four client-level "Client Meeting" checklists exist from earlier package applies (cleanup = his call).
+**Known weak spot:** `db/store-staleness.test.mjs` has active-template fixtures dated 2026-10-31, 2026-12-01 and
+2026-12-31 that may trip the read-time materializer on those exact days (one did today for 10-15 and was moved to
+2099) - sweep them before those dates. Worktrees: lane H folder may still exist if the removal was refused (its branch
+is merged; `git worktree remove --force` once the folder is free); branches `main` + `hold/july-security-p3`.
 
 **2026-10-14 (evening, ~22:30Z) - FIVE SHIPS; READ THIS FIRST. The automatic invoice reminders go out for the first
 time on 2026-10-15 at the first hourly tick at or after 09:00 Eastern.** `main` = `242be1d` (+ this handoff), deployed,
