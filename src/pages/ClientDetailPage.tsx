@@ -1502,19 +1502,11 @@ export function ApplyPackageField({ client }: { client: Client }) {
       .map((planId) => data.plans.find((plan) => plan.id === planId))
       .filter((plan): plan is SubscriptionPlan => Boolean(plan))
     const addedPlanNames = addedPlans.map((plan) => plan.name)
-    // The server's set: the package's own checklists plus each ADDED plan's
-    // bundle (the rule signing uses), and its skip rule - a client checklist
-    // stamped from the blueprint OR with the same title - so the dialog cannot
-    // promise a checklist the apply then skips.
-    const wanted = {
-      templateIds: [
-        ...pkg.templateIds,
-        ...defaultPackageTemplateIds(
-          addedPlans.map((plan) => plan.id),
-          data.plans,
-        ),
-      ],
-    }
+    // The server's set: exactly the package's own checklists (a plan the package
+    // covers brings nothing beyond them - featreq-8bdc5ec5), and its skip rule - a
+    // client checklist stamped from the blueprint OR with the same title - so the
+    // dialog cannot promise a checklist the apply then skips.
+    const wanted = { templateIds: [...pkg.templateIds] }
     const attached = planTemplates(wanted, data.checklistTemplates)
     // Two blueprints with one title make one copy (the server skips the second
     // as same-titled), so the preview counts them once.
@@ -2244,11 +2236,10 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
   )
 
   // What each group lists. A package group mirrors the package exactly: only
-  // its own checklist set (featreq-3ce2d75d). A plan the package covers gets a
-  // group of its own only for what it bundles BEYOND that set - a "Client
-  // Meeting" the package leaves out was otherwise invisible, with no Set up and
-  // no nudge (featreq-8bdc5ec5); a covered plan with nothing left over gets no
-  // group. A checklist shows in the first group that lists it, never twice.
+  // its own checklist set (featreq-3ce2d75d). A plan the package covers gets no
+  // group of its own and brings nothing beyond that set, even a checklist it
+  // bundles itself; a plan OUTSIDE the package brings its own (featreq-8bdc5ec5).
+  // A checklist shows in the first group that lists it, never twice.
   const groups = useMemo(() => {
     const shown = new Set<string>()
     const take = (ids: readonly string[]) => {
@@ -2283,9 +2274,9 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
       })
     }
     for (const plan of clientPlans) {
+      if (covered.has(plan.id)) continue
       const own = planTemplates(plan, data.checklistTemplates).map((template) => template.id)
       const templateIds = take(own)
-      if (covered.has(plan.id) && templateIds.length === 0) continue
       result.push({
         key: plan.id,
         name: plan.name,

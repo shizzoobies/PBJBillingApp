@@ -22796,9 +22796,9 @@ describe('packages (file backend)', () => {
       templateIds: ['bp-close', 'bp-vanished'],
     })
     const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
-    // bp-payroll comes from the Payroll plan the apply ADDED (its bundle), not
-    // from the package's own set.
-    expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-payroll'])
+    // bp-payroll is bundled by the Payroll plan the apply ADDED, but the package
+    // does not list it: a package brings exactly its own set (featreq-8bdc5ec5).
+    expect(result.clonedTemplateIds).toEqual(['bp-close'])
     expect(result.skippedTemplateIds).toEqual([])
   })
 
@@ -22827,11 +22827,12 @@ describe('packages (file backend)', () => {
   })
 
   /**
-   * featreq-8bdc5ec5 / featreq-2b067744: a plan the apply ADDS brings its own
-   * bundled checklists along, even ones the package's set leaves out - the same
-   * rule signing an engagement uses. A plan the client already had is left alone.
+   * featreq-8bdc5ec5 / featreq-2b067744: a package brings EXACTLY its own
+   * checklist set. A plan the apply adds brings nothing beyond it, even a
+   * checklist that plan bundles which the package's set leaves out (Brittany's
+   * Client Meeting under Quarterly Accounting).
    */
-  describe("the added plans' bundled checklists", () => {
+  describe("the package's own checklists only", () => {
     const withReview = () =>
       roster({
         plans: [
@@ -22846,7 +22847,7 @@ describe('packages (file backend)', () => {
         ],
       })
 
-    it("copies an added plan's checklist the package does not list, and not a kept plan's", async () => {
+    it("copies only the package's checklists - not one an added plan or a kept plan bundles beyond them", async () => {
       await store.write(withReview())
       const pkg = await store.createPackage({
         name: 'Quarterly Accounting',
@@ -22856,11 +22857,11 @@ describe('packages (file backend)', () => {
       const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
 
       expect(result.addedPlanIds).toEqual(['plan-payroll'])
-      // The package's two, then the ADDED plan's leftover (Client Meeting). The
-      // review checklist belongs to Bookkeeping, which the client already had.
-      expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-payroll', 'bp-meeting'])
+      // The package's two. Payroll's Client Meeting and Bookkeeping's review are
+      // not in the package's set, so neither comes.
+      expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-payroll'])
       const copies = (await store.read()).checklistTemplates.filter((t) => t.clientId === 'c1')
-      expect(copies.map((t) => t.sourceTemplateId).sort()).toEqual(['bp-close', 'bp-meeting', 'bp-payroll'])
+      expect(copies.map((t) => t.sourceTemplateId).sort()).toEqual(['bp-close', 'bp-payroll'])
     })
 
     it('skips a hand-made checklist that was linked (stamped) to the blueprint', async () => {
@@ -22886,7 +22887,7 @@ describe('packages (file backend)', () => {
       })
       const result = await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
       expect(result.skippedTemplateIds).toEqual(['bp-payroll'])
-      expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-meeting'])
+      expect(result.clonedTemplateIds).toEqual(['bp-close'])
       const payrollCopies = (await store.read()).checklistTemplates.filter(
         (t) => t.clientId === 'c1' && t.sourceTemplateId === 'bp-payroll',
       )
@@ -23210,12 +23211,13 @@ describe('a recipe copied onto a client keeps its whole setup', () => {
 })
 
 /**
- * The Postgres half of "an added plan brings its checklists" (featreq-8bdc5ec5):
- * the apply's copy save inserts the package's checklists AND the added plan's
- * bundle, and the plan write stays the targeted `update clients`.
+ * The Postgres half of "a package brings exactly its own checklists"
+ * (featreq-8bdc5ec5): the apply's copy save inserts the package's checklists and
+ * nothing an added plan bundles beyond them, and the plan write stays the
+ * targeted `update clients`.
  */
-describe("applying a package copies the added plans' bundles (postgres)", () => {
-  it("inserts a copy of the added plan's bundled checklist the package leaves out", async () => {
+describe("applying a package copies only the package's own checklists (postgres)", () => {
+  it("inserts no copy of the added plan's bundled checklist the package leaves out", async () => {
     const templateRow = (id, title) => ({
       id,
       title,
@@ -23280,12 +23282,13 @@ describe("applying a package copies the added plans' bundles (postgres)", () => 
     const result = await pgStore.applyPackageToClient('c1', 'pkg-qa', { actorUserId: 'emp-1' })
 
     expect(result.addedPlanIds).toEqual(['plan-payroll'])
-    expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-payroll', 'bp-meeting'])
+    expect(result.clonedTemplateIds).toEqual(['bp-close', 'bp-payroll'])
     const [planWrite] = fake.matching(/^update clients set plan_ids = \$2, plan_id = \$3/i)
     expect(planWrite.params).toEqual(['c1', ['plan-books', 'plan-payroll'], 'plan-books'])
     const copyRows = insertedRows(fake.statements, 'checklist_templates').filter((row) => row.client_id === 'c1')
-    expect(copyRows.map((row) => row.source_template_id)).toEqual(['bp-close', 'bp-payroll', 'bp-meeting'])
-    // The kept plan's own bundle (Bookkeeping's review) is not copied.
+    expect(copyRows.map((row) => row.source_template_id)).toEqual(['bp-close', 'bp-payroll'])
+    // Neither the added plan's Client Meeting nor the kept plan's review comes.
+    expect(copyRows.some((row) => row.source_template_id === 'bp-meeting')).toBe(false)
     expect(copyRows.some((row) => row.source_template_id === 'bp-review')).toBe(false)
   })
 })
@@ -48153,7 +48156,47 @@ describe('signing an engagement creates the client (file backend)', () => {
     const client = (await store.read()).clients.find((row) => row.id === result.clientId)
     expect(client.planIds).toEqual(['plan-books', 'plan-payroll'])
     expect([...result.addedPlanIds].sort()).toEqual(['plan-books', 'plan-payroll'])
-    expect([...result.clonedTemplateIds].sort()).toEqual(['bp-close', 'bp-payroll'])
+    // Exactly the package's own set: Bookkeeping's Monthly close is not in it.
+    expect([...result.clonedTemplateIds].sort()).toEqual(['bp-payroll'])
+  })
+
+  it("a plan on the letter outside the package brings its own checklists; the package's plans bring only the package's set", async () => {
+    const data = await store.read()
+    await store.write({
+      ...data,
+      plans: [...data.plans, { id: 'plan-meet', name: 'Client Meeting', notes: '', templateIds: ['bp-meet'] }],
+      checklistTemplates: [...data.checklistTemplates, blueprint('bp-meet', 'Client Meeting')],
+    })
+    const pkg = await store.createPackage({
+      name: 'Full service',
+      description: '',
+      planIds: ['plan-books', 'plan-payroll'],
+      templateIds: ['bp-payroll'],
+    })
+    const { engagement } = await wonEngagement({ accept: { packageId: pkg.id, planIds: ['plan-meet'] } })
+    const result = await sign(engagement.id)
+    expect([...result.addedPlanIds].sort()).toEqual(['plan-books', 'plan-meet', 'plan-payroll'])
+    expect([...result.clonedTemplateIds].sort()).toEqual(['bp-meet', 'bp-payroll'])
+  })
+
+  it("a letter that also names a plan INSIDE the package still brings only the package's set for it (no bp-close)", async () => {
+    const data = await store.read()
+    await store.write({
+      ...data,
+      plans: [...data.plans, { id: 'plan-meet', name: 'Client Meeting', notes: '', templateIds: ['bp-meet'] }],
+      checklistTemplates: [...data.checklistTemplates, blueprint('bp-meet', 'Client Meeting')],
+    })
+    const pkg = await store.createPackage({
+      name: 'Full service',
+      description: '',
+      planIds: ['plan-books', 'plan-payroll'],
+      templateIds: ['bp-payroll'],
+    })
+    const { engagement } = await wonEngagement({ accept: { packageId: pkg.id, planIds: ['plan-books', 'plan-meet'] } })
+    const result = await sign(engagement.id)
+    expect([...result.addedPlanIds].sort()).toEqual(['plan-books', 'plan-meet', 'plan-payroll'])
+    // plan-books is inside the package, so its Monthly close does not come.
+    expect([...result.clonedTemplateIds].sort()).toEqual(['bp-meet', 'bp-payroll'])
   })
 
   it('drafts the retainer invoice, which the month lists as a draft retainer', async () => {
@@ -53574,7 +53617,7 @@ describe('a client copy follows its plan cadence (file backend)', () => {
       const pkg = await store.createPackage({
         name: 'Everything',
         planIds: ['plan-q', 'plan-w', 'plan-own'],
-        templateIds: ['bp-loose'],
+        templateIds: ['bp-books', 'bp-payroll', 'bp-tax', 'bp-loose'],
       })
       await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
       const data = await store.read()
@@ -53601,7 +53644,7 @@ describe('a client copy follows its plan cadence (file backend)', () => {
           checklistTemplates: BLUEPRINTS,
         }),
       )
-      const pkg = await store.createPackage({ name: 'Meetings', planIds: ['plan-a', 'plan-b'], templateIds: [] })
+      const pkg = await store.createPackage({ name: 'Meetings', planIds: ['plan-a', 'plan-b'], templateIds: ['bp-loose'] })
       await store.applyPackageToClient('c1', pkg.id, { actorUserId: 'emp-1' })
       expect(copyOf(await store.read(), 'bp-loose')).toMatchObject({
         frequency: 'specific-months',

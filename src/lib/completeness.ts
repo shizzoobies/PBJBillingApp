@@ -270,10 +270,10 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     )
     // One nudge per GROUP, grouped exactly like the client page's Plan
     // checklists panel (ClientDetailPage `groups`): a package covering the
-    // client is one group listing only the package's own checklist set; each
-    // plan then nudges for what is left of its own (a plan the package covers
-    // only for what it bundles beyond the package's set - featreq-8bdc5ec5).
-    // A checklist is named in at most one nudge.
+    // client is one group listing only the package's own checklist set, and
+    // every plan it combines gets no nudge of its own (nothing beyond the
+    // package's set - featreq-8bdc5ec5); a plan outside the package keeps its
+    // own. A checklist is named in at most one nudge.
     const shown = new Set<string>()
     const groups: {
       id: string
@@ -282,7 +282,9 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
       templateIds: string[]
       planIds: string[]
     }[] = []
+    const covered = new Set<string>()
     for (const pkg of packagesCoveringPlans(client.planIds ?? [], input.packages ?? [])) {
+      for (const planId of pkg.planIds) covered.add(planId)
       groups.push({
         id: `pkg-${pkg.id}`,
         name: pkg.name,
@@ -293,7 +295,7 @@ export function computeSetupIssues(input: CompletenessInput): SetupIssue[] {
     }
     for (const planId of client.planIds ?? []) {
       const plan = planById.get(planId)
-      if (!plan) continue
+      if (!plan || covered.has(plan.id)) continue
       groups.push({
         id: plan.id,
         name: plan.name,

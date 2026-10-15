@@ -489,7 +489,8 @@ describe('computeSetupIssues — plan checklists group by package like the clien
     computeSetupIssues(input).filter((i) => i.id.startsWith('client:plan-checklists:'))
 
   // The 1969 Beach shape: the package's own set is T1, T2; a covered plan also
-  // bundles T3, which the package deliberately leaves out.
+  // bundles T3, which the package deliberately leaves out - and a package brings
+  // ONLY its own set (featreq-8bdc5ec5 send-back).
   const beach = (): CompletenessInput => ({
     ...emptyInput,
     clients: [makeClient({ planIds: ['plan-a', 'plan-b'] })],
@@ -498,25 +499,16 @@ describe('computeSetupIssues — plan checklists group by package like the clien
     packages: [pkg('pk-1', 'Quarterly Accounting', ['plan-a', 'plan-b'], ['t1', 't2'])],
   })
 
-  it('gives a covered client a package nudge with only the package templates, and a plan nudge for the leftover', () => {
+  it('gives a covered client one package nudge with only the package templates, and none for the extra a covered plan bundles', () => {
     const found = nudges(beach())
-    expect(found).toHaveLength(2)
+    // T3 (Client Meeting) is bundled by a covered plan but not in the package:
+    // nothing nudges for it.
+    expect(found).toHaveLength(1)
     expect(found[0].id).toBe('client:plan-checklists:client-1:pkg-pk-1')
     expect(found[0].title).toBe('Set up Quarterly Accounting package checklists for Acme')
     expect(found[0].items).toEqual(['Close', 'Reconcile'])
-    // T3 is bundled by a covered plan but not in the package: the plan nudges
-    // for it on its own (featreq-8bdc5ec5), like its group on the client page.
-    expect(found[1].id).toBe('client:plan-checklists:client-1:plan-b')
-    expect(found[1].title).toBe('Set up Quarterly checklists for Acme')
-    expect(found[1].items).toEqual(['Client Meeting'])
-    // Each fix names the plans its copies take their "How often" from
-    // (featreq-acdd0c84): the plan, or the package's plans in its order.
-    expect(found[1].fix).toEqual({
-      kind: 'planChecklists',
-      clientId: 'client-1',
-      templateIds: ['t3'],
-      planIds: ['plan-b'],
-    })
+    // The fix names the plans its copies take their "How often" from
+    // (featreq-acdd0c84): the package's plans in its order.
     expect(found[0].detail).toContain('2 plan checklists')
     expect(found[0].fix).toEqual({
       kind: 'planChecklists',
@@ -533,7 +525,7 @@ describe('computeSetupIssues — plan checklists group by package like the clien
       tmpl('c-1', 'Close', 'client-1'),
     ]
     const partial = nudges(input)
-    expect(partial).toHaveLength(2)
+    expect(partial).toHaveLength(1)
     expect(partial[0].items).toEqual(['Reconcile'])
     expect(partial[0].fix).toEqual({
       kind: 'planChecklists',
@@ -542,10 +534,27 @@ describe('computeSetupIssues — plan checklists group by package like the clien
       planIds: ['plan-a', 'plan-b'],
     })
     input.checklistTemplates = [...input.checklistTemplates, tmpl('c-2', 'Reconcile', 'client-1')]
-    // The package set is done; only the covered plan's leftover is still asked for.
-    expect(nudges(input).map((i) => i.id)).toEqual(['client:plan-checklists:client-1:plan-b'])
-    input.checklistTemplates = [...input.checklistTemplates, tmpl('c-3', 'Client Meeting', 'client-1')]
+    // The package set is done: nothing is asked for, though the covered plan's
+    // Client Meeting was never set up.
     expect(nudges(input)).toEqual([])
+  })
+
+  it('nudges for an additional plan outside the package, with its own recipes', () => {
+    const input = beach()
+    input.clients = [makeClient({ planIds: ['plan-a', 'plan-b', 'plan-m'] })]
+    input.plans = [...input.plans, plan('plan-m', 'Client Meeting - Quarterly', ['t3'])]
+    const found = nudges(input)
+    expect(found.map((i) => i.id)).toEqual([
+      'client:plan-checklists:client-1:pkg-pk-1',
+      'client:plan-checklists:client-1:plan-m',
+    ])
+    expect(found[1].items).toEqual(['Client Meeting'])
+    expect(found[1].fix).toEqual({
+      kind: 'planChecklists',
+      clientId: 'client-1',
+      templateIds: ['t3'],
+      planIds: ['plan-m'],
+    })
   })
 
   it('keeps a per-plan nudge for a plan no package covers, without repeating a checklist', () => {
@@ -556,12 +565,11 @@ describe('computeSetupIssues — plan checklists group by package like the clien
     const found = nudges(input)
     expect(found.map((i) => i.id)).toEqual([
       'client:plan-checklists:client-1:pkg-pk-1',
-      'client:plan-checklists:client-1:plan-b',
       'client:plan-checklists:client-1:plan-c',
     ])
     // t2 already shown by the package nudge, so the plan's nudge has only t4.
-    expect(found[2].items).toEqual(['Payroll Run'])
-    expect(found[2].fix).toEqual({
+    expect(found[1].items).toEqual(['Payroll Run'])
+    expect(found[1].fix).toEqual({
       kind: 'planChecklists',
       clientId: 'client-1',
       templateIds: ['t4'],
@@ -593,12 +601,8 @@ describe('computeSetupIssues — plan checklists group by package like the clien
     // pk-1 is a strict subset of pk-2: one nudge, and pk-1's own t2 is folded in.
     input.packages[0].templateIds = ['t1', 't2', 't5']
     const found = nudges(input)
-    expect(found.map((i) => i.id)).toEqual([
-      'client:plan-checklists:client-1:pkg-pk-2',
-      'client:plan-checklists:client-1:plan-b',
-    ])
+    expect(found.map((i) => i.id)).toEqual(['client:plan-checklists:client-1:pkg-pk-2'])
     expect(found[0].items).toEqual(['Close', 'Reconcile', 'Extra'])
-    expect(found[1].items).toEqual(['Client Meeting'])
   })
 })
 

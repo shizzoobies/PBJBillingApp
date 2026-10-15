@@ -404,11 +404,12 @@ describe('"+ Add package" on a client', () => {
     expect(await screen.findByText(/Applied "Full service"/)).toBeTruthy()
   })
 
-  it("lists the added plan's own checklists the package leaves out, and counts a same-title checklist as skipped", async () => {
+  it("lists only the package's own checklists - not one an added plan bundles beyond them - and counts a same-title checklist as skipped", async () => {
     // Payroll (the plan the apply adds) bundles a Client Meeting the package
-    // does not list - the server copies it too, so the dialog names it. Monthly
-    // close is on the client under the same title but NOT stamped: the server
-    // skips it (stamp or title), so the preview must too.
+    // does not list - a package brings exactly its own set (featreq-8bdc5ec5),
+    // so the dialog does not name it. Monthly close is on the client under the
+    // same title but NOT stamped: the server skips it (stamp or title), so the
+    // preview must too.
     const plans: SubscriptionPlan[] = [
       PLANS[0],
       { id: 'plan-payroll', name: 'Payroll', notes: '', templateIds: ['bp-payroll', 'bp-meeting'] },
@@ -431,7 +432,8 @@ describe('"+ Add package" on a client', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Full service' }))
 
     const sentence = String((confirm.mock.calls[0] as unknown[] | undefined)?.[0] ?? '')
-    expect(sentence).toContain('Creates 2 checklists for this client: Payroll run, Client Meeting')
+    expect(sentence).toContain('Creates 1 checklist for this client: Payroll run')
+    expect(sentence).not.toContain('Client Meeting')
     expect(sentence).toContain('(1 already exists and will be skipped)')
   })
 
@@ -447,8 +449,10 @@ describe('"+ Add package" on a client', () => {
   })
 
   it('counts two checklists with one title once, as the server copies them once', async () => {
+    listPackagesRequest = vi.fn(async () => [
+      { ...FULL_SERVICE, templateIds: ['bp-close', 'bp-payroll', 'bp-payroll-2'] },
+    ])
     setContext({
-      plans: [PLANS[0], { id: 'plan-payroll', name: 'Payroll', notes: '', templateIds: ['bp-payroll', 'bp-payroll-2'] }],
       clients: [ACME],
       checklistTemplates: [
         ...TEMPLATES,

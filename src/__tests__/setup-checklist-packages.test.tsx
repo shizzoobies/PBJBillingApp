@@ -104,8 +104,28 @@ describe('SetupChecklistPage plan checklist nudges', () => {
     expect(screen.getByText('Set up Quarterly Accounting package checklists for Acme')).toBeTruthy()
     expect(screen.queryByText(/Set up Accounting checklists/)).toBeNull()
     // The covered Quarterly plan bundles Client Meeting, which the package's
-    // set leaves out: it nudges for that one on its own (featreq-8bdc5ec5).
-    expect(screen.getByText('Set up Quarterly checklists for Acme')).toBeTruthy()
+    // set leaves out: a package brings only its own set, so nothing nudges for
+    // it (featreq-8bdc5ec5 send-back).
+    expect(screen.queryByText('Set up Quarterly checklists for Acme')).toBeNull()
+    expect(screen.queryByText('Client Meeting')).toBeNull()
+  })
+
+  it('still nudges for an additional plan outside the package, with its own checklist', async () => {
+    const base = contextValue
+    contextValue = {
+      ...base,
+      data: {
+        ...base.data,
+        clients: base.data.clients.map((c) => ({ ...c, planIds: ['plan-a', 'plan-b', 'plan-m'] })),
+        plans: [...base.data.plans, { id: 'plan-m', name: 'Meetings', notes: '', templateIds: ['t3'] }],
+      },
+    } as unknown as AppContextValue
+    mockPackages.mockResolvedValue([PACKAGE])
+    renderPage()
+    await act(async () => {})
+    openClients()
+    expect(screen.getByText('Set up Quarterly Accounting package checklists for Acme')).toBeTruthy()
+    expect(screen.getByText('Set up Meetings checklists for Acme')).toBeTruthy()
     expect(screen.getAllByText('Client Meeting')).toHaveLength(1)
   })
 

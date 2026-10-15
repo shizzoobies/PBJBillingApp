@@ -14077,15 +14077,15 @@ export class AppDataStore {
     // stamped from it, or the same title), all in ONE workspace save, decided
     // against the data re-read inside it - so two applies at once copy once. A
     // blueprint deleted since the package was configured is simply not there to
-    // copy - the FK-free array idiom again. The set is the package's own plus
-    // each plan this apply ADDED (its bundled checklists) - the rule signing an
-    // engagement uses, so a plan's checklist the package does not list still
-    // populates (featreq-8bdc5ec5). A plan the client already had is left alone.
+    // copy - the FK-free array idiom again. The set is EXACTLY the package's own:
+    // a plan the package covers brings nothing beyond it, even a checklist that
+    // plan bundles (featreq-8bdc5ec5 send-back: "only the checklist associated
+    // with that package should come over").
     // Each copy follows the "How often" of the plan that bundles it - an added
     // plan first, then the package's others (featreq-acdd0c84 B2).
     const { copies, skippedTemplateIds } = await this.copyTemplatesToClient(
       clientId,
-      [...pkg.templateIds, ...AppDataStore._planBundleTemplateIds(data.plans, addedPlanIds)],
+      [...pkg.templateIds],
       { cadenceByTemplateId: AppDataStore._planBundleCadences(data.plans, [...addedPlanIds, ...pkg.planIds]) },
     )
     await this._grantTemplateCopiesVisibility(clientId, copies)
@@ -28495,13 +28495,21 @@ export class AppDataStore {
         } else if (addedPlanIds.length > 0) {
           await this._setClientPlanIds(clientId, [...existing, ...addedPlanIds])
         }
-        // The package's checklists and each ADDED plan's standard ones - a recipe she
-        // deleted from a plan the client already had never comes back. One save.
+        // The package's own checklists, plus the standard ones of each ADDED plan the
+        // package does not cover - a plan inside the package brings nothing beyond its
+        // set, and a recipe she deleted from a plan the client already had never
+        // comes back. One save.
         // Each copy follows the "How often" of the plan that bundles it - an added
         // plan first, then the letter's others (featreq-acdd0c84 B2).
         const { copies } = await this.copyTemplatesToClient(
           clientId,
-          [...(pkgNow?.templateIds ?? []), ...AppDataStore._planBundleTemplateIds(workspace.plans, addedPlanIds)],
+          [
+            ...(pkgNow?.templateIds ?? []),
+            ...AppDataStore._planBundleTemplateIds(
+              workspace.plans,
+              addedPlanIds.filter((planId) => !(pkgNow?.planIds ?? []).includes(planId)),
+            ),
+          ],
           { cadenceByTemplateId: AppDataStore._planBundleCadences(workspace.plans, [...addedPlanIds, ...lettered]) },
         )
         await this._grantTemplateCopiesVisibility(clientId, copies)
