@@ -386,8 +386,10 @@ function OwnerDashboardView() {
     .filter((entry) => entry.billable && isInBillingPeriod(entry, billingPeriod))
     .reduce((total, entry) => total + entry.minutes, 0)
 
+  // A skipped task is closed out for its cycle without its steps being ticked,
+  // so it never rolls up complete; the queue leaves it out like the cards above.
   const myChecklists = data.checklists.filter(
-    (c) => c.assigneeId === activeEmployeeId && !isComplete(c),
+    (c) => !isChecklistSkipped(c) && c.assigneeId === activeEmployeeId && !isComplete(c),
   )
   const queueToday = myChecklists.filter((c) => !c.dueDate || c.dueDate <= todayIso)
   const queueWeek = myChecklists.filter(
@@ -646,8 +648,9 @@ function OwnerDashboardView() {
         ) : (
           <div className="dashboard-team-grid">
             {analyticsMembers.map((member) => {
+              // A skipped task is neither open nor overdue, as in the queue.
               const memberChecklists = data.checklists.filter(
-                (c) => c.assigneeId === member.id && !isComplete(c),
+                (c) => !isChecklistSkipped(c) && c.assigneeId === member.id && !isComplete(c),
               )
               const overdueCount = memberChecklists.filter(
                 (c) => c.dueDate && c.dueDate < todayIso,
@@ -946,8 +949,9 @@ function EmployeeDashboardView() {
     return ids
   }, [activity, data.checklists, threeDaysAgo, userId])
 
+  // Same as the owner view: a skipped task is not in the queue.
   const myChecklists = data.checklists.filter(
-    (c) => c.assigneeId === userId && !isComplete(c),
+    (c) => !isChecklistSkipped(c) && c.assigneeId === userId && !isComplete(c),
   )
   const queueToday = myChecklists.filter((c) => !c.dueDate || c.dueDate <= todayIso)
   const queueWeek = myChecklists.filter(
@@ -955,8 +959,10 @@ function EmployeeDashboardView() {
   )
   const queueLater = myChecklists.filter((c) => c.dueDate && c.dueDate > weekEndIso)
 
-  // Watching: viewer-only (not assignee, not editor).
+  // Watching: viewer-only (not assignee, not editor). A skipped task is left
+  // out, as in the queue.
   const watching = data.checklists.filter((c) => {
+    if (isChecklistSkipped(c)) return false
     if (c.assigneeId === userId) return false
     if ((c.editorIds ?? []).includes(userId)) return false
     return (c.viewerIds ?? []).includes(userId)
