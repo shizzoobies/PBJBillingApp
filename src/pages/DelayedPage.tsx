@@ -1,5 +1,5 @@
 import { AlarmClock, Check, ChevronDown, ChevronRight } from 'lucide-react'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { ListSearch } from '../components/ListSearch'
@@ -265,11 +265,17 @@ export function DelayedPage() {
     tabParam: searchParams.get('tab'),
     counts: tabCounts,
   })
+  // `?focus=<wait id>` comes from the blocker's bell and Dashboard row
+  // (`blockerWaitLink`, featreq-4fd52a3c): the wait she was sent for is marked
+  // and scrolled to, since the checklist itself may not be hers to open.
+  const focusWaitId = searchParams.get('focus')
   const showTab = (tab: DelayedTab) => {
     // Written even for the tab that would have been the default — otherwise
     // clicking a quiet tab bounces straight back to the busy one.
     const next = new URLSearchParams(searchParams)
     next.set('tab', tab)
+    // A tab click is her own navigation; the arrival highlight has done its job.
+    next.delete('focus')
     setSearchParams(next, { replace: true })
   }
 
@@ -463,6 +469,7 @@ export function DelayedPage() {
                                           key={entry.id}
                                           entry={entry}
                                           tab={activeTab}
+                                          focused={entry.id === focusWaitId}
                                           busy={busy}
                                           blockerName={blockerLabel(entry, group.clientId)}
                                           assigneeId={row.assigneeId ?? null}
@@ -555,6 +562,7 @@ export function DelayedPage() {
 function DelayedWaitRow({
   entry,
   tab,
+  focused,
   busy,
   blockerName,
   assigneeId,
@@ -567,6 +575,8 @@ function DelayedWaitRow({
 }: {
   entry: WaitingOn
   tab: DelayedTab
+  /** The wait a blocker link (`?focus=`) pointed at: marked and scrolled to. */
+  focused: boolean
   busy: boolean
   blockerName: string
   assigneeId: string | null
@@ -586,8 +596,13 @@ function DelayedWaitRow({
   const lastQuestion = entry.questions?.[entry.questions.length - 1]
   const nameOf = (id: string) => employees.find((e) => e.id === id)?.name ?? 'A team member'
 
+  const lineRef = useRef<HTMLLIElement | null>(null)
+  useEffect(() => {
+    if (focused) lineRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+  }, [focused])
+
   return (
-    <li className={`delayed-wait is-${stage}`}>
+    <li ref={lineRef} className={`delayed-wait is-${stage}${focused ? ' is-focused' : ''}`}>
       <span className="delayed-row-note">
         {`Waiting on ${blockerName}`}
         {entry.note ? ` — ${entry.note}` : ''}

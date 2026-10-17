@@ -8365,6 +8365,14 @@ button.repeating-task-toggle-pill {
   gap: 8px;
 }
 
+/* The wait a blocker's bell or Dashboard row pointed at (?focus=). Same berry
+   ring as a focused checklist card on the Checklists page. */
+.delayed-wait.is-focused {
+  border-radius: 6px;
+  box-shadow: 0 0 0 2px rgba(142, 47, 82, 0.25);
+  padding: 2px 6px;
+}
+
 /* Why it came back. Not a warning colour — a rejection here is ordinary. */
 .delayed-wait-sendback {
   color: var(--muted);

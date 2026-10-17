@@ -25,6 +25,7 @@ import {
 // revenue estimate below says what the month run will.
 import { billRateAt, ratePeriodAsOf } from '../../lib/rate-history.js'
 import {
+  blockerWaitLink,
   OWNER_TICK_CLEARS_WAIT_TITLE,
   WAITING_BLOCK_TITLES,
   waitingToggleRefusal,
@@ -1064,10 +1065,9 @@ function EmployeeDashboardView() {
             {waitingOnMe.map((row) => (
               <li key={row.waitingOnId} className="waiting-on-you-row">
                 <div className="waiting-on-you-main">
-                  <Link
-                    className="waiting-on-you-step"
-                    to={`/checklists?focus=${encodeURIComponent(row.checklistId)}`}
-                  >
+                  {/* Her Delayed page, not the checklist: she may not be on the
+                      task, and Checklists lists only the tasks she is on. */}
+                  <Link className="waiting-on-you-step" to={blockerWaitLink(row.waitingOnId)}>
                     {row.checklistTitle}
                     <span className="waiting-on-you-sub">
                       {' › '}

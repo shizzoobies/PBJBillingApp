@@ -261,6 +261,7 @@ import {
   verifyStripeEvent,
 } from './lib/stripe-rail.js'
 import {
+  blockerWaitLink,
   canAskWaitingOnQuestion,
   canMarkWaitingOnDone,
   canSendBackWaitingOn,
@@ -16466,7 +16467,8 @@ const server = createServer(async (request, response) => {
           await notify(appDataStore, resolved.entry.blockerId, 'waiting_on_requested', {
             checklistId,
             message: `${senderName} sent "${resolved.label}" in "${checklistTitle}" back to you — ${sendBackNote}`,
-            link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
+            // Her Delayed page, not the checklist: she may not be on the task.
+            link: blockerWaitLink(resolved.entry.id),
             appPublicUrl: getPublicAppUrl(request),
           })
           await appDataStore.recordActivity(
@@ -16672,7 +16674,9 @@ const server = createServer(async (request, response) => {
           await notify(appDataStore, blockerId, 'waiting_on_requested', {
             checklistId,
             message: `${flaggerName} is waiting on you: "${result.node.label}" in "${checklist.title}"`,
-            link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
+            // Her Delayed page, not the checklist: the person being waited on
+            // is often not on the task, and Checklists would not list it.
+            link: blockerWaitLink(result.entry.id),
             appPublicUrl: getPublicAppUrl(request),
           })
         } catch (err) {
