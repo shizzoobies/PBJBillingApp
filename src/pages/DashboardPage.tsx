@@ -96,6 +96,13 @@ function isInProgress(checklist: Checklist) {
  * with the cases and links to the finished step's card, where Open next step
  * now revives it.
  */
+/**
+ * The Dashboard lists a stall only when its finished step was due in the last
+ * this-many days: 188 older ones (mostly the August imports) would flood Stuck
+ * cases. The card's Open next step now is offered on every stall regardless.
+ */
+const STALLED_CASE_WINDOW_DAYS = 90
+
 function StalledCaseRow({ stage, clients }: { stage: Checklist; clients: Parameters<typeof clientName>[0] }) {
   const stageIndex = stage.stageIndex ?? 0
   const stageCount = stage.stageCount ?? 1
@@ -378,8 +385,13 @@ function OwnerDashboardView() {
       !isComplete(c),
   )
 
-  // featreq-ed73d181: finished steps whose next step never opened, every case.
-  const stalledStages = useMemo(() => stalledCaseStages(data.checklists), [data.checklists])
+  // featreq-ed73d181: finished steps whose next step never opened, every case
+  // whose finished step was due in the last STALLED_CASE_WINDOW_DAYS.
+  const stalledSince = addDays(todayIso, -STALLED_CASE_WINDOW_DAYS)
+  const stalledStages = useMemo(
+    () => stalledCaseStages(data.checklists, stalledSince),
+    [data.checklists, stalledSince],
+  )
 
   const stuckCaseIds = useMemo(() => {
     const checklistRecency = new Map<string, string>()
@@ -954,9 +966,10 @@ function EmployeeDashboardView() {
   // activity on that case's checklist in 3+ days. Also (featreq-ed73d181) a case
   // whose finished step is theirs and whose next step never opened: they can
   // revive it from the card (Open next step now is the owner's or the assignee's).
+  const stalledSince = addDays(todayIso, -STALLED_CASE_WINDOW_DAYS)
   const myStalledStages = useMemo(
-    () => stalledCaseStages(data.checklists).filter((stage) => stage.assigneeId === userId),
-    [data.checklists, userId],
+    () => stalledCaseStages(data.checklists, stalledSince).filter((stage) => stage.assigneeId === userId),
+    [data.checklists, userId, stalledSince],
   )
   const stuckCaseIds = useMemo(() => {
     const checklistRecency = new Map<string, string>()

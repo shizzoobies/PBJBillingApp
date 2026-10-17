@@ -32,9 +32,15 @@ export function nextStageNeverOpened(checklist: Checklist, checklists: readonly 
   )
 }
 
-/** Every stalled stage in `checklists` (at most one per case: the latest live stage), soonest due first. */
-export function stalledCaseStages(checklists: readonly Checklist[]): Checklist[] {
+/**
+ * Every stalled stage in `checklists` (at most one per case: the latest live
+ * stage), soonest due first. `dueOnOrAfter` (YYYY-MM-DD) keeps only stages due
+ * that day or later: the Dashboard lists the last 90 days, so the old August
+ * import stalls do not flood it. The card's button is offered on every stall.
+ */
+export function stalledCaseStages(checklists: readonly Checklist[], dueOnOrAfter?: string): Checklist[] {
   return checklists
+    .filter((checklist) => !dueOnOrAfter || (checklist.dueDate ?? '') >= dueOnOrAfter)
     .filter((checklist) => nextStageNeverOpened(checklist, checklists))
     .sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0))
 }

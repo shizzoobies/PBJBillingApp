@@ -5,6 +5,7 @@ import { DashboardPage } from '../pages/DashboardPage'
 import { nextStageNeverOpened, stalledCaseStages } from '../lib/stalledCase'
 import type { AppContextValue } from '../AppContext'
 import type { AppData, Checklist } from '../lib/types'
+import { localDateOnly } from '../lib/utils'
 
 /**
  * featreq-ed73d181: a case whose step is finished but whose next step never
@@ -26,12 +27,19 @@ const LISA = 'emp-lisa'
 const BRITT = 'emp-brit'
 const LABEL = 'Finished, next step never opened'
 
+/** The firm-local date `days` before today, the way the Dashboard reads "today". */
+const daysAgo = (days: number) => {
+  const date = new Date()
+  date.setDate(date.getDate() - days)
+  return localDateOnly(date)
+}
+
 const stage = (over: Partial<Checklist>): Checklist =>
   ({
     clientId: 'client-acme',
     assigneeId: LISA,
     templateId: 'tmpl-q',
-    dueDate: '2026-10-05',
+    dueDate: daysAgo(12),
     stageIndex: 0,
     stageCount: 3,
     viewerIds: [],
@@ -63,7 +71,16 @@ const BEHIND_LATER = stage({ id: 'cl-behind', title: 'Quarterly behind', caseId:
 const LATER = stage({ id: 'cl-later', title: 'Quarterly later', caseId: 'case-behind', stageIndex: 2, items: [] })
 const BRITTS = stage({ id: 'cl-britts', title: 'Quarterly Britts', caseId: 'case-britts', assigneeId: BRITT })
 
-const ALL = [STALLED, HANDED, HANDED_NEXT, LAST, OPEN, BEHIND_LATER, LATER, BRITTS]
+/** Stalled long ago (the August imports): the Dashboard leaves it out; its card still offers the button. */
+const OLD = stage({ id: 'cl-old', title: 'Quarterly old', caseId: 'case-old', dueDate: daysAgo(200) })
+/**
+ * Due 89 days ago: inside the Dashboard's 90-day window. (Not exactly 90: the
+ * page's day arithmetic and this file's could differ by a day across a time
+ * zone edge, and a boundary-day test would then flip.)
+ */
+const EDGE = stage({ id: 'cl-edge', title: 'Quarterly edge', caseId: 'case-edge', dueDate: daysAgo(89) })
+
+const ALL = [STALLED, HANDED, HANDED_NEXT, LAST, OPEN, BEHIND_LATER, LATER, BRITTS, OLD, EDGE]
 
 describe('nextStageNeverOpened / stalledCaseStages', () => {
   it('is true only for a finished, non-last stage with no later live stage', () => {
@@ -93,7 +110,13 @@ describe('nextStageNeverOpened / stalledCaseStages', () => {
   })
 
   it('lists the stalled stages, soonest due first', () => {
-    expect(stalledCaseStages(ALL).map((row) => row.id)).toEqual(['cl-stalled', 'cl-britts'])
+    expect(stalledCaseStages(ALL).map((row) => row.id)).toEqual(['cl-old', 'cl-edge', 'cl-stalled', 'cl-britts'])
+    // An old stall is still a stall: the card's button is offered on it.
+    expect(nextStageNeverOpened(OLD, ALL)).toBe(true)
+  })
+
+  it('with a due-on-or-after day, leaves out the stages due before it', () => {
+    expect(stalledCaseStages(ALL, daysAgo(90)).map((row) => row.id)).toEqual(['cl-edge', 'cl-stalled', 'cl-britts'])
   })
 })
 
@@ -161,6 +184,7 @@ describe('the Dashboard lists a case whose next step never opened', () => {
     for (const [title, id] of [
       ['Quarterly stalled', 'cl-stalled'],
       ['Quarterly Britts', 'cl-britts'],
+      ['Quarterly edge', 'cl-edge'],
     ]) {
       const row = rowFor(title)
       expect(within(row).getByText(LABEL)).not.toBeNull()
@@ -169,8 +193,19 @@ describe('the Dashboard lists a case whose next step never opened', () => {
     expect(screen.queryByText('Quarterly handed')).toBeNull()
     expect(screen.queryByText('Quarterly last')).toBeNull()
     expect(screen.queryByText('Quarterly behind')).toBeNull()
-    expect(screen.getAllByText(LABEL)).toHaveLength(2)
-    expect(stuckCount()).toBe('2')
+    expect(screen.getAllByText(LABEL)).toHaveLength(3)
+    expect(stuckCount()).toBe('3')
+  })
+
+  it('leaves out a stall whose finished step was due more than 90 days ago, in both views', () => {
+    signIn('owner')
+    const owner = renderDashboard()
+    expect(screen.queryByText('Quarterly old')).toBeNull()
+    owner.unmount()
+    signIn('staff')
+    renderDashboard()
+    expect(screen.queryByText('Quarterly old')).toBeNull()
+    expect(screen.getByText('Quarterly edge')).not.toBeNull()
   })
 
   it("staff: their own stalled case, labeled, linking to its card, counted as stuck; not someone else's", () => {
@@ -180,7 +215,8 @@ describe('the Dashboard lists a case whose next step never opened', () => {
     expect(within(row).getByText(LABEL)).not.toBeNull()
     expect(within(row).getByRole('link').getAttribute('href')).toBe('/checklists?focus=cl-stalled')
     expect(screen.queryByText('Quarterly Britts')).toBeNull()
-    expect(screen.getAllByText(LABEL)).toHaveLength(1)
-    expect(stuckCount()).toBe('1')
+    // Hers: the recent one and the one due 89 days ago.
+    expect(screen.getAllByText(LABEL)).toHaveLength(2)
+    expect(stuckCount()).toBe('2')
   })
 })
