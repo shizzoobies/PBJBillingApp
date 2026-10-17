@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { inviteToAutopayRequest, listAutopayRequest, turnOffAutopayRequest } from '../lib/api'
-import type { AutopaySummary } from '../lib/types'
+import { ApiError, type AutopaySummary } from '../lib/types'
 import { autopayStatusText } from '../lib/autopayText'
 import type { InvoiceRecipientDetail } from '../lib/utils'
 import { RecipientPicker } from './RecipientPicker'
@@ -41,6 +41,8 @@ export function AutopayPanel({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [picking, setPicking] = useState(false)
+  // After a 409 recipients_changed: the list the server has now, used instead of the page's.
+  const [freshRecipients, setFreshRecipients] = useState<InvoiceRecipientDetail[] | null>(null)
 
   // Fetched once per mount; the caller keys this by client, so a different
   // client is a fresh mount rather than this one being talked into forgetting.
@@ -75,6 +77,12 @@ export function AutopayPanel({
       setSummary(await action())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'That did not work. Please try again.')
+      // An address she ticked is no longer on file (featreq-34627da1): reopen the picker
+      // on the list as it is now.
+      if (err instanceof ApiError && err.code === 'recipients_changed') {
+        setFreshRecipients(err.recipients ?? null)
+        setPicking(true)
+      }
     } finally {
       setBusy(false)
     }
@@ -140,13 +148,16 @@ export function AutopayPanel({
       {picking ? (
         <RecipientPicker
           label={`The autopay invitation for ${clientName}`}
-          details={recipients}
+          details={freshRecipients ?? recipients}
           busy={busy}
           onSend={(to, extra) => {
             setPicking(false)
             void run(() => inviteToAutopayRequest(clientId, extra.length > 0 ? { to, extra } : { to }))
           }}
-          onCancel={() => setPicking(false)}
+          onCancel={() => {
+            setPicking(false)
+            setFreshRecipients(null)
+          }}
         />
       ) : null}
     </div>

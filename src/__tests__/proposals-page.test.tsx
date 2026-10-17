@@ -1038,6 +1038,25 @@ describe('Send to prospect', () => {
     expect(dialog.getByRole('alert')).toHaveTextContent(/Pick at least one address on file/)
   })
 
+  // Review round 1: a ticked address no longer on file is refused (409), not dropped.
+  it('on recipients_changed says so and reopens the picker on the list the server answered with', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    const changed = new ApiError(409, 'The addresses on file for this client have changed. Reload and choose again.', 'recipients_changed')
+    changed.recipients = [{ email: 'new@acme.test', source: 'Pat Doe' }]
+    api.sendProposalRequest = vi
+      .fn()
+      .mockRejectedValueOnce(changed)
+      .mockResolvedValueOnce({ ...WITH_LETTER, status: 'sent' })
+    renderEditor('/proposals/prop-1?tab=letter')
+    await pickAndSend()
+    expect(await screen.findByText(/The addresses on file for this client have changed/)).toBeTruthy()
+    const reopened = within(await screen.findByRole('dialog', { name: 'Choose who this goes to' }))
+    expect(reopened.getByRole('checkbox', { name: /new@acme.test/ })).toBeChecked()
+    expect(reopened.queryByRole('checkbox', { name: /pat@acme.test/ })).toBeNull()
+    fireEvent.click(reopened.getByRole('button', { name: 'Send to 1 person' }))
+    await waitFor(() => expect(api.sendProposalRequest).toHaveBeenLastCalledWith('prop-1', { to: ['new@acme.test'] }))
+  })
+
   it('sends nothing when she cancels the picker', async () => {
     api.getProposalRequest = vi.fn(async () => WITH_LETTER)
     renderEditor('/proposals/prop-1?tab=letter')

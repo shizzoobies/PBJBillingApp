@@ -381,7 +381,7 @@ describe('the send refuses the whole batch before the first client', () => {
     expect(body).toContain("(choice.extra !== undefined && !Array.isArray(choice.extra))")
     expect(at('recipients: letterRecipientChoices,')).toBeGreaterThan(at('await sendLetterBatch('))
     // The decision itself is the invoice Send's resolver, in the lib.
-    expect(libSource).toContain('resolveSendRecipients({ allowed: preview.to, to: choice.to, extra: choice.extra })')
+    expect(libSource).toContain('resolveSendRecipients({ allowed: preview.to, to: choice.to, extra: choice.extra, strict: true })')
     expect(libSource).toContain('withoutTeamAddresses(typed, context.teamEmails, context.replyTo)')
   })
 

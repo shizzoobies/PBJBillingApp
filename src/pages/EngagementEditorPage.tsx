@@ -6,7 +6,6 @@ import { DocumentPreviewModal } from '../components/letters/DocumentPreviewModal
 import { insertPlaceholder, isBoldShortcut, toggleBold, unknownPlaceholderSentence } from '../components/letters/letterEditing'
 import { SaveBadge } from '../components/SectionKit'
 import { RecipientPicker } from '../components/RecipientPicker'
-import { recipientListLabel } from '../lib/recipientSelection'
 import { AddressedTo, type AddressedToFields } from '../components/engagements/AddressedTo'
 import { SignEngagementForm, SigningSummary } from '../components/engagements/SignEngagement'
 import {
@@ -15,6 +14,7 @@ import {
   listEngagementSectionsRequest,
   listEngagementsRequest,
   listPackagesRequest,
+  engagementRecipientsRequest,
   previewEngagementRequest,
   reassembleEngagementRequest,
   sendEngagementRequest,
@@ -495,11 +495,8 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
     setActionError('')
     setNotice('')
     try {
-      const preview = await previewEngagementRequest(engagementId)
-      setPicking({
-        details: preview.details ?? preview.to.map((email) => ({ email, source: partyName })),
-        defaultTo: preview.defaultTo ?? preview.to,
-      })
+      // The list alone, from the server (no letter is built for it).
+      setPicking(await engagementRecipientsRequest(engagementId))
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : 'Could not read who this letter can go to.')
     } finally {
@@ -520,11 +517,20 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
         to,
         ...(extra.length > 0 ? { extra } : {}),
       })
-      if (result.ok) setNotice(`Sent to ${recipientListLabel(to, extra)}.`)
+      // The list it actually went to, as the server answered it.
+      if (result.ok) setNotice(`Sent to ${(result.to ?? [...to, ...extra]).join(', ')}.`)
       else setActionError(`Not sent: ${result.error ?? 'the email provider refused the message.'}`)
       await refresh({ overwrite: false, advanceStamp: true })
     } catch (err) {
       setActionError(engagementSendRefusalSentence(err))
+      // An address she ticked is no longer on file: reopen the picker on the list as it is now.
+      if (err instanceof ApiError && err.code === 'recipients_changed') {
+        try {
+          setPicking(await engagementRecipientsRequest(engagementId))
+        } catch {
+          // The refusal sentence above still says to choose again.
+        }
+      }
       // The engagement changed under the page (or went out a moment ago): show the stored one.
       if (
         err instanceof ApiError &&

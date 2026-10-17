@@ -101,6 +101,8 @@ export declare function partyRecipientDetails(args: {
  * prospect (and its client) of the proposal its answers started. None for a new link.
  */
 export declare function questionnaireRecipientDetails(args: {
+  /** Every address the last successful send went to (from the log); wins over `sentTo`. */
+  previous?: string[] | null
   sentTo?: string | null
   proposal?: {
     clientId?: string | null
@@ -110,11 +112,24 @@ export declare function questionnaireRecipientDetails(args: {
   contacts?: ResolveInvoiceRecipientsArgs['contacts']
 }): InvoiceRecipientDetail[]
 
+/** Every address a questionnaire link's last successful email went to (its log), else `sentTo`. */
+export declare function questionnaireLastRecipients(
+  questionnaire:
+    | {
+        sentTo?: string | null
+        emailLog?: Array<{ kind?: string; ok?: boolean; to?: string[] }> | null
+      }
+    | null
+    | undefined,
+): string[]
+
 /** Who a send goes to: the chosen on-file addresses plus the one-time extras. */
 export declare function resolveSendRecipients(args: {
   allowed: string[]
   to?: unknown
   extra?: unknown
+  /** Refuse (409 recipients_changed) a `to` address no longer on file instead of dropping it. */
+  strict?: boolean
 }):
   | { ok: true; to: string[]; oneTime: string[] }
   | { ok: false; status: number; error: string; message: string }

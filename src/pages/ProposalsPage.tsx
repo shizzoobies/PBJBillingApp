@@ -6,7 +6,7 @@ import { QuestionnaireInbox } from '../components/proposals/QuestionnaireInbox'
 import { QuestionnaireSheet } from '../components/proposals/QuestionnaireSheet'
 import { ProposalRatesBanner } from '../components/proposals/RatesBanner'
 import { RecipientPicker } from '../components/RecipientPicker'
-import { questionnaireRecipientDetails } from '../../lib/invoice-recipients.js'
+import { questionnaireLastRecipients, questionnaireRecipientDetails } from '../../lib/invoice-recipients.js'
 import {
   createProposalRequest,
   createQuestionnaireRequest,
@@ -59,6 +59,8 @@ export function ProposalsPage() {
   // featreq-34627da1: the recipient picker for a questionnaire link - a new one (`new`,
   // nothing on file yet) or "Send again" for one already sent (its id).
   const [pickingFor, setPickingFor] = useState<'new' | string | null>(null)
+  // After a 409 recipients_changed on Send again: the list the server has now.
+  const [freshRecipients, setFreshRecipients] = useState<Array<{ email: string; source: string }> | null>(null)
   const [sendingLink, setSendingLink] = useState(false)
 
   // The catalog's rates, only to warn when one is still $0. A failed read
@@ -207,6 +209,13 @@ export function ProposalsPage() {
       await refreshQuestionnaires()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not make a new link.')
+      // An address she ticked is no longer on file (featreq-34627da1): reopen the picker
+      // on the list as the server has it now.
+      if (err instanceof ApiError && err.code === 'recipients_changed') {
+        setFreshRecipients(err.recipients ?? null)
+        setPickingFor(questionnaire.id)
+        void refreshQuestionnaires()
+      }
     } finally {
       setBusyQuestionnaireId(null)
     }
@@ -270,8 +279,12 @@ export function ProposalsPage() {
   // The questionnaire whose "Send again" picker is open, and who is on file for it.
   const pickingQuestionnaire =
     pickingFor && pickingFor !== 'new' ? (questionnaires.find((entry) => entry.id === pickingFor) ?? null) : null
-  const pickingDetails = pickingQuestionnaire
+  const pickingDetails = freshRecipients
+    ? freshRecipients
+    : pickingQuestionnaire
     ? questionnaireRecipientDetails({
+        // Everyone the last email went to (its log), not only the first (`sentTo`).
+        previous: questionnaireLastRecipients(pickingQuestionnaire),
         sentTo: pickingQuestionnaire.sentTo,
         proposal: pickingQuestionnaire.proposalId
           ? (proposals.find((proposal) => proposal.id === pickingQuestionnaire.proposalId) ?? null)
@@ -335,7 +348,7 @@ export function ProposalsPage() {
           <RecipientPicker
             label="The new questionnaire link"
             details={pickingDetails}
-            defaultTo={pickingQuestionnaire.sentTo ? [pickingQuestionnaire.sentTo] : null}
+            defaultTo={questionnaireLastRecipients(pickingQuestionnaire)}
             busy={busyQuestionnaireId === pickingQuestionnaire.id}
             onSend={(to, extra) => void renewLink(pickingQuestionnaire, { to, extra })}
             onCancel={() => setPickingFor(null)}
@@ -364,7 +377,10 @@ export function ProposalsPage() {
           onWithdraw={(questionnaire) => void withdrawQuestionnaire(questionnaire)}
           onStartDraft={(questionnaire) => void startDraft(questionnaire)}
           onCopyLink={(questionnaire) => void copyLink(questionnaire)}
-          onSendAgain={(questionnaire) => setPickingFor(questionnaire.id)}
+          onSendAgain={(questionnaire) => {
+            setFreshRecipients(null)
+            setPickingFor(questionnaire.id)
+          }}
           onNewLink={(questionnaire) => void renewLink(questionnaire)}
         />
 

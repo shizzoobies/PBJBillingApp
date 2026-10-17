@@ -329,6 +329,11 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
    * response, and its own response is ignored if it names a different
    * proposal (a stale request landing after a navigation).
    */
+  // The Send recipient picker (featreq-34627da1): open or not, and - after a 409
+  // recipients_changed - the list the server answered with, used instead of the page's.
+  const [pickingRecipients, setPickingRecipients] = useState(false)
+  const [freshRecipients, setFreshRecipients] = useState<Array<{ email: string; source: string }> | null>(null)
+
   const enqueue = (action: (latest: Proposal) => Promise<Proposal>) => {
     beginBusy()
     const previous = queueRef.current
@@ -456,6 +461,13 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
             : await sendProposalRequest(proposalId, recipients, { ...confirmed })
         } catch (err) {
           if (!(err instanceof ApiError)) throw err
+          // An address she ticked is no longer on file (featreq-34627da1): say so and reopen
+          // the picker on the list as the server has it now.
+          if (err.code === 'recipients_changed') {
+            setFreshRecipients(err.recipients ?? null)
+            setPickingRecipients(true)
+            throw err
+          }
           if (err.code === 'stale_letter_figures' && !confirmed.confirmStaleFigures && window.confirm(err.message)) {
             confirmed.confirmStaleFigures = true
             continue
@@ -845,13 +857,21 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           onDraft={() => enqueue(() => draftProposalLetterRequest(proposalId))}
           onSaveText={(text) => save(() => ({ letterText: text }))}
           onSend={sendLetter}
-          recipients={partyRecipientDetails({
-            email: proposal.prospect.email,
-            source: proposal.prospect.contactName || proposal.prospect.company || 'Prospect',
-            client: proposal.clientId ? (data.clients.find((entry) => entry.id === proposal.clientId) ?? null) : null,
-            clients: data.clients,
-            contacts: data.contacts ?? [],
-          })}
+          picking={pickingRecipients}
+          onPickingChange={(open) => {
+            setPickingRecipients(open)
+            if (!open) setFreshRecipients(null)
+          }}
+          recipients={
+            freshRecipients ??
+            partyRecipientDetails({
+              email: proposal.prospect.email,
+              source: proposal.prospect.contactName || proposal.prospect.company || 'Prospect',
+              client: proposal.clientId ? (data.clients.find((entry) => entry.id === proposal.clientId) ?? null) : null,
+              clients: data.clients,
+              contacts: data.contacts ?? [],
+            })
+          }
         />
       ) : null}
       {tab === 'activity' ? <ActivityTab proposal={proposal} /> : null}

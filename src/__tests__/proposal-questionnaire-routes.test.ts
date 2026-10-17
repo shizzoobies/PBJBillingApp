@@ -357,9 +357,10 @@ describe('the owner routes, now with links', () => {
   // featreq-34627da1: the recipient picker's choice, by the invoice Send's resolver.
   it('a new link takes only addresses for this send (nothing is on file yet), decided before anything is made', () => {
     const create = between(ownerBlock, "request.method === 'POST') {", 'const questionnaireIdMatch')
-    const resolve = create.indexOf('const createRecipients = resolveSendRecipients({')
+    const resolve = create.indexOf('const createRecipients = chooseSendRecipients({')
     expect(resolve).toBeGreaterThan(-1)
-    expect(create).toContain('allowed: questionnaireRecipientDetails({}).map((detail) => detail.email),')
+    expect(create).toContain('details: questionnaireAllowedDetails({}),')
+    expect(create).toContain('recipients: createRecipients.recipients,')
     expect(create).toContain('extra: legacyTo ? [legacyTo] : createChoice.extra,')
     expect(create.indexOf('if (!createRecipients.ok) {')).toBeLessThan(create.indexOf('appDataStore.createProposalQuestionnaire('))
     expect(create).toContain('to = createRecipients.to')
@@ -368,9 +369,15 @@ describe('the owner routes, now with links', () => {
   it('a renewed link is sent among the addresses on file plus this send\'s, decided before the link is renewed', () => {
     const renew = between(ownerBlock, "if (action === 'new-link') {", "if (action === 'withdraw')")
     expect(renew).toContain('const renewChoice = recipientChoiceOf(payload)')
-    expect(renew).toContain('questionnaireRecipientDetails({')
-    expect(renew).toContain('sentTo: current.sentTo,')
+
+    // Review round 1: the decision is lib/send-recipients.js (strict; tested there), and a
+    // refusal hands the page the list as it is now so the picker can reopen on it.
+    expect(renew).toContain('const renewRecipients = chooseSendRecipients({')
+    expect(renew).toContain('details: questionnaireAllowedDetails({')
+    // The whole list the last email went to (its log), not only sentTo.
+    expect(renew).toContain('questionnaire: current,')
     expect(renew).toContain('extra: renewChoice.extra,')
+    expect(renew).toContain('recipients: renewRecipients.recipients,')
     expect(renew.indexOf('if (!renewRecipients.ok) {')).toBeLessThan(renew.indexOf('renewProposalQuestionnaireLink(questionnaireId)'))
   })
 

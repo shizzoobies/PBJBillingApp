@@ -496,6 +496,46 @@ describe('Send questionnaire', () => {
     expect(within(inbox).queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument()
   })
 
+  // Review round 1: a link emailed to three addresses re-offers all three (the log has the
+  // whole list; sentTo only the first), and a stale one reopens the picker on the fresh list.
+  it('Send again re-offers everyone the last email went to, ticked', async () => {
+    const sentThree = questionnaire({
+      ...waitingLink,
+      emailLog: [
+        { kind: 'send', at: '2026-10-04T15:00:00.000Z', providerId: 're_1', ok: true, to: ['pat@acme.test', 'lee@acme.test', 'cfo@acme.test'] },
+      ],
+    })
+    api.listQuestionnairesRequest = vi.fn(async () => [sentThree])
+    renderList()
+    const inbox = await screen.findByRole('region', { name: 'Questionnaires' })
+    fireEvent.click(within(inbox).getByRole('button', { name: 'Send again' }))
+    const dialog = within(await screen.findByRole('dialog', { name: 'Choose who this goes to' }))
+    for (const email of ['pat@acme.test', 'lee@acme.test', 'cfo@acme.test']) {
+      expect(dialog.getByRole('checkbox', { name: new RegExp(email) })).toBeChecked()
+    }
+    expect(dialog.getByRole('button', { name: 'Send to 3 people' })).toBeEnabled()
+  })
+
+  it('on recipients_changed says so and reopens the picker on the list the server answered with', async () => {
+    api.listQuestionnairesRequest = vi.fn(async () => [waitingLink])
+    const changed = new ApiError(409, 'The addresses on file for this client have changed. Reload and choose again.', 'recipients_changed')
+    changed.recipients = [{ email: 'new@acme.test', source: 'Sent the link before' }]
+    api.renewQuestionnaireLinkRequest = vi
+      .fn()
+      .mockRejectedValueOnce(changed)
+      .mockResolvedValueOnce({ questionnaire: waitingLink, emailed: { ok: true, to: 'new@acme.test', error: null } })
+    renderList()
+    const inbox = await screen.findByRole('region', { name: 'Questionnaires' })
+    fireEvent.click(within(inbox).getByRole('button', { name: 'Send again' }))
+    fireEvent.click(
+      within(await screen.findByRole('dialog', { name: 'Choose who this goes to' })).getByRole('button', { name: 'Send to 1 person' }),
+    )
+    expect(await screen.findByText(/The addresses on file for this client have changed/)).toBeInTheDocument()
+    const reopened = within(await screen.findByRole('dialog', { name: 'Choose who this goes to' }))
+    expect(reopened.getAllByRole('checkbox')).toHaveLength(1)
+    expect(reopened.getByRole('checkbox', { name: /new@acme.test/ })).toBeInTheDocument()
+  })
+
   it('an expired or withdrawn link gets a New link, without emailing anyone', async () => {
     api.listQuestionnairesRequest = vi.fn(async () => [
       questionnaire({ id: 'pq-old', mode: 'link', expired: true, sentTo: 'pat@acme.test' }),

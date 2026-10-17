@@ -955,8 +955,10 @@ export async function applyPackageRequest(
 async function proposalRequest<T>(path: string, init: RequestInit, failure: string): Promise<T> {
   const response = await apiFetch(path, { credentials: 'same-origin', ...init })
   if (!response.ok) {
-    const { message, code } = await safeError(response)
-    throw new ApiError(response.status, message || `${failure} (${response.status})`, code)
+    const { message, code, recipients } = await safeError(response)
+    const error = new ApiError(response.status, message || `${failure} (${response.status})`, code)
+    if (recipients) error.recipients = recipients
+    throw error
   }
   return (await response.json()) as T
 }
@@ -2628,14 +2630,27 @@ export async function recordClientProfileActivity(clientId: string) {
  * be read once: a helper that returned the sentence and left the code behind
  * would have to be called twice to get both.
  */
-async function safeError(response: Response): Promise<{ message: string; code?: string }> {
+/** A 409 `recipients_changed` body's fresh list of addresses on file (featreq-34627da1). */
+function recipientsOf(body: unknown): ApiError['recipients'] {
+  const list = (body as { recipients?: unknown } | null)?.recipients
+  if (!Array.isArray(list)) return undefined
+  return list.filter(
+    (entry): entry is { email: string; source: string } =>
+      Boolean(entry) && typeof entry.email === 'string' && typeof entry.source === 'string',
+  )
+}
+
+async function safeError(
+  response: Response,
+): Promise<{ message: string; code?: string; recipients?: ApiError['recipients'] }> {
   try {
     const body = await response.json()
     const code = body && typeof body.error === 'string' ? body.error : undefined
+    const recipients = recipientsOf(body)
     if (body && typeof body.message === 'string' && body.message.trim()) {
-      return { message: body.message, code }
+      return { message: body.message, code, ...(recipients ? { recipients } : {}) }
     }
-    if (code) return { message: code, code }
+    if (code) return { message: code, code, ...(recipients ? { recipients } : {}) }
   } catch {
     // ignore
   }
@@ -5203,8 +5218,11 @@ async function autopayAction(
     body: JSON.stringify(body),
   })
   if (!response.ok) {
-    const message = await safeErrorMessage(response)
-    throw new ApiError(response.status, message || `${failure} (${response.status})`)
+    // The code too, and a 409 recipients_changed's fresh list (featreq-34627da1).
+    const { message, code, recipients } = await safeError(response)
+    const error = new ApiError(response.status, message || `${failure} (${response.status})`, code)
+    if (recipients) error.recipients = recipients
+    throw error
   }
   return ((await response.json()) as { enrollment: AutopaySummary }).enrollment
 }
@@ -5421,8 +5439,10 @@ async function engagementRequest<T>(path: string, init: RequestInit, failure: st
     let code: string | undefined
     let reason: string | undefined
     let engagementId: string | undefined
+    let recipients: ApiError['recipients']
     try {
       const body = await response.json()
+      recipients = recipientsOf(body)
       if (body && typeof body.error === 'string') code = body.error
       if (body && typeof body.reason === 'string') reason = body.reason
       if (body && typeof body.engagementId === 'string') engagementId = body.engagementId
@@ -5434,6 +5454,7 @@ async function engagementRequest<T>(path: string, init: RequestInit, failure: st
     const error = new ApiError(response.status, message || `${failure} (${response.status})`, code, reason)
     // A refusal that names an engagement (Draft the engagement when one exists) carries its id.
     if (engagementId) Object.assign(error, { engagementId })
+    if (recipients) error.recipients = recipients
     throw error
   }
   return (await response.json()) as T
@@ -5527,6 +5548,16 @@ export function previewEngagementRequest(
     proposalJson('POST', choice ?? {}),
     'Could not build the preview',
   )
+}
+
+/**
+ * What the engagement letter's Send picker lists and ticks (featreq-34627da1): the
+ * addresses on file and the party's own. Builds no document.
+ */
+export function engagementRecipientsRequest(
+  id: string,
+): Promise<{ details: Array<{ email: string; source: string }>; defaultTo: string[] }> {
+  return engagementRequest(engagementPath(id, 'recipients'), { method: 'GET' }, 'Could not read who this letter can go to')
 }
 
 /** The PDF half of the preview, streamed by the server for an embedded frame (the same for any recipient). */

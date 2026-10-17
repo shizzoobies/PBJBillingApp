@@ -204,14 +204,17 @@ describe('sending a proposal', () => {
   it('decides the recipients with the invoice Send\'s resolver, from the prospect and its client, before the PDF or the email', () => {
     const text = block()
     expect(text).toContain('const proposalChoice = recipientChoiceOf(payload)')
-    expect(text).toContain('partyRecipientDetails({')
-    expect(text).toContain('email: proposal.prospect?.email,')
-    expect(text).toContain('const proposalRecipients = resolveSendRecipients({')
-    expect(text).toContain('allowed: proposalAllowed,')
+
+    // Review round 1: the decision is lib/send-recipients.js (strict; tested there), and a
+    // refusal hands the page the list as it is now so the picker can reopen on it.
+    expect(text).toContain('const proposalAllowed = proposalAllowedDetails({')
+    expect(text).toContain('const proposalRecipients = chooseSendRecipients({')
+    expect(text).toContain('details: proposalAllowed,')
     expect(text).toContain('extra: proposalChoice.extra,')
     const refuseAt = text.indexOf('if (!proposalRecipients.ok) {')
     expect(refuseAt).toBeGreaterThan(-1)
     expect(text.slice(refuseAt, refuseAt + 300)).toContain('sendJson(response, proposalRecipients.status, {')
+    expect(text.slice(refuseAt, refuseAt + 300)).toContain('recipients: proposalRecipients.recipients,')
     expect(refuseAt).toBeLessThan(text.indexOf('buildProposalPdf('))
     expect(refuseAt).toBeLessThan(text.indexOf('sendInvoiceEmail('))
     // The email and its log carry exactly the list resolved.

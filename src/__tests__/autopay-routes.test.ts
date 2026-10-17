@@ -140,9 +140,14 @@ describe('POST /api/clients/:id/autopay/(invite|turn-off)', () => {
     const readAt = block.indexOf('invitePayload = await readJsonBody(request)')
     expect(readAt).toBeGreaterThan(block.indexOf("'application/json required'"))
     expect(block).toContain('const inviteChoice = recipientChoiceOf(invitePayload ?? {})')
-    const resolveAt = block.indexOf('const inviteSendTo = resolveSendRecipients({')
+
+    // Review round 1: the decision is lib/send-recipients.js (strict; tested there), and a
+    // refusal hands the page the list as it is now so the picker can reopen on it.
+    expect(block).toContain('const inviteAddressee = autopayAllowedDetails({')
+    const resolveAt = block.indexOf('const inviteSendTo = chooseSendRecipients({')
     expect(resolveAt).toBeGreaterThan(-1)
-    expect(block).toContain('allowed: inviteRecipients.to,')
+    expect(block).toContain('details: inviteAddressee.details,')
+    expect(block).toContain('recipients: inviteSendTo.recipients,')
     expect(block).toContain('extra: inviteChoice.extra,')
     const refuseAt = block.indexOf('if (!inviteSendTo.ok) {')
     expect(refuseAt).toBeGreaterThan(resolveAt)

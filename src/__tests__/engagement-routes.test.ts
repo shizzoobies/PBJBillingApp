@@ -105,6 +105,7 @@ const ROUTES: Route[] = [
   { name: 'POST /api/engagements/:id/void', pattern: /if \(engagementVoidMatch && request\.method === 'POST'\)/, write: true },
   { name: 'POST /api/engagements', pattern: /normalizedPath === '\/api\/engagements' && request\.method === 'POST'/, write: true }, // stage 4: appended so the indexes above stay
   { name: 'POST /api/engagements/:id/restore', pattern: /if \(engagementRestoreMatch && request\.method === 'POST'\)/, write: true }, // featreq-e5ae8279: appended, same reason
+  { name: 'GET /api/engagements/:id/recipients', pattern: /if \(engagementRecipientsMatch && request\.method === 'GET'\)/, write: false }, // featreq-34627da1: appended, same reason
 ]
 
 describe('the engagement routes are owner-only, same-origin and above the catch-all', () => {
@@ -499,7 +500,8 @@ describe('the send refuses before the provider is called', () => {
     const after = body.slice(body.indexOf('if (result.ok) {'))
     expect(after).toContain("'engagement_sent'")
     expect(after).toContain('broadcastDataChanged()')
-    expect(after).toContain('sendJson(response, 200, { engagement: result.engagement, ok: result.ok, error: result.error })')
+    // `to`: the list it actually went to - the page's "Sent to" names it (review round 1).
+    expect(after).toContain('sendJson(response, 200, { engagement: result.engagement, ok: result.ok, error: result.error, to: result.to })')
     expect(after).not.toMatch(/sendJson\(response, (4|5)\d\d,/)
   })
 
@@ -585,11 +587,10 @@ describe('an engagement letter goes to the client and nowhere else (Alex, 2026-1
   // featreq-34627da1: a posted address must be on file (the party's, or the linked client's); one
   // typed for this send is an `extra`, decided by the invoice Send's resolver and the team guard.
   it('a posted address is shape-checked, chosen among the addresses on file, and a one-time one still goes through the team guard', () => {
-    const helper = serverHelpers().slice(serverHelpers().indexOf('function isOneEmailAddress('))
-    expect(helper).toContain('value.trim().length <= 320')
-    expect(helper).toMatch(/\[\^\\s@,;<>\]\+@/)
-    expect(serverHelpers()).toContain('function recipientChoiceOf(payload) {')
+    // The shape check moved to lib/send-recipients.js (tested there); strict on file.
+    expect(serverSource).toMatch(/recipientChoiceOf,\s*\} from '\.\/lib\/send-recipients\.js'/)
     expect(previewAssembly()).toContain('resolveSendRecipients({')
+    expect(previewAssembly()).toContain('strict: true,')
     expect(previewAssembly()).toContain('withoutTeamAddresses([entry], context.teamEmails, context.replyTo)')
   })
 })
@@ -657,5 +658,33 @@ describe('POST /api/engagements starts a draft amendment from a saved letter', (
     const postAt = serverSource.search(/normalizedPath === '\/api\/engagements' && request\.method === 'POST'/)
     expect(postAt).toBeGreaterThan(serverSource.search(/normalizedPath === '\/api\/engagements' && request\.method === 'GET'/))
     expect(postAt).toBeLessThan(serverSource.indexOf('const engagementMatch = normalizedPath.match('))
+  })
+})
+
+// Review round 1 (featreq-34627da1): the Send picker reads the list from its own route, with no
+// document built - the send builds the letter once.
+describe('GET /api/engagements/:id/recipients', () => {
+  const route = () => between('// GET /api/engagements/:id/recipients', '// POST /api/engagements/:id/preview - { to? }')
+
+  it('is owner-only and same-origin before anything is read, and 404s a missing engagement', () => {
+    const body = route()
+    const gate = body.indexOf("session.user.role !== 'owner'")
+    const origin = body.indexOf('isCrossSiteOrigin(request)')
+    expect(gate).toBeGreaterThan(-1)
+    expect(gate).toBeLessThan(origin)
+    expect(origin).toBeLessThan(body.indexOf('appDataStore.getEngagement('))
+    expect(body).toContain("sendJson(response, 404, { error: 'Engagement not found' })")
+  })
+
+  it('answers the list from the shared helper, uncached, and builds no document', () => {
+    const body = route()
+    expect(body).toContain('engagementRecipientList(await loadEngagementContext(session), engagement)')
+    expect(body).toContain("'Cache-Control': 'no-store'")
+    for (const builder of ['assembleEngagementPreview(', 'buildEngagementDocuments(', 'buildPdf', 'sendEngagement(']) {
+      expect(body, builder).not.toContain(builder)
+    }
+    const helper = between('export function engagementRecipientList(', 'export function engagementWarnings(', libSource)
+    expect(helper).toContain('engagementRecipientDetails(context, engagement, client)')
+    expect(helper).not.toContain('buildEngagementDocuments(')
   })
 })

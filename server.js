@@ -91,7 +91,13 @@ import {
   sendInvoicePaymentEmail,
 } from './lib/invoice-email.js'
 import { invoiceEmailAddressee, resolveSendRecipients } from './lib/invoice-recipients.js'
-import { partyRecipientDetails, questionnaireRecipientDetails } from './lib/invoice-recipients.js'
+import {
+  autopayAllowedDetails,
+  chooseSendRecipients,
+  proposalAllowedDetails,
+  questionnaireAllowedDetails,
+  recipientChoiceOf,
+} from './lib/send-recipients.js'
 import { remindInvoice } from './lib/invoice-reminder.js'
 import { AUTO_REMINDER_EVENT, runAutoInvoiceReminders } from './lib/invoice-auto-reminders.js'
 import { invoiceContentChanged, totalsDiffer } from './lib/invoice-sent-change.js'
@@ -153,6 +159,7 @@ import {
   engagementWarnings,
   sendEngagement,
 } from './lib/engagement-send.js'
+import { engagementRecipientList } from './lib/engagement-send.js'
 import { engagementChangedSinceSent } from './lib/engagement-hash.js'
 import { placeholdersFor } from './lib/letter-template.js'
 import {
@@ -2714,33 +2721,8 @@ const engagementPause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)
  */
 const engagementsBeingSent = new Set()
 
-/** A single address typed at Send: the same shape check the proposal send uses. */
-function isOneEmailAddress(value) {
-  return typeof value === 'string' && value.trim().length <= 320 && /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(value.trim())
-}
-
-/**
- * The recipient picker's choice as a manual send's body carries it (featreq-34627da1):
- * `to`, the on-file addresses she left ticked (a list; one address as a string is read
- * as a list of one), and `extra`, the ones added for this send only. Absent fields mean
- * the send's own default. Only the SHAPE is checked here - whether each address is on
- * file, valid, at most three, never one-time alone, is `resolveSendRecipients` - so a
- * shape it cannot read answers null and the route refuses before anything happens.
- *
- * @returns {{to: string|string[]|undefined, extra: unknown[]|undefined} | null}
- */
-function recipientChoiceOf(payload) {
-  const rawTo = payload?.to
-  const rawExtra = payload?.extra
-  let to
-  if (rawTo === undefined || rawTo === null || rawTo === '') to = undefined
-  else if (typeof rawTo === 'string') to = isOneEmailAddress(rawTo) ? rawTo.trim() : null
-  else if (Array.isArray(rawTo) && rawTo.length <= 50 && rawTo.every((address) => typeof address === 'string')) to = rawTo
-  else to = null
-  if (to === null) return null
-  if (rawExtra !== undefined && rawExtra !== null && !Array.isArray(rawExtra)) return null
-  return { to, extra: rawExtra ?? undefined }
-}
+// The recipient picker's choice (`recipientChoiceOf`) and each route's on-file list and
+// decision live in lib/send-recipients.js (featreq-34627da1).
 
 /**
  * Everything an engagement preview or send reads once: the workspace (the linked
@@ -5968,32 +5950,38 @@ const server = createServer(async (request, response) => {
       }
 
       const inviteData = await appDataStore.read()
-      const inviteAddressee = invoiceEmailAddressee(autopayClient, inviteData.clients ?? [])
+      // Who it may go to: the invoice addressee's addresses (lib/send-recipients.js).
+      const inviteAddressee = autopayAllowedDetails({
+        client: autopayClient,
+        clients: inviteData.clients ?? [],
+        contacts: inviteData.contacts ?? [],
+      })
       if (inviteAddressee.refusal) {
         sendJson(response, 409, inviteAddressee.refusal)
         return
       }
-      const inviteRecipients = resolveInvoiceRecipients({
-        client: inviteAddressee.addressee,
-        contacts: inviteData.contacts ?? [],
-      })
-      if (inviteRecipients.to.length === 0) {
+      if (inviteAddressee.details.length === 0) {
         sendJson(response, 409, {
           error: 'invoice_no_recipient',
           message: `There is no email address on file for ${autopayClient.name}.`,
         })
         return
       }
-      // Her choice, by the invoice Send's own rule: `to` filters the addresses on file,
-      // at most three valid one-time ones ride alongside, never alone. Decided before
-      // Stripe is asked for a customer or the enrollment is touched.
-      const inviteSendTo = resolveSendRecipients({
-        allowed: inviteRecipients.to,
-        to: typeof inviteChoice.to === 'string' ? [inviteChoice.to] : inviteChoice.to,
+      // Her choice, by the invoice Send's own rule, strictly: every `to` still on file
+      // (else 409 recipients_changed with the fresh list), at most three valid one-time
+      // ones, never alone. Decided before Stripe is asked for a customer or the
+      // enrollment is touched.
+      const inviteSendTo = chooseSendRecipients({
+        details: inviteAddressee.details,
+        to: inviteChoice.to,
         extra: inviteChoice.extra,
       })
       if (!inviteSendTo.ok) {
-        sendJson(response, inviteSendTo.status, { error: inviteSendTo.error, message: inviteSendTo.message })
+        sendJson(response, inviteSendTo.status, {
+          error: inviteSendTo.error,
+          message: inviteSendTo.message,
+          recipients: inviteSendTo.recipients,
+        })
         return
       }
 
@@ -7599,6 +7587,9 @@ const server = createServer(async (request, response) => {
         allowed: recipients.to,
         to: sendPayload?.to,
         extra: sendPayload?.extra,
+        // The picker opens before every send (featreq-34627da1): an address it showed
+        // that is no longer on file refuses the send (409 recipients_changed).
+        strict: true,
       })
       if (!sendRecipients.ok) {
         sendJson(response, sendRecipients.status, {
@@ -12282,6 +12273,33 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // GET /api/engagements/:id/recipients - what the Send picker lists and ticks
+    // (featreq-34627da1): the addresses on file (the party's, then the linked client's;
+    // never a team member's) and the party's own. Owner-only, same-origin, uncached, and
+    // it builds NO document: the send builds the letter once.
+    const engagementRecipientsMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/recipients$/)
+    if (engagementRecipientsMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can send engagements' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const engagement = await appDataStore.getEngagement(engagementRecipientsMatch[1])
+      if (!engagement) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      sendJson(response, 200, engagementRecipientList(await loadEngagementContext(session), engagement), {
+        'Cache-Control': 'no-store',
+      })
+      return
+    }
+
     // POST /api/engagements/:id/preview - { to? } - what the party would receive, from the
     // STORED engagement and the same builder as Send. Read-only, uncached. The address she
     // typed rides in the body, never in a URL (history, logs); the GET form with ?to= still
@@ -12452,7 +12470,8 @@ const server = createServer(async (request, response) => {
         }
       }
       broadcastDataChanged()
-      sendJson(response, 200, { engagement: result.engagement, ok: result.ok, error: result.error })
+      // `to`: the list it actually went to (the page names it, not what it asked for).
+      sendJson(response, 200, { engagement: result.engagement, ok: result.ok, error: result.error, to: result.to })
       return
     }
 
@@ -13213,13 +13232,17 @@ const server = createServer(async (request, response) => {
           sendJson(response, 400, { error: 'A valid email address is required.' })
           return
         }
-        const createRecipients = resolveSendRecipients({
-          allowed: questionnaireRecipientDetails({}).map((detail) => detail.email),
+        const createRecipients = chooseSendRecipients({
+          details: questionnaireAllowedDetails({}),
           to: legacyTo ? [] : createChoice.to,
           extra: legacyTo ? [legacyTo] : createChoice.extra,
         })
         if (!createRecipients.ok) {
-          sendJson(response, createRecipients.status, { error: createRecipients.error, message: createRecipients.message })
+          sendJson(response, createRecipients.status, {
+            error: createRecipients.error,
+            message: createRecipients.message,
+            recipients: createRecipients.recipients,
+          })
           return
         }
         to = createRecipients.to
@@ -13326,18 +13349,22 @@ const server = createServer(async (request, response) => {
                 return
               }
               const renewData = current.proposalId ? await appDataStore.read() : null
-              const renewRecipients = resolveSendRecipients({
-                allowed: questionnaireRecipientDetails({
-                  sentTo: current.sentTo,
+              const renewRecipients = chooseSendRecipients({
+                details: questionnaireAllowedDetails({
+                  questionnaire: current,
                   proposal: current.proposalId ? await appDataStore.getProposal(current.proposalId) : null,
                   clients: renewData?.clients ?? [],
                   contacts: renewData?.contacts ?? [],
-                }).map((detail) => detail.email),
-                to: typeof renewChoice.to === 'string' ? [renewChoice.to] : (renewChoice.to ?? []),
+                }),
+                to: renewChoice.to ?? [],
                 extra: renewChoice.extra,
               })
               if (!renewRecipients.ok) {
-                sendJson(response, renewRecipients.status, { error: renewRecipients.error, message: renewRecipients.message })
+                sendJson(response, renewRecipients.status, {
+                  error: renewRecipients.error,
+                  message: renewRecipients.message,
+                  recipients: renewRecipients.recipients,
+                })
                 return
               }
               to = renewRecipients.to
@@ -13728,24 +13755,21 @@ const server = createServer(async (request, response) => {
       // among them; at most three one-time addresses ride alongside, never alone while
       // anything is on file. It used to accept any one typed address.
       const proposalSendData = await appDataStore.read()
-      const proposalAllowed = partyRecipientDetails({
-        email: proposal.prospect?.email,
-        source: proposal.prospect?.contactName || proposal.prospect?.company || 'Prospect',
-        client: proposal.clientId
-          ? ((proposalSendData.clients ?? []).find((entry) => entry.id === proposal.clientId) ?? null)
-          : null,
+      const proposalAllowed = proposalAllowedDetails({
+        proposal,
         clients: proposalSendData.clients ?? [],
         contacts: proposalSendData.contacts ?? [],
-      }).map((detail) => detail.email)
-      const proposalRecipients = resolveSendRecipients({
-        allowed: proposalAllowed,
-        to: typeof proposalChoice.to === 'string' ? [proposalChoice.to] : (proposalChoice.to ?? []),
+      })
+      const proposalRecipients = chooseSendRecipients({
+        details: proposalAllowed,
+        to: proposalChoice.to ?? [],
         extra: proposalChoice.extra,
       })
       if (!proposalRecipients.ok) {
         sendJson(response, proposalRecipients.status, {
           error: proposalRecipients.error,
           message: proposalRecipients.message,
+          recipients: proposalRecipients.recipients,
         })
         return
       }

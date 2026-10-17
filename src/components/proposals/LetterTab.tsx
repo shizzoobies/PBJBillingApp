@@ -18,6 +18,8 @@ export function LetterTab({
   onSaveText,
   onSend,
   recipients,
+  picking,
+  onPickingChange,
 }: {
   proposal: Proposal
   busy: boolean
@@ -26,9 +28,12 @@ export function LetterTab({
   onSend: (to: string[], extra: string[]) => void
   /** The addresses on file the picker lists: the prospect's, then its client's (featreq-34627da1). */
   recipients: InvoiceRecipientDetail[]
+  /** Whether the recipient picker is open - held by the page, which reopens it on a 409 recipients_changed. */
+  picking: boolean
+  onPickingChange: (open: boolean) => void
 }) {
   const [copied, setCopied] = useState(false)
-  const [picking, setPicking] = useState(false)
+  const setPicking = onPickingChange
   const locked = proposal.status === 'accepted' || proposal.status === 'declined'
   const text = proposal.letter?.text ?? ''
   const badge = proposalDeliveryBadge(proposal)

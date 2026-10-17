@@ -18,6 +18,7 @@ vi.mock('../lib/api', () => ({
   updateEngagementRequest: (...args: unknown[]) => api.updateEngagementRequest(...args),
   reassembleEngagementRequest: (...args: unknown[]) => api.reassembleEngagementRequest(...args),
   previewEngagementRequest: (...args: unknown[]) => api.previewEngagementRequest(...args),
+  engagementRecipientsRequest: (...args: unknown[]) => api.engagementRecipientsRequest(...args),
   engagementPreviewPdfUrl: (id: string) => `/api/engagements/${id}/preview.pdf`,
   sendEngagementRequest: (...args: unknown[]) => api.sendEngagementRequest(...args),
   signEngagementRequest: (...args: unknown[]) => api.signEngagementRequest(...args),
@@ -147,6 +148,11 @@ beforeEach(() => {
     view({ subject: 'Rebuilt subject', emailBody: 'Rebuilt email', letterBody: 'Rebuilt letter' }, 'hash-3'),
   )
   api.previewEngagementRequest = vi.fn(async () => previewAnswer())
+  // The Send picker's list, from its own route (no letter built): the party alone here.
+  api.engagementRecipientsRequest = vi.fn(async () => ({
+    details: [{ email: 'pat@acme.test', source: 'Pat Doe' }],
+    defaultTo: ['pat@acme.test'],
+  }))
   api.sendEngagementRequest = vi.fn(async () => ({
     engagement: engagement({ status: 'sent' }),
     ok: true,
@@ -535,10 +541,18 @@ describe('Send', () => {
   }
 
   it('opens the picker with the party ticked and the client\'s contacts listed, then posts what she leaves ticked', async () => {
-    api.previewEngagementRequest = vi.fn(async () => ({ ...previewAnswer(), ...linked }))
+    api.engagementRecipientsRequest = vi.fn(async () => linked)
+    api.sendEngagementRequest = vi.fn(async () => ({
+      engagement: engagement({ status: 'sent' }),
+      ok: true,
+      error: null,
+      to: ['lee@acme.test'],
+    }))
     await renderEditor()
     const dialog = await openPicker()
-    expect(api.previewEngagementRequest).toHaveBeenCalledWith('eng-1')
+    expect(api.engagementRecipientsRequest).toHaveBeenCalledWith('eng-1')
+    // The list comes from its own route: no preview (no letter or PDF) is built for it.
+    expect(api.previewEngagementRequest).not.toHaveBeenCalled()
     expect(dialog.getByRole('checkbox', { name: /pat@acme.test/ })).toBeChecked()
     expect(dialog.getByRole('checkbox', { name: /lee@acme.test/ })).not.toBeChecked()
     expect(dialog.getByText(/Replies go to brittany@pbjsa.com/)).toBeTruthy()
@@ -552,7 +566,13 @@ describe('Send', () => {
     expect(await screen.findByText('Sent to lee@acme.test.')).toBeTruthy()
   })
 
-  it('sends to an address added for this send only, as `extra`', async () => {
+  it('sends to an address added for this send only, as `extra`, and names the list the server says it went to', async () => {
+    api.sendEngagementRequest = vi.fn(async () => ({
+      engagement: engagement({ status: 'sent' }),
+      ok: true,
+      error: null,
+      to: ['pat@acme.test', 'owner@acme.test'],
+    }))
     await renderEditor()
     const dialog = await openPicker()
     fireEvent.change(dialog.getByLabelText('Add another address for this send only'), { target: { value: 'owner@acme.test' } })
@@ -565,7 +585,7 @@ describe('Send', () => {
         extra: ['owner@acme.test'],
       }),
     )
-    expect(await screen.findByText('Sent to pat@acme.test, owner@acme.test (this send only).')).toBeTruthy()
+    expect(await screen.findByText('Sent to pat@acme.test, owner@acme.test.')).toBeTruthy()
   })
 
   it('needs one address on file: everyone unticked disables Send and says why', async () => {
@@ -646,8 +666,36 @@ describe('Send', () => {
     )
   })
 
+  // Review round 1: a ticked address no longer on file is refused (409), not dropped; the
+  // picker reopens on the list as it is now.
+  it('on recipients_changed says so and reopens the picker on the fresh list', async () => {
+    api.sendEngagementRequest = vi.fn(async () => {
+      throw new ApiError(409, 'The addresses on file for this client have changed. Reload and choose again.', 'recipients_changed')
+    })
+    api.engagementRecipientsRequest = vi
+      .fn()
+      .mockResolvedValueOnce({ details: [{ email: 'pat@acme.test', source: 'Pat Doe' }], defaultTo: ['pat@acme.test'] })
+      .mockResolvedValueOnce({ details: [{ email: 'new@acme.test', source: 'Pat Doe' }], defaultTo: ['new@acme.test'] })
+    await renderEditor()
+    await confirmSend()
+    expect(await screen.findByText(/The addresses on file for this client have changed/)).toBeTruthy()
+    api.sendEngagementRequest = vi.fn(async () => ({
+      engagement: engagement({ status: 'sent' }),
+      ok: true,
+      error: null,
+      to: ['new@acme.test'],
+    }))
+    // The picker reopened by itself, on what the server has now.
+    const reopened = within(await screen.findByRole('dialog', { name: 'Choose who this goes to' }))
+    expect(reopened.getByRole('checkbox', { name: /new@acme.test/ })).toBeChecked()
+    fireEvent.click(reopened.getByRole('button', { name: 'Send to 1 person' }))
+    await waitFor(() =>
+      expect(api.sendEngagementRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-1', to: ['new@acme.test'] }),
+    )
+  })
+
   it('says why when the addresses could not be read, and opens nothing', async () => {
-    api.previewEngagementRequest = vi.fn(async () => {
+    api.engagementRecipientsRequest = vi.fn(async () => {
       throw new ApiError(500, 'Could not build the preview')
     })
     await renderEditor()

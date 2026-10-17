@@ -51,6 +51,8 @@ describe('the send route validates `extra` before anything leaves', () => {
     expect(call).toContain('allowed: recipients.to')
     expect(call).toContain('to: sendPayload?.to')
     expect(call).toContain('extra: sendPayload?.extra')
+    // Review round 1 (featreq-34627da1): strict - a ticked address no longer on file is a 409.
+    expect(sendBlock.slice(resolve, resolve + 600)).toContain('strict: true,')
     // The old inline decision is gone: there is one place that makes it.
     expect(sendBlock).not.toContain('chooseInvoiceRecipients(')
     expect(serverSource).toMatch(

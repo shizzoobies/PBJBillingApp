@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AutopayPanel } from '../components/AutopayPanel'
 import { autopayStatusText } from '../lib/autopayText'
-import type { AutopaySummary } from '../lib/types'
+import { ApiError, type AutopaySummary } from '../lib/types'
 
 const listAutopayRequest = vi.fn()
 const inviteToAutopayRequest = vi.fn()
@@ -179,6 +179,20 @@ describe('<AutopayPanel> actions', () => {
     await waitFor(() =>
       expect(inviteToAutopayRequest).toHaveBeenCalledWith('c1', { to: ['bo@acme.test'], extra: ['ap@acme.test'] }),
     )
+  })
+
+  // Review round 1: a ticked address no longer on file is refused (409), not dropped.
+  it('on recipients_changed says so and reopens the picker on the list the server answered with', async () => {
+    await load([])
+    const changed = new ApiError(409, 'The addresses on file for this client have changed. Reload and choose again.', 'recipients_changed')
+    changed.recipients = [{ email: 'cy@acme.test', source: 'Cy' }]
+    inviteToAutopayRequest.mockRejectedValueOnce(changed).mockResolvedValueOnce(summary({ status: 'invited' }))
+    fireEvent.click(openPicker().getByRole('button', { name: 'Send to 2 people' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('have changed'))
+    const reopened = within(await screen.findByRole('dialog', { name: 'Choose who this goes to' }))
+    expect(reopened.getAllByRole('checkbox')).toHaveLength(1)
+    fireEvent.click(reopened.getByRole('button', { name: 'Send to 1 person' }))
+    await waitFor(() => expect(inviteToAutopayRequest).toHaveBeenLastCalledWith('c1', { to: ['cy@acme.test'] }))
   })
 
   it('needs one address on file: everyone unticked disables Send and says why', async () => {

@@ -2470,6 +2470,12 @@ export class ApiError extends Error {
   /** The send guard's 409 `reason` ('unpaid' | 'not_applied') when `code` is `prepayment_unpaid`. */
   reason?: string
 
+  /**
+   * A manual send's 409 `recipients_changed` (featreq-34627da1) carries the addresses on
+   * file as they are NOW, so the page can reopen the recipient picker on them.
+   */
+  recipients?: Array<{ email: string; source: string }>
+
   constructor(status: number, message: string, code?: string, reason?: string) {
     super(message)
     this.status = status
@@ -2956,4 +2962,6 @@ export type EngagementSendResult = {
   engagement: Engagement
   ok: boolean
   error: string | null
+  /** The addresses it actually went to (featreq-34627da1). */
+  to?: string[]
 }
