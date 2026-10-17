@@ -5,6 +5,8 @@ import { BoldBar, PlaceholderChipsToggle } from '../components/letters/LetterEdi
 import { DocumentPreviewModal } from '../components/letters/DocumentPreviewModal'
 import { insertPlaceholder, isBoldShortcut, toggleBold, unknownPlaceholderSentence } from '../components/letters/letterEditing'
 import { SaveBadge } from '../components/SectionKit'
+import { RecipientPicker } from '../components/RecipientPicker'
+import { recipientListLabel } from '../lib/recipientSelection'
 import { AddressedTo, type AddressedToFields } from '../components/engagements/AddressedTo'
 import { SignEngagementForm, SigningSummary } from '../components/engagements/SignEngagement'
 import {
@@ -188,8 +190,13 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   const plansMenuRef = useRef<HTMLDivElement | null>(null)
 
   const [previewOpen, setPreviewOpen] = useState(false)
-  // The address Send uses: the party's own until she types another (null = not typed).
-  const [typedTo, setTypedTo] = useState<string | null>(null)
+  // featreq-34627da1: Send opens the shared recipient picker - the addresses on file (the
+  // party's, then the linked client's; never a team member's, the server lists them) with
+  // the party's ticked. Open while this holds them.
+  const [picking, setPicking] = useState<{
+    details: Array<{ email: string; source: string }>
+    defaultTo: string[]
+  } | null>(null)
   const [busy, setBusy] = useState<'' | 'reassemble' | 'send' | 'sign' | 'void'>('')
   const [actionError, setActionError] = useState('')
   const [notice, setNotice] = useState('')
@@ -321,9 +328,6 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
       cancelled = true
     }
   }, [ownerMode, chainClientId, dataRefreshCount])
-
-  const partyEmail = engagement?.party?.email ?? ''
-  const sendTo = typedTo ?? partyEmail
 
   // Close the Plans picker on a click outside it or on Escape.
   useEffect(() => {
@@ -485,21 +489,38 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
     }
   }
 
-  const send = async () => {
-    const to = sendTo.trim()
-    if (!to) return
-    const again = engagement.status === 'sent' ? ' again' : ''
-    const ok = window.confirm(
-      `Send the engagement letter to ${partyName} at ${to}${again}? They get your email with the letter attached as a PDF. Replies go to ${replyTo}.`,
-    )
-    if (!ok) return
+  // Send, step one: who it may go to, from the server (the same list the send checks against).
+  const openSendPicker = async () => {
     setBusy('send')
     setActionError('')
     setNotice('')
     try {
-      // Always the address she just confirmed, never one the server picks.
-      const result = await sendEngagementRequest(engagementId, { templateHash: view.hash, to })
-      if (result.ok) setNotice(`Sent to ${to}.`)
+      const preview = await previewEngagementRequest(engagementId)
+      setPicking({
+        details: preview.details ?? preview.to.map((email) => ({ email, source: partyName })),
+        defaultTo: preview.defaultTo ?? preview.to,
+      })
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Could not read who this letter can go to.')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  // Step two: the addresses she left ticked in the picker (the picker is the confirm).
+  const send = async (to: string[], extra: string[]) => {
+    setPicking(null)
+    setBusy('send')
+    setActionError('')
+    setNotice('')
+    try {
+      // Always the addresses she just chose, never ones the server picks.
+      const result = await sendEngagementRequest(engagementId, {
+        templateHash: view.hash,
+        to,
+        ...(extra.length > 0 ? { extra } : {}),
+      })
+      if (result.ok) setNotice(`Sent to ${recipientListLabel(to, extra)}.`)
       else setActionError(`Not sent: ${result.error ?? 'the email provider refused the message.'}`)
       await refresh({ overwrite: false, advanceStamp: true })
     } catch (err) {
@@ -561,7 +582,6 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   }
 
   const blockedReason = unsaved ? 'Save the engagement to preview, send or sign it.' : ''
-  const previewTo = sendTo.trim() && sendTo.trim() !== partyEmail ? sendTo.trim() : undefined
   const activity = activityRows(
     engagement,
     (userId) => (userId ? ((data.employees ?? []).find((employee) => employee.id === userId)?.name ?? '') : ''),
@@ -782,20 +802,8 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
 
             {editable ? (
               <>
-                <label className="field">
-                  <span>Send to</span>
-                  <input
-                    className="input"
-                    type="email"
-                    aria-label="Send to"
-                    value={sendTo}
-                    onChange={(event) => setTypedTo(event.target.value)}
-                  />
-                </label>
                 <p className="muted-text">
-                  {sendTo.trim() && sendTo.trim() !== partyEmail
-                    ? `For this send only: the party's address on file is ${partyEmail || 'blank'}.`
-                    : `The party's address. Replies go to ${replyTo}; nothing is copied to anyone else.`}
+                  {`Send asks who it goes to: the party's address is ticked, and you can choose the client's contacts or add an address for this send only. Replies go to ${replyTo}; nothing is copied to anyone else.`}
                 </p>
                 <div className="button-row">
                   <button
@@ -810,8 +818,8 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                   <button
                     type="button"
                     className="primary-action"
-                    disabled={unsaved || busy !== '' || !sendTo.trim()}
-                    onClick={() => void send()}
+                    disabled={unsaved || busy !== ''}
+                    onClick={() => void openSendPicker()}
                   >
                     {busy === 'send' ? 'Sending...' : engagement.status === 'sent' ? 'Send again' : 'Send'}
                   </button>
@@ -1055,14 +1063,30 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
 
       {previewOpen ? (
         <DocumentPreviewModal<EngagementPreview>
-          loadKey={`${engagementId}|${view.hash}|${previewTo ?? ''}`}
-          load={() => previewEngagementRequest(engagementId, previewTo)}
+          loadKey={`${engagementId}|${view.hash}`}
+          load={() => previewEngagementRequest(engagementId)}
           pdfUrl={engagementPreviewPdfUrl(engagementId)}
           title={`What ${partyName} receives`}
           ariaLabel={`Preview of the engagement letter for ${partyName}`}
           notes={engagementPreviewNotes}
           onClose={() => setPreviewOpen(false)}
         />
+      ) : null}
+
+      {picking ? (
+        <RecipientPicker
+          label={`The engagement letter for ${partyName}`}
+          details={picking.details}
+          defaultTo={picking.defaultTo}
+          busy={busy === 'send'}
+          emptyNote={`There is no email address on file for ${partyName}. Add one above to send to it once.`}
+          onSend={(to, extra) => void send(to, extra)}
+          onCancel={() => setPicking(null)}
+        >
+          <p className="muted-text">
+            {`They get your email with the letter attached as a PDF. Replies go to ${replyTo}; nothing is copied to anyone else.`}
+          </p>
+        </RecipientPicker>
       ) : null}
     </section>
   )

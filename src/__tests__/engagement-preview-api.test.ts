@@ -20,14 +20,14 @@ afterEach(() => {
 })
 
 describe('previewEngagementRequest', () => {
-  it('POSTs the typed address in the body and the URL has no to=', async () => {
-    await previewEngagementRequest('eng 1', 'typed@client.test')
+  it('POSTs the chosen recipients in the body and the URL has no to= (featreq-34627da1)', async () => {
+    await previewEngagementRequest('eng 1', { to: ['pat@client.test'], extra: ['typed@client.test'] })
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(String(url)).toContain('/api/engagements/eng%201/preview')
     expect(String(url)).not.toContain('to=')
     expect(String(url)).not.toContain('typed@client.test')
     expect(init.method).toBe('POST')
-    expect(JSON.parse(String(init.body))).toEqual({ to: 'typed@client.test' })
+    expect(JSON.parse(String(init.body))).toEqual({ to: ['pat@client.test'], extra: ['typed@client.test'] })
   })
 
   it('with no typed address sends an empty body, still a POST', async () => {

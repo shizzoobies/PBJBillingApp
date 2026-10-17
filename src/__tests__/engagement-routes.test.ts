@@ -328,10 +328,10 @@ const NEVER_IN_A_PREVIEW = [
 describe('the preview routes', () => {
   it('build from the STORED engagement through the shared builder Send uses', () => {
     expect(previewRoute()).toContain('appDataStore.getEngagement(engagementPreviewMatch[1])')
-    expect(previewRoute()).toContain('await assembleEngagementPreview(await loadEngagementContext(session), engagement, {')
+    expect(previewRoute()).toContain('await assembleEngagementPreview(await loadEngagementContext(session), engagement, previewChoice)')
     expect(previewAssembly()).toContain('await buildEngagementDocuments({')
     expect(previewAssembly()).toContain('engagementValues({')
-    expect(sendLib()).toContain('const preview = await assembleEngagementPreview(context, engagement, { to })')
+    expect(sendLib()).toContain('const preview = await assembleEngagementPreview(context, engagement, { to, extra })')
   })
 
   it('send, save, record and notify nothing', () => {
@@ -356,6 +356,9 @@ describe('the preview routes', () => {
       'html: preview.docs.email.html',
       'text: preview.docs.email.text',
       'to: preview.to',
+      // featreq-34627da1: what the recipient picker lists and ticks.
+      'details: preview.details',
+      'defaultTo: preview.defaultTo',
       'recipientNote: preview.recipientNote',
       'missing: preview.missing',
       'missingNote: preview.missingNote',
@@ -369,16 +372,18 @@ describe('the preview routes', () => {
     }
   })
 
-  it('check a typed address before anything is read', () => {
+  it('check the recipient choice\'s shape before anything is read', () => {
     const body = previewRoute()
-    expect(body.indexOf('isOneEmailAddress(typedTo)')).toBeLessThan(body.indexOf('appDataStore.getEngagement('))
+    const check = body.indexOf('if (!previewChoice) {')
+    expect(check).toBeGreaterThan(-1)
+    expect(check).toBeLessThan(body.indexOf('appDataStore.getEngagement('))
   })
 
-  // The typed recipient leaves the URL (engagements leftovers 6): the JSON preview is a POST.
-  it('take the typed address from a POST body, behind the origin and JSON guards, owner gate first', () => {
+  // The chosen recipients leave the URL (engagements leftovers 6): the JSON preview is a POST.
+  it('take the recipient choice from a POST body, behind the origin and JSON guards, owner gate first', () => {
     const body = previewRoute()
     expect(body).toContain("(request.method === 'POST' && !engagementPreviewMatch[2])")
-    expect(body).toContain("typedTo = typeof payload.to === 'string' ? payload.to.trim() : ''")
+    expect(body).toContain('previewChoice = recipientChoiceOf(payload)')
     const gate = body.indexOf("session.user.role !== 'owner'")
     const origin = body.indexOf('isCrossSiteOrigin(request)')
     const json = body.indexOf('isJsonContentType(request)')
@@ -405,7 +410,11 @@ describe('the send refuses before the provider is called', () => {
     const body = sendRoute()
     expect(at(body, "error: 'engagement_invalid'")).toBeLessThan(at(body, 'appDataStore.getEngagement('))
     expect(body).toContain("typeof payload.templateHash !== 'string'")
-    expect(body).toContain('!isOneEmailAddress(payload.to)')
+    // featreq-34627da1: the picker's `to` / `extra`, shape-checked here, decided in the lib.
+    expect(body).toContain('const sendChoice = recipientChoiceOf(payload)')
+    expect(at(body, 'const sendChoice = recipientChoiceOf(payload)')).toBeLessThan(at(body, "error: 'engagement_invalid'"))
+    expect(body).toContain('to: sendChoice.to,')
+    expect(body).toContain('extra: sendChoice.extra,')
   })
 
   it('decides every refusal in the plan order, then sends once, then logs', () => {
@@ -568,15 +577,20 @@ describe('an engagement letter goes to the client and nowhere else (Alex, 2026-1
     expect(body).toContain('.toLowerCase()')
     // No catch on that read: if the team cannot be read nothing is previewed or sent.
     expect(body.slice(0, body.indexOf('teamEmails:'))).not.toContain('getTeamMembers().catch(')
-    expect(previewAssembly()).toContain('withoutTeamAddresses(resolved, context.teamEmails, context.replyTo)')
+    expect(libSource).toContain('const details = withoutTeamAddresses(raw, context.teamEmails, context.replyTo)')
+    expect(previewAssembly()).toContain('engagementRecipientDetails(context, engagement, client)')
     expect(sendLib().indexOf("'team_address'")).toBeLessThan(sendLib().indexOf('deps.sendMail('))
   })
 
-  it('a typed address is ONE address, shape-checked, and still goes through the team guard', () => {
+  // featreq-34627da1: a posted address must be on file (the party's, or the linked client's); one
+  // typed for this send is an `extra`, decided by the invoice Send's resolver and the team guard.
+  it('a posted address is shape-checked, chosen among the addresses on file, and a one-time one still goes through the team guard', () => {
     const helper = serverHelpers().slice(serverHelpers().indexOf('function isOneEmailAddress('))
     expect(helper).toContain('value.trim().length <= 320')
     expect(helper).toMatch(/\[\^\\s@,;<>\]\+@/)
-    expect(previewAssembly()).toContain("const raw = typed || String(engagement.party?.email ?? '').trim()")
+    expect(serverHelpers()).toContain('function recipientChoiceOf(payload) {')
+    expect(previewAssembly()).toContain('resolveSendRecipients({')
+    expect(previewAssembly()).toContain('withoutTeamAddresses([entry], context.teamEmails, context.replyTo)')
   })
 })
 

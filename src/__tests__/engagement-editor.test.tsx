@@ -146,20 +146,7 @@ beforeEach(() => {
   api.reassembleEngagementRequest = vi.fn(async () =>
     view({ subject: 'Rebuilt subject', emailBody: 'Rebuilt email', letterBody: 'Rebuilt letter' }, 'hash-3'),
   )
-  api.previewEngagementRequest = vi.fn(async () => ({
-    subject: 'Engagement letter - Acme Books',
-    html: '<p>Hi Pat</p>',
-    text: 'Hi Pat',
-    to: ['pat@acme.test'],
-    recipientNote: null,
-    missing: [],
-    missingNote: null,
-    unknown: [],
-    retired: [],
-    pdfAvailable: true,
-    pdfFilename: 'Engagement-Letter-acme-books-2026.pdf',
-    refusal: null,
-  }))
+  api.previewEngagementRequest = vi.fn(async () => previewAnswer())
   api.sendEngagementRequest = vi.fn(async () => ({
     engagement: engagement({ status: 'sent' }),
     ok: true,
@@ -181,6 +168,26 @@ afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
 })
+
+/** What the preview call answers: the letter, and the recipient picker's lists (featreq-34627da1). */
+function previewAnswer() {
+  return {
+    subject: 'Engagement letter - Acme Books',
+    html: '<p>Hi Pat</p>',
+    text: 'Hi Pat',
+    to: ['pat@acme.test'],
+    details: [{ email: 'pat@acme.test', source: 'Pat Doe' }],
+    defaultTo: ['pat@acme.test'],
+    recipientNote: null,
+    missing: [],
+    missingNote: null,
+    unknown: [],
+    retired: [],
+    pdfAvailable: true,
+    pdfFilename: 'Engagement-Letter-acme-books-2026.pdf',
+    refusal: null,
+  }
+}
 
 describe('loading', () => {
   it('shows the party, the kind and status, the proposal link, the three boxes and the figures', async () => {
@@ -427,9 +434,9 @@ describe('Save', () => {
       }),
     )
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled())
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await confirmSend()
     await waitFor(() =>
-      expect(api.sendEngagementRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-2', to: 'pat@acme.test' }),
+      expect(api.sendEngagementRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-2', to: ['pat@acme.test'] }),
     )
   })
 
@@ -506,46 +513,82 @@ describe('Re-assemble from the proposal', () => {
   })
 })
 
+// featreq-34627da1: Send opens the shared recipient picker - the party's address ticked,
+// the linked client's contacts listed, one added for this send only - and the picker is
+// the confirm.
+const openPicker = async (name: RegExp = /^Send$/) => {
+  fireEvent.click(screen.getByRole('button', { name }))
+  return within(await screen.findByRole('dialog', { name: 'Choose who this goes to' }))
+}
+const confirmSend = async (name?: RegExp) => {
+  const dialog = await openPicker(name)
+  fireEvent.click(dialog.getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
+}
+
 describe('Send', () => {
-  it('confirms naming the party, the address and the reply-to, then posts the confirmed address', async () => {
-    const confirm = mockConfirm(true)
+  const linked = {
+    details: [
+      { email: 'pat@acme.test', source: 'Pat Doe' },
+      { email: 'lee@acme.test', source: 'Lee Roe' },
+    ],
+    defaultTo: ['pat@acme.test'],
+  }
+
+  it('opens the picker with the party ticked and the client\'s contacts listed, then posts what she leaves ticked', async () => {
+    api.previewEngagementRequest = vi.fn(async () => ({ ...previewAnswer(), ...linked }))
     await renderEditor()
-    expect(screen.getByLabelText('Send to')).toHaveValue('pat@acme.test')
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
-    expect(confirm).toHaveBeenCalledWith(
-      'Send the engagement letter to Acme Books at pat@acme.test? They get your email with the letter attached as a PDF. Replies go to brittany@pbjsa.com.',
-    )
+    const dialog = await openPicker()
+    expect(api.previewEngagementRequest).toHaveBeenCalledWith('eng-1')
+    expect(dialog.getByRole('checkbox', { name: /pat@acme.test/ })).toBeChecked()
+    expect(dialog.getByRole('checkbox', { name: /lee@acme.test/ })).not.toBeChecked()
+    expect(dialog.getByText(/Replies go to brittany@pbjsa.com/)).toBeTruthy()
+    fireEvent.click(dialog.getByRole('checkbox', { name: /lee@acme.test/ }))
+    fireEvent.click(dialog.getByRole('checkbox', { name: /pat@acme.test/ }))
+    expect(dialog.getByText('Goes to: lee@acme.test')).toBeTruthy()
+    fireEvent.click(dialog.getByRole('button', { name: 'Send to 1 person' }))
     await waitFor(() =>
-      expect(api.sendEngagementRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-1', to: 'pat@acme.test' }),
+      expect(api.sendEngagementRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-1', to: ['lee@acme.test'] }),
     )
-    expect(await screen.findByText('Sent to pat@acme.test.')).toBeTruthy()
+    expect(await screen.findByText('Sent to lee@acme.test.')).toBeTruthy()
   })
 
-  it('sends to an address typed for this send', async () => {
-    const confirm = mockConfirm(true)
+  it('sends to an address added for this send only, as `extra`', async () => {
     await renderEditor()
-    fireEvent.change(screen.getByLabelText('Send to'), { target: { value: 'owner@acme.test' } })
-    expect(screen.getByText(/For this send only/)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
-    expect(confirm.mock.calls[0][0]).toContain('at owner@acme.test?')
+    const dialog = await openPicker()
+    fireEvent.change(dialog.getByLabelText('Add another address for this send only'), { target: { value: 'owner@acme.test' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Add' }))
+    fireEvent.click(dialog.getByRole('button', { name: 'Send to 2 people' }))
     await waitFor(() =>
-      expect(api.sendEngagementRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-1', to: 'owner@acme.test' }),
+      expect(api.sendEngagementRequest).toHaveBeenCalledWith('eng-1', {
+        templateHash: 'hash-1',
+        to: ['pat@acme.test'],
+        extra: ['owner@acme.test'],
+      }),
     )
+    expect(await screen.findByText('Sent to pat@acme.test, owner@acme.test (this send only).')).toBeTruthy()
   })
 
-  it('does nothing on a no', async () => {
-    mockConfirm(false)
+  it('needs one address on file: everyone unticked disables Send and says why', async () => {
     await renderEditor()
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    const dialog = await openPicker()
+    fireEvent.click(dialog.getByRole('checkbox', { name: /pat@acme.test/ }))
+    expect(dialog.getByRole('button', { name: 'Send to 0 people' })).toBeDisabled()
+    expect(dialog.getByRole('alert')).toHaveTextContent(/Pick at least one address on file/)
+  })
+
+  it('does nothing on Cancel', async () => {
+    await renderEditor()
+    const dialog = await openPicker()
+    fireEvent.click(dialog.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog', { name: 'Choose who this goes to' })).toBeNull()
     expect(api.sendEngagementRequest).not.toHaveBeenCalled()
   })
 
   it('is off while the request is in flight', async () => {
-    mockConfirm(true)
     let finish: (value: unknown) => void = () => {}
     api.sendEngagementRequest = vi.fn(() => new Promise((resolve) => (finish = resolve)))
     await renderEditor()
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await confirmSend()
     const sending = await screen.findByRole('button', { name: 'Sending...' })
     expect(sending).toBeDisabled()
     fireEvent.click(sending)
@@ -555,15 +598,14 @@ describe('Send', () => {
   })
 
   it('says when the provider refused it', async () => {
-    mockConfirm(true)
     api.sendEngagementRequest = vi.fn(async () => ({ engagement: engagement(), ok: false, error: 'Mailbox full' }))
     await renderEditor()
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await confirmSend()
     expect(await screen.findByText('Not sent: Mailbox full')).toBeTruthy()
   })
 
   const refusals: Array<[string, ApiError, RegExp]> = [
-    ['engagement_invalid', new ApiError(400, 'x', 'engagement_invalid'), /Type one email address to send to/],
+    ['engagement_invalid', new ApiError(400, 'x', 'engagement_invalid'), /The chosen addresses could not be read/],
     ['unknown_placeholder', new ApiError(409, '{{nope}} is not a placeholder the app fills in. Nothing was sent.', 'unknown_placeholder'), /\{\{nope\}\} is not a placeholder/],
     ['missing_placeholder', new ApiError(409, '{{fee}} has no value for Acme Books - fill it in on the engagement.', 'missing_placeholder'), /\{\{fee\}\} has no value for Acme Books/],
     ['engagement_empty', new ApiError(409, 'x', 'engagement_empty'), /Write the subject, the email and the letter before sending/],
@@ -572,38 +614,47 @@ describe('Send', () => {
     ['sending', new ApiError(409, 'x', 'engagement_refused', 'sending'), /A send of this letter is already under way - wait a minute, then check Activity./],
     ['team_address', new ApiError(409, 'x', 'team_address'), /belongs to someone on your team/],
     ['no_recipient', new ApiError(409, 'x', 'no_recipient'), /There is no email address to send to/],
+    ['invoice_no_chosen_recipient', new ApiError(400, 'None of the chosen addresses belong to this client, so nothing was sent.', 'invoice_no_chosen_recipient'), /None of the chosen addresses belong to this client/],
     ['pdf_failed', new ApiError(502, 'x', 'pdf_failed'), /The PDF could not be built, so nothing was sent/],
     ['engagement_send_failed', new ApiError(502, 'x', 'engagement_send_failed'), /Email is not set up yet/],
     ['not found', new ApiError(404, 'Engagement not found'), /This engagement no longer exists/],
   ]
   for (const [name, error, sentence] of refusals) {
     it(`answers ${name} with a plain sentence`, async () => {
-      mockConfirm(true)
       api.sendEngagementRequest = vi.fn(async () => {
         throw error
       })
       await renderEditor()
-      fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+      await confirmSend()
       expect(await screen.findByText(sentence)).toBeTruthy()
     })
   }
 
   it('re-reads the engagement when it changed since the page loaded', async () => {
-    mockConfirm(true)
     api.sendEngagementRequest = vi.fn(async () => {
       throw new ApiError(409, 'changed', 'engagement_changed')
     })
     await renderEditor()
     api.getEngagementRequest = vi.fn(async () => view({ subject: 'Saved elsewhere' }, 'hash-9'))
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await confirmSend()
     expect(await screen.findByText(/The engagement changed since this page loaded/)).toBeTruthy()
     await screen.findByDisplayValue('Saved elsewhere')
-    mockConfirm(true)
     api.sendEngagementRequest = vi.fn(async () => ({ engagement: engagement(), ok: true, error: null }))
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await confirmSend()
     await waitFor(() =>
-      expect(api.sendEngagementRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-9', to: 'pat@acme.test' }),
+      expect(api.sendEngagementRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-9', to: ['pat@acme.test'] }),
     )
+  })
+
+  it('says why when the addresses could not be read, and opens nothing', async () => {
+    api.previewEngagementRequest = vi.fn(async () => {
+      throw new ApiError(500, 'Could not build the preview')
+    })
+    await renderEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(await screen.findByText(/Could not build the preview/)).toBeTruthy()
+    expect(screen.queryByRole('dialog', { name: 'Choose who this goes to' })).toBeNull()
+    expect(api.sendEngagementRequest).not.toHaveBeenCalled()
   })
 })
 
@@ -618,7 +669,7 @@ describe('Save after a Send', () => {
         }),
     )
     await renderEditor()
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await confirmSend()
     await waitFor(() => expect(api.sendEngagementRequest).toHaveBeenCalled())
     // Typing while it sends makes the page dirty.
     fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Typed while sending' } })
@@ -648,16 +699,13 @@ describe('Preview', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }))
     const dialog = await screen.findByRole('dialog', { name: 'Preview of the engagement letter for Acme Books' })
     expect(await within(dialog).findByText('To: pat@acme.test')).toBeTruthy()
-    expect(api.previewEngagementRequest).toHaveBeenCalledWith('eng-1', undefined)
+    expect(api.previewEngagementRequest).toHaveBeenCalledWith('eng-1')
     expect(within(dialog).getByRole('tab', { name: 'PDF attachment' })).toBeTruthy()
   })
 
-  it('hands a typed address to the preview call (which puts it in the request body, not the URL)', async () => {
+  it('has no Send to box any more: who it goes to is chosen in the picker at Send', async () => {
     await renderEditor()
-    fireEvent.change(screen.getByLabelText('Send to'), { target: { value: 'typed@client.test' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Preview' }))
-    await screen.findByRole('dialog', { name: 'Preview of the engagement letter for Acme Books' })
-    await waitFor(() => expect(api.previewEngagementRequest).toHaveBeenCalledWith('eng-1', 'typed@client.test'))
+    expect(screen.queryByLabelText('Send to')).toBeNull()
   })
 })
 
@@ -1189,10 +1237,9 @@ describe('Addressed to', () => {
         expectedUpdatedAt: '2026-10-11T15:00:00.000Z',
       }),
     )
-    // The card starts clean on the stored values, and Send now addresses the new email.
+    // The card starts clean on the stored values (Send's picker reads the stored party from the server).
     await waitFor(() => expect(screen.getByLabelText('Addressed to email')).toHaveValue('owner@acme.test'))
     expect(screen.getByRole('button', { name: 'Save address' })).toBeDisabled()
-    await waitFor(() => expect(screen.getByLabelText('Send to')).toHaveValue('owner@acme.test'))
     // The next text save carries the stamp that save returned.
     fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Later subject' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))

@@ -2934,6 +2934,12 @@ export type EngagementPreview = {
   html: string
   text: string
   to: string[]
+  /**
+   * The addresses on file the recipient picker lists (the party's, then the linked
+   * client's; never a team member's), and the ones it ticks (the party's). featreq-34627da1.
+   */
+  details?: Array<{ email: string; source: string }>
+  defaultTo?: string[]
   recipientNote: string | null
   missing: string[]
   missingNote: string | null

@@ -2713,6 +2713,29 @@ function isOneEmailAddress(value) {
 }
 
 /**
+ * The recipient picker's choice as a manual send's body carries it (featreq-34627da1):
+ * `to`, the on-file addresses she left ticked (a list; one address as a string is read
+ * as a list of one), and `extra`, the ones added for this send only. Absent fields mean
+ * the send's own default. Only the SHAPE is checked here - whether each address is on
+ * file, valid, at most three, never one-time alone, is `resolveSendRecipients` - so a
+ * shape it cannot read answers null and the route refuses before anything happens.
+ *
+ * @returns {{to: string|string[]|undefined, extra: unknown[]|undefined} | null}
+ */
+function recipientChoiceOf(payload) {
+  const rawTo = payload?.to
+  const rawExtra = payload?.extra
+  let to
+  if (rawTo === undefined || rawTo === null || rawTo === '') to = undefined
+  else if (typeof rawTo === 'string') to = isOneEmailAddress(rawTo) ? rawTo.trim() : null
+  else if (Array.isArray(rawTo) && rawTo.length <= 50 && rawTo.every((address) => typeof address === 'string')) to = rawTo
+  else to = null
+  if (to === null) return null
+  if (rawExtra !== undefined && rawExtra !== null && !Array.isArray(rawExtra)) return null
+  return { to, extra: rawExtra ?? undefined }
+}
+
+/**
  * Everything an engagement preview or send reads once: the workspace (the linked
  * client and its contacts), the firm, who is sending, and the addresses of the app's
  * user accounts. The team read FAILS CLOSED: if it cannot be made, nothing is
@@ -12237,7 +12260,9 @@ const server = createServer(async (request, response) => {
         sendJson(response, 403, { error: 'Only owners can preview an engagement' })
         return
       }
-      let typedTo = requestUrl.searchParams.get('to') || ''
+      // The recipient picker's choice (featreq-34627da1): `?to=` on a GET, `{ to, extra }`
+      // on a POST. Absent, the preview addresses the party, as Send's default does.
+      let previewChoice = recipientChoiceOf({ to: requestUrl.searchParams.get('to') || undefined })
       if (request.method === 'POST') {
         if (isCrossSiteOrigin(request)) {
           sendJson(response, 403, { error: 'Origin not allowed' })
@@ -12248,10 +12273,13 @@ const server = createServer(async (request, response) => {
           return
         }
         const payload = (await readJsonBody(request)) ?? {}
-        typedTo = typeof payload.to === 'string' ? payload.to.trim() : ''
+        previewChoice = recipientChoiceOf(payload)
       }
-      if (typedTo && !isOneEmailAddress(typedTo)) {
-        sendJson(response, 400, { error: 'engagement_invalid', message: 'Type one email address to send to.' })
+      if (!previewChoice) {
+        sendJson(response, 400, {
+          error: 'engagement_invalid',
+          message: 'The chosen recipients were not in a shape this send can read.',
+        })
         return
       }
       const engagement = await appDataStore.getEngagement(engagementPreviewMatch[1])
@@ -12259,9 +12287,7 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'Engagement not found' })
         return
       }
-      const preview = await assembleEngagementPreview(await loadEngagementContext(session), engagement, {
-        to: typedTo || undefined,
-      })
+      const preview = await assembleEngagementPreview(await loadEngagementContext(session), engagement, previewChoice)
       if (engagementPreviewMatch[2]) {
         if (!preview.docs.pdf) {
           sendJson(response, 502, {
@@ -12286,6 +12312,9 @@ const server = createServer(async (request, response) => {
           html: preview.docs.email.html,
           text: preview.docs.email.text,
           to: preview.to,
+          // What the recipient picker lists (team addresses never) and ticks.
+          details: preview.details,
+          defaultTo: preview.defaultTo,
           recipientNote: preview.recipientNote,
           missing: preview.missing,
           missingNote: preview.missingNote,
@@ -12300,9 +12329,11 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // POST /api/engagements/:id/send - { templateHash, to? }. Every refusal is decided
-    // in lib/engagement-send.js before the provider is called; then one send to the
-    // party (or the one address typed), logged on the engagement.
+    // POST /api/engagements/:id/send - { templateHash, to?, extra? }. Every refusal is
+    // decided in lib/engagement-send.js before the provider is called; then one send to
+    // the party (no `to`), or to the recipient picker's choice - `to` among the addresses
+    // on file (the party's, and the linked client's), `extra` for this send only
+    // (featreq-34627da1) - logged on the engagement with the list actually used.
     const engagementSendMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/send$/)
     if (engagementSendMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
@@ -12320,13 +12351,11 @@ const server = createServer(async (request, response) => {
         return
       }
       const payload = (await readJsonBody(request)) ?? {}
-      if (
-        typeof payload.templateHash !== 'string' ||
-        (payload.to !== undefined && payload.to !== null && payload.to !== '' && !isOneEmailAddress(payload.to))
-      ) {
+      const sendChoice = recipientChoiceOf(payload)
+      if (typeof payload.templateHash !== 'string' || !sendChoice) {
         sendJson(response, 400, {
           error: 'engagement_invalid',
-          message: 'Send the page hash, and at most one email address to send to.',
+          message: 'Send the page hash, and the recipients in a shape this send can read.',
         })
         return
       }
@@ -12350,7 +12379,8 @@ const server = createServer(async (request, response) => {
           await loadEngagementContext(session),
           engagement,
           {
-            to: typeof payload.to === 'string' && payload.to.trim() ? payload.to.trim() : undefined,
+            to: sendChoice.to,
+            extra: sendChoice.extra,
             templateHash: payload.templateHash,
             userId: session.user.id,
           },

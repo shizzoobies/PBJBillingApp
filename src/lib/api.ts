@@ -5491,12 +5491,16 @@ export function reassembleEngagementRequest(id: string): Promise<EngagementView>
 
 /**
  * What the party would receive, from the STORED engagement. Nothing is sent or saved.
- * The address she typed for this send rides in the body, never in the URL.
+ * Its `details` / `defaultTo` are what the recipient picker lists and ticks
+ * (featreq-34627da1); a chosen list rides in the body, never in the URL.
  */
-export function previewEngagementRequest(id: string, to?: string): Promise<EngagementPreview> {
+export function previewEngagementRequest(
+  id: string,
+  choice?: { to?: string[]; extra?: string[] },
+): Promise<EngagementPreview> {
   return engagementRequest<EngagementPreview>(
     engagementPath(id, 'preview'),
-    proposalJson('POST', to ? { to } : {}),
+    proposalJson('POST', choice ?? {}),
     'Could not build the preview',
   )
 }
@@ -5507,13 +5511,14 @@ export function engagementPreviewPdfUrl(id: string) {
 }
 
 /**
- * Send the engagement to `to` (the address she confirmed). `templateHash` is the
- * hash the page loaded: the server refuses (409 `engagement_changed`) when the
- * engagement changed since.
+ * Send the engagement to the recipient picker's choice (featreq-34627da1): `to`, the
+ * addresses on file she left ticked, and `extra`, the ones added for this send only.
+ * `templateHash` is the hash the page loaded: the server refuses (409
+ * `engagement_changed`) when the engagement changed since.
  */
 export function sendEngagementRequest(
   id: string,
-  input: { templateHash: string; to: string },
+  input: { templateHash: string; to: string[]; extra?: string[] },
 ): Promise<EngagementSendResult> {
   return engagementRequest<EngagementSendResult>(
     engagementPath(id, 'send'),

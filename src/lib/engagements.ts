@@ -83,11 +83,11 @@ export function engagementSendRefusalSentence(err: unknown): string {
           ? err.message
           : `${err.message} Nothing was sent.`
     case 'team_address':
-      return "That address belongs to someone on your team. An engagement letter goes to the client only: type the client's address. Nothing was sent."
+      return "That address belongs to someone on your team. An engagement letter goes to the client only: choose the client's address. Nothing was sent."
     case 'no_recipient':
-      return "There is no email address to send to. Type the client's address in Send to. Nothing was sent."
+      return "There is no email address to send to. Add the client's address to the party, or add it for this send at Send. Nothing was sent."
     case 'engagement_invalid':
-      return 'Type one email address to send to. Nothing was sent.'
+      return 'The chosen addresses could not be read. Choose who it goes to again. Nothing was sent.'
     case 'pdf_failed':
       return 'The PDF could not be built, so nothing was sent. Open Preview to see what is wrong, or try again in a minute.'
     case 'engagement_send_failed':
