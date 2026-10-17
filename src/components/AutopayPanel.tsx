@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { inviteToAutopayRequest, listAutopayRequest, turnOffAutopayRequest } from '../lib/api'
 import type { AutopaySummary } from '../lib/types'
 import { autopayStatusText } from '../lib/autopayText'
+import type { InvoiceRecipientDetail } from '../lib/utils'
+import { RecipientPicker } from './RecipientPicker'
 
 /**
  * Autopay, on a client's Billing tab (featreq-bef42b72): whether the client has
@@ -15,9 +17,17 @@ import { autopayStatusText } from '../lib/autopayText'
  */
 export function AutopayPanel({
   clientId,
+  clientName = 'this client',
+  recipients = [],
   neverEmailed = false,
 }: {
   clientId: string
+  clientName?: string
+  /**
+   * The addresses on file the invitation may go to (the invoice addressee's), for the
+   * recipient picker Invite opens (featreq-34627da1); all ticked by default.
+   */
+  recipients?: InvoiceRecipientDetail[]
   /**
    * This client's invoices are never emailed, so the invitation (an email) is
    * refused. The panel stays so an existing enrollment still shows and can be
@@ -30,6 +40,7 @@ export function AutopayPanel({
   const [failed, setFailed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [picking, setPicking] = useState(false)
 
   // Fetched once per mount; the caller keys this by client, so a different
   // client is a fresh mount rather than this one being talked into forgetting.
@@ -87,7 +98,10 @@ export function AutopayPanel({
                 ? 'This client’s invoices are never emailed, so automatic payments are not offered'
                 : undefined
             }
-            onClick={() => void run(() => inviteToAutopayRequest(clientId))}
+            onClick={() => {
+              setError(null)
+              setPicking(true)
+            }}
             type="button"
           >
             {waiting ? 'Send the invitation again' : 'Invite to autopay'}
@@ -122,6 +136,18 @@ export function AutopayPanel({
         <small className="invoice-run-error" role="alert">
           {error}
         </small>
+      ) : null}
+      {picking ? (
+        <RecipientPicker
+          label={`The autopay invitation for ${clientName}`}
+          details={recipients}
+          busy={busy}
+          onSend={(to, extra) => {
+            setPicking(false)
+            void run(() => inviteToAutopayRequest(clientId, extra.length > 0 ? { to, extra } : { to }))
+          }}
+          onCancel={() => setPicking(false)}
+        />
       ) : null}
     </div>
   )

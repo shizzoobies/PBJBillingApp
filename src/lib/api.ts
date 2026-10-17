@@ -5190,12 +5190,17 @@ export async function listAutopayRequest() {
   return ((await response.json()) as { enrollments: AutopaySummary[] }).enrollments
 }
 
-async function autopayAction(clientId: string, action: 'invite' | 'turn-off', failure: string) {
+async function autopayAction(
+  clientId: string,
+  action: 'invite' | 'turn-off',
+  failure: string,
+  body: Record<string, unknown> = {},
+) {
   const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/autopay/${action}`, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
+    body: JSON.stringify(body),
   })
   if (!response.ok) {
     const message = await safeErrorMessage(response)
@@ -5204,9 +5209,16 @@ async function autopayAction(clientId: string, action: 'invite' | 'turn-off', fa
   return ((await response.json()) as { enrollment: AutopaySummary }).enrollment
 }
 
-/** Email the client a link to set up automatic payments. Nothing is charged. */
-export function inviteToAutopayRequest(clientId: string) {
-  return autopayAction(clientId, 'invite', 'Could not send the invitation')
+/**
+ * Email the client a link to set up automatic payments. Nothing is charged.
+ * `recipients`: the recipient picker's choice (featreq-34627da1) - the addresses on
+ * file she left ticked, and the ones added for this send only; none = everyone on file.
+ */
+export function inviteToAutopayRequest(clientId: string, recipients?: { to: string[]; extra?: string[] }) {
+  return autopayAction(clientId, 'invite', 'Could not send the invitation', {
+    ...(recipients ? { to: recipients.to } : {}),
+    ...(recipients?.extra && recipients.extra.length > 0 ? { extra: recipients.extra } : {}),
+  })
 }
 
 /** The owner turns a client's autopay off; the saved method is removed. */

@@ -21,6 +21,7 @@ import { AssignedTeamControl } from '../components/AssignedTeamControl'
 import { LinkExistingChecklist } from '../components/LinkExistingChecklist'
 import { AccountCreditPanel } from '../components/AccountCreditPanel'
 import { AutopayPanel } from '../components/AutopayPanel'
+import { invoiceEmailAddressee, resolveInvoiceRecipients } from '../../lib/invoice-recipients.js'
 import { BilledOnCard } from '../components/BilledOnCard'
 import { ChipMultiSelect } from '../components/ChipMultiSelect'
 import { ClientTimeModal } from '../components/ClientTimeModal'
@@ -212,6 +213,14 @@ export function ClientDetailPage() {
     () => data.clients.find((entry) => entry.id === clientId),
     [data.clients, clientId],
   )
+  // The addresses the autopay invitation may go to, for its recipient picker
+  // (featreq-34627da1): the invoice addressee's, exactly as the server resolves them.
+  const autopayRecipients = useMemo(() => {
+    const addressee = invoiceEmailAddressee(client, data.clients)
+    return addressee.refusal
+      ? []
+      : resolveInvoiceRecipients({ client: addressee.addressee, contacts: data.contacts ?? [] }).details
+  }, [client, data.clients, data.contacts])
 
   // Whether this client may be deleted (lib/client-delete-rule.js). Time is
   // known locally; invoices are not in the workspace payload, so they are asked
@@ -609,6 +618,10 @@ export function ClientDetailPage() {
               <AutopayPanel
                 key={client.id}
                 clientId={client.id}
+                clientName={client.name}
+                // Who the invitation may go to: the invoice addressee's addresses
+                // (a billing master's receiving company), as the server resolves them.
+                recipients={autopayRecipients}
                 neverEmailed={client.invoiceNoEmail === true}
               />
             )}

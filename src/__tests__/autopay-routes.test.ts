@@ -135,6 +135,24 @@ describe('POST /api/clients/:id/autopay/(invite|turn-off)', () => {
     expect(failure.indexOf('updateClientAutopay')).toBeLessThan(failure.indexOf('502'))
   })
 
+  // featreq-34627da1: the invitation's recipient picker.
+  it('reads her recipient choice and settles it with the invoice Send\'s resolver before Stripe, the row or the email', () => {
+    const readAt = block.indexOf('invitePayload = await readJsonBody(request)')
+    expect(readAt).toBeGreaterThan(block.indexOf("'application/json required'"))
+    expect(block).toContain('const inviteChoice = recipientChoiceOf(invitePayload ?? {})')
+    const resolveAt = block.indexOf('const inviteSendTo = resolveSendRecipients({')
+    expect(resolveAt).toBeGreaterThan(-1)
+    expect(block).toContain('allowed: inviteRecipients.to,')
+    expect(block).toContain('extra: inviteChoice.extra,')
+    const refuseAt = block.indexOf('if (!inviteSendTo.ok) {')
+    expect(refuseAt).toBeGreaterThan(resolveAt)
+    expect(refuseAt).toBeLessThan(block.indexOf('ensureStripeCustomer('))
+    expect(refuseAt).toBeLessThan(block.indexOf("status: 'invited'"))
+    expect(block).toMatch(/sendInvoiceEmail\(\{\s*to: inviteSendTo\.to,/)
+    // The turn-off branch returns before the body is read: it takes no recipients.
+    expect(block.indexOf("autopayActionMatch[2] === 'turn-off'")).toBeLessThan(readAt)
+  })
+
   it('the owner turning it off goes through turnOffAutopay', () => {
     expect(squash(block)).toContain("by: 'owner'")
     expect(block).toContain('turnOffAutopay({')

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AutopayPanel } from '../components/AutopayPanel'
 import { autopayStatusText } from '../lib/autopayText'
@@ -9,7 +9,7 @@ const inviteToAutopayRequest = vi.fn()
 const turnOffAutopayRequest = vi.fn()
 vi.mock('../lib/api', () => ({
   listAutopayRequest: () => listAutopayRequest(),
-  inviteToAutopayRequest: (id: string) => inviteToAutopayRequest(id),
+  inviteToAutopayRequest: (...args: unknown[]) => inviteToAutopayRequest(...args),
   turnOffAutopayRequest: (id: string) => turnOffAutopayRequest(id),
 }))
 
@@ -137,10 +137,19 @@ describe('<AutopayPanel> actions', () => {
     turnOffAutopayRequest.mockReset()
   })
 
+  const onFile = [
+    { email: 'ann@acme.test', source: 'Ann' },
+    { email: 'bo@acme.test', source: 'Bo' },
+  ]
   const load = async (rows: AutopaySummary[]) => {
     listAutopayRequest.mockResolvedValue(rows)
-    render(<AutopayPanel clientId="c1" />)
+    render(<AutopayPanel clientId="c1" clientName="Acme" recipients={onFile} />)
     await waitFor(() => expect(screen.getByTestId('autopay-status')).toBeInTheDocument())
+  }
+  // featreq-34627da1: Invite opens the shared recipient picker, everyone on file ticked.
+  const openPicker = () => {
+    fireEvent.click(screen.getByRole('button', { name: /^(Invite to autopay|Send the invitation again)$/ }))
+    return within(screen.getByRole('dialog', { name: 'Choose who this goes to' }))
   }
 
   it('offers Invite to a client who is not enrolled, and shows the new status after it', async () => {
@@ -148,11 +157,37 @@ describe('<AutopayPanel> actions', () => {
     inviteToAutopayRequest.mockResolvedValue(summary({ status: 'invited' }))
     expect(screen.queryByRole('button', { name: 'Turn off' })).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Invite to autopay' }))
+    const dialog = openPicker()
+    expect(inviteToAutopayRequest).not.toHaveBeenCalled()
+    expect(dialog.getByRole('checkbox', { name: /ann@acme.test/ })).toBeChecked()
+    expect(dialog.getByRole('checkbox', { name: /bo@acme.test/ })).toBeChecked()
+    fireEvent.click(dialog.getByRole('button', { name: 'Send to 2 people' }))
 
     await waitFor(() => expect(screen.getByTestId('autopay-status')).toHaveTextContent('Invited on'))
-    expect(inviteToAutopayRequest).toHaveBeenCalledWith('c1')
+    expect(inviteToAutopayRequest).toHaveBeenCalledWith('c1', { to: ['ann@acme.test', 'bo@acme.test'] })
     expect(screen.getByRole('button', { name: 'Send the invitation again' })).toBeInTheDocument()
+  })
+
+  it('posts what she leaves ticked and an address added for this send', async () => {
+    await load([])
+    inviteToAutopayRequest.mockResolvedValue(summary({ status: 'invited' }))
+    const dialog = openPicker()
+    fireEvent.click(dialog.getByRole('checkbox', { name: /ann@acme.test/ }))
+    fireEvent.change(dialog.getByLabelText('Add another address for this send only'), { target: { value: 'ap@acme.test' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Add' }))
+    fireEvent.click(dialog.getByRole('button', { name: 'Send to 2 people' }))
+    await waitFor(() =>
+      expect(inviteToAutopayRequest).toHaveBeenCalledWith('c1', { to: ['bo@acme.test'], extra: ['ap@acme.test'] }),
+    )
+  })
+
+  it('needs one address on file: everyone unticked disables Send and says why', async () => {
+    await load([])
+    const dialog = openPicker()
+    for (const box of dialog.getAllByRole('checkbox')) fireEvent.click(box)
+    expect(dialog.getByRole('button', { name: 'Send to 0 people' })).toBeDisabled()
+    expect(dialog.getByRole('alert')).toHaveTextContent(/Pick at least one address on file/)
+    expect(inviteToAutopayRequest).not.toHaveBeenCalled()
   })
 
   it('an enrolled client can only be turned off, not invited again', async () => {
@@ -181,7 +216,7 @@ describe('<AutopayPanel> actions', () => {
   it('shows the server’s sentence when the invitation is refused', async () => {
     await load([])
     inviteToAutopayRequest.mockRejectedValue(new Error('Acme is invoiced outside the app.'))
-    fireEvent.click(screen.getByRole('button', { name: 'Invite to autopay' }))
+    fireEvent.click(openPicker().getByRole('button', { name: 'Send to 2 people' }))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('invoiced outside the app'))
     expect(screen.getByTestId('autopay-status')).toHaveTextContent('Not enrolled.')
   })

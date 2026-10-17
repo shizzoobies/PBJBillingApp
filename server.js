@@ -5902,6 +5902,26 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // The invitation's recipients (featreq-34627da1): `to`, the addresses on file she
+      // left ticked in the recipient picker, and `extra`, the ones added for this send
+      // only. Read before anything slow; decided below by resolveSendRecipients. An
+      // empty body still means everyone on file, as before.
+      let invitePayload = null
+      try {
+        invitePayload = await readJsonBody(request)
+      } catch {
+        sendJson(response, 400, { error: 'Could not read the request body.' })
+        return
+      }
+      const inviteChoice = recipientChoiceOf(invitePayload ?? {})
+      if (!inviteChoice) {
+        sendJson(response, 400, {
+          error: 'invoice_bad_recipients',
+          message: 'The chosen recipients were not in a shape this send can read, so nothing was sent.',
+        })
+        return
+      }
+
       if (!isStripeConfigured()) {
         sendJson(response, 503, {
           error: 'stripe_unavailable',
@@ -5961,6 +5981,18 @@ const server = createServer(async (request, response) => {
         })
         return
       }
+      // Her choice, by the invoice Send's own rule: `to` filters the addresses on file,
+      // at most three valid one-time ones ride alongside, never alone. Decided before
+      // Stripe is asked for a customer or the enrollment is touched.
+      const inviteSendTo = resolveSendRecipients({
+        allowed: inviteRecipients.to,
+        to: typeof inviteChoice.to === 'string' ? [inviteChoice.to] : inviteChoice.to,
+        extra: inviteChoice.extra,
+      })
+      if (!inviteSendTo.ok) {
+        sendJson(response, inviteSendTo.status, { error: inviteSendTo.error, message: inviteSendTo.message })
+        return
+      }
 
       // The customer is made BEFORE the link goes out, so the client's first
       // click is one hop; Stripe refusing stops the invite with nothing sent.
@@ -5997,7 +6029,7 @@ const server = createServer(async (request, response) => {
         firmSettings: inviteFirm,
       })
       const inviteResult = await sendInvoiceEmail({
-        to: inviteRecipients.to,
+        to: inviteSendTo.to,
         subject: inviteEmail.subject,
         html: inviteEmail.html,
         text: inviteEmail.text,
