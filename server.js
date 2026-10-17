@@ -15332,7 +15332,7 @@ const server = createServer(async (request, response) => {
     // the next step while waiting." Starts the case's next stage while this one's
     // remaining work is all waiting; this stage stays open until its waits clear.
     // It also revives a finished stage whose next step never opened
-    // (featreq-ed73d181) - the store decides which. Not Push (that moves a task to a new date). The store decides and refuses
+    // (featreq-ed73d181). Not Push (that moves a task to a new date). The store decides and refuses
     // (NextStageRefusedError); this route checks who may ask and words the answer.
     const checklistOpenNextStageMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)\/open-next-stage$/)
     if (checklistOpenNextStageMatch) {
