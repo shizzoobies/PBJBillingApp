@@ -694,6 +694,18 @@ describe('Send', () => {
     )
   })
 
+  // Review round 2: reading the list is not sending.
+  it('reads "Loading..." (not "Sending...") while the list loads', async () => {
+    let finish: (value: unknown) => void = () => {}
+    api.engagementRecipientsRequest = vi.fn(() => new Promise((resolve) => (finish = resolve)))
+    await renderEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(await screen.findByRole('button', { name: 'Loading...' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Sending...' })).toBeNull()
+    finish({ details: [{ email: 'pat@acme.test', source: 'Pat Doe' }], defaultTo: ['pat@acme.test'] })
+    expect(await screen.findByRole('dialog', { name: 'Choose who this goes to' })).toBeTruthy()
+  })
+
   it('says why when the addresses could not be read, and opens nothing', async () => {
     api.engagementRecipientsRequest = vi.fn(async () => {
       throw new ApiError(500, 'Could not build the preview')

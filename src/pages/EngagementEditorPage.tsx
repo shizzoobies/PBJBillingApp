@@ -197,7 +197,8 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
     details: Array<{ email: string; source: string }>
     defaultTo: string[]
   } | null>(null)
-  const [busy, setBusy] = useState<'' | 'reassemble' | 'send' | 'sign' | 'void'>('')
+  // 'recipients': Send is reading who the letter may go to (the picker's list), not sending.
+  const [busy, setBusy] = useState<'' | 'reassemble' | 'recipients' | 'send' | 'sign' | 'void'>('')
   const [actionError, setActionError] = useState('')
   const [notice, setNotice] = useState('')
 
@@ -491,7 +492,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
 
   // Send, step one: who it may go to, from the server (the same list the send checks against).
   const openSendPicker = async () => {
-    setBusy('send')
+    setBusy('recipients')
     setActionError('')
     setNotice('')
     try {
@@ -827,7 +828,13 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                     disabled={unsaved || busy !== ''}
                     onClick={() => void openSendPicker()}
                   >
-                    {busy === 'send' ? 'Sending...' : engagement.status === 'sent' ? 'Send again' : 'Send'}
+                    {busy === 'send'
+                      ? 'Sending...'
+                      : busy === 'recipients'
+                        ? 'Loading...'
+                        : engagement.status === 'sent'
+                          ? 'Send again'
+                          : 'Send'}
                   </button>
                 </div>
 

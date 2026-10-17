@@ -1024,6 +1024,43 @@ describe('choosing who a client\'s letter goes to', () => {
     await waitFor(() => expect(within(row).queryByText('Chosen for this send')).not.toBeInTheDocument())
   })
 
+  // Review round 2: a stale tick keeps the rest of her choice and says to pick again.
+  it('a client refused for an address no longer on file keeps the rest of its choice and says to pick again', async () => {
+    twoOnFile()
+    mockConfirm(true)
+    api.sendLettersRequest = vi.fn(async () => ({
+      results: [
+        {
+          clientId: 'c-two',
+          clientName: 'Two Co',
+          status: 'skipped',
+          code: 'recipients_changed',
+          message: 'The addresses on file for this client have changed. Reload and choose again. Nothing was sent to Two Co.',
+        },
+      ],
+      sent: 0,
+      failed: 0,
+      skipped: 1,
+    }))
+    await renderPage()
+    const dialog = openPicker()
+    fireEvent.change(dialog.getByLabelText('Add another address for this send only'), { target: { value: 'ap@other.test' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Add' }))
+    fireEvent.click(dialog.getByRole('checkbox', { name: /office@two.test/ }))
+    fireEvent.click(dialog.getByRole('button', { name: 'Use 2 addresses' }))
+    // Tia's address leaves the file before the send.
+    contextValue = {
+      ...contextValue,
+      data: { ...contextValue.data, contacts: [{ id: 'ct-1', name: 'Tia Two', email: 'tia.new@two.test' }] },
+    } as unknown as AppContextValue
+    fireEvent.click(screen.getByLabelText('Select Two Co'))
+    fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 1 client' }))
+    expect(await screen.findByText(/An address is no longer on file - click Change to pick again\./)).toBeInTheDocument()
+    // The stale tick is gone; the added address stays.
+    const row = screen.getByLabelText('Select Two Co').closest('tr') as HTMLElement
+    await waitFor(() => expect(within(row).getByText('ap@other.test (this send only)')).toBeInTheDocument())
+  })
+
   it('never offers a team member\'s address in the picker', async () => {
     api.fetchLetterTemplate = vi.fn(async () => templateState({}, 'hash-1', ['tia@two.test']))
     twoOnFile()

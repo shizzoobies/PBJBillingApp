@@ -46,6 +46,9 @@ const SEND_CHUNK = 10
  */
 const SHOWN_BY_DEFAULT = new Set(['active', 'onboarding'])
 
+/** What a client's row says when an address ticked in its picker is no longer on file (featreq-34627da1). */
+const STALE_RECIPIENT_SENTENCE = 'An address is no longer on file - click Change to pick again.'
+
 /** The longest name a letter may have (the server refuses longer). */
 const NAME_MAX = 80
 
@@ -542,10 +545,32 @@ export function LettersPage() {
             Object.fromEntries(Object.entries(current).filter(([clientId]) => !wentOut.has(clientId))),
           )
         }
+        // A client skipped because an address she ticked is no longer on file: its choice
+        // keeps the ticks still on file (and her added ones), and the row says to pick again.
+        const stale = new Set(
+          answer.results.filter((result) => result.code === 'recipients_changed').map((result) => result.clientId),
+        )
+        if (stale.size > 0) {
+          setRecipientChoices((current) => {
+            const next = { ...current }
+            for (const clientId of stale) {
+              const choice = next[clientId]
+              if (!choice) continue
+              const onFile = new Set(
+                (rows.find((row) => row.client.id === clientId)?.to ?? []).map((email) => email.toLowerCase()),
+              )
+              next[clientId] = { to: choice.to.filter((email) => onFile.has(email.toLowerCase())), extra: choice.extra }
+            }
+            return next
+          })
+        }
+        const answered = answer.results.map((result) =>
+          stale.has(result.clientId) ? { ...result, message: STALE_RECIPIENT_SENTENCE } : result,
+        )
         setResults((currentResults) =>
           reconcileCoveredResults([
             ...currentResults.filter((result) => !chunk.includes(result.clientId)),
-            ...answer.results,
+            ...answered,
           ]),
         )
         await refreshSends()

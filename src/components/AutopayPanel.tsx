@@ -15,6 +15,9 @@ import { RecipientPicker } from './RecipientPicker'
  * the setup link, the payment method id or the mandate. Inviting EMAILS the
  * client a link; nothing is charged by anything on this panel.
  */
+/** Why Invite is off for a client with no address on file - the server's refusal, said first. */
+const NO_AUTOPAY_ADDRESS = 'No address on file for this client'
+
 export function AutopayPanel({
   clientId,
   clientName = 'this client',
@@ -41,6 +44,9 @@ export function AutopayPanel({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [picking, setPicking] = useState(false)
+  // Nothing on file: the server refuses the invitation (it never goes to added addresses
+  // alone), so Invite is off with its reason rather than offering a send it would refuse.
+  const noAddress = recipients.length === 0
   // After a 409 recipients_changed: the list the server has now, used instead of the page's.
   const [freshRecipients, setFreshRecipients] = useState<InvoiceRecipientDetail[] | null>(null)
 
@@ -100,11 +106,13 @@ export function AutopayPanel({
         {status !== 'enrolled' ? (
           <button
             className="ghost-action"
-            disabled={busy || neverEmailed}
+            disabled={busy || neverEmailed || noAddress}
             title={
               neverEmailed
                 ? 'This client’s invoices are never emailed, so automatic payments are not offered'
-                : undefined
+                : noAddress
+                  ? NO_AUTOPAY_ADDRESS
+                  : undefined
             }
             onClick={() => {
               setError(null)
@@ -139,6 +147,9 @@ export function AutopayPanel({
         <small className="field-helper">
           This client’s invoices are never emailed, so automatic payments are not offered.
         </small>
+      ) : null}
+      {!neverEmailed && noAddress && status !== 'enrolled' ? (
+        <small className="field-helper">{NO_AUTOPAY_ADDRESS}.</small>
       ) : null}
       {error ? (
         <small className="invoice-run-error" role="alert">

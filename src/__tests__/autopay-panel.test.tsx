@@ -124,9 +124,24 @@ describe('<AutopayPanel> for a never-email client', () => {
 
   it('an ordinary client’s Invite is enabled', async () => {
     listAutopayRequest.mockResolvedValue([])
-    render(<AutopayPanel clientId="c1" />)
+    render(<AutopayPanel clientId="c1" recipients={[{ email: 'ann@acme.test', source: 'Ann' }]} />)
     await waitFor(() => expect(screen.getByTestId('autopay-status')).toBeInTheDocument())
     expect(screen.getByRole('button', { name: 'Invite to autopay' })).toBeEnabled()
+  })
+
+  // Review round 2: the server never invites added addresses alone, so with nothing on
+  // file Invite is off with its reason instead of offering a send it would refuse.
+  it('with no address on file disables Invite with the reason', async () => {
+    listAutopayRequest.mockResolvedValue([])
+    render(<AutopayPanel clientId="c1" recipients={[]} />)
+    await waitFor(() => expect(screen.getByTestId('autopay-status')).toBeInTheDocument())
+    const invite = screen.getByRole('button', { name: 'Invite to autopay' })
+    expect(invite).toBeDisabled()
+    expect(invite).toHaveAttribute('title', 'No address on file for this client')
+    expect(screen.getByText('No address on file for this client.')).toBeVisible()
+    fireEvent.click(invite)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(inviteToAutopayRequest).not.toHaveBeenCalled()
   })
 })
 

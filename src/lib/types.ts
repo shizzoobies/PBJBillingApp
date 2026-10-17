@@ -2715,6 +2715,9 @@ export type LetterSendResult = {
     | 'letter_deleted'
     | 'provider'
     | 'unexpected'
+    // featreq-34627da1: her recipient choice could not be used.
+    | 'bad_recipients'
+    | 'recipients_changed'
   message?: string
   /** `master_in_batch`: the billing master whose letter covers this client. */
   masterId?: string
