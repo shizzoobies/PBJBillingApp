@@ -184,3 +184,33 @@ describe('the Dashboard queue checkbox for the owner', () => {
     expect(box.closest('label')?.title).toBe('Disabled in preview mode')
   })
 })
+
+/**
+ * featreq-4fd52a3c: the person being waited on is often NOT on the task, and the
+ * Checklists page only lists tasks she is on. Her "Waiting on you" row opens the
+ * Delayed page's "Waiting on me" tab instead, focused on that wait.
+ */
+describe('the "Waiting on you" row', () => {
+  it('links to the Delayed page, Waiting on me tab, focused on the wait', () => {
+    signInWith([])
+    contextValue = {
+      ...contextValue,
+      waitingOnMe: [
+        {
+          checklistId: 'check-2a32fae2',
+          checklistTitle: 'Monthly Reconciliations',
+          clientId: 'client-acme',
+          clientName: 'Acme LLC',
+          itemLabel: 'House Call Pro',
+          waitingOnId: 'wo-820da051',
+          requestedById: BRITT,
+          requestedByName: 'Brittany Fox',
+          createdAt: '2026-10-12T15:09:00.000Z',
+        },
+      ],
+    } as unknown as AppContextValue
+    renderDashboard()
+    const link = screen.getByRole('link', { name: /Monthly Reconciliations/ })
+    expect(link).toHaveAttribute('href', '/delayed?tab=blocking&focus=wo-820da051')
+  })
+})

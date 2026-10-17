@@ -87,6 +87,29 @@ const ONBOARDING = stage({
 const LAST = stage({ id: 'cl-last', title: 'Last close', caseId: 'case-last', stageIndex: 2 })
 /** Sam's step, which Lisa can see as a viewer but is not hers to move on. */
 const SAMS = stage({ id: 'cl-sams', title: 'Sams close', caseId: 'case-sams', assigneeId: SAM, viewerIds: [LISA] })
+const finishedItems = (id: string) => [
+  { id: `${id}-1`, label: 'Gather', done: true },
+  { id: `${id}-2`, label: 'Statements', done: true },
+]
+/** featreq-ed73d181: step 1 finished, step 2 never opened (I-95). */
+const STALLED = stage({ id: 'cl-stalled', title: 'Stalled close', caseId: 'case-stalled', items: finishedItems('st') })
+/** Finished, and its next step is open: an ordinary hand-off. */
+const HANDED = stage({ id: 'cl-handed', title: 'Handed close', caseId: 'case-handed', items: finishedItems('hd') })
+const HANDED_NEXT = stage({
+  id: 'cl-handed-next',
+  title: 'Handed review',
+  caseId: 'case-handed',
+  stageIndex: 1,
+  items: [{ id: 'hn-1', label: 'Review', done: false }],
+})
+/** The last step of its case, finished: nothing comes after it. */
+const FINISHED_LAST = stage({
+  id: 'cl-finished-last',
+  title: 'Finished last close',
+  caseId: 'case-finished-last',
+  stageIndex: 2,
+  items: finishedItems('fl'),
+})
 
 const data = {
   clients: [CLIENT],
@@ -95,7 +118,19 @@ const data = {
     { id: SAM, name: 'Sam Lee', role: 'Bookkeeper' },
     { id: OWNER, name: 'Patrice Owner', role: 'Owner' },
   ],
-  checklists: [READY, NOT_READY, ALREADY_OPEN, ALREADY_OPEN_NEXT, ONBOARDING, LAST, SAMS],
+  checklists: [
+    READY,
+    NOT_READY,
+    ALREADY_OPEN,
+    ALREADY_OPEN_NEXT,
+    ONBOARDING,
+    LAST,
+    SAMS,
+    STALLED,
+    HANDED,
+    HANDED_NEXT,
+    FINISHED_LAST,
+  ],
   checklistTemplates: [TEMPLATE],
   recycledChecklists: [],
   timeEntries: [],
@@ -216,6 +251,44 @@ describe('Open next step now', () => {
     expect(openNextStageEarly).toHaveBeenCalledWith('cl-ready')
     const pill = await within(cardFor('Ready close')).findByRole('link', { name: 'Step 2 opened' })
     expect(pill.getAttribute('href')).toBe('/checklists?focus=cl-next')
+  })
+
+  /** Finished steps sit in the collapsed "Completed" group. */
+  const openCompleted = () => {
+    const header = screen
+      .getAllByRole('button')
+      .find((button) => button.matches('.checklist-group-header') && button.textContent?.startsWith('Completed'))
+    fireEvent.click(header as HTMLElement)
+  }
+
+  it('is offered on a finished step whose next step never opened, saying so', () => {
+    renderPage()
+    openCompleted()
+    expect(buttonOn('Stalled close')).not.toBeNull()
+    expect(buttonOn('Stalled close')?.getAttribute('title')).toBe('Every step here is done. Open Step 2 (Review) now.')
+    const card = cardFor('Stalled close')
+    expect(within(card).getByText('This step is done but the next one never opened.')).not.toBeNull()
+    // Not a hand-off: nothing was handed to anyone.
+    expect(within(card).queryByText('Handed off')).toBeNull()
+  })
+
+  it('a revive calls the same action', async () => {
+    renderPage()
+    openCompleted()
+    fireEvent.click(buttonOn('Stalled close') as HTMLElement)
+    expect(openNextStageEarly).toHaveBeenCalledWith('cl-stalled')
+  })
+
+  it('is absent on a finished step whose next step is open, and on a finished last step', () => {
+    renderPage()
+    openCompleted()
+    expect(buttonOn('Handed close')).toBeNull()
+    expect(within(cardFor('Handed close')).queryByText('This step is done but the next one never opened.')).toBeNull()
+    expect(within(cardFor('Handed close')).queryByText('Handed off')).not.toBeNull()
+    expect(buttonOn('Finished last close')).toBeNull()
+    expect(
+      within(cardFor('Finished last close')).queryByText('This step is done but the next one never opened.'),
+    ).toBeNull()
   })
 
   it("shows the server's sentence when it refuses", async () => {

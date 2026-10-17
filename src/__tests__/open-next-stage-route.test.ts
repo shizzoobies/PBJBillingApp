@@ -58,7 +58,22 @@ describe('POST /api/checklists/:id/open-next-stage', () => {
     expect(route).toContain('error instanceof NextStageRefusedError')
     expect(route).toContain("error: 'next_stage_refused'")
     expect(route).toContain('reason: error.reason')
-    expect(route).toContain('message: nextStageRefusalMessage(error.reason, {')
+    expect(route).toContain('nextStageRefusalMessage(error.reason, {')
+  })
+
+  it('a refusal that carries its own sentence (a billing master) is sent as it is, still a 409', () => {
+    const route = openNextStageRoute()
+    expect(route).toContain('message: error.sentence || nextStageRefusalMessage(error.reason, {')
+  })
+
+  it('leaves readiness to the store, so a finished stage reaches it for the owner and the assignee alike', () => {
+    // featreq-ed73d181: the store also accepts a finished stage whose next step
+    // never opened. The route must not pre-filter on waiting, or the revive
+    // would be refused here for both of the people allowed to ask.
+    const route = openNextStageRoute()
+    const store = route.indexOf('appDataStore.openNextStageEarly(')
+    expect(route.slice(0, store)).not.toMatch(/if \(!?\s*(stageOpenWorkAllWaiting|stageFinished|revived)\b/)
+    expect(route).toContain("session.user.role === 'owner' || checklist.assigneeId === session.user.id")
   })
 
   it('records case_advanced_early, notifies the next assignee, answers { checklist, spawned }', () => {
@@ -66,7 +81,12 @@ describe('POST /api/checklists/:id/open-next-stage', () => {
     const activity = route.indexOf("'case_advanced_early'")
     expect(activity).toBeGreaterThan(route.indexOf('appDataStore.openNextStageEarly('))
     expect(route).toContain(
-      '`${from.title} · case ${caseId} · stage ${fromIdx} -> stage ${fromIdx + 1} (opened while waiting)`',
+      '`${from.title} · case ${caseId} · stage ${fromIdx} -> stage ${fromIdx + 1} (${revived ? \'opened after the step was finished\' : \'opened while waiting\'})`',
+    )
+    // Read from the stage as the route found it, before the store call.
+    expect(route).toContain('const revived = stageFinished(checklist)')
+    expect(route.indexOf('const revived = stageFinished(checklist)')).toBeLessThan(
+      route.indexOf('appDataStore.openNextStageEarly('),
     )
     const notifyAt = route.indexOf("await notify(appDataStore, nextAssigneeId, 'task_assigned', {")
     expect(notifyAt).toBeGreaterThan(activity)

@@ -262,6 +262,7 @@ import {
   verifyStripeEvent,
 } from './lib/stripe-rail.js'
 import {
+  blockerWaitLink,
   canAskWaitingOnQuestion,
   canMarkWaitingOnDone,
   canSendBackWaitingOn,
@@ -276,6 +277,7 @@ import {
   removalOpenWaitRefusal,
   removalWouldCompleteWaitingStep,
   SELF_WAIT_REFUSAL,
+  stageFinished,
   WAIT_ALREADY_CLOSED,
   WAIT_ALREADY_MARKED_DONE,
   WAIT_NOT_DONE_YET_TO_APPROVE,
@@ -285,6 +287,7 @@ import {
   waitingLockRefusal,
   waitingOnActionRefusal,
   waitingOnStage,
+  waitNoticeLink,
 } from './lib/waiting-on-state.js'
 import {
   caseAllDone,
@@ -15511,7 +15514,8 @@ const server = createServer(async (request, response) => {
     // all other steps checked off, a button to open next step populates to push
     // the next step while waiting." Starts the case's next stage while this one's
     // remaining work is all waiting; this stage stays open until its waits clear.
-    // Not Push (that moves a task to a new date). The store decides and refuses
+    // It also revives a finished stage whose next step never opened
+    // (featreq-ed73d181). Not Push (that moves a task to a new date). The store decides and refuses
     // (NextStageRefusedError); this route checks who may ask and words the answer.
     const checklistOpenNextStageMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)\/open-next-stage$/)
     if (checklistOpenNextStageMatch) {
@@ -15548,6 +15552,9 @@ const server = createServer(async (request, response) => {
 
       const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
       const template = (data.checklistTemplates ?? []).find((entry) => entry.id === checklist.templateId)
+      // featreq-ed73d181: the store also revives a FINISHED stage whose next step
+      // never opened; the Activity row says which kind of open this was.
+      const revived = stageFinished(checklist)
       let result
       try {
         result = await appDataStore.openNextStageEarly(checklistId, session.user.id)
@@ -15556,7 +15563,7 @@ const server = createServer(async (request, response) => {
           sendJson(response, 409, {
             error: 'next_stage_refused',
             reason: error.reason,
-            message: nextStageRefusalMessage(error.reason, {
+            message: error.sentence || nextStageRefusalMessage(error.reason, {
               stageIndex,
               nextStageName: template?.stages?.[stageIndex + 1]?.name ?? '',
               anyWaiting: stageHasOpenWait(checklist),
@@ -15573,7 +15580,7 @@ const server = createServer(async (request, response) => {
       await appDataStore.recordActivity(
         session.user.id,
         'case_advanced_early',
-        `${from.title} · case ${caseId} · stage ${fromIdx} -> stage ${fromIdx + 1} (opened while waiting)`,
+        `${from.title} · case ${caseId} · stage ${fromIdx} -> stage ${fromIdx + 1} (${revived ? 'opened after the step was finished' : 'opened while waiting'})`,
       )
       // The next stage's assignee is told exactly as a finished stage tells them.
       const nextAssigneeId = spawned?.assigneeId
@@ -15759,7 +15766,10 @@ const server = createServer(async (request, response) => {
       // second tick retries); an all-done stage that should have advanced but
       // had nothing to advance to is `spawnReason`. Both leave an Activity row.
       const stageAdvanceFailed = toggleResult.spawnError || null
-      const SHOULD_HAVE_ADVANCED = ['no_template', 'template_not_found', 'no_stages', 'next_stage_empty']
+      // `later_stage_exists` / `date_taken` (featreq-ed73d181, Saylor Grace
+      // 2026-10-16): the case already moved past this step, or another case of
+      // the recipe holds it on that date - visible, named, never a failure.
+      const SHOULD_HAVE_ADVANCED = ['no_template', 'template_not_found', 'no_stages', 'next_stage_empty', 'later_stage_exists', 'date_taken']
       if (stageAdvanceFailed || SHOULD_HAVE_ADVANCED.includes(toggleResult.spawnReason)) {
         const fromIdx = (updatedChecklist.stageIndex ?? 0) + 1
         const caseId = updatedChecklist.caseId || updatedChecklist.id
@@ -15774,7 +15784,7 @@ const server = createServer(async (request, response) => {
           await appDataStore.recordActivity(
             session.user.id,
             'case_advance_skipped',
-            `${where}: ${toggleResult.spawnReason}`,
+            `${where}: ${toggleResult.spawnReason}${toggleResult.spawnHeldBy ? ` (held by ${toggleResult.spawnHeldBy})` : ''}`,
           )
         }
       }
@@ -16621,7 +16631,8 @@ const server = createServer(async (request, response) => {
             await notify(appDataStore, recipientId, 'waiting_on_question', {
               checklistId,
               message: `${askerName} has a question about "${resolved.label}" in "${checklistTitle}" — ${questionNote}`,
-              link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
+              // The blocker may not be on the task: her Delayed page instead.
+              link: waitNoticeLink(recipientId, resolved.entry, checklistId),
               appPublicUrl: getPublicAppUrl(request),
             })
           }
@@ -16647,7 +16658,8 @@ const server = createServer(async (request, response) => {
           await notify(appDataStore, resolved.entry.blockerId, 'waiting_on_requested', {
             checklistId,
             message: `${senderName} sent "${resolved.label}" in "${checklistTitle}" back to you — ${sendBackNote}`,
-            link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
+            // Her Delayed page, not the checklist: she may not be on the task.
+            link: blockerWaitLink(resolved.entry.id),
             appPublicUrl: getPublicAppUrl(request),
           })
           await appDataStore.recordActivity(
@@ -16853,7 +16865,9 @@ const server = createServer(async (request, response) => {
           await notify(appDataStore, blockerId, 'waiting_on_requested', {
             checklistId,
             message: `${flaggerName} is waiting on you: "${result.node.label}" in "${checklist.title}"`,
-            link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
+            // Her Delayed page, not the checklist: the person being waited on
+            // is often not on the task, and Checklists would not list it.
+            link: blockerWaitLink(result.entry.id),
             appPublicUrl: getPublicAppUrl(request),
           })
         } catch (err) {

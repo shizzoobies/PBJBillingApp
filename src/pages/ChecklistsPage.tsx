@@ -103,6 +103,7 @@ import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
 import { completedTaskRows } from '../lib/completedTasks'
 import { filterInProgressChecklists, waitingStepCount } from '../lib/inProgressFilter'
 import { overdueChecklists } from '../lib/overdueChecklists'
+import { nextStageNeverOpened as isNextStageNeverOpened } from '../lib/stalledCase'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { inactiveClientIdSet, workableClients } from '../lib/clientLifecycle'
 import {
@@ -2698,8 +2699,9 @@ export function ChecklistCard({
   // When all items are checked off and there's a next stage, the next stage's
   // assignee gets a fresh checklist; show a hand-off indicator instead of the
   // toggle controls. We don't know the next assignee's name from this scope,
-  // so we just report the hand-off generically.
-  const handedOff = allDone && !isLastStage
+  // so we just report the hand-off generically. (Defined below, after
+  // `nextStageNeverOpened`: a finished step whose next one never opened handed
+  // nothing off.)
 
   // Open next step now (featreq-8b54d117): "when a task under a step gets a
   // delayed [waiting] but all other steps checked off, a button to open next step
@@ -2718,6 +2720,11 @@ export function ChecklistCard({
   const nextStageAlreadyOpen = contextData.checklists.some(
     (entry) => (entry.caseId || entry.id) === caseKey && entry.stageIndex === stageIndex + 1,
   )
+  // featreq-ed73d181: every step here is done, yet the next step never opened
+  // (a stall from before the 10-12 hardening). The same button revives it. The
+  // rule (src/lib/stalledCase.ts) is the Dashboard's too.
+  const nextStageNeverOpened = isNextStageNeverOpened(checklist, contextData.checklists)
+  const handedOff = allDone && !isLastStage && !nextStageNeverOpened
   const canOpenNextStage =
     !checklist.projected &&
     !isLastStage &&
@@ -2728,7 +2735,7 @@ export function ChecklistCard({
     (role === 'owner' || isAssignee) &&
     !previewMode &&
     !nextStageAlreadyOpen &&
-    stageOpenWorkAllWaiting(checklist)
+    (stageOpenWorkAllWaiting(checklist) || nextStageNeverOpened)
   const openNextStageNow = async () => {
     setOpeningNextStage(true)
     setOpenNextStageError(null)
@@ -2993,10 +3000,17 @@ export function ChecklistCard({
               className="secondary-action"
               disabled={openingNextStage}
               onClick={() => void openNextStageNow()}
-              title={`Steps here are waiting. Start Step ${stageNumber + 1}${nextStageName ? ` (${nextStageName})` : ''} now; this step stays open until its waits clear.`}
+              title={
+                nextStageNeverOpened
+                  ? `Every step here is done. Open Step ${stageNumber + 1}${nextStageName ? ` (${nextStageName})` : ''} now.`
+                  : `Steps here are waiting. Start Step ${stageNumber + 1}${nextStageName ? ` (${nextStageName})` : ''} now; this step stays open until its waits clear.`
+              }
             >
               {openingNextStage ? 'Opening…' : 'Open next step now'}
             </button>
+          ) : null}
+          {canOpenNextStage && nextStageNeverOpened && !openedNextStage ? (
+            <span className="muted-text">This step is done but the next one never opened.</span>
           ) : null}
           {openedNextStage ? (
             <Link className="status-pill" to={`/checklists?focus=${encodeURIComponent(openedNextStage.id)}`}>
