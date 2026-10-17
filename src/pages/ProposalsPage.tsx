@@ -5,6 +5,8 @@ import { defaultProposalPricing } from '../../lib/proposal-pricing.js'
 import { QuestionnaireInbox } from '../components/proposals/QuestionnaireInbox'
 import { QuestionnaireSheet } from '../components/proposals/QuestionnaireSheet'
 import { ProposalRatesBanner } from '../components/proposals/RatesBanner'
+import { RecipientPicker } from '../components/RecipientPicker'
+import { questionnaireRecipientDetails } from '../../lib/invoice-recipients.js'
 import {
   createProposalRequest,
   createQuestionnaireRequest,
@@ -36,7 +38,7 @@ const STATUSES = Object.keys(PROPOSAL_STATUS_LABELS) as ProposalStatus[]
  * as a copy rather than started from zero.
  */
 export function ProposalsPage() {
-  const { ownerMode } = useAppContext()
+  const { ownerMode, data } = useAppContext()
   const navigate = useNavigate()
   const [proposals, setProposals] = useState<Proposal[]>([])
   const [loaded, setLoaded] = useState(false)
@@ -54,7 +56,9 @@ export function ProposalsPage() {
   const [startingSheet, setStartingSheet] = useState(false)
   const [notice, setNotice] = useState('')
   // "Send questionnaire": the address she confirms, then the link goes out.
-  const [sendingTo, setSendingTo] = useState<string | null>(null)
+  // featreq-34627da1: the recipient picker for a questionnaire link - a new one (`new`,
+  // nothing on file yet) or "Send again" for one already sent (its id).
+  const [pickingFor, setPickingFor] = useState<'new' | string | null>(null)
   const [sendingLink, setSendingLink] = useState(false)
 
   // The catalog's rates, only to warn when one is still $0. A failed read
@@ -167,15 +171,16 @@ export function ProposalsPage() {
     }
   }
 
-  const sendLink = async () => {
-    const to = (sendingTo ?? '').trim()
-    if (!to) return
+  // A new link has nobody on file (the prospect has not answered): the picker's
+  // added addresses are the recipients.
+  const sendLink = async (extra: string[]) => {
+    if (extra.length === 0) return
     setSendingLink(true)
     setError('')
     setNotice('')
     try {
-      reportLink(await sendQuestionnaireRequest(to))
-      setSendingTo(null)
+      reportLink(await sendQuestionnaireRequest({ extra }))
+      setPickingFor(null)
       await refreshQuestionnaires()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not send the questionnaire.')
@@ -184,16 +189,20 @@ export function ProposalsPage() {
     }
   }
 
-  const renewLink = async (questionnaire: ProposalQuestionnaire, email: boolean) => {
+  // `recipients`: the picker's choice for "Send again"; none makes a new link and emails nobody.
+  const renewLink = async (questionnaire: ProposalQuestionnaire, recipients?: { to: string[]; extra: string[] }) => {
     setBusyQuestionnaireId(questionnaire.id)
+    setPickingFor(null)
     setError('')
     setNotice('')
     try {
       reportLink(
-        await renewQuestionnaireLinkRequest(
-          questionnaire.id,
-          email ? (questionnaire.sentTo ?? undefined) : undefined,
-        ),
+        await (recipients
+          ? renewQuestionnaireLinkRequest(questionnaire.id, {
+              to: recipients.to,
+              ...(recipients.extra.length > 0 ? { extra: recipients.extra } : {}),
+            })
+          : renewQuestionnaireLinkRequest(questionnaire.id)),
       )
       await refreshQuestionnaires()
     } catch (err) {
@@ -258,6 +267,19 @@ export function ProposalsPage() {
   }
 
   const openSheet = questionnaires.find((entry) => entry.id === sheetId && entry.mode === 'call') ?? null
+  // The questionnaire whose "Send again" picker is open, and who is on file for it.
+  const pickingQuestionnaire =
+    pickingFor && pickingFor !== 'new' ? (questionnaires.find((entry) => entry.id === pickingFor) ?? null) : null
+  const pickingDetails = pickingQuestionnaire
+    ? questionnaireRecipientDetails({
+        sentTo: pickingQuestionnaire.sentTo,
+        proposal: pickingQuestionnaire.proposalId
+          ? (proposals.find((proposal) => proposal.id === pickingQuestionnaire.proposalId) ?? null)
+          : null,
+        clients: data?.clients ?? [],
+        contacts: data?.contacts ?? [],
+      })
+    : []
 
   return (
     <section className="content-grid" id="proposals">
@@ -274,7 +296,7 @@ export function ProposalsPage() {
             <button
               className="secondary-action"
               type="button"
-              onClick={() => setSendingTo((current) => (current === null ? '' : null))}
+              onClick={() => setPickingFor('new')}
             >
               Send questionnaire
             </button>
@@ -299,38 +321,25 @@ export function ProposalsPage() {
 
         <ProposalRatesBanner rates={rates} />
 
-        {sendingTo !== null ? (
-          <form
-            className="questionnaire-send"
-            onSubmit={(event) => {
-              event.preventDefault()
-              void sendLink()
-            }}
-          >
-            <label className="field">
-              <span>Email the questionnaire link to</span>
-              <input
-                className="input"
-                type="email"
-                aria-label="Prospect email"
-                placeholder="prospect@example.com"
-                value={sendingTo}
-                onChange={(event) => setSendingTo(event.target.value)}
-              />
-            </label>
-            <div className="button-row">
-              <button
-                className="primary-action"
-                type="submit"
-                disabled={sendingLink || sendingTo.trim() === ''}
-              >
-                Send
-              </button>
-              <button className="ghost-action" type="button" onClick={() => setSendingTo(null)}>
-                Cancel
-              </button>
-            </div>
-          </form>
+        {pickingFor === 'new' ? (
+          <RecipientPicker
+            label="The questionnaire link"
+            details={[]}
+            busy={sendingLink}
+            emptyNote="Nobody is on file before the prospect answers. Add their address above to send the link."
+            onSend={(_to, extra) => void sendLink(extra)}
+            onCancel={() => setPickingFor(null)}
+          />
+        ) : null}
+        {pickingQuestionnaire ? (
+          <RecipientPicker
+            label="The new questionnaire link"
+            details={pickingDetails}
+            defaultTo={pickingQuestionnaire.sentTo ? [pickingQuestionnaire.sentTo] : null}
+            busy={busyQuestionnaireId === pickingQuestionnaire.id}
+            onSend={(to, extra) => void renewLink(pickingQuestionnaire, { to, extra })}
+            onCancel={() => setPickingFor(null)}
+          />
         ) : null}
 
         {openSheet ? (
@@ -355,8 +364,8 @@ export function ProposalsPage() {
           onWithdraw={(questionnaire) => void withdrawQuestionnaire(questionnaire)}
           onStartDraft={(questionnaire) => void startDraft(questionnaire)}
           onCopyLink={(questionnaire) => void copyLink(questionnaire)}
-          onSendAgain={(questionnaire) => void renewLink(questionnaire, true)}
-          onNewLink={(questionnaire) => void renewLink(questionnaire, false)}
+          onSendAgain={(questionnaire) => setPickingFor(questionnaire.id)}
+          onNewLink={(questionnaire) => void renewLink(questionnaire)}
         />
 
         <div className="form-grid two-col">

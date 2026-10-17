@@ -91,7 +91,7 @@ import {
   sendInvoicePaymentEmail,
 } from './lib/invoice-email.js'
 import { invoiceEmailAddressee, resolveSendRecipients } from './lib/invoice-recipients.js'
-import { partyRecipientDetails } from './lib/invoice-recipients.js'
+import { partyRecipientDetails, questionnaireRecipientDetails } from './lib/invoice-recipients.js'
 import { remindInvoice } from './lib/invoice-reminder.js'
 import { AUTO_REMINDER_EVENT, runAutoInvoiceReminders } from './lib/invoice-auto-reminders.js'
 import { invoiceContentChanged, totalsDiffer } from './lib/invoice-sent-change.js'
@@ -2042,6 +2042,9 @@ const QUESTIONNAIRE_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
  * questionnaire so the delivery webhook files its events on it. Every attempt,
  * failed ones included, goes on the questionnaire's log. Never throws.
  *
+ * `to` is the list the recipient picker settled (featreq-34627da1); the log carries all
+ * of it, and the answer names it as one string.
+ *
  * @returns {Promise<{ok: boolean, to: string, error: string|null}>}
  */
 async function emailQuestionnaireLink(request, record, to) {
@@ -2050,7 +2053,7 @@ async function emailQuestionnaireLink(request, record, to) {
     const firmSettings = await appDataStore.getFirmSettings()
     const email = buildQuestionnaireEmail({ link, firmSettings, expiresAt: record.expiresAt })
     const sendResult = await sendInvoiceEmail({
-      to: [to],
+      to,
       subject: email.subject,
       html: email.html,
       text: email.text,
@@ -2061,15 +2064,15 @@ async function emailQuestionnaireLink(request, record, to) {
     await appDataStore.appendProposalQuestionnaireEmailEvent(record.id, {
       kind: 'send',
       ok: sendResult.ok,
-      to: [to],
+      to,
       subject: email.subject,
       providerId: sendResult.providerId ?? null,
       error: sendResult.error ?? null,
     })
-    return { ok: sendResult.ok, to, error: sendResult.error ?? null }
+    return { ok: sendResult.ok, to: to.join(', '), error: sendResult.error ?? null }
   } catch (error) {
     console.error('[questionnaire] could not email the link:', record.id, error)
-    return { ok: false, to, error: 'The email could not be sent.' }
+    return { ok: false, to: to.join(', '), error: 'The email could not be sent.' }
   }
 }
 
@@ -13155,12 +13158,36 @@ const server = createServer(async (request, response) => {
         })
         return
       }
-      // An address is only for a link, and the owner confirms it on every send -
-      // the same rule the proposal email follows.
-      const to = typeof payload.to === 'string' ? payload.to.trim() : ''
-      if (to && (payload.mode !== 'link' || to.length > 320 || !QUESTIONNAIRE_EMAIL_PATTERN.test(to))) {
+      // An address is only for a link, and the owner chooses it on every send in the
+      // recipient picker (featreq-34627da1). A new link has nothing on file - there is
+      // no prospect yet - so its addresses are the ones added for this send (`extra`,
+      // at most three, valid). A single `to` string from an older page is the same
+      // thing: one address typed for this send. Decided before anything is made.
+      const createChoice = recipientChoiceOf(payload)
+      const legacyTo = typeof payload.to === 'string' ? payload.to.trim() : ''
+      if (
+        !createChoice ||
+        (legacyTo && (payload.mode !== 'link' || legacyTo.length > 320 || !QUESTIONNAIRE_EMAIL_PATTERN.test(legacyTo)))
+      ) {
         sendJson(response, 400, { error: 'A valid email address is required.' })
         return
+      }
+      let to = null
+      if (createChoice.to !== undefined || createChoice.extra !== undefined) {
+        if (payload.mode !== 'link') {
+          sendJson(response, 400, { error: 'A valid email address is required.' })
+          return
+        }
+        const createRecipients = resolveSendRecipients({
+          allowed: questionnaireRecipientDetails({}).map((detail) => detail.email),
+          to: legacyTo ? [] : createChoice.to,
+          extra: legacyTo ? [legacyTo] : createChoice.extra,
+        })
+        if (!createRecipients.ok) {
+          sendJson(response, createRecipients.status, { error: createRecipients.error, message: createRecipients.message })
+          return
+        }
+        to = createRecipients.to
       }
       let created
       try {
@@ -13248,10 +13275,37 @@ const server = createServer(async (request, response) => {
           // was never answered; the old link names nothing from this moment.
           if (action === 'new-link') {
             const payload = (await readJsonBody(request)) ?? {}
-            const to = typeof payload.to === 'string' ? payload.to.trim() : ''
-            if (to && (to.length > 320 || !QUESTIONNAIRE_EMAIL_PATTERN.test(to))) {
+            // featreq-34627da1: who it goes to is chosen among the addresses on file -
+            // where the link went before, and the prospect of the proposal it started -
+            // plus at most three for this send only. Decided before the link is renewed.
+            const renewChoice = recipientChoiceOf(payload)
+            if (!renewChoice) {
               sendJson(response, 400, { error: 'A valid email address is required.' })
               return
+            }
+            let to = null
+            if (renewChoice.to !== undefined || renewChoice.extra !== undefined) {
+              const current = await appDataStore.getProposalQuestionnaire(questionnaireId)
+              if (!current) {
+                sendJson(response, 404, { error: 'Questionnaire not found' })
+                return
+              }
+              const renewData = current.proposalId ? await appDataStore.read() : null
+              const renewRecipients = resolveSendRecipients({
+                allowed: questionnaireRecipientDetails({
+                  sentTo: current.sentTo,
+                  proposal: current.proposalId ? await appDataStore.getProposal(current.proposalId) : null,
+                  clients: renewData?.clients ?? [],
+                  contacts: renewData?.contacts ?? [],
+                }).map((detail) => detail.email),
+                to: typeof renewChoice.to === 'string' ? [renewChoice.to] : (renewChoice.to ?? []),
+                extra: renewChoice.extra,
+              })
+              if (!renewRecipients.ok) {
+                sendJson(response, renewRecipients.status, { error: renewRecipients.error, message: renewRecipients.message })
+                return
+              }
+              to = renewRecipients.to
             }
             const renewed = await appDataStore.renewProposalQuestionnaireLink(questionnaireId)
             if (!renewed) {

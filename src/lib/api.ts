@@ -1145,22 +1145,31 @@ export type QuestionnaireLinkResult = {
 }
 
 /**
- * Owner-only: make a link questionnaire and, when an address is given, email it.
- * A failed email still leaves the link made - `emailed.ok` says so.
+ * Owner-only: make a link questionnaire and, when recipients are given (the recipient
+ * picker's choice, featreq-34627da1 - for a new link, the addresses added for this send),
+ * email it. A failed email still leaves the link made - `emailed.ok` says so.
  */
-export function sendQuestionnaireRequest(to?: string): Promise<QuestionnaireLinkResult> {
+export function sendQuestionnaireRequest(
+  recipients?: { to?: string[]; extra?: string[] },
+): Promise<QuestionnaireLinkResult> {
   return proposalRequest<QuestionnaireLinkResult>(
     '/api/proposal-questionnaires',
-    proposalJson('POST', { mode: 'link', ...(to ? { to } : {}) }),
+    proposalJson('POST', { mode: 'link', ...(recipients ?? {}) }),
     'Could not make the questionnaire link',
   )
 }
 
-/** Owner-only: a fresh link for one that was never answered; the old link stops working. Emails it when asked. */
-export function renewQuestionnaireLinkRequest(id: string, to?: string): Promise<QuestionnaireLinkResult> {
+/**
+ * Owner-only: a fresh link for one that was never answered; the old link stops working.
+ * Emailed to the recipient picker's choice when one is given (featreq-34627da1).
+ */
+export function renewQuestionnaireLinkRequest(
+  id: string,
+  recipients?: { to?: string[]; extra?: string[] },
+): Promise<QuestionnaireLinkResult> {
   return proposalRequest<QuestionnaireLinkResult>(
     questionnairePath(id, 'new-link'),
-    proposalJson('POST', to ? { to } : {}),
+    proposalJson('POST', recipients ?? {}),
     'Could not make a new link',
   )
 }

@@ -96,6 +96,20 @@ export declare function partyRecipientDetails(args: {
   contacts?: ResolveInvoiceRecipientsArgs['contacts']
 }): InvoiceRecipientDetail[]
 
+/**
+ * The addresses on file for a questionnaire link: where it was last emailed, then the
+ * prospect (and its client) of the proposal its answers started. None for a new link.
+ */
+export declare function questionnaireRecipientDetails(args: {
+  sentTo?: string | null
+  proposal?: {
+    clientId?: string | null
+    prospect?: { email?: string; contactName?: string; company?: string } | null
+  } | null
+  clients?: object[] | null
+  contacts?: ResolveInvoiceRecipientsArgs['contacts']
+}): InvoiceRecipientDetail[]
+
 /** Who a send goes to: the chosen on-file addresses plus the one-time extras. */
 export declare function resolveSendRecipients(args: {
   allowed: string[]

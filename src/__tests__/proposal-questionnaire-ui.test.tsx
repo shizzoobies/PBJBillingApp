@@ -416,21 +416,32 @@ describe('Send questionnaire', () => {
     link,
   })
 
-  it('asks for the address, and only Send with one filled in goes out', async () => {
+  // featreq-34627da1: the shared recipient picker. A new link has nobody on file (the
+  // prospect has not answered), so its recipients are the addresses added for this send.
+  const addAndSend = async (address = 'pat@acme.test', count = 1) => {
+    fireEvent.click(await screen.findByRole('button', { name: 'Send questionnaire' }))
+    const dialog = within(await screen.findByRole('dialog', { name: 'Choose who this goes to' }))
+    fireEvent.change(dialog.getByLabelText('Add another address for this send only'), { target: { value: address } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Add' }))
+    fireEvent.click(dialog.getByRole('button', { name: `Send to ${count} ${count === 1 ? 'person' : 'people'}` }))
+  }
+
+  it('opens the picker with nobody on file; only an added address goes out', async () => {
     api.sendQuestionnaireRequest = vi.fn(async () => ({
       questionnaire: waitingLink,
       emailed: { ok: true, to: 'pat@acme.test', error: null },
     }))
     renderList()
     fireEvent.click(await screen.findByRole('button', { name: 'Send questionnaire' }))
-    const send = screen.getByRole('button', { name: 'Send' })
-    expect(send).toBeDisabled()
-    fireEvent.change(screen.getByLabelText('Prospect email'), { target: { value: 'pat@acme.test' } })
-    expect(send).toBeEnabled()
-    fireEvent.click(send)
-    await waitFor(() => expect(api.sendQuestionnaireRequest).toHaveBeenCalledWith('pat@acme.test'))
+    const dialog = within(await screen.findByRole('dialog', { name: 'Choose who this goes to' }))
+    expect(dialog.queryAllByRole('checkbox')).toHaveLength(0)
+    expect(dialog.getByText(/Nobody is on file before the prospect answers/)).toBeInTheDocument()
+    expect(dialog.getByRole('button', { name: 'Send to 0 people' })).toBeDisabled()
+    fireEvent.click(dialog.getByRole('button', { name: 'Cancel' }))
+    await addAndSend()
+    await waitFor(() => expect(api.sendQuestionnaireRequest).toHaveBeenCalledWith({ extra: ['pat@acme.test'] }))
     expect(await screen.findByText('The questionnaire was emailed to pat@acme.test.')).toBeInTheDocument()
-    expect(screen.queryByLabelText('Prospect email')).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Choose who this goes to' })).not.toBeInTheDocument()
   })
 
   it('says when the email did not go, and that the link is made anyway', async () => {
@@ -440,9 +451,7 @@ describe('Send questionnaire', () => {
     }))
     api.listQuestionnairesRequest = vi.fn(async () => [waitingLink])
     renderList()
-    fireEvent.click(await screen.findByRole('button', { name: 'Send questionnaire' }))
-    fireEvent.change(screen.getByLabelText('Prospect email'), { target: { value: 'pat@acme.test' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await addAndSend()
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('The link is made, but the email to pat@acme.test did not go')
     expect(alert).toHaveTextContent('Email is not configured yet.')
@@ -453,9 +462,7 @@ describe('Send questionnaire', () => {
       throw new ApiError(400, 'A valid email address is required.')
     })
     renderList()
-    fireEvent.click(await screen.findByRole('button', { name: 'Send questionnaire' }))
-    fireEvent.change(screen.getByLabelText('Prospect email'), { target: { value: 'pat@acme.test' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await addAndSend()
     expect(await screen.findByRole('alert')).toHaveTextContent('A valid email address is required.')
   })
 
@@ -473,8 +480,17 @@ describe('Send questionnaire', () => {
     fireEvent.click(within(inbox).getByRole('button', { name: 'Copy link' }))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(link))
     fireEvent.click(within(inbox).getByRole('button', { name: 'Send again' }))
+    // The picker, with the address it went to before ticked (featreq-34627da1).
+    const dialog = within(await screen.findByRole('dialog', { name: 'Choose who this goes to' }))
+    expect(dialog.getByRole('checkbox', { name: /pat@acme.test/ })).toBeChecked()
+    fireEvent.change(dialog.getByLabelText('Add another address for this send only'), { target: { value: 'cfo@acme.test' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Add' }))
+    fireEvent.click(dialog.getByRole('button', { name: 'Send to 2 people' }))
     await waitFor(() =>
-      expect(api.renewQuestionnaireLinkRequest).toHaveBeenCalledWith('pq-link', 'pat@acme.test'),
+      expect(api.renewQuestionnaireLinkRequest).toHaveBeenCalledWith('pq-link', {
+        to: ['pat@acme.test'],
+        extra: ['cfo@acme.test'],
+      }),
     )
     // A link is not a call sheet: there is nothing to resume.
     expect(within(inbox).queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument()
@@ -491,7 +507,7 @@ describe('Send questionnaire', () => {
     renderList()
     fireEvent.click(await screen.findByRole('button', { name: 'New link' }))
     await waitFor(() =>
-      expect(api.renewQuestionnaireLinkRequest).toHaveBeenCalledWith('pq-old', undefined),
+      expect(api.renewQuestionnaireLinkRequest).toHaveBeenCalledWith('pq-old'),
     )
     expect(await screen.findByText('The link is ready - use Copy link below.')).toBeInTheDocument()
   })

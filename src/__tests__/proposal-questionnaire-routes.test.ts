@@ -347,11 +347,31 @@ describe('the owner routes, now with links', () => {
 
   it('checks the address before it makes anything, and only a link takes one', () => {
     const create = between(ownerBlock, "request.method === 'POST') {", 'const questionnaireIdMatch')
-    const check = create.indexOf('QUESTIONNAIRE_EMAIL_PATTERN.test(to)')
+    const check = create.indexOf('QUESTIONNAIRE_EMAIL_PATTERN.test(legacyTo)')
     const make = create.indexOf('appDataStore.createProposalQuestionnaire(')
     expect(check).toBeGreaterThan(-1)
     expect(check).toBeLessThan(make)
     expect(create).toContain("payload.mode !== 'link'")
+  })
+
+  // featreq-34627da1: the recipient picker's choice, by the invoice Send's resolver.
+  it('a new link takes only addresses for this send (nothing is on file yet), decided before anything is made', () => {
+    const create = between(ownerBlock, "request.method === 'POST') {", 'const questionnaireIdMatch')
+    const resolve = create.indexOf('const createRecipients = resolveSendRecipients({')
+    expect(resolve).toBeGreaterThan(-1)
+    expect(create).toContain('allowed: questionnaireRecipientDetails({}).map((detail) => detail.email),')
+    expect(create).toContain('extra: legacyTo ? [legacyTo] : createChoice.extra,')
+    expect(create.indexOf('if (!createRecipients.ok) {')).toBeLessThan(create.indexOf('appDataStore.createProposalQuestionnaire('))
+    expect(create).toContain('to = createRecipients.to')
+  })
+
+  it('a renewed link is sent among the addresses on file plus this send\'s, decided before the link is renewed', () => {
+    const renew = between(ownerBlock, "if (action === 'new-link') {", "if (action === 'withdraw')")
+    expect(renew).toContain('const renewChoice = recipientChoiceOf(payload)')
+    expect(renew).toContain('questionnaireRecipientDetails({')
+    expect(renew).toContain('sentTo: current.sentTo,')
+    expect(renew).toContain('extra: renewChoice.extra,')
+    expect(renew.indexOf('if (!renewRecipients.ok) {')).toBeLessThan(renew.indexOf('renewProposalQuestionnaireLink(questionnaireId)'))
   })
 
   it('a new link goes through the same email path as the first one', () => {
