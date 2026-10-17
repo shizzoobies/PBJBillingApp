@@ -120,6 +120,7 @@ export function DelayedPage() {
     waitingOnSendBack,
     waitingOnQuestion,
     activeEmployeeId: meId,
+    dataSyncState,
   } = useAppContext()
   const { clients, employees, checklists } = data
   const today = localDateOnly()
@@ -281,6 +282,19 @@ export function DelayedPage() {
 
   const groups = groupsByTab[activeTab]
 
+  // The link named a wait that is no longer hers to act on - she pressed Done
+  // already, or it was approved - so it left this tab by design. Not while the
+  // feed is still loading: an empty page then proves nothing.
+  const focusHandled =
+    Boolean(focusWaitId) &&
+    activeTab === 'blocking' &&
+    dataSyncState !== 'loading' &&
+    !groupsByTab.blocking.some((group) =>
+      group.checklists.some((checklist) =>
+        checklist.rows.some((row) => row.waits.some((entry) => entry.id === focusWaitId)),
+      ),
+    )
+
   const [query, setQuery] = useState('')
 
   const visibleGroups = useMemo(() => {
@@ -392,6 +406,12 @@ export function DelayedPage() {
           )
         })}
       </div>
+
+      {focusHandled ? (
+        <p className="delayed-focus-handled" role="status">
+          That wait has been handled - nothing more to do here.
+        </p>
+      ) : null}
 
       <p className="panel-intro">
         {activeTab === 'blocking'
@@ -602,7 +622,13 @@ function DelayedWaitRow({
   }, [focused])
 
   return (
-    <li ref={lineRef} className={`delayed-wait is-${stage}${focused ? ' is-focused' : ''}`}>
+    <li
+      ref={lineRef}
+      className={`delayed-wait is-${stage}${focused ? ' is-focused' : ''}`}
+      aria-current={focused ? 'true' : undefined}
+    >
+      {/* In words as well as the border, so the mark is not color-only. */}
+      {focused ? <span className="delayed-wait-from-link">From your notification</span> : null}
       <span className="delayed-row-note">
         {`Waiting on ${blockerName}`}
         {entry.note ? ` — ${entry.note}` : ''}

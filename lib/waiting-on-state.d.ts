@@ -209,3 +209,8 @@ export function legacyWaitBelongsOnTab(
   args: { userId: string; assigneeId?: string | null; tab: DelayedTab },
 ): boolean
 export function blockerWaitLink(waitingOnId: string | null | undefined): string
+export function waitNoticeLink(
+  recipientId: string,
+  entry: { id?: string; blockerId?: string | null } | null | undefined,
+  checklistId: string,
+): string

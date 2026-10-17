@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // @ts-expect-error - plain-JS module without type declarations
 import { notify } from '../../lib/notify.js'
-import { blockerWaitLink } from '../../lib/waiting-on-state.js'
+import { blockerWaitLink, waitNoticeLink } from '../../lib/waiting-on-state.js'
 import { checklistsVisibleTo } from '../lib/checklistVisibility'
 import type { Checklist } from '../lib/types'
 
@@ -53,6 +53,15 @@ describe('the blocker link', () => {
     expect(blockerWaitLink(undefined)).toBe('/delayed?tab=blocking')
   })
 
+  it('is what the BLOCKER of a wait gets on a notice; everyone else gets the checklist', () => {
+    const entry = { id: 'wo-820da051', blockerId: ALLISON, requestedBy: LISA }
+    expect(waitNoticeLink(ALLISON, entry, 'check-2a32fae2')).toBe(
+      '/delayed?tab=blocking&focus=wo-820da051',
+    )
+    expect(waitNoticeLink(LISA, entry, 'check-2a32fae2')).toBe('/checklists?focus=check-2a32fae2')
+    expect(waitNoticeLink('emp-step-assignee', entry, 'check 1')).toBe('/checklists?focus=check%201')
+  })
+
   // WHY the checklist was the wrong target: the blocker is not shown the task.
   it('is needed because the Checklists page does not list a task the blocker is not on', () => {
     const lisasTask = { id: 'check-2a32fae2', assigneeId: LISA, viewerIds: [] } as unknown as Checklist
@@ -77,16 +86,24 @@ describe('the server sends the blocker to the Delayed page', () => {
   })
 
   // The requester side owns the task, so the checklist is still the right page.
-  it('leaves the requester-facing notices on the checklist', () => {
-    for (const event of ["'waiting_on_done'", "'waiting_on_question'"]) {
-      const block = routeBlock(new RegExp(`await notify\\(appDataStore, recipientId, ${event}, \\{`), 500)
-      expect(block).toContain('link: `/checklists?focus=${encodeURIComponent(checklistId)}`')
-    }
+  it('leaves the requester-facing done notice on the checklist', () => {
+    const block = routeBlock(/await notify\(appDataStore, recipientId, 'waiting_on_done', \{/, 500)
+    expect(block).toContain('link: `/checklists?focus=${encodeURIComponent(checklistId)}`')
   })
 
-  it('imports the one shared helper', () => {
+  // A question goes to the requester and assignee AND, when an owner asks on
+  // the blocker's behalf, to the blocker: each recipient gets their own page.
+  it('picks the question link per recipient', () => {
+    const block = routeBlock(/await notify\(appDataStore, recipientId, 'waiting_on_question', \{/, 500)
+    expect(block).toContain('link: waitNoticeLink(recipientId, resolved.entry, checklistId)')
+    expect(block).not.toContain('/checklists?focus=')
+  })
+
+  it('imports the shared helpers', () => {
     const imports = serverSource.slice(0, serverSource.indexOf("} from './lib/waiting-on-state.js'"))
-    expect(imports.slice(imports.lastIndexOf('import {'))).toContain('blockerWaitLink,')
+    const block = imports.slice(imports.lastIndexOf('import {'))
+    expect(block).toContain('blockerWaitLink,')
+    expect(block).toContain('waitNoticeLink,')
   })
 })
 

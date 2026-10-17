@@ -285,6 +285,7 @@ import {
   waitingLockRefusal,
   waitingOnActionRefusal,
   waitingOnStage,
+  waitNoticeLink,
 } from './lib/waiting-on-state.js'
 import {
   caseAllDone,
@@ -16441,7 +16442,8 @@ const server = createServer(async (request, response) => {
             await notify(appDataStore, recipientId, 'waiting_on_question', {
               checklistId,
               message: `${askerName} has a question about "${resolved.label}" in "${checklistTitle}" — ${questionNote}`,
-              link: `/checklists?focus=${encodeURIComponent(checklistId)}`,
+              // The blocker may not be on the task: her Delayed page instead.
+              link: waitNoticeLink(recipientId, resolved.entry, checklistId),
               appPublicUrl: getPublicAppUrl(request),
             })
           }

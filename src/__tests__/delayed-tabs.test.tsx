@@ -491,6 +491,7 @@ describe('an old free-text wait', () => {
  * so the wait she was sent for has to stand out when she lands.
  */
 describe('arriving from a blocker link', () => {
+  const HANDLED = 'That wait has been handled - nothing more to do here.'
   const scrollIntoView = vi.fn()
 
   beforeEach(() => {
@@ -524,6 +525,20 @@ describe('arriving from a blocker link', () => {
     expect(scrollIntoView.mock.contexts[0]).toBe(focused)
   })
 
+  // Not color-only: assistive tech hears it, and a visible tag says why it stands out.
+  it('marks the focused wait as current and tags it in words', () => {
+    signInAs(B, [notHers()])
+    renderAt('/delayed?tab=blocking&focus=wo-2')
+
+    const focused = waitLine(/the payroll file/)
+    expect(focused).toHaveAttribute('aria-current', 'true')
+    expect(within(focused).getByText('From your notification')).toBeInTheDocument()
+    const other = waitLine(/the bank statements/)
+    expect(other).not.toHaveAttribute('aria-current')
+    expect(within(other).queryByText('From your notification')).not.toBeInTheDocument()
+    expect(screen.queryByText(HANDLED)).not.toBeInTheDocument()
+  })
+
   it('highlights nothing without a focus param', () => {
     signInAs(B, [notHers()])
     renderAt('/delayed?tab=blocking')
@@ -531,6 +546,8 @@ describe('arriving from a blocker link', () => {
     expect(waitLine(/the payroll file/)).not.toHaveClass('is-focused')
     expect(waitLine(/the bank statements/)).not.toHaveClass('is-focused')
     expect(scrollIntoView).not.toHaveBeenCalled()
+    expect(screen.queryByText('From your notification')).not.toBeInTheDocument()
+    expect(screen.queryByText(HANDLED)).not.toBeInTheDocument()
   })
 
   it('lets go of the focus when she switches tabs', () => {
@@ -540,5 +557,44 @@ describe('arriving from a blocker link', () => {
     fireEvent.click(tab(/Waiting on me/))
 
     expect(waitLine(/the payroll file/)).not.toHaveClass('is-focused')
+  })
+
+  // She pressed Done already (or it was approved): the wait left her tab by
+  // design, so the link she followed points at nothing. Say so, quietly.
+  it('says the wait was handled when the focused one is no longer hers to act on', () => {
+    signInAs(B, [
+      checklistWith([step([resolved({ id: 'wo-2', note: 'the payroll file' }), wait({ id: 'wo-1' })])]),
+    ])
+    renderAt('/delayed?tab=blocking&focus=wo-2')
+
+    expect(screen.getByText(HANDLED)).toBeInTheDocument()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    // The rest of her tab is still there, unmarked.
+    expect(waitLine(/the bank statements/)).not.toHaveClass('is-focused')
+  })
+
+  it('says so on an otherwise empty tab too', () => {
+    signInAs(B, [checklistWith([step([verified({ id: 'wo-2' })])])])
+    renderAt('/delayed?tab=blocking&focus=wo-2')
+
+    expect(screen.getByText(HANDLED)).toBeInTheDocument()
+    expect(screen.getByText('Nobody is waiting on you right now.')).toBeInTheDocument()
+  })
+
+  // Arriving cold from the bell, the feed may not be in yet: an empty page then
+  // is not evidence the wait was handled.
+  it('stays quiet while the data is still loading', () => {
+    signInAs(B, [])
+    contextValue = { ...contextValue, dataSyncState: 'loading' } as unknown as AppContextValue
+    renderAt('/delayed?tab=blocking&focus=wo-2')
+
+    expect(screen.queryByText(HANDLED)).not.toBeInTheDocument()
+  })
+
+  it('stays quiet on the other tab', () => {
+    signInAs(B, [checklistWith([step([resolved({ id: 'wo-2' })])])])
+    renderAt('/delayed?tab=requesting&focus=wo-2')
+
+    expect(screen.queryByText(HANDLED)).not.toBeInTheDocument()
   })
 })
