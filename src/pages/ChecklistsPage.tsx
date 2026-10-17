@@ -35,7 +35,6 @@ import {
   removalWouldCompleteWaitingStep,
   removalWouldDropOpenWait,
   STEP_HAS_OPEN_WAIT_MESSAGE,
-  stageFinished,
   stageOpenWorkAllWaiting,
   stepWouldDropOpenWait,
   WAITING_BLOCK_TITLES,
@@ -104,6 +103,7 @@ import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
 import { completedTaskRows } from '../lib/completedTasks'
 import { filterInProgressChecklists, waitingStepCount } from '../lib/inProgressFilter'
 import { overdueChecklists } from '../lib/overdueChecklists'
+import { nextStageNeverOpened as isNextStageNeverOpened } from '../lib/stalledCase'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { inactiveClientIdSet, workableClients } from '../lib/clientLifecycle'
 import {
@@ -2720,26 +2720,10 @@ export function ChecklistCard({
   const nextStageAlreadyOpen = contextData.checklists.some(
     (entry) => (entry.caseId || entry.id) === caseKey && entry.stageIndex === stageIndex + 1,
   )
-  // A later step of the case already open: the server refuses to create this
-  // one behind it (later_stage_exists), so nothing is offered.
-  const laterStageOpen = contextData.checklists.some(
-    (entry) =>
-      (entry.caseId || entry.id) === caseKey &&
-      typeof entry.stageIndex === 'number' &&
-      entry.stageIndex > stageIndex + 1,
-  )
   // featreq-ed73d181: every step here is done, yet the next step never opened
-  // (a stall from before the 10-12 hardening). The same button revives it.
-  const nextStageNeverOpened =
-    !checklist.projected &&
-    !isLastStage &&
-    Boolean(checklist.templateId) &&
-    !checklist.onboardingForClientId &&
-    !checklist.pushedToChecklistId &&
-    !checklist.skippedAt &&
-    !nextStageAlreadyOpen &&
-    !laterStageOpen &&
-    stageFinished(checklist)
+  // (a stall from before the 10-12 hardening). The same button revives it. The
+  // rule (src/lib/stalledCase.ts) is the Dashboard's too.
+  const nextStageNeverOpened = isNextStageNeverOpened(checklist, contextData.checklists)
   const handedOff = allDone && !isLastStage && !nextStageNeverOpened
   const canOpenNextStage =
     !checklist.projected &&

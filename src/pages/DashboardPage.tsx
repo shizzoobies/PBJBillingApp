@@ -37,6 +37,7 @@ import {
   fetchTeamActivity,
   listInvoicesRequest,
 } from '../lib/api'
+import { stalledCaseStages } from '../lib/stalledCase'
 import type {
   ActivityEntry,
   BillRateVersion,
@@ -86,6 +87,32 @@ function isComplete(checklist: Checklist) {
 function isInProgress(checklist: Checklist) {
   const done = checklist.items.filter((item) => item.done).length
   return done > 0 && done < checklist.items.length
+}
+
+/**
+ * featreq-ed73d181: a case whose step is finished but whose next step never
+ * opened (`stalledCaseStages`). It has no open row anywhere, so it is listed
+ * with the cases and links to the finished step's card, where Open next step
+ * now revives it.
+ */
+function StalledCaseRow({ stage, clients }: { stage: Checklist; clients: Parameters<typeof clientName>[0] }) {
+  const stageIndex = stage.stageIndex ?? 0
+  const stageCount = stage.stageCount ?? 1
+  return (
+    <li className="dashboard-case-row">
+      <div className="dashboard-case-main">
+        <strong>{stage.title}</strong>
+        <span className="dashboard-case-client">{clientName(clients, stage.clientId)}</span>
+      </div>
+      <div className="dashboard-case-stage">
+        Step {stageIndex + 1} of {stageCount} done
+      </div>
+      <span className="status-pill status-pill-red">Finished, next step never opened</span>
+      <Link to={`/checklists?focus=${encodeURIComponent(stage.id)}`} className="dashboard-case-link">
+        Open step →
+      </Link>
+    </li>
+  )
 }
 
 export function DashboardPage() {
@@ -350,6 +377,9 @@ function OwnerDashboardView() {
       !isComplete(c),
   )
 
+  // featreq-ed73d181: finished steps whose next step never opened, every case.
+  const stalledStages = useMemo(() => stalledCaseStages(data.checklists), [data.checklists])
+
   const stuckCaseIds = useMemo(() => {
     const checklistRecency = new Map<string, string>()
     for (const entry of activity) {
@@ -365,7 +395,8 @@ function OwnerDashboardView() {
       }
     }
     const cutoffIso = `${sevenDaysAgo}T00:00:00.000Z`
-    const ids = new Set<string>()
+    // A case whose next step never opened is stuck however recent its activity.
+    const ids = new Set<string>(stalledStages.map((stage) => stage.caseId || stage.id))
     for (const c of data.checklists) {
       if (!c.caseId) continue
       if (isComplete(c)) continue
@@ -379,7 +410,7 @@ function OwnerDashboardView() {
       }
     }
     return ids
-  }, [activity, data.checklists, sevenDaysAgo])
+  }, [activity, data.checklists, sevenDaysAgo, stalledStages])
 
   const unbilledMinutes = data.timeEntries
     .filter((entry) => entry.billable && isInBillingPeriod(entry, billingPeriod))
@@ -681,10 +712,13 @@ function OwnerDashboardView() {
 
       <section className="dashboard-section" aria-label="Cases in flight">
         <h2>Cases in flight</h2>
-        {limitedCases.length === 0 ? (
+        {limitedCases.length === 0 && stalledStages.length === 0 ? (
           <p className="empty-state">No multi-step cases in flight.</p>
         ) : (
           <ul className="dashboard-cases">
+            {stalledStages.map((stage) => (
+              <StalledCaseRow key={stage.id} stage={stage} clients={data.clients} />
+            ))}
             {limitedCases.map((row) => {
               const stuck = stuckCaseIds.has(row.caseId)
               const stageIndex = row.current.stageIndex ?? row.completedCount
@@ -913,7 +947,13 @@ function EmployeeDashboardView() {
 
   // Stuck cases (employee variant): the EFFECTIVE user holds the current stage
   // (i.e. is the assignee on the in-progress checklist) and there's been no
-  // activity on that case's checklist in 3+ days.
+  // activity on that case's checklist in 3+ days. Also (featreq-ed73d181) a case
+  // whose finished step is theirs and whose next step never opened: they can
+  // revive it from the card (Open next step now is the owner's or the assignee's).
+  const myStalledStages = useMemo(
+    () => stalledCaseStages(data.checklists).filter((stage) => stage.assigneeId === userId),
+    [data.checklists, userId],
+  )
   const stuckCaseIds = useMemo(() => {
     const checklistRecency = new Map<string, string>()
     for (const entry of activity) {
@@ -929,7 +969,7 @@ function EmployeeDashboardView() {
       }
     }
     const cutoffIso = `${threeDaysAgo}T00:00:00.000Z`
-    const ids = new Set<string>()
+    const ids = new Set<string>(myStalledStages.map((stage) => stage.caseId || stage.id))
     for (const c of data.checklists) {
       if (!c.caseId) continue
       if (c.assigneeId !== userId) continue
@@ -943,7 +983,7 @@ function EmployeeDashboardView() {
       }
     }
     return ids
-  }, [activity, data.checklists, threeDaysAgo, userId])
+  }, [activity, data.checklists, threeDaysAgo, userId, myStalledStages])
 
   const myChecklists = data.checklists.filter(
     (c) => c.assigneeId === userId && !isComplete(c),
@@ -1160,10 +1200,13 @@ function EmployeeDashboardView() {
 
       <section className="dashboard-section" aria-label="My cases in flight">
         <h2>My cases in flight</h2>
-        {myCases.length === 0 ? (
+        {myCases.length === 0 && myStalledStages.length === 0 ? (
           <p className="empty-state">No cases in flight.</p>
         ) : (
           <ul className="dashboard-cases">
+            {myStalledStages.map((stage) => (
+              <StalledCaseRow key={stage.id} stage={stage} clients={data.clients} />
+            ))}
             {myCases.map((row) => {
               const stageIndex = row.current.stageIndex ?? 0
               const stageCount = row.current.stageCount ?? 1

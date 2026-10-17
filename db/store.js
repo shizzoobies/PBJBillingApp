@@ -4672,14 +4672,17 @@ export class StepIsWaitingError extends Error {
  * `not_ready` (some open step is neither done nor waiting), `date_taken` (another
  * case of the same recipe holds that step on that date), or a
  * `maybeSpawnNextStage` reason (`next_stage_empty`, `no_template`,
- * `template_not_found`, `no_stages`, `later_stage_exists`). The
- * route turns it into a sentence. Nothing was written.
+ * `template_not_found`, `no_stages`, `later_stage_exists`), or `billing_master`
+ * (the case's client is a billing master; `sentence` carries that refusal's own
+ * words, sent as it is). The route turns the rest into a sentence. Nothing was
+ * written.
  */
 export class NextStageRefusedError extends Error {
-  constructor(reason) {
+  constructor(reason, sentence = null) {
     super(`The next step cannot be opened: ${reason}`)
     this.name = 'NextStageRefusedError'
     this.reason = reason
+    this.sentence = sentence
   }
 }
 
@@ -22120,6 +22123,9 @@ export class AppDataStore {
       try {
         advance = await this.maybeSpawnNextStage(data, checklist, { allowWaiting: true })
       } catch (error) {
+        // createChecklist's billing-master guard: a worded refusal (the tick path
+        // reports the same sentence), never a 500.
+        if (error instanceof BillingMasterError) throw new NextStageRefusedError('billing_master', error.message)
         // A 23505 that is NOT this case's next stage (maybeSpawnNextStage already
         // re-read for that): another case of the same recipe holds that step on
         // that date. Refused in words, logged with the constraint.
@@ -22140,10 +22146,17 @@ export class AppDataStore {
       const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
       const refused = openNextStageEarlyRefusal(data, checklist)
       if (refused) throw new NextStageRefusedError(refused)
-      const advance = await this.maybeSpawnNextStage(data, checklist, {
-        fileMode: true,
-        allowWaiting: true,
-      })
+      let advance
+      try {
+        advance = await this.maybeSpawnNextStage(data, checklist, {
+          fileMode: true,
+          allowWaiting: true,
+        })
+      } catch (error) {
+        // Same as the Postgres branch: the file spawn's billing-master refusal.
+        if (error instanceof BillingMasterError) throw new NextStageRefusedError('billing_master', error.message)
+        throw error
+      }
       if (!advance.spawned) throw new NextStageRefusedError(advance.reason)
       data.checklists = sortChecklists([...data.checklists, advance.spawned])
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))

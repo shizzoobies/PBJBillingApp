@@ -15380,7 +15380,7 @@ const server = createServer(async (request, response) => {
           sendJson(response, 409, {
             error: 'next_stage_refused',
             reason: error.reason,
-            message: nextStageRefusalMessage(error.reason, {
+            message: error.sentence || nextStageRefusalMessage(error.reason, {
               stageIndex,
               nextStageName: template?.stages?.[stageIndex + 1]?.name ?? '',
               anyWaiting: stageHasOpenWait(checklist),

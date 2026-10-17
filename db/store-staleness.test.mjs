@@ -52466,6 +52466,23 @@ describe('open next step now (file backend)', () => {
     expect((await refusal(store.openNextStageEarly('cl-last', 'emp-1'))).reason).toBe('last_stage')
   })
 
+  it('a billing master is refused as a sentence (billing_master), and nothing is written', async () => {
+    await seed([finishedStage()])
+    const data = await persisted()
+    data.clients = (data.clients ?? []).map((client) =>
+      client.id === 'c1' ? { ...client, name: 'KLC Group', isBillingMaster: true } : client,
+    )
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    const before = await readFile(localDataPath, 'utf8')
+    const error = await refusal(store.openNextStageEarly('cl-wait', 'emp-1'))
+    expect(error).toBeInstanceOf(NextStageRefusedError)
+    expect(error.reason).toBe('billing_master')
+    expect(error.sentence).toBe(
+      'KLC Group is a billing master — it holds no tasks of its own. Use one of its sub clients instead.',
+    )
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
   it('a stage with an open step and nothing waiting is still refused not_ready', async () => {
     await seed([
       finishedStage({
@@ -52857,6 +52874,20 @@ describe('open next step now (Postgres)', () => {
     const advance = await pgStore.maybeSpawnNextStage(data, finished)
     expect(advance).toEqual({ spawned: null, reason: 'date_taken', heldBy: 'cl-twin' })
     expect(fake.statements.filter((s) => /^(insert|update|delete|begin)\b/i.test(s.text))).toEqual([])
+  })
+
+  it('a billing master is refused as a sentence (billing_master), not a 500', async () => {
+    // The REAL createChecklist runs its master guard against the fake's clients row.
+    const fake = fakePostgres({ clientRows: [{ id: 'c1', name: 'KLC Group', is_billing_master: true }] })
+    const pgStore = postgresStore(fake)
+    pgStore.read = async () => ({ checklists: [finished], checklistTemplates: [template] })
+    const error = await pgStore.openNextStageEarly('cl-wait', 'emp-1').catch((caught) => caught)
+    expect(error).toBeInstanceOf(NextStageRefusedError)
+    expect(error.reason).toBe('billing_master')
+    expect(error.sentence).toBe(
+      'KLC Group is a billing master — it holds no tasks of its own. Use one of its sub clients instead.',
+    )
+    expect(fake.matching(/^insert into checklists \(/i)).toHaveLength(0)
   })
 
   it('both toggle branches hand the holder on as spawnHeldBy (the route names it in the Activity row)', async () => {

@@ -58,7 +58,12 @@ describe('POST /api/checklists/:id/open-next-stage', () => {
     expect(route).toContain('error instanceof NextStageRefusedError')
     expect(route).toContain("error: 'next_stage_refused'")
     expect(route).toContain('reason: error.reason')
-    expect(route).toContain('message: nextStageRefusalMessage(error.reason, {')
+    expect(route).toContain('nextStageRefusalMessage(error.reason, {')
+  })
+
+  it('a refusal that carries its own sentence (a billing master) is sent as it is, still a 409', () => {
+    const route = openNextStageRoute()
+    expect(route).toContain('message: error.sentence || nextStageRefusalMessage(error.reason, {')
   })
 
   it('leaves readiness to the store, so a finished stage reaches it for the owner and the assignee alike', () => {
