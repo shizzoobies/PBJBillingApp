@@ -8115,9 +8115,11 @@ const server = createServer(async (request, response) => {
         sendJson(response, 415, { error: 'application/json required' })
         return
       }
-      // The body's one field is `to`: the addresses the owner's confirm SHOWED.
-      // The reminder goes to exactly those, and refuses if any is no longer on
-      // file (lib/invoice-reminder.js); omitted means everyone Send would email.
+      // The body's fields are `to`, the on-file addresses the owner left ticked in
+      // the recipient picker, and `extra`, the ones added for this send only
+      // (featreq-34627da1). The reminder goes to exactly those, and refuses if any
+      // `to` is no longer on file (lib/invoice-reminder.js); omitted means everyone
+      // Send would email.
       let remindPayload = null
       try {
         remindPayload = await readJsonBody(request)
@@ -8136,6 +8138,7 @@ const server = createServer(async (request, response) => {
             stripeConfigured: isStripeConfigured(),
             userId: session.user.id,
             ...(remindPayload && remindPayload.to !== undefined ? { to: remindPayload.to } : {}),
+            ...(remindPayload && remindPayload.extra !== undefined ? { extra: remindPayload.extra } : {}),
           },
           { store: appDataStore, sendEmail: sendInvoiceEmail },
         )

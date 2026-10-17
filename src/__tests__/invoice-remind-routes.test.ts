@@ -67,6 +67,13 @@ describe('POST /api/invoices/:id/remind', () => {
     expect(passed).toBeLessThan(body.indexOf('{ store: appDataStore, sendEmail: sendInvoiceEmail }'))
   })
 
+  it('passes the picker\'s `extra` (this send only) through too (featreq-34627da1)', () => {
+    const body = route()
+    const passed = body.indexOf('{ extra: remindPayload.extra }')
+    expect(passed).toBeGreaterThan(body.indexOf('remindPayload = await readJsonBody(request)'))
+    expect(passed).toBeLessThan(body.indexOf('{ store: appDataStore, sendEmail: sendInvoiceEmail }'))
+  })
+
   it('never touches Stripe, a checkout session or the send stamp itself', () => {
     const body = route()
     for (const forbidden of [

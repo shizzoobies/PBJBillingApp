@@ -53,7 +53,14 @@ import {
   updateInvoiceRequest,
 } from '../lib/api'
 import { InvoicePreviewModal } from './InvoicePreviewModal'
-import { RecipientPicker } from './RecipientPicker'
+import { RecipientChoices, RecipientPicker } from './RecipientPicker'
+import {
+  PICK_ONE_ON_FILE,
+  initialRecipientSelection,
+  recipientListLabel,
+  recipientSelectionResult,
+  type RecipientSelection,
+} from '../lib/recipientSelection'
 import { useAutopayAttempts } from '../hooks/useAutopayAttempts'
 import {
   autopayAttemptBadge,
@@ -340,7 +347,19 @@ function reminderBlock(
  * One line of the "Remind all past due" confirm. `to` is the list it SHOWS, and
  * exactly what is posted: the server refuses if any of it is no longer on file.
  */
-type RemindAllLine = { invoice: PersistedInvoice; label: string; detail: string; to: string[] }
+/**
+ * One line of a Remind all confirm. A line that will be sent carries its recipient
+ * picker (featreq-34627da1): the addresses on file (`details`), what is ticked
+ * (`selection`, everyone by default) and the sent-age note shown after the list.
+ */
+type RemindAllLine = {
+  invoice: PersistedInvoice
+  label: string
+  detail: string
+  details?: ResolvedInvoiceRecipients['details']
+  selection?: RecipientSelection
+  age?: string
+}
 
 /**
  * Said for the rest of the session after a reminder that LEFT but could not be
@@ -410,14 +429,12 @@ function paymentFailedGoesBackTo(invoice: PersistedInvoice): 'Sent' | 'Past due'
  */
 function useReminderSend({
   invoice,
-  to,
   onInvoiceChanged,
   onInvoiceMoved,
   onReminderUnrecorded,
   onError,
 }: {
   invoice: PersistedInvoice
-  to: string[]
   onInvoiceChanged: (invoice: PersistedInvoice) => void
   onInvoiceMoved: () => Promise<void>
   onReminderUnrecorded: () => void
@@ -426,10 +443,14 @@ function useReminderSend({
   // "Send reminder" (featreq-3f1d63b6): its confirm is up, and its request is out.
   const [reminding, setReminding] = useState(false)
   const [remindBusy, setRemindBusy] = useState(false)
-  const send = async () => {
+  // `to`: the on-file addresses she left ticked; `extra`: the ones added for this
+  // send only (featreq-34627da1), posted only when there are some.
+  const send = async (to: string[], extra: string[] = []) => {
     setRemindBusy(true)
     try {
-      const result = await remindInvoiceRequest(invoice.id, to)
+      const result = await (extra.length > 0
+        ? remindInvoiceRequest(invoice.id, to, extra)
+        : remindInvoiceRequest(invoice.id, to))
       setReminding(false)
       // It left, but its log entry did not land: the run keeps the button off
       // and says so for the rest of the session.
@@ -446,7 +467,11 @@ function useReminderSend({
   return { reminding, setReminding, remindBusy, send }
 }
 
-/** Send reminder's confirm: who it goes to, before anything leaves. */
+/**
+ * Send reminder's confirm: who it goes to, before anything leaves - the shared
+ * recipient picker's list (featreq-34627da1), everyone on file ticked, untick or
+ * add one for this send only.
+ */
 function ReminderConfirm({
   invoice,
   details,
@@ -459,28 +484,32 @@ function ReminderConfirm({
   details: ResolvedInvoiceRecipients['details']
   busy: boolean
   sending: boolean
-  onSend: () => void
+  onSend: (to: string[], extra: string[]) => void
   onCancel: () => void
 }) {
   const backTo = paymentFailedGoesBackTo(invoice)
+  const [selection, setSelection] = useState<RecipientSelection>(() => initialRecipientSelection(details))
+  const { to, extra, canSend } = recipientSelectionResult(details, selection)
   return (
     <div className="invoice-run-remind-confirm" role="group" aria-label="Send reminder">
       <p className="invoice-run-remind-prompt">
         Email a payment reminder for {invoice.number ? `invoice ${invoice.number}` : 'this invoice'},
         with the same pay link, to:
       </p>
-      <ul>
-        {details.map((detail) => (
-          <li key={detail.email}>{formatInvoiceRecipient(detail)}</li>
-        ))}
-      </ul>
+      <RecipientChoices details={details} selection={selection} onChange={setSelection} busy={sending} />
       {backTo ? (
         <p className="invoice-run-remind-prompt">
           This also clears Payment failed - the invoice goes back to {backTo}.
         </p>
       ) : null}
       <div className="invoice-run-remind-actions">
-        <button type="button" className="primary-action" disabled={sending || busy} onClick={onSend}>
+        <button
+          type="button"
+          className="primary-action"
+          disabled={sending || busy || !canSend}
+          title={canSend ? undefined : PICK_ONE_ON_FILE}
+          onClick={() => onSend(to, extra)}
+        >
           {sending ? 'Sending…' : 'Send reminder now'}
         </button>
         <button type="button" className="ghost-action" disabled={sending} onClick={onCancel}>
@@ -972,6 +1001,8 @@ export function InvoiceMonthRun({
     skip: RemindAllLine[]
   } | null>(null)
   const [remindAllBusy, setRemindAllBusy] = useState(false)
+  // The one Remind all line whose recipient list is opened for changing (collapsed otherwise).
+  const [remindAllOpenLine, setRemindAllOpenLine] = useState<string | null>(null)
   // Invoices whose reminder left this session but could not be logged
   // (`logged: false`). Session-only on purpose: it stands in for the log entry
   // that is missing, until a reload shows whatever the log now says.
@@ -1759,24 +1790,41 @@ export function InvoiceMonthRun({
         autopayAttempt: autopay.byInvoice[invoice.id] ?? null,
       })
       const recipients = recipientsFor(invoice.clientId)
-      const none: string[] = []
       if (unrecordedReminders.has(invoice.id)) {
-        skip.push({ invoice, label, detail: REMINDER_UNRECORDED, to: none })
+        skip.push({ invoice, label, detail: REMINDER_UNRECORDED })
       } else if (code) {
-        skip.push({ invoice, label, detail: REMINDER_REFUSAL_TIPS[code], to: none })
+        skip.push({ invoice, label, detail: REMINDER_REFUSAL_TIPS[code] })
       } else if (recipients.to.length === 0) {
-        skip.push({ invoice, label, detail: recipients.reason ?? 'No email address on file', to: none })
+        skip.push({ invoice, label, detail: recipients.reason ?? 'No email address on file' })
       } else {
         send.push({
           invoice,
           label,
-          detail: recipients.to.join(', ') + (tab === 'sent' ? sentAgeLabel(invoice) : ''),
-          to: recipients.to,
+          detail: '',
+          details: recipients.details,
+          selection: initialRecipientSelection(recipients.details),
+          age: tab === 'sent' ? sentAgeLabel(invoice) : '',
         })
       }
     }
+    setRemindAllOpenLine(null)
     setRemindAll({ tab, send, skip })
   }
+
+  /** One Remind all line's picker, read: who it goes to, and whether it may go. */
+  const remindAllChoice = (line: RemindAllLine) =>
+    recipientSelectionResult(line.details ?? [], line.selection ?? { chosen: [], extras: [] })
+
+  /** Re-tick one Remind all line (its "Change" list). */
+  const setRemindAllSelection = (invoiceId: string, selection: RecipientSelection) =>
+    setRemindAll((current) =>
+      current
+        ? {
+            ...current,
+            send: current.send.map((line) => (line.invoice.id === invoiceId ? { ...line, selection } : line)),
+          }
+        : current,
+    )
 
   /**
    * Step two: the single-invoice route, ONE invoice at a time, in the order the
@@ -1802,7 +1850,12 @@ export function InvoiceMonthRun({
     try {
       for (const line of queue) {
         try {
-          const result = await remindInvoiceRequest(line.invoice.id, line.to)
+          // What its picker has ticked: the on-file addresses, and any added for
+          // this send only (posted only when there are some).
+          const { to, extra } = remindAllChoice(line)
+          const result = await (extra.length > 0
+            ? remindInvoiceRequest(line.invoice.id, to, extra)
+            : remindInvoiceRequest(line.invoice.id, to))
           done += 1
           if (result.logged === false) {
             unrecorded += 1
@@ -2175,9 +2228,41 @@ export function InvoiceMonthRun({
                       Email a payment reminder, with the same pay link, for:
                     </p>
                     <ul aria-label="Will be reminded">
-                      {remindAll.send.map((line) => (
-                        <li key={line.invoice.id}>{`${line.label} — ${line.detail}`}</li>
-                      ))}
+                      {remindAll.send.map((line) => {
+                        // Each line is the recipient picker, collapsed: who it goes
+                        // to now, and "Change" to untick or add one for this send.
+                        const choice = remindAllChoice(line)
+                        const opened = remindAllOpenLine === line.invoice.id
+                        return (
+                          <li key={line.invoice.id} className="recipient-picker-line">
+                            {`${line.label} — ${
+                              choice.total > 0 ? recipientListLabel(choice.to, choice.extra) : 'nobody ticked'
+                            }${line.age ?? ''}`}{' '}
+                            <button
+                              type="button"
+                              className="ghost-action"
+                              aria-expanded={opened}
+                              aria-label={`Change who ${line.invoice.number ?? line.label} goes to`}
+                              disabled={remindAllBusy}
+                              onClick={() => setRemindAllOpenLine(opened ? null : line.invoice.id)}
+                            >
+                              {opened ? 'Done' : 'Change'}
+                            </button>
+                            {opened ? (
+                              <RecipientChoices
+                                details={line.details ?? []}
+                                selection={line.selection ?? { chosen: [], extras: [] }}
+                                onChange={(next) => setRemindAllSelection(line.invoice.id, next)}
+                                busy={remindAllBusy}
+                              />
+                            ) : !choice.canSend ? (
+                              <p className="invoice-run-error" role="alert">
+                                {PICK_ONE_ON_FILE}
+                              </p>
+                            ) : null}
+                          </li>
+                        )
+                      })}
                     </ul>
                   </>
                 ) : (
@@ -2200,7 +2285,11 @@ export function InvoiceMonthRun({
                     <button
                       type="button"
                       className="primary-action"
-                      disabled={remindAllBusy}
+                      // Every line needs someone on file ticked, as the server requires.
+                      disabled={remindAllBusy || remindAll.send.some((line) => !remindAllChoice(line).canSend)}
+                      title={
+                        remindAll.send.some((line) => !remindAllChoice(line).canSend) ? PICK_ONE_ON_FILE : undefined
+                      }
                       onClick={() => void runRemindAll()}
                     >
                       {remindAllBusy
@@ -2444,7 +2533,6 @@ function InvoiceRow({
   const rowReminderCode = reminderBlock(invoice, { optedOut, noEmail, autopayAttempt })
   const rowReminder = useReminderSend({
     invoice,
-    to: recipients.to,
     onInvoiceChanged,
     onInvoiceMoved,
     onReminderUnrecorded,
@@ -2734,7 +2822,7 @@ function InvoiceRow({
           details={recipients.details}
           busy={busy || remindHeld !== null}
           sending={rowReminder.remindBusy}
-          onSend={() => void rowReminder.send()}
+          onSend={(to, extra) => void rowReminder.send(to, extra)}
           onCancel={() => rowReminder.setReminding(false)}
         />
       ) : null}
@@ -3808,7 +3896,6 @@ function InvoiceEditor({
     send: sendReminder,
   } = useReminderSend({
     invoice,
-    to: recipients.to,
     onInvoiceChanged,
     onInvoiceMoved,
     onReminderUnrecorded,
@@ -5346,9 +5433,9 @@ function InvoiceEditor({
           details={recipients.details}
           busy={busy}
           sending={remindBusy}
-          onSend={() => {
+          onSend={(to, extra) => {
             setSendError(null)
-            void sendReminder()
+            void sendReminder(to, extra)
           }}
           onCancel={() => setReminding(false)}
         />

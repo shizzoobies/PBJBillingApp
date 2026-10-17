@@ -264,6 +264,51 @@ describe('sending one reminder', () => {
     expect(mockRemind).not.toHaveBeenCalled()
   })
 
+  // featreq-34627da1: the confirm is the shared recipient picker.
+  it('ticks everyone on file; unticking one changes what is posted', async () => {
+    await openRun([makeInvoice()])
+    mockRemind.mockResolvedValue({ invoice: makeInvoice() })
+    fireEvent.click(remindButton())
+    const confirm = screen.getByRole('group', { name: 'Send reminder' })
+    expect(within(confirm).getByRole('checkbox', { name: /ann@acme.test/ })).toBeChecked()
+    expect(within(confirm).getByRole('checkbox', { name: /bo@acme.test/ })).toBeChecked()
+
+    fireEvent.click(within(confirm).getByRole('checkbox', { name: /ann@acme.test/ }))
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send reminder now' }))
+
+    await waitFor(() => expect(mockRemind).toHaveBeenCalledWith('inv-1', ['bo@acme.test']))
+  })
+
+  it('needs one address on file: everyone unticked disables Send and says why', async () => {
+    await openRun([makeInvoice()])
+    fireEvent.click(remindButton())
+    const confirm = screen.getByRole('group', { name: 'Send reminder' })
+    for (const box of within(confirm).getAllByRole('checkbox')) fireEvent.click(box)
+
+    const send = within(confirm).getByRole('button', { name: 'Send reminder now' })
+    expect(send).toBeDisabled()
+    expect(send).toHaveAttribute('title', expect.stringMatching(/Pick at least one address on file/))
+    expect(within(confirm).getByRole('alert')).toHaveTextContent(/Pick at least one address on file/)
+    fireEvent.click(send)
+    expect(mockRemind).not.toHaveBeenCalled()
+  })
+
+  it('posts an address added for this send only as `extra`', async () => {
+    await openRun([makeInvoice()])
+    mockRemind.mockResolvedValue({ invoice: makeInvoice() })
+    fireEvent.click(remindButton())
+    const confirm = screen.getByRole('group', { name: 'Send reminder' })
+    fireEvent.change(within(confirm).getByLabelText('Add another address for this send only'), {
+      target: { value: 'ap@other.test' },
+    })
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Add' }))
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send reminder now' }))
+
+    await waitFor(() =>
+      expect(mockRemind).toHaveBeenCalledWith('inv-1', ['ann@acme.test', 'bo@acme.test'], ['ap@other.test']),
+    )
+  })
+
   it("says the server's refusal and re-reads the month", async () => {
     await openRun([makeInvoice()])
     mockRemind.mockRejectedValue(
@@ -506,6 +551,47 @@ describe('Remind all past due', () => {
       ['inv-a', ['ann@acme.test', 'bo@acme.test']],
       ['inv-b', ['cy@bolt.test']],
     ])
+  })
+
+  // featreq-34627da1: one collapsed picker per invoice inside the confirm.
+  it('each line opens its own picker: untick or add one, and that is what is posted', async () => {
+    await openPastDue()
+    mockRemind.mockImplementation(async (id: string) => ({
+      invoice: rows.find((row) => row.id === id) as PersistedInvoice,
+    }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all past due' }))
+    // Collapsed: no checkboxes until a line is opened.
+    expect(within(panel()).queryAllByRole('checkbox')).toHaveLength(0)
+
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Change who INV-2026-08-001 goes to' }))
+    fireEvent.click(within(panel()).getByRole('checkbox', { name: /bo@acme.test/ }))
+    fireEvent.change(within(panel()).getByLabelText('Add another address for this send only'), {
+      target: { value: 'ap@other.test' },
+    })
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Add' }))
+    expect(within(panel()).getByText(/INV-2026-08-001 · Acme/)).toHaveTextContent(
+      'ann@acme.test, ap@other.test (this send only)',
+    )
+
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Send 2 reminders' }))
+    await screen.findByText(/Reminded 2 of 2\./)
+    expect(mockRemind.mock.calls).toEqual([
+      ['inv-a', ['ann@acme.test'], ['ap@other.test']],
+      ['inv-b', ['cy@bolt.test']],
+    ])
+  })
+
+  it('will not send while a line has nobody on file ticked, and says why', async () => {
+    await openPastDue()
+    fireEvent.click(await screen.findByRole('button', { name: 'Remind all past due' }))
+    fireEvent.click(within(panel()).getByRole('button', { name: 'Change who INV-2026-08-002 goes to' }))
+    fireEvent.click(within(panel()).getByRole('checkbox', { name: /cy@bolt.test/ }))
+
+    const send = within(panel()).getByRole('button', { name: 'Send 2 reminders' })
+    expect(send).toBeDisabled()
+    expect(send).toHaveAttribute('title', expect.stringMatching(/Pick at least one address on file/))
+    fireEvent.click(send)
+    expect(mockRemind).not.toHaveBeenCalled()
   })
 
   it('lists a per-invoice refusal (409) as skipped and carries on', async () => {
