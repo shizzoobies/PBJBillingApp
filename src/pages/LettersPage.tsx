@@ -533,6 +533,15 @@ export function LettersPage() {
           ...(ids.length > SEND_CHUNK ? { batch: ids } : {}),
         })
         done += chunk.length
+        // A choice is for its send: once that client's letter went, the next send starts from
+        // everyone on file again. A client that failed or was skipped keeps hers, so "Send
+        // again to the N that failed" and Send again post the same narrowed list.
+        const wentOut = new Set(answer.results.filter((result) => result.status === 'sent').map((result) => result.clientId))
+        if (wentOut.size > 0) {
+          setRecipientChoices((current) =>
+            Object.fromEntries(Object.entries(current).filter(([clientId]) => !wentOut.has(clientId))),
+          )
+        }
         setResults((currentResults) =>
           reconcileCoveredResults([
             ...currentResults.filter((result) => !chunk.includes(result.clientId)),
@@ -567,21 +576,23 @@ export function LettersPage() {
     const replyAddress = state?.sender.replyTo || 'the reply address'
     const count = chosen.length
     const hiddenNames = hiddenChosen.map((id) => clients.find((client) => client.id === id)?.name ?? id)
-    // The final list of every client whose recipients she changed, so the confirm says it.
-    const changed = chosen
-      .filter((id) => recipientChoices[id])
-      .map((id) => `${nameOf(id, null)}: ${recipientListLabel(recipientChoices[id].to, recipientChoices[id].extra)}`)
     const ok = window.confirm(
       `Send "${letterName}" to ${count} client${count === 1 ? '' : 's'}${hiddenNote}? Each gets your email with the letter attached as a PDF. Replies go to ${replyAddress}.` +
         (hiddenNames.length > 0 ? ` Also sending to (not in the list right now): ${hiddenNames.join(', ')}.` : '') +
-        (changed.length > 0 ? ` Recipients you chose - ${changed.join('; ')}.` : ''),
+        // Every client's final list (featreq-34627da1): her choice, or everyone on file.
+        ` Recipients - ${chosen.map((id) => `${nameOf(id, null)}: ${finalRecipients(id)}`).join('; ')}.`,
     )
     if (!ok) return
     // A fresh Send starts a fresh list; the retry buttons below merge into it instead.
     setResults([])
     await sendBatch(chosen, { resend: false })
-    // A choice is for that send: the next one starts from everyone on file again.
-    setRecipientChoices({})
+  }
+
+  /** Who one client's letter goes to now: her picker choice, or everyone Send may use. */
+  const finalRecipients = (id: string) => {
+    const choice = recipientChoices[id]
+    if (choice) return recipientListLabel(choice.to, choice.extra)
+    return rows.find((row) => row.client.id === id)?.to.join(', ') ?? ''
   }
 
   const nameOf = (id: string, fallback: string | null) =>
@@ -593,8 +604,8 @@ export function LettersPage() {
     const name = nameOf(id, null)
     const ok = window.confirm(
       why === 'unfinished'
-        ? `Send "${letterName}" to ${name} again? An earlier send to them never finished, so check that it did not go out first.`
-        : `Send "${letterName}" to ${name} again? It was already sent today.`,
+        ? `Send "${letterName}" to ${name} again? An earlier send to them never finished, so check that it did not go out first. It goes to ${finalRecipients(id)}.`
+        : `Send "${letterName}" to ${name} again? It was already sent today. It goes to ${finalRecipients(id)}.`,
     )
     if (!ok) return
     await sendBatch([id], { resend: true })

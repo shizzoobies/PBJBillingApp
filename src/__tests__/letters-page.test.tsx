@@ -620,7 +620,7 @@ describe('the client picker', () => {
     const send = screen.getByRole('button', { name: 'Send "1099 Filing" to 2 clients (1 hidden)' })
     fireEvent.click(send)
     expect(confirm).toHaveBeenCalledWith(
-      'Send "1099 Filing" to 2 clients (1 hidden)? Each gets your email with the letter attached as a PDF. Replies go to brittany@pbjsa.com. Also sending to (not in the list right now): Acme Books.',
+      'Send "1099 Filing" to 2 clients (1 hidden)? Each gets your email with the letter attached as a PDF. Replies go to brittany@pbjsa.com. Also sending to (not in the list right now): Acme Books. Recipients - Acme Books: pat@acme.test; Onboarding Co: new@onb.test.',
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Untick hidden' }))
@@ -858,7 +858,7 @@ describe('a send that never finished', () => {
     expect(screen.queryByText(/Already sent today/)).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Send again anyway' }))
     expect(confirm).toHaveBeenLastCalledWith(
-      'Send "1099 Filing" to Acme Books again? An earlier send to them never finished, so check that it did not go out first.',
+      'Send "1099 Filing" to Acme Books again? An earlier send to them never finished, so check that it did not go out first. It goes to pat@acme.test.',
     )
     await waitFor(() =>
       expect(api.sendLettersRequest).toHaveBeenLastCalledWith('default', { clientIds: ['c-acme'], templateHash: 'hash-1', resendToday: true }),
@@ -972,6 +972,58 @@ describe('choosing who a client\'s letter goes to', () => {
     )
   })
 
+  it('the confirm lists EVERY client\'s final recipients, changed or not', async () => {
+    setClients([
+      { id: 'c-two', name: 'Two Co', contact: '', email: 'office@two.test', contactIds: ['ct-1'], lifecycleStage: 'active' },
+      { id: 'c-acme', name: 'Acme Books', contact: '', email: 'pat@acme.test', contactIds: [], lifecycleStage: 'active' },
+    ])
+    contextValue = {
+      ...contextValue,
+      data: { ...contextValue.data, contacts: [{ id: 'ct-1', name: 'Tia Two', email: 'tia@two.test' }] },
+    } as unknown as AppContextValue
+    const confirm = mockConfirm(false)
+    await renderPage()
+    const dialog = openPicker()
+    fireEvent.click(dialog.getByRole('checkbox', { name: /office@two.test/ }))
+    fireEvent.click(dialog.getByRole('button', { name: 'Use 1 address' }))
+    fireEvent.click(screen.getByLabelText('Select Two Co'))
+    fireEvent.click(screen.getByLabelText('Select Acme Books'))
+    fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 2 clients' }))
+    expect((confirm as Mock).mock.calls[0][0]).toContain('Recipients - Two Co: tia@two.test; Acme Books: pat@acme.test.')
+  })
+
+  it('a failed client keeps its narrowed choice: "Send again to the N that failed" posts it again; a sent one drops it', async () => {
+    twoOnFile()
+    mockConfirm(true)
+    api.sendLettersRequest = vi
+      .fn()
+      .mockResolvedValueOnce({
+        results: [{ clientId: 'c-two', clientName: 'Two Co', status: 'failed', code: 'provider', message: 'Mailbox full' }],
+        sent: 0,
+        failed: 1,
+        skipped: 0,
+      })
+      .mockResolvedValueOnce({
+        results: [{ clientId: 'c-two', clientName: 'Two Co', status: 'sent', to: ['tia@two.test'] }],
+        sent: 1,
+        failed: 0,
+        skipped: 0,
+      })
+    await renderPage()
+    const dialog = openPicker()
+    fireEvent.click(dialog.getByRole('checkbox', { name: /office@two.test/ }))
+    fireEvent.click(dialog.getByRole('button', { name: 'Use 1 address' }))
+    fireEvent.click(screen.getByLabelText('Select Two Co'))
+    fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 1 client' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Send again to the 1 that failed' }))
+    await waitFor(() => expect(api.sendLettersRequest).toHaveBeenCalledTimes(2))
+    const calls = (api.sendLettersRequest as Mock).mock.calls
+    expect(calls[1][1].recipients).toEqual({ 'c-two': { to: ['tia@two.test'], extra: [] } })
+    // It went out this time: the row is back to everyone on file.
+    const row = screen.getByLabelText('Select Two Co').closest('tr') as HTMLElement
+    await waitFor(() => expect(within(row).queryByText('Chosen for this send')).not.toBeInTheDocument())
+  })
+
   it('never offers a team member\'s address in the picker', async () => {
     api.fetchLetterTemplate = vi.fn(async () => templateState({}, 'hash-1', ['tia@two.test']))
     twoOnFile()
@@ -991,7 +1043,8 @@ describe('sending', () => {
     fireEvent.click(screen.getByLabelText('Select Acme Books'))
     fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 1 client' }))
     expect(confirm).toHaveBeenCalledWith(
-      'Send "1099 Filing" to 1 client? Each gets your email with the letter attached as a PDF. Replies go to brittany@pbjsa.com.',
+      // featreq-34627da1: the confirm names every client's final recipients.
+      'Send "1099 Filing" to 1 client? Each gets your email with the letter attached as a PDF. Replies go to brittany@pbjsa.com. Recipients - Acme Books: pat@acme.test.',
     )
     expect(api.sendLettersRequest).not.toHaveBeenCalled()
   })
@@ -1077,7 +1130,9 @@ describe('sending', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 1 client' }))
     await screen.findByText(/Already sent today\./)
     fireEvent.click(screen.getByRole('button', { name: 'Send again anyway' }))
-    expect(confirm).toHaveBeenLastCalledWith('Send "1099 Filing" to Acme Books again? It was already sent today.')
+    expect(confirm).toHaveBeenLastCalledWith(
+      'Send "1099 Filing" to Acme Books again? It was already sent today. It goes to pat@acme.test.',
+    )
     await waitFor(() =>
       expect(api.sendLettersRequest).toHaveBeenLastCalledWith('default', {
         clientIds: ['c-acme'],
