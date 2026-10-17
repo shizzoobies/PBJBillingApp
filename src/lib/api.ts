@@ -1053,13 +1053,16 @@ export function draftProposalLetterRequest(id: string): Promise<Proposal> {
  */
 export function sendProposalRequest(
   id: string,
-  to: string,
+  // The recipient picker's choice (featreq-34627da1): the addresses on file she left
+  // ticked, and the ones added for this send only.
+  recipients: { to: string[]; extra?: string[] },
   opts: { confirmStaleFigures?: boolean; confirmUnpriced?: boolean } = {},
 ): Promise<Proposal> {
   return proposalRequest<Proposal>(
     proposalPath(id, 'send'),
     proposalJson('POST', {
-      to,
+      to: recipients.to,
+      ...(recipients.extra && recipients.extra.length > 0 ? { extra: recipients.extra } : {}),
       ...(opts.confirmStaleFigures ? { confirmStaleFigures: true } : {}),
       ...(opts.confirmUnpriced ? { confirmUnpriced: true } : {}),
     }),

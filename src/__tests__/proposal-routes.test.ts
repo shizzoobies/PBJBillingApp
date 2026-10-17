@@ -190,13 +190,35 @@ describe('sending a proposal', () => {
       write: true,
       // The stale-letter-figures guard (Important 1, final fix wave) pushes
       // `broadcastDataChanged()` past the shared 3000-char default; the unpriced
-      // lines confirm (2026-10-11) pushed it 3600 -> 4400.
-      broadcastLength: 4400,
+      // lines confirm (2026-10-11) pushed it 3600 -> 4400; the recipient picker
+      // (featreq-34627da1) pushed it 4400 -> 6400.
+      broadcastLength: 6400,
     },
   ])
 
-  // Widened 4600 -> 5400 for the unpriced-lines confirm (2026-10-11).
-  const block = () => routeBlock(/proposalSendMatch && request\.method === 'POST'/, 5400)
+  // Widened 4600 -> 5400 for the unpriced-lines confirm (2026-10-11), 5400 -> 7400 for
+  // the recipient picker (featreq-34627da1).
+  const block = () => routeBlock(/proposalSendMatch && request\.method === 'POST'/, 7400)
+
+  // featreq-34627da1: the address is chosen among the ones on file, plus one-time ones.
+  it('decides the recipients with the invoice Send\'s resolver, from the prospect and its client, before the PDF or the email', () => {
+    const text = block()
+    expect(text).toContain('const proposalChoice = recipientChoiceOf(payload)')
+    expect(text).toContain('partyRecipientDetails({')
+    expect(text).toContain('email: proposal.prospect?.email,')
+    expect(text).toContain('const proposalRecipients = resolveSendRecipients({')
+    expect(text).toContain('allowed: proposalAllowed,')
+    expect(text).toContain('extra: proposalChoice.extra,')
+    const refuseAt = text.indexOf('if (!proposalRecipients.ok) {')
+    expect(refuseAt).toBeGreaterThan(-1)
+    expect(text.slice(refuseAt, refuseAt + 300)).toContain('sendJson(response, proposalRecipients.status, {')
+    expect(refuseAt).toBeLessThan(text.indexOf('buildProposalPdf('))
+    expect(refuseAt).toBeLessThan(text.indexOf('sendInvoiceEmail('))
+    // The email and its log carry exactly the list resolved.
+    expect(text).toContain('const to = proposalRecipients.to')
+    expect(text).toMatch(/sendInvoiceEmail\(\{\s*to,/)
+    expect(text).toMatch(/appendProposalEmailEvent\(proposal\.id, \{\s*kind: 'send',\s*ok: sendResult\.ok,\s*\/\/[^\n]*\n\s*to,/)
+  })
 
   // A questionnaire draft can carry a line whose count is only asked on a call:
   // $0, so the quote would leave it out. She confirms before it goes.

@@ -6,6 +6,7 @@ import { ChatPanel } from '../components/proposals/ChatPanel'
 import { EstimateTab } from '../components/proposals/EstimateTab'
 import { LetterTab } from '../components/proposals/LetterTab'
 import { workableClients } from '../lib/clientLifecycle'
+import { partyRecipientDetails } from '../../lib/invoice-recipients.js'
 import { engagementInstantLabel, refusedEngagementId } from '../lib/engagements'
 import {
   PROPOSAL_NOT_PRICED_MESSAGE,
@@ -443,14 +444,16 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
    * quote) is asked the same way and resent with `confirmUnpriced: true`;
    * each question is asked at most once per send.
    */
-  const sendLetter = (to: string) =>
+  const sendLetter = (to: string[], extra: string[]) =>
     enqueue(async () => {
       const confirmed: { confirmStaleFigures?: boolean; confirmUnpriced?: boolean } = {}
+      // The recipient picker's choice; `extra` only when she added some (featreq-34627da1).
+      const recipients = extra.length > 0 ? { to, extra } : { to }
       for (;;) {
         try {
           return Object.keys(confirmed).length === 0
-            ? await sendProposalRequest(proposalId, to)
-            : await sendProposalRequest(proposalId, to, { ...confirmed })
+            ? await sendProposalRequest(proposalId, recipients)
+            : await sendProposalRequest(proposalId, recipients, { ...confirmed })
         } catch (err) {
           if (!(err instanceof ApiError)) throw err
           if (err.code === 'stale_letter_figures' && !confirmed.confirmStaleFigures && window.confirm(err.message)) {
@@ -842,6 +845,13 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
           onDraft={() => enqueue(() => draftProposalLetterRequest(proposalId))}
           onSaveText={(text) => save(() => ({ letterText: text }))}
           onSend={sendLetter}
+          recipients={partyRecipientDetails({
+            email: proposal.prospect.email,
+            source: proposal.prospect.contactName || proposal.prospect.company || 'Prospect',
+            client: proposal.clientId ? (data.clients.find((entry) => entry.id === proposal.clientId) ?? null) : null,
+            clients: data.clients,
+            contacts: data.contacts ?? [],
+          })}
         />
       ) : null}
       {tab === 'activity' ? <ActivityTab proposal={proposal} /> : null}

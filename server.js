@@ -91,6 +91,7 @@ import {
   sendInvoicePaymentEmail,
 } from './lib/invoice-email.js'
 import { invoiceEmailAddressee, resolveSendRecipients } from './lib/invoice-recipients.js'
+import { partyRecipientDetails } from './lib/invoice-recipients.js'
 import { remindInvoice } from './lib/invoice-reminder.js'
 import { AUTO_REMINDER_EVENT, runAutoInvoiceReminders } from './lib/invoice-auto-reminders.js'
 import { invoiceContentChanged, totalsDiffer } from './lib/invoice-sent-change.js'
@@ -13620,8 +13621,11 @@ const server = createServer(async (request, response) => {
         return
       }
       const payload = await readJsonBody(request)
-      const to = typeof payload?.to === 'string' ? payload.to.trim() : ''
-      if (!to || to.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+      // The recipient picker's choice (featreq-34627da1): `to`, the addresses on file
+      // she left ticked, and `extra`, the ones added for this send only. A send with
+      // neither is refused, as one with no address always was.
+      const proposalChoice = recipientChoiceOf(payload)
+      if (!proposalChoice || (proposalChoice.to === undefined && proposalChoice.extra === undefined)) {
         sendJson(response, 400, { error: 'A valid email address is required.' })
         return
       }
@@ -13630,6 +13634,33 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'Proposal not found' })
         return
       }
+      // On file: the prospect's own address, then (when the proposal is for a client)
+      // that client's addresses - the list the picker showed. `to` may only choose
+      // among them; at most three one-time addresses ride alongside, never alone while
+      // anything is on file. It used to accept any one typed address.
+      const proposalSendData = await appDataStore.read()
+      const proposalAllowed = partyRecipientDetails({
+        email: proposal.prospect?.email,
+        source: proposal.prospect?.contactName || proposal.prospect?.company || 'Prospect',
+        client: proposal.clientId
+          ? ((proposalSendData.clients ?? []).find((entry) => entry.id === proposal.clientId) ?? null)
+          : null,
+        clients: proposalSendData.clients ?? [],
+        contacts: proposalSendData.contacts ?? [],
+      }).map((detail) => detail.email)
+      const proposalRecipients = resolveSendRecipients({
+        allowed: proposalAllowed,
+        to: typeof proposalChoice.to === 'string' ? [proposalChoice.to] : (proposalChoice.to ?? []),
+        extra: proposalChoice.extra,
+      })
+      if (!proposalRecipients.ok) {
+        sendJson(response, proposalRecipients.status, {
+          error: proposalRecipients.error,
+          message: proposalRecipients.message,
+        })
+        return
+      }
+      const to = proposalRecipients.to
       if (proposal.status === 'accepted' || proposal.status === 'declined') {
         sendJson(response, 409, {
           error: 'proposal_refused',
@@ -13678,7 +13709,7 @@ const server = createServer(async (request, response) => {
       const pdf = await buildProposalPdf({ proposal, firmSettings })
       const email = buildProposalEmail({ proposal, firmSettings })
       const sendResult = await sendInvoiceEmail({
-        to: [to],
+        to,
         subject: email.subject,
         html: email.html,
         text: email.text,
@@ -13690,7 +13721,8 @@ const server = createServer(async (request, response) => {
       await appDataStore.appendProposalEmailEvent(proposal.id, {
         kind: 'send',
         ok: sendResult.ok,
-        to: [to],
+        // The list actually used, one-time addresses included.
+        to,
         subject: email.subject,
         providerId: sendResult.providerId ?? null,
         error: sendResult.error ?? null,
@@ -13711,7 +13743,7 @@ const server = createServer(async (request, response) => {
         await appDataStore.recordActivity(
           session.user.id,
           'proposal_sent',
-          `${proposal.prospect.company || proposal.id} -> ${to}`,
+          `${proposal.prospect.company || proposal.id} -> ${to.join(', ')}`,
         )
       } catch (error) {
         console.error('[proposals] send bookkeeping failed after delivery:', error)

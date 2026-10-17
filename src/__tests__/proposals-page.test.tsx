@@ -984,22 +984,65 @@ describe('Preview PDF', () => {
   })
 })
 
+// featreq-34627da1: Send opens the shared recipient picker instead of a prompt.
+const openSendPicker = async () => {
+  fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
+  return within(await screen.findByRole('dialog', { name: 'Choose who this goes to' }))
+}
+const pickAndSend = async () => {
+  const dialog = await openSendPicker()
+  fireEvent.click(dialog.getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
+}
+
 describe('Send to prospect', () => {
-  it('asks for the address, prefilled from the prospect, and sends to what she confirms', async () => {
+  it('opens the picker with the prospect ticked, and sends to what she leaves ticked', async () => {
     api.getProposalRequest = vi.fn(async () => WITH_LETTER)
-    const prompt = vi.fn(() => 'pat@acme.test')
-    vi.stubGlobal('prompt', prompt)
     renderEditor('/proposals/prop-1?tab=letter')
-    fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
-    expect(prompt).toHaveBeenCalledWith('Send the proposal to which email address?', 'pat@acme.test')
-    await waitFor(() => expect(api.sendProposalRequest).toHaveBeenCalledWith('prop-1', 'pat@acme.test'))
+    const dialog = await openSendPicker()
+    expect(dialog.getByRole('checkbox', { name: /pat@acme.test/ })).toBeChecked()
+    expect(dialog.getByText('Goes to: pat@acme.test')).toBeTruthy()
+    fireEvent.click(dialog.getByRole('button', { name: 'Send to 1 person' }))
+    await waitFor(() => expect(api.sendProposalRequest).toHaveBeenCalledWith('prop-1', { to: ['pat@acme.test'] }))
   })
 
-  it('sends nothing when she cancels the address prompt', async () => {
-    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
-    vi.stubGlobal('prompt', vi.fn(() => null))
+  it("lists the client's contacts when the proposal is for a client, and posts an address added for this send", async () => {
+    contextValue = {
+      ...contextValue,
+      data: {
+        clients: [{ id: 'client-1', name: 'Existing Co', billingMode: 'subscription', contactIds: ['ct-1'] }],
+        contacts: [{ id: 'ct-1', name: 'Bea Books', email: 'bea@existing.test' }],
+      },
+    } as typeof contextValue
+    api.getProposalRequest = vi.fn(async () => ({ ...WITH_LETTER, clientId: 'client-1' }))
     renderEditor('/proposals/prop-1?tab=letter')
-    fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
+    const dialog = await openSendPicker()
+    expect(dialog.getByRole('checkbox', { name: /bea@existing.test/ })).not.toBeChecked()
+    fireEvent.click(dialog.getByRole('checkbox', { name: /bea@existing.test/ }))
+    fireEvent.change(dialog.getByLabelText('Add another address for this send only'), { target: { value: 'cfo@acme.test' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Add' }))
+    fireEvent.click(dialog.getByRole('button', { name: 'Send to 3 people' }))
+    await waitFor(() =>
+      expect(api.sendProposalRequest).toHaveBeenCalledWith('prop-1', {
+        to: ['pat@acme.test', 'bea@existing.test'],
+        extra: ['cfo@acme.test'],
+      }),
+    )
+  })
+
+  it('needs one address on file: everyone unticked disables Send and says why', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    renderEditor('/proposals/prop-1?tab=letter')
+    const dialog = await openSendPicker()
+    fireEvent.click(dialog.getByRole('checkbox', { name: /pat@acme.test/ }))
+    expect(dialog.getByRole('button', { name: 'Send to 0 people' })).toBeDisabled()
+    expect(dialog.getByRole('alert')).toHaveTextContent(/Pick at least one address on file/)
+  })
+
+  it('sends nothing when she cancels the picker', async () => {
+    api.getProposalRequest = vi.fn(async () => WITH_LETTER)
+    renderEditor('/proposals/prop-1?tab=letter')
+    const dialog = await openSendPicker()
+    fireEvent.click(dialog.getByRole('button', { name: 'Cancel' }))
     expect(api.sendProposalRequest).not.toHaveBeenCalled()
   })
 
@@ -1047,7 +1090,6 @@ describe('Send to prospect', () => {
 
   it('on a stale-letter 409, confirms with the server sentence and resends with confirmStaleFigures: true', async () => {
     api.getProposalRequest = vi.fn(async () => WITH_LETTER)
-    vi.stubGlobal('prompt', vi.fn(() => 'pat@acme.test'))
     const confirm = vi.fn(() => true)
     vi.stubGlobal('confirm', confirm)
     const staleError = new ApiError(
@@ -1060,10 +1102,10 @@ describe('Send to prospect', () => {
       .mockRejectedValueOnce(staleError)
       .mockResolvedValueOnce({ ...WITH_LETTER, status: 'sent' })
     renderEditor('/proposals/prop-1?tab=letter')
-    fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
+    await pickAndSend()
     await waitFor(() => expect(confirm).toHaveBeenCalledWith(staleError.message))
     await waitFor(() =>
-      expect(api.sendProposalRequest).toHaveBeenNthCalledWith(2, 'prop-1', 'pat@acme.test', {
+      expect(api.sendProposalRequest).toHaveBeenNthCalledWith(2, 'prop-1', { to: ['pat@acme.test'] }, {
         confirmStaleFigures: true,
       }),
     )
@@ -1074,7 +1116,6 @@ describe('Send to prospect', () => {
   // is confirmed before it goes - and both questions can come on one send.
   it('on an unpriced-lines 409, confirms with the server sentence and resends with confirmUnpriced: true', async () => {
     api.getProposalRequest = vi.fn(async () => WITH_LETTER)
-    vi.stubGlobal('prompt', vi.fn(() => 'pat@acme.test'))
     const confirm = vi.fn(() => true)
     vi.stubGlobal('confirm', confirm)
     const staleError = new ApiError(
@@ -1093,16 +1134,16 @@ describe('Send to prospect', () => {
       .mockRejectedValueOnce(unpricedError)
       .mockResolvedValueOnce({ ...WITH_LETTER, status: 'sent' })
     renderEditor('/proposals/prop-1?tab=letter')
-    fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
+    await pickAndSend()
     await waitFor(() => expect(confirm).toHaveBeenCalledWith(unpricedError.message))
     await waitFor(() =>
-      expect(api.sendProposalRequest).toHaveBeenNthCalledWith(3, 'prop-1', 'pat@acme.test', {
+      expect(api.sendProposalRequest).toHaveBeenNthCalledWith(3, 'prop-1', { to: ['pat@acme.test'] }, {
         confirmStaleFigures: true,
         confirmUnpriced: true,
       }),
     )
-    expect(api.sendProposalRequest).toHaveBeenNthCalledWith(1, 'prop-1', 'pat@acme.test')
-    expect(api.sendProposalRequest).toHaveBeenNthCalledWith(2, 'prop-1', 'pat@acme.test', {
+    expect(api.sendProposalRequest).toHaveBeenNthCalledWith(1, 'prop-1', { to: ['pat@acme.test'] })
+    expect(api.sendProposalRequest).toHaveBeenNthCalledWith(2, 'prop-1', { to: ['pat@acme.test'] }, {
       confirmStaleFigures: true,
     })
     expect(await screen.findByText('Sent', { selector: '.status-pill' })).toBeTruthy()
@@ -1110,7 +1151,6 @@ describe('Send to prospect', () => {
 
   it('does not send when she cancels the unpriced-lines confirm, and shows the sentence', async () => {
     api.getProposalRequest = vi.fn(async () => WITH_LETTER)
-    vi.stubGlobal('prompt', vi.fn(() => 'pat@acme.test'))
     vi.stubGlobal('confirm', vi.fn(() => false))
     const unpricedError = new ApiError(
       409,
@@ -1119,14 +1159,13 @@ describe('Send to prospect', () => {
     )
     api.sendProposalRequest = vi.fn().mockRejectedValueOnce(unpricedError)
     renderEditor('/proposals/prop-1?tab=letter')
-    fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
+    await pickAndSend()
     expect(await screen.findByText(unpricedError.message)).toBeTruthy()
     expect(api.sendProposalRequest).toHaveBeenCalledTimes(1)
   })
 
   it('does not resend, and shows the sentence, when she cancels the stale-figures confirm', async () => {
     api.getProposalRequest = vi.fn(async () => WITH_LETTER)
-    vi.stubGlobal('prompt', vi.fn(() => 'pat@acme.test'))
     vi.stubGlobal('confirm', vi.fn(() => false))
     const staleError = new ApiError(
       409,
@@ -1135,7 +1174,7 @@ describe('Send to prospect', () => {
     )
     api.sendProposalRequest = vi.fn().mockRejectedValueOnce(staleError)
     renderEditor('/proposals/prop-1?tab=letter')
-    fireEvent.click(await screen.findByRole('button', { name: 'Send to prospect' }))
+    await pickAndSend()
     await waitFor(() => expect(api.sendProposalRequest).toHaveBeenCalledTimes(1))
     expect(await screen.findByText(staleError.message, { selector: '.form-error' })).toBeTruthy()
   })

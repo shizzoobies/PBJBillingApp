@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { SavingTextarea } from '../SectionKit'
+import { RecipientPicker } from '../RecipientPicker'
+import type { InvoiceRecipientDetail } from '../../lib/utils'
 import { proposalDeliveryBadge, staleLetterFigureCount } from '../../lib/proposals'
 import type { Proposal } from '../../lib/types'
 
@@ -15,14 +17,18 @@ export function LetterTab({
   onDraft,
   onSaveText,
   onSend,
+  recipients,
 }: {
   proposal: Proposal
   busy: boolean
   onDraft: () => void
   onSaveText: (text: string) => void
-  onSend: (to: string) => void
+  onSend: (to: string[], extra: string[]) => void
+  /** The addresses on file the picker lists: the prospect's, then its client's (featreq-34627da1). */
+  recipients: InvoiceRecipientDetail[]
 }) {
   const [copied, setCopied] = useState(false)
+  const [picking, setPicking] = useState(false)
   const locked = proposal.status === 'accepted' || proposal.status === 'declined'
   const text = proposal.letter?.text ?? ''
   const badge = proposalDeliveryBadge(proposal)
@@ -31,12 +37,14 @@ export function LetterTab({
   // server enforces at send, rather than an alarm before she has even tried.
   const staleCount = staleLetterFigureCount(proposal)
 
-  // The address is confirmed on EVERY send; the prospect's email only fills it in.
-  const send = () => {
-    const to = window.prompt('Send the proposal to which email address?', proposal.prospect.email)
-    if (to === null || !to.trim()) return
-    onSend(to.trim())
-  }
+  // Who it goes to is chosen on EVERY send, in the shared recipient picker
+  // (featreq-34627da1): the prospect's address ticked, the client's contacts listed
+  // when there is a client, and up to three added for this send only.
+  const prospectEmail = proposal.prospect.email.trim().toLowerCase()
+  const defaultTo = recipients.some((detail) => detail.email.toLowerCase() === prospectEmail)
+    ? [proposal.prospect.email.trim()]
+    : null
+  const send = () => setPicking(true)
 
   const draft = () => {
     if (
@@ -97,6 +105,19 @@ export function LetterTab({
           {badge ? <span className="status-pill">{badge}</span> : null}
         </div>
       </div>
+      {picking ? (
+        <RecipientPicker
+          label={`The proposal for ${proposal.prospect.company || proposal.prospect.contactName || 'this prospect'}`}
+          details={recipients}
+          defaultTo={defaultTo}
+          emptyNote="There is no email address for this prospect yet. Add one above to send to it."
+          onSend={(to, extra) => {
+            setPicking(false)
+            onSend(to, extra)
+          }}
+          onCancel={() => setPicking(false)}
+        />
+      ) : null}
       {proposal.letter?.subject ? (
         <p className="muted-text">Subject: {proposal.letter.subject}</p>
       ) : null}

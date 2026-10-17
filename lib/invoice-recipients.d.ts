@@ -84,6 +84,18 @@ export declare function invoiceEmailAddressee<C extends object>(
   refusal: { readonly error: string; readonly message: string } | null
 }
 
+/**
+ * The addresses on file for a send to a party (a prospect's proposal or questionnaire
+ * link): the party's own first, then the client's by the invoice addressee rule.
+ */
+export declare function partyRecipientDetails(args: {
+  email?: string | null
+  source: string
+  client?: object | null
+  clients?: object[] | null
+  contacts?: ResolveInvoiceRecipientsArgs['contacts']
+}): InvoiceRecipientDetail[]
+
 /** Who a send goes to: the chosen on-file addresses plus the one-time extras. */
 export declare function resolveSendRecipients(args: {
   allowed: string[]
