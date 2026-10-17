@@ -122,13 +122,29 @@ describe('InvoiceMonthRun — who the invoice goes to', () => {
     expect(mockSend).not.toHaveBeenCalled()
   })
 
-  it('sends straight out when there is only one address — no dialog', async () => {
+  it('opens the picker even for ONE address, ticked, and shows the final list (featreq-34627da1)', async () => {
     await openEditor([invoice({ clientId: 'client-solo' })])
 
     fireEvent.click(screen.getByRole('button', { name: /^Send$/ }))
 
-    await waitFor(() => expect(mockSend).toHaveBeenCalledWith('inv-1', undefined))
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog')
+    expect(mockSend).not.toHaveBeenCalled()
+    expect(within(dialog).getByRole('checkbox', { name: /sol@solo.com/ })).toBeChecked()
+    expect(dialog).toHaveTextContent('Goes to: sol@solo.com')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send to 1 person' }))
+    await waitFor(() => expect(mockSend).toHaveBeenCalledWith('inv-1', ['sol@solo.com']))
+  })
+
+  it('unticking the only address disables Send and says why', async () => {
+    await openEditor([invoice({ clientId: 'client-solo' })])
+    fireEvent.click(screen.getByRole('button', { name: /^Send$/ }))
+    const dialog = await screen.findByRole('dialog')
+
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /sol@solo.com/ }))
+
+    expect(within(dialog).getByRole('button', { name: /^Send to 0 people/ })).toBeDisabled()
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(/Pick at least one address on file/)
+    expect(mockSend).not.toHaveBeenCalled()
   })
 
   it('opens the checkbox list with everyone ticked when there is a choice', async () => {

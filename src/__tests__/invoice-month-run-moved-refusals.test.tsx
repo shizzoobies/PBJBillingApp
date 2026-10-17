@@ -297,6 +297,7 @@ describe('InvoiceMonthRun — a void that lands mid-send reloads the month (feat
     ])
 
     fireEvent.click(await screen.findByRole('button', { name: /^Send$/ }))
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
 
     await waitFor(() => expect(mockList).toHaveBeenCalledTimes(2))
     expect(mockList).toHaveBeenLastCalledWith(mockList.mock.calls[0][0])
@@ -314,6 +315,7 @@ describe('InvoiceMonthRun — a void that lands mid-send reloads the month (feat
     await openEditor([makeInvoice({ status: 'reviewed' })], /^Reviewed/)
 
     fireEvent.click(await screen.findByRole('button', { name: /^Send$/ }))
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
 
     expect(await editor().findByText('The email provider refused.')).toBeInTheDocument()
     expect(mockList).toHaveBeenCalledTimes(1)
@@ -428,6 +430,7 @@ describe('InvoiceMonthRun — a failure that arrives after the editor is gone is
     const fail = pending(mockSend)
     await openEditor([makeInvoice({ status: 'reviewed' })], /^Reviewed/)
     fireEvent.click(await screen.findByRole('button', { name: /^Send$/ }))
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
     collapseRow()
 
     fail(sentence)
@@ -504,6 +507,7 @@ describe('InvoiceMonthRun — the same failures with the editor still open are u
     await openEditor([makeInvoice({ status: 'reviewed' })], /^Reviewed/)
 
     fireEvent.click(await screen.findByRole('button', { name: /^Send$/ }))
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
 
     await expectSaidOnceInEditor()
   })

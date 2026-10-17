@@ -196,9 +196,10 @@ describe('after a save that changed what the client sees on a sent invoice', () 
 
     fireEvent.click(await within(await waitFor(() => notice() as HTMLElement)).findByRole('button', { name: WITH_CHANGES }))
 
-    // One address on file, so it goes straight out, exactly as the footer's does.
+    // The recipient picker opens first, exactly as the footer's Send does (featreq-34627da1).
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to 1 person$/ }))
     await waitFor(() => expect(mockSend).toHaveBeenCalledTimes(1))
-    expect(mockSend).toHaveBeenCalledWith('inv-1', undefined)
+    expect(mockSend).toHaveBeenCalledWith('inv-1', [expect.any(String)])
     await waitFor(() => expect(notice()).toBeNull())
     expect(screen.queryByText('Changed since sent')).not.toBeInTheDocument()
   })
@@ -290,6 +291,7 @@ describe('Send again from the notice is the same Send', () => {
     mockSend.mockRejectedValue(new Error('Stripe is not configured yet.'))
 
     fireEvent.click(within(notice() as HTMLElement).getByRole('button', { name: WITH_CHANGES }))
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to 1 person$/ }))
 
     await waitFor(() => expect(editor().getAllByRole('alert')).toHaveLength(1))
     expect(editor().getByRole('alert')).toHaveTextContent('Stripe is not configured yet.')

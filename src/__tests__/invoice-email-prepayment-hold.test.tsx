@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoicesPage } from '../pages/InvoicesPage'
 import { ApiError, type Client, type PersistedInvoice } from '../lib/types'
@@ -96,8 +96,11 @@ const october = {
 
 const sentOctober = { ...october, status: 'sent', emailLog: [] } as unknown as PersistedInvoice
 
-const pressEmail = async () =>
+// The recipient picker opens before every send (featreq-34627da1): take its default.
+const pressEmail = async () => {
   fireEvent.click(await screen.findByRole('button', { name: 'Email invoice' }))
+  fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Send to 1 person' }))
+}
 
 beforeEach(() => {
   mockList.mockReset()
@@ -114,7 +117,7 @@ describe('Email invoice and the billing-period hold', () => {
     expect(ask.closest('.invoice-run-prepayment-ask')).not.toBeNull()
     expect(screen.getByRole('button', { name: 'Send anyway' })).toBeEnabled()
     expect(mockSend).toHaveBeenCalledTimes(1)
-    expect(mockSend).toHaveBeenCalledWith('inv-oct', undefined)
+    expect(mockSend).toHaveBeenCalledWith('inv-oct', ['quinn@q.test'])
   })
 
   it('Send anyway repeats the send with allowUnpaidPrepayment and clears the question', async () => {
@@ -124,7 +127,7 @@ describe('Email invoice and the billing-period hold', () => {
     await pressEmail()
     fireEvent.click(await screen.findByRole('button', { name: 'Send anyway' }))
     await waitFor(() => expect(mockSend).toHaveBeenCalledTimes(2))
-    expect(mockSend).toHaveBeenLastCalledWith('inv-oct', undefined, undefined, { allowUnpaidPrepayment: true })
+    expect(mockSend).toHaveBeenLastCalledWith('inv-oct', ['quinn@q.test'], [], { allowUnpaidPrepayment: true })
     await waitFor(() => expect(screen.queryByText(HOLD)).toBeNull())
   })
 

@@ -13557,6 +13557,18 @@ details.invoice-run-sent ul,
   min-width: 0;
 }
 
+/* The picker's final list, above its buttons: exactly who the send goes to. */
+.recipient-picker-final {
+  font-size: 13px;
+  margin: 10px 0 0;
+  overflow-wrap: anywhere;
+}
+
+/* Remind all: one collapsed picker per invoice inside the confirm. */
+.recipient-picker-line summary {
+  cursor: pointer;
+}
+
 /* The quiet "Send to other addresses..." beside a Send button. */
 .invoice-send-others {
   background: none;

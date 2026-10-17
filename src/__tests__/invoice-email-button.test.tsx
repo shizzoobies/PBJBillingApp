@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoicesPage } from '../pages/InvoicesPage'
 import type { Client, PersistedInvoice } from '../lib/types'
@@ -120,6 +120,11 @@ function renderPage() {
 
 const pressEmail = async () =>
   fireEvent.click(await screen.findByRole('button', { name: 'Email invoice' }))
+// The recipient picker opens before every send (featreq-34627da1): take its default.
+const acceptRecipients = async () =>
+  fireEvent.click(
+    within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }),
+  )
 
 beforeEach(() => {
   mockList.mockReset()
@@ -135,6 +140,7 @@ describe('Email invoice picks the month\'s invoice, never a retainer by accident
     renderPage()
 
     await pressEmail()
+    await acceptRecipients()
 
     await waitFor(() => expect(mockSend).toHaveBeenCalledOnce())
     expect(mockSend.mock.calls[0][0]).toBe('inv-monthly')
@@ -145,6 +151,7 @@ describe('Email invoice picks the month\'s invoice, never a retainer by accident
     renderPage()
 
     await pressEmail()
+    await acceptRecipients()
 
     await waitFor(() => expect(mockSend).toHaveBeenCalledOnce())
     expect(mockSend.mock.calls[0][0]).toBe('inv-monthly')
@@ -178,6 +185,7 @@ describe('Email invoice picks the month\'s invoice, never a retainer by accident
     renderPage()
 
     await pressEmail()
+    await acceptRecipients()
 
     await waitFor(() => expect(mockSend).toHaveBeenCalledOnce())
     expect(mockSend.mock.calls[0][0]).toBe('inv-monthly')

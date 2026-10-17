@@ -90,7 +90,7 @@ afterEach(() => {
 })
 
 describe('Send to other addresses... opens the picker', () => {
-  it('for a client with ONE address, where Send goes straight out', async () => {
+  it('for a client with ONE address', async () => {
     await openEditor([invoice()])
 
     const dialog = await openPicker()
@@ -100,15 +100,16 @@ describe('Send to other addresses... opens the picker', () => {
     expect(dialog.getByLabelText('Add another address for this send only')).toBeInTheDocument()
   })
 
-  it('leaves the ordinary one-click Send exactly as it was', async () => {
+  it('Send opens the same picker for one address (featreq-34627da1), with nothing extra on the wire', async () => {
     await openEditor([invoice()])
 
     fireEvent.click(screen.getByRole('button', { name: /^Send$/ }))
+    const dialog = within(await screen.findByRole('dialog'))
+    expect(mockSend).not.toHaveBeenCalled()
+    fireEvent.click(dialog.getByRole('button', { name: 'Send to 1 person' }))
 
     await waitFor(() => expect(mockSend).toHaveBeenCalledTimes(1))
-    // Nothing extra on the wire: the request is the one it always was.
-    expect(mockSend).toHaveBeenCalledWith('inv-1', undefined)
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(mockSend).toHaveBeenCalledWith('inv-1', ['sol@solo.com'])
   })
 
   it('for a client with NO address, where Send is dead', async () => {

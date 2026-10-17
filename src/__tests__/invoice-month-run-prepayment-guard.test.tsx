@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoiceMonthRun } from '../components/InvoiceMonthRun'
 import { ApiError, type Client, type Contact, type PersistedInvoice } from '../lib/types'
@@ -131,11 +131,12 @@ describe('Send on a marked invoice', () => {
     await openEditor(marked())
     mockSend.mockRejectedValueOnce(new ApiError(409, MESSAGE, 'prepayment_unpaid', 'unpaid'))
     fireEvent.click(sendButton())
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
     const ask = await screen.findByRole('alert')
     expect(ask).toHaveTextContent(MESSAGE)
     expect(screen.getByRole('button', { name: 'Send anyway' })).toBeEnabled()
     expect(mockSend).toHaveBeenCalledTimes(1)
-    expect(mockSend).toHaveBeenCalledWith('inv-nov', undefined)
+    expect(mockSend).toHaveBeenCalledWith('inv-nov', ['ann@q.test'])
   })
 
   it('Send anyway repeats the send with allowUnpaidPrepayment', async () => {
@@ -143,15 +144,17 @@ describe('Send on a marked invoice', () => {
     mockSend.mockRejectedValueOnce(new ApiError(409, MESSAGE, 'prepayment_unpaid', 'unpaid'))
     mockSend.mockResolvedValueOnce({ invoice: makeInvoice({ status: 'sent', sentAt: '2026-11-30T12:00:00.000Z' }) })
     fireEvent.click(sendButton())
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
     fireEvent.click(await screen.findByRole('button', { name: 'Send anyway' }))
     await waitFor(() => expect(mockSend).toHaveBeenCalledTimes(2))
-    expect(mockSend).toHaveBeenLastCalledWith('inv-nov', undefined, undefined, { allowUnpaidPrepayment: true })
+    expect(mockSend).toHaveBeenLastCalledWith('inv-nov', ['ann@q.test'], [], { allowUnpaidPrepayment: true })
   })
 
   it('Not now closes the question and sends nothing more', async () => {
     await openEditor(marked())
     mockSend.mockRejectedValueOnce(new ApiError(409, MESSAGE, 'prepayment_unpaid', 'unpaid'))
     fireEvent.click(sendButton())
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
     fireEvent.click(await screen.findByRole('button', { name: 'Not now' }))
     expect(screen.queryByRole('button', { name: 'Send anyway' })).toBeNull()
     expect(mockSend).toHaveBeenCalledTimes(1)
@@ -162,6 +165,7 @@ describe('Send on a marked invoice', () => {
     await openEditor(marked())
     mockSend.mockResolvedValueOnce({ invoice: makeInvoice({ status: 'sent', sentAt: '2026-11-30T12:00:00.000Z' }) })
     fireEvent.click(sendButton())
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
     await waitFor(() => expect(mockSend).toHaveBeenCalledTimes(1))
     expect(screen.queryByRole('button', { name: 'Send anyway' })).toBeNull()
   })
@@ -176,6 +180,7 @@ describe('the paid-but-not-applied hold (I-1)', () => {
     mockSend.mockRejectedValueOnce(new ApiError(409, NOT_APPLIED, 'prepayment_unpaid', 'not_applied'))
     const listCalls = mockList.mock.calls.length
     fireEvent.click(sendButton())
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
     expect(await screen.findByRole('alert')).toHaveTextContent(NOT_APPLIED)
     expect(screen.queryByRole('button', { name: 'Send anyway' })).toBeNull()
     expect(screen.getByRole('button', { name: 'OK' })).toBeInTheDocument()
@@ -193,6 +198,7 @@ describe('the paid-but-not-applied hold (I-1)', () => {
     mockSend.mockRejectedValueOnce(new ApiError(409, CLEARING, 'prepayment_unpaid', 'processing'))
     const listCalls = mockList.mock.calls.length
     fireEvent.click(sendButton())
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
     expect(await screen.findByRole('alert')).toHaveTextContent(CLEARING)
     expect(screen.queryByRole('button', { name: 'Send anyway' })).toBeNull()
     expect(screen.getByRole('button', { name: 'OK' })).toBeInTheDocument()
@@ -244,15 +250,16 @@ describe('the server backstop (a list that was stale)', () => {
     await openEditor(makeInvoice())
     mockSend.mockRejectedValueOnce(new ApiError(409, MESSAGE, 'prepayment_unpaid', 'unpaid'))
     fireEvent.click(sendButton())
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }))
     expect(await screen.findByRole('button', { name: 'Send anyway' })).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent(MESSAGE)
     // The ordinary send went out WITHOUT the override first.
-    expect(mockSend).toHaveBeenCalledWith('inv-nov', undefined)
+    expect(mockSend).toHaveBeenCalledWith('inv-nov', ['ann@q.test'])
 
     mockSend.mockResolvedValueOnce({ invoice: makeInvoice({ status: 'sent', sentAt: '2026-11-30T12:00:00.000Z' }) })
     fireEvent.click(screen.getByRole('button', { name: 'Send anyway' }))
     await waitFor(() => expect(mockSend).toHaveBeenCalledTimes(2))
-    expect(mockSend).toHaveBeenLastCalledWith('inv-nov', undefined, undefined, { allowUnpaidPrepayment: true })
+    expect(mockSend).toHaveBeenLastCalledWith('inv-nov', ['ann@q.test'], [], { allowUnpaidPrepayment: true })
   })
 })
 

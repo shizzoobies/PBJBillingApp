@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoicesPage } from '../pages/InvoicesPage'
 import { ApiError, type Client, type PersistedInvoice } from '../lib/types'
@@ -107,6 +107,10 @@ async function pressEmailAndWaitFor(sentence: string) {
   await act(async () => {})
   const before = mockList.mock.calls.length
   fireEvent.click(button)
+  // The recipient picker opens before every send (featreq-34627da1): take its default.
+  fireEvent.click(
+    within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to \d+ (person|people)$/ }),
+  )
   expect(await screen.findByText(sentence)).toBeInTheDocument()
   return before
 }

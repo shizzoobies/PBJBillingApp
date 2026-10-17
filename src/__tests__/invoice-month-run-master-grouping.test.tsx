@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoiceMonthRun } from '../components/InvoiceMonthRun'
 import type { Client, PersistedInvoice } from '../lib/types'
@@ -285,6 +285,8 @@ describe('InvoiceMonthRun — sending a master invoice with no recipient chosen'
     const send = screen.getByRole('button', { name: 'Send' })
     expect(send).not.toBeDisabled()
     fireEvent.click(send)
+    // The recipient picker opens before every send (featreq-34627da1).
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /^Send to 1 person$/ }))
 
     expect(
       await screen.findByText(

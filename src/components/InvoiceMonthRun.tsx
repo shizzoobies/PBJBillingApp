@@ -53,7 +53,7 @@ import {
   updateInvoiceRequest,
 } from '../lib/api'
 import { InvoicePreviewModal } from './InvoicePreviewModal'
-import { InvoiceRecipientPicker } from './InvoiceRecipientPicker'
+import { RecipientPicker } from './RecipientPicker'
 import { useAutopayAttempts } from '../hooks/useAutopayAttempts'
 import {
   autopayAttemptBadge,
@@ -3385,7 +3385,7 @@ function InvoiceEditor({
     canOverride: boolean
     review?: boolean
   } | null>(null)
-  // Open only when there is a choice to make — see `startSend`.
+  // The recipient picker, open before every send — see `startSend`.
   const [picking, setPicking] = useState(false)
   // Why the last save's retainer credit was refused. Kept here rather than on
   // the run, because it is about the lines on this screen and it arrives with
@@ -3780,26 +3780,19 @@ function InvoiceEditor({
   }
 
   /**
-   * What the Send button does. One address on file goes straight out — a dialog
-   * asking a question with one possible answer is friction, not a safeguard.
-   * Two or more opens the picker with everyone ticked, so the default is still
-   * "send to all of them" and unticking is the deliberate act.
+   * What the Send button does: open the picker with everyone ticked - even for a
+   * single address, because seeing who it goes to is the point (featreq-34627da1).
+   * "Send to all of them" is still one more click; unticking is the deliberate act.
    */
   const startSend = () => {
     if (recipients.to.length === 0) return
-    if (recipients.to.length === 1) {
-      void sendInvoice()
-      return
-    }
     setSendError(null)
     setPicking(true)
   }
 
   /**
-   * "Send to other addresses..." — the picker even when there is nothing to
-   * choose between. A client with ONE address on file sends straight out from
-   * Send, so without this she would have nowhere to add an extra one; a client
-   * with none can only be reached this way, by typing the address for this send.
+   * "Send to other addresses..." — the same picker, and the only way to reach a
+   * client with NO address on file: by typing the address for this send.
    */
   const startSendToOthers = () => {
     setSendError(null)
@@ -5362,8 +5355,8 @@ function InvoiceEditor({
       ) : null}
 
       {picking ? (
-        <InvoiceRecipientPicker
-          invoiceLabel={`${invoice.number ? `Invoice ${invoice.number}` : 'This invoice'} for ${clientName}`}
+        <RecipientPicker
+          label={`${invoice.number ? `Invoice ${invoice.number}` : 'This invoice'} for ${clientName}`}
           details={recipients.details}
           busy={sendBusy}
           onSend={(to, extra) => void sendInvoice(to, extra)}

@@ -51,7 +51,7 @@ import { invoiceDisplayDate, paymentTermsLabel } from '../../lib/invoice-draft.j
 import { mailingAddressLines } from '../../lib/mailing-address.js'
 import type { InvoiceLineOut, InvoiceRoleTier } from '../../lib/invoice-lines.js'
 import { InvoiceDeliveryBadge } from '../components/InvoiceDeliveryBadge'
-import { InvoiceRecipientPicker } from '../components/InvoiceRecipientPicker'
+import { RecipientPicker } from '../components/RecipientPicker'
 import { PrepaymentHoldNotice } from '../components/PrepaymentHoldNotice'
 import { prepaymentHoldOf } from '../lib/prepaymentHold'
 import {
@@ -900,19 +900,14 @@ export function InvoicesPage({
       }
 
       const label = stored.number ? `Invoice ${stored.number}` : 'This invoice'
-      // One address goes straight out; two or more get the checkbox list, all
-      // ticked, so she can leave one off. Same rule as the month run. The
-      // "other addresses" link opens it regardless, to add one for this send.
-      if (recipients.to.length > 1 || chooseAddresses) {
-        setPickingSend({
-          invoiceId: stored.id,
-          label: `${label} for ${selectedClient.name}`,
-          details: recipients.details,
-        })
-        return
-      }
-
-      await performSend(stored.id)
+      // Always the checkbox list, all ticked, even for one address: she sees who
+      // it goes to and can leave one off or add one for this send. Same rule as
+      // the month run (featreq-34627da1).
+      setPickingSend({
+        invoiceId: stored.id,
+        label: `${label} for ${selectedClient.name}`,
+        details: recipients.details,
+      })
     } catch (err) {
       // The endpoint answers with sentences meant for a person — no recipients
       // on file, the provider refused — so show what it said.
@@ -1041,11 +1036,11 @@ export function InvoicesPage({
         />
       ) : null}
 
-      {/* The checkbox list for a client with more than one address on file.
-          Rendered at the page root so it overlays whichever half is showing. */}
+      {/* The checkbox list, before every send. Rendered at the page root so it
+          overlays whichever half is showing. */}
       {pickingSend ? (
-        <InvoiceRecipientPicker
-          invoiceLabel={pickingSend.label}
+        <RecipientPicker
+          label={pickingSend.label}
           details={pickingSend.details}
           busy={sendBusy}
           onSend={(to, extra) => void performSend(pickingSend.invoiceId, to, extra)}

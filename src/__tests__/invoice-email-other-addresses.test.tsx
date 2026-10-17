@@ -161,14 +161,17 @@ describe('Send to other addresses... beside Email invoice', () => {
     ).toBeInTheDocument()
   })
 
-  it('leaves Email invoice itself exactly as it was: one address goes straight out', async () => {
+  it('Email invoice opens the same picker for one address (featreq-34627da1)', async () => {
     renderPage()
 
     fireEvent.click(await screen.findByRole('button', { name: 'Email invoice' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    expect(mockSend).not.toHaveBeenCalled()
+    expect(dialog.getByRole('checkbox', { name: /hana@hourly.test/ })).toBeChecked()
+    fireEvent.click(dialog.getByRole('button', { name: 'Send to 1 person' }))
 
     await waitFor(() => expect(mockSend).toHaveBeenCalledTimes(1))
-    expect(mockSend).toHaveBeenCalledWith('inv-monthly', undefined)
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(mockSend).toHaveBeenCalledWith('inv-monthly', ['hana@hourly.test'])
   })
 
   it('reaches a client with no address on file, where Email invoice only says there is none', async () => {
@@ -245,13 +248,15 @@ describe("a billing master's invoice, from the lower button", () => {
     expect(dialog.getAllByRole('checkbox')).toHaveLength(1)
   })
 
-  it('Email invoice sends straight out to the one address the master names', async () => {
+  it('Email invoice offers the one address the master names, and sends to it', async () => {
     renderPage()
 
     fireEvent.click(await screen.findByRole('button', { name: 'Email invoice' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    fireEvent.click(dialog.getByRole('button', { name: 'Send to 1 person' }))
 
     await waitFor(() => expect(mockSend).toHaveBeenCalledTimes(1))
-    expect(mockSend).toHaveBeenCalledWith('inv-monthly', undefined)
+    expect(mockSend).toHaveBeenCalledWith('inv-monthly', ['ap@alpha.test'])
     expect(screen.queryByText(/No email address on file/)).not.toBeInTheDocument()
   })
 })
