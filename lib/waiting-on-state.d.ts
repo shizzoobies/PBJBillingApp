@@ -75,6 +75,9 @@ export function hasLiveSavedWaitInTree(
 export function stageOpenWorkAllWaiting(
   checklist: { items?: Array<WaitingStepLike & { done?: boolean; subItems?: unknown[] }> } | undefined,
 ): boolean
+export function stageFinished(
+  checklist: { items?: Array<{ done?: boolean; subItems?: unknown[] }> } | undefined,
+): boolean
 export function waitingBlocksCompletion(
   node: (WaitingStepLike & { done?: boolean; subItems?: unknown[] }) | undefined,
 ): boolean

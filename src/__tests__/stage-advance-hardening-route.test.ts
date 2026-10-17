@@ -54,11 +54,13 @@ describe('POST /api/checklists/:id/items/:itemId/toggle when the next stage cann
   it('records case_advance_skipped only for the reasons that should have advanced', () => {
     const tail = toggleRouteTail()
     expect(tail).toContain(
-      "const SHOULD_HAVE_ADVANCED = ['no_template', 'template_not_found', 'no_stages', 'next_stage_empty']",
+      "const SHOULD_HAVE_ADVANCED = ['no_template', 'template_not_found', 'no_stages', 'next_stage_empty', 'later_stage_exists', 'date_taken']",
     )
     const at = tail.indexOf("'case_advance_skipped'")
     expect(at).toBeGreaterThan(tail.indexOf("'case_advance_failed'"))
-    expect(tail.slice(at, at + 300)).toContain('`${where}: ${toggleResult.spawnReason}`')
+    expect(tail.slice(at, at + 300)).toContain(
+      '`${where}: ${toggleResult.spawnReason}${toggleResult.spawnHeldBy ? ` (held by ${toggleResult.spawnHeldBy})` : \'\'}`',
+    )
   })
 
   it('answers 200 with the checklist and stageAdvanceFailed - never a 500 for a saved tick', () => {

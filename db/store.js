@@ -70,6 +70,7 @@ import {
   REMOVAL_WOULD_COMPLETE_WAITING_STEP,
   removalOpenWaitRefusal,
   removalWouldCompleteWaitingStep,
+  stageFinished,
   stageOpenWorkAllWaiting,
   toggleClosingWaits,
   waitingLockRefusal,
@@ -4668,10 +4669,10 @@ export class StepIsWaitingError extends Error {
  * Thrown by `openNextStageEarly` (Open next step now, featreq-8b54d117) when the
  * next stage may not be opened from this checklist. `reason` is machine-readable:
  * `not_found`, `skipped`, `pushed`, `onboarding`, `last_stage`, `already_spawned`,
- * `not_ready` (some open step is not waiting), `date_taken` (Postgres: another
+ * `not_ready` (some open step is neither done nor waiting), `date_taken` (another
  * case of the same recipe holds that step on that date), or a
  * `maybeSpawnNextStage` reason (`next_stage_empty`, `no_template`,
- * `template_not_found`, `no_stages`). The
+ * `template_not_found`, `no_stages`, `later_stage_exists`). The
  * route turns it into a sentence. Nothing was written.
  */
 export class NextStageRefusedError extends Error {
@@ -4685,6 +4686,9 @@ export class NextStageRefusedError extends Error {
 /**
  * Why `openNextStageEarly` may not open the next stage from `checklist`, or null.
  * Decided on the data as read: the spawn itself re-checks `already_spawned`.
+ * Ready means every open step is waiting, OR every step is done and the next
+ * stage never opened (featreq-ed73d181: a stall from before the 10-12 hardening
+ * left a finished stage with no next one, and nothing else could advance it).
  */
 function openNextStageEarlyRefusal(data, checklist) {
   if (!checklist) return 'not_found'
@@ -4698,8 +4702,22 @@ function openNextStageEarlyRefusal(data, checklist) {
   if ((data.checklists ?? []).some((entry) => entry.caseId === caseId && entry.stageIndex === stageIndex + 1)) {
     return 'already_spawned'
   }
-  if (!stageOpenWorkAllWaiting(checklist)) return 'not_ready'
+  if (!stageOpenWorkAllWaiting(checklist) && !stageFinished(checklist)) return 'not_ready'
   return null
+}
+
+/**
+ * The live row of ANOTHER case that holds the instance slot `spawn` needs: same
+ * recipe, same identity date, same stage - the tuple the v3 unique index keys on
+ * (deleted and pushed-away rows excluded, as the index excludes them). Saylor
+ * Grace 2026-10-16: a second June case held step 3 on the same date, so the
+ * spawn's insert died on the index. Null when the slot is free.
+ */
+function nextStageInstanceHolder(checklists, spawn, caseId) {
+  const others = (checklists ?? []).filter(
+    (entry) => entry && (entry.caseId || entry.id) !== caseId && !entry.deletedAt && !entry.pushedToChecklistId,
+  )
+  return findChecklistInstance(others, spawn.templateId, spawn.dueDate, spawn.stageIndex) ?? null
 }
 
 /**
@@ -5642,6 +5660,8 @@ const STAGE_ADVANCE_LOGGED_SKIPS = new Set([
   'no_stages',
   'already_spawned',
   'next_stage_empty',
+  'later_stage_exists',
+  'date_taken',
 ])
 
 /**
@@ -21793,11 +21813,13 @@ export class AppDataStore {
       // reported as `spawnError`, logged, and a second tick retries it.
       let spawn = null
       let spawnReason = null
+      let spawnHeldBy = null
       let spawnError = null
       try {
         const advance = await this.maybeSpawnNextStage(data, updated)
         spawn = advance.spawned
         spawnReason = advance.reason
+        spawnHeldBy = advance.heldBy ?? null
       } catch (error) {
         spawnError = stageAdvanceFailure(updated, error)
       }
@@ -21819,6 +21841,7 @@ export class AppDataStore {
         checklist: updated,
         spawned: spawn,
         spawnReason,
+        ...(spawnHeldBy ? { spawnHeldBy } : {}),
         ...(spawnError ? { spawnError } : {}),
         ...(closeWaitsBy ? { closedWaits } : {}),
       }
@@ -21900,6 +21923,7 @@ export class AppDataStore {
       // the Postgres branch gives, where the tick has already committed.
       let spawn = null
       let spawnReason = null
+      let spawnHeldBy = null
       let spawnError = null
       try {
         const advance = await this.maybeSpawnNextStage(data, updatedChecklist, { fileMode: true })
@@ -21908,6 +21932,7 @@ export class AppDataStore {
         }
         spawn = advance.spawned
         spawnReason = advance.reason
+        spawnHeldBy = advance.heldBy ?? null
       } catch (error) {
         spawnError = stageAdvanceFailure(updatedChecklist, error)
       }
@@ -21929,6 +21954,7 @@ export class AppDataStore {
         checklist: updatedChecklist,
         spawned: spawn,
         spawnReason,
+        ...(spawnHeldBy ? { spawnHeldBy } : {}),
         ...(spawnError ? { spawnError } : {}),
         ...(closeWaitsBy ? { closedWaits } : {}),
       }
@@ -21943,7 +21969,9 @@ export class AppDataStore {
    * `{ spawned, reason }`: the spawned checklist with `reason: null`, or
    * `spawned: null` and the reason it did not advance (`not_all_done`,
    * `pushed`, `last_stage`, `no_template`, `template_not_found`, `no_stages`,
-   * `already_spawned`, `next_stage_empty`).
+   * `already_spawned`, `later_stage_exists`, `next_stage_empty`, `date_taken`).
+   * `date_taken` also carries `heldBy`: the other case's checklist in that slot,
+   * found before the insert or, on Postgres, on the re-read after a 23505.
    *
    * `allowWaiting` (Open next step now, featreq-8b54d117 - only
    * `openNextStageEarly` passes it): a stage whose open work is all held by
@@ -21964,19 +21992,23 @@ export class AppDataStore {
     // Bright Tower 2026-10-01 and XAct 2026-10-05 stopped at stage 1 with no
     // trace). The reasons that mean "all done, yet no next stage" and are not
     // the ordinary end of a case are logged, so the next one leaves a line.
-    const skip = (reason) => {
+    // `heldBy` (date_taken only): the other case's checklist holding the slot.
+    const skip = (reason, heldBy = null) => {
       if (STAGE_ADVANCE_LOGGED_SKIPS.has(reason)) {
         console.log(
-          `[stage-advance] skipped ${checklist.id} case ${checklist.caseId || checklist.id}: ${reason}`,
+          `[stage-advance] skipped ${checklist.id} case ${checklist.caseId || checklist.id}: ${reason}${heldBy ? ` (held by ${heldBy})` : ''}`,
         )
       }
-      return { spawned: null, reason }
+      return heldBy ? { spawned: null, reason, heldBy } : { spawned: null, reason }
     }
     if (!checklist || !Array.isArray(checklist.items) || checklist.items.length === 0) {
       return { spawned: null, reason: 'not_all_done' }
     }
     const allDone = checklist.items.every((item) => item.done)
-    if (!allDone && !(allowWaiting && stageOpenWorkAllWaiting(checklist))) return skip('not_all_done')
+    // Open next step now also revives a finished stage whose next one never
+    // opened (featreq-ed73d181), read through the roll-up.
+    const readyEarly = allowWaiting && (stageOpenWorkAllWaiting(checklist) || stageFinished(checklist))
+    if (!allDone && !readyEarly) return skip('not_all_done')
     // A row that handed its open work to a pushed copy is a completed RECORD,
     // not the live stage: re-checking one of its steps must not spawn the next
     // stage (the new row carries that duty).
@@ -22000,12 +22032,27 @@ export class AppDataStore {
       (entry) => entry.caseId === caseId && entry.stageIndex === stageIndex + 1,
     )
     if (alreadySpawned) return skip('already_spawned')
+    // A LATER stage of this case is already live (Saylor Grace 2026-10-16: step 3
+    // binned in August, steps 4-6 live). Creating the missing step behind it
+    // would reopen work the case has moved past; say so instead.
+    const laterStageLive = (data.checklists ?? []).some(
+      (entry) =>
+        entry.caseId === caseId &&
+        !entry.deletedAt &&
+        typeof entry.stageIndex === 'number' &&
+        entry.stageIndex > stageIndex + 1,
+    )
+    if (laterStageLive) return skip('later_stage_exists')
 
     const spawn = buildSpawnedNextStageChecklist({
       template: { ...template, stages },
       justCompletedChecklist: checklist,
     })
     if (!spawn) return skip('next_stage_empty')
+    // Another case of this recipe already holds this step on this date: the v3
+    // instance index would refuse the insert. Not a failure - visible, and named.
+    const holder = nextStageInstanceHolder(data.checklists, spawn, caseId)
+    if (holder) return skip('date_taken', holder.id)
 
     if (fileMode) {
       // Caller persists; just return the new instance. Postgres refuses a
@@ -22031,6 +22078,9 @@ export class AppDataStore {
         (entry) => entry.caseId === caseId && entry.stageIndex === stageIndex + 1,
       )
       if (landed) return skip('already_spawned')
+      // ...or another case took that step's slot on that date in the meantime.
+      const raced = nextStageInstanceHolder(fresh.checklists, spawn, caseId)
+      if (raced) return skip('date_taken', raced.id)
       throw error
     }
     // Auto-grant the new stage's assignee visibility into the client. The stage
@@ -22051,6 +22101,8 @@ export class AppDataStore {
    * this stage's remaining work is all waiting. This stage stays open; its waits
    * clear and its steps are ticked as usual, and the tick that finishes it finds
    * the next stage already there (`already_spawned`) rather than making another.
+   * It also revives a stage that is already finished but whose next stage never
+   * opened (featreq-ed73d181); the spawn is the same one a tick would have made.
    *
    * Refuses with `NextStageRefusedError` (see `openNextStageEarlyRefusal`); on
    * success returns `{ checklist, spawned }`. Onboarding cases are refused: their

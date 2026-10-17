@@ -275,6 +275,7 @@ import {
   removalOpenWaitRefusal,
   removalWouldCompleteWaitingStep,
   SELF_WAIT_REFUSAL,
+  stageFinished,
   WAIT_ALREADY_CLOSED,
   WAIT_ALREADY_MARKED_DONE,
   WAIT_NOT_DONE_YET_TO_APPROVE,
@@ -15330,7 +15331,8 @@ const server = createServer(async (request, response) => {
     // all other steps checked off, a button to open next step populates to push
     // the next step while waiting." Starts the case's next stage while this one's
     // remaining work is all waiting; this stage stays open until its waits clear.
-    // Not Push (that moves a task to a new date). The store decides and refuses
+    // It also revives a finished stage whose next step never opened
+    // (featreq-ed73d181) - the store decides which. Not Push (that moves a task to a new date). The store decides and refuses
     // (NextStageRefusedError); this route checks who may ask and words the answer.
     const checklistOpenNextStageMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)\/open-next-stage$/)
     if (checklistOpenNextStageMatch) {
@@ -15367,6 +15369,9 @@ const server = createServer(async (request, response) => {
 
       const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
       const template = (data.checklistTemplates ?? []).find((entry) => entry.id === checklist.templateId)
+      // featreq-ed73d181: the store also revives a FINISHED stage whose next step
+      // never opened; the Activity row says which kind of open this was.
+      const revived = stageFinished(checklist)
       let result
       try {
         result = await appDataStore.openNextStageEarly(checklistId, session.user.id)
@@ -15392,7 +15397,7 @@ const server = createServer(async (request, response) => {
       await appDataStore.recordActivity(
         session.user.id,
         'case_advanced_early',
-        `${from.title} · case ${caseId} · stage ${fromIdx} -> stage ${fromIdx + 1} (opened while waiting)`,
+        `${from.title} · case ${caseId} · stage ${fromIdx} -> stage ${fromIdx + 1} (${revived ? 'opened after the step was finished' : 'opened while waiting'})`,
       )
       // The next stage's assignee is told exactly as a finished stage tells them.
       const nextAssigneeId = spawned?.assigneeId
@@ -15578,7 +15583,10 @@ const server = createServer(async (request, response) => {
       // second tick retries); an all-done stage that should have advanced but
       // had nothing to advance to is `spawnReason`. Both leave an Activity row.
       const stageAdvanceFailed = toggleResult.spawnError || null
-      const SHOULD_HAVE_ADVANCED = ['no_template', 'template_not_found', 'no_stages', 'next_stage_empty']
+      // `later_stage_exists` / `date_taken` (featreq-ed73d181, Saylor Grace
+      // 2026-10-16): the case already moved past this step, or another case of
+      // the recipe holds it on that date - visible, named, never a failure.
+      const SHOULD_HAVE_ADVANCED = ['no_template', 'template_not_found', 'no_stages', 'next_stage_empty', 'later_stage_exists', 'date_taken']
       if (stageAdvanceFailed || SHOULD_HAVE_ADVANCED.includes(toggleResult.spawnReason)) {
         const fromIdx = (updatedChecklist.stageIndex ?? 0) + 1
         const caseId = updatedChecklist.caseId || updatedChecklist.id
@@ -15593,7 +15601,7 @@ const server = createServer(async (request, response) => {
           await appDataStore.recordActivity(
             session.user.id,
             'case_advance_skipped',
-            `${where}: ${toggleResult.spawnReason}`,
+            `${where}: ${toggleResult.spawnReason}${toggleResult.spawnHeldBy ? ` (held by ${toggleResult.spawnHeldBy})` : ''}`,
           )
         }
       }
