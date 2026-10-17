@@ -1,0 +1,21 @@
+{
+  "at": "2026-10-17T18:50:08.763Z",
+  "reason": "featreq-ed73d181: I-95 Quarterly Reconciliations with Review step 2 never spawned; re-tick via store.toggleChecklistItem",
+  "actor": "emp-alex-anderson",
+  "caseId": "case-8b17c9df",
+  "before": {
+    "check-928df429": [
+      {
+        "id": "item-3efe0a4f",
+        "label": "TD Bank 7765",
+        "done": true,
+        "completed_at": "2026-10-07T20:20:30.044Z"
+      }
+    ],
+    "stageIndex1RowsForCase": []
+  },
+  "undo": [
+    "delete from checklists where case_id = 'case-8b17c9df' and stage_index = 1; -- items cascade (checklist_items_checklist_id FK on delete cascade)",
+    "update checklist_items set done = true, completed_at = '2026-10-07T20:20:30.044Z' where checklist_id = 'check-928df429' and id = 'item-3efe0a4f';"
+  ]
+}
