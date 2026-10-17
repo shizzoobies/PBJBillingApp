@@ -132,3 +132,51 @@ describe.each(cases)('the Dashboard queue ($viewer)', ({ viewer, region }) => {
     expect(within(queue).queryByText('Client Meeting (skipped)')).not.toBeInTheDocument()
   })
 })
+
+// No Dashboard number counts a skipped task: the same rule reaches the owner's
+// Team overview counts and the staff Watching list.
+describe('the rest of the Dashboard leaves skipped tasks out too', () => {
+  it("the owner's Team overview counts only Lisa's unskipped task as open and overdue", () => {
+    signInWith('owner', () => [
+      task('cl-skipped', 'Client Meeting (skipped)', LISA, { ...SKIPPED, dueDate: '2000-01-01' }),
+      task('cl-open', 'Monthly close', LISA, { dueDate: '2000-01-01' }),
+    ])
+    renderDashboard()
+
+    const team = screen.getByRole('region', { name: 'Team' })
+    const text = (team.textContent ?? '').replace(/\s+/g, ' ')
+    expect(text).toContain('Lisa Chen')
+    expect(text).toContain('1 open')
+    expect(text).toContain('1 overdue')
+    expect(text).not.toContain('2 open')
+    expect(text).not.toContain('2 overdue')
+  })
+
+  it('the staff Watching list leaves out a skipped task', () => {
+    signInWith('staff', () => [
+      task('cl-skipped', 'Client Meeting (skipped)', BRITT, {
+        ...SKIPPED,
+        viewerIds: [LISA],
+      } as Partial<Checklist>),
+      task('cl-open', 'Monthly close', BRITT, { viewerIds: [LISA] } as Partial<Checklist>),
+    ])
+    renderDashboard()
+
+    const watching = screen.getByRole('region', { name: 'Watching' })
+    expect(within(watching).getByText('Monthly close')).toBeInTheDocument()
+    expect(within(watching).queryByText('Client Meeting (skipped)')).not.toBeInTheDocument()
+  })
+
+  it('the staff Watching list is empty when the only watched task is skipped', () => {
+    signInWith('staff', () => [
+      task('cl-skipped', 'Client Meeting (skipped)', BRITT, {
+        ...SKIPPED,
+        viewerIds: [LISA],
+      } as Partial<Checklist>),
+    ])
+    renderDashboard()
+
+    const watching = screen.getByRole('region', { name: 'Watching' })
+    expect(within(watching).getByText("Nothing you're watching.")).toBeInTheDocument()
+  })
+})

@@ -647,8 +647,9 @@ function OwnerDashboardView() {
         ) : (
           <div className="dashboard-team-grid">
             {analyticsMembers.map((member) => {
+              // A skipped task is neither open nor overdue, as in the queue.
               const memberChecklists = data.checklists.filter(
-                (c) => c.assigneeId === member.id && !isComplete(c),
+                (c) => !isChecklistSkipped(c) && c.assigneeId === member.id && !isComplete(c),
               )
               const overdueCount = memberChecklists.filter(
                 (c) => c.dueDate && c.dueDate < todayIso,
@@ -957,8 +958,10 @@ function EmployeeDashboardView() {
   )
   const queueLater = myChecklists.filter((c) => c.dueDate && c.dueDate > weekEndIso)
 
-  // Watching: viewer-only (not assignee, not editor).
+  // Watching: viewer-only (not assignee, not editor). A skipped task is left
+  // out, as in the queue.
   const watching = data.checklists.filter((c) => {
+    if (isChecklistSkipped(c)) return false
     if (c.assigneeId === userId) return false
     if ((c.editorIds ?? []).includes(userId)) return false
     return (c.viewerIds ?? []).includes(userId)
