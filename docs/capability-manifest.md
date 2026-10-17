@@ -29,11 +29,11 @@ Sidebar pages: those grouped in the next paragraph (Engagements, Letters and Upd
 
 ## Dashboard
 
-- At-a-glance cards: overdue tasks, due this week, stuck cases, unbilled hours. Each card links to the relevant page.
-- "Your queue": checklist items assigned to you that need action.
+- At-a-glance cards: overdue tasks, due this week, stuck cases, unbilled hours. Each links to its page.
+- "Your queue": checklist items assigned to you that need action (skipped tasks are left out).
 - Team overview (owner): each member's open/overdue counts, last active, link to view their tasks.
 - Cases in flight: multi-step cases with current step, who holds it, and a Stuck badge when blocked. Click to open the case.
-- **"Skipped and pushed tasks to review (N)" (owner only)** - this year's quietly-skipped recurring tasks AND those pushed to a new date, newest first: the task, the client, who did it, when, which of the three reasons they picked, and their written explanation. A pushed row reads "Pushed to &lt;date&gt;" where a skipped row reads "Skipped". Each row's "Reviewed" clears it off the dashboard; **reviewing keeps the record** (an audit trail stamped with who reviewed it and when, never deleted). Hidden when nothing needs review; never shown to a bookkeeper or accountant. See "Skipping a recurring task" and "Pushing a recurring task to a new date" under Checklists.
+- **"Skipped and pushed tasks to review (N)" (owner only)** - this year's skipped recurring tasks AND those pushed to a new date, newest first: the task, the client, who did it, when, which of the three reasons they picked, and their written explanation. A pushed row reads "Pushed to &lt;date&gt;", a skipped one "Skipped". Each row's "Reviewed" clears it; **reviewing keeps the record** (an audit trail of who reviewed it and when, never deleted). Hidden when nothing needs review; never shown to a bookkeeper or accountant. See "Skipping a recurring task" and "Pushing a recurring task to a new date" under Checklists.
 - **"Invoices past due (N)" (owner only)** - every past-due invoice across ALL months, oldest line first: invoice number, client, when it was sent, days past due, total, and a link to the Invoices page. Same rule as the month run's **Past due** tab; one with a failed payment is left out here (it has its own tab). Hidden when nothing is past due, and never shown to a bookkeeper or while an owner is previewing as somebody else.
 - Recent activity feed (owner).
 - Quick actions: New task, Invite bookkeeper, Add client, Notifications.

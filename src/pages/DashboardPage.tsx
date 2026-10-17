@@ -385,8 +385,10 @@ function OwnerDashboardView() {
     .filter((entry) => entry.billable && isInBillingPeriod(entry, billingPeriod))
     .reduce((total, entry) => total + entry.minutes, 0)
 
+  // A skipped task is closed out for its cycle without its steps being ticked,
+  // so it never rolls up complete; the queue leaves it out like the cards above.
   const myChecklists = data.checklists.filter(
-    (c) => c.assigneeId === activeEmployeeId && !isComplete(c),
+    (c) => !isChecklistSkipped(c) && c.assigneeId === activeEmployeeId && !isComplete(c),
   )
   const queueToday = myChecklists.filter((c) => !c.dueDate || c.dueDate <= todayIso)
   const queueWeek = myChecklists.filter(
@@ -945,8 +947,9 @@ function EmployeeDashboardView() {
     return ids
   }, [activity, data.checklists, threeDaysAgo, userId])
 
+  // Same as the owner view: a skipped task is not in the queue.
   const myChecklists = data.checklists.filter(
-    (c) => c.assigneeId === userId && !isComplete(c),
+    (c) => !isChecklistSkipped(c) && c.assigneeId === userId && !isComplete(c),
   )
   const queueToday = myChecklists.filter((c) => !c.dueDate || c.dueDate <= todayIso)
   const queueWeek = myChecklists.filter(
