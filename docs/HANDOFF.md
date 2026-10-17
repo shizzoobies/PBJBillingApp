@@ -25,6 +25,33 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
+**2026-10-17 (~20:00Z) - FIVE SHIPS + one approved prod write; READ THIS FIRST.** `main` = `f3fb36e7` (+ this handoff),
+deployed, `/health` 200, voice re-provisioned, manifest 204,951 (49 under the cap - TRIM FIRST), only the primary worktree.
+Fable orchestrating, Opus 5.5 implementers, Sonnet reviews, one lane + one deploy each; every bug was DIAGNOSED READ-ONLY
+against production before any code (diag notes in the session scratchpad; the facts are on the tickets). **Shipped:**
+`97f4e337` Dashboard Your queue / cards / Team overview / Watching leave SKIPPED tasks out (featreq-9c818fca - her two
+skipped Dobco meetings); `cec67268` a waiting-on BLOCKER's bell + Dashboard card + question notice open THEIR Delayed page
+(`/delayed?tab=blocking&focus=<waitId>`, `blockerWaitLink` / `waitNoticeLink` in lib/waiting-on-state.js; email stays
+app-root) (featreq-4fd52a3c - the Saylor "delay" was workflow: Allison Done -> Lisa Approve+tick); `5b778de3` stalled
+cases: "Open next step now" also accepts a FINISHED stage whose next never opened, two spawn guards in
+maybeSpawnNextStage (`later_stage_exists`, cross-case 23505 -> `date_taken` as case_advance_skipped naming the holder),
+Dashboard Stuck cases lists "Finished, next step never opened" for stages due in the last 90 days (188 OLD stalled cases
+exist, mostly August imports - hidden by the window, recoverable from their cards; cleanup = Alex), the add-task-then-tick
+stall lead NOT reproduced (pinned) (featreq-ed73d181); `f3fb36e7` **recipient picker** on every manual client send
+(invoice Send, reminders, Remind all, Letters, engagement, proposal, questionnaire link, autopay invite; shared
+src/components/RecipientPicker.tsx; server `to` STRICT via resolveSendRecipients + <=3 `extra`; GET
+/api/engagements/:id/recipients; one-time-only sends allowed ONLY when nothing is on file) (featreq-34627da1 stage 1;
+stage 2 = per-client "Send invoices to" default driving automatic reminders/receipts - needs her answer + a schema
+change). **Prod write (Alex approved):** I-95 case-8b17c9df stage 2 re-spawned via scripts/prod/i95-respawn-2026-10-17.mjs
+(untick+re-tick through store.toggleChecklistItem; snapshot docs/prod-snapshots/2026-10-17-i95-respawn.json). Also
+`a734d8cb` ship.sh compares /health on 7 chars (`--short` grew to 8 and a LIVE deploy read as never-showed). **Tickets:**
+9c818fca / 4fd52a3c / ed73d181 / 34627da1 (needs_input) / 2b067744 Shipped, b77e2f7d done (confirmation). **Questions
+to her (on the tickets):** which I-95 recipes to switch back on + continue the Sept Monthly Recs; whether Allison hit the
+dead end before Done; once-per-client default + which email went astray. **For Alex:** Saylor case-b2ce4441 is malformed
+(stage 2 binned, 3-5 live, stage_count 6) - data decision; the 188 old stalls; chip task_7fcd25b4 (file-backend
+appendChecklistItems race = plausible stall trigger). The auto-mode classifier blocked nothing after Alex's "run it for
+me I approve" earlier in the week, except the first attempt; `git push` itself is still blocked - ship.sh is the path.
+
 **2026-10-15 (afternoon, ~17:40Z) - two more ships; the automatic reminders ran for the first time; READ THIS FIRST.**
 `main` = `f78092c` (+ this handoff), deployed, `/health` 200, voice re-provisioned, manifest 204,978 (22 bytes under the
 cap - TRIM FIRST). Planned is EMPTY; her Shipped queue: `featreq-338b1507` (Board), `featreq-3f1d63b6` (reminders),
