@@ -12983,6 +12983,34 @@ const server = createServer(async (request, response) => {
         })
         return
       }
+      // `recipients` (featreq-34627da1): { [clientId]: { to, extra } } for the clients
+      // whose recipient picker she changed. Each `to` filters that client's on-file
+      // addresses and `extra` adds one-time ones (lib/letter-send.js letterRecipients);
+      // a client left out goes to everyone on file, as before. A shape it cannot
+      // read refuses the whole send before anything is claimed.
+      const letterRecipientChoices = payload.recipients
+      if (
+        letterRecipientChoices !== undefined &&
+        (letterRecipientChoices === null ||
+          typeof letterRecipientChoices !== 'object' ||
+          Array.isArray(letterRecipientChoices) ||
+          Object.keys(letterRecipientChoices).length > LETTER_MAX_CLIENTS_PER_SEND ||
+          Object.values(letterRecipientChoices).some(
+            (choice) =>
+              !choice ||
+              typeof choice !== 'object' ||
+              Array.isArray(choice) ||
+              (choice.to !== undefined &&
+                (!Array.isArray(choice.to) || choice.to.some((address) => typeof address !== 'string'))) ||
+              (choice.extra !== undefined && !Array.isArray(choice.extra)),
+          ))
+      ) {
+        sendJson(response, 400, {
+          error: 'letter_invalid',
+          message: 'The chosen recipients were not in a shape this send can read. Nothing was sent.',
+        })
+        return
+      }
       const context = await loadLetterContext(session, letterSendMatch[1])
       if (!context.template) {
         sendJson(response, 404, {
@@ -13046,6 +13074,8 @@ const server = createServer(async (request, response) => {
           firmDay: firmToday(context.now),
           resend: payload.resendToday === true,
           userId: session.user.id,
+          // Her picker choices, per client (checked above); absent = everyone on file.
+          recipients: letterRecipientChoices,
           // The whole send when the page splits it into requests of ten (ids only, capped).
           batch: (Array.isArray(payload.batch) ? payload.batch : [])
             .filter((id) => typeof id === 'string' && /^[A-Za-z0-9_-]+$/.test(id))

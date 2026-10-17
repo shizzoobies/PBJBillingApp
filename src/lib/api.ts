@@ -5362,6 +5362,12 @@ export function sendLettersRequest(
     resendToday?: boolean
     /** Every client in the whole send, when it is split into several requests. */
     batch?: string[]
+    /**
+     * The clients whose recipient picker she changed (featreq-34627da1): the on-file
+     * addresses left ticked (`to`) and the ones added for this send only (`extra`).
+     * A client left out goes to everyone on file.
+     */
+    recipients?: Record<string, { to: string[]; extra?: string[] }>
   },
 ): Promise<LetterSendResponse> {
   return proposalRequest<LetterSendResponse>(

@@ -889,6 +889,99 @@ describe('a send that never finished', () => {
   })
 })
 
+// featreq-34627da1: each client's To list opens the shared recipient picker.
+describe('choosing who a client\'s letter goes to', () => {
+  const twoOnFile = () => {
+    setClients([
+      { id: 'c-two', name: 'Two Co', contact: '', email: 'office@two.test', contactIds: ['ct-1'], lifecycleStage: 'active' },
+    ])
+    contextValue = {
+      ...contextValue,
+      data: { ...contextValue.data, contacts: [{ id: 'ct-1', name: 'Tia Two', email: 'tia@two.test' }] },
+    } as unknown as AppContextValue
+  }
+  const openPicker = () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Change who Two Co gets it' }))
+    return within(screen.getByRole('dialog'))
+  }
+
+  it('opens with today\'s list ticked; unticking one changes the row and what is posted', async () => {
+    twoOnFile()
+    const confirm = mockConfirm(true)
+    await renderPage()
+    const dialog = openPicker()
+    expect(dialog.getByRole('checkbox', { name: /tia@two.test/ })).toBeChecked()
+    expect(dialog.getByRole('checkbox', { name: /office@two.test/ })).toBeChecked()
+
+    fireEvent.click(dialog.getByRole('checkbox', { name: /office@two.test/ }))
+    fireEvent.click(dialog.getByRole('button', { name: 'Use 1 address' }))
+
+    const row = screen.getByText('Two Co').closest('tr') as HTMLElement
+    expect(within(row).getByText('tia@two.test')).toBeInTheDocument()
+    expect(within(row).getByText('Chosen for this send')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Select Two Co'))
+    fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 1 client' }))
+    // The confirm names the final list for a client whose list she changed.
+    expect((confirm as Mock).mock.calls[0][0]).toContain('Two Co: tia@two.test')
+    await waitFor(() =>
+      expect(api.sendLettersRequest).toHaveBeenCalledWith('default', {
+        clientIds: ['c-two'],
+        templateHash: 'hash-1',
+        recipients: { 'c-two': { to: ['tia@two.test'], extra: [] } },
+      }),
+    )
+  })
+
+  it('posts an address added for this send only, and shows it marked', async () => {
+    twoOnFile()
+    mockConfirm(true)
+    await renderPage()
+    const dialog = openPicker()
+    fireEvent.change(dialog.getByLabelText('Add another address for this send only'), { target: { value: 'ap@other.test' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Add' }))
+    fireEvent.click(dialog.getByRole('button', { name: 'Use 3 addresses' }))
+
+    const row = screen.getByText('Two Co').closest('tr') as HTMLElement
+    expect(within(row).getByText('tia@two.test, office@two.test, ap@other.test (this send only)')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Select Two Co'))
+    fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 1 client' }))
+    await waitFor(() =>
+      expect((api.sendLettersRequest as Mock).mock.calls[0][1].recipients).toEqual({
+        'c-two': { to: ['tia@two.test', 'office@two.test'], extra: ['ap@other.test'] },
+      }),
+    )
+  })
+
+  it('needs one address on file: everyone unticked disables the button and says why', async () => {
+    twoOnFile()
+    await renderPage()
+    const dialog = openPicker()
+    for (const box of dialog.getAllByRole('checkbox')) fireEvent.click(box)
+    expect(dialog.getByRole('button', { name: 'Use 0 addresses' })).toBeDisabled()
+    expect(dialog.getByRole('alert')).toHaveTextContent(/Pick at least one address on file/)
+  })
+
+  it('a client she did not change posts no choice (everyone on file, as before)', async () => {
+    twoOnFile()
+    mockConfirm(true)
+    await renderPage()
+    fireEvent.click(screen.getByLabelText('Select Two Co'))
+    fireEvent.click(screen.getByRole('button', { name: 'Send "1099 Filing" to 1 client' }))
+    await waitFor(() =>
+      expect(api.sendLettersRequest).toHaveBeenCalledWith('default', { clientIds: ['c-two'], templateHash: 'hash-1' }),
+    )
+  })
+
+  it('never offers a team member\'s address in the picker', async () => {
+    api.fetchLetterTemplate = vi.fn(async () => templateState({}, 'hash-1', ['tia@two.test']))
+    twoOnFile()
+    await renderPage()
+    const dialog = openPicker()
+    expect(dialog.getAllByRole('checkbox')).toHaveLength(1)
+    expect(dialog.queryByText('tia@two.test')).not.toBeInTheDocument()
+  })
+})
+
 describe('sending', () => {
   const ids = (call: unknown[]) => (call[1] as { clientIds: string[] }).clientIds
 

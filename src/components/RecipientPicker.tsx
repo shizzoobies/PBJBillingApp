@@ -185,6 +185,7 @@ export function RecipientPicker({
   label,
   details,
   defaultTo,
+  initial,
   busy = false,
   onSend,
   onCancel,
@@ -198,6 +199,8 @@ export function RecipientPicker({
   details: InvoiceRecipientDetail[]
   /** The addresses ticked when it opens; everyone on file when omitted. */
   defaultTo?: string[] | null
+  /** A whole earlier choice to reopen with (ticks and added addresses); wins over `defaultTo`. */
+  initial?: RecipientSelection | null
   busy?: boolean
   onSend: (to: string[], extra: string[]) => void
   onCancel: () => void
@@ -207,8 +210,8 @@ export function RecipientPicker({
   /** Anything else the confirm must say, above the buttons. */
   children?: ReactNode
 }) {
-  const [selection, setSelection] = useState<RecipientSelection>(() =>
-    initialRecipientSelection(details, defaultTo),
+  const [selection, setSelection] = useState<RecipientSelection>(
+    () => initial ?? initialRecipientSelection(details, defaultTo),
   )
   const { to, extra, total, canSend } = recipientSelectionResult(details, selection)
   const words = actionLabel ?? ((count: number) => `Send to ${count} ${count === 1 ? 'person' : 'people'}`)

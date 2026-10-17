@@ -6,6 +6,9 @@ import { LetterPreviewModal } from '../components/LetterPreviewModal'
 import { BoldBar, PlaceholderChips } from '../components/letters/LetterEditorKit'
 import { insertPlaceholder, isBoldShortcut, toggleBold, unknownPlaceholderSentence } from '../components/letters/letterEditing'
 import { SaveBadge } from '../components/SectionKit'
+import { RecipientPicker } from '../components/RecipientPicker'
+import { recipientListLabel } from '../lib/recipientSelection'
+import type { InvoiceRecipientDetail } from '../lib/utils'
 import {
   createLetterRequest,
   deleteLetterRequest,
@@ -63,6 +66,8 @@ type PickerRow = {
   client: Client
   contactName: string
   to: string[]
+  /** The addresses Send may use, each named: what the recipient picker lists. */
+  details: InvoiceRecipientDetail[]
   /** How many of the client's addresses are a team member's: Send never uses them. */
   teamHidden: number
   /** Why this client cannot be picked, or null when it can. */
@@ -117,6 +122,10 @@ export function LettersPage() {
   const [progress, setProgress] = useState('')
   const [sendError, setSendError] = useState('')
   const [results, setResults] = useState<LetterSendResult[]>([])
+  // featreq-34627da1: the clients whose recipient picker she changed - the on-file
+  // addresses left ticked and the ones added for this send only - and whose picker is open.
+  const [recipientChoices, setRecipientChoices] = useState<Record<string, { to: string[]; extra: string[] }>>({})
+  const [choosingFor, setChoosingFor] = useState<string | null>(null)
 
   const subjectRef = useRef<HTMLInputElement>(null)
   const emailBodyRef = useRef<HTMLTextAreaElement>(null)
@@ -240,6 +249,7 @@ export function LettersPage() {
   /** A different letter starts clean: its own results, log and save state. */
   const resetForLetter = () => {
     setResults([])
+    setRecipientChoices({})
     setSendError('')
     setSaveError('')
     setSaveState('idle')
@@ -412,6 +422,7 @@ export function LettersPage() {
         client,
         contactName: linked?.name?.trim() || client.contact || '',
         to,
+        details: usable,
         teamHidden,
         blocked,
         pills,
@@ -508,9 +519,14 @@ export function LettersPage() {
       for (let at = 0; at < ids.length; at += SEND_CHUNK) {
         const chunk = ids.slice(at, at + SEND_CHUNK)
         setProgress(`Sending ${Math.min(done + 1, ids.length)} to ${Math.min(done + chunk.length, ids.length)} of ${ids.length}...`)
+        // Her picker choices for the clients in this request; the rest go to everyone on file.
+        const chosenRecipients = Object.fromEntries(
+          chunk.filter((id) => recipientChoices[id]).map((id) => [id, recipientChoices[id]]),
+        )
         const answer = await sendLettersRequest(sendingId, {
           clientIds: chunk,
           templateHash: state.hash,
+          ...(Object.keys(chosenRecipients).length > 0 ? { recipients: chosenRecipients } : {}),
           ...(resend ? { resendToday: true } : {}),
           // Split into requests of ten: tell the server the whole send, so a master and its
           // sub in different requests are still seen together.
@@ -551,14 +567,21 @@ export function LettersPage() {
     const replyAddress = state?.sender.replyTo || 'the reply address'
     const count = chosen.length
     const hiddenNames = hiddenChosen.map((id) => clients.find((client) => client.id === id)?.name ?? id)
+    // The final list of every client whose recipients she changed, so the confirm says it.
+    const changed = chosen
+      .filter((id) => recipientChoices[id])
+      .map((id) => `${nameOf(id, null)}: ${recipientListLabel(recipientChoices[id].to, recipientChoices[id].extra)}`)
     const ok = window.confirm(
       `Send "${letterName}" to ${count} client${count === 1 ? '' : 's'}${hiddenNote}? Each gets your email with the letter attached as a PDF. Replies go to ${replyAddress}.` +
-        (hiddenNames.length > 0 ? ` Also sending to (not in the list right now): ${hiddenNames.join(', ')}.` : ''),
+        (hiddenNames.length > 0 ? ` Also sending to (not in the list right now): ${hiddenNames.join(', ')}.` : '') +
+        (changed.length > 0 ? ` Recipients you chose - ${changed.join('; ')}.` : ''),
     )
     if (!ok) return
     // A fresh Send starts a fresh list; the retry buttons below merge into it instead.
     setResults([])
     await sendBatch(chosen, { resend: false })
+    // A choice is for that send: the next one starts from everyone on file again.
+    setRecipientChoices({})
   }
 
   const nameOf = (id: string, fallback: string | null) =>
@@ -591,6 +614,7 @@ export function LettersPage() {
   const editorLocked = !saved
   const blockedReason = dirty ? 'Save the letter to preview or send it.' : ''
   const previewClient = previewId ? clients.find((client) => client.id === previewId) : null
+  const choosingRow = choosingFor ? (rows.find((row) => row.client.id === choosingFor && row.to.length > 0) ?? null) : null
   const fieldHint = (field: Field) => {
     if (field === 'subject') return ''
     return field === 'emailBody'
@@ -940,10 +964,28 @@ export function LettersPage() {
                   </td>
                   <td>
                     {row.to.length > 0 ? (
-                      row.to.join(', ')
+                      recipientChoices[row.client.id] ? (
+                        recipientListLabel(recipientChoices[row.client.id].to, recipientChoices[row.client.id].extra)
+                      ) : (
+                        row.to.join(', ')
+                      )
                     ) : (
                       <span className="muted-text">{row.teamHidden > 0 ? 'Only a team address on file' : 'No email on file'}</span>
                     )}
+                    {row.to.length > 0 ? (
+                      <div>
+                        <button
+                          type="button"
+                          className="ghost-action"
+                          aria-label={`Change who ${row.client.name} gets it`}
+                          disabled={sending}
+                          onClick={() => setChoosingFor(row.client.id)}
+                        >
+                          Change
+                        </button>
+                        {recipientChoices[row.client.id] ? <span className="muted-text">Chosen for this send</span> : null}
+                      </div>
+                    ) : null}
                     {row.teamHidden > 0 ? (
                       <div className="muted-text">{`${row.teamHidden} team address${row.teamHidden === 1 ? '' : 'es'} hidden`}</div>
                     ) : null}
@@ -1084,6 +1126,33 @@ export function LettersPage() {
           clientName={previewClient.name}
           batchIds={previewClient.billToClientId && chosenSet.has(previewClient.billToClientId) ? [previewClient.billToClientId] : []}
           onClose={() => setPreviewId(null)}
+        />
+      ) : null}
+
+      {/* The shared recipient picker for one client's letter (featreq-34627da1): the
+          addresses Send may use (team addresses never listed), today's list ticked.
+          It sends nothing itself - the choice rides on the next Send. */}
+      {choosingRow ? (
+        <RecipientPicker
+          label={`"${letterName}" for ${choosingRow.client.name}`}
+          details={choosingRow.details}
+          initial={
+            recipientChoices[choosingRow.client.id]
+              ? {
+                  chosen: [
+                    ...recipientChoices[choosingRow.client.id].to,
+                    ...recipientChoices[choosingRow.client.id].extra,
+                  ],
+                  extras: recipientChoices[choosingRow.client.id].extra,
+                }
+              : null
+          }
+          actionLabel={(total) => `Use ${total} address${total === 1 ? '' : 'es'}`}
+          onSend={(to, extra) => {
+            setRecipientChoices((current) => ({ ...current, [choosingRow.client.id]: { to, extra } }))
+            setChoosingFor(null)
+          }}
+          onCancel={() => setChoosingFor(null)}
         />
       ) : null}
     </section>

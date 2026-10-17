@@ -369,6 +369,22 @@ describe('the send refuses the whole batch before the first client', () => {
     expect(at("error: 'letter_invalid'")).toBeLessThan(at("error: 'letter_changed'"))
   })
 
+  // featreq-34627da1: the per-client recipient picker.
+  it('reads her per-client recipient choices, refuses a shape it cannot read before anything, and hands them to the loop', () => {
+    const body = route()
+    const read = at('const letterRecipientChoices = payload.recipients')
+    const refused = at("message: 'The chosen recipients were not in a shape this send can read. Nothing was sent.'")
+    expect(read).toBeLessThan(refused)
+    expect(refused).toBeLessThan(at('const context = await loadLetterContext(session, letterSendMatch[1])'))
+    expect(body).toContain('Array.isArray(letterRecipientChoices)')
+    expect(body).toContain('(!Array.isArray(choice.to) || choice.to.some((address) => typeof address !== \'string\'))')
+    expect(body).toContain("(choice.extra !== undefined && !Array.isArray(choice.extra))")
+    expect(at('recipients: letterRecipientChoices,')).toBeGreaterThan(at('await sendLetterBatch('))
+    // The decision itself is the invoice Send's resolver, in the lib.
+    expect(libSource).toContain('resolveSendRecipients({ allowed: preview.to, to: choice.to, extra: choice.extra })')
+    expect(libSource).toContain('withoutTeamAddresses(typed, context.teamEmails, context.replyTo)')
+  })
+
   it('always answers 200 once the loop started, and logs the run', () => {
     const body = route()
     const loopAt = at('await sendLetterBatch(')
@@ -415,7 +431,9 @@ describe('sending to one client', () => {
     expect(body).toContain('attachments: [{ filename: preview.docs.pdfFilename, content: preview.docs.pdf }]')
     expect(body).toContain('letterSendId: claim.send.id')
     expect(body).toContain("kind: 'letter'")
-    expect(body).toContain('to: preview.to')
+    // featreq-34627da1: the recipients settled from her choice (or everyone on file).
+    expect(body).toContain('to: sendTo,')
+    expect(body).toContain('const sendTo = chosen.to')
   })
 
   it('waits 1,500 ms and retries once on a 429', () => {
@@ -491,7 +509,7 @@ describe('a letter goes to the client and nowhere else (Alex, 2026-10-08)', () =
     const record = body.slice(body.lastIndexOf('try {', recordAt), body.indexOf("return { ...base, status: 'sent'", recordAt))
     expect(record).toContain('} catch (error) {')
     expect(record).toContain('console.error(')
-    expect(record).toContain('to: preview.to,')
+    expect(record).toContain('to: sendTo,')
     expect(record.match(/deps\.\w+/g)).toEqual(['deps.store'])
     expect(libSource.match(/recordAmendmentFromLetterSend\(/g)).toHaveLength(1)
   })
