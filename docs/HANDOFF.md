@@ -25,6 +25,37 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
+**2026-10-21 (afternoon, ~19:45Z) - SignWell e-signatures PUSHED, NOT YET DEPLOYED (Railway incident); READ THIS FIRST.**
+`origin/main` = `1315c9f4` (the three e-sign commits a3bb442a / d601f10c / 1315c9f4 on top of 4a0c0b87) + locally `67865bd7`
+(ship.sh `ok=0` fix) + this handoff. **Railway has built NOTHING since the 10-17 handoff `dba630af`**: platform incident
+https://status.railway.com/incident/QH8L8B3E ("all builds have paused"), so neither 4a0c0b87 (the 10-21 test fixes) nor
+1315c9f4 is live; `/health` still reports `dba630a`. FIRST THING next session: `curl -s https://app.pbjsa.com/health` -
+if it still says `dba630a`, run `npx @railway/cli@latest deployment list --service PBJBillingApp --json` (read-only); if
+builds have resumed but no deployment exists for 1315c9f4, ask Alex for one empty-commit push or `railway up` (both are
+deploys = his yes). The first boot after deploy creates three tables (`signature_requests`, `signature_documents`,
+`signwell_events`, DDL approved by Alex 2026-10-21; a rolled-back prod trial of the DDL + every statement passed three
+times, script `prod-signwell-trial.mjs` in the 10-14 session scratchpad). **What the e-sign build is:** Alex's brief
+`D:\PBJ Accounting Work\E-Sign Thing\SIGNWELL_HANDOFF.md`; his five decisions (file route with white text tags drawn
+under the signature line; signed PDFs in Postgres bytea; one signer = the party; the webhook runs `signEngagement`
+itself; three tables); everything SignWell lives in `lib/signwell.js` + `lib/signwell-webhook.js`; routes `POST
+/api/engagements/:id/esign`, `/esign/remind`, `/esign/:requestId/finish` (Check SignWell / Finish e-signature),
+`GET /esign`, `/esign/:requestId/pdf`, `GET /api/signwell/status`, webhook `POST /api/signwell/webhook` (HMAC-SHA256
+over `type@time` keyed by the WEBHOOK ID - which is therefore a secret; canonical-hash ledger keyed on
+type|time|hash|documentId + a signed-triple replay guard; status ONLY from the re-fetched document; completion runs after
+the 200 with `finishing_at` durability; refuses to auto-sign when the letter or its signing details changed since it
+went out (`esign_hash`), on a superseding letter with open amendments, on "Manually completed", and IN TEST MODE for any
+client other than the existing client named exactly "Test"). Four review rounds found: the fee-change hole (a letter edited after going to SignWell
+would have billed the new fee against the old signed PDF), a replay bypass via hash case, the status taken from the
+event type instead of the document, and a Finish race that could swallow a completion. Docs: `docs/signwell.md` (env vars, registration script, status mapping, Alex's manual test
+plan, the unconfirmed list). **Alex's manual side, in order (docs/signwell.md steps):** SignWell account + API key ->
+set `SIGNWELL_API_KEY` on the Railway service (leave `SIGNWELL_TEST_MODE` unset = test) -> after deploy run
+`node scripts/prod/signwell-webhook-register.mjs` from the primary tree and set `SIGNWELL_WEBHOOK_ID` (secret, never in
+chat) -> test-mode send on the `Test` client, sign it, check the row / PDF / owner notice / the things the docs do not
+say -> only then `SIGNWELL_TEST_MODE=false`. **Tickets:** `featreq-56d39567` (Planned - move to Shipped with the note in
+the session scratchpad `notes/esign-shipped.txt` once `/health` shows 1315c9f4 and the voice agent is re-provisioned),
+`featreq-60118b28` (New: 13 leftovers incl. cancel-on-void, the vector-line fallback if white tags are not detected,
+the Finish-vs-manual race). Voice agent NOT yet re-provisioned for this manifest (do it after deploy). Lane E removed.
+
 **2026-10-21 (check-in, nothing built) - READ THIS FIRST, then the 10-17 paragraph.** `main` = `dba630af` (the 10-17
 handoff) + this commit, pushed, deployed (`/health` 200 reports commit `dba630a`), tree clean, only the primary worktree,
 branches `main` + `hold/july-security-p3`, no subagents, manifest 204,951 bytes (49 under the cap - TRIM FIRST on any
