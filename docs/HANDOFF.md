@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-10-15. Everything below is committed on
+Written 2026-07-21, last updated 2026-10-21. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -25,6 +25,32 @@ requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
 
+**2026-10-21 (check-in, nothing built) - READ THIS FIRST, then the 10-17 paragraph.** `main` = `dba630af` (the 10-17
+handoff) + this commit, pushed, deployed (`/health` 200 reports commit `dba630a`), tree clean, only the primary worktree,
+branches `main` + `hold/july-security-p3`, no subagents, manifest 204,951 bytes (49 under the cap - TRIM FIRST on any
+feature commit). Nothing shipped since 10-17; this paragraph records what arrived in the tracker in the meantime so the
+next session starts from it. **New in the tracker (all from Brittany, read with `tracker-list.mjs --all`):** (1)
+`featreq-9c818fca` (dashboard) came back PLANNED on 10-20 with a QUESTION, not a defect: "what is the Cases in flight
+section on the dashboard for?" - answer in words on the ticket (what it lists, what counts as in flight, how items leave
+it, and whether skipped tasks are left out there too, since the 10-17 fix named Your queue / cards / Team overview /
+Watching but not Cases in flight); no code unless her follow-up says it is also showing handled items. (2)
+`featreq-fccf901f` PLANNED 10-20: conditional follow-up questions in the client questionnaire ("depending on their
+questions" - almost certainly means ANSWERS; confirm with her on the ticket before building; owner sets "ask only if
+question X was answered Y", client sees only what applies, unconditioned questions unchanged). (3) `featreq-da3801ab`
+SENT 10-21 00:02Z (improvement/medium): the creator of a note can edit their own note; others view only; confirm WHICH
+notes (client notes, task notes, letters) with her first; the server must refuse a non-creator edit, not just the UI.
+**Still open from 10-15 / 10-17 (unchanged):** her answers on I-95 recipes + Sept Monthly Recs, Allison before/after Done,
+the once-per-client "Send invoices to" default (featreq-34627da1 is now SHIPPED for stage 1; stage 2 needs her yes + a
+schema change), the 5-day gap / weekend sends for automatic reminders, the Addressed-to card on upsell letters, "adding
+the last plan = choosing the package?"; for Alex: Saylor `case-b2ce4441` malformed (stage 2 binned, 3-5 live, stage_count
+6), the 188 old stalled cases hidden by the 90-day window, three DDL asks (stage unique index, one Original per proposal,
+letter-name uniqueness), bounce notices to every owner, boot DDL lock_timeout, chip task_7fcd25b4 (file-backend append
+race). **Dated test fixtures that will trip:** `db/store-staleness.test.mjs` still has active-template fixtures dated
+2026-10-31 (near lines 5001 and 5022) and 2026-11-30 (near line 6617); on those days the read-time materializer fires in
+the test and verify goes red - move them to 2099 BEFORE 10-31 (the 10-15 one was fixed the same way). **Suggested order
+next session:** answer 9c818fca in words -> triage da3801ab (question on locations, then Planned) -> ask the fccf901f
+interpretation question -> build whichever she has answered, one lane, one review round, one deploy each, ship.sh then
+voice-provision then the ticket note in her words.
 **2026-10-17 (~20:00Z) - FIVE SHIPS + one approved prod write; READ THIS FIRST.** `main` = `f3fb36e7` (+ this handoff),
 deployed, `/health` 200, voice re-provisioned, manifest 204,951 (49 under the cap - TRIM FIRST), only the primary worktree.
 Fable orchestrating, Opus 5.5 implementers, Sonnet reviews, one lane + one deploy each; every bug was DIAGNOSED READ-ONLY
