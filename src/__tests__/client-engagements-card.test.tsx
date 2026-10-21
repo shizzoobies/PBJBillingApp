@@ -19,6 +19,11 @@ vi.mock('../lib/api', () => ({
   getEngagementRequest: (...args: unknown[]) => api.getEngagementRequest(...args),
   signEngagementRequest: (...args: unknown[]) => api.signEngagementRequest(...args),
   restoreEngagementRequest: (...args: unknown[]) => api.restoreEngagementRequest(...args),
+  signwellStatusRequest: (...args: unknown[]) => api.signwellStatusRequest(...args),
+  listEngagementEsignRequests: (...args: unknown[]) => api.listEngagementEsignRequests(...args),
+  sendEngagementEsignRequest: (...args: unknown[]) => api.sendEngagementEsignRequest(...args),
+  remindEngagementEsignRequest: (...args: unknown[]) => api.remindEngagementEsignRequest(...args),
+  engagementEsignPdfUrl: (id: string, requestId: string) => `/api/engagements/${id}/esign/${requestId}/pdf`,
 }))
 
 const api: Record<string, Mock> = {}
@@ -95,6 +100,10 @@ function renderCard(ownerMode = true, props: Partial<Parameters<typeof ClientEng
 }
 
 beforeEach(() => {
+  api.signwellStatusRequest = vi.fn(async () => ({ configured: false, testMode: true }))
+  api.listEngagementEsignRequests = vi.fn(async () => [])
+  api.sendEngagementEsignRequest = vi.fn()
+  api.remindEngagementEsignRequest = vi.fn()
   api.listEngagementsRequest = vi.fn(async () => ROWS)
   api.listLettersRequest = vi.fn(async () => ({
     letters: [
@@ -653,5 +662,57 @@ describe('ClientEngagementsCard: a superseding letter replaces the open amendmen
     await within(dialog).findByRole('group', { name: 'Open amendments this letter replaces' })
     expect(within(dialog).queryByText("Reading the client's amendments...")).toBeNull()
     expect(within(dialog).getByRole('button', { name: 'Mark as signed' })).toBeEnabled()
+  })
+})
+
+/** E-signature (featreq-56d39567): where a sent letter stands at SignWell, beside its status. */
+describe('e-signature status on the card', () => {
+  const request = (over: Record<string, unknown> = {}) => ({
+    id: 'sigreq-1',
+    engagementId: 'eng-amend',
+    clientId: 'c-acme',
+    status: 'sent',
+    recipients: [],
+    testMode: true,
+    signedDocumentId: null,
+    sentAt: '2026-10-21T15:00:00.000Z',
+    completedAt: null,
+    lastEventAt: null,
+    lastError: null,
+    lastRemindedAt: null,
+    createdAt: '2026-10-21T15:00:00.000Z',
+    updatedAt: '2026-10-21T15:00:00.000Z',
+    ...over,
+  })
+
+  it('shows "E-sign: sent Oct 21" and the Test mode tag on a sent letter that went out for signature', async () => {
+    api.listEngagementEsignRequests = vi.fn(async (id: string) => (id === 'eng-amend' ? [request()] : []))
+    renderCard()
+    const row = (await screen.findByText('Your 2027 1099s')).closest('tr') as HTMLElement
+    expect(await within(row).findByText('E-sign: sent Oct 21')).toBeTruthy()
+    expect(within(row).getByText('Test mode')).toBeTruthy()
+    // Only sent and signed letters are asked about: no per-draft calls.
+    expect(api.listEngagementEsignRequests.mock.calls.map((call) => call[0]).sort()).toEqual(['eng-1', 'eng-amend'])
+  })
+
+  it('shows signed for a letter signed electronically, and nothing for a letter with no request', async () => {
+    api.listEngagementEsignRequests = vi.fn(async (id: string) =>
+      id === 'eng-1' ? [request({ id: 'sigreq-2', engagementId: 'eng-1', status: 'completed', testMode: false, completedAt: '2026-10-05T15:00:00.000Z' })] : [],
+    )
+    renderCard()
+    const signed = (await screen.findByText('Engagement letter - {{client_name}}')).closest('tr') as HTMLElement
+    expect(await within(signed).findByText('E-sign: signed Oct 5')).toBeTruthy()
+    expect(within(signed).queryByText('Test mode')).toBeNull()
+    const other = screen.getByText('Your 2027 1099s').closest('tr') as HTMLElement
+    expect(within(other).queryByText(/E-sign/)).toBeNull()
+  })
+
+  it('a failed read of the requests leaves the card as it was', async () => {
+    api.listEngagementEsignRequests = vi.fn(async () => {
+      throw new ApiError(500, 'boom')
+    })
+    renderCard()
+    expect(await screen.findByText('Your 2027 1099s')).toBeTruthy()
+    expect(screen.queryByText(/E-sign/)).toBeNull()
   })
 })

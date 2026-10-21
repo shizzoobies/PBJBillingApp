@@ -2832,6 +2832,18 @@ export type EngagementEmailLogEntry =
     }
   /** A Send claimed the letter (the "sending" mark); a send entry after it ends the claim. */
   | { kind: 'sending'; at: string }
+  /** The letter went out for e-signature through SignWell (featreq-56d39567). */
+  | {
+      kind: 'esign'
+      at: string
+      to: string[]
+      signatureRequestId: string | null
+      testMode?: boolean
+      ok?: boolean
+      subject?: string
+      /** The hash of the letter this send carried, like a send's. */
+      hash?: string | null
+    }
 
 export type Engagement = {
   id: string
@@ -2959,6 +2971,45 @@ export type EngagementPreview = {
   /** The sentence that would stop Send now, or null. */
   refusal: string | null
 }
+
+/** Where an e-signature request stands (ours, mapped from SignWell's events; docs/signwell.md). */
+export type SignatureRequestStatus =
+  | 'draft'
+  | 'sent'
+  | 'viewed'
+  | 'signed_partial'
+  | 'completed'
+  | 'declined'
+  | 'expired'
+  | 'canceled'
+  | 'bounced'
+  | 'error'
+
+/** One engagement letter sent for e-signature. Never carries the signed PDF's bytes or a signing link. */
+export type SignatureRequest = {
+  id: string
+  engagementId: string
+  clientId: string | null
+  status: SignatureRequestStatus
+  recipients: Array<{ id: string; name: string; email: string; status?: string }>
+  /** True while SIGNWELL_TEST_MODE is not the literal `false`: not legally binding. */
+  testMode: boolean
+  /** The kept signed PDF, once there is one (download it through the engagement's esign route). */
+  signedDocumentId: string | null
+  sentAt: string | null
+  completedAt: string | null
+  /** Set while the work after a completed document is under way (or died half-done); null when finished. */
+  finishingAt?: string | null
+  lastEventAt: string | null
+  /** A problem finishing the request (a signed PDF that could not be kept, a signing that was refused), in words. */
+  lastError: string | null
+  lastRemindedAt: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+/** Whether e-signature is set up on the server, and whether it is in test mode. */
+export type SignwellStatus = { configured: boolean; testMode: boolean }
 
 /** The answer to a Send that was not refused: whether the provider took it. */
 export type EngagementSendResult = {

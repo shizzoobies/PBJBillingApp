@@ -6955,6 +6955,10 @@ const server = createServer(async (request, response) => {
         deps: signwellFinishDeps(request),
       })
       sendJson(response, handled.status, handled.body)
+      // An event that changed something: the open pages read the request again.
+      if (handled.body.received && !handled.body.duplicate && !handled.body.ignored && !handled.body.refetch) {
+        broadcastDataChanged()
+      }
       if (handled.after) {
         setImmediate(() => {
           handled.after().catch((error) => console.error('[signwell] finishing a document failed:', error?.message || error))
@@ -12998,6 +13002,29 @@ const server = createServer(async (request, response) => {
         'Cache-Control': 'no-store',
       })
       response.end(signed.bytes)
+      return
+    }
+
+    // GET /api/signwell/status - what the page needs to decide whether to offer Send for
+    // signature: is SignWell set up (a key), and is it in test mode. Owner-only; reveals neither
+    // the key nor the webhook id.
+    if (normalizedPath === '/api/signwell/status' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see the e-signature settings' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      sendJson(
+        response,
+        200,
+        { configured: signwell.signwellConfigured(process.env), testMode: signwell.isTestMode(process.env) },
+        { 'Cache-Control': 'no-store' },
+      )
       return
     }
     // ---- end of the engagement e-signature routes ---------------------------------

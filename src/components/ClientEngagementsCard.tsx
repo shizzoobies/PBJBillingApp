@@ -1,8 +1,15 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { createAmendmentRequest, listEngagementsRequest, listLettersRequest, restoreEngagementRequest } from '../lib/api'
+import {
+  createAmendmentRequest,
+  listEngagementEsignRequests,
+  listEngagementsRequest,
+  listLettersRequest,
+  restoreEngagementRequest,
+} from '../lib/api'
 import { ENGAGEMENT_KIND_LABELS, ENGAGEMENT_STATUS_LABELS, engagementInstantLabel } from '../lib/engagements'
-import { ApiError, type Engagement, type LetterSummary } from '../lib/types'
+import { ApiError, type Engagement, type LetterSummary, type SignatureRequest } from '../lib/types'
+import { EsignBadge } from './engagements/EsignPanel'
 import { SignEngagementDialog } from './engagements/SignEngagement'
 
 /**
@@ -34,6 +41,8 @@ export function ClientEngagementsCard({
 }) {
   const navigate = useNavigate()
   const [engagements, setEngagements] = useState<Engagement[] | null>(null)
+  // The newest e-signature request of each sent or signed letter (a failed read shows no badge).
+  const [esign, setEsign] = useState<Record<string, SignatureRequest>>({})
   const [loadError, setLoadError] = useState('')
   const [letters, setLetters] = useState<LetterSummary[] | null>(null)
   const [picking, setPicking] = useState(false)
@@ -54,6 +63,19 @@ export function ClientEngagementsCard({
         if (cancelled) return
         setEngagements(rows)
         setLoadError('')
+        void Promise.all(
+          rows
+            .filter((row) => row.status === 'sent' || row.status === 'signed')
+            .map((row) =>
+              listEngagementEsignRequests(row.id).then(
+                (requests) => [row.id, requests[0]] as const,
+                () => [row.id, undefined] as const,
+              ),
+            ),
+        ).then((pairs) => {
+          if (cancelled) return
+          setEsign(Object.fromEntries(pairs.filter(([, request]) => request)) as Record<string, SignatureRequest>)
+        })
       },
       (err) => {
         if (cancelled) return
@@ -148,6 +170,7 @@ export function ClientEngagementsCard({
                   <td>{ENGAGEMENT_KIND_LABELS[engagement.kind] ?? engagement.kind}</td>
                   <td>
                     <span className="status-pill">{ENGAGEMENT_STATUS_LABELS[engagement.status] ?? engagement.status}</span>
+                    {esign[engagement.id] ? <EsignBadge request={esign[engagement.id]} /> : null}
                   </td>
                   <td>{engagement.subject || '-'}</td>
                   <td>{engagementInstantLabel(engagement.sentAt) || '-'}</td>

@@ -1,6 +1,6 @@
 import { dateOnlyInZone } from '../../lib/firm-time.js'
 import { formatProposalMoney } from '../../lib/proposal-pricing.js'
-import { ApiError, type Engagement, type EngagementKind, type EngagementStatus } from './types'
+import { ApiError, type Engagement, type EngagementKind, type EngagementStatus, type SignatureRequest } from './types'
 
 /**
  * Engagements (docs/plans/engagements-2026-10.md, stage 2): the words the list and
@@ -95,5 +95,89 @@ export function engagementSendRefusalSentence(err: unknown): string {
     default:
       if (err.status === 404) return 'This engagement no longer exists. Nothing was sent.'
       return err.message || 'Could not send the engagement letter. Nothing was sent.'
+  }
+}
+
+/** What the page says while an e-signature request is open and the letter is sent again or edited. */
+export const ESIGN_OPEN_WARNING = 'An e-signature request is open; the client will sign the earlier version.'
+
+/** A request SignWell completed by a person (not signed by the client): Finish e-signature does not apply. */
+export const esignWasMarkedComplete = (request: Pick<SignatureRequest, 'lastError'> | null | undefined): boolean =>
+  String(request?.lastError ?? '').startsWith('Marked complete in SignWell')
+
+/** The note a send for signature carries while SignWell is in test mode: the document is not binding. */
+export const ESIGN_TEST_MODE_NOTE =
+  'Test mode - no legally binding document, the client may not receive an email, and it will not mark the letter signed unless this is the Test client.'
+
+/** The statuses in which a signature request is still out with the signer. */
+export const ESIGN_ACTIVE_STATUSES = ['sent', 'viewed', 'signed_partial'] as const
+
+export const esignIsActive = (request: Pick<SignatureRequest, 'status'> | null | undefined): boolean =>
+  Boolean(request) && (ESIGN_ACTIVE_STATUSES as readonly string[]).includes(request?.status ?? '')
+
+/**
+ * Whether editing or re-sending the letter should warn: the request is out with the signer, or it bounced or
+ * errored (both can recover to "out" when SignWell is checked, and the client would then sign the earlier version).
+ */
+export const esignWarnsOnEdit = (request: Pick<SignatureRequest, 'status'> | null | undefined): boolean =>
+  esignIsActive(request) || request?.status === 'bounced' || request?.status === 'error'
+
+/** "E-sign: sent Oct 21" - the badge text for a signature request (the day is the firm's). */
+export function esignBadgeText(request: Pick<SignatureRequest, 'status' | 'sentAt' | 'completedAt' | 'lastEventAt'>): string {
+  const day = (instant: string | null | undefined) => {
+    const label = engagementInstantLabel(instant).replace(/, \d{4}$/, '')
+    return label ? ` ${label}` : ''
+  }
+  switch (request.status) {
+    case 'sent':
+      return `E-sign: sent${day(request.sentAt)}`
+    case 'viewed':
+      return 'E-sign: viewed'
+    case 'signed_partial':
+      return 'E-sign: partly signed'
+    case 'completed':
+      return `E-sign: signed${day(request.completedAt ?? request.lastEventAt)}`
+    case 'declined':
+      return 'E-sign: declined'
+    case 'expired':
+      return 'E-sign: expired'
+    case 'canceled':
+      return 'E-sign: canceled'
+    case 'bounced':
+      return 'E-sign: email bounced'
+    case 'error':
+      return 'E-sign: problem'
+    default:
+      return 'E-sign: not sent'
+  }
+}
+
+/** A refused send for signature (or reminder), as a plain sentence for the page. */
+export function esignRefusalSentence(err: unknown, action: 'send' | 'remind' | 'finish' = 'send'): string {
+  // Checking or finishing sends nothing: its own words, never "Nothing was sent."
+  if (action === 'finish') {
+    if (!(err instanceof ApiError)) return 'Could not check SignWell. Try again in a minute.'
+    if (err.status === 404) return 'This engagement or signature request no longer exists.'
+    return err.message || 'Could not check SignWell. Try again in a minute.'
+  }
+  const nothing = action === 'send' ? 'Nothing was sent.' : 'No reminder was sent.'
+  if (!(err instanceof ApiError)) return `${action === 'send' ? 'Could not send the letter for signature' : 'Could not send the reminder'}. ${nothing}`
+  switch (err.code) {
+    case 'engagement_changed':
+      return 'The engagement changed since this page loaded, so nothing was sent. The page now shows the saved version: check it and send again.'
+    case 'signature_active':
+      return 'This letter is already out for signature. Send a reminder instead.'
+    case 'reminded_today':
+      return 'A reminder already went out today.'
+    case 'not_completed':
+    case 'finishing':
+    case 'ended':
+    case 'esign_failed':
+      return err.message
+    case 'team_address':
+      return "That address belongs to someone on your team. An engagement letter goes to the client only. Nothing was sent."
+    default:
+      if (err.status === 404) return `This engagement no longer exists. ${nothing}`
+      return err.message || `Something went wrong. ${nothing}`
   }
 }

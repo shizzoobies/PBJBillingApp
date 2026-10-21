@@ -9,6 +9,7 @@ import {
   engagementPartyName,
 } from '../../lib/engagements'
 import { engagementFeeChoices, signRefusalSentence, signingSentence } from '../../lib/engagementSigning'
+import { EsignPanel } from './EsignPanel'
 import { engagementIsPureRecord } from '../../../lib/engagement-record.js'
 import { firmToday } from '../../../lib/firm-time.js'
 import { formatProposalMoney } from '../../../lib/proposal-pricing.js'
@@ -93,7 +94,9 @@ export function SignEngagementForm({
   // fixed a typo, so it is a warning she can sign past ("Mark signed anyway"), not a refusal.
   const changed = engagement.status === 'sent' && changedSinceSent
   const canSign = amendmentsReady && (engagement.status === 'sent' || (engagement.status === 'draft' && inPerson))
-  const lastSent = [...(engagement.emailLog ?? [])].reverse().find((entry) => entry?.kind === 'send' && entry.ok)
+  const lastSent = [...(engagement.emailLog ?? [])]
+    .reverse()
+    .find((entry) => (entry?.kind === 'send' || entry?.kind === 'esign') && entry.ok)
   const lastSentDay = engagementInstantLabel(lastSent?.at ?? engagement.sentAt)
 
   const sign = async ({ anyway = false } = {}) => {
@@ -376,6 +379,7 @@ export function SignEngagementDialog({
 }) {
   const [engagement, setEngagement] = useState<Engagement>(row)
   const [changedSinceSent, setChangedSinceSent] = useState(false)
+  const [hash, setHash] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [summary, setSummary] = useState<EngagementSignResult | null>(null)
@@ -386,6 +390,7 @@ export function SignEngagementDialog({
       const view = await getEngagementRequest(row.id)
       setEngagement(view.engagement)
       setChangedSinceSent(view.changedSinceSent === true)
+      setHash(view.hash)
     } catch {
       /* the listed row stands; a refusal still says why */
     }
@@ -397,6 +402,7 @@ export function SignEngagementDialog({
         if (cancelled) return
         setEngagement(view.engagement)
         setChangedSinceSent(view.changedSinceSent === true)
+        setHash(view.hash)
       },
       () => {},
     )
@@ -440,6 +446,14 @@ export function SignEngagementDialog({
         </>
       ) : signable ? (
         <>
+          {/* Where the letter stands at SignWell, and a reminder: sending is from the letter's own page. */}
+          <EsignPanel
+            engagementId={engagement.id}
+            partyName={partyName}
+            partyEmail={engagement.party.email}
+            templateHash={hash}
+            canSend={false}
+          />
           {feeLine ? (
             <p className="muted-text" aria-label="Monthly fee when signed">
               {`${clientName}'s monthly fee, when signed: ${feeLine}. `}

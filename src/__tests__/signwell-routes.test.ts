@@ -179,3 +179,12 @@ describe('the boot says when an e-signature was left half-finished', () => {
     expect(boot).toContain('setInterval(() => void warnSignwellLeftFinishing(10 * 60 * 1000), 60 * 60 * 1000)')
   })
 })
+
+describe('the open pages hear about a webhook that changed something', () => {
+  it('broadcasts after the answer, only when the event was new and was ours', () => {
+    const route = webhookRoute()
+    expect(route).toContain('if (handled.body.received && !handled.body.duplicate && !handled.body.ignored && !handled.body.refetch) {')
+    expect(route.indexOf('sendJson(response, handled.status, handled.body)')).toBeLessThan(route.indexOf('broadcastDataChanged()'))
+    expect(route.indexOf('broadcastDataChanged()')).toBeLessThan(route.indexOf('setImmediate('))
+  })
+})

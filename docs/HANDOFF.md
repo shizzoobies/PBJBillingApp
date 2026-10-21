@@ -1309,6 +1309,10 @@ deliberately **not** a dependency and this is **not** wired into
 `npm run verify` (which stays jsdom-fast); without Playwright the script skips
 with instructions rather than failing. Run it by hand after any print change.
 
+**E-signature (SignWell):** the setup, the webhook registration, the status mapping, the manual test
+plan and what the docs could not confirm are in [`docs/signwell.md`](signwell.md). A request that looks
+stuck is a read-only look at its `signature_requests` row: `last_error` says why.
+
 ---
 
 ## 5. Where things stand (newest first)

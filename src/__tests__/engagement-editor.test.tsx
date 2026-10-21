@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import type { AppContextValue } from '../AppContext'
 import { EngagementEditorPage } from '../pages/EngagementEditorPage'
 import { firmToday } from '../../lib/firm-time.js'
-import { ApiError, type Engagement, type EngagementSignResult, type EngagementView } from '../lib/types'
+import { ApiError, type Engagement, type EngagementSignResult, type EngagementView, type SignatureRequest } from '../lib/types'
 
 /**
  * The engagement editor (docs/plans/engagements-2026-10.md, stage 2C): what it loads,
@@ -26,6 +26,12 @@ vi.mock('../lib/api', () => ({
   listPackagesRequest: (...args: unknown[]) => api.listPackagesRequest(...args),
   listEngagementSectionsRequest: (...args: unknown[]) => api.listEngagementSectionsRequest(...args),
   listEngagementsRequest: (...args: unknown[]) => api.listEngagementsRequest(...args),
+  signwellStatusRequest: (...args: unknown[]) => api.signwellStatusRequest(...args),
+  listEngagementEsignRequests: (...args: unknown[]) => api.listEngagementEsignRequests(...args),
+  sendEngagementEsignRequest: (...args: unknown[]) => api.sendEngagementEsignRequest(...args),
+  remindEngagementEsignRequest: (...args: unknown[]) => api.remindEngagementEsignRequest(...args),
+  finishEngagementEsignRequest: (...args: unknown[]) => api.finishEngagementEsignRequest(...args),
+  engagementEsignPdfUrl: (id: string, requestId: string) => `/api/engagements/${id}/esign/${requestId}/pdf`,
 }))
 
 const api: Record<string, Mock> = {}
@@ -161,6 +167,17 @@ beforeEach(() => {
   api.signEngagementRequest = vi.fn(async () => signResult())
   api.voidEngagementRequest = vi.fn(async () => engagement({ status: 'void' }))
   api.listEngagementsRequest = vi.fn(async () => [])
+  // E-signature (featreq-56d39567): not set up unless a test says so, so the panel stays out of the way.
+  api.signwellStatusRequest = vi.fn(async () => ({ configured: false, testMode: true }))
+  api.listEngagementEsignRequests = vi.fn(async () => [])
+  api.sendEngagementEsignRequest = vi.fn(async () => ({ request: signatureRequest(), engagement: engagement({ status: 'sent' }) }))
+  api.remindEngagementEsignRequest = vi.fn(async () => ({ request: signatureRequest() }))
+  api.finishEngagementEsignRequest = vi.fn(async () => ({
+    request: signatureRequest({ status: 'completed', signedDocumentId: 'sigdoc-1' }),
+    signed: true,
+    issues: [],
+    engagement: engagement({ status: 'signed' }),
+  }))
   api.listPackagesRequest = vi.fn(async () => [
     { id: 'pkg-1', name: 'Full service', description: '', planIds: [], templateIds: [], createdAt: '', updatedAt: null },
   ])
@@ -174,6 +191,27 @@ afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
 })
+
+/** One e-signature request as the server lists it. */
+function signatureRequest(over: Partial<SignatureRequest> = {}): SignatureRequest {
+  return {
+    id: 'sigreq-1',
+    engagementId: 'eng-1',
+    clientId: null,
+    status: 'sent',
+    recipients: [{ id: '1', name: 'Pat Doe', email: 'pat@acme.test' }],
+    testMode: true,
+    signedDocumentId: null,
+    sentAt: '2026-10-21T15:00:00.000Z',
+    completedAt: null,
+    lastEventAt: null,
+    lastError: null,
+    lastRemindedAt: null,
+    createdAt: '2026-10-21T15:00:00.000Z',
+    updatedAt: '2026-10-21T15:00:00.000Z',
+    ...over,
+  }
+}
 
 /** What the preview call answers: the letter, and the recipient picker's lists (featreq-34627da1). */
 function previewAnswer() {
@@ -1351,5 +1389,483 @@ describe('Addressed to', () => {
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
     fireEvent.click(within(card).getByRole('button', { name: 'Save address' }))
     expect(api.updateEngagementRequest).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * E-signature through SignWell (featreq-56d39567): Send for signature beside Send, the status
+ * badge, Send reminder, Download signed PDF. Mark as signed stays as the manual path.
+ */
+describe('e-signature', () => {
+  const configured = (testMode = true) => {
+    api.signwellStatusRequest = vi.fn(async () => ({ configured: true, testMode }))
+  }
+  const withRequests = (...requests: SignatureRequest[]) => {
+    api.listEngagementEsignRequests = vi.fn(async () => requests)
+  }
+
+  it('is hidden when SignWell is not set up and the letter has no request', async () => {
+    await renderEditor()
+    await waitFor(() => expect(api.signwellStatusRequest).toHaveBeenCalled())
+    await waitFor(() => expect(api.listEngagementEsignRequests).toHaveBeenCalledWith('eng-1'))
+    expect(screen.queryByRole('heading', { name: 'E-signature' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Send for signature' })).toBeNull()
+  })
+
+  it('offers Send for signature beside Send once SignWell is set up, and Mark as signed stays', async () => {
+    configured()
+    await renderEditor()
+    const send = await screen.findByRole('button', { name: 'Send for signature' })
+    expect(send).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Send' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Mark as signed' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Mark as signed' })).toBeTruthy()
+  })
+
+  it('waits for the page to be saved, like Send', async () => {
+    configured()
+    await renderEditor()
+    const send = await screen.findByRole('button', { name: 'Send for signature' })
+    fireEvent.change(screen.getByLabelText('Email body'), { target: { value: 'Edited and not saved' } })
+    expect(send).toBeDisabled()
+  })
+
+  it('confirms with the recipient and the test-mode warning, sends with the page hash, and reads the letter again', async () => {
+    configured(true)
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
+    const confirm = screen.getByRole('group', { name: 'Confirm send for signature' })
+    expect(within(confirm).getByText(/Send the engagement letter for Acme Books to pat@acme\.test for signature\?/)).toBeTruthy()
+    expect(
+      within(confirm).getByText(
+        'Test mode - no legally binding document, the client may not receive an email, and it will not mark the letter signed unless this is the Test client.',
+      ),
+    ).toBeTruthy()
+    // Nothing is sent until she confirms.
+    expect(api.sendEngagementEsignRequest).not.toHaveBeenCalled()
+    const loads = api.getEngagementRequest.mock.calls.length
+
+    withRequests(signatureRequest())
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send now' }))
+    await waitFor(() => expect(api.sendEngagementEsignRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-1' }))
+    expect(await screen.findByText(/Sent for signature to pat@acme\.test\. Test mode - no legally binding document/)).toBeTruthy()
+    await waitFor(() => expect(api.getEngagementRequest.mock.calls.length).toBeGreaterThan(loads))
+    // The badge shows the new request.
+    expect(await screen.findByText('E-sign: sent Oct 21')).toBeTruthy()
+  })
+
+  it('Cancel closes the confirm without sending', async () => {
+    configured()
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('group', { name: 'Confirm send for signature' })).toBeNull()
+    expect(api.sendEngagementEsignRequest).not.toHaveBeenCalled()
+  })
+
+  it('says nothing about test mode in live mode', async () => {
+    configured(false)
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
+    const confirm = screen.getByRole('group', { name: 'Confirm send for signature' })
+    expect(within(confirm).queryByText(/Test mode/)).toBeNull()
+    withRequests(signatureRequest({ testMode: false }))
+    api.sendEngagementEsignRequest = vi.fn(async () => ({ request: signatureRequest({ testMode: false }), engagement: engagement({ status: 'sent' }) }))
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send now' }))
+    expect(await screen.findByText('Sent for signature to pat@acme.test.')).toBeTruthy()
+    expect(screen.queryByText('Test mode', { selector: '.status-pill' })).toBeNull()
+  })
+
+  it('says a refusal in plain words and sends nothing', async () => {
+    configured()
+    api.sendEngagementEsignRequest = vi.fn(async () => {
+      throw new ApiError(409, "pat@acme.test belongs to a team member. An engagement letter goes to the client only.", 'team_address')
+    })
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Send now' }))
+    expect(await screen.findByText(/belongs to someone on your team\. An engagement letter goes to the client only\. Nothing was sent\./)).toBeTruthy()
+  })
+
+  it('shows the status badge and the Test mode tag; Send for signature gives way to Send reminder while the request is out', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'viewed', testMode: true }))
+    await renderEditor()
+    expect(await screen.findByText('E-sign: viewed')).toBeTruthy()
+    expect(screen.getByText('Test mode', { selector: '.status-pill' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Send for signature' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Send reminder' })).toBeEnabled()
+    expect(screen.getByText(/When the client signs, the letter is marked signed here for you/)).toBeTruthy()
+  })
+
+  it('Send reminder calls the server and reads the requests again', async () => {
+    configured()
+    withRequests(signatureRequest())
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send reminder' }))
+    await waitFor(() => expect(api.remindEngagementEsignRequest).toHaveBeenCalledWith('eng-1'))
+    expect(await screen.findByText('Reminder sent to pat@acme.test.')).toBeTruthy()
+  })
+
+  it('Send reminder is disabled, with the reason, when one already went out today', async () => {
+    configured()
+    withRequests(signatureRequest({ lastRemindedAt: new Date().toISOString() }))
+    await renderEditor()
+    const remind = await screen.findByRole('button', { name: 'Send reminder' })
+    expect(remind).toBeDisabled()
+    expect(remind).toHaveAttribute('title', 'A reminder already went out today.')
+    expect(screen.getByText('A reminder already went out today.')).toBeTruthy()
+  })
+
+  it('a reminder the server refuses says why', async () => {
+    configured()
+    withRequests(signatureRequest())
+    api.remindEngagementEsignRequest = vi.fn(async () => {
+      throw new ApiError(409, 'A reminder already went out today.', 'reminded_today')
+    })
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send reminder' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('A reminder already went out today.')
+  })
+
+  it('a signed letter shows signed, with a download link for the kept PDF', async () => {
+    configured(false)
+    api.getEngagementRequest = vi.fn(async () =>
+      view({ status: 'signed', signedAt: '2026-10-22T16:00:00.000Z', signedBy: 'user-1', clientId: 'client-9' }),
+    )
+    withRequests(signatureRequest({ status: 'completed', testMode: false, completedAt: '2026-10-22T15:30:00.000Z', signedDocumentId: 'sigdoc-1' }))
+    await renderEditor()
+    expect(await screen.findByText('E-sign: signed Oct 22')).toBeTruthy()
+    const link = screen.getByRole('link', { name: 'Download signed PDF' })
+    expect(link.getAttribute('href')).toBe('/api/engagements/eng-1/esign/sigreq-1/pdf')
+    expect(screen.queryByRole('button', { name: 'Send for signature' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Send reminder' })).toBeNull()
+  })
+
+  it('a completed request whose PDF was not kept shows what needs attention, and no download', async () => {
+    configured()
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent', clientId: 'client-9' }))
+    withRequests(signatureRequest({ status: 'completed', completedAt: '2026-10-22T15:30:00.000Z', lastError: 'The signed PDF could not be saved - download it from SignWell' }))
+    await renderEditor()
+    expect(await screen.findByText('Needs attention: The signed PDF could not be saved - download it from SignWell.')).toBeTruthy()
+    expect(screen.queryByRole('link', { name: 'Download signed PDF' })).toBeNull()
+  })
+
+  it('hides the needs-attention note once the letter is marked signed', async () => {
+    configured()
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'signed', signedAt: '2026-10-22T16:00:00.000Z', clientId: 'client-9' }))
+    withRequests(signatureRequest({ status: 'completed', signedDocumentId: 'sigdoc-1', lastError: 'Choose which amendments to keep - finish by hand' }))
+    await renderEditor()
+    expect(await screen.findByText('E-sign: signed')).toBeTruthy()
+    expect(screen.queryByText(/Needs attention/)).toBeNull()
+  })
+
+  it.each([
+    ['declined', 'E-sign: declined'],
+    ['expired', 'E-sign: expired'],
+    ['canceled', 'E-sign: canceled'],
+    ['bounced', 'E-sign: email bounced'],
+    ['signed_partial', 'E-sign: partly signed'],
+  ] as const)('a %s request reads "%s"', async (status, text) => {
+    configured()
+    withRequests(signatureRequest({ status }))
+    await renderEditor()
+    expect(await screen.findByText(text)).toBeTruthy()
+  })
+
+  it('a declined or expired request can be sent again', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'declined' }))
+    await renderEditor()
+    expect(await screen.findByRole('button', { name: 'Send for signature' })).toBeEnabled()
+  })
+
+  it('puts the e-signature send in the Activity list, with test mode', async () => {
+    api.getEngagementRequest = vi.fn(async () =>
+      view({
+        status: 'sent',
+        sentAt: '2026-10-21T15:00:00.000Z',
+        emailLog: [{ kind: 'esign', at: '2026-10-21T15:00:00.000Z', to: ['pat@acme.test'], signatureRequestId: 'sigreq-1', testMode: true, ok: true, hash: null }],
+      }),
+    )
+    await renderEditor()
+    const activity = screen.getByRole('list', { name: 'Activity' })
+    expect(within(activity).getByText('Sent for e-signature to pat@acme.test (test mode)')).toBeTruthy()
+    // The sent stamp does not add a second, plain "Sent" line.
+    expect(within(activity).queryByText('Sent')).toBeNull()
+  })
+})
+
+/**
+ * Finishing a signature by hand, and the warning while a request is out (fix round 1): the server
+ * died part-way or the PDF could not be fetched -> "Finish e-signature"; a letter sent again or
+ * edited while a request is open warns that the client will sign the earlier version.
+ */
+describe('e-signature: finish and the open-request warning', () => {
+  const configured = () => {
+    api.signwellStatusRequest = vi.fn(async () => ({ configured: true, testMode: true }))
+  }
+  const withRequests = (...requests: SignatureRequest[]) => {
+    api.listEngagementEsignRequests = vi.fn(async () => requests)
+  }
+  const WARNING = 'An e-signature request is open; the client will sign the earlier version.'
+
+  it('offers Finish e-signature for a completed request with no signed PDF, and shows the outcome', async () => {
+    configured()
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent' }))
+    withRequests(signatureRequest({ status: 'completed', finishingAt: '2026-10-22T15:30:00.000Z' }))
+    await renderEditor()
+    expect(await screen.findByText(/Finishing this signature/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Finish e-signature' }))
+    await waitFor(() => expect(api.finishEngagementEsignRequest).toHaveBeenCalledWith('eng-1', 'sigreq-1'))
+    expect(await screen.findByText('Finished: the signed PDF is kept and the letter is marked signed.')).toBeTruthy()
+  })
+
+  it('says what is still left when finishing could not do it all', async () => {
+    configured()
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent' }))
+    withRequests(signatureRequest({ status: 'completed' }))
+    api.finishEngagementEsignRequest = vi.fn(async () => ({
+      request: signatureRequest({ status: 'completed' }),
+      signed: false,
+      issues: ['The letter changed after it went to SignWell - the client signed the earlier version; finish by hand'],
+      engagement: engagement({ status: 'sent' }),
+    }))
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Finish e-signature' }))
+    expect(await screen.findByText(/Finished what could be: The letter changed after it went to SignWell/)).toBeTruthy()
+  })
+
+  it('a refusal from the server (SignWell does not read Completed) is shown in its own words', async () => {
+    configured()
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent' }))
+    withRequests(signatureRequest({ status: 'completed' }))
+    api.finishEngagementEsignRequest = vi.fn(async () => {
+      throw new ApiError(409, 'SignWell shows this document as Viewed, not completed.', 'not_completed')
+    })
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Finish e-signature' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('SignWell shows this document as Viewed, not completed.')
+  })
+
+  it('offers Finish for a signed letter whose signed PDF is missing, but not for a finished one or a manually completed one', async () => {
+    configured()
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'signed', signedAt: '2026-10-22T16:00:00.000Z', clientId: 'client-9' }))
+    withRequests(signatureRequest({ status: 'completed' }))
+    await renderEditor()
+    expect(await screen.findByRole('button', { name: 'Finish e-signature' })).toBeTruthy()
+    cleanup()
+
+    // Finished: PDF kept and the letter signed.
+    withRequests(signatureRequest({ status: 'completed', signedDocumentId: 'sigdoc-1' }))
+    await renderEditor()
+    await screen.findByRole('link', { name: 'Download signed PDF' })
+    expect(screen.queryByRole('button', { name: 'Finish e-signature' })).toBeNull()
+    cleanup()
+
+    // Marked complete by a person at SignWell: nothing for the app to finish.
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent' }))
+    withRequests(signatureRequest({ status: 'completed', lastError: 'Marked complete in SignWell, not signed by the client - mark it signed by hand if that is right' }))
+    await renderEditor()
+    await screen.findByText(/Needs attention: Marked complete in SignWell/)
+    expect(screen.queryByRole('button', { name: 'Finish e-signature' })).toBeNull()
+  })
+
+  it('a request that is still out offers Check SignWell (not Finish e-signature); one that ended offers neither', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'viewed' }))
+    await renderEditor()
+    await screen.findByText('E-sign: viewed')
+    expect(screen.queryByRole('button', { name: 'Finish e-signature' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Check SignWell' })).toBeEnabled()
+    cleanup()
+    for (const status of ['declined', 'expired', 'canceled'] as const) {
+      withRequests(signatureRequest({ status }))
+      await renderEditor()
+      await screen.findByText(/^E-sign: /)
+      expect(screen.queryByRole('button', { name: 'Check SignWell' }), status).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Finish e-signature' }), status).toBeNull()
+      cleanup()
+    }
+  })
+
+  it('Check SignWell says what SignWell shows, and reads the requests again', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'sent' }))
+    api.finishEngagementEsignRequest = vi.fn(async () => ({
+      request: signatureRequest({ status: 'viewed' }),
+      signed: false,
+      issues: [],
+      engagement: engagement({ status: 'sent' }),
+    }))
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Check SignWell' }))
+    await waitFor(() => expect(api.finishEngagementEsignRequest).toHaveBeenCalledWith('eng-1', 'sigreq-1'))
+    expect(await screen.findByText('Checked SignWell: still viewed.')).toBeTruthy()
+  })
+
+  it('the sentence follows what the press did, not the request status: a completed request that signed nothing does not say it finished', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'viewed' }))
+    api.finishEngagementEsignRequest = vi.fn(async () => ({
+      request: signatureRequest({ status: 'completed', signedDocumentId: 'sigdoc-1' }),
+      signed: false,
+      issues: [],
+      engagement: engagement({ status: 'sent' }),
+    }))
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Check SignWell' }))
+    expect(await screen.findByText(/^Checked SignWell: still signed/)).toBeTruthy()
+    expect(screen.queryByText(/^Finished/)).toBeNull()
+  })
+
+  it('a Check SignWell that completes the request says it finished the signing', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'viewed' }))
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Check SignWell' }))
+    expect(await screen.findByText('Finished: the signed PDF is kept and the letter is marked signed.')).toBeTruthy()
+  })
+
+  it('a failed check says so in its own words, never "Nothing was sent."', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'viewed' }))
+    api.finishEngagementEsignRequest = vi.fn(async () => {
+      throw new ApiError(502, 'SignWell could not be reached, so nothing was checked. Try again in a minute.', 'esign_failed')
+    })
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Check SignWell' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('SignWell could not be reached, so nothing was checked. Try again in a minute.')
+    expect(alert.textContent).not.toMatch(/Nothing was sent/)
+    cleanup()
+    // An error with no message of its own still has words.
+    api.finishEngagementEsignRequest = vi.fn(async () => {
+      throw new Error('boom')
+    })
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Check SignWell' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not check SignWell. Try again in a minute.')
+  })
+
+  it('Save of an edit to the SIGNING DETAILS (retainer, package, plans, fee choice) warns while a request is out, like a text edit', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'sent' }))
+    await renderEditor()
+    await screen.findByText('E-sign: sent Oct 21')
+    fireEvent.change(screen.getByLabelText('Retainer amount'), { target: { value: '999' } })
+    const confirm = mockConfirm(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(api.updateEngagementRequest).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByLabelText('Retainer amount'), { target: { value: '630' } })
+    await waitFor(() => expect(screen.getByRole('option', { name: 'Full service' })).toBeTruthy())
+    fireEvent.change(screen.getByLabelText('Package'), { target: { value: 'pkg-1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(confirm).toHaveBeenCalledTimes(2)
+    expect(api.updateEngagementRequest).not.toHaveBeenCalled()
+  })
+
+  it('Save address warns while a request is out, saves on yes and does nothing on no', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'sent' }))
+    await renderEditor()
+    await screen.findByText('E-sign: sent Oct 21')
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'new@acme.test' } })
+    const confirm = mockConfirm(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Save address' }))
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(confirm.mock.calls[0][0]).toBe('An e-signature request is open; the client will sign the earlier version. Save the address anyway?')
+    expect(api.updateEngagementRequest).not.toHaveBeenCalled()
+    // The first press is still finishing (the button is busy): wait for it before pressing again.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save address' })).toBeEnabled())
+    mockConfirm(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Save address' }))
+    await waitFor(() => expect(api.updateEngagementRequest).toHaveBeenCalledTimes(1))
+  })
+
+  it('Save address asks nothing when no request is out', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'declined' }))
+    await renderEditor()
+    await screen.findByText('E-sign: declined')
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'new@acme.test' } })
+    const confirm = mockConfirm(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Save address' }))
+    await waitFor(() => expect(api.updateEngagementRequest).toHaveBeenCalledTimes(1))
+    expect(confirm).not.toHaveBeenCalled()
+  })
+
+  it('warns in the Send picker while a request is out - and does not block it', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'sent' }))
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent' }))
+    await renderEditor()
+    await screen.findByText('E-sign: sent Oct 21')
+    fireEvent.click(screen.getByRole('button', { name: 'Send again' }))
+    const warning = await screen.findByText(WARNING)
+    expect(warning).toBeTruthy()
+    // The picker itself is still usable.
+    expect(within(screen.getByRole('dialog')).getAllByRole('button').length).toBeGreaterThan(0)
+  })
+
+  it.each(['bounced', 'error'] as const)('warns in the Send picker for a %s request too (it can recover to out)', async (status) => {
+    configured()
+    withRequests(signatureRequest({ status }))
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent' }))
+    await renderEditor()
+    await screen.findByText(/^E-sign: /)
+    fireEvent.click(screen.getByRole('button', { name: 'Send again' }))
+    expect(await screen.findByText(WARNING)).toBeTruthy()
+  })
+
+  it('Save of an edit warns for a bounced request too', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'bounced' }))
+    await renderEditor()
+    await screen.findByText('E-sign: email bounced')
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Changed subject' } })
+    const confirm = mockConfirm(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(api.updateEngagementRequest).not.toHaveBeenCalled()
+  })
+
+  it('does not warn in the Send picker when no request is out', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'declined' }))
+    await renderEditor()
+    await screen.findByText('E-sign: declined')
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await screen.findByRole('dialog')
+    expect(screen.queryByText(WARNING)).toBeNull()
+  })
+
+  it('Save of an edit asks first while a request is out; cancelling saves nothing, confirming saves', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'viewed' }))
+    await renderEditor()
+    await screen.findByText('E-sign: viewed')
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Changed subject' } })
+    const confirm = mockConfirm(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(confirm.mock.calls[0][0]).toBe(`${WARNING} Save your edits anyway?`)
+    expect(api.updateEngagementRequest).not.toHaveBeenCalled()
+    mockConfirm(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(api.updateEngagementRequest).toHaveBeenCalledTimes(1))
+  })
+
+  it('Save asks nothing when no request is out', async () => {
+    configured()
+    withRequests(signatureRequest({ status: 'declined' }))
+    await renderEditor()
+    await screen.findByText('E-sign: declined')
+    const confirm = mockConfirm(false)
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Changed subject' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(api.updateEngagementRequest).toHaveBeenCalledTimes(1))
+    expect(confirm).not.toHaveBeenCalled()
   })
 })

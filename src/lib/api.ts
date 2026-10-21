@@ -39,6 +39,8 @@
   type EngagementPreview,
   type EngagementSection,
   type EngagementSendResult,
+  type SignatureRequest,
+  type SignwellStatus,
   type EngagementSignResult,
   type EngagementStatus,
   type EngagementView,
@@ -5580,6 +5582,55 @@ export function sendEngagementRequest(
     proposalJson('POST', input),
     'Failed to send the engagement letter',
   )
+}
+
+/** Whether e-signature (SignWell) is set up, and whether it is in test mode. Owner-only. */
+export function signwellStatusRequest(): Promise<SignwellStatus> {
+  return engagementRequest<SignwellStatus>('/api/signwell/status', { method: 'GET' }, 'Could not read the e-signature settings')
+}
+
+/** This engagement's e-signature requests, newest first (never the signed bytes). */
+export async function listEngagementEsignRequests(id: string): Promise<SignatureRequest[]> {
+  const body = await engagementRequest<{ requests?: SignatureRequest[] }>(
+    engagementPath(id, 'esign'),
+    { method: 'GET' },
+    'Could not read the signature requests',
+  )
+  return Array.isArray(body.requests) ? body.requests : []
+}
+
+/** Send the engagement letter for e-signature to its party. `templateHash` is the hash the page loaded. */
+export function sendEngagementEsignRequest(
+  id: string,
+  input: { templateHash: string },
+): Promise<{ request: SignatureRequest; engagement: Engagement }> {
+  return engagementRequest(engagementPath(id, 'esign'), proposalJson('POST', input), 'Failed to send the letter for signature')
+}
+
+/** Remind the signer of the active request (once per firm day). */
+export function remindEngagementEsignRequest(id: string): Promise<{ request: SignatureRequest }> {
+  return engagementRequest(engagementPath(id, 'esign/remind'), proposalJson('POST', {}), 'Failed to send the reminder')
+}
+
+/**
+ * "Finish e-signature": re-run, idempotently, the work after SignWell completed a document (keep
+ * the signed PDF, mark the letter signed). `signed` says whether the letter is now marked signed;
+ * `issues` is what still needs a person.
+ */
+export function finishEngagementEsignRequest(
+  id: string,
+  requestId: string,
+): Promise<{ request: SignatureRequest; signed: boolean; issues: string[]; engagement: Engagement }> {
+  return engagementRequest(
+    engagementPath(id, `esign/${encodeURIComponent(requestId)}/finish`),
+    proposalJson('POST', {}),
+    'Failed to finish the e-signature',
+  )
+}
+
+/** The signed PDF of a completed request, downloaded in the app (never emailed). */
+export function engagementEsignPdfUrl(id: string, requestId: string) {
+  return engagementPath(id, `esign/${encodeURIComponent(requestId)}/pdf`)
 }
 
 /**

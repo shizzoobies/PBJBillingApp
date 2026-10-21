@@ -210,3 +210,26 @@ describe('the thank-you page SignWell sends a signer to', () => {
     expect(block).not.toMatch(/appDataStore|searchParams|query/)
   })
 })
+
+describe('GET /api/signwell/status', () => {
+  const statusRoute = () => between("if (normalizedPath === '/api/signwell/status' && request.method === 'GET') {", '// ---- end of the engagement e-signature routes')
+
+  it('is owner-only and same-origin, inside the e-signature block, above the /api/ catch-all', () => {
+    const block = statusRoute()
+    expect(block).toContain('await requireSession(request, response)')
+    expect(block).toMatch(/session\.user\.role !== 'owner'/)
+    expect(block).toContain('isCrossSiteOrigin(request)')
+    expect(block.indexOf("session.user.role !== 'owner'")).toBeLessThan(block.indexOf('signwell.'))
+    expect(serverSource.indexOf("normalizedPath === '/api/signwell/status'")).toBeLessThan(
+      serverSource.indexOf("if (normalizedPath.startsWith('/api/')) {"),
+    )
+    expect(routes()).toContain("normalizedPath === '/api/signwell/status'")
+  })
+
+  it('answers whether it is configured and whether it is in test mode - never the key or the webhook id', () => {
+    const block = statusRoute()
+    expect(block).toContain('{ configured: signwell.signwellConfigured(process.env), testMode: signwell.isTestMode(process.env) }')
+    expect(block).not.toMatch(/SIGNWELL_API_KEY|SIGNWELL_WEBHOOK_ID/)
+    expect(block).toContain("'Cache-Control': 'no-store'")
+  })
+})

@@ -7,6 +7,7 @@ import { insertPlaceholder, isBoldShortcut, toggleBold, unknownPlaceholderSenten
 import { SaveBadge } from '../components/SectionKit'
 import { RecipientPicker } from '../components/RecipientPicker'
 import { AddressedTo, type AddressedToFields } from '../components/engagements/AddressedTo'
+import { EsignPanel } from '../components/engagements/EsignPanel'
 import { SignEngagementForm, SigningSummary } from '../components/engagements/SignEngagement'
 import {
   engagementPreviewPdfUrl,
@@ -22,6 +23,7 @@ import {
   voidEngagementRequest,
 } from '../lib/api'
 import { addFeeChoiceHidden, engagementFeeChoices } from '../lib/engagementSigning'
+import { ESIGN_OPEN_WARNING, esignWarnsOnEdit } from '../lib/engagements'
 import {
   ENGAGEMENT_KIND_LABELS,
   ENGAGEMENT_STATUS_LABELS,
@@ -43,6 +45,7 @@ import {
   type EngagementSignResult,
   type EngagementView,
   type Package,
+  type SignatureRequest,
 } from '../lib/types'
 
 type Field = 'subject' | 'emailBody' | 'letterBody'
@@ -117,10 +120,15 @@ function activityRows(engagement: Engagement, nameOf: (userId: string | null) =>
     } else if (entry.kind === 'delivery') {
       const label = DELIVERY_LABELS[entry.event] ?? entry.event
       rows.push({ at: entry.at, text: `${label}${to ? ` (${to})` : ''}${entry.detail ? `: ${entry.detail}` : ''}` })
+    } else if (entry.kind === 'esign') {
+      rows.push({ at: entry.at, text: `Sent for e-signature to ${to}${entry.testMode ? ' (test mode)' : ''}` })
     }
   })
   // The sent stamp, when the log holds no successful send (a row written before the log).
-  if (engagement.sentAt && !(engagement.emailLog ?? []).some((entry) => entry?.kind === 'send' && entry.ok)) {
+  if (
+    engagement.sentAt &&
+    !(engagement.emailLog ?? []).some((entry) => (entry?.kind === 'send' || entry?.kind === 'esign') && entry.ok)
+  ) {
     rows.push({ at: engagement.sentAt, text: 'Sent' })
   }
   if (engagement.signedAt) {
@@ -205,6 +213,10 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   // What the last Mark as signed did (the client, checklists, retainer, skips). The form
   // itself (day, note, in person, the changed-since-sent warning) is the shared SignEngagementForm.
   const [signSummary, setSignSummary] = useState<EngagementSignResult | null>(null)
+  // The e-signature requests the panel read: while one is out, sending again or editing warns that the
+  // client will sign the earlier version (a warning, never a block).
+  const [esignRequests, setEsignRequests] = useState<SignatureRequest[]>([])
+  const esignOpen = esignRequests.some((request) => esignWarnsOnEdit(request))
 
   const subjectRef = useRef<HTMLInputElement>(null)
   const emailBodyRef = useRef<HTMLTextAreaElement>(null)
@@ -420,6 +432,17 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
 
   const save = async () => {
     if (parsedRetainer === undefined) return
+    const textEdited =
+      subject !== (engagement.subject ?? '') ||
+      emailBody !== (engagement.emailBody ?? '') ||
+      letterBody !== (engagement.letterBody ?? '') ||
+      parsedRetainer !== (engagement.retainerAmount && engagement.retainerAmount > 0 ? engagement.retainerAmount : null) ||
+      packageId !== (engagement.packageId ?? '') ||
+      planIds.length !== savedPlanIds.length ||
+      planIds.some((id) => !savedPlanIds.includes(id)) ||
+      feeMode !== (engagement.feeMode ?? 'replace')
+    // The text AND the signing details (retainer, package, plans, fee choice) are what the client signs.
+    if (esignOpen && textEdited && !window.confirm(`${ESIGN_OPEN_WARNING} Save your edits anyway?`)) return
     setSaveState('saving')
     setSaveError('')
     setNotice('')
@@ -454,6 +477,8 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
 
   /** Save Address: only the party's name, email and company, merged over the stored party by the server. */
   const saveAddressedTo = async (fields: AddressedToFields) => {
+    // The party is part of the letter the client signs: warn first, as Save does (a warning, not a block).
+    if (esignOpen && !window.confirm(`${ESIGN_OPEN_WARNING} Save the address anyway?`)) return
     let next: EngagementView
     try {
       next = await updateEngagementRequest(engagementId, {
@@ -838,6 +863,18 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                   </button>
                 </div>
 
+                <EsignPanel
+                  engagementId={engagementId}
+                  partyName={partyName}
+                  partyEmail={engagement.party.email}
+                  templateHash={view.hash}
+                  canSend
+                  disabled={unsaved || busy !== ''}
+                  refreshKey={dataRefreshCount}
+                  onRequests={setEsignRequests}
+                  onChanged={() => refresh({ overwrite: false, advanceStamp: true })}
+                />
+
                 <h3>Mark as signed</h3>
                 <SignEngagementForm
                   engagement={engagement}
@@ -860,6 +897,16 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                 <button type="button" className="secondary-action" onClick={() => setPreviewOpen(true)}>
                   Preview
                 </button>
+                <EsignPanel
+                  engagementId={engagementId}
+                  partyName={partyName}
+                  partyEmail={engagement.party.email}
+                  templateHash={view.hash}
+                  canSend={false}
+                  refreshKey={dataRefreshCount}
+                  engagementSigned={engagement.status === 'signed'}
+                  onChanged={() => refresh({ overwrite: false, advanceStamp: true })}
+                />
               </>
             )}
           </div>
@@ -1099,6 +1146,11 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
           <p className="muted-text">
             {`They get your email with the letter attached as a PDF. Replies go to ${replyTo}; nothing is copied to anyone else.`}
           </p>
+          {esignOpen ? (
+            <p className="form-error" role="status">
+              {ESIGN_OPEN_WARNING}
+            </p>
+          ) : null}
         </RecipientPicker>
       ) : null}
     </section>
