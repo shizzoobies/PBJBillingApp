@@ -25,7 +25,8 @@ for h in "$@"; do
   node scripts/prod/quiet-check.mjs || { echo "production not quiet - stopping"; exit 1; }
   [ "$(git rev-parse "$h")" = "$(git rev-parse refs/heads/main)" ] || git merge --ff-only "$h" >/dev/null || { echo "fast-forward failed"; exit 1; }
   git push origin main 2>&1 | tail -1
-  short=$(git rev-parse --short=7 "$h")  # /health prints 7 chars; --short may grow past that; ok=0
+  short=$(git rev-parse --short=7 "$h")  # /health prints 7 chars; --short may grow past that
+  ok=0
   for i in $(seq 1 40); do
     c=$(curl -s https://app.pbjsa.com/health | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const j=JSON.parse(s);console.log(j.commit+' ok='+j.ok+' db='+j.db)}catch(e){console.log('unparsed')}})")
     case "$c" in "$short"*) echo "live: $c"; ok=1; break;; esac
