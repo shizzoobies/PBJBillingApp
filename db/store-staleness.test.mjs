@@ -54753,3 +54753,518 @@ describe('a client copy follows its plan cadence (postgres branch)', () => {
     expect(read).toHaveBeenCalled()
   })
 })
+
+/**
+ * Electronic signature requests (featreq-56d39567; docs/signwell.md): `signature_requests`,
+ * `signature_documents` and the `signwell_events` ledger. Endpoint-managed, outside the bulk
+ * save. File backend round-trips plus the Postgres statements through the recording fake.
+ */
+describe('signature requests (both backends)', () => {
+  const readAuthState = async () => JSON.parse(await readFile(localAuthPath, 'utf8'))
+  const resetSignatureState = async () => {
+    const state = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    state.signatureRequests = []
+    state.signatureDocuments = []
+    state.signwellEvents = []
+    await writeFile(localAuthPath, JSON.stringify(state, null, 2))
+  }
+  const newRequest = (overrides = {}) =>
+    store.createSignatureRequest({
+      engagementId: 'eng-1',
+      clientId: null,
+      signwellDocumentId: 'doc-1',
+      status: 'sent',
+      recipients: [{ id: '1', name: 'Pat Example', email: 'pat@example.invalid' }],
+      testMode: true,
+      esignHash: 'a'.repeat(64),
+      sentAt: '2026-10-21T15:00:00.000Z',
+      createdBy: 'emp-patrice',
+      ...overrides,
+    })
+
+  beforeEach(resetSignatureState)
+
+  it('file: creates, reads, looks up by SignWell document id and lists newest first', async () => {
+    const first = await newRequest()
+    expect(first).toMatchObject({
+      engagementId: 'eng-1',
+      signwellDocumentId: 'doc-1',
+      status: 'sent',
+      testMode: true,
+      sentAt: '2026-10-21T15:00:00.000Z',
+      completedAt: null,
+      lastEventAt: null,
+      lastError: null,
+      lastRemindedAt: null,
+      signedDocumentId: null,
+      createdBy: 'emp-patrice',
+      // The hash of the letter and its signing details as sent (signing is refused if they changed since); not yet finishing.
+      esignHash: 'a'.repeat(64),
+      finishingAt: null,
+    })
+    expect(first.id).toMatch(/^sigreq-[0-9a-f]{8}$/)
+    expect(first.recipients).toEqual([{ id: '1', name: 'Pat Example', email: 'pat@example.invalid' }])
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const second = await newRequest({ signwellDocumentId: 'doc-2', status: 'declined' })
+
+    expect(await store.getSignatureRequest(first.id)).toEqual(first)
+    expect((await store.getSignatureRequestByDocumentId('doc-2')).id).toBe(second.id)
+    expect(await store.getSignatureRequestByDocumentId('doc-missing')).toBeNull()
+    expect(await store.getSignatureRequest('')).toBeNull()
+    expect((await store.listSignatureRequestsForEngagement('eng-1')).map((row) => row.id)).toEqual([second.id, first.id])
+    expect(await store.listSignatureRequestsForEngagement('eng-other')).toEqual([])
+    // Only a request still out with the signer is ACTIVE: the declined one is not.
+    expect((await store.activeSignatureRequestForEngagement('eng-1')).id).toBe(first.id)
+    await store.updateSignatureRequest(first.id, { status: 'completed' })
+    expect(await store.activeSignatureRequestForEngagement('eng-1')).toBeNull()
+    for (const active of ['viewed', 'signed_partial']) {
+      const row = await newRequest({ signwellDocumentId: `doc-${active}`, status: active })
+      expect((await store.activeSignatureRequestForEngagement('eng-1')).id).toBe(row.id)
+      await store.updateSignatureRequest(row.id, { status: 'completed' })
+    }
+  })
+
+  it('file: refuses an unknown status, a missing engagement and a duplicate SignWell document', async () => {
+    await expect(newRequest({ status: 'nonsense' })).rejects.toThrow(/unknown signature status/)
+    await expect(newRequest({ engagementId: '' })).rejects.toThrow(/engagementId/)
+    await newRequest()
+    await expect(newRequest()).rejects.toThrow(/already exists/)
+  })
+
+  it('file: in-progress statuses never move backward, and nothing leaves a finished request', async () => {
+    const request = await newRequest()
+    const at = (minute) => `2026-10-21T15:0${minute}:00.000Z`
+    expect((await store.updateSignatureRequest(request.id, { status: 'viewed', lastEventAt: at(1) })).status).toBe('viewed')
+    expect((await store.updateSignatureRequest(request.id, { status: 'signed_partial', lastEventAt: at(2) })).status).toBe(
+      'signed_partial',
+    )
+    // A later "viewed" or "sent" (an earlier step) changes nothing.
+    expect((await store.updateSignatureRequest(request.id, { status: 'viewed', lastEventAt: at(3) })).status).toBe('signed_partial')
+    expect((await store.updateSignatureRequest(request.id, { status: 'sent' })).status).toBe('signed_partial')
+    const done = await store.updateSignatureRequest(request.id, { status: 'completed', completedAt: at(4), lastEventAt: at(4) })
+    expect(done.status).toBe('completed')
+    expect(done.completedAt).toBe(at(4))
+    for (const later of ['declined', 'expired', 'canceled', 'bounced', 'error', 'viewed', 'sent']) {
+      expect((await store.updateSignatureRequest(request.id, { status: later, lastEventAt: at(5) })).status).toBe('completed')
+    }
+    // Every finished status is final, whichever it is.
+    for (const finished of ['declined', 'expired', 'canceled']) {
+      const other = await newRequest({ signwellDocumentId: `doc-${finished}`, status: finished })
+      expect((await store.updateSignatureRequest(other.id, { status: 'completed' })).status).toBe(finished)
+      expect((await store.updateSignatureRequest(other.id, { status: 'sent' })).status).toBe(finished)
+    }
+  })
+
+  it('file: bounced and error are recoverable by an in-progress status, and an in-progress request can bounce or error', async () => {
+    const request = await newRequest()
+    expect((await store.updateSignatureRequest(request.id, { status: 'bounced' })).status).toBe('bounced')
+    expect((await store.updateSignatureRequest(request.id, { status: 'viewed' })).status).toBe('viewed')
+    expect((await store.updateSignatureRequest(request.id, { status: 'error' })).status).toBe('error')
+    expect((await store.updateSignatureRequest(request.id, { status: 'sent' })).status).toBe('sent')
+    expect((await store.updateSignatureRequest(request.id, { status: 'signed_partial' })).status).toBe('signed_partial')
+    // A bounced request can still end: finished, or declined.
+    expect((await store.updateSignatureRequest(request.id, { status: 'bounced' })).status).toBe('bounced')
+    expect((await store.updateSignatureRequest(request.id, { status: 'declined' })).status).toBe('declined')
+  })
+
+  it('file: a late event never moves an in-progress status, but a finished status read from the document always applies', async () => {
+    const request = await newRequest()
+    await store.updateSignatureRequest(request.id, { status: 'viewed', lastEventAt: '2026-10-21T15:10:00.000Z' })
+    // An older event for an in-progress status: ignored.
+    expect((await store.updateSignatureRequest(request.id, { status: 'signed_partial', lastEventAt: '2026-10-21T15:05:00.000Z' })).status).toBe('viewed')
+    // An older event whose status is a finished one the document shows: applied, and the clock still only moves forward.
+    const done = await store.updateSignatureRequest(request.id, { status: 'completed', lastEventAt: '2026-10-21T15:01:00.000Z' })
+    expect(done.status).toBe('completed')
+    expect(done.lastEventAt).toBe('2026-10-21T15:10:00.000Z')
+  })
+
+  it('file: counts requests left finishing for longer than a cutoff (the boot log line)', async () => {
+    const old = await newRequest({ signwellDocumentId: 'doc-old' })
+    const fresh = await newRequest({ signwellDocumentId: 'doc-fresh' })
+    await newRequest({ signwellDocumentId: 'doc-idle' })
+    await store.updateSignatureRequest(old.id, { finishingAt: new Date(Date.now() - 30 * 60 * 1000).toISOString() })
+    await store.updateSignatureRequest(fresh.id, { finishingAt: new Date(Date.now() - 60 * 1000).toISOString() })
+    // Only the one finishing for longer than the default 10 minutes; a 0 cutoff (the boot check) lists every one.
+    expect(await store.listStuckSignatureRequestIds()).toEqual([old.id])
+    expect(await store.listStuckSignatureRequestIds(30 * 1000)).toEqual([old.id, fresh.id])
+    expect(await store.listStuckSignatureRequestIds(0)).toEqual([old.id, fresh.id])
+    await store.updateSignatureRequest(old.id, { finishingAt: null })
+    expect(await store.listStuckSignatureRequestIds()).toEqual([])
+    expect(await store.listStuckSignatureRequestIds(0)).toEqual([fresh.id])
+  })
+
+  it('file: finishing_at is set, cleared with null and kept when absent', async () => {
+    const request = await newRequest()
+    const set = await store.updateSignatureRequest(request.id, { finishingAt: '2026-10-21T16:00:00.000Z' })
+    expect(set.finishingAt).toBe('2026-10-21T16:00:00.000Z')
+    expect((await store.updateSignatureRequest(request.id, { lastError: 'x' })).finishingAt).toBe('2026-10-21T16:00:00.000Z')
+    expect((await store.updateSignatureRequest(request.id, { finishingAt: null })).finishingAt).toBeNull()
+  })
+
+  it('file: a hash that is not 64 hex characters is stored as none', async () => {
+    expect((await newRequest({ esignHash: 'not-a-hash' })).esignHash).toBeNull()
+    expect((await newRequest({ signwellDocumentId: 'doc-2', esignHash: undefined })).esignHash).toBeNull()
+  })
+
+  it('file: last_event_at only moves forward, and an event older than the newest does not change the status', async () => {
+    const request = await newRequest()
+    await store.updateSignatureRequest(request.id, { status: 'viewed', lastEventAt: '2026-10-21T15:10:00.000Z' })
+    const older = await store.updateSignatureRequest(request.id, {
+      status: 'signed_partial',
+      lastEventAt: '2026-10-21T15:05:00.000Z',
+    })
+    expect(older.lastEventAt).toBe('2026-10-21T15:10:00.000Z')
+    expect(older.status).toBe('viewed')
+    const newer = await store.updateSignatureRequest(request.id, {
+      status: 'signed_partial',
+      lastEventAt: '2026-10-21T15:20:00.000Z',
+    })
+    expect(newer.lastEventAt).toBe('2026-10-21T15:20:00.000Z')
+    expect(newer.status).toBe('signed_partial')
+  })
+
+  it("file: lastError sets, clears (null) and is kept when absent; recipients keep SignWell's own status string; an unknown id is null", async () => {
+    const request = await newRequest()
+    expect((await store.updateSignatureRequest(request.id, { lastError: 'could not fetch' })).lastError).toBe('could not fetch')
+    expect((await store.updateSignatureRequest(request.id, { status: 'viewed' })).lastError).toBe('could not fetch')
+    expect((await store.updateSignatureRequest(request.id, { lastError: null })).lastError).toBeNull()
+    const withStatus = await store.updateSignatureRequest(request.id, {
+      recipients: [{ id: '1', name: 'Pat Example', email: 'pat@example.invalid', status: 'viewed', extra: 'dropped' }],
+      lastRemindedAt: '2026-10-22T14:00:00.000Z',
+    })
+    expect(withStatus.recipients).toEqual([{ id: '1', name: 'Pat Example', email: 'pat@example.invalid', status: 'viewed' }])
+    expect(withStatus.lastRemindedAt).toBe('2026-10-22T14:00:00.000Z')
+    expect(await store.updateSignatureRequest('sigreq-missing', { status: 'viewed' })).toBeNull()
+    expect(await store.updateSignatureRequest('', { status: 'viewed' })).toBeNull()
+  })
+
+  it('file: keeps a signed PDF (bytes round-trip, metadata has no bytes) in the auth file, never the workspace', async () => {
+    const request = await newRequest()
+    const bytes = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x00, 0xff, 0x80, 0x0a])
+    const meta = await store.storeSignedDocument({ signatureRequestId: request.id, fileName: 'Signed.pdf', bytes })
+    expect(meta).toMatchObject({ signatureRequestId: request.id, fileName: 'Signed.pdf', byteSize: bytes.length })
+    expect(meta.id).toMatch(/^sigdoc-[0-9a-f]{8}$/)
+    expect(meta).not.toHaveProperty('bytes')
+    const read = await store.getSignedDocument(meta.id)
+    expect(read.bytes.equals(bytes)).toBe(true)
+    expect(read.fileName).toBe('Signed.pdf')
+    expect(await store.getSignedDocument('sigdoc-missing')).toBeNull()
+    expect((await readAuthState()).signatureDocuments).toHaveLength(1)
+    expect(await readFile(localDataPath, 'utf8')).not.toContain('signatureDocuments')
+    await expect(store.storeSignedDocument({ signatureRequestId: request.id, fileName: 'x.pdf', bytes: Buffer.alloc(0) })).rejects.toThrow(
+      /PDF bytes/,
+    )
+    await expect(store.storeSignedDocument({ signatureRequestId: '', fileName: 'x.pdf', bytes })).rejects.toThrow(/signatureRequestId/)
+    const unnamed = await store.storeSignedDocument({ signatureRequestId: 'sigreq-other', fileName: '  ', bytes })
+    expect(unnamed.fileName).toBe('signed-engagement-letter.pdf')
+  })
+
+  it('file: one signed PDF per request - a second store reads the first back and keeps its bytes', async () => {
+    const request = await newRequest()
+    const first = await store.storeSignedDocument({ signatureRequestId: request.id, fileName: 'First.pdf', bytes: Buffer.from('%PDF-first') })
+    const again = await store.storeSignedDocument({ signatureRequestId: request.id, fileName: 'Second.pdf', bytes: Buffer.from('%PDF-second') })
+    expect(again.id).toBe(first.id)
+    expect(again.fileName).toBe('First.pdf')
+    expect((await readAuthState()).signatureDocuments).toHaveLength(1)
+    expect((await store.getSignedDocument(first.id)).bytes.toString()).toBe('%PDF-first')
+  })
+
+  it('file: the event ledger records a key once and stays bounded', async () => {
+    expect(await store.recordSignwellEventOnce('key-a', 'document_completed')).toBe(true)
+    expect(await store.recordSignwellEventOnce('key-a', 'document_completed')).toBe(false)
+    expect(await store.recordSignwellEventOnce('key-b', 'document_viewed')).toBe(true)
+    expect(await store.recordSignwellEventOnce('', 'x')).toBe(false)
+    expect((await readAuthState()).signwellEvents.map((entry) => entry.id)).toEqual(['key-a', 'key-b'])
+    for (let index = 0; index < 505; index += 1) await store.recordSignwellEventOnce(`bulk-${index}`, 'x')
+    const ledger = (await readAuthState()).signwellEvents
+    expect(ledger).toHaveLength(500)
+    expect(ledger.at(-1).id).toBe('bulk-504')
+  }, 60000)
+
+  it('file: forgetting an event key lets the same event be recorded again, and an unknown key is a harmless false', async () => {
+    expect(await store.recordSignwellEventOnce('key-a', 'document_viewed')).toBe(true)
+    expect(await store.recordSignwellEventOnce('key-b', 'document_viewed')).toBe(true)
+    expect(await store.forgetSignwellEvent('key-a')).toBe(true)
+    expect(await store.forgetSignwellEvent('key-a')).toBe(false)
+    expect(await store.forgetSignwellEvent('')).toBe(false)
+    expect((await readAuthState()).signwellEvents.map((entry) => entry.id)).toEqual(['key-b'])
+    expect(await store.recordSignwellEventOnce('key-a', 'document_viewed')).toBe(true)
+  })
+
+  it('is never in the bulk save: not in its lock list, its tables or the workspace fingerprint', () => {
+    const named = JSON.stringify([BULK_SAVE_LOCK_TABLES, BULK_SAVE_LOCK_SQL, BULK_SAVE_TABLES])
+    for (const table of ['signature_requests', 'signature_documents', 'signwell_events']) {
+      expect(named).not.toContain(table)
+    }
+  })
+
+  describe('postgres statements', () => {
+    /** The fake, answering the statement the test names with the given rows. */
+    function pgWith(answers) {
+      const fake = fakePostgres()
+      const inner = fake.pool.query.bind(fake.pool)
+      fake.pool.query = async (text, params) => {
+        const result = await inner(text, params)
+        for (const [pattern, answer] of answers) {
+          if (pattern.test(String(text).trim())) return typeof answer === 'function' ? answer(params) : answer
+        }
+        return result
+      }
+      return { fake, pg: postgresStore(fake) }
+    }
+    const row = (overrides = {}) => ({
+      id: 'sigreq-aaaaaaaa',
+      engagement_id: 'eng-1',
+      client_id: null,
+      signwell_document_id: 'doc-1',
+      status: 'sent',
+      recipients: [{ id: '1', name: 'Pat Example', email: 'pat@example.invalid' }],
+      test_mode: true,
+      esign_hash: 'a'.repeat(64),
+      signed_document_id: null,
+      sent_at: new Date('2026-10-21T15:00:00.000Z'),
+      completed_at: null,
+      finishing_at: null,
+      last_event_at: null,
+      last_error: null,
+      last_reminded_at: null,
+      created_by: 'emp-patrice',
+      created_at: new Date('2026-10-21T15:00:00.000Z'),
+      updated_at: new Date('2026-10-21T15:00:00.000Z'),
+      ...overrides,
+    })
+
+    it('createSignatureRequest is one INSERT .. RETURNING with the row in a fixed parameter order', async () => {
+      const { fake, pg } = pgWith([[/^insert into signature_requests/i, { rows: [row()], rowCount: 1 }]])
+      const created = await pg.createSignatureRequest({
+        engagementId: 'eng-1',
+        signwellDocumentId: 'doc-1',
+        recipients: [{ id: '1', name: 'Pat Example', email: 'pat@example.invalid' }],
+        testMode: true,
+        esignHash: 'a'.repeat(64),
+        sentAt: '2026-10-21T15:00:00.000Z',
+        createdBy: 'emp-patrice',
+      })
+      expect(created).toMatchObject({ id: 'sigreq-aaaaaaaa', engagementId: 'eng-1', status: 'sent', testMode: true, esignHash: 'a'.repeat(64) })
+      const inserts = fake.matching(/^insert into signature_requests/i)
+      expect(inserts).toHaveLength(1)
+      expect(inserts[0].text.replace(/\s+/g, ' ')).toContain(
+        '(id, engagement_id, client_id, signwell_document_id, status, recipients, test_mode, sent_at, created_by, esign_hash) values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::timestamptz, $9, $10)',
+      )
+      expect(inserts[0].text).toMatch(/returning id, engagement_id, client_id, signwell_document_id, status, recipients,/)
+      const [id, engagementId, clientId, documentId, status, recipients, testMode, sentAt, createdBy, esignHash] = inserts[0].params
+      expect(id).toMatch(/^sigreq-[0-9a-f]{8}$/)
+      expect([engagementId, clientId, documentId, status, testMode, sentAt, createdBy, esignHash]).toEqual([
+        'eng-1',
+        null,
+        'doc-1',
+        'sent',
+        true,
+        '2026-10-21T15:00:00.000Z',
+        'emp-patrice',
+        'a'.repeat(64),
+      ])
+      expect(JSON.parse(recipients)).toEqual([{ id: '1', name: 'Pat Example', email: 'pat@example.invalid' }])
+    })
+
+    it('reads: by id, by SignWell document id, the active one (newest first, active statuses only), the list', async () => {
+      const { fake, pg } = pgWith([[/^select id, engagement_id[\s\S]*from signature_requests/i, { rows: [row()] }]])
+      expect((await pg.getSignatureRequest('sigreq-aaaaaaaa')).id).toBe('sigreq-aaaaaaaa')
+      expect((await pg.getSignatureRequestByDocumentId('doc-1')).signwellDocumentId).toBe('doc-1')
+      expect((await pg.activeSignatureRequestForEngagement('eng-1')).id).toBe('sigreq-aaaaaaaa')
+      expect((await pg.listSignatureRequestsForEngagement('eng-1')).map((entry) => entry.id)).toEqual(['sigreq-aaaaaaaa'])
+      const selects = fake.matching(/^select id, engagement_id[\s\S]*from signature_requests/i).map((entry) => ({
+        sql: entry.text.replace(/\s+/g, ' ').replace(/^select .*? from signature_requests /i, ''),
+        params: entry.params,
+      }))
+      expect(selects).toEqual([
+        { sql: 'where id = $1', params: ['sigreq-aaaaaaaa'] },
+        { sql: 'where signwell_document_id = $1', params: ['doc-1'] },
+        {
+          sql: 'where engagement_id = $1 and status = any($2::text[]) order by created_at desc, id desc limit 1',
+          params: ['eng-1', ['sent', 'viewed', 'signed_partial']],
+        },
+        { sql: 'where engagement_id = $1 order by created_at desc, id desc', params: ['eng-1'] },
+      ])
+      expect(await postgresStore(fakePostgres()).getSignatureRequest('')).toBeNull()
+      expect(await postgresStore(fakePostgres()).activeSignatureRequestForEngagement('')).toBeNull()
+    })
+
+    it('updateSignatureRequest is ONE guarded UPDATE: finished never changes, in-progress only forward, bounced/error recoverable, last_event_at greatest', async () => {
+      const { fake, pg } = pgWith([[/^update signature_requests set/i, { rows: [row({ status: 'viewed' })], rowCount: 1 }]])
+      const updated = await pg.updateSignatureRequest('sigreq-aaaaaaaa', {
+        status: 'viewed',
+        lastEventAt: '2026-10-21T15:05:00.000Z',
+        lastError: 'boom',
+        recipients: [{ id: '1', name: 'Pat Example', email: 'pat@example.invalid', status: 'viewed' }],
+        completedAt: '2026-10-21T15:06:00.000Z',
+        signedDocumentId: 'sigdoc-bbbbbbbb',
+        lastRemindedAt: '2026-10-21T15:07:00.000Z',
+        finishingAt: '2026-10-21T15:08:00.000Z',
+      })
+      expect(updated.status).toBe('viewed')
+      const updates = fake.matching(/^update signature_requests set/i)
+      expect(updates).toHaveLength(1)
+      const sql = updates[0].text.replace(/\s+/g, ' ')
+      expect(sql).toContain('and ($7::timestamptz is null or last_event_at is null or $7::timestamptz >= last_event_at or $2::text = any($9::text[]))')
+      expect(sql).toContain('and status <> all($9::text[])')
+      expect(sql).toContain(
+        'and ($2::text <> all($10::text[]) or status = any($11::text[]) or array_position($10::text[], $2::text) >= array_position($10::text[], status))',
+      )
+      expect(sql).toContain('greatest(coalesce(last_event_at, $7::timestamptz), $7::timestamptz)')
+      expect(sql).toContain('last_error = case when $6::boolean then $8::text else last_error end')
+      expect(sql).toContain('last_reminded_at = coalesce($12::timestamptz, last_reminded_at)')
+      expect(sql).toContain('finishing_at = case when $13::boolean then $14::timestamptz else finishing_at end')
+      expect(sql).toContain('where id = $1')
+      const params = updates[0].params
+      expect(params[0]).toBe('sigreq-aaaaaaaa')
+      expect(params[1]).toBe('viewed')
+      expect(JSON.parse(params[2])).toEqual([{ id: '1', name: 'Pat Example', email: 'pat@example.invalid', status: 'viewed' }])
+      expect(params.slice(3)).toEqual([
+        'sigdoc-bbbbbbbb',
+        '2026-10-21T15:06:00.000Z',
+        true,
+        '2026-10-21T15:05:00.000Z',
+        'boom',
+        ['completed', 'declined', 'expired', 'canceled'],
+        ['draft', 'sent', 'viewed', 'signed_partial'],
+        ['bounced', 'error'],
+        '2026-10-21T15:07:00.000Z',
+        true,
+        '2026-10-21T15:08:00.000Z',
+      ])
+    })
+
+    it('an empty patch keeps everything: null parameters, both set-flags off', async () => {
+      const { fake, pg } = pgWith([[/^update signature_requests set/i, { rows: [], rowCount: 0 }]])
+      expect(await pg.updateSignatureRequest('sigreq-aaaaaaaa', {})).toBeNull()
+      const params = fake.matching(/^update signature_requests set/i)[0].params
+      expect(params.slice(1, 8)).toEqual([null, null, null, null, false, null, null])
+      expect(params[11]).toBeNull()
+      expect(params[12]).toBe(false)
+      expect(params[13]).toBeNull()
+    })
+
+    it('finishing_at can be cleared: null sets the flag with a null value', async () => {
+      const { fake, pg } = pgWith([[/^update signature_requests set/i, { rows: [row()], rowCount: 1 }]])
+      await pg.updateSignatureRequest('sigreq-aaaaaaaa', { finishingAt: null })
+      const params = fake.matching(/^update signature_requests set/i)[0].params
+      expect(params[12]).toBe(true)
+      expect(params[13]).toBeNull()
+    })
+
+    it('storeSignedDocument INSERTs the bytes as a Buffer; getSignedDocument reads them back', async () => {
+      const bytes = Buffer.from('%PDF-1.4 pg bytes')
+      const created = new Date('2026-10-21T16:00:00.000Z')
+      const { fake, pg } = pgWith([
+        [
+          /^insert into signature_documents/i,
+          (params) => ({
+            rows: [{ id: params[0], signature_request_id: params[1], file_name: params[2], byte_size: params[3], created_at: created }],
+            rowCount: 1,
+          }),
+        ],
+        [
+          /^select id, signature_request_id, file_name, byte_size, created_at, bytes from signature_documents/i,
+          {
+            rows: [
+              { id: 'sigdoc-bbbbbbbb', signature_request_id: 'sigreq-aaaaaaaa', file_name: 'Signed.pdf', byte_size: bytes.length, created_at: created, bytes },
+            ],
+          },
+        ],
+      ])
+      const meta = await pg.storeSignedDocument({ signatureRequestId: 'sigreq-aaaaaaaa', fileName: 'Signed.pdf', bytes })
+      expect(meta).toMatchObject({ signatureRequestId: 'sigreq-aaaaaaaa', fileName: 'Signed.pdf', byteSize: bytes.length })
+      const insert = fake.matching(/^insert into signature_documents/i)[0]
+      expect(insert.text.replace(/\s+/g, ' ')).toContain(
+        '(id, signature_request_id, file_name, byte_size, bytes) values ($1, $2, $3, $4, $5)',
+      )
+      expect(Buffer.isBuffer(insert.params[4])).toBe(true)
+      expect(insert.params[4].equals(bytes)).toBe(true)
+      const read = await pg.getSignedDocument('sigdoc-bbbbbbbb')
+      expect(read.bytes.equals(bytes)).toBe(true)
+      expect(fake.matching(/^select id, signature_request_id[\s\S]*from signature_documents/i)[0].params).toEqual(['sigdoc-bbbbbbbb'])
+      expect(await postgresStore(fakePostgres()).getSignedDocument('')).toBeNull()
+    })
+
+    it('storeSignedDocument is INSERT .. ON CONFLICT (signature_request_id) DO NOTHING, reading the first back on a conflict', async () => {
+      const bytes = Buffer.from('%PDF-1.4 second')
+      const created = new Date('2026-10-21T16:00:00.000Z')
+      const { fake, pg } = pgWith([
+        [/^insert into signature_documents/i, { rows: [], rowCount: 0 }],
+        [
+          /^select id, signature_request_id, file_name, byte_size, created_at from signature_documents where signature_request_id/i,
+          { rows: [{ id: 'sigdoc-first', signature_request_id: 'sigreq-aaaaaaaa', file_name: 'First.pdf', byte_size: 15, created_at: created }] },
+        ],
+      ])
+      const meta = await pg.storeSignedDocument({ signatureRequestId: 'sigreq-aaaaaaaa', fileName: 'Second.pdf', bytes })
+      expect(meta).toMatchObject({ id: 'sigdoc-first', fileName: 'First.pdf' })
+      expect(fake.matching(/^insert into signature_documents/i)[0].text.replace(/\s+/g, ' ')).toContain('on conflict (signature_request_id) do nothing')
+      const readBack = fake.matching(/^select id, signature_request_id[\s\S]*where signature_request_id = \$1$/i)
+      expect(readBack).toHaveLength(1)
+      expect(readBack[0].params).toEqual(['sigreq-aaaaaaaa'])
+    })
+
+    it('listStuckSignatureRequestIds is one SELECT of ids with finishing_at older than the cutoff', async () => {
+      const { fake, pg } = pgWith([[/^select id from signature_requests/i, { rows: [{ id: 'sigreq-a' }, { id: 'sigreq-b' }] }]])
+      expect(await pg.listStuckSignatureRequestIds()).toEqual(['sigreq-a', 'sigreq-b'])
+      const lists = fake.matching(/^select id from signature_requests/i)
+      expect(lists).toHaveLength(1)
+      expect(lists[0].text.replace(/\s+/g, ' ')).toContain(
+        'where finishing_at is not null and finishing_at < now() - make_interval(secs => $1::double precision) order by finishing_at',
+      )
+      expect(lists[0].params).toEqual([600])
+      // The boot check passes no grace at all.
+      await pg.listStuckSignatureRequestIds(0)
+      expect(fake.matching(/^select id from signature_requests/i)[1].params).toEqual([0])
+    })
+
+    it('forgetSignwellEvent is one DELETE by id (like forgetStripeEvent)', async () => {
+      const { fake, pg } = pgWith([[/^delete from signwell_events/i, { rows: [], rowCount: 1 }]])
+      expect(await pg.forgetSignwellEvent('key-a')).toBe(true)
+      const deletes = fake.matching(/^delete from signwell_events/i)
+      expect(deletes).toHaveLength(1)
+      expect(deletes[0].text).toBe('delete from signwell_events where id = $1')
+      expect(deletes[0].params).toEqual(['key-a'])
+      expect(await postgresStore(fakePostgres()).forgetSignwellEvent('')).toBe(false)
+    })
+
+    it('the event ledger is one INSERT .. ON CONFLICT (id) DO NOTHING; a conflict answers false', async () => {
+      const { fake, pg } = pgWith([[/^insert into signwell_events/i, { rows: [], rowCount: 1 }]])
+      expect(await pg.recordSignwellEventOnce('key-a', 'document_completed')).toBe(true)
+      const insert = fake.matching(/^insert into signwell_events/i)[0]
+      expect(insert.text.replace(/\s+/g, ' ')).toBe(
+        'insert into signwell_events (id, type) values ($1, $2) on conflict (id) do nothing',
+      )
+      expect(insert.params).toEqual(['key-a', 'document_completed'])
+      const conflict = pgWith([[/^insert into signwell_events/i, { rows: [], rowCount: 0 }]])
+      expect(await conflict.pg.recordSignwellEventOnce('key-a', 'x')).toBe(false)
+      expect(await postgresStore(fakePostgres()).recordSignwellEventOnce('', 'x')).toBe(false)
+    })
+
+    it('boots the three tables beside the engagements and mirrors them in schema.sql, with no foreign key', async () => {
+      const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
+      const schema = await readFile(path.join(projectRoot, 'db', 'schema.sql'), 'utf8')
+      for (const table of ['signature_requests', 'signature_documents', 'signwell_events']) {
+        expect(source).toContain(`create table if not exists ${table} (`)
+        expect(schema).toContain(`create table if not exists ${table} (`)
+      }
+      expect(source).toContain('create index if not exists signature_requests_engagement_idx on signature_requests (engagement_id)')
+      expect(schema).toContain('create index if not exists signature_requests_engagement_idx on signature_requests (engagement_id);')
+      const ddl = source.slice(
+        source.indexOf('create table if not exists signature_requests'),
+        source.indexOf('create table if not exists signwell_events') + 300,
+      )
+      expect(ddl).not.toMatch(/\breferences\b/i)
+      expect(ddl).toContain('signwell_document_id text unique')
+      expect(ddl).toContain('bytes bytea not null')
+      expect(ddl).toContain('esign_hash text,')
+      expect(ddl).toContain('finishing_at timestamptz,')
+      // One signed PDF per request, enforced by the database.
+      expect(source).toContain('create unique index if not exists signature_documents_request_idx on signature_documents (signature_request_id)')
+      expect(schema).toContain('create unique index if not exists signature_documents_request_idx on signature_documents (signature_request_id);')
+      expect(schema).toContain('esign_hash text,')
+      expect(schema).toContain('finishing_at timestamptz,')
+    })
+  })
+})

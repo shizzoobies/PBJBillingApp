@@ -1668,6 +1668,101 @@ export class EngagementStateError extends Error {
   }
 }
 
+/**
+ * Electronic signature requests (featreq-56d39567; docs/signwell.md). Every status a request can
+ * hold, and the rules for moving between them (`updateSignatureRequest`):
+ *  - a FINISHED request (completed, declined, expired, canceled) never changes status again;
+ *  - an event older than the newest one applied never changes status;
+ *  - the in-progress statuses (draft, sent, viewed, signed_partial) only move forward, except that
+ *    bounced and error are RECOVERABLE: a re-fetched in-progress status replaces them;
+ *  - anything else (bounced, error, a finished status) may be reached from a request not finished.
+ */
+export const SIGNATURE_STATUS_ORDER = Object.freeze([
+  'draft',
+  'sent',
+  'viewed',
+  'signed_partial',
+  'bounced',
+  'error',
+  'expired',
+  'canceled',
+  'declined',
+  'completed',
+])
+/** The statuses in which a request is still out with the signer (one active request per engagement). */
+export const ACTIVE_SIGNATURE_STATUSES = Object.freeze(['sent', 'viewed', 'signed_partial'])
+/** Statuses a request never leaves. */
+export const FINISHED_SIGNATURE_STATUSES = Object.freeze(['completed', 'declined', 'expired', 'canceled'])
+/** The in-progress statuses, in the order they are reached (never backward among themselves). */
+const PROGRESS_SIGNATURE_STATUSES = Object.freeze(['draft', 'sent', 'viewed', 'signed_partial'])
+/** Statuses a re-fetched in-progress status may replace. */
+const RECOVERABLE_SIGNATURE_STATUSES = Object.freeze(['bounced', 'error'])
+const SIGNATURE_REQUEST_COLUMNS = `id, engagement_id, client_id, signwell_document_id, status, recipients,
+          test_mode, esign_hash, signed_document_id, sent_at, completed_at, finishing_at, last_event_at,
+          last_error, last_reminded_at, created_by, created_at, updated_at`
+const SIGNATURE_DOCUMENT_META_COLUMNS = `id, signature_request_id, file_name, byte_size, created_at`
+/** The longest dedupe ledger the file backend keeps (a ledger, not history), like the Stripe one. */
+const SIGNWELL_EVENT_LEDGER_MAX = 500
+
+/** The signers as stored: id, name, email and SignWell's own status string, capped. Nothing else. */
+function cleanSignatureRecipients(raw) {
+  const list = engagementJson(raw, [])
+  return (Array.isArray(list) ? list : []).slice(0, 10).map((entry) => {
+    const recipient = {
+      id: String(entry?.id ?? '').slice(0, 60),
+      name: String(entry?.name ?? '').slice(0, 200),
+      email: String(entry?.email ?? '').slice(0, 320),
+    }
+    const status = String(entry?.status ?? '').slice(0, 60)
+    return status ? { ...recipient, status } : recipient
+  })
+}
+
+/** One signature request for the API, from either backend's row shape. */
+function mapSignatureRequestRow(row) {
+  const pick = (snake, camel) => (row[snake] !== undefined ? row[snake] : row[camel])
+  const iso = (value) => {
+    if (!value) return null
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? null : date.toISOString()
+  }
+  return {
+    id: row.id,
+    engagementId: pick('engagement_id', 'engagementId'),
+    clientId: pick('client_id', 'clientId') ?? null,
+    signwellDocumentId: pick('signwell_document_id', 'signwellDocumentId') ?? null,
+    status: row.status,
+    recipients: cleanSignatureRecipients(row.recipients),
+    testMode: pick('test_mode', 'testMode') !== false,
+    // The hash of the letter AND its signing details as they went to SignWell (engagementEsignHash): signing is
+    // refused for a letter whose text or signing details changed since.
+    esignHash: pick('esign_hash', 'esignHash') ?? null,
+    signedDocumentId: pick('signed_document_id', 'signedDocumentId') ?? null,
+    sentAt: iso(pick('sent_at', 'sentAt')),
+    completedAt: iso(pick('completed_at', 'completedAt')),
+    // Set while the work after a completed document is under way (or died half-done); null when finished.
+    finishingAt: iso(pick('finishing_at', 'finishingAt')),
+    lastEventAt: iso(pick('last_event_at', 'lastEventAt')),
+    lastError: pick('last_error', 'lastError') ?? null,
+    lastRemindedAt: iso(pick('last_reminded_at', 'lastRemindedAt')),
+    createdBy: pick('created_by', 'createdBy') ?? null,
+    createdAt: iso(pick('created_at', 'createdAt')),
+    updatedAt: iso(pick('updated_at', 'updatedAt')),
+  }
+}
+
+/** A stored signed PDF's metadata (never its bytes) for the API. */
+function mapSignatureDocumentMeta(row) {
+  const pick = (snake, camel) => (row[snake] !== undefined ? row[snake] : row[camel])
+  return {
+    id: row.id,
+    signatureRequestId: pick('signature_request_id', 'signatureRequestId'),
+    fileName: pick('file_name', 'fileName'),
+    byteSize: Number(pick('byte_size', 'byteSize')) || 0,
+    createdAt: pick('created_at', 'createdAt') ? new Date(pick('created_at', 'createdAt')).toISOString() : null,
+  }
+}
+
 /** A party as stored: the ten address-card strings, trimmed and capped, nothing else. */
 function cleanEngagementParty(raw) {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
@@ -8100,6 +8195,56 @@ export class AppDataStore {
              on engagements (letter_send_id) where letter_send_id is not null`,
         )
       }
+      // Electronic signature through SignWell (featreq-56d39567; docs/signwell.md). Three
+      // endpoint-managed tables beside the engagements, NO foreign keys, outside the bulk
+      // save's lock list and fingerprint: `signature_requests` (one row per document sent
+      // for signature), `signature_documents` (the signed PDF, a few hundred KB, as bytea)
+      // and `signwell_events` (the webhook's idempotency ledger, like `stripe_events`).
+      await this.pool.query(`
+        create table if not exists signature_requests (
+          id text primary key,                      -- 'sigreq-xxxxxxxx'
+          engagement_id text not null,
+          client_id text,
+          signwell_document_id text unique,
+          status text not null,                     -- draft, sent, viewed, signed_partial, completed, declined, expired, canceled, bounced, error
+          recipients jsonb not null default '[]',   -- [{id, name, email, status}]
+          test_mode boolean not null default true,
+          esign_hash text,                          -- hash of the letter and its signing details as sent: signing needs it unchanged
+          signed_document_id text,
+          sent_at timestamptz,
+          completed_at timestamptz,
+          finishing_at timestamptz,                 -- set while the finishing work after completion runs
+          last_event_at timestamptz,
+          last_error text,
+          last_reminded_at timestamptz,
+          created_by text,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`
+        create index if not exists signature_requests_engagement_idx on signature_requests (engagement_id)
+      `)
+      await this.pool.query(`
+        create table if not exists signature_documents (
+          id text primary key,                      -- 'sigdoc-xxxxxxxx'
+          signature_request_id text not null,
+          file_name text not null,
+          byte_size integer not null,
+          bytes bytea not null,
+          created_at timestamptz not null default now()
+        )
+      `)
+      await this.pool.query(`
+        create unique index if not exists signature_documents_request_idx on signature_documents (signature_request_id)
+      `)
+      await this.pool.query(`
+        create table if not exists signwell_events (
+          id text primary key,                      -- sha256 of type|time|hash|document id, and of the signed triple type|time|hash: no PII
+          type text not null,
+          received_at timestamptz not null default now()
+        )
+      `)
       // ---- RATE HISTORY (docs/plans/rate-history-2026-09.md) ----
       //
       // Brittany raises rates one client at a time, at that client's yearly
@@ -28228,6 +28373,376 @@ export class AppDataStore {
       return { result: mapEngagementRow(row), changed: true }
     })
   }
+
+  // ---- Electronic signature requests (featreq-56d39567; docs/signwell.md) ------
+  // Three endpoint-managed tables with no foreign keys, outside the bulk save: on the
+  // file backend they live in tmp/auth-state.json beside the engagements, the signed
+  // PDF as base64 (tests and local dev only; production keeps it as bytea).
+
+  /** The ONE read-modify-write on the file backend's signature tables (see `_mutateEngagementFile`). */
+  async _mutateSignatureFile(mutate) {
+    return enqueueFileOperation(localAuthPath, async () => {
+      const authState = existsSync(localAuthPath)
+        ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+        : {}
+      for (const key of ['signatureRequests', 'signatureDocuments', 'signwellEvents']) {
+        if (!Array.isArray(authState[key])) authState[key] = []
+      }
+      const { result, changed } = mutate(authState)
+      if (changed) await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return result
+    })
+  }
+
+  /**
+   * Record that an engagement was sent for signature. `status` is one of
+   * SIGNATURE_STATUS_ORDER (a freshly created SignWell document is 'sent').
+   *
+   * @returns {Promise<object>} the request as the API shows it
+   */
+  async createSignatureRequest({
+    engagementId,
+    clientId = null,
+    signwellDocumentId = null,
+    status = 'sent',
+    recipients = [],
+    testMode = true,
+    esignHash = null,
+    sentAt = null,
+    createdBy = null,
+  } = {}) {
+    if (!engagementId) throw new Error('createSignatureRequest needs an engagementId')
+    if (!SIGNATURE_STATUS_ORDER.includes(status)) throw new Error(`unknown signature status: ${status}`)
+    const id = `sigreq-${randomUUID().slice(0, 8)}`
+    const signers = cleanSignatureRecipients(recipients)
+    const sent = sentAt && !Number.isNaN(new Date(sentAt).getTime()) ? new Date(sentAt).toISOString() : null
+    const hash = typeof esignHash === 'string' && /^[0-9a-f]{64}$/.test(esignHash) ? esignHash : null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `insert into signature_requests
+           (id, engagement_id, client_id, signwell_document_id, status, recipients, test_mode, sent_at, created_by, esign_hash)
+         values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::timestamptz, $9, $10)
+         returning ${SIGNATURE_REQUEST_COLUMNS}`,
+        [id, engagementId, clientId, signwellDocumentId, status, JSON.stringify(signers), testMode !== false, sent, createdBy, hash],
+      )
+      return mapSignatureRequestRow(rows[0])
+    }
+    return this._mutateSignatureFile((authState) => {
+      if (signwellDocumentId && authState.signatureRequests.some((row) => row.signwellDocumentId === signwellDocumentId)) {
+        throw new Error('a signature request for that SignWell document already exists')
+      }
+      const now = nowIso()
+      const row = {
+        id,
+        engagementId,
+        clientId,
+        signwellDocumentId,
+        status,
+        recipients: signers,
+        testMode: testMode !== false,
+        esignHash: hash,
+        signedDocumentId: null,
+        sentAt: sent,
+        completedAt: null,
+        finishingAt: null,
+        lastEventAt: null,
+        lastError: null,
+        lastRemindedAt: null,
+        createdBy,
+        createdAt: now,
+        updatedAt: now,
+      }
+      authState.signatureRequests.push(row)
+      return { result: mapSignatureRequestRow(row), changed: true }
+    })
+  }
+
+  /** One signature request, or null. */
+  async getSignatureRequest(id) {
+    if (!id) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(`select ${SIGNATURE_REQUEST_COLUMNS} from signature_requests where id = $1`, [id])
+      return rows[0] ? mapSignatureRequestRow(rows[0]) : null
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const found = (authState.signatureRequests ?? []).find((row) => row?.id === id)
+    return found ? mapSignatureRequestRow(found) : null
+  }
+
+  /** The request SignWell's document id belongs to (the webhook's lookup), or null. */
+  async getSignatureRequestByDocumentId(signwellDocumentId) {
+    if (!signwellDocumentId) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${SIGNATURE_REQUEST_COLUMNS} from signature_requests where signwell_document_id = $1`,
+        [signwellDocumentId],
+      )
+      return rows[0] ? mapSignatureRequestRow(rows[0]) : null
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const found = (authState.signatureRequests ?? []).find((row) => row?.signwellDocumentId === signwellDocumentId)
+    return found ? mapSignatureRequestRow(found) : null
+  }
+
+  /** The engagement's request still out with the signer (sent, viewed or partly signed), newest first, or null. */
+  async activeSignatureRequestForEngagement(engagementId) {
+    if (!engagementId) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${SIGNATURE_REQUEST_COLUMNS} from signature_requests
+          where engagement_id = $1 and status = any($2::text[])
+          order by created_at desc, id desc
+          limit 1`,
+        [engagementId, ACTIVE_SIGNATURE_STATUSES],
+      )
+      return rows[0] ? mapSignatureRequestRow(rows[0]) : null
+    }
+    return (
+      (await this.listSignatureRequestsForEngagement(engagementId)).find((request) =>
+        ACTIVE_SIGNATURE_STATUSES.includes(request.status),
+      ) ?? null
+    )
+  }
+
+  /** Every request for an engagement, newest first (no signed bytes). */
+  async listSignatureRequestsForEngagement(engagementId) {
+    if (!engagementId) return []
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${SIGNATURE_REQUEST_COLUMNS} from signature_requests
+          where engagement_id = $1
+          order by created_at desc, id desc`,
+        [engagementId],
+      )
+      return rows.map(mapSignatureRequestRow)
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    return (authState.signatureRequests ?? [])
+      .filter((row) => row?.engagementId === engagementId)
+      .map(mapSignatureRequestRow)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) || String(b.id).localeCompare(String(a.id)))
+  }
+
+  /**
+   * Change a request. `patch`: `status`, `recipients`, `signedDocumentId`, `completedAt`,
+   * `lastEventAt`, `lastRemindedAt`, `lastError` and `finishingAt` (a value sets it, null clears
+   * it, absent keeps it). Rules that keep a late or replayed event from undoing what is known:
+   *  - `last_event_at` only ever moves FORWARD (the greatest of the stored and the given);
+   *  - `status` follows SIGNATURE_STATUS_ORDER's rules above: a finished request never changes,
+   *    in-progress statuses only move forward (bounced and error are recoverable), and an event
+   *    older than the newest one already applied never changes it (unless the status it applies is a
+   *    finished one, which the document itself shows).
+   * The rest of the patch applies either way. Returns the request, or null when there is none.
+   */
+  async updateSignatureRequest(id, patch = {}) {
+    if (!id) return null
+    const time = (value) => (value && !Number.isNaN(new Date(value).getTime()) ? new Date(value).toISOString() : null)
+    const status = SIGNATURE_STATUS_ORDER.includes(patch.status) ? patch.status : null
+    const recipients = patch.recipients === undefined ? null : JSON.stringify(cleanSignatureRecipients(patch.recipients))
+    const signedDocumentId = patch.signedDocumentId ? String(patch.signedDocumentId) : null
+    const completedAt = time(patch.completedAt)
+    const lastEventAt = time(patch.lastEventAt)
+    const lastRemindedAt = time(patch.lastRemindedAt)
+    const setsError = patch.lastError !== undefined
+    const lastError = patch.lastError ? String(patch.lastError).slice(0, 500) : null
+    const setsFinishing = patch.finishingAt !== undefined
+    const finishingAt = time(patch.finishingAt)
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update signature_requests set
+            status = case
+              when $2::text is not null
+               and ($7::timestamptz is null or last_event_at is null or $7::timestamptz >= last_event_at
+                    or $2::text = any($9::text[]))
+               and status <> all($9::text[])
+               and ($2::text <> all($10::text[])
+                    or status = any($11::text[])
+                    or array_position($10::text[], $2::text) >= array_position($10::text[], status))
+              then $2::text else status end,
+            recipients = coalesce($3::jsonb, recipients),
+            signed_document_id = coalesce($4::text, signed_document_id),
+            completed_at = coalesce($5::timestamptz, completed_at),
+            last_event_at = case when $7::timestamptz is null then last_event_at
+                                 else greatest(coalesce(last_event_at, $7::timestamptz), $7::timestamptz) end,
+            last_error = case when $6::boolean then $8::text else last_error end,
+            last_reminded_at = coalesce($12::timestamptz, last_reminded_at),
+            finishing_at = case when $13::boolean then $14::timestamptz else finishing_at end,
+            updated_at = now()
+          where id = $1
+          returning ${SIGNATURE_REQUEST_COLUMNS}`,
+        [
+          id,
+          status,
+          recipients,
+          signedDocumentId,
+          completedAt,
+          setsError,
+          lastEventAt,
+          lastError,
+          FINISHED_SIGNATURE_STATUSES,
+          PROGRESS_SIGNATURE_STATUSES,
+          RECOVERABLE_SIGNATURE_STATUSES,
+          lastRemindedAt,
+          setsFinishing,
+          finishingAt,
+        ],
+      )
+      return rows[0] ? mapSignatureRequestRow(rows[0]) : null
+    }
+    return this._mutateSignatureFile((authState) => {
+      const row = authState.signatureRequests.find((candidate) => candidate?.id === id)
+      if (!row) return { result: null, changed: false }
+      const progress = (value) => PROGRESS_SIGNATURE_STATUSES.indexOf(value)
+      // A late event never moves an in-progress status; a FINISHED status read from the document is not late news.
+      const stale =
+        lastEventAt &&
+        row.lastEventAt &&
+        Date.parse(lastEventAt) < Date.parse(row.lastEventAt) &&
+        !FINISHED_SIGNATURE_STATUSES.includes(status)
+      const movable =
+        !FINISHED_SIGNATURE_STATUSES.includes(row.status) &&
+        (!PROGRESS_SIGNATURE_STATUSES.includes(status) ||
+          RECOVERABLE_SIGNATURE_STATUSES.includes(row.status) ||
+          progress(status) >= progress(row.status))
+      if (status && !stale && movable) row.status = status
+      if (setsFinishing) row.finishingAt = finishingAt
+      if (patch.recipients !== undefined) row.recipients = cleanSignatureRecipients(patch.recipients)
+      if (signedDocumentId) row.signedDocumentId = signedDocumentId
+      if (completedAt) row.completedAt = completedAt
+      if (lastEventAt && (!row.lastEventAt || Date.parse(lastEventAt) > Date.parse(row.lastEventAt))) {
+        row.lastEventAt = lastEventAt
+      }
+      if (setsError) row.lastError = lastError
+      if (lastRemindedAt) row.lastRemindedAt = lastRemindedAt
+      row.updatedAt = nowIso()
+      return { result: mapSignatureRequestRow(row), changed: true }
+    })
+  }
+
+  /**
+   * Keep the signed PDF of a request (a Buffer). Returns its metadata - id, file name and
+   * size - never the bytes; `getSignedDocument` reads them back.
+   */
+  async storeSignedDocument({ signatureRequestId, fileName, bytes } = {}) {
+    if (!signatureRequestId) throw new Error('storeSignedDocument needs a signatureRequestId')
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new Error('storeSignedDocument needs the PDF bytes')
+    const id = `sigdoc-${randomUUID().slice(0, 8)}`
+    const name = String(fileName ?? '').trim().slice(0, 200) || 'signed-engagement-letter.pdf'
+    if (this.pool) {
+      // One signed PDF per request: a second store (a retry, "Finish e-signature") reads the first back.
+      const { rows } = await this.pool.query(
+        `insert into signature_documents (id, signature_request_id, file_name, byte_size, bytes)
+         values ($1, $2, $3, $4, $5)
+         on conflict (signature_request_id) do nothing
+         returning ${SIGNATURE_DOCUMENT_META_COLUMNS}`,
+        [id, signatureRequestId, name, bytes.length, bytes],
+      )
+      if (rows[0]) return mapSignatureDocumentMeta(rows[0])
+      const existing = await this.pool.query(
+        `select ${SIGNATURE_DOCUMENT_META_COLUMNS} from signature_documents where signature_request_id = $1`,
+        [signatureRequestId],
+      )
+      return mapSignatureDocumentMeta(existing.rows[0])
+    }
+    return this._mutateSignatureFile((authState) => {
+      const held = authState.signatureDocuments.find((row) => row.signatureRequestId === signatureRequestId)
+      if (held) return { result: mapSignatureDocumentMeta(held), changed: false }
+      const row = {
+        id,
+        signatureRequestId,
+        fileName: name,
+        byteSize: bytes.length,
+        bytes: bytes.toString('base64'),
+        createdAt: nowIso(),
+      }
+      authState.signatureDocuments.push(row)
+      return { result: mapSignatureDocumentMeta(row), changed: true }
+    })
+  }
+
+  /** One stored signed PDF: its metadata and `bytes` (a Buffer), or null. */
+  async getSignedDocument(id) {
+    if (!id) return null
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${SIGNATURE_DOCUMENT_META_COLUMNS}, bytes from signature_documents where id = $1`,
+        [id],
+      )
+      return rows[0] ? { ...mapSignatureDocumentMeta(rows[0]), bytes: Buffer.from(rows[0].bytes) } : null
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const found = (authState.signatureDocuments ?? []).find((row) => row?.id === id)
+    return found ? { ...mapSignatureDocumentMeta(found), bytes: Buffer.from(String(found.bytes ?? ''), 'base64') } : null
+  }
+
+  /**
+   * Record a SignWell webhook event the FIRST time it is seen (`key` is a sha256 of what the
+   * HMAC covers plus the document, or of the signed triple alone, so no PII is stored). True if new, false if
+   * already seen - the same ledger shape as `recordStripeEventOnce`.
+   */
+  async recordSignwellEventOnce(key, type) {
+    if (!key) return false
+    if (this.pool) {
+      const { rowCount } = await this.pool.query(
+        `insert into signwell_events (id, type) values ($1, $2)
+         on conflict (id) do nothing`,
+        [key, String(type ?? '')],
+      )
+      return rowCount > 0
+    }
+    return this._mutateSignatureFile((authState) => {
+      if (authState.signwellEvents.some((entry) => entry.id === key)) return { result: false, changed: false }
+      authState.signwellEvents.push({ id: key, type: String(type ?? ''), at: nowIso() })
+      if (authState.signwellEvents.length > SIGNWELL_EVENT_LEDGER_MAX) {
+        authState.signwellEvents = authState.signwellEvents.slice(-SIGNWELL_EVENT_LEDGER_MAX)
+      }
+      return { result: true, changed: true }
+    })
+  }
+
+  /**
+   * The ids of requests left "finishing" (completed at SignWell, the work after it started and never
+   * ended) for longer than `olderThanMs` - the log line that says a person should open the letter. At
+   * boot the cutoff is 0: nothing is finishing in a fresh process.
+   * @returns {Promise<string[]>}
+   */
+  async listStuckSignatureRequestIds(olderThanMs = 10 * 60 * 1000) {
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select id from signature_requests
+          where finishing_at is not null and finishing_at < now() - make_interval(secs => $1::double precision)
+          order by finishing_at`,
+        [olderThanMs / 1000],
+      )
+      return rows.map((row) => row.id)
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const cutoff = Date.now() - olderThanMs
+    return (authState.signatureRequests ?? [])
+      .filter((row) => row?.finishingAt && Date.parse(row.finishingAt) < cutoff)
+      .sort((a, b) => String(a.finishingAt).localeCompare(String(b.finishingAt)))
+      .map((row) => row.id)
+  }
+
+  /**
+   * Take a SignWell event key back out of the dedupe ledger, so SignWell's retry of an event this
+   * app failed to process is processed instead of answered "duplicate" (like `forgetStripeEvent`).
+   * @returns {Promise<boolean>} true if the key was in the ledger.
+   */
+  async forgetSignwellEvent(key) {
+    if (!key) return false
+    if (this.pool) {
+      const { rowCount } = await this.pool.query('delete from signwell_events where id = $1', [key])
+      return rowCount > 0
+    }
+    return this._mutateSignatureFile((authState) => {
+      const kept = authState.signwellEvents.filter((entry) => entry.id !== key)
+      if (kept.length === authState.signwellEvents.length) return { result: false, changed: false }
+      authState.signwellEvents = kept
+      return { result: true, changed: true }
+    })
+  }
+  // ---- end of the signature requests --------------------------------------------
 
   /**
    * Mark a SENT engagement signed - or a draft one, with `allowUnsent: true`, for

@@ -161,6 +161,8 @@ import {
 } from './lib/engagement-send.js'
 import { engagementRecipientList } from './lib/engagement-send.js'
 import { engagementChangedSinceSent } from './lib/engagement-hash.js'
+import * as signwell from './lib/signwell.js'
+import { handleSignwellWebhook } from './lib/signwell-webhook.js'
 import { placeholdersFor } from './lib/letter-template.js'
 import {
   cardProcessingFeeLine,
@@ -2025,6 +2027,55 @@ async function recordEngagementDelivery(request, engagementId, deliveryEvent, re
   }
   return true
 }
+// ---- SignWell e-signature (featreq-56d39567; docs/signwell.md) ---------------
+// The webhook handler is lib/signwell-webhook.js; these two are the glue it is given.
+const SIGNWELL_WEBHOOK_MAX_BYTES = 1024 * 1024
+
+/**
+ * Tell every owner that a letter was signed electronically (or that it needs a hand).
+ * NAMES ONLY, on the owners' ordinary notice: the signed document is never attached or
+ * linked to - it is downloaded in the app - so nothing a client signed ever reaches an
+ * owner's mailbox (Alex, 2026-10-08).
+ */
+async function notifySignwellOwners(request, { message, link }) {
+  const members = await appDataStore.getTeamMembers()
+  for (const owner of members.filter((member) => member.role === 'owner')) {
+    await notify(appDataStore, owner.id, 'engagement_esigned', {
+      message,
+      subject: message,
+      link,
+      appPublicUrl: getPublicAppUrl(request),
+    })
+  }
+}
+
+/** What the sign route records after a signing, for the webhook's signing (the owner who sent the request signs). */
+async function recordSignwellSigning(result, signatureRequest, signedBy) {
+  const userId = signedBy || signatureRequest.createdBy || 'system'
+  const lines = [['engagement_signed', `${engagementActivityTarget(result.engagement)} via SignWell`]]
+  if (result.supersededId) {
+    lines.push([
+      'engagement_superseded',
+      engagementActivityTarget({ party: result.engagement.party, id: result.supersededId }),
+    ])
+  }
+  for (const amendmentId of result.supersededAmendmentIds ?? []) {
+    lines.push([
+      'engagement_amendment_superseded',
+      engagementActivityTarget({ party: result.engagement.party, id: amendmentId }),
+    ])
+  }
+  for (const [action, target] of lines) {
+    try {
+      await appDataStore.recordActivity(userId, action, target)
+    } catch (error) {
+      console.error('[signwell] could not record the signing:', error?.message || error)
+    }
+  }
+  broadcastDataChanged()
+}
+// ---- end of the SignWell glue ------------------------------------------------
+
 // ---- Proposal questionnaires (featreq-8f139178) ----------------------------
 // lib/proposal-questionnaire.js. The intake that comes before a proposal; see
 // the owner routes below ("Proposal questionnaires (owner)").
@@ -6848,6 +6899,44 @@ const server = createServer(async (request, response) => {
       }
 
       sendJson(response, 200, { received: true })
+      return
+    }
+
+    // POST /api/signwell/webhook - SignWell tells us a document it holds for us moved
+    // (featreq-56d39567; lib/signwell-webhook.js, docs/signwell.md).
+    //
+    // UNAUTHENTICATED BY NECESSITY, on the same terms as the Stripe and Resend webhooks
+    // above: SignWell cannot hold a session or send our Origin, so the event hash
+    // (HMAC of the type and time, keyed by the webhook id) is the boundary - and since it
+    // covers only those two, the handler re-reads the document before it acts. Answers
+    // 503 until SIGNWELL_WEBHOOK_ID is set. A finished document's slow part (the signed
+    // PDF, marking the engagement signed, telling the owners) runs AFTER the 200 is sent.
+    if (normalizedPath === '/api/signwell/webhook' && request.method === 'POST') {
+      let rawBody
+      try {
+        // An event is a few hundred bytes: refuse anything big before reading it all.
+        rawBody = await readRawBody(request, SIGNWELL_WEBHOOK_MAX_BYTES)
+      } catch (error) {
+        if (error?.statusCode === 413) sendJson(response, 413, { error: 'Request body too large' })
+        else sendJson(response, 400, { error: 'Could not read body' })
+        return
+      }
+      const handled = await handleSignwellWebhook({
+        rawBody,
+        webhookId: process.env.SIGNWELL_WEBHOOK_ID,
+        deps: {
+          store: appDataStore,
+          signwell,
+          notifyOwners: (notice) => notifySignwellOwners(request, notice),
+          afterSigned: recordSignwellSigning,
+        },
+      })
+      sendJson(response, handled.status, handled.body)
+      if (handled.after) {
+        setImmediate(() => {
+          handled.after().catch((error) => console.error('[signwell] finishing a document failed:', error?.message || error))
+        })
+      }
       return
     }
 
@@ -19225,6 +19314,21 @@ const server = createServer(async (request, response) => {
 })
 
 await appDataStore.initialize()
+// E-signatures left half-finished (the server stopped between SignWell's "completed" and marking the letter
+// signed): say so in the log, so someone opens the letter in the app. Nothing is finishing in a fresh
+// process, so the boot check has no cutoff; the hourly re-check leaves a 10 minute grace for work under way.
+async function warnSignwellLeftFinishing(olderThanMs) {
+  try {
+    const ids = await appDataStore.listStuckSignatureRequestIds(olderThanMs)
+    if (ids.length > 0) {
+      console.warn(`[signwell] ${ids.length} e-signature request(s) were left finishing (${ids.join(', ')}) - open the letter in the app`)
+    }
+  } catch (error) {
+    console.error('[signwell] could not check for e-signatures left finishing:', error?.message || error)
+  }
+}
+await warnSignwellLeftFinishing(0)
+const signwellFinishingTimer = setInterval(() => void warnSignwellLeftFinishing(10 * 60 * 1000), 60 * 60 * 1000)
 // Bulletproof owner recovery: if `OWNER_BOOTSTRAP_PASSWORD` is set on the
 // environment, ensure the first owner's password hash matches it. Lets an
 // owner ALWAYS sign in via /owner → "Password" tab, even when email/Resend

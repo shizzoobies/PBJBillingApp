@@ -357,3 +357,43 @@ create table if not exists notifications (
   created_at timestamptz not null default now()
 );
 create index if not exists notifications_user_idx on notifications(user_id, created_at desc);
+
+-- Electronic signature through SignWell (featreq-56d39567; docs/signwell.md). Endpoint-managed,
+-- no foreign keys, outside the bulk save. Mirrors the boot DDL in db/store.js.
+create table if not exists signature_requests (
+  id text primary key,
+  engagement_id text not null,
+  client_id text,
+  signwell_document_id text unique,
+  status text not null,
+  recipients jsonb not null default '[]',
+  test_mode boolean not null default true,
+  esign_hash text,
+  signed_document_id text,
+  sent_at timestamptz,
+  completed_at timestamptz,
+  finishing_at timestamptz,
+  last_event_at timestamptz,
+  last_error text,
+  last_reminded_at timestamptz,
+  created_by text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists signature_requests_engagement_idx on signature_requests (engagement_id);
+
+create table if not exists signature_documents (
+  id text primary key,
+  signature_request_id text not null,
+  file_name text not null,
+  byte_size integer not null,
+  bytes bytea not null,
+  created_at timestamptz not null default now()
+);
+create unique index if not exists signature_documents_request_idx on signature_documents (signature_request_id);
+
+create table if not exists signwell_events (
+  id text primary key,
+  type text not null,
+  received_at timestamptz not null default now()
+);
