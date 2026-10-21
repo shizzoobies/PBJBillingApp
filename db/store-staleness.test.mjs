@@ -55268,3 +55268,200 @@ describe('signature requests (both backends)', () => {
     })
   })
 })
+
+/**
+ * `markEngagementEsigned` (featreq-56d39567): the engagement's side of "sent for signature" - one
+ * `esign` entry on the email log carrying the sent letter's hash, a draft moved to sent, `sent_at`
+ * stamped once. Both backends.
+ */
+describe('markEngagementEsigned (both backends)', () => {
+  const HASH = 'a'.repeat(64)
+  const seedEngagement = async (over = {}) => {
+    const state = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    state.engagements = [
+      {
+        id: 'eng-esign',
+        kind: 'original',
+        status: 'draft',
+        party: { company: 'Acme Books', contactName: 'Pat Doe', email: 'pat@example.invalid' },
+        subject: 'S',
+        emailBody: 'E',
+        letterBody: 'L',
+        emailLog: [],
+        sentAt: null,
+        updatedAt: '2026-10-21T15:00:00.000Z',
+        createdAt: '2026-10-21T15:00:00.000Z',
+        ...over,
+      },
+    ]
+    await writeFile(localAuthPath, JSON.stringify(state, null, 2))
+  }
+
+  it('file: logs the esign entry, moves a draft to sent and stamps sent_at once', async () => {
+    await seedEngagement()
+    const first = await store.markEngagementEsigned('eng-esign', {
+      to: ['pat@example.invalid'],
+      signatureRequestId: 'sigreq-1',
+      testMode: true,
+      subject: 'Engagement letter',
+      hash: HASH,
+      at: '2026-10-21T16:00:00.000Z',
+    })
+    expect(first.status).toBe('sent')
+    expect(first.sentAt).toBe('2026-10-21T16:00:00.000Z')
+    expect(first.emailLog).toEqual([
+      {
+        kind: 'esign',
+        at: '2026-10-21T16:00:00.000Z',
+        to: ['pat@example.invalid'],
+        signatureRequestId: 'sigreq-1',
+        testMode: true,
+        ok: true,
+        subject: 'Engagement letter',
+        hash: HASH,
+      },
+    ])
+    // A second send for signature adds an entry; sent_at keeps its first value.
+    const second = await store.markEngagementEsigned('eng-esign', { to: ['pat@example.invalid'], signatureRequestId: 'sigreq-2', at: '2026-10-22T16:00:00.000Z' })
+    expect(second.emailLog.map((entry) => entry.signatureRequestId)).toEqual(['sigreq-1', 'sigreq-2'])
+    expect(second.sentAt).toBe('2026-10-21T16:00:00.000Z')
+    expect(second.emailLog[1].hash).toBeNull()
+    expect(await store.markEngagementEsigned('eng-missing', { to: [] })).toBeNull()
+  })
+
+  it('file: a status that is not a draft is left as it is (a sent letter stays sent; sent_at is kept)', async () => {
+    await seedEngagement({ status: 'sent', sentAt: '2026-10-01T12:00:00.000Z' })
+    const row = await store.markEngagementEsigned('eng-esign', { to: ['pat@example.invalid'], signatureRequestId: 'sigreq-1' })
+    expect(row.status).toBe('sent')
+    expect(row.sentAt).toBe('2026-10-01T12:00:00.000Z')
+  })
+
+  it('a hash that is not 64 hex characters is stored as none, and a long address is capped', async () => {
+    await seedEngagement()
+    const row = await store.markEngagementEsigned('eng-esign', { to: ['x'.repeat(400)], hash: 'not-a-hash' })
+    expect(row.emailLog[0].hash).toBeNull()
+    expect(row.emailLog[0].to[0]).toHaveLength(320)
+  })
+
+  it('postgres: ONE UPDATE appends the entry, moves only a draft to sent, keeps the first sent_at', async () => {
+    const fake = fakePostgres()
+    const inner = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      const result = await inner(text, params)
+      if (/^update engagements/i.test(String(text).trim())) {
+        return {
+          rows: [
+            {
+              id: 'eng-esign',
+              kind: 'original',
+              status: 'sent',
+              party: {},
+              email_log: JSON.parse(params[1]),
+              sent_at: new Date(params[2]),
+              updated_at: new Date(),
+              created_at: new Date(),
+            },
+          ],
+          rowCount: 1,
+        }
+      }
+      return result
+    }
+    const row = await postgresStore(fake).markEngagementEsigned('eng-esign', {
+      to: ['pat@example.invalid'],
+      signatureRequestId: 'sigreq-1',
+      testMode: false,
+      subject: 'Letter',
+      hash: HASH,
+      at: '2026-10-21T16:00:00.000Z',
+    })
+    const updates = fake.matching(/^update engagements/i)
+    expect(updates).toHaveLength(1)
+    const sql = updates[0].text.replace(/\s+/g, ' ')
+    expect(sql).toContain("set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb")
+    expect(sql).toContain("status = case when status = 'draft' then 'sent' else status end")
+    expect(sql).toContain('sent_at = coalesce(sent_at, $3::timestamptz)')
+    expect(sql).toContain('where id = $1')
+    expect(updates[0].params[0]).toBe('eng-esign')
+    expect(JSON.parse(updates[0].params[1])).toEqual([
+      {
+        kind: 'esign',
+        at: '2026-10-21T16:00:00.000Z',
+        to: ['pat@example.invalid'],
+        signatureRequestId: 'sigreq-1',
+        testMode: false,
+        ok: true,
+        subject: 'Letter',
+        hash: HASH,
+      },
+    ])
+    expect(updates[0].params[2]).toBe('2026-10-21T16:00:00.000Z')
+    expect(row.emailLog[0].kind).toBe('esign')
+  })
+})
+
+describe('sending for signature end to end on the file backend (featreq-56d39567)', () => {
+  it('writes the request and the engagement log, blocks a second send, and sees an edit after the send', async () => {
+    const { sendEngagementForSignature } = await import('../lib/engagement-esign.js')
+    const { engagementHash, engagementChangedSinceSent, engagementEsignHash } = await import('../lib/engagement-hash.js')
+    const state = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    state.signatureRequests = []
+    state.engagements = [
+      {
+        id: 'eng-e2e',
+        kind: 'original',
+        status: 'draft',
+        clientId: null,
+        party: { company: 'Acme Books', contactName: 'Pat Doe', email: 'pat@example.invalid', title: '', phone: '' },
+        subject: 'Engagement letter - {{client_name}}',
+        emailBody: 'Hi {{contact_first_name}},\n\nPlease sign.',
+        letterBody: 'Dear {{contact_name}},\n\nSignature: ______\nDate: ______',
+        figures: { totals: { monthly: 100 }, lines: [], hoursByRole: {}, paymentTerms: '' },
+        emailLog: [],
+        sentAt: null,
+        updatedAt: '2026-10-21T15:00:00.000Z',
+        createdAt: '2026-10-21T15:00:00.000Z',
+      },
+    ]
+    await writeFile(localAuthPath, JSON.stringify(state, null, 2))
+    const engagement = await store.getEngagement('eng-e2e')
+    const signwell = { createDocumentFromFile: vi.fn(async () => ({ id: 'doc-e2e', status: 'Created' })) }
+    const context = {
+      data: { clients: [], contacts: [] },
+      firmSettings: { name: 'PB&J Strategic Accounting' },
+      senderName: 'Brittany',
+      now: new Date('2026-10-21T16:00:00Z'),
+      teamEmails: new Set(),
+      replyTo: '',
+    }
+    const deps = {
+      store,
+      signwell,
+      env: { SIGNWELL_API_KEY: 'sw_fake_key_1234567890' },
+      publicUrl: 'https://app.example.invalid',
+      buildPdf: async () => Buffer.from('%PDF-1.4 stub'),
+      isPureRecord: () => false,
+    }
+
+    const sent = await sendEngagementForSignature(context, engagement, { templateHash: engagementHash(engagement), userId: 'emp-patrice' }, deps)
+    expect(sent.ok).toBe(true)
+    expect(sent.request).toMatchObject({ engagementId: 'eng-e2e', signwellDocumentId: 'doc-e2e', status: 'sent', testMode: true, createdBy: 'emp-patrice' })
+    // The letter and its signing details as they went to SignWell are kept on the request (signing later needs them unchanged).
+    expect((await store.getSignatureRequest(sent.request.id)).esignHash).toBe(engagementEsignHash(engagement))
+    const after = await store.getEngagement('eng-e2e')
+    expect(after.status).toBe('sent')
+    expect(after.sentAt).not.toBeNull()
+    expect(after.emailLog).toHaveLength(1)
+    expect(after.emailLog[0]).toMatchObject({ kind: 'esign', to: ['pat@example.invalid'], signatureRequestId: sent.request.id, testMode: true, ok: true })
+    expect((await store.activeSignatureRequestForEngagement('eng-e2e')).id).toBe(sent.request.id)
+
+    // A second send while the first is out is refused, and SignWell hears nothing more.
+    const again = await sendEngagementForSignature(context, after, { templateHash: engagementHash(after), userId: 'emp-patrice' }, deps)
+    expect(again.refused).toMatchObject({ status: 409, error: 'signature_active', requestId: sent.request.id })
+    expect(signwell.createDocumentFromFile).toHaveBeenCalledTimes(1)
+
+    // The letter as it went out is what signing compares against.
+    expect(engagementChangedSinceSent(after)).toBe(false)
+    expect(engagementChangedSinceSent({ ...after, letterBody: `${after.letterBody} (edited)` })).toBe(true)
+  })
+})

@@ -162,7 +162,8 @@ import {
 import { engagementRecipientList } from './lib/engagement-send.js'
 import { engagementChangedSinceSent } from './lib/engagement-hash.js'
 import * as signwell from './lib/signwell.js'
-import { handleSignwellWebhook } from './lib/signwell-webhook.js'
+import { finishSignatureRequest, handleSignwellWebhook } from './lib/signwell-webhook.js'
+import { remindEngagementSignature, sendEngagementForSignature } from './lib/engagement-esign.js'
 import { placeholdersFor } from './lib/letter-template.js'
 import {
   cardProcessingFeeLine,
@@ -2046,6 +2047,19 @@ async function notifySignwellOwners(request, { message, link }) {
       link,
       appPublicUrl: getPublicAppUrl(request),
     })
+  }
+}
+
+/**
+ * What the webhook handler and "Finish e-signature" are both handed: the store, SignWell, the owner
+ * notice and the bookkeeping a signing leaves (activity, a broadcast).
+ */
+function signwellFinishDeps(request) {
+  return {
+    store: appDataStore,
+    signwell,
+    notifyOwners: (notice) => notifySignwellOwners(request, notice),
+    afterSigned: recordSignwellSigning,
   }
 }
 
@@ -4416,6 +4430,20 @@ const server = createServer(async (request, response) => {
         'Cache-Control': 'no-cache',
       })
       response.end()
+      return
+    }
+
+    // ---- /signed-thank-you - where SignWell sends a signer when they finish (public) ----
+    // featreq-56d39567. A fixed address that says only "thank you": nothing in the URL,
+    // nothing stored behind it. Above the SPA fallback, which would answer it with the app.
+    if (normalizedPath === '/signed-thank-you' && (request.method === 'GET' || request.method === 'HEAD')) {
+      sendQuestionnairePage(
+        response,
+        renderQuestionnaireStatusPage({
+          heading: 'Thank you - your engagement letter is signed',
+          body: 'We have your signature and will be in touch soon. You can close this page.',
+        }),
+      )
       return
     }
 
@@ -6924,12 +6952,7 @@ const server = createServer(async (request, response) => {
       const handled = await handleSignwellWebhook({
         rawBody,
         webhookId: process.env.SIGNWELL_WEBHOOK_ID,
-        deps: {
-          store: appDataStore,
-          signwell,
-          notifyOwners: (notice) => notifySignwellOwners(request, notice),
-          afterSigned: recordSignwellSigning,
-        },
+        deps: signwellFinishDeps(request),
       })
       sendJson(response, handled.status, handled.body)
       if (handled.after) {
@@ -12759,6 +12782,225 @@ const server = createServer(async (request, response) => {
       return
     }
     // ---- end of the engagement routes ---------------------------------------
+
+    // ---- Engagement e-signature routes (featreq-56d39567; docs/signwell.md) ------
+    // Owner-only; the writes are same-origin and JSON. Kept OUTSIDE the engagement routes
+    // above on purpose: those pin "a letter goes to the client and nowhere else" by their
+    // text. SignWell, not the firm, emails the signer; nothing here mails or notifies anyone.
+
+    // POST /api/engagements/:id/esign - { templateHash }. Every refusal is decided in
+    // lib/engagement-esign.js before SignWell is called; then ONE document is created for
+    // the party and a signature_requests row written. Answers { request, engagement }.
+    const engagementEsignMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/esign$/)
+    if (engagementEsignMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can send engagements for signature' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = (await readJsonBody(request)) ?? {}
+      if (typeof payload.templateHash !== 'string') {
+        sendJson(response, 400, { error: 'engagement_invalid', message: 'Send the page hash.' })
+        return
+      }
+      const engagement = await appDataStore.getEngagement(engagementEsignMatch[1])
+      if (!engagement) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      const sent = await sendEngagementForSignature(
+        await loadEngagementContext(session),
+        engagement,
+        { templateHash: payload.templateHash, userId: session.user.id },
+        {
+          store: appDataStore,
+          signwell,
+          env: process.env,
+          publicUrl: getPublicAppUrl(request),
+          isPureRecord: (candidate) => AppDataStore._engagementIsPureRecord(candidate),
+        },
+      )
+      if (sent.refused) {
+        const { status, ...body } = sent.refused
+        sendJson(response, status, body)
+        return
+      }
+      try {
+        await appDataStore.recordActivity(
+          session.user.id,
+          'engagement_esign_sent',
+          `${engagementActivityTarget(engagement)}${sent.request.testMode ? ' (test mode)' : ''}`,
+        )
+      } catch (error) {
+        console.error('[esign] could not record the send:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { request: sent.request, engagement: sent.engagement })
+      return
+    }
+
+    // POST /api/engagements/:id/esign/remind - nudge the signer of the active request, once per firm day.
+    const engagementEsignRemindMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/esign\/remind$/)
+    if (engagementEsignRemindMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can send engagements for signature' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const engagement = await appDataStore.getEngagement(engagementEsignRemindMatch[1])
+      if (!engagement) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      const reminded = await remindEngagementSignature(engagement.id, { store: appDataStore, signwell, env: process.env })
+      if (reminded.refused) {
+        const { status, ...body } = reminded.refused
+        sendJson(response, status, body)
+        return
+      }
+      try {
+        await appDataStore.recordActivity(session.user.id, 'engagement_esign_reminded', engagementActivityTarget(engagement))
+      } catch (error) {
+        console.error('[esign] could not record the reminder:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, { request: reminded.request })
+      return
+    }
+
+    // POST /api/engagements/:id/esign/:requestId/finish - "Check SignWell" / "Finish e-signature": for any
+    // request that has not ended, re-read its document and apply what it says; when it reads Completed, re-run
+    // idempotently the work after completion (keep the signed PDF, mark the letter signed). Refuses a request
+    // that ended; the activity line says whether the press completed the request or only checked it.
+    const engagementEsignFinishMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/esign\/([^/]+)\/finish$/)
+    if (engagementEsignFinishMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can finish an e-signature' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const engagement = await appDataStore.getEngagement(engagementEsignFinishMatch[1])
+      const signatureRequest = await appDataStore.getSignatureRequest(engagementEsignFinishMatch[2])
+      if (!engagement || !signatureRequest || signatureRequest.engagementId !== engagement.id) {
+        sendJson(response, 404, { error: 'Signature request not found' })
+        return
+      }
+      const finished = await finishSignatureRequest(signatureRequest.id, signwellFinishDeps(request))
+      if (finished.refused) {
+        const { status, ...body } = finished.refused
+        sendJson(response, status, body)
+        return
+      }
+      try {
+        await appDataStore.recordActivity(
+          session.user.id,
+          finished.request.status === 'completed' ? 'engagement_esign_finished' : 'engagement_esign_checked',
+          engagementActivityTarget(engagement),
+        )
+      } catch (error) {
+        console.error('[esign] could not record the finish:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, {
+        request: finished.request,
+        signed: finished.signed,
+        issues: finished.issues,
+        engagement: await appDataStore.getEngagement(engagement.id),
+      })
+      return
+    }
+
+    // GET /api/engagements/:id/esign - this engagement's signature requests, newest first (never the signed bytes).
+    const engagementEsignListMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/esign$/)
+    if (engagementEsignListMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see signature requests' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const engagement = await appDataStore.getEngagement(engagementEsignListMatch[1])
+      if (!engagement) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      sendJson(
+        response,
+        200,
+        { requests: await appDataStore.listSignatureRequestsForEngagement(engagement.id) },
+        { 'Cache-Control': 'no-store' },
+      )
+      return
+    }
+
+    // GET /api/engagements/:id/esign/:requestId/pdf - the signed PDF, downloaded in the app (it is
+    // never emailed). 404 unless the request is this engagement's, completed, and its PDF was kept.
+    const engagementEsignPdfMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/esign\/([^/]+)\/pdf$/)
+    if (engagementEsignPdfMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can download a signed letter' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const signatureRequest = await appDataStore.getSignatureRequest(engagementEsignPdfMatch[2])
+      const signed =
+        signatureRequest &&
+        signatureRequest.engagementId === engagementEsignPdfMatch[1] &&
+        signatureRequest.status === 'completed' &&
+        signatureRequest.signedDocumentId
+          ? await appDataStore.getSignedDocument(signatureRequest.signedDocumentId)
+          : null
+      if (!signed) {
+        sendJson(response, 404, { error: 'No signed letter for that request' })
+        return
+      }
+      const safeName = String(signed.fileName).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[.-]+/, '') || 'signed-letter.pdf'
+      response.writeHead(200, {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="${safeName}"`,
+        'Content-Length': signed.bytes.length,
+        'Cache-Control': 'no-store',
+      })
+      response.end(signed.bytes)
+      return
+    }
+    // ---- end of the engagement e-signature routes ---------------------------------
 
     // ---- Engagement letters (featreq-5e195707) -----------------------------
     //

@@ -1,0 +1,212 @@
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { describe, expect, it } from 'vitest'
+
+/**
+ * The e-signature routes' GLUE in server.js (featreq-56d39567): send for signature, remind,
+ * list, download the signed PDF, and the public thank-you page. server.js is not booted by
+ * tests, so what is pinned is the wiring - an owner gate dropped, an origin guard missing, the
+ * signed document handed to anyone but an owner in the app. The behavior is tested by running
+ * it: lib/engagement-esign.test.mjs and db/store-staleness.test.mjs.
+ */
+
+const here = path.dirname(fileURLToPath(import.meta.url))
+const root = path.resolve(here, '../..')
+const serverSource = readFileSync(path.join(root, 'server.js'), 'utf8')
+const esignSource = readFileSync(path.join(root, 'lib/engagement-esign.js'), 'utf8')
+
+function between(startAnchor: string, endAnchor: string, source = serverSource): string {
+  const start = source.indexOf(startAnchor)
+  expect(start, `${startAnchor} is gone`).toBeGreaterThan(-1)
+  const end = source.indexOf(endAnchor, start + startAnchor.length)
+  expect(end, `${endAnchor} is gone`).toBeGreaterThan(start)
+  return source.slice(start, end)
+}
+
+const routes = () =>
+  between('// ---- Engagement e-signature routes (featreq-56d39567; docs/signwell.md)', '// ---- end of the engagement e-signature routes')
+const sendRoute = () => between('// POST /api/engagements/:id/esign - { templateHash }', '// POST /api/engagements/:id/esign/remind')
+const remindRoute = () => between('// POST /api/engagements/:id/esign/remind', '// POST /api/engagements/:id/esign/:requestId/finish')
+const finishRoute = () => between('// POST /api/engagements/:id/esign/:requestId/finish', '// GET /api/engagements/:id/esign - this engagement')
+const listRoute = () => between('// GET /api/engagements/:id/esign - this engagement', '// GET /api/engagements/:id/esign/:requestId/pdf')
+const pdfRoute = () => between('// GET /api/engagements/:id/esign/:requestId/pdf', '// ---- end of the engagement e-signature routes')
+
+type Route = { name: string; block: () => string; write: boolean }
+const ROUTES: Route[] = [
+  { name: 'POST /api/engagements/:id/esign', block: sendRoute, write: true },
+  { name: 'POST /api/engagements/:id/esign/remind', block: remindRoute, write: true },
+  { name: 'POST /api/engagements/:id/esign/:requestId/finish', block: finishRoute, write: true },
+  { name: 'GET /api/engagements/:id/esign', block: listRoute, write: false },
+  { name: 'GET /api/engagements/:id/esign/:requestId/pdf', block: pdfRoute, write: false },
+]
+
+describe('the e-signature routes are owner-only and same-origin', () => {
+  for (const route of ROUTES) {
+    it(`${route.name} requires a session and refuses a non-owner before reading anything`, () => {
+      const block = route.block()
+      expect(block).toContain('await requireSession(request, response)')
+      expect(block).toMatch(/session\.user\.role !== 'owner'/)
+      expect(block).toMatch(/sendJson\(response, 403,/)
+      expect(block.indexOf("session.user.role !== 'owner'")).toBeLessThan(block.indexOf('appDataStore.'))
+      expect(block).toContain('isCrossSiteOrigin(request)')
+      expect(block).toContain("sendJson(response, 403, { error: 'Origin not allowed' })")
+    })
+
+    if (route.write) {
+      it(`${route.name} wants JSON, records activity and tells the other sessions`, () => {
+        const block = route.block()
+        expect(block).toContain('isJsonContentType(request)')
+        expect(block).toContain("sendJson(response, 415, { error: 'application/json required' })")
+        expect(block.indexOf('isJsonContentType(request)')).toBeLessThan(block.indexOf('appDataStore.'))
+        expect(block).toContain('appDataStore.recordActivity(')
+        expect(block).toContain('broadcastDataChanged()')
+      })
+    }
+  }
+
+  it('every route sits above the /api/ catch-all, after the engagement routes and outside their block', () => {
+    const guardAt = serverSource.indexOf("if (normalizedPath.startsWith('/api/')) {")
+    expect(guardAt).toBeGreaterThan(-1)
+    const engagementEnd = serverSource.indexOf('// ---- end of the engagement routes')
+    for (const route of ROUTES) {
+      const at = serverSource.indexOf(route.block().slice(0, 60))
+      expect(at, `${route.name} is unreachable`).toBeLessThan(guardAt)
+      expect(at, `${route.name} sits inside the engagement routes block`).toBeGreaterThan(engagementEnd)
+    }
+  })
+})
+
+describe('sending for signature', () => {
+  it('wants the page hash, reads the STORED engagement and hands the lib the environment and the public URL', () => {
+    const block = sendRoute()
+    expect(block).toContain("typeof payload.templateHash !== 'string'")
+    expect(block).toContain('appDataStore.getEngagement(engagementEsignMatch[1])')
+    expect(block).toContain('await sendEngagementForSignature(')
+    expect(block).toContain('env: process.env')
+    expect(block).toContain('publicUrl: getPublicAppUrl(request)')
+    expect(block).toContain('AppDataStore._engagementIsPureRecord(candidate)')
+    expect(block).toContain('const { status, ...body } = sent.refused')
+    expect(block).toContain('sendJson(response, 200, { request: sent.request, engagement: sent.engagement })')
+  })
+
+  it('answers the lib\'s refusals as they are, and never answers with the signing link or the document', () => {
+    const block = sendRoute()
+    expect(block).toContain('sendJson(response, status, body)')
+    expect(block).not.toMatch(/signing_url|file_base64|\.bytes/)
+  })
+
+  it('reminds through the lib, and 404s an unknown engagement first', () => {
+    const block = remindRoute()
+    expect(block).toContain('await remindEngagementSignature(engagement.id,')
+    expect(block.indexOf("sendJson(response, 404, { error: 'Engagement not found' })")).toBeLessThan(block.indexOf('await remindEngagementSignature('))
+  })
+
+  it('finishes through the lib, only for a request of THIS engagement, and answers its refusals as they are', () => {
+    const block = finishRoute()
+    expect(block).toContain('signatureRequest.engagementId !== engagement.id')
+    expect(block).toContain("sendJson(response, 404, { error: 'Signature request not found' })")
+    expect(block.indexOf("sendJson(response, 404, { error: 'Signature request not found' })")).toBeLessThan(
+      block.indexOf('await finishSignatureRequest('),
+    )
+    expect(block).toContain('await finishSignatureRequest(signatureRequest.id, signwellFinishDeps(request))')
+    expect(block).toContain('const { status, ...body } = finished.refused')
+    // The activity line says what the press did: completed the request, or only checked it.
+    expect(block).toContain("finished.request.status === 'completed' ? 'engagement_esign_finished' : 'engagement_esign_checked'")
+    expect(block).not.toContain('Refuses unless SignWell still reads Completed')
+  })
+
+  it('the webhook and the finish route are handed the same deps (store, SignWell, owner notice, signing bookkeeping)', () => {
+    const helper = between('function signwellFinishDeps(request) {', '/** What the sign route records')
+    expect(helper).toContain('store: appDataStore')
+    expect(helper).toContain('notifyOwners: (notice) => notifySignwellOwners(request, notice)')
+    expect(helper).toContain('afterSigned: recordSignwellSigning')
+    expect(serverSource).toContain('deps: signwellFinishDeps(request),')
+  })
+
+  it('lists requests newest-first without bytes', () => {
+    const block = listRoute()
+    expect(block).toContain('appDataStore.listSignatureRequestsForEngagement(engagement.id)')
+    expect(block).toContain("'Cache-Control': 'no-store'")
+    expect(block).not.toContain('getSignedDocument')
+  })
+})
+
+describe('downloading the signed PDF', () => {
+  it('serves it only for a COMPLETED request of THIS engagement whose PDF was kept, else 404', () => {
+    const block = pdfRoute()
+    expect(block).toContain('signatureRequest.engagementId === engagementEsignPdfMatch[1]')
+    expect(block).toContain("signatureRequest.status === 'completed'")
+    expect(block).toContain('signatureRequest.signedDocumentId')
+    expect(block).toContain("sendJson(response, 404, { error: 'No signed letter for that request' })")
+  })
+
+  it('streams application/pdf as an attachment with a sanitized filename, uncached', () => {
+    const block = pdfRoute()
+    expect(block).toContain("'Content-Type': 'application/pdf'")
+    expect(block).toContain('attachment; filename="${safeName}"')
+    expect(block).toContain("replace(/[^A-Za-z0-9._-]+/g, '-')")
+    expect(block).toContain("'Cache-Control': 'no-store'")
+  })
+
+  it('is the ONLY place the signed bytes are read', () => {
+    expect(serverSource.match(/getSignedDocument\(/g)).toHaveLength(1)
+    expect(esignSource).not.toContain('getSignedDocument')
+  })
+})
+
+describe('a signed or sent letter never reaches an owner\'s mailbox (Alex, 2026-10-08)', () => {
+  const FORBIDDEN = [
+    'notify(',
+    'notifyOwners',
+    'notifyOwner',
+    'sendInvoiceEmail',
+    'sendDigestEmail',
+    'sendReportEmail',
+    'sendFeatureRequestEmail',
+    'attachments',
+    'bcc',
+    'Bcc',
+    'BCC',
+    'cc:',
+    'OWNER_EMAIL_COPY',
+  ]
+
+  it('the routes and lib/engagement-esign.js carry no notifier, mail sender, attachment or copy', () => {
+    for (const [name, text] of [
+      ['the e-signature routes', routes()],
+      ['lib/engagement-esign.js', esignSource],
+    ] as const) {
+      for (const forbidden of FORBIDDEN) {
+        expect(text, `${forbidden} must not appear in ${name}`).not.toContain(forbidden)
+      }
+    }
+    expect(esignSource).not.toMatch(/from '\.\/notify\.js'/)
+    expect(esignSource).not.toMatch(/from '\.\/.*email/)
+  })
+
+  it('refuses a team address before SignWell is called', () => {
+    expect(esignSource.indexOf("'team_address'")).toBeGreaterThan(-1)
+    expect(esignSource.indexOf("'team_address'")).toBeLessThan(esignSource.indexOf('signwell.createDocumentFromFile('))
+    expect(esignSource).toContain('assembleEngagementPreview(')
+  })
+
+  it('refuses everything it can before the one SignWell call, and makes only one', () => {
+    expect(esignSource.match(/signwell\.createDocumentFromFile\(/g)).toHaveLength(1)
+    const call = esignSource.indexOf('signwell.createDocumentFromFile(')
+    for (const refusal of ["'signwell_not_configured'", "'engagement_changed'", "'client_refused'", "'signature_active'", "'engagement_empty'", "'no_recipient'", "'pdf_failed'"]) {
+      expect(esignSource.indexOf(refusal), refusal).toBeGreaterThan(-1)
+      expect(esignSource.indexOf(refusal), refusal).toBeLessThan(call)
+    }
+  })
+})
+
+describe('the thank-you page SignWell sends a signer to', () => {
+  it('is public (no session), read-only, above the SPA fallback and says only thank you', () => {
+    const block = between("if (normalizedPath === '/signed-thank-you'", '// ---- /questionnaire/:token')
+    expect(block).not.toContain('requireSession')
+    expect(block).toContain("request.method === 'GET' || request.method === 'HEAD'")
+    expect(block).toContain('Thank you - your engagement letter is signed')
+    expect(block).not.toMatch(/appDataStore|searchParams|query/)
+  })
+})

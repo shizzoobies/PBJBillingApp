@@ -28289,6 +28289,48 @@ export class AppDataStore {
   }
 
   /**
+   * Log that the letter went out for ELECTRONIC signature (featreq-56d39567): one `esign` entry on
+   * the email log - who it went to, the signature request, test mode, and the hash of the letter
+   * sent (so `engagementChangedSinceSent` works exactly as for an emailed send) - and the same
+   * move as a send that left: a draft becomes sent and `sent_at` is stamped the first time.
+   * Returns the engagement, or null when there is none.
+   */
+  async markEngagementEsigned(id, { to = [], signatureRequestId = null, testMode = true, subject = '', hash = null, at = null } = {}) {
+    const entry = {
+      kind: 'esign',
+      at: at && !Number.isNaN(new Date(at).getTime()) ? new Date(at).toISOString() : nowIso(),
+      to: (Array.isArray(to) ? to : [to]).filter(Boolean).map((address) => String(address).slice(0, 320)).slice(0, 10),
+      signatureRequestId: signatureRequestId ? String(signatureRequestId) : null,
+      testMode: testMode !== false,
+      ok: true,
+      subject: String(subject ?? '').slice(0, 200),
+      hash: typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash) ? hash : null,
+    }
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update engagements
+            set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
+                status = case when status = 'draft' then 'sent' else status end,
+                sent_at = coalesce(sent_at, $3::timestamptz),
+                updated_at = now()
+          where id = $1
+          returning ${ENGAGEMENT_COLUMNS}`,
+        [id, JSON.stringify([entry]), entry.at],
+      )
+      return rows[0] ? mapEngagementRow(rows[0]) : null
+    }
+    return this._mutateEngagementFile((authState) => {
+      const row = authState.engagements.find((candidate) => candidate?.id === id)
+      if (!row) return { result: null, changed: false }
+      row.emailLog = [...(Array.isArray(row.emailLog) ? row.emailLog : []), entry]
+      if (row.status === 'draft') row.status = 'sent'
+      if (!row.sentAt) row.sentAt = entry.at
+      row.updatedAt = nowIso()
+      return { result: mapEngagementRow(row), changed: true }
+    })
+  }
+
+  /**
    * Take the "sending" mark for one Send: stamps updated_at, but only if the row still
    * carries the stamp the send loaded (a compare-and-set in ONE statement). Two Sends
    * that loaded the same letter at once cannot both win: the loser matches nothing and
