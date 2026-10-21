@@ -22,13 +22,21 @@ import type { Checklist } from '../lib/types'
 
 const CHECKLIST_ID = 'cl-rec'
 
+// Due today, in the page's own local day: inside the default report period and the open
+// "Due this week" group whatever today is (a fixed date slid into "Overdue" once it passed).
+const dueDate = (() => {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+})()
+
 const checklist = (): Checklist =>
   ({
     id: CHECKLIST_ID,
     title: 'Bank rec close',
     clientId: 'client-clover',
     assigneeId: 'emp-patrice',
-    dueDate: '2026-10-20',
+    dueDate,
     viewerIds: [],
     editorIds: [],
     items: [
@@ -90,8 +98,9 @@ async function openChecklists(refusal: { error: string; message: string }) {
   const page = within(container)
   await page.findByRole('navigation')
   await openNavLink(page, 'Checklists')
-  for (const heading of await screen.findAllByRole('button', { name: /^(Later|Overdue|This week)/ })) {
-    fireEvent.click(heading)
+  // Open every closed group; a click on an already-open one would fold it away.
+  for (const heading of await screen.findAllByRole('button', { name: /^(Later|Overdue|Due this week|Due this month)/ })) {
+    if (heading.getAttribute('aria-expanded') === 'false') fireEvent.click(heading)
   }
   return { page, container, state }
 }

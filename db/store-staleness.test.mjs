@@ -26616,11 +26616,12 @@ describe('accepting a proposal (file backend)', () => {
     // actor, so the log already carries entries from earlier runs — only what
     // THIS call appends is asserted on, not the whole log.
     const before = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
-    const beforeCount = (before.activityLog ?? []).length
+    // By id, not by length: the log is trimmed to 200 rows per user on every write.
+    const beforeIds = new Set((before.activityLog ?? []).map((entry) => entry.id))
     const proposal = await prospectProposal()
     const result = await store.acceptProposal(proposal.id, { actorUserId: 'emp-patrice' })
     const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
-    const added = (authState.activityLog ?? []).slice(beforeCount)
+    const added = (authState.activityLog ?? []).filter((entry) => !beforeIds.has(entry.id))
     expect(added.find((entry) => entry.action === 'client_created')).toBeUndefined()
     expect(added.find((entry) => entry.action === 'proposal_accepted')).toMatchObject({
       action: 'proposal_accepted',
@@ -48469,7 +48470,7 @@ describe('signing an engagement creates the client (file backend)', () => {
 
   it('creates the client and its contact with every field Accept used to give it, plus hours by role', async () => {
     const before = await readAuth()
-    const beforeCount = (before.activityLog ?? []).length
+    const beforeIds = new Set((before.activityLog ?? []).map((entry) => entry.id))
     const { proposal, engagement } = await wonEngagement({ accept: { planIds: ['plan-books'] } })
     // Hours by role from the figures, one decimal; the proposal's controller is the client's CFO.
     await patchStored(engagement.id, {
@@ -48515,7 +48516,7 @@ describe('signing an engagement creates the client (file backend)', () => {
 
     // The Won proposal is linked to its client now, and the client is logged as created.
     expect((await store.getProposal(proposal.id)).clientId).toBe(result.clientId)
-    const added = ((await readAuth()).activityLog ?? []).slice(beforeCount)
+    const added = ((await readAuth()).activityLog ?? []).filter((entry) => !beforeIds.has(entry.id))
     expect(added.find((entry) => entry.action === 'client_created')).toMatchObject({ target: 'Acme Books' })
   })
 
@@ -48651,7 +48652,7 @@ describe('signing an engagement creates the client (file backend)', () => {
 
   it('drafts the retainer invoice, which the month lists as a draft retainer', async () => {
     const before = await readAuth()
-    const beforeCount = (before.activityLog ?? []).length
+    const beforeIds = new Set((before.activityLog ?? []).map((entry) => entry.id))
     const { engagement } = await wonEngagement()
     expect(engagement.retainerAmount).toBe(630)
     const result = await sign(engagement.id)
@@ -48668,7 +48669,7 @@ describe('signing an engagement creates the client (file backend)', () => {
       timeZone: 'UTC',
     })
     expect(listed.lineItems[0]).toMatchObject({ kind: 'retainer', amount: 630, detail: `Retainer - engagement letter signed ${day}` })
-    const added = ((await readAuth()).activityLog ?? []).slice(beforeCount)
+    const added = ((await readAuth()).activityLog ?? []).filter((entry) => !beforeIds.has(entry.id))
     expect(added.find((entry) => entry.action === 'retainer_invoice_issued')).toBeTruthy()
   })
 
@@ -49282,7 +49283,9 @@ describe('signing an engagement creates the client (file backend)', () => {
     }
 
     it('opens at the Onboarding stage: Proposal born done at the signing instant, Onboarding live, the client stays in Onboarding', async () => {
-      const before = (await readAuth()).activityLog?.length ?? 0
+      // By id, not by length: the log is trimmed to 200 rows per user on every write,
+      // and how full the actor's log is depends on which tests ran before this one.
+      const beforeIds = new Set(((await readAuth()).activityLog ?? []).map((entry) => entry.id))
       const { engagement } = await wonEngagement()
       const signedOn = daysBefore(firmToday(), 3)
       const result = await sign(engagement.id, { signedOn })
@@ -49323,7 +49326,7 @@ describe('signing an engagement creates the client (file backend)', () => {
 
       // Plain startOnboarding would have moved the client back to Proposal; signing does not.
       expect(data.clients.find((row) => row.id === result.clientId).lifecycleStage).toBe('onboarding')
-      const added = ((await readAuth()).activityLog ?? []).slice(before)
+      const added = ((await readAuth()).activityLog ?? []).filter((entry) => !beforeIds.has(entry.id))
       expect(added.find((entry) => entry.action === 'onboarding_started')).toMatchObject({ target: 'Acme Books' })
       expect(result.skipped.map((entry) => entry.what)).not.toContain('Onboarding checklist')
     })
