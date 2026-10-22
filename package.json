@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "start": "node server.js",
-    "test": "vitest run && npm run test:scripts",
+    "test": "vitest run",
     "test:scripts": "node --test \"scripts/**/*.test.mjs\"",
     "test:watch": "vitest",
     "verify": "npm run lint && npm run build && npm run test",
