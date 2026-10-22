@@ -246,7 +246,14 @@ function storedServiceCategoryGroup(value) {
   return typeof value === 'string' && value.trim() ? value : null
 }
 
-const demoPassword = process.env.AUTH_DEMO_PASSWORD || 'pbj-demo'
+// The seed workspace's shared password. Known-value defaults are for local and test runs
+// only: a production process that seeds (an empty database, or no DATABASE_URL) gives the
+// demo users a random password nobody knows, so a public address can never be signed into
+// with `pbj-demo`. The owner's real password still arrives through OWNER_BOOTSTRAP_PASSWORD,
+// which is applied in the same process right after seeding.
+const demoPassword =
+  process.env.AUTH_DEMO_PASSWORD ||
+  (process.env.NODE_ENV === 'production' ? randomUUID() : 'pbj-demo')
 
 const DEFAULT_FIRM_SETTINGS = {
   name: 'PB&J Strategic Accounting',
