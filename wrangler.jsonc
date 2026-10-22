@@ -1,0 +1,36 @@
+{
+  // PBJBillingApp on Cloudflare: a Worker in front of ONE container running the
+  // Dockerfile image. See docs/cloudflare.md. Non-secret settings only; every secret
+  // is a Worker secret (scripts/cf/secrets-upload.mjs) read in cloudflare/worker.js.
+  // No account id here: wrangler reads CLOUDFLARE_ACCOUNT_ID.
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "pbjbillingapp",
+  "main": "cloudflare/worker.js",
+  "compatibility_date": "2026-10-21",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  // https://developers.cloudflare.com/containers/configuration/wrangler/
+  "containers": [
+    {
+      "class_name": "AppContainer",
+      "image": "./Dockerfile",
+      "max_instances": 1,
+      "instance_type": "standard-1"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "APP", "class_name": "AppContainer" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AppContainer"] }],
+
+  // The Worker POSTs /internal/tick to the container every 15 minutes (UTC).
+  // https://developers.cloudflare.com/workers/configuration/cron-triggers/
+  "triggers": { "crons": ["*/15 * * * *"] },
+
+  "vars": {
+    "APP_PUBLIC_URL": "https://app.pbjsatime.com",
+    "NODE_ENV": "production",
+    "FIRM_TIME_ZONE": "America/New_York"
+  }
+}

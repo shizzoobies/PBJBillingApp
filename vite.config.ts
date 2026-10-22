@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 // `vitest/config`'s defineConfig accepts the `test` block below with full typing.
 import { defineConfig } from 'vitest/config'
@@ -12,6 +13,9 @@ export default defineConfig({
     },
   },
   test: {
+    // The Worker imports @cloudflare/containers, which only exists inside the Workers bundle.
+    // worker.test.mjs mocks it; the alias just lets the import resolve before it is installed.
+    alias: { '@cloudflare/containers': fileURLToPath(new URL('./cloudflare/test-support/containers-stub.mjs', import.meta.url)) },
     // happy-dom gives the test environment a DOM so React components mount.
     environment: 'happy-dom',
     globals: true,
@@ -20,7 +24,7 @@ export default defineConfig({
     // Only pick up the project's own tests — never node_modules. Plain-JS
     // server-side libs get .test.mjs files (outside tsc's reach, so a TS
     // test can never import a JS lib and break the clean build).
-    include: ['src/**/*.{test,spec}.{ts,tsx}', 'lib/**/*.test.mjs', 'db/**/*.test.mjs'],
+    include: ['src/**/*.{test,spec}.{ts,tsx}', 'lib/**/*.test.mjs', 'db/**/*.test.mjs', 'cloudflare/**/*.test.mjs'],
     // The whole-app tests mount <App> and wait on several mocked fetches. On a
     // loaded machine (two working copies running the suite at once) the 5 s
     // default turned slow-but-correct tests into timeouts. A passing test is

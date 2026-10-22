@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
+    "@cloudflare/containers": "0.3.7",
     "@elevenlabs/react": "^1.6.5",
     "@types/qrcode": "^1.5.6",
     "lucide-react": "^1.14.0",
@@ -45,6 +46,7 @@
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.2",
     "vite": "^8.0.10",
-    "vitest": "^4.1.6"
+    "vitest": "^4.1.6",
+    "wrangler": "4.151.3"
   }
 }
