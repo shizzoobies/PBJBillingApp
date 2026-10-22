@@ -46,7 +46,19 @@ its own post-call override - patch the agent, then re-provision the voice tools 
 off -> redirect app.pbjsa.com. **Secrets:** `D:\PBJ Accounting Work\secrets\rotation-2026-10-21.env` (outside git; names only
 in chat; template comments were stripped; JWT_SECRET is not read by the app; TOTP_ENC_KEY deliberately empty; SignWell x3
 empty = e-sign stays off) and `staging-2026-10-21.env` (same values, DATABASE_URL=pbj_staging, digest/past-due/reminders off;
-delete after cutover). **Restart proof PASSED at 04:41Z on `db24839c`:** a restart after a secret upload had come back on the OLD env
+delete after cutover). **2026-10-22 08:00 ET update: Railway's gateway is back; the full move was REHEARSED end to end** (dump 4 s, restore
+11 s, verify = 53 tables match by full-row hash, boot DDL clean + the 3 e-sign tables, second verify OK); Neon `neondb` holds
+that rehearsal copy and is reset before the final restore. **Cutover is TONIGHT 2026-10-22 after Brittany's office hours, with
+Alex present; his instruction: "don't pause her app till I say".** Everything is staged outside git in
+`D:\PBJ Accounting Work\secrets\cutover\` (`cutover-data.ps1`, `cutover-finish.ps1`, the Resend/ElevenLabs/Railway-proxy
+helper scripts) plus `secrets\railway-source.url` (tunnel: `npx @railway/cli@latest connect Postgres --tunnel-only`, rewrite the
+port) and `secrets\neon-target.url`. Freeze = `npx @railway/cli@latest down --service PBJBillingApp -y` (or dashboard Remove), then
+the data script refuses to run until app.pbjsa.com/health fails. The Stripe endpoint for the new address exists DISABLED
+(`we_1UTKlpQ0WOYRCGot3UsqK2Np`; its secret is already the rotation file's STRIPE_WEBHOOK_SECRET); the finish script enables it
+and disables the old one. The app.pbjsa.com forward is Alex's (pbjsa.com zone on his other Cloudflare account: Redirect Rule 301
+to app.pbjsatime.com, preserve path + query).
+
+**Restart proof PASSED at 04:41Z on `db24839c`:** a restart after a secret upload had come back on the OLD env
 revision four times (the Durable Object isolate keeps the env it was constructed with); fix round 3 hands the Worker's current
 env to the container on `POST /internal/restart` (`restartWith`), adds `GET /internal/env-revision` and `uptimeSeconds` to
 `/health`; the live run printed `container restarted: uptime 13 s` and `env revision: matches`. The cutover sequence
