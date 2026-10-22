@@ -14,6 +14,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# The job only reads the repo; Cloudflare is reached with the API token below.
+permissions:
+  contents: read
+
 # Queue, never cancel: a deploy cut off halfway through an image push is worse than a
 # short wait.
 concurrency:

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { SECRET_NAMES, selectSecrets, uploadSecrets } from './secrets-upload.mjs'
+import { CONTAINER_ENV_NAMES } from '../../cloudflare/env-names.js'
+import { SECRET_NAMES, WRANGLER_VARS, assertMaintenanceGate, parseJsonc, selectSecrets, uploadSecrets } from './secrets-upload.mjs'
 import { parseEnvText } from '../prod/env.mjs'
 
 function fixture(t, text) {
@@ -26,8 +27,46 @@ test('allow-list keeps only approved nonblank names, including false and off', (
   assert.ok(skipped.includes('UNRELATED_TOKEN'))
 })
 
+test('secret names are exactly the container names minus the wrangler.jsonc vars', () => {
+  assert.deepEqual([...WRANGLER_VARS].sort(), ['APP_PUBLIC_URL', 'FIRM_TIME_ZONE', 'NODE_ENV'])
+  assert.deepEqual([...SECRET_NAMES], CONTAINER_ENV_NAMES.filter((name) => !WRANGLER_VARS.includes(name)))
+  // The settings that used to be "deliberately absent" now travel as secrets: the repo is public.
+  for (const name of ['MAINTENANCE_MODE', 'OWNER_EMAIL', 'ADMIN_EMAIL', 'EMAIL_FROM', 'INVOICE_EMAIL_FROM', 'INVOICE_REPLY_TO', 'ELEVENLABS_AGENT_ID', 'AUTOPAY_CHARGING', 'INVOICE_PAST_DUE_NOTICES', 'ASSISTANT_DIGEST']) {
+    assert.ok(SECRET_NAMES.includes(name), name)
+  }
+  for (const name of WRANGLER_VARS) assert.ok(!SECRET_NAMES.includes(name), name)
+})
+
+test('parseJsonc keeps // inside strings, drops comments and trailing commas', () => {
+  const parsed = parseJsonc('{ // note\n "url": "https://x.test/a", /* block */ "list": [1, 2,],\n}')
+  assert.deepEqual(parsed, { url: 'https://x.test/a', list: [1, 2] })
+  assert.throws(() => parseJsonc('{ /* open'), /Unterminated/)
+})
+
+test('a database upload without MAINTENANCE_MODE is refused unless --allow-live', (t) => {
+  const file = fixture(t, 'DATABASE_URL=synthetic-private-url\nMAINTENANCE_MODE=  \n')
+  const noRun = () => assert.fail('refused upload spawned a command')
+  assert.throws(() => uploadSecrets([file], { run: noRun, print: () => {} }), (error) => {
+    assert.match(error.message, /DATABASE_URL/)
+    assert.match(error.message, /MAINTENANCE_MODE/)
+    assert.ok(!error.message.includes('synthetic-private-url'))
+    return true
+  })
+  assert.throws(() => uploadSecrets([file, '--dry-run'], { run: noRun, print: () => {} }), /MAINTENANCE_MODE/)
+  let calls = 0
+  uploadSecrets([file, '--allow-live'], { run: () => { calls++; return { status: 0 } }, print: () => {} })
+  assert.equal(calls, 1)
+})
+
+test('the gate passes when MAINTENANCE_MODE is set, or when there is no database', () => {
+  assert.doesNotThrow(() => assertMaintenanceGate({ DATABASE_URL: 'x', MAINTENANCE_MODE: '1' }))
+  assert.doesNotThrow(() => assertMaintenanceGate({ JWT_SECRET: 'x' }))
+  assert.doesNotThrow(() => assertMaintenanceGate({ DATABASE_URL: ' ' }))
+  assert.throws(() => assertMaintenanceGate({ DATABASE_URL: 'x' }), /MAINTENANCE_MODE/)
+})
+
 test('dry run prints only names, never invokes a command, and never modifies the file', (t) => {
-  const file = fixture(t, '# preserve\r\nDATABASE_URL=synthetic-private-url\r\nJWT_SECRET=\r\nUNRELATED_TOKEN=fake-extra\r\n')
+  const file = fixture(t, '# preserve\r\nDATABASE_URL=synthetic-private-url\r\nMAINTENANCE_MODE=1\r\nJWT_SECRET=\r\nUNRELATED_TOKEN=fake-extra\r\n')
   const before = readFileSync(file, 'utf8')
   const lines = []
   const result = uploadSecrets([file, '--dry-run', '--generate'], {

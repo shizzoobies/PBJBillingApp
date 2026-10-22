@@ -9,14 +9,14 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "start": "node server.js",
-    "test": "vitest run",
+    "test": "vitest run && npm run test:scripts",
+    "test:scripts": "node --test \"scripts/**/*.test.mjs\"",
     "test:watch": "vitest",
     "verify": "npm run lint && npm run build && npm run test",
     "health-check": "node scripts/health-check.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
-    "@cloudflare/containers": "0.3.7",
     "@elevenlabs/react": "^1.6.5",
     "@types/qrcode": "^1.5.6",
     "lucide-react": "^1.14.0",
@@ -30,6 +30,7 @@
     "svg-to-pdfkit": "^0.1.8"
   },
   "devDependencies": {
+    "@cloudflare/containers": "0.3.7",
     "@eslint/js": "^10.0.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",

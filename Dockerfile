@@ -33,14 +33,15 @@ WORKDIR /app
 ENV NODE_ENV=production
 # Every container host (Railway sets its own PORT; Cloudflare's Worker talks to 8080).
 ENV PORT=8080
-# Which commit this image was built from, for /health. A host that builds the image from
-# a git checkout passes it as a build arg; the Cloudflare deploy workflow instead writes
-# `.app-commit` into the build context (copied below). lib/host-runtime.js reads either.
-ARG APP_COMMIT=unknown
-ENV APP_COMMIT=$APP_COMMIT
 RUN npm install -g npm@${NPM_VERSION}
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
+# Which commit this image was built from, for /health. A host that builds the image from
+# a git checkout passes it as a build arg; the Cloudflare deploy workflow instead writes
+# `.app-commit` into the build context (copied below). lib/host-runtime.js reads either.
+# Declared AFTER npm ci so a new commit does not invalidate the dependency layer.
+ARG APP_COMMIT=unknown
+ENV APP_COMMIT=$APP_COMMIT
 # The server, its libraries, and the built client. Nothing else — no tests,
 # no docs, no desktop shell, no scratch. (.dockerignore keeps them out of the
 # build context too, so a stray tmp/ file cannot change the image.)
@@ -57,5 +58,5 @@ COPY public ./public
 COPY --from=build /app/package.json /app/.app-commit* ./
 
 EXPOSE 8080
-# Railway supplies PORT; server.js reads it and falls back to 8080.
+# server.js listens on PORT (8080 from the ENV above; its own default is 4173 for local runs).
 CMD ["node", "server.js"]

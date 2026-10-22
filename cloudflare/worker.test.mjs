@@ -37,19 +37,93 @@ describe('fetch', () => {
     expect(containerFetch).toHaveBeenCalledTimes(1)
     expect(containerFetch.mock.calls[0][0]).toBe(request)
   })
+
+  it('answers 400 to a client-chosen container port without touching the container', async () => {
+    const request = new Request('https://app.pbjsatime.com/', { headers: { 'cf-container-target-port': '22' } })
+    const response = await worker.fetch(request, { APP: {}, TICK_TOKEN: 't' })
+    expect(response.status).toBe(400)
+    expect(getContainer).not.toHaveBeenCalled()
+  })
+
+  it('answers 404 to every /internal path from outside, including /internal/tick and encoded or cased spellings', async () => {
+    for (const path of ['/internal/tick', '/internal/anything', '/INTERNAL/tick', '/%69nternal/tick', '/internal']) {
+      const request = new Request('https://app.pbjsatime.com' + path, { method: 'POST', headers: { 'x-tick-token': 'tick-token-value' } })
+      const response = await worker.fetch(request, { APP: {}, TICK_TOKEN: 'tick-token-value' })
+      expect(response.status, path).toBe(404)
+    }
+    expect(getContainer).not.toHaveBeenCalled()
+  })
+
+  it('answers 400 to a path that cannot be decoded', async () => {
+    const response = await worker.fetch(new Request('https://app.pbjsatime.com/%E0%A4%A'), { APP: {} })
+    expect(response.status).toBe(400)
+    expect(getContainer).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /internal/restart', () => {
+  const restart = (token, method = 'POST') =>
+    new Request('https://app.pbjsatime.com/internal/restart', { method, headers: token === undefined ? {} : { 'x-tick-token': token } })
+
+  it('is 404 when TICK_TOKEN is not configured, and does not touch the container', async () => {
+    const response = await worker.fetch(restart('anything'), { APP: {} })
+    expect(response.status).toBe(404)
+    expect(getContainer).not.toHaveBeenCalled()
+  })
+
+  it('is 401 for a missing or wrong token (same length or not), and does not touch the container', async () => {
+    for (const token of [undefined, '', 'wrong', 'tick-token-valuf', 'tick-token-value-and-more']) {
+      const response = await worker.fetch(restart(token), { APP: {}, TICK_TOKEN: 'tick-token-value' })
+      expect(response.status).toBe(401)
+    }
+    expect(getContainer).not.toHaveBeenCalled()
+  })
+
+  it('is 404 for any other method', async () => {
+    const response = await worker.fetch(restart('tick-token-value', 'GET'), { APP: {}, TICK_TOKEN: 'tick-token-value' })
+    expect(response.status).toBe(404)
+    expect(getContainer).not.toHaveBeenCalled()
+  })
+
+  it('destroys the container (awaited) and answers { restarted: true } for the right token', async () => {
+    let finished = false
+    const destroy = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      finished = true
+    })
+    getContainer.mockReturnValueOnce({ destroy, fetch: containerFetch })
+    const env = { APP: { binding: true }, TICK_TOKEN: 'tick-token-value' }
+    const response = await worker.fetch(restart('tick-token-value'), env)
+    expect(finished).toBe(true)
+    expect(destroy).toHaveBeenCalledTimes(1)
+    expect(getContainer).toHaveBeenCalledWith(env.APP, 'app')
+    expect(containerFetch).not.toHaveBeenCalled()
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ restarted: true })
+  })
 })
 
 describe('scheduled', () => {
   it('posts the tick with the token header and keeps the Worker alive until it answers', async () => {
-    const pending = Promise.resolve(new Response('{}'))
-    containerFetch.mockReturnValue(pending)
+    containerFetch.mockReturnValue(Promise.resolve(new Response('{}')))
     const waitUntil = vi.fn()
     worker.scheduled({}, { APP: {}, TICK_TOKEN: 'tick-token-value' }, { waitUntil })
     expect(containerFetch).toHaveBeenCalledWith('http://app/internal/tick', {
       method: 'POST',
       headers: { 'x-tick-token': 'tick-token-value' },
     })
-    expect(waitUntil).toHaveBeenCalledWith(pending)
+    expect(waitUntil).toHaveBeenCalledTimes(1)
+    await expect(waitUntil.mock.calls[0][0]).resolves.toBe(true)
+  })
+
+  it('logs the status when the tick is not ok', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    containerFetch.mockResolvedValue(new Response('{}', { status: 401 }))
+    const waitUntil = vi.fn()
+    worker.scheduled({}, { APP: {}, TICK_TOKEN: 'tick-token-value' }, { waitUntil })
+    await waitUntil.mock.calls[0][0]
+    expect(spy).toHaveBeenCalledWith('[cron] tick', 401)
+    spy.mockRestore()
   })
 
   it('sends an empty token (which the app refuses) rather than the word "undefined"', () => {
@@ -90,6 +164,15 @@ describe('pickContainerEnv', () => {
       'INVOICE_AUTO_REMINDERS',
       'INVOICE_PAST_DUE_NOTICES',
       'ASSISTANT_DIGEST',
+      'ASSISTANT_DIGEST_DOW',
+      'ASSISTANT_MODEL',
+      'ASSISTANT_FALLBACK_MODEL',
+      'ASSISTANT_SUMMARY_MODEL',
+      'ASSISTANT_CAPACITY_TARGET',
+      'INVOICE_AI_MODEL',
+      'INVOICE_AUTO_REMINDER_MIN_DAYS',
+      'FEATURE_REQUEST_EMAIL',
+      'AUTOPAY_CHARGING',
       'TICK_TOKEN',
       'MAINTENANCE_MODE',
     ])
