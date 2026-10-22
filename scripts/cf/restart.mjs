@@ -20,7 +20,9 @@ import { DEFAULT_ROTATION_FILE } from './secrets-upload.mjs'
 export const DEFAULT_APP_URL = 'https://app.pbjsatime.com'
 const HEALTH_TIMEOUT_MS = 90_000
 const HEALTH_INTERVAL_MS = 3_000
-const REQUEST_TIMEOUT_MS = 20_000
+// The restart route itself waits up to 20 s for a graceful stop before it destroys the
+// container (measured 20.9 s on 2026-10-22), so the request budget has to be well above that.
+const REQUEST_TIMEOUT_MS = 60_000
 export const MAX_EXTRA_RESTARTS = 3
 export const RESTART_GAP_MS = 20_000
 const USAGE = 'Usage: node scripts/cf/restart.mjs [env-file] [--url=https://...] [--expect-revision=<value>]'
