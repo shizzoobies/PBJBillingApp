@@ -176,7 +176,8 @@ describe('the boot says when an e-signature was left half-finished', () => {
 
   it('re-checks hourly, leaving a 10 minute grace for work that is under way', () => {
     const boot = between('await appDataStore.initialize()', '// Bulletproof owner recovery')
-    expect(boot).toContain('setInterval(() => void warnSignwellLeftFinishing(10 * 60 * 1000), 60 * 60 * 1000)')
+    expect(boot).toContain('warnSignwellLeftFinishing(10 * 60 * 1000)')
+    expect(boot).toContain('setInterval(() => void runPeriodicJob(signwellFinishingJob), 60 * 60 * 1000)')
   })
 })
 

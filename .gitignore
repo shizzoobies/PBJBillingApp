@@ -41,3 +41,6 @@ scripts/rescue-login.mjs
 desktop/package-lock.json
 desktop/node_modules/
 desktop/src-tauri/target/
+
+# Written by the Cloudflare deploy workflow into the build context
+.app-commit

@@ -71,6 +71,18 @@ import { createPendingActionStore } from './lib/pending-actions.js'
 import { capacity, clientProfitability, deadlines, timeSummary } from './lib/firm-analytics.js'
 import { buildMemoryDigest, safeEqual, verifyElevenLabsSignature } from './lib/voice.js'
 import { buildClientRecap, buildMasterRecap } from './lib/client-recap.js'
+import {
+  isMaintenanceMode,
+  isProviderWebhookPath,
+  maintenanceRefusal,
+  resolveAppCommit,
+} from './lib/host-runtime.js'
+import {
+  registerPeriodicJob,
+  runAllPeriodicJobs,
+  runPeriodicJob,
+  tickRefusal,
+} from './lib/periodic-jobs.js'
 import { buildInvoiceRecap } from './lib/invoice-recap.js'
 import { currentPeriod, isValidPeriod, isValidPeriodType } from './lib/periods.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
@@ -316,6 +328,8 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const distDir = path.join(__dirname, 'dist')
 const indexFile = path.join(distDir, 'index.html')
+// Local dev (vite's proxy, the pbj-api launch entry) expects 4173. The Dockerfile sets
+// PORT=8080 for every container host, so the image never relies on this fallback.
 const port = Number(process.env.PORT || 4173)
 const appDataStore = new AppDataStore()
 // Pending-notes attach pass (featreq-b688e73c) runs from inside db/store.js
@@ -501,7 +515,8 @@ function sweepRateLimitBuckets(windowMs = RATE_LIMIT_WINDOW_MS) {
     }
   }
 }
-const rateLimitSweepTimer = setInterval(() => sweepRateLimitBuckets(), 60 * 60 * 1000)
+const rateLimitSweepJob = registerPeriodicJob('rate-limit-sweep', () => sweepRateLimitBuckets())
+const rateLimitSweepTimer = setInterval(() => void runPeriodicJob(rateLimitSweepJob), 60 * 60 * 1000)
 rateLimitSweepTimer.unref?.()
 
 /**
@@ -3224,12 +3239,45 @@ const server = createServer(async (request, response) => {
         db,
         stripe: !isStripeConfigured() ? 'unconfigured' : isStripeTestMode() ? 'test' : 'live',
         stripeWebhook: isStripeWebhookConfigured() ? 'configured' : 'missing',
-        // Which commit is serving. Railway injects RAILWAY_GIT_COMMIT_SHA at
-        // runtime; a session with no Railway login (a claude.ai cloud session,
-        // a laptop on the road) confirms a deploy by matching this to the
-        // commit it pushed, instead of polling the CLI. Null off Railway.
-        commit: String(process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || null,
+        // Which commit is serving. A session with no Railway login (a claude.ai cloud
+        // session, a laptop on the road) or the Cloudflare deploy workflow confirms a
+        // deploy by matching this to the commit it pushed. See lib/host-runtime.js for
+        // the lookup order; 'unknown' when nothing says.
+        commit: resolveAppCommit(),
+        // True while the app is being moved between hosts: writes answer 503, no jobs run.
+        maintenance: isMaintenanceMode(),
       })
+      return
+    }
+
+    // POST /internal/tick - the Cloudflare Worker's Cron Trigger calls this to run every
+    // periodic job (lib/periodic-jobs.js), because a container host may sleep or restart
+    // and cannot be trusted to keep the hourly intervals alive. NOT a browser route:
+    // outside session auth and the cross-site check, like the webhooks; the shared
+    // TICK_TOKEN header is the boundary, and the route does not exist (404) without it.
+    if (normalizedPath === '/internal/tick') {
+      const refusal = tickRefusal(process.env, request.headers['x-tick-token'])
+      if (refusal || request.method !== 'POST') {
+        const answer = refusal || { status: 404, body: { error: 'Not found' } }
+        sendJson(response, answer.status, answer.body)
+        return
+      }
+      const result = await runAllPeriodicJobs()
+      console.log(
+        result.skipped
+          ? `[tick] skipped (${result.skipped})`
+          : `[tick] ran ${result.ran.join(',') || '-'}; failed ${result.failed.map((job) => job.name).join(',') || '-'}`,
+      )
+      sendJson(response, 200, result)
+      return
+    }
+
+    // MAINTENANCE_MODE=1 (host moves): nothing writes - the provider webhooks too, because
+    // Stripe, Resend and SignWell retry a non-2xx and the events land after the switch.
+    const maintenance = maintenanceRefusal(process.env, request.method, normalizedPath)
+    if (maintenance) {
+      if (isProviderWebhookPath(normalizedPath)) console.log(`[maintenance] webhook deferred ${normalizedPath}`)
+      sendJson(response, maintenance.status, maintenance.body)
       return
     }
 
@@ -19597,7 +19645,10 @@ async function warnSignwellLeftFinishing(olderThanMs) {
   }
 }
 await warnSignwellLeftFinishing(0)
-const signwellFinishingTimer = setInterval(() => void warnSignwellLeftFinishing(10 * 60 * 1000), 60 * 60 * 1000)
+const signwellFinishingJob = registerPeriodicJob('signwell-left-finishing', () =>
+  warnSignwellLeftFinishing(10 * 60 * 1000),
+)
+const signwellFinishingTimer = setInterval(() => void runPeriodicJob(signwellFinishingJob), 60 * 60 * 1000)
 // Bulletproof owner recovery: if `OWNER_BOOTSTRAP_PASSWORD` is set on the
 // environment, ensure the first owner's password hash matches it. Lets an
 // owner ALWAYS sign in via /owner → "Password" tab, even when email/Resend
@@ -19650,9 +19701,10 @@ async function maybeSendWeeklyDigest() {
 }
 // Check hourly; the per-week marker keeps it to one send. First check shortly
 // after boot so a restart on digest day still delivers.
-const digestTimer = setInterval(maybeSendWeeklyDigest, 60 * 60 * 1000)
+const digestJob = registerPeriodicJob('weekly-digest', maybeSendWeeklyDigest)
+const digestTimer = setInterval(() => void runPeriodicJob(digestJob), 60 * 60 * 1000)
 digestTimer.unref?.()
-setTimeout(() => void maybeSendWeeklyDigest(), 30 * 1000).unref?.()
+setTimeout(() => void runPeriodicJob(digestJob), 30 * 1000).unref?.()
 
 // ---- Past-due invoice notices ----
 // Deterministic, like the digest above: any invoice that has passed the firm's
@@ -19733,9 +19785,10 @@ async function maybeNotifyPastDueInvoices() {
 // Hourly; the per-invoice marker keeps it to one notice each. First check
 // shortly after boot so a restart does not push a day's worth of them back an
 // hour, and unref'd so it can never hold the process open.
-const pastDueTimer = setInterval(maybeNotifyPastDueInvoices, 60 * 60 * 1000)
+const pastDueJob = registerPeriodicJob('past-due-notices', maybeNotifyPastDueInvoices)
+const pastDueTimer = setInterval(() => void runPeriodicJob(pastDueJob), 60 * 60 * 1000)
 pastDueTimer.unref?.()
-setTimeout(() => void maybeNotifyPastDueInvoices(), 30 * 1000).unref?.()
+setTimeout(() => void runPeriodicJob(pastDueJob), 30 * 1000).unref?.()
 
 // ---- Automatic invoice reminders (featreq-3f1d63b6) ----
 // On the 15th, 20th, 25th and the last day of the month (the firm's day), at or
@@ -19807,7 +19860,8 @@ async function maybeSendAutoInvoiceReminders() {
 }
 // Hourly; the first check shortly after boot so a restart on a reminder day
 // still delivers. Unref'd so it can never hold the process open.
-const autoReminderTimer = setInterval(maybeSendAutoInvoiceReminders, 60 * 60 * 1000)
+const autoReminderJob = registerPeriodicJob('auto-invoice-reminders', maybeSendAutoInvoiceReminders)
+const autoReminderTimer = setInterval(() => void runPeriodicJob(autoReminderJob), 60 * 60 * 1000)
 autoReminderTimer.unref?.()
-setTimeout(() => void maybeSendAutoInvoiceReminders(), 30 * 1000).unref?.()
+setTimeout(() => void runPeriodicJob(autoReminderJob), 30 * 1000).unref?.()
 

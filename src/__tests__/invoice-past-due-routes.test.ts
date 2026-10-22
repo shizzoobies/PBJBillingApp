@@ -40,13 +40,14 @@ describe('the past-due scheduler', () => {
   // file is unref'd for that reason.
   it('never holds the process open', () => {
     const text = block()
-    expect(text).toContain('const pastDueTimer = setInterval(maybeNotifyPastDueInvoices')
+    expect(text).toContain('const pastDueTimer = setInterval(() => void runPeriodicJob(pastDueJob)')
     expect(text).toContain('pastDueTimer.unref?.()')
-    expect(text).toMatch(/setTimeout\(\(\) => void maybeNotifyPastDueInvoices\(\), 30 \* 1000\)\.unref\?\.\(\)/)
+    expect(text).toMatch(/setTimeout\(\(\) => void runPeriodicJob\(pastDueJob\), 30 \* 1000\)\.unref\?\.\(\)/)
   })
 
   it('runs hourly, like the digest beside it', () => {
-    expect(block()).toContain('setInterval(maybeNotifyPastDueInvoices, 60 * 60 * 1000)')
+    expect(block()).toContain("registerPeriodicJob('past-due-notices', maybeNotifyPastDueInvoices)")
+    expect(block()).toContain('setInterval(() => void runPeriodicJob(pastDueJob), 60 * 60 * 1000)')
   })
 
   // The off switch, the same shape as the weekly digest's ASSISTANT_DIGEST=off

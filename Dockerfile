@@ -31,6 +31,13 @@ FROM node:${NODE_VERSION}-bookworm-slim AS runtime
 ARG NPM_VERSION
 WORKDIR /app
 ENV NODE_ENV=production
+# Every container host (Railway sets its own PORT; Cloudflare's Worker talks to 8080).
+ENV PORT=8080
+# Which commit this image was built from, for /health. A host that builds the image from
+# a git checkout passes it as a build arg; the Cloudflare deploy workflow instead writes
+# `.app-commit` into the build context (copied below). lib/host-runtime.js reads either.
+ARG APP_COMMIT=unknown
+ENV APP_COMMIT=$APP_COMMIT
 RUN npm install -g npm@${NPM_VERSION}
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
@@ -45,6 +52,9 @@ COPY scripts ./scripts
 COPY docs/capability-manifest.md ./docs/capability-manifest.md
 COPY docs/voice-agent-persona.md ./docs/voice-agent-persona.md
 COPY public ./public
+# Optional `.app-commit` (the glob alongside a file that always exists is how Docker lets
+# a COPY source be absent; a lone glob that matches nothing fails the build).
+COPY --from=build /app/package.json /app/.app-commit* ./
 
 EXPOSE 8080
 # Railway supplies PORT; server.js reads it and falls back to 8080.
