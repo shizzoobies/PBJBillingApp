@@ -19,9 +19,11 @@ name: db-backup
 # Repo secrets (Settings > Secrets and variables > Actions - names only here,
 # values never touch this file):
 #   BACKUP_DATABASE_URL   Connection string of the database to back up (Neon:
-#                         the DIRECT, non-pooled URL). Ending it with
-#                         ?sslmode=verify-full&sslrootcert=system makes the
-#                         runner check the server certificate.
+#                         the DIRECT, non-pooled URL). Replace Neon's
+#                         sslmode=require with sslmode=verify-full and append
+#                         &sslrootcert=system so the runner checks the server
+#                         certificate (never leave sslmode=require next to
+#                         sslrootcert=system: libpq refuses it).
 #   R2_ACCOUNT_ID         Cloudflare account id (builds the R2 S3 endpoint).
 #   R2_ACCESS_KEY_ID      R2 API token access key id (Object Read & Write on
 #                         the one bucket).

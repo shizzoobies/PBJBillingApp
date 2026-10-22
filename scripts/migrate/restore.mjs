@@ -32,6 +32,7 @@ import {
   runTool,
   sameDatabase,
   toolEnv,
+  cleanupToolEnv,
 } from './lib.mjs'
 
 export const IGNORED_SCHEMAS = ['pg_catalog', 'information_schema', 'pg_toast', 'neon', 'neon_auth']
@@ -132,11 +133,15 @@ export async function main(argv, env = process.env, deps = {}) {
   const pgRestore = pgBinary('pg_restore', env, platform)
   const started = Date.now()
   let result
+  let childEnv
   try {
-    result = await runTool(spawn, pgRestore, restoreArgs(database, file), toolEnv(env, target.url))
+    childEnv = toolEnv(env, target.url)
+    result = await runTool(spawn, pgRestore, restoreArgs(database, file), childEnv)
   } catch (error) {
     log(`restore: could not start ${pgRestore}: ${redact(error.message, [target.url])}. Set PG_BIN to the PostgreSQL 18 bin folder.`)
     return 1
+  } finally {
+    cleanupToolEnv(childEnv)
   }
   const seconds = ((Date.now() - started) / 1000).toFixed(1)
   log(`restore: pg_restore exit code ${result.code} after ${seconds}s`)
@@ -157,7 +162,7 @@ export async function main(argv, env = process.env, deps = {}) {
   } finally {
     await client.end()
   }
-  log('restore: OK (analyze done). Next: node scripts/migrate/boot-check.mjs, then verify.mjs')
+  log('restore: OK (analyze done). Next: node scripts/migrate/verify.mjs (no allowances), then boot-check.mjs, then verify.mjs --allow-missing')
   return 0
 }
 

@@ -28,6 +28,7 @@ import {
   redact,
   runTool,
   toolEnv,
+  cleanupToolEnv,
   utcStamp,
 } from './lib.mjs'
 
@@ -94,6 +95,8 @@ export async function main(argv, env = process.env, deps = {}) {
   } catch (error) {
     log(`dump: could not start ${pgDump}: ${redact(error.message, [source.url])}. Set PG_BIN to the PostgreSQL 18 bin folder.`)
     return 1
+  } finally {
+    cleanupToolEnv(childEnv)
   }
   const seconds = ((Date.now() - started) / 1000).toFixed(1)
   log(`dump: pg_dump exit code ${result.code} after ${seconds}s`)

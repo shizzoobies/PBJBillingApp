@@ -62,9 +62,18 @@ export AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
 export AWS_DEFAULT_REGION="auto"
 
 # An sslmode inside BACKUP_DATABASE_URL always wins over this default. `require`
-# encrypts; put ?sslmode=verify-full&sslrootcert=system on the secret to also
-# have the runner check the server certificate (the runbook says how).
+# encrypts; on the secret, REPLACE Neon's sslmode=require with sslmode=verify-full
+# and append &sslrootcert=system to also have the runner check the server
+# certificate (the runbook says how).
 export PGSSLMODE="${PGSSLMODE:-require}"
+# libpq refuses sslrootcert=system with a mode of require ("weak sslmode require may
+# not be used with sslrootcert=system"). Say so plainly instead of failing in pg_dump.
+if [[ "$BACKUP_DATABASE_URL" == *sslrootcert=system* ]] &&
+   { [[ "$BACKUP_DATABASE_URL" == *sslmode=require* ]] ||
+     { [[ "$BACKUP_DATABASE_URL" != *sslmode=* ]] && [ "$PGSSLMODE" = "require" ]; }; }; then
+  echo "::error title=BACKUP_DATABASE_URL::sslrootcert=system needs sslmode=verify-full, but the URL (or PGSSLMODE) still says require. Replace sslmode=require with sslmode=verify-full in the secret. No backup was taken." >&2
+  exit 1
+fi
 # A dead host should fail in half a minute, not sit until the job times out
 # (the 2026-10-19 run hung for 24 minutes before failing).
 export PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-30}"

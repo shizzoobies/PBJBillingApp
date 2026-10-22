@@ -8,10 +8,14 @@
 //   2. The URL never appears in a child process's argv (process listings are
 //      readable by other users). pg_dump / pg_restore get the connection as
 //      libpq environment variables (PGHOST, PGPORT, PGUSER, PGPASSWORD,
-//      PGDATABASE, PGSSLMODE) and, where a database name is mandatory, the
-//      bare database name as `-d <name>`.
+//      PGDATABASE, PGSSLMODE, and for remote hosts PGSSLROOTCERT) and, where a
+//      database name is mandatory, the bare database name as `-d <name>`.
 
+import { randomBytes } from 'node:crypto'
+import { rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
+import tls from 'node:tls'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 import { poolOptions } from '../../db/pool-options.js'
@@ -95,9 +99,21 @@ export function libpqEnv(connectionUrl) {
   return env
 }
 
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1'])
+
+// Root-certificate files this process wrote for client tools, removed by cleanupToolEnv.
+const tempRootCerts = new Set()
+
 /**
  * The environment handed to a PostgreSQL client tool: the caller's own (PATH,
  * SystemRoot, ...) minus anything database-shaped, plus this one connection.
+ *
+ * Verification matches db/pool-options.js: for any host that is not this machine,
+ * `sslmode=require` (or no sslmode) becomes `verify-full`, and the tool is pointed at
+ * Node's bundled root certificates (written to a private temporary PEM file, because the
+ * Windows EDB OpenSSL has no system store and `sslrootcert=system` fails there). A mode
+ * that would leave the server unverified (disable, allow, prefer) is refused for such a
+ * host. Call cleanupToolEnv(env) when the tool has exited.
  */
 export function toolEnv(baseEnv, connectionUrl) {
   const clean = {}
@@ -105,7 +121,28 @@ export function toolEnv(baseEnv, connectionUrl) {
     if (/^PG/i.test(key) || /DATABASE_URL$/i.test(key)) continue
     clean[key] = value
   }
-  return connectionUrl ? { ...clean, ...libpqEnv(connectionUrl) } : clean
+  if (!connectionUrl) return clean
+  const connection = libpqEnv(connectionUrl)
+  if (!LOCAL_HOSTS.has(String(connection.PGHOST || 'localhost').toLowerCase())) {
+    const mode = String(connection.PGSSLMODE || 'require').toLowerCase()
+    if (mode === 'require' || mode === 'verify-full') connection.PGSSLMODE = 'verify-full'
+    else if (mode !== 'verify-ca') {
+      throw new Error(
+        `The database URL's sslmode "${mode}" would leave the server unverified; use sslmode=require (or verify-full) for ${connection.PGHOST} (URL not shown).`,
+      )
+    }
+    const file = path.join(tmpdir(), `pbj-pgroot-${randomBytes(8).toString('hex')}.pem`)
+    writeFileSync(file, `${tls.rootCertificates.join('\n')}\n`, { mode: 0o600 })
+    tempRootCerts.add(file)
+    connection.PGSSLROOTCERT = file
+  }
+  return { ...clean, ...connection }
+}
+
+/** Removes the temporary root-certificate file toolEnv wrote for this environment, if any. */
+export function cleanupToolEnv(env) {
+  const file = env?.PGSSLROOTCERT
+  if (file && tempRootCerts.delete(file)) rmSync(file, { force: true })
 }
 
 /** host:port/database, for comparing two URLs and for safe display. */

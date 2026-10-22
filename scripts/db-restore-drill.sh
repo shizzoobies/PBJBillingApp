@@ -28,7 +28,7 @@ set -euo pipefail
 : "${PGDATABASE:?PGDATABASE is required}"
 
 if [ ! -f "$DUMP_PATH" ]; then
-  echo "::error::No dump file at ${DUMP_PATH} — did the backup job run and upload the db-dump artifact?" >&2
+  echo "::error::No dump file at ${DUMP_PATH} — did the backup job run? Download the night's object from R2 first." >&2
   exit 1
 fi
 

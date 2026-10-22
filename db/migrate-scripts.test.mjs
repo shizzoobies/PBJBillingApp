@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { REPO_ROOT, isCloudSyncedPath, isPoolerHost, libpqEnv, parseArgs, pgBinary, redact, toolEnv, utcStamp } from '../scripts/migrate/lib.mjs'
+import { existsSync, readFileSync } from 'node:fs'
+import { REPO_ROOT, cleanupToolEnv, isCloudSyncedPath, isPoolerHost, libpqEnv, parseArgs, pgBinary, redact, toolEnv, utcStamp } from '../scripts/migrate/lib.mjs'
 import { dumpArgs, main as dumpMain } from '../scripts/migrate/dump.mjs'
 import { IGNORED_SCHEMAS, main as restoreMain, restoreArgs } from '../scripts/migrate/restore.mjs'
 import { compareSides, largestTables, main as verifyMain } from '../scripts/migrate/verify.mjs'
@@ -87,6 +88,43 @@ describe('lib', () => {
     expect(env.PGHOST).toMatch(/neon\.tech$/)
     expect(env.SOURCE_DATABASE_URL).toBeUndefined()
     expect(env.DATABASE_URL).toBeUndefined()
+  })
+
+  it('a remote host is verified like the app does: verify-full plus a temporary root-certificate file', () => {
+    const noMode = TARGET_URL.replace('?sslmode=require&channel_binding=require', '')
+    for (const url of [TARGET_URL, noMode, TARGET_URL.replace('sslmode=require', 'sslmode=verify-full')]) {
+      const env = toolEnv({ PATH: '/bin' }, url)
+      expect(env.PGSSLMODE).toBe('verify-full')
+      expect(existsSync(env.PGSSLROOTCERT)).toBe(true)
+      expect(readFileSync(env.PGSSLROOTCERT, 'utf8')).toContain('-----BEGIN CERTIFICATE-----')
+      cleanupToolEnv(env)
+      expect(existsSync(env.PGSSLROOTCERT)).toBe(false)
+    }
+    const kept = toolEnv({}, TARGET_URL)
+    expect(kept.PGCHANNELBINDING).toBe('require')
+    cleanupToolEnv(kept)
+  })
+
+  it('refuses a remote URL that would leave the server unverified, without showing the URL', () => {
+    for (const mode of ['disable', 'allow', 'prefer', 'no-verify']) {
+      const url = TARGET_URL.replace('sslmode=require', 'sslmode=' + mode)
+      expect(() => toolEnv({}, url)).toThrow(/unverified/)
+      try {
+        toolEnv({}, url)
+      } catch (error) {
+        expect(error.message).not.toContain(PASSWORD)
+        expect(error.message).not.toContain('postgresql://')
+      }
+    }
+  })
+
+  it('a local host (the Railway tunnel) is left alone: no mode forced, no certificate file', () => {
+    expect(toolEnv({}, SOURCE_URL).PGSSLMODE).toBeUndefined()
+    expect(toolEnv({}, SOURCE_URL).PGSSLROOTCERT).toBeUndefined()
+    const plain = toolEnv({}, 'postgresql://u:p@127.0.0.1:5432/db?sslmode=disable')
+    expect(plain.PGSSLMODE).toBe('disable')
+    expect(plain.PGSSLROOTCERT).toBeUndefined()
+    cleanupToolEnv(plain)
   })
 
   it('redacts URLs and passwords out of tool output', () => {
@@ -246,6 +284,10 @@ describe('restore.mjs', () => {
     expect(calls[0].env).toMatchObject({ PGHOST: expect.stringContaining('neon.tech'), PGPASSWORD: PASSWORD, PGDATABASE: 'neondb' })
     expect(queries.some((q) => q.sql === 'analyze')).toBe(true)
     expect(out.text()).toContain('pg_restore exit code 0')
+    expect(out.text()).toContain('verify.mjs (no allowances), then boot-check.mjs, then verify.mjs --allow-missing')
+    // The temporary root-certificate file is gone once the tool has exited.
+    expect(calls[0].env.PGSSLMODE).toBe('verify-full')
+    expect(existsSync(calls[0].env.PGSSLROOTCERT)).toBe(false)
   })
 
   it('--force skips the emptiness question but still runs pg_restore', async () => {
@@ -426,11 +468,12 @@ describe('verify.mjs', () => {
     expect(code).toBe(0)
     expect(out.text()).toContain('verify: OK')
     for (const client of both) {
-      expect(client.statements.slice(0, 4)).toEqual([
+      expect(client.statements.slice(0, 5)).toEqual([
         "set timezone = 'UTC'",
         "set datestyle = 'ISO'",
         'set extra_float_digits = 3',
         "set bytea_output = 'hex'",
+        "set intervalstyle = 'postgres'",
       ])
     }
   })

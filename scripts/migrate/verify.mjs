@@ -41,6 +41,7 @@ export const SESSION_SETTINGS = [
   `set datestyle = 'ISO'`,
   `set extra_float_digits = 3`,
   `set bytea_output = 'hex'`,
+  `set intervalstyle = 'postgres'`,
 ]
 
 function maxTimestampSql(table, column, dataType) {

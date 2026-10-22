@@ -56,7 +56,7 @@ secret**:
 
 | Secret | What it is |
 | --- | --- |
-| `BACKUP_DATABASE_URL` | Connection string of the database to back up. After the move: the Neon **direct** (non-pooled) URL. End it with `?sslmode=verify-full&sslrootcert=system` so the runner checks the certificate (needs the PG 16+ client the workflow installs; plain `sslmode=require` also works but only encrypts). Until the move this may stay unset - the job will say so. |
+| `BACKUP_DATABASE_URL` | Connection string of the database to back up. After the move: the Neon **direct** (non-pooled) URL. Neon's URL already ends `?sslmode=require&channel_binding=require`: **replace** `sslmode=require` with `sslmode=verify-full` and **append** `&sslrootcert=system`, so the runner checks the certificate (Linux runner, PG 16+ client). Never leave `sslmode=require` next to `sslrootcert=system`: libpq refuses that combination, and `scripts/db-backup.sh` stops with a message if it sees it. Until the move this may stay unset - the job will say so. |
 | `R2_ACCOUNT_ID` | Cloudflare account id (dashboard -> R2 -> Overview, right-hand side). Builds the endpoint `https://<id>.r2.cloudflarestorage.com`. |
 | `R2_ACCESS_KEY_ID` | R2 API token access key id (R2 -> Manage API Tokens -> Create API Token; scope it to Object Read & Write on the one bucket, not account-wide). |
 | `R2_SECRET_ACCESS_KEY` | The matching secret for that token. Shown once at creation - save it then. |
@@ -187,11 +187,20 @@ non-zero on any failure.
   `PGSSLMODE`); Railway's internal URL has no `sslmode` and stays plain. The
   app's `DATABASE_URL` is **the plain Neon URL, exactly as Neon shows it**
   (`sslmode=require` is fine: the pool verifies anyway). Only
-  `BACKUP_DATABASE_URL` (the GitHub secret, read by libpq on the runner) carries
-  `&sslrootcert=system`; the pool also ignores that parameter if it ever sees
-  it. The command-line tools use libpq: on Windows leave Neon's default
-  `sslmode=require` for them (libpq there has no root-certificate file for
-  `verify-full`).
+  `BACKUP_DATABASE_URL` (the GitHub secret, read by libpq on the Linux runner)
+  carries `sslmode=verify-full` and `&sslrootcert=system`; the pool also ignores
+  that parameter if it ever sees it. The migration scripts (`scripts/migrate/`)
+  verify the server the same way on Windows: for any host other than this
+  machine they run `pg_dump` / `pg_restore` with `PGSSLMODE=verify-full` and
+  `PGSSLROOTCERT` pointing at a temporary PEM file of Node's bundled root
+  certificates (private, deleted when the tool exits), because the Windows
+  PostgreSQL build has no system certificate store and `sslrootcert=system`
+  fails there. So the Neon **target** URL in `neon-target.url` keeps Neon's
+  default `sslmode=require&channel_binding=require` exactly as shown (the script
+  upgrades `require` to `verify-full` and passes `channel_binding` on), and the
+  Railway **source** URL (through the `localhost` tunnel) carries no `sslmode`.
+  A URL whose mode would leave a remote server unverified (`disable`, `allow`,
+  `prefer`) is refused.
 - *Where the dump lives:* `D:\PBJ Accounting Work\secrets\dumps\backups\`. It is
   a full copy of production data: the folder must **not** be inside a
   cloud-synced folder (OneDrive, Dropbox, Google Drive, iCloud: `dump.mjs`
@@ -274,8 +283,9 @@ cut over.
    (a column the target *lacks* is a mismatch).
 9. **Cut over:** set the app's `DATABASE_URL` to the plain Neon URL, deploy (or
    redeploy the removed deployment with the new variable), check `/health`, set
-   the `BACKUP_DATABASE_URL` repo secret to the same URL **plus
-   `&sslrootcert=system`**, and run the db-backup workflow once with "Also run
+   the `BACKUP_DATABASE_URL` repo secret to the same URL with `sslmode=require`
+   **replaced by `sslmode=verify-full`** and **`&sslrootcert=system`
+   appended**, and run the db-backup workflow once with "Also run
    the restore drill" ticked. Note the moment of the first write on Neon (the
    first login or save): it is the decision point for the rollback below.
 10. **Keep the Railway database, untouched,** until two nightly backups have
@@ -287,11 +297,18 @@ cut over.
 Railway's public proxy is gone, so a rolled-back app must run **on Railway
 itself** (its internal `DATABASE_URL`), not from a laptop.
 
-- **Before the first write on Neon** (nobody has logged in or saved since
-  cut-over): point the app's `DATABASE_URL` back at Railway's internal Postgres
-  URL and restart the app. Nothing is lost: the Railway database was only ever
-  read from, and it is untouched.
-- **After writes on Neon:** switching back to Railway would silently drop every
+- **Before the first write on Neon:** decide mechanically, not from memory of
+  who logged in. Run `verify.mjs` with the SOURCE = Railway (through the
+  tunnel) and the TARGET = Neon, allowing only the three e-signature tables:
+  ```powershell
+  node scripts/migrate/verify.mjs --allow-missing signature_documents,signature_requests,signwell_events
+  ```
+  **Only exit 0 permits the direct switch back**: point the app's `DATABASE_URL`
+  at Railway's internal Postgres URL and restart the app. Nothing is lost: the
+  Railway database was only ever read from, and it is untouched. **Any other
+  result** (a mismatch, an error, a table that differs) means Neon has taken a
+  write: use the next path, dump Neon and restore into a fresh Railway database.
+- **After writes on Neon (or whenever the check above is not exit 0):** switching back to Railway would silently drop every
   write made on Neon since cut-over (time entries, invoices, payments - Stripe
   would still hold the charges). Do not just flip the variable. Instead:
   1. stop the app (same hard stop as step 2);
@@ -320,7 +337,7 @@ and `aws` programs (missing-secret failure, happy path, upload confirmation).
 **Not verified - cannot be, until the owner adds the five secrets above**:
 
 - That `BACKUP_DATABASE_URL` actually connects from a GitHub-hosted runner
-  (network reachability, and that `sslmode=verify-full&sslrootcert=system`
+  (network reachability, and that `sslmode=verify-full` with `sslrootcert=system`
   works against Neon from the runner's CA store).
 - That the R2 credentials and bucket are scoped correctly and the
   `--endpoint-url` construction (`https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`)

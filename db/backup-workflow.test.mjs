@@ -64,6 +64,14 @@ describe('db-backup workflow', () => {
     expect(script).toContain('decodeURIComponent(u.password)')
   })
 
+  it('stops with a clear message when sslrootcert=system sits next to sslmode=require', () => {
+    const guard = script.indexOf('*sslrootcert=system*')
+    expect(guard).toBeGreaterThan(script.indexOf('export PGSSLMODE='))
+    expect(guard).toBeLessThan(script.indexOf('pg_dump --format=custom'))
+    expect(script).toContain('*sslmode=require*')
+    expect(script).toContain('Replace sslmode=require with sslmode=verify-full')
+  })
+
   it('a failed prune is a warning, not a failed backup', () => {
     expect(script).toMatch(/prune_prefix "daily\/" 30 \|\| echo "::warning::/)
     expect(script).toMatch(/prune_prefix "monthly\/" 365 \|\| echo "::warning::/)
