@@ -255,6 +255,21 @@ const demoPassword =
   process.env.AUTH_DEMO_PASSWORD ||
   (process.env.NODE_ENV === 'production' ? randomUUID() : 'pbj-demo')
 
+/**
+ * Is this hash still a seed password nobody chose? Checks this process's seed value AND
+ * the known defaults, so an owner seeded by an earlier process (random value, gone with
+ * it) or by an older build (`pbj-demo`) is still recognized as "never set by a person".
+ */
+function isSeedPasswordHash(hash) {
+  if (!hash) return false
+  const candidates = new Set([demoPassword, 'pbj-demo'])
+  if (process.env.AUTH_DEMO_PASSWORD) candidates.add(process.env.AUTH_DEMO_PASSWORD)
+  for (const candidate of candidates) {
+    if (verifyPassword(candidate, hash)) return true
+  }
+  return false
+}
+
 const DEFAULT_FIRM_SETTINGS = {
   name: 'PB&J Strategic Accounting',
   tagline: '',
@@ -33598,7 +33613,7 @@ export class AppDataStore {
         // Already the env value — silent no-op.
         return false
       }
-      if (!verifyPassword(demoPassword, owner.password_hash)) {
+      if (!isSeedPasswordHash(owner.password_hash)) {
         // Real, user-chosen password is already in place. Leave it alone.
         console.log(
           '[bootstrap] owner already has a non-default password; OWNER_BOOTSTRAP_PASSWORD ignored',
@@ -33630,7 +33645,7 @@ export class AppDataStore {
     if (verifyPassword(password, owner.passwordHash)) {
       return false
     }
-    if (!verifyPassword(demoPassword, owner.passwordHash)) {
+    if (!isSeedPasswordHash(owner.passwordHash)) {
       console.log(
         '[bootstrap] owner already has a non-default password; OWNER_BOOTSTRAP_PASSWORD ignored (file mode)',
       )
