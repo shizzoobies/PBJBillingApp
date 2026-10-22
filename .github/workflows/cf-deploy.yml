@@ -1,0 +1,75 @@
+name: cf-deploy
+
+# Deploys the Cloudflare runtime (docs/cloudflare.md): a Worker in front of one
+# container built from the repo Dockerfile. `wrangler deploy` builds that image with
+# Docker, which this laptop does not have and ubuntu-latest does, so the deploy lives
+# here. Rollback = re-run this workflow on the previous commit (Actions > cf-deploy >
+# Run workflow > pick the older commit's branch/tag, or push a revert).
+#
+# Secrets: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (repo secrets, already set).
+# The APP's secrets are Worker secrets uploaded once with scripts/cf/secrets-upload.mjs;
+# nothing from the app's environment passes through this workflow.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Queue, never cancel: a deploy cut off halfway through an image push is worse than a
+# short wait.
+concurrency:
+  group: cf-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # The same gate as every push. A red verify never reaches Cloudflare.
+      - name: Verify
+        run: npm run verify
+
+      # How /health learns its commit. wrangler's `image_vars` can pass a Docker build arg,
+      # but wrangler.jsonc is static and the SHA changes every run, so the SHA goes into a
+      # file in the build context instead: the Dockerfile copies `.app-commit` into the
+      # image and lib/host-runtime.js reads it. (.app-commit is gitignored.)
+      - name: Stamp the commit into the image
+        run: echo "${GITHUB_SHA::7}" > .app-commit
+
+      - name: Deploy to Cloudflare
+        run: npx wrangler deploy
+
+      # Confirms the NEW code is the code answering: /health carries the 7-character
+      # commit. 40 tries, 15 seconds apart (10 minutes): a container rollout takes a few
+      # minutes. The custom domain may not be attached on the first deploy, so this step
+      # does not fail the job yet.
+      # Once app.pbjsatime.com is attached to the Worker, delete the
+      # `continue-on-error` line below so a deploy that never shows up fails the run.
+      - name: Wait for the new commit on /health
+        continue-on-error: true
+        run: |
+          want="${GITHUB_SHA::7}"
+          for i in $(seq 1 40); do
+            body="$(curl -fsS --max-time 10 https://app.pbjsatime.com/health 2>/dev/null || true)"
+            if echo "$body" | grep -q "\"commit\":\"$want\""; then
+              echo "app.pbjsatime.com/health reports $want (try $i)"
+              exit 0
+            fi
+            echo "try $i/40: /health does not report $want yet"
+            sleep 15
+          done
+          echo "::warning::app.pbjsatime.com/health never reported $want. If the custom domain is not attached to the Worker yet, that is expected on the first deploy (docs/cloudflare.md). Otherwise check 'wrangler tail' and the Cloudflare dashboard."
+          exit 1
