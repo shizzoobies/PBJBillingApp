@@ -210,10 +210,13 @@ import path from 'node:path'
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
+import { poolOptions } from './pool-options.js'
 
 // The step math moved to lib/checklist-step-ops.js so the waiting guard can run
 // it; the normalizer stays importable from the store for its existing callers.
 export { normalizeWaitingOns }
+// TLS rules for the pool (Neon needs verify-full; Railway's internal URL has none).
+export { poolOptions }
 
 const { Pool } = pg
 
@@ -5991,7 +5994,7 @@ export function statementAccountsVersion(rows) {
 
 export class AppDataStore {
   constructor() {
-    this.pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null
+    this.pool = process.env.DATABASE_URL ? new Pool(poolOptions(process.env.DATABASE_URL)) : null
     this.mode = this.pool ? 'postgres' : 'file'
   }
 
