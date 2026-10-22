@@ -53,10 +53,18 @@ browser / Stripe / Resend / SignWell / ElevenLabs
 - **The container reads its environment only when it starts.** A new Worker version re-attaches to the
   running container, and `onActivityExpired` never stops it, so a secret upload changes nothing until the
   container is restarted. `POST /internal/restart` (header `x-tick-token` = `TICK_TOKEN`) is answered by
-  the Worker itself: it sends SIGTERM, waits up to 20 seconds for the container to report stopped, then
-  destroys it either way and answers `{ restarted: true, graceful: <bool> }` (`graceful` is false when it had
-  to be killed). The next request starts it with the current environment. `node scripts/cf/restart.mjs` does
-  the call and waits for `/health`. Every other `/internal/*` path is 404
+  the Worker itself, which hands its CURRENT env (`pickContainerEnv(env)`) to the Durable Object that owns
+  the container by calling `restartWith(envVars)` on it (Durable Object RPC inside the one Worker, never over
+  the public network). `restartWith` validates the values, sets `this.envVars`, sends SIGTERM, waits up to
+  20 seconds for the container to be gone, then destroys it either way and answers
+  `{ restarted: true, graceful: <bool>, lastStatus: <last getState() status> }` (`graceful` is false when it had
+  to be killed). A failing `destroy()` answers 500 `{ restarted: false }`. The next request starts the
+  container with the env that was handed over. The hand-over matters because the Durable Object isolate can be
+  OLDER than the Worker version (a secret upload does not replace it promptly) and then still holds the env it
+  was constructed with; the stateless Worker always has the current one. `GET /internal/env-revision` (same token
+  checks: 404 without `TICK_TOKEN`, 401 on a mismatch) answers `{ workerEnvRevision }`, the `ENV_REVISION` this
+  Worker version carries, and `/health` reports `uptimeSeconds`. `node scripts/cf/restart.mjs` uses both to
+  prove the restart, then waits for `/health`. Every other `/internal/*` path is 404
   from outside (the cron reaches `/internal/tick` through the Durable Object stub), and a request that
   carries a `cf-container-target-port` header is refused with 400 so a client cannot choose the port.
 - **Maintenance mode.** `MAINTENANCE_MODE=1` is the cutover switch. Nothing writes: every non-GET request
@@ -103,15 +111,20 @@ node scripts/cf/restart.mjs
 
 It reads `TICK_TOKEN` from the rotation file (or the env file you pass), POSTs
 `https://app.pbjsatime.com/internal/restart` (`--url=https://...` for the workers.dev address before the
-domain is attached), prints the HTTP status (and whether the stop was graceful) only, then polls `/health`
-for up to 90 seconds and prints the `commit` and `maintenance` fields. The token is never printed. A 404 means
+domain is attached). First it reads `/health` (`uptimeSeconds`) and `GET /internal/env-revision` (prints
+`worker env revision: <value>`). After the POST it prints the HTTP status (and whether the stop was graceful, and
+the last container status), then polls `/health` for up to 90 seconds until it answers 200 AND `uptimeSeconds`
+is lower than before (below 120 when there was no earlier reading), and prints
+`container restarted: uptime <n> s` plus the `commit` and `maintenance` fields. If the uptime never drops it
+fails with "the container did not restart" and the last fields. The token is never printed. A 404 means
 `TICK_TOKEN` has not been uploaded yet; a 401 means the file and the Worker disagree. Check that `commit` is
 the one you expect and `maintenance` is what you intended before going on. If `/health` never answers 200 the
 error names the last status, `db`, `maintenance` and `envRevision` it saw.
 
-**Prove the restart used the new environment.** The container's environment is captured when the Durable
-Object is constructed, so a restart served by an older Worker version can bring the container back on the OLD
-values. Every real (non-dry-run) `secrets-upload.mjs` therefore adds `ENV_REVISION=<ISO timestamp>` to the
+**Prove the restart used the new environment.** Before the Worker handed its env to the Durable Object
+(`restartWith`), the container's environment was the one captured when the Durable Object was constructed, so
+a restart could bring the container back on the OLD values (observed live on 2026-10-22: four restarts, all
+back on the old `envRevision`). The proof stays: every real (non-dry-run) `secrets-upload.mjs` therefore adds `ENV_REVISION=<ISO timestamp>` to the
 upload and prints it, together with the command to run next:
 
 ```powershell
@@ -120,11 +133,12 @@ node scripts/cf/secrets-upload.mjs
 node scripts/cf/restart.mjs --expect-revision=2026-10-21T12:00:00.000Z
 ```
 
-`/health` echoes the running value as `envRevision` (null when none was ever uploaded). With
-`--expect-revision`, after `/health` answers 200 the script compares: on a match it prints
-`env revision: matches`; otherwise it waits 20 seconds and restarts again, up to 3 more times (4 restarts in
-total), and then fails, printing the last status, `db`, `maintenance` and `envRevision`. Without the flag the
-script behaves as before and checks nothing about the revision.
+`/health` echoes the running value as `envRevision` (null when none was ever uploaded). The flag defaults to the
+Worker's own revision (`GET /internal/env-revision`) when the Worker reports one, so a plain
+`node scripts/cf/restart.mjs` proves the env too. After `/health` answers 200 with a dropped uptime the script
+compares: on a match it prints `env revision: matches (<revision>, uptime <n> s)`; otherwise it waits 20 seconds and restarts again, up to 3 more times (4 restarts in
+total), and then fails, printing the last status, `db`, `maintenance`, `envRevision` and `uptimeSeconds`. When
+neither the flag nor the Worker gives a revision, nothing about the revision is checked.
 
 ## First-deploy checklist
 
@@ -174,7 +188,8 @@ Nothing here has run against Cloudflare yet; the first deploy should check each 
 - `max_instances: 1` holds under a rollout (an old and a new container may overlap briefly; the app's
   markers make the jobs safe, but check for double sends).
 - `standard-1` (4 GiB) is enough for PDF generation and the bulk save under real load.
-- `POST /internal/restart` really ends the container on Cloudflare (the code calls `stop('SIGTERM')`, polls `getState()` for `stopped`, then `destroy()` on the stub, checked against the package source and a mock, not against a live Durable Object) and the next request starts it with the new environment (`--expect-revision` is the live proof).
+- `POST /internal/restart` really ends the container on Cloudflare and the next request starts it with the new environment. The code (`AppContainer.restartWith`) sets `envVars`, calls `stop('SIGTERM')`, polls `getState()` (and the runtime's `running` flag) for the container to be gone, then `destroy()`; checked against the package source and a mock. The live proof is `restart.mjs`: `uptimeSeconds` drops and `envRevision` matches `worker env revision`.
+- 2026-10-22 04:13-04:20Z observation that led to `restartWith`: after `secrets-upload.mjs --allow-live` stamped `ENV_REVISION=2026-10-22T04:13:33.697Z`, four restarts (each `HTTP 200 graceful=false`) all came back with the OLD `envRevision=2026-10-22T03:08:09.580Z` within seconds. The Durable Object isolate that owns the container still held the env it was constructed with, and the restart reused it. Still to confirm live: that `restartWith` is reachable on that isolate (RPC methods of the new class code), that `graceful` becomes true now that the runtime `running` flag counts, and that the uptime really drops (the earlier runs could not show whether the container restarted at all).
 - Outbound Postgres on 5432 from the container works (`/health` shows `db: ok`).
 - `package-lock.json` as edited on Windows installs cleanly with `npm ci` on Linux; if it does not, run
   the lockfile-refresh workflow.

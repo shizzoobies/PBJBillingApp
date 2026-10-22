@@ -3249,6 +3249,9 @@ const server = createServer(async (request, response) => {
         // The ENV_REVISION stamped by the last secrets upload (scripts/cf/secrets-upload.mjs);
         // scripts/cf/restart.mjs polls it to prove the container started with that upload.
         envRevision: String(process.env.ENV_REVISION || '') || null,
+        // Seconds since this process started: scripts/cf/restart.mjs requires it to drop after a
+        // restart, which proves the container really restarted.
+        uptimeSeconds: Math.round(process.uptime()),
       })
       return
     }
