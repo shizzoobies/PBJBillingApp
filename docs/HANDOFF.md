@@ -46,10 +46,12 @@ its own post-call override - patch the agent, then re-provision the voice tools 
 off -> redirect app.pbjsa.com. **Secrets:** `D:\PBJ Accounting Work\secrets\rotation-2026-10-21.env` (outside git; names only
 in chat; template comments were stripped; JWT_SECRET is not read by the app; TOTP_ENC_KEY deliberately empty; SignWell x3
 empty = e-sign stays off) and `staging-2026-10-21.env` (same values, DATABASE_URL=pbj_staging, digest/past-due/reminders off;
-delete after cutover). **Known open item (fix round 3 running at handoff time):** a restart after a secret upload came back on
-the OLD env revision four times (the Durable Object isolate keeps the env it was constructed with); the fix hands the Worker's
-current env to the container on `POST /internal/restart` and adds `uptimeSeconds` to `/health` - re-run
-`node scripts/cf/restart.mjs --expect-revision=<revision>` after it deploys and do not cut over until that proof passes.
+delete after cutover). **Restart proof PASSED at 04:41Z on `db24839c`:** a restart after a secret upload had come back on the OLD env
+revision four times (the Durable Object isolate keeps the env it was constructed with); fix round 3 hands the Worker's current
+env to the container on `POST /internal/restart` (`restartWith`), adds `GET /internal/env-revision` and `uptimeSeconds` to
+`/health`; the live run printed `container restarted: uptime 13 s` and `env revision: matches`. The cutover sequence
+(upload -> `node scripts/cf/restart.mjs`) is therefore proven end to end; `graceful=false lastStatus=healthy` means the
+app does not exit on SIGTERM within 20 s and gets destroyed - acceptable, note it as a follow-up (handle SIGTERM in server.js).
 Gotchas learned: GitHub secrets set from PowerShell carried a BOM/newline (set with `printf '%s' | gh secret set` or `--body`);
 the image lacked `prototype-data.json` + `tmp/` and the boot DDL created `checklists`/`checklist_templates` AFTER altering
 them, so the container exited on any EMPTY database (fixed in ce17b7b7; Railway never noticed because its tables existed);
