@@ -53,6 +53,11 @@ COPY scripts ./scripts
 COPY docs/capability-manifest.md ./docs/capability-manifest.md
 COPY docs/voice-agent-persona.md ./docs/voice-agent-persona.md
 COPY public ./public
+# The seed workspace: both store backends read it when the users table is empty (a fresh
+# database, or the file backend with no DATABASE_URL), and the file backend writes under tmp/.
+# Railway never noticed it missing because its database was never empty.
+COPY prototype-data.json ./
+RUN mkdir -p tmp
 # Optional `.app-commit` (the glob alongside a file that always exists is how Docker lets
 # a COPY source be absent; a lone glob that matches nothing fails the build).
 COPY --from=build /app/package.json /app/.app-commit* ./
