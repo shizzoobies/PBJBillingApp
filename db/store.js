@@ -6585,194 +6585,6 @@ export class AppDataStore {
         `create index if not exists item_deletion_requests_checklist_idx on item_deletion_requests (checklist_id)`,
       )
 
-      // Active Checklists board: per-template/per-checklist service category
-      // (the board's columns) + the categories table itself. The column is a
-      // plain text id (NOT a FK) so deleting a category leaves rows readable as
-      // "Uncategorized". Seeded below when the table is empty.
-      await this.pool.query(`alter table checklists add column if not exists category_id text`)
-      await this.pool.query(
-        `alter table checklist_templates add column if not exists category_id text`,
-      )
-      // Push (featreq-68638ed2). These three columns are declared HERE, ahead
-      // of the skip stamps further down, only because the unique index built
-      // immediately below reads `cycle_due_date` and a column has to exist
-      // before an index can mention it.
-      //
-      // `cycle_due_date` is the date this occurrence was ORIGINALLY due. It is
-      // written once (coalesce, never overwritten by a second push) and it is
-      // what identity reads, so a pushed row still answers for its own cycle
-      // while `due_date` carries the date the work is now expected.
-      await this.pool.query(`alter table checklists add column if not exists cycle_due_date date`)
-      await this.pool.query(`alter table checklists add column if not exists pushed_at timestamptz`)
-      await this.pool.query(`alter table checklists add column if not exists pushed_by text`)
-      // Split push (featreq-fbab3370): "pushing a checklist where every item is
-      // completed pushes no items and moves all of them to Complete." A mixed
-      // push (some done, some open) creates a NEW checklist that carries the
-      // open work forward and leaves the original behind holding only its done
-      // steps. These two columns are the link between them —
-      // `pushed_from_checklist_id` on the new row points back at the original,
-      // `pushed_to_checklist_id` on the original points forward at the new row.
-      // Declared here, ahead of the v3 unique index below, for the same reason
-      // `cycle_due_date` is declared ahead of v2: the index reads the column.
-      await this.pool.query(
-        `alter table checklists add column if not exists pushed_from_checklist_id text`,
-      )
-      await this.pool.query(
-        `alter table checklists add column if not exists pushed_to_checklist_id text`,
-      )
-
-      // DUPLICATE-INSTANCE BACKSTOP.
-      //
-      // The materializer's idempotency was check-then-insert with nothing
-      // underneath it, so two simultaneous `GET /api/app-data` reads could each
-      // decide a period had no instance yet and each create one. Production
-      // collected 21 groups of ACTIVE checklists sharing an identical
-      // (template_id, due_date, stage_index). This UNIQUE partial index makes
-      // that physically impossible.
-      //
-      // Why the tuple is (template_id, due_date, stage_index) and not a month
-      // key: a weekly template legitimately has four instances inside one month.
-      // The due date is the finest identity that is still stable across runs.
-      // `deleted_at is null` keeps the recycle bin out of it (a restored-then-
-      // re-deleted instance must not collide), and `template_id is not null`
-      // leaves one-off manual checklists completely alone.
-      //
-      // WHY THIS IS WRAPPED IN try/catch: production still contains the 21
-      // duplicate groups today — the cleanup write is scheduled for AFTER this
-      // deploys. `create unique index` would fail on that dirty data and, since
-      // initialize() is the boot path, an unguarded throw would take the whole
-      // app down. So we attempt it on every boot and log loudly when it can't
-      // be built yet; the first boot after the cleanup lands creates it and the
-      // backstop arms itself with no further deploy. Until then the shared
-      // in-code guard (lib/checklist-identity.js) is what prevents new
-      // duplicates.
-      //
-      // PUSH CHANGED THE TUPLE'S DATE. It is now the CYCLE date
-      // (`coalesce(cycle_due_date, due_date)`), not the working due date: a
-      // pushed occurrence parks by default on exactly the next cycle's date,
-      // so an index on `due_date` would refuse the push the moment that
-      // occurrence exists — and would stop recognizing the cycle the row came
-      // from. The two are identical for every row that has never been pushed
-      // (`cycle_due_date` is null there), so this index builds exactly when the
-      // old one would have.
-      //
-      // THE SWAP IS ONE TRANSACTION, for the same reason the
-      // `invoices_client_period_live` swap further down is: two implicit
-      // transactions leave a window in which this table has NO backstop at all
-      // (create v2, then a failing drop, or the reverse ordering after a crash
-      // between them), and a materializer racing through that window writes the
-      // duplicates this index exists to make impossible. `create index`
-      // (non-concurrent) is transactional in Postgres, so the window can simply
-      // be closed. Order inside it still matters: build v2 FIRST so a ROLLBACK
-      // leaves v1 — the old backstop — standing rather than nothing.
-      //
-      // ONLY WHILE v3 DOES NOT EXIST YET. Once v3 has replaced v2, running this
-      // block again would rebuild v2 on every later boot, and once a split pair
-      // exists that rebuild fails and logs a false "duplicate rows" warning. A
-      // boot that died between this block and the v3 swap leaves both; v3's swap
-      // below drops v2 on the next boot.
-      const checklistIndexV3Probe = await this.pool.query(
-        `select to_regclass('${CHECKLIST_INSTANCE_UNIQUE_INDEX_V3}') is null as missing`,
-      )
-      const checklistIndexV3Missing = checklistIndexV3Probe?.rows?.[0]?.missing !== false
-      if (checklistIndexV3Missing) {
-        const checklistIndexClient = await this.pool.connect()
-        let checklistIndexV2Created = false
-        try {
-          await checklistIndexClient.query('BEGIN')
-          await checklistIndexClient.query(`
-            create unique index if not exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2}
-              on checklists (template_id, coalesce(cycle_due_date, due_date), stage_index)
-              where deleted_at is null and template_id is not null
-          `)
-          checklistIndexV2Created = true
-          await checklistIndexClient.query(`drop index if exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX}`)
-          await checklistIndexClient.query('COMMIT')
-        } catch (error) {
-          try {
-            await checklistIndexClient.query('ROLLBACK')
-          } catch {
-            /* already rolled back, or the connection is gone */
-          }
-          // Two different failures, two different things to go look at. Only the
-          // first is the dirty-data case everyone is waiting on.
-          if (checklistIndexV2Created) {
-            console.warn(
-              `[init] built ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} but could not finish the swap, so ` +
-                `the whole swap was rolled back and ${CHECKLIST_INSTANCE_UNIQUE_INDEX} is still the ` +
-                `backstop. Not a data problem — this will be retried on the next boot. Reason:`,
-              error && error.message ? error.message : error,
-            )
-          } else {
-            console.warn(
-              `[init] could not create ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} — most likely duplicate ` +
-                `(template_id, cycle date, stage_index) rows still present. New duplicates are still ` +
-                `blocked in code; this will be retried on the next boot. Reason:`,
-              error && error.message ? error.message : error,
-            )
-          }
-        } finally {
-          checklistIndexClient.release()
-        }
-      }
-
-      // SPLIT PUSH CHANGED THE TUPLE AGAIN — not the columns it reads (still
-      // `template_id, coalesce(cycle_due_date, due_date), stage_index`), but
-      // which ROWS count. A mixed push (featreq-fbab3370) creates a new
-      // checklist that inherits the SAME cycle identity the original row
-      // answered for, so the two would collide under v2's predicate the moment
-      // both exist un-deleted. `pushed_to_checklist_id is null` excludes the
-      // original once it has handed its identity to the new row — the same
-      // idea `deleted_at is null` already applies to the recycle bin.
-      //
-      // Same swap discipline as v1→v2: one transaction, build v3 before
-      // dropping v2, wrapped in try/catch so a boot never crashes over this.
-      const checklistIndexV3Client = await this.pool.connect()
-      let checklistIndexV3Created = false
-      try {
-        await checklistIndexV3Client.query('BEGIN')
-        await checklistIndexV3Client.query(`
-          create unique index if not exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V3}
-            on checklists (template_id, coalesce(cycle_due_date, due_date), stage_index)
-            where deleted_at is null and template_id is not null and pushed_to_checklist_id is null
-        `)
-        checklistIndexV3Created = true
-        await checklistIndexV3Client.query(
-          `drop index if exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2}`,
-        )
-        await checklistIndexV3Client.query('COMMIT')
-      } catch (error) {
-        try {
-          await checklistIndexV3Client.query('ROLLBACK')
-        } catch {
-          /* already rolled back, or the connection is gone */
-        }
-        if (checklistIndexV3Created) {
-          console.warn(
-            `[init] built ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V3} but could not finish the swap, ` +
-              `so the whole swap was rolled back and ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} is ` +
-              `still the backstop. Not a data problem — this will be retried on the next boot. Reason:`,
-            error && error.message ? error.message : error,
-          )
-        } else {
-          console.warn(
-            `[init] could not create ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V3} — most likely duplicate ` +
-              `(template_id, cycle date, stage_index) rows still present among rows that have not ` +
-              `handed off their identity. New duplicates are still blocked in code; this will be ` +
-              `retried on the next boot. Reason:`,
-            error && error.message ? error.message : error,
-          )
-        }
-      } finally {
-        checklistIndexV3Client.release()
-      }
-
-      // Templates cloned from another template stamp their origin id so the UI
-      // can tell a plan's checklist is "already set up" on a client. Plain text
-      // id, no FK (the source may later be deleted).
-      await this.pool.query(
-        `alter table checklist_templates add column if not exists source_template_id text`,
-      )
       await this.pool.query(`
         create table if not exists service_categories (
           id text primary key,
@@ -7228,6 +7040,43 @@ export class AppDataStore {
           and c.plan_id is not null
       `)
 
+      // checklists and checklist_templates are created right after clients and users,
+      // the only tables they reference: every later statement in this function may add
+      // columns to them, and on an empty database (the first Cloudflare boot) the creates
+      // used to come too late ("relation checklists does not exist").
+
+      await this.pool.query(`
+        create table if not exists checklists (
+          id text primary key,
+          title text not null,
+          client_id text not null references clients(id) on delete cascade,
+          assignee_id text not null references users(id) on delete restrict,
+          template_id text,
+          frequency text,
+          due_date date not null,
+          viewer_ids text[] not null default '{}',
+          editor_ids text[] not null default '{}',
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+
+      await this.pool.query(`
+        create table if not exists checklist_templates (
+          id text primary key,
+          title text not null,
+          client_id text not null references clients(id) on delete cascade,
+          assignee_id text not null references users(id) on delete restrict,
+          frequency text not null check (frequency in ('daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'annually')),
+          next_due_date date not null,
+          active boolean not null default true,
+          viewer_ids text[] not null default '{}',
+          editor_ids text[] not null default '{}',
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `)
+
       await this.pool.query(`
         create table if not exists client_assignments (
           client_id text not null references clients(id) on delete cascade,
@@ -7624,21 +7473,6 @@ export class AppDataStore {
         )
       `)
 
-      await this.pool.query(`
-        create table if not exists checklists (
-          id text primary key,
-          title text not null,
-          client_id text not null references clients(id) on delete cascade,
-          assignee_id text not null references users(id) on delete restrict,
-          template_id text,
-          frequency text,
-          due_date date not null,
-          viewer_ids text[] not null default '{}',
-          editor_ids text[] not null default '{}',
-          created_at timestamptz not null default now(),
-          updated_at timestamptz not null default now()
-        )
-      `)
 
       await this.pool.query(`
         alter table checklists
@@ -7711,21 +7545,202 @@ export class AppDataStore {
         `alter table checklist_items add column if not exists completed_at timestamptz`,
       )
 
-      await this.pool.query(`
-        create table if not exists checklist_templates (
-          id text primary key,
-          title text not null,
-          client_id text not null references clients(id) on delete cascade,
-          assignee_id text not null references users(id) on delete restrict,
-          frequency text not null check (frequency in ('daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'annually')),
-          next_due_date date not null,
-          active boolean not null default true,
-          viewer_ids text[] not null default '{}',
-          editor_ids text[] not null default '{}',
-          created_at timestamptz not null default now(),
-          updated_at timestamptz not null default now()
+
+      // The checklists / checklist_templates column additions, the push index and the
+      // source_template_id stamp live here, AFTER both tables exist: on an empty database
+      // (the first Cloudflare boot) they used to run first and failed with "relation
+      // checklists does not exist". Railway never noticed because its tables already existed.
+      // Active Checklists board: per-template/per-checklist service category
+      // (the board's columns) + the categories table itself. The column is a
+      // plain text id (NOT a FK) so deleting a category leaves rows readable as
+      // "Uncategorized". Seeded below when the table is empty.
+      await this.pool.query(`alter table checklists add column if not exists category_id text`)
+      await this.pool.query(
+        `alter table checklist_templates add column if not exists category_id text`,
+      )
+      // Push (featreq-68638ed2). These three columns are declared HERE, ahead
+      // of the skip stamps further down, only because the unique index built
+      // immediately below reads `cycle_due_date` and a column has to exist
+      // before an index can mention it.
+      //
+      // `cycle_due_date` is the date this occurrence was ORIGINALLY due. It is
+      // written once (coalesce, never overwritten by a second push) and it is
+      // what identity reads, so a pushed row still answers for its own cycle
+      // while `due_date` carries the date the work is now expected.
+      await this.pool.query(`alter table checklists add column if not exists cycle_due_date date`)
+      await this.pool.query(`alter table checklists add column if not exists pushed_at timestamptz`)
+      await this.pool.query(`alter table checklists add column if not exists pushed_by text`)
+      // stage_index is declared again further down with the other stage columns; the unique
+      // indexes right below read it, so on an empty database it has to exist already.
+      await this.pool.query(`alter table checklists add column if not exists stage_index int`)
+      // Split push (featreq-fbab3370): "pushing a checklist where every item is
+      // completed pushes no items and moves all of them to Complete." A mixed
+      // push (some done, some open) creates a NEW checklist that carries the
+      // open work forward and leaves the original behind holding only its done
+      // steps. These two columns are the link between them —
+      // `pushed_from_checklist_id` on the new row points back at the original,
+      // `pushed_to_checklist_id` on the original points forward at the new row.
+      // Declared here, ahead of the v3 unique index below, for the same reason
+      // `cycle_due_date` is declared ahead of v2: the index reads the column.
+      await this.pool.query(
+        `alter table checklists add column if not exists pushed_from_checklist_id text`,
+      )
+      await this.pool.query(
+        `alter table checklists add column if not exists pushed_to_checklist_id text`,
+      )
+
+      // DUPLICATE-INSTANCE BACKSTOP.
+      //
+      // The materializer's idempotency was check-then-insert with nothing
+      // underneath it, so two simultaneous `GET /api/app-data` reads could each
+      // decide a period had no instance yet and each create one. Production
+      // collected 21 groups of ACTIVE checklists sharing an identical
+      // (template_id, due_date, stage_index). This UNIQUE partial index makes
+      // that physically impossible.
+      //
+      // Why the tuple is (template_id, due_date, stage_index) and not a month
+      // key: a weekly template legitimately has four instances inside one month.
+      // The due date is the finest identity that is still stable across runs.
+      // `deleted_at is null` keeps the recycle bin out of it (a restored-then-
+      // re-deleted instance must not collide), and `template_id is not null`
+      // leaves one-off manual checklists completely alone.
+      //
+      // WHY THIS IS WRAPPED IN try/catch: production still contains the 21
+      // duplicate groups today — the cleanup write is scheduled for AFTER this
+      // deploys. `create unique index` would fail on that dirty data and, since
+      // initialize() is the boot path, an unguarded throw would take the whole
+      // app down. So we attempt it on every boot and log loudly when it can't
+      // be built yet; the first boot after the cleanup lands creates it and the
+      // backstop arms itself with no further deploy. Until then the shared
+      // in-code guard (lib/checklist-identity.js) is what prevents new
+      // duplicates.
+      //
+      // PUSH CHANGED THE TUPLE'S DATE. It is now the CYCLE date
+      // (`coalesce(cycle_due_date, due_date)`), not the working due date: a
+      // pushed occurrence parks by default on exactly the next cycle's date,
+      // so an index on `due_date` would refuse the push the moment that
+      // occurrence exists — and would stop recognizing the cycle the row came
+      // from. The two are identical for every row that has never been pushed
+      // (`cycle_due_date` is null there), so this index builds exactly when the
+      // old one would have.
+      //
+      // THE SWAP IS ONE TRANSACTION, for the same reason the
+      // `invoices_client_period_live` swap further down is: two implicit
+      // transactions leave a window in which this table has NO backstop at all
+      // (create v2, then a failing drop, or the reverse ordering after a crash
+      // between them), and a materializer racing through that window writes the
+      // duplicates this index exists to make impossible. `create index`
+      // (non-concurrent) is transactional in Postgres, so the window can simply
+      // be closed. Order inside it still matters: build v2 FIRST so a ROLLBACK
+      // leaves v1 — the old backstop — standing rather than nothing.
+      //
+      // ONLY WHILE v3 DOES NOT EXIST YET. Once v3 has replaced v2, running this
+      // block again would rebuild v2 on every later boot, and once a split pair
+      // exists that rebuild fails and logs a false "duplicate rows" warning. A
+      // boot that died between this block and the v3 swap leaves both; v3's swap
+      // below drops v2 on the next boot.
+      const checklistIndexV3Probe = await this.pool.query(
+        `select to_regclass('${CHECKLIST_INSTANCE_UNIQUE_INDEX_V3}') is null as missing`,
+      )
+      const checklistIndexV3Missing = checklistIndexV3Probe?.rows?.[0]?.missing !== false
+      if (checklistIndexV3Missing) {
+        const checklistIndexClient = await this.pool.connect()
+        let checklistIndexV2Created = false
+        try {
+          await checklistIndexClient.query('BEGIN')
+          await checklistIndexClient.query(`
+            create unique index if not exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2}
+              on checklists (template_id, coalesce(cycle_due_date, due_date), stage_index)
+              where deleted_at is null and template_id is not null
+          `)
+          checklistIndexV2Created = true
+          await checklistIndexClient.query(`drop index if exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX}`)
+          await checklistIndexClient.query('COMMIT')
+        } catch (error) {
+          try {
+            await checklistIndexClient.query('ROLLBACK')
+          } catch {
+            /* already rolled back, or the connection is gone */
+          }
+          // Two different failures, two different things to go look at. Only the
+          // first is the dirty-data case everyone is waiting on.
+          if (checklistIndexV2Created) {
+            console.warn(
+              `[init] built ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} but could not finish the swap, so ` +
+                `the whole swap was rolled back and ${CHECKLIST_INSTANCE_UNIQUE_INDEX} is still the ` +
+                `backstop. Not a data problem — this will be retried on the next boot. Reason:`,
+              error && error.message ? error.message : error,
+            )
+          } else {
+            console.warn(
+              `[init] could not create ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} — most likely duplicate ` +
+                `(template_id, cycle date, stage_index) rows still present. New duplicates are still ` +
+                `blocked in code; this will be retried on the next boot. Reason:`,
+              error && error.message ? error.message : error,
+            )
+          }
+        } finally {
+          checklistIndexClient.release()
+        }
+      }
+
+      // SPLIT PUSH CHANGED THE TUPLE AGAIN — not the columns it reads (still
+      // `template_id, coalesce(cycle_due_date, due_date), stage_index`), but
+      // which ROWS count. A mixed push (featreq-fbab3370) creates a new
+      // checklist that inherits the SAME cycle identity the original row
+      // answered for, so the two would collide under v2's predicate the moment
+      // both exist un-deleted. `pushed_to_checklist_id is null` excludes the
+      // original once it has handed its identity to the new row — the same
+      // idea `deleted_at is null` already applies to the recycle bin.
+      //
+      // Same swap discipline as v1→v2: one transaction, build v3 before
+      // dropping v2, wrapped in try/catch so a boot never crashes over this.
+      const checklistIndexV3Client = await this.pool.connect()
+      let checklistIndexV3Created = false
+      try {
+        await checklistIndexV3Client.query('BEGIN')
+        await checklistIndexV3Client.query(`
+          create unique index if not exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V3}
+            on checklists (template_id, coalesce(cycle_due_date, due_date), stage_index)
+            where deleted_at is null and template_id is not null and pushed_to_checklist_id is null
+        `)
+        checklistIndexV3Created = true
+        await checklistIndexV3Client.query(
+          `drop index if exists ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2}`,
         )
-      `)
+        await checklistIndexV3Client.query('COMMIT')
+      } catch (error) {
+        try {
+          await checklistIndexV3Client.query('ROLLBACK')
+        } catch {
+          /* already rolled back, or the connection is gone */
+        }
+        if (checklistIndexV3Created) {
+          console.warn(
+            `[init] built ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V3} but could not finish the swap, ` +
+              `so the whole swap was rolled back and ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V2} is ` +
+              `still the backstop. Not a data problem — this will be retried on the next boot. Reason:`,
+            error && error.message ? error.message : error,
+          )
+        } else {
+          console.warn(
+            `[init] could not create ${CHECKLIST_INSTANCE_UNIQUE_INDEX_V3} — most likely duplicate ` +
+              `(template_id, cycle date, stage_index) rows still present among rows that have not ` +
+              `handed off their identity. New duplicates are still blocked in code; this will be ` +
+              `retried on the next boot. Reason:`,
+            error && error.message ? error.message : error,
+          )
+        }
+      } finally {
+        checklistIndexV3Client.release()
+      }
+
+      // Templates cloned from another template stamp their origin id so the UI
+      // can tell a plan's checklist is "already set up" on a client. Plain text
+      // id, no FK (the source may later be deleted).
+      await this.pool.query(
+        `alter table checklist_templates add column if not exists source_template_id text`,
+      )
 
       await this.pool.query(`
         alter table checklist_templates
