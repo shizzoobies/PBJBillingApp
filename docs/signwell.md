@@ -9,13 +9,13 @@ Everything SignWell-specific lives in two files: `lib/signwell.js` (the only fil
 SignWell's URLs and shapes) and `lib/signwell-webhook.js` (the webhook handler). The send and remind
 rules are in `lib/engagement-esign.js`; `server.js` only wires them.
 
-## Environment variables (Railway, service `PBJBillingApp`)
+## Environment variables (Worker secrets via scripts/cf/secrets-upload.mjs)
 
 | Variable | Meaning |
 |---|---|
 | `SIGNWELL_API_KEY` | The SignWell API key. Without it the **Send for signature** button is hidden and the send route answers 409 `signwell_not_configured`. Never logged. |
 | `SIGNWELL_TEST_MODE` | **Missing means TEST mode.** Only the literal `false` (any case) means live; anything else (`true`, empty, `0`, `no`, a typo) is test. Every document the app creates passes `test_mode` from this variable, and the code can only ever force test mode on, never live. Keep it unset or `true` until the end-to-end test below has passed. A test-mode document is not binding, so **a test-mode signature never marks a real client's letter signed**: only a letter of the existing client named exactly `Test` is signed (a prospect whose party is named Test is not: signing would create a second Test client); any other gets "Test mode - not marked signed; use Mark as signed if this was a real signature". |
-| `SIGNWELL_WEBHOOK_ID` | The id of the registered webhook (printed by the registration script). SignWell signs each event with it, so **it is a secret** (anyone who knows it can forge events): set it in Railway only, never in chat, a ticket or a commit. The handler answers 503 until it is set. |
+| `SIGNWELL_WEBHOOK_ID` | The id of the registered webhook (printed by the registration script). SignWell signs each event with it, so **it is a secret** (anyone who knows it can forge events): set it as a Worker secret only, never in chat, a ticket or a commit. The handler answers 503 until it is set. |
 | `APP_PUBLIC_URL` | Already set for the app. The webhook callback is `${APP_PUBLIC_URL}/api/signwell/webhook` and a signer lands on `${APP_PUBLIC_URL}/signed-thank-you` when they finish. |
 
 There is no `.env.example` in this repo: this table is the documentation.
@@ -30,10 +30,11 @@ node scripts/prod/signwell-webhook-register.mjs --delete <id>   # removes one ho
 ```
 
 It reads `SIGNWELL_API_KEY` and `APP_PUBLIC_URL` from the environment, or, for whichever is missing,
-from the Railway service variables (the way `scripts/prod/voice-provision.mjs` does). It never prints
+from PBJ_PROD_ENV_FILE via scripts/prod/env.mjs (the way `scripts/prod/voice-provision.mjs` does). It never prints
 the key or the address; it prints the webhook id with "set SIGNWELL_WEBHOOK_ID to this on the Railway
 service". One URL receives every event type. Because the id is a secret, the script prints only OUR
-hook's id (never another hook's on the account); put it straight into Railway.
+hook's id (never another hook's on the account); put it in the external rotation file and upload the Worker secret.
+The quoted Railway wording is historical script output; the destination after cutover is the Worker.
 
 ## What the app does
 
@@ -164,7 +165,7 @@ The DDL is in `db/store.js` (`initialize()`) and mirrored in `db/schema.sql`.
 0. The three tables are created at the first boot after this deploys (Alex's yes to the schema is on
    record, 2026-10-21); nothing to run by hand.
 1. Create the SignWell account and an API key.
-2. On the Railway `PBJBillingApp` service set `SIGNWELL_API_KEY`. Leave `SIGNWELL_TEST_MODE` unset
+2. Set SIGNWELL_API_KEY as a Worker secret with scripts/cf/secrets-upload.mjs. Leave `SIGNWELL_TEST_MODE` unset
    (that is test mode). Deploy.
 3. Run `node scripts/prod/signwell-webhook-register.mjs` and set `SIGNWELL_WEBHOOK_ID` to the id it
    prints. Redeploy (or restart) so the variable is read.

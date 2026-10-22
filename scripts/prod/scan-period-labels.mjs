@@ -4,9 +4,8 @@
  * what the corrected `periodLabelForInstance` computes from its template and its
  * own due date.
  *
- *   npx @railway/cli@latest variables --service Postgres --json \
- *     | node scripts/prod/scan-period-labels.mjs           rows that HAVE a label
- *     | node scripts/prod/scan-period-labels.mjs --all      and the unlabeled ones too
+ *   node scripts/prod/scan-period-labels.mjs           rows that HAVE a label
+ *   node scripts/prod/scan-period-labels.mjs --all      and the unlabeled ones too
  *
  * By default only rows with a STORED label are listed. The unlabeled ones are
  * instances that spawned before the feature existed — the label stamps "every
@@ -25,7 +24,7 @@
  * includes a stored label whose template no longer carries a window at all
  * (computed "(none)") and a missing label the template would now produce.
  */
-import { readFileSync } from 'node:fs'
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import { createRequire } from 'node:module'
 
 import { periodLabelForInstance } from '../../lib/checklist-period-label.js'
@@ -34,18 +33,11 @@ const require = createRequire(import.meta.url)
 const { Client } = require('pg')
 
 const all = process.argv.includes('--all')
-const vars = JSON.parse(readFileSync(0, 'utf8'))
-if (!vars.DATABASE_PUBLIC_URL) {
-  // Loudly, because `new Client({ connectionString: undefined })` quietly falls
-  // back to libpq's own defaults and would scan whatever local database the
-  // environment happens to point at.
-  console.error('DATABASE_PUBLIC_URL missing from stdin JSON')
-  process.exit(1)
-}
+const vars = prodEnv(['PROD_DATABASE_URL'])
 
 const db = new Client({
-  connectionString: vars.DATABASE_PUBLIC_URL,
-  ssl: { rejectUnauthorized: false },
+  connectionString: prodDatabaseUrl(vars.PROD_DATABASE_URL),
+  ssl: { rejectUnauthorized: true },
 })
 
 const show = (value) => (value === null || value === undefined ? '(none)' : value)

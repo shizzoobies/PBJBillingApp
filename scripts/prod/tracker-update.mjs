@@ -33,10 +33,9 @@
 //   node scripts/prod/tracker-update.mjs --file-new --title "<120 chars>" \
 //        --description "<what and why, 2000 chars>" [--description-file <path>] ...
 //
-// The connection string comes from DATABASE_PUBLIC_URL (or DATABASE_URL) in
-// the environment, else from `railway variables --service Postgres --json`.
+// Connection: PROD_DATABASE_URL from the environment or PBJ_PROD_ENV_FILE.
 
-import { execFileSync } from 'node:child_process'
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import pg from 'pg'
@@ -106,20 +105,11 @@ function parseArgs(argv) {
 }
 
 function connectionString() {
-  const fromEnv = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL
-  if (fromEnv) return fromEnv
-  const out = execFileSync(
-    'npx',
-    ['@railway/cli@latest', 'variables', '--service', 'Postgres', '--json'],
-    { encoding: 'utf8', shell: true, stdio: ['ignore', 'pipe', 'inherit'] },
-  )
-  const url = JSON.parse(out).DATABASE_PUBLIC_URL
-  if (!url) throw new Error('DATABASE_PUBLIC_URL missing from railway variables output')
-  return url
+  return prodDatabaseUrl(prodEnv(['PROD_DATABASE_URL']).PROD_DATABASE_URL)
 }
 
 const opts = parseArgs(process.argv.slice(2))
-const pool = new pg.Pool({ connectionString: connectionString(), ssl: { rejectUnauthorized: false } })
+const pool = new pg.Pool({ connectionString: connectionString(), ssl: { rejectUnauthorized: true } })
 
 // One new row: 'shipped' (with its shipped date) for work already live, or
 // 'new' (no shipped date) for work queued for later.

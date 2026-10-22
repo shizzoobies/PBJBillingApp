@@ -7,9 +7,11 @@ each working session and says exactly where things stand, what is in flight and 
 
 ## 1. What this is, who is who
 
-- The time-tracking / checklist / proposal / invoicing app of **PB&J Strategic Accounting**, live
-  at **https://app.pbjsa.com**, deployed by **pushing `main`** to `github.com/shizzoobies/PBJBillingApp`
-  (Railway builds the `Dockerfile` and auto-deploys; nothing else deploys).
+- The time-tracking / checklist / proposal / invoicing app of **PB&J Strategic Accounting**, targeting
+  **https://app.pbjsatime.com** after verified cutover. Pushing main to
+  github.com/shizzoobies/PBJBillingApp runs GitHub Actions cf-deploy.yml, which builds
+  the Dockerfile and deploys the Cloudflare Worker/Container. Data lives in Neon Postgres 18.
+  Until cutover, app.pbjsa.com remains the old source; follow docs/runbooks/cloudflare-cutover.md.
 - **Alex** is the developer and the person you talk to. **Brittany** is the client (the firm's
   owner; app user id `emp-patrice`). Her requests arrive through the in-app **Updates tracker**
   (table `feature_requests`), never by editing code herself.
@@ -41,8 +43,8 @@ each working session and says exactly where things stand, what is in flight and 
    and the push must be gated on its exit code - never on grepped output. Run it from the folder
    you built in; **never two vitest runs in one folder at once** (they share `tmp/app-data.json`
    and fail by the hundreds).
-3. **Deploy is part of done:** push `main` -> poll `https://app.pbjsa.com/health` until its
-   `commit` equals the hash you pushed -> read the boot log. If the manifest changed,
+3. **Deploy is part of done:** push main -> wait for that commit's cf-deploy.yml run -> poll https://app.pbjsatime.com/health until its
+   `commit` equals the seven-character hash you pushed and ok=true -> inspect Container startup logs. If the manifest changed,
    **re-provision the voice agent** at the released commit (`node scripts/prod/voice-provision.mjs`).
 4. **One item per deploy.** Ship pieces one at a time as each finishes - never a batch of unrelated
    changes in one push. Each commit must be green and deployable alone.
@@ -54,9 +56,10 @@ each working session and says exactly where things stand, what is in flight and 
    The ONE standing exception: single-row tracker writes through `scripts/prod/tracker-update.mjs`.
 6. **Schema changes** (`alter table`, new tables) ship as look-first `create/alter ... if not exists`
    blocks in `initialize()` and need Alex's yes beforehand. No foreign keys to the bulk-saved tables.
-7. **Secrets never appear in chat or commits.** Environment comes from Railway
-   (`npx @railway/cli@latest variables --service <PBJBillingApp|Postgres> --json`), read by scripts,
-   never pasted. Test credentials only on localhost.
+7. **Secrets never appear in chat or commits.** Production scripts read process environment first,
+   then the external file selected by PBJ_PROD_ENV_FILE (default D:\PBJ Accounting Work\secrets\prod.env).
+   scripts/prod/env.mjs loads only requested names; database tools use PROD_DATABASE_URL with verified TLS.
+   Worker secrets are uploaded by scripts/cf/secrets-upload.mjs. Test credentials only on localhost.
 8. **Never merge or delete `hold/july-security-p3`** (sole copy of two files). The desktop app's
    updater key lives outside the repo (`D:\PBJ Accounting Work\desktop-updater-key`).
 9. **American English** everywhere (labor, color, labeled).
@@ -87,7 +90,8 @@ each working session and says exactly where things stand, what is in flight and 
    to savepoints, `read()` and `write()` stubbed, everything rolled back, then a read-only check
    that nothing persisted).
 6. **Ship:** from the primary checkout on `main`, `npm run verify && bash scripts/prod/ship.sh <hash>`
-   (quiet check -> fast-forward -> push -> health poll -> boot log). Then, if the manifest changed,
+   (quiet check -> fast-forward -> push -> matching cf-deploy.yml success -> health poll -> optional live tail).
+   Inspect Container startup logs separately; a Worker tail is not historical boot evidence. Then, if the manifest changed,
    `node scripts/prod/voice-provision.mjs`.
 7. **Flip the ticket** with a note in Brittany's words:
    `node scripts/prod/tracker-update.mjs featreq-xxxxxxxx --status shipped --dev-notes-file <note.txt>`
@@ -99,17 +103,16 @@ each working session and says exactly where things stand, what is in flight and 
 
 ## 5. Production access and diagnostics
 
-- Railway CLI must be **linked** in the folder you run it from (`npx @railway/cli@latest link`,
-  project PBJBillingApp); the primary checkout is linked, worktrees are not.
-- Read-only Postgres: `DATABASE_PUBLIC_URL` from the Postgres service's variables; `pg` is a
-  dependency. Example scripts: `scripts/prod/quiet-check.mjs`, `tracker-list.mjs`, `tracker-read.mjs`.
-- Logs: `npx @railway/cli@latest logs --service PBJBillingApp`. A whole-workspace save logs
-  `[bulk-save] write committed in <N>ms after <K> lock attempt(s)` (expect under a second).
-- `/health` returns `{ ok, mode, db, stripe, stripeWebhook, commit }`; 503 means Postgres is
-  unreachable, not that the code is broken. The old image keeps serving on a FAILED build; failed
-  build logs are only reachable through Railway's GraphQL (HANDOFF).
-- Stripe: the webhook endpoint is `app.pbjsa.com/api/stripe/webhook`; events it needs are listed
-  in the HANDOFF; the signing secret lives in Railway. Never create test payments against live.
+- Production tools need PROD_DATABASE_URL from process environment or PBJ_PROD_ENV_FILE, not a linked CLI.
+  Neon access must use verified TLS. Read-only examples: scripts/prod/quiet-check.mjs, tracker-list.mjs,
+  tracker-read.mjs. Do not execute any data writer without the production approval required above.
+- Deploy status: gh run list --workflow cf-deploy.yml --commit <sha>, then gh run watch <id> --exit-status.
+  Logs: Cloudflare Container startup logs and npx wrangler tail pbjbillingapp --format json (live Worker stream).
+  Bulk-save timing remains logged by the application.
+- /health returns { ok, mode, db, stripe, stripeWebhook, commit }; require HTTP 200, ok=true and the matching
+  seven-character commit. A 503 can mean Postgres is unreachable. A failed deploy can leave an old image live.
+- Stripe after cutover: app.pbjsatime.com/api/stripe/webhook; signing secret is a Worker secret forwarded
+  to the Container. Never create test payments against live. Follow docs/runbooks/cloudflare-cutover.md.
 - **`invoices.updated_at` is not an event time** - the bulk save re-stamps every invoice it
   restores. Use `invoice_events`, `email_log` and the review events.
 - Local dev: `npm run dev` pair (API on 4173 + Vite); seed users and the owner's TOTP come from

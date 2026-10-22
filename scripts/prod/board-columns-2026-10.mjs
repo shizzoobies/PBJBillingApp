@@ -24,11 +24,9 @@
 // Every matched template's default column becomes its FIRST step's column (when
 // that step is matched), whatever it was before, so defaults are consistent.
 //
-// Connection: DATABASE_PUBLIC_URL or DATABASE_URL, else
-// `npx @railway/cli@latest variables --service Postgres --json` (the folder must be
-// linked). PGSSLMODE=no-verify because the Railway public proxy presents a
-// certificate node-pg will not verify. Every write is set-based (unnest arrays), in
-// one transaction with `set local lock_timeout = '5s'`, and each statement is
+// Connection: PROD_DATABASE_URL from the environment or PBJ_PROD_ENV_FILE.
+// TLS verifies the host certificate. Every write is set-based (unnest arrays), in
+// one transaction with set local lock_timeout = '5s', and each statement is
 // guarded on the value it expects to replace: a row count that differs from the
 // plan aborts the whole transaction.
 //
@@ -53,7 +51,7 @@
 //   4. templates: update checklist_templates set category_id = <plan.templateDefaults[].from> (may be NULL) where id = <id>;
 //   5. instances: update checklists set category_id = <plan.instancesNulled[].from> where id = <id> and category_id is null;
 
-import { execFileSync } from 'node:child_process'
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -206,20 +204,11 @@ if (unknown.length || (apply && trial)) {
 const MODE = apply ? 'apply' : trial ? 'trial' : 'dry-run'
 
 function connectionString() {
-  const fromEnv = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL
-  if (fromEnv) return fromEnv
-  const out = execFileSync('npx', ['@railway/cli@latest', 'variables', '--service', 'Postgres', '--json'], {
-    encoding: 'utf8',
-    shell: true,
-    stdio: ['ignore', 'pipe', 'inherit'],
-  })
-  const url = JSON.parse(out).DATABASE_PUBLIC_URL
-  if (!url) throw new Error('DATABASE_PUBLIC_URL missing from railway variables output')
-  return url
+  return prodDatabaseUrl(prodEnv(['PROD_DATABASE_URL']).PROD_DATABASE_URL)
 }
 
-process.env.PGSSLMODE = 'no-verify'
-const db = new Client({ connectionString: connectionString(), ssl: { rejectUnauthorized: false } })
+process.env.PGSSLMODE = 'verify-full'
+const db = new Client({ connectionString: connectionString(), ssl: { rejectUnauthorized: true } })
 
 async function hasGroupColumn() {
   const r = await db.query(

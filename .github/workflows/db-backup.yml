@@ -1,29 +1,40 @@
 name: db-backup
 
-# Nightly production Postgres backup to Cloudflare R2, with a restore drill
-# ("a backup that has never been restored is a hope, not a backup" —
-# docs/plans/resilience-2026-09.md §2.3, Tier 1 step 2.3).
+# Nightly Postgres backup to Cloudflare R2, with a restore drill
+# ("a backup that has never been restored is a hope, not a backup" -
+# docs/plans/resilience-2026-09.md section 2.3).
 #
-# What this does NOT do: connect to production to discover its Postgres
-# version. PG_MAJOR below was verified against production by hand (see the
-# comment on that line) and must be kept correct by hand.
+# WHY THIS FAILED EVERY NIGHT SINCE IT WAS ADDED (all 48 scheduled runs on
+# record, 2026-09-04 onward, are red; found 2026-10-22 by reading
+# `gh run view --log-failed`): the four R2_* repository secrets were
+# never created, so scripts/db-backup.sh died on `R2_ACCOUNT_ID is required`
+# 14 seconds in, with a one-line message buried in the log. DATABASE_PUBLIC_URL
+# existed but pointed at Railway's public proxy, which was removed on
+# 2026-10-21. This file now (1) checks every secret FIRST and fails with one
+# red annotation per missing secret plus a run summary, and (2) reads the
+# database from BACKUP_DATABASE_URL (the Neon URL once the move is done).
+# Until BACKUP_DATABASE_URL and the R2_* secrets exist, the job is MEANT to be
+# red: a red night with a clear reason beats a silent gap.
 #
-# Owner-provided secrets (repo Settings > Secrets and variables > Actions —
-# names only here, values never touch this file):
-#   DATABASE_PUBLIC_URL   Railway Postgres PUBLIC connection string (the one
-#                         reachable from outside Railway's network — not the
-#                         internal DATABASE_URL the app itself uses).
-#   R2_ACCOUNT_ID         Cloudflare account id (builds the R2 endpoint URL).
-#   R2_ACCESS_KEY_ID      R2 API token access key id.
+# Repo secrets (Settings > Secrets and variables > Actions - names only here,
+# values never touch this file):
+#   BACKUP_DATABASE_URL   Connection string of the database to back up (Neon:
+#                         the DIRECT, non-pooled URL). Ending it with
+#                         ?sslmode=verify-full&sslrootcert=system makes the
+#                         runner check the server certificate.
+#   R2_ACCOUNT_ID         Cloudflare account id (builds the R2 S3 endpoint).
+#   R2_ACCESS_KEY_ID      R2 API token access key id (Object Read & Write on
+#                         the one bucket).
 #   R2_SECRET_ACCESS_KEY  R2 API token secret.
-#   R2_BUCKET             R2 bucket the dumps live in.
+#   R2_BUCKET             R2 bucket the dumps live in (bucket lock: 30 days,
+#                         set in the Cloudflare dashboard - see the runbook).
 #
-# See docs/runbooks/db-backup-and-restore.md for setup, the restore
-# procedure, and how to tell this is actually working.
+# See docs/runbooks/db-backup-and-restore.md for setup, the restore procedure
+# and how to tell this is actually working.
 
 on:
   schedule:
-    # 08:15 UTC = 03:15/04:15 US-Eastern depending on DST — quiet hours for a
+    # 08:15 UTC = 03:15/04:15 US-Eastern depending on DST - quiet hours for a
     # US-East firm, and off the hour so it isn't queued behind everyone
     # else's on-the-hour crons.
     - cron: '15 8 * * *'
@@ -34,7 +45,10 @@ on:
         type: boolean
         default: false
 
-# A backup mid-dump should never be cancelled by a newer trigger — unlike
+permissions:
+  contents: read
+
+# A backup mid-dump should never be cancelled by a newer trigger - unlike
 # verify.yml's CI runs, there's no "in-flight, now-stale" work here to save
 # time by killing.
 concurrency:
@@ -42,11 +56,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Production Postgres major version. VERIFIED 2026-09-03 with a read-only
-  # `select version()` against production: PostgreSQL 18.6. It has to match
-  # or exceed the server — pg_dump refuses to dump a server newer than
-  # itself — and the restore drill's throwaway container reads it too. If
-  # Railway ever upgrades Postgres, this one line is the fix.
+  # Postgres major version of the database being backed up. Railway was 18.6
+  # (verified 2026-09-03) and Neon is created as 18, so this stays 18. pg_dump
+  # refuses a server newer than itself, and the restore drill's throwaway
+  # container reads it too. If the provider ever upgrades, this one line is the
+  # fix.
   PG_MAJOR: '18'
 
 jobs:
@@ -61,6 +75,36 @@ jobs:
       pg_major: ${{ env.PG_MAJOR }}
     steps:
       - uses: actions/checkout@v4
+
+      # First, before anything is installed: say exactly which secret is
+      # missing. This is what turns "failed in 14 s for no visible reason"
+      # into a one-glance diagnosis.
+      - name: Check that every required secret is set
+        env:
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          missing=""
+          for name in BACKUP_DATABASE_URL R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error title=Backup secret missing::Repository secret ${name} is not set (or is empty), so no database backup was taken. Add it under Settings > Secrets and variables > Actions. See docs/runbooks/db-backup-and-restore.md."
+              missing="${missing} ${name}"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            {
+              echo "## Database backup NOT taken"
+              echo
+              echo "Missing repository secret(s):${missing}"
+              echo
+              echo "Nothing was dumped and nothing was uploaded. Set the secret(s) above, then re-run this workflow from the Actions tab. Setup steps: docs/runbooks/db-backup-and-restore.md."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "All five backup secrets are set."
 
       - name: Install postgresql-client ${{ env.PG_MAJOR }}
         run: |
@@ -80,10 +124,10 @@ jobs:
       - name: Verify pg_dump matches PG_MAJOR
         run: pg_dump --version
 
-      - name: Dump and upload to R2
+      - name: Dump, upload to R2 and confirm the object is there
         id: dump
         env:
-          DATABASE_PUBLIC_URL: ${{ secrets.DATABASE_PUBLIC_URL }}
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -100,16 +144,6 @@ jobs:
           else
             echo "run_drill=false" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Upload dump for the restore-drill job
-        if: steps.decide-drill.outputs.run_drill == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: db-dump
-          path: ${{ steps.dump.outputs.dump_path }}
-          # Only needs to survive this run handing off to the next job, not
-          # linger as a second unencrypted copy of production data.
-          retention-days: 1
 
   restore-drill:
     needs: backup
@@ -144,11 +178,26 @@ jobs:
           sudo apt-get install -y --no-install-recommends "postgresql-client-${PG_MAJOR}"
           echo "/usr/lib/postgresql/${PG_MAJOR}/bin" >> "$GITHUB_PATH"
 
-      - name: Download the dump this run just made
-        uses: actions/download-artifact@v4
-        with:
-          name: db-dump
-          path: dump
+      # The dump is NEVER handed over as a GitHub Actions artifact: this repository
+      # is public, and an artifact is downloadable by anyone who can read the repo.
+      # The drill instead pulls the object the backup job just uploaded to R2 (which
+      # also proves the uploaded copy, not a local one, is restorable).
+      - name: Download tonight's dump from R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          DUMP_NAME: ${{ needs.backup.outputs.dump_name }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          echo "::add-mask::${R2_ACCESS_KEY_ID}"
+          echo "::add-mask::${R2_SECRET_ACCESS_KEY}"
+          export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+          mkdir -p dump
+          aws s3 cp "s3://${R2_BUCKET}/daily/${DUMP_NAME}" "dump/${DUMP_NAME}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" --only-show-errors
+          ls -l dump
 
       - name: Restore into the throwaway Postgres and verify row counts
         env:

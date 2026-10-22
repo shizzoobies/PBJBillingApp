@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { execSync } from 'node:child_process';
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import { createRequire } from 'node:module';
 const repo = process.cwd();
 const require = createRequire(path.join(repo, 'package.json'));
@@ -18,8 +18,8 @@ const snapshotDir = args.find((a) => !a.startsWith('--'));
 if (!snapshotDir) throw new Error('usage: node qbo-forward-apply.mjs <snapshotDir> [--apply] [--include-workforce]');
 const apply = args.includes('--apply');
 const includeWorkforce = args.includes('--include-workforce');
-const vars = JSON.parse(execSync('npx @railway/cli@latest variables --service Postgres --json', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
-const pool = new Pool({ connectionString: vars.DATABASE_PUBLIC_URL, ssl: { rejectUnauthorized: false } });
+const vars = prodEnv(['PROD_DATABASE_URL']);
+const pool = new Pool({ connectionString: prodDatabaseUrl(vars.PROD_DATABASE_URL), ssl: { rejectUnauthorized: true } });
 
 const PERIOD = '2026-09';
 const WINDOW = { start: '2026-10-13', end: '2026-11-13' };

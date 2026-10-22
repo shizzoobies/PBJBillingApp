@@ -43,10 +43,9 @@
 // forward run and the undo both re-select and verify inside the transaction and
 // throw — rolling the whole thing back — on any mismatch.
 //
-// Connection string: DATABASE_PUBLIC_URL / DATABASE_URL in the environment, else
-// the Railway CLI.
+// Connection: PROD_DATABASE_URL from the environment or PBJ_PROD_ENV_FILE.
 
-import { execFileSync } from 'node:child_process'
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { arrayUnionAssignment } from '../../lib/merge-client-sql.js'
@@ -150,30 +149,10 @@ const FREE_TEXT_SCANS = [
 ]
 
 function connectionString() {
-  const fromEnv = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL
-  if (fromEnv) return fromEnv
-  let out
-  try {
-    out = execFileSync(
-      'npx',
-      ['@railway/cli@latest', 'variables', '--service', 'Postgres', '--json'],
-      { encoding: 'utf8', shell: true, stdio: ['ignore', 'pipe', 'inherit'] },
-    )
-  } catch {
-    throw new Error(
-      'no Postgres connection string: set DATABASE_PUBLIC_URL or DATABASE_URL, or log in to the Railway CLI. This script is Postgres-only.',
-    )
-  }
-  const url = JSON.parse(out).DATABASE_PUBLIC_URL
-  if (!url) {
-    throw new Error(
-      'no Postgres connection string: DATABASE_PUBLIC_URL missing from railway variables output. This script is Postgres-only.',
-    )
-  }
-  return url
+  return prodDatabaseUrl(prodEnv(['PROD_DATABASE_URL']).PROD_DATABASE_URL)
 }
 
-const db = new Client({ connectionString: connectionString(), ssl: { rejectUnauthorized: false } })
+const db = new Client({ connectionString: connectionString(), ssl: { rejectUnauthorized: true } })
 
 // ---------------------------------------------------------------------------
 // Schema, read at runtime so the script survives drift. Production is usually a

@@ -20,26 +20,21 @@
  *
  * Both modes write a JSON snapshot of every client's CURRENT team list to
  * docs/prod-snapshots/ first — that file is the undo (see the bottom of the
- * output for the restore statement). Connection: DATABASE_PUBLIC_URL on stdin
- * as the Railway variables JSON (never printed):
- *   npx @railway/cli@latest variables --service Postgres --json | node scripts/prod/reset-team-lists-2026-09.mjs
+ * output for the restore statement). Connection: PROD_DATABASE_URL from the environment or PBJ_PROD_ENV_FILE:
  */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
+import { writeFileSync, mkdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 const { Client } = require('pg')
 
 const apply = process.argv.includes('--apply')
-const vars = JSON.parse(readFileSync(0, 'utf8'))
-if (!vars.DATABASE_PUBLIC_URL) {
-  console.error('DATABASE_PUBLIC_URL missing from stdin JSON')
-  process.exit(1)
-}
+const vars = prodEnv(['PROD_DATABASE_URL'])
 
 const db = new Client({
-  connectionString: vars.DATABASE_PUBLIC_URL,
-  ssl: { rejectUnauthorized: false },
+  connectionString: prodDatabaseUrl(vars.PROD_DATABASE_URL),
+  ssl: { rejectUnauthorized: true },
 })
 
 const stamp = new Date().toISOString().replace(/[:.]/g, '-')

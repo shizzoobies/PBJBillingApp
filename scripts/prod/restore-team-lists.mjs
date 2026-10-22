@@ -3,11 +3,11 @@
  * Undo for reset-team-lists-2026-09.mjs: puts every client's
  * `assigned_bookkeeper_ids` back to what the snapshot recorded.
  *
- *   npx @railway/cli@latest variables --service Postgres --json \
- *     | node scripts/prod/restore-team-lists.mjs docs/prod-snapshots/<stamp>-team-lists-before-reset.json [--apply]
+ *   node scripts/prod/restore-team-lists.mjs docs/prod-snapshots/<stamp>-team-lists-before-reset.json [--apply]
  *
  * Without --apply it prints what it would restore and rolls back.
  */
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
@@ -20,12 +20,12 @@ if (!snapshotPath) {
   console.error('usage: restore-team-lists.mjs <snapshot.json> [--apply]')
   process.exit(1)
 }
-const vars = JSON.parse(readFileSync(0, 'utf8'))
+const vars = prodEnv(['PROD_DATABASE_URL'])
 const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'))
 
 const db = new Client({
-  connectionString: vars.DATABASE_PUBLIC_URL,
-  ssl: { rejectUnauthorized: false },
+  connectionString: prodDatabaseUrl(vars.PROD_DATABASE_URL),
+  ssl: { rejectUnauthorized: true },
 })
 
 async function main() {
