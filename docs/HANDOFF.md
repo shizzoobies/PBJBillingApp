@@ -50,7 +50,8 @@ delete after cutover). **2026-10-22 08:00 ET update: Railway's gateway is back; 
 11 s, verify = 53 tables match by full-row hash, boot DDL clean + the 3 e-sign tables, second verify OK); Neon `neondb` holds
 that rehearsal copy and is reset before the final restore. **Cutover is TONIGHT 2026-10-22 after Brittany's office hours, with
 Alex present; his instruction: "don't pause her app till I say".** Everything is staged outside git in
-`D:\PBJ Accounting Work\secrets\cutover\` (`cutover-data.ps1`, `cutover-finish.ps1`, the Resend/ElevenLabs/Railway-proxy
+`D:\PBJ Accounting Work\secrets\cutover\` (**the operator's step-by-step is `ASTRA-CUTOVER-HANDOFF.md` in that folder,
+written for the session running the cutover tonight; start there**; `cutover-data.ps1`, `cutover-finish.ps1`, the Resend/ElevenLabs/Railway-proxy
 helper scripts) plus `secrets\railway-source.url` (tunnel: `npx @railway/cli@latest connect Postgres --tunnel-only`, rewrite the
 port) and `secrets\neon-target.url`. Freeze = `npx @railway/cli@latest down --service PBJBillingApp -y` (or dashboard Remove), then
 the data script refuses to run until app.pbjsa.com/health fails. The Stripe endpoint for the new address exists DISABLED
