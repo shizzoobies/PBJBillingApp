@@ -1154,7 +1154,11 @@ read-maps it to `'new'`, so the app never shows it. Only raw SQL sees `sent`.
 ## 1. What this is
 
 A time-tracking / recurring-checklist / billing app for **PB&J Strategic
-Accounting**, a bookkeeping firm. Deployed at **app.pbjsa.com** (Railway).
+Accounting**, a bookkeeping firm. The Cloudflare migration targets **app.pbjsatime.com**:
+Worker `pbjbillingapp` forwards to a Container built from this repo, with Neon Postgres 18
+(AWS us-east-1) over verified TLS. GitHub Actions `cf-deploy.yml` builds and deploys main.
+The old app.pbjsa.com address remains the source until the authorized cutover is verified;
+see [the cutover runbook](runbooks/cloudflare-cutover.md) for freeze, rollback and evidence.
 
 **The people** (this matters — the ids are misleading):
 
@@ -1251,16 +1255,31 @@ Co-Authored-By: <your session's Claude attribution> <noreply@anthropic.com>
 **This has caught more real bugs than any other technique.** Repeatedly, code that
 passed lint + build + tests was still wrong against real data. Use it.
 
-Get a connection (read-only work needs no permission; see the write rule below):
+After cutover, scripts read `PROD_DATABASE_URL` from the process environment first, then the
+external file selected by `PBJ_PROD_ENV_FILE` (default
+`D:\PBJ Accounting Work\secrets\prod.env`). No Railway CLI/link is needed. Use
+`scripts/prod/env.mjs` and verified TLS; do not print a connection string or disable
+certificate verification. For a read-only diagnostic from the repository root:
 
-```bash
-# Run from the repo root. NODE_PATH is needed because these are throwaway
-# `node -e` scripts outside the package, so `require('pg')` won't resolve.
-export NODE_PATH="$PWD/node_modules"
-DBURL=$(npx @railway/cli@latest variables --service Postgres --json \
-  | node -e 'const v=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(v.DATABASE_PUBLIC_URL)')
-# then: new Pool({ connectionString: DBURL, ssl: { rejectUnauthorized: false } })
+```js
+import pg from 'pg'
+import { prodEnv, prodDatabaseUrl } from './scripts/prod/env.mjs'
+const { PROD_DATABASE_URL } = prodEnv(['PROD_DATABASE_URL'])
+const db = new pg.Client({ connectionString: prodDatabaseUrl(PROD_DATABASE_URL) })
+await db.connect()
+try {
+  await db.query('begin read only')
+  // Issue the bounded read-only query here; never log credentials.
+  await db.query('rollback')
+} finally { await db.end() }
 ```
+
+Cloudflare deploy status is the `cf-deploy.yml` GitHub Actions run for the commit
+(`gh run list --workflow cf-deploy.yml --commit <sha>`, then `gh run watch <id> --exit-status`).
+Readiness: `https://app.pbjsatime.com/health` must be 200 with `ok=true` and the matching
+seven-character commit. A 503 can mean Postgres is unreachable. Inspect Container startup
+logs in Cloudflare; `npx wrangler tail pbjbillingapp --format json` is a live Worker stream,
+not historical boot output. A failed build can leave the older image serving.
 
 **Two patterns:**
 

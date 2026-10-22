@@ -9,14 +9,14 @@
 //   node scripts/prod/split-cleanup-project-2026-10.mjs            # dry run: snapshot + plan
 //   node scripts/prod/split-cleanup-project-2026-10.mjs --apply    # do it
 //
-// Connection: DATABASE_PUBLIC_URL or DATABASE_URL. The store is built the way the
-// server builds it; PGSSLMODE=no-verify is set here because the Railway public
-// proxy presents a certificate node-pg will not verify.
+// Connection: PROD_DATABASE_URL from the environment or PBJ_PROD_ENV_FILE.
+// TLS verifies the host certificate. Store-backed scripts use the same URL.
 //
 // Undo: the snapshot JSON holds the eleven original rows in full. To reverse,
 // delete every time_entries row whose group_id is in the printed list, and
 // re-insert the snapshot rows (all columns are there).
 
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
@@ -47,18 +47,14 @@ const TARGETS = [
 ]
 
 const apply = process.argv.includes('--apply')
-const url = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL
-if (!url) {
-  console.error('DATABASE_PUBLIC_URL (or DATABASE_URL) is required')
-  process.exit(1)
-}
+const url = prodDatabaseUrl(prodEnv(['PROD_DATABASE_URL']).PROD_DATABASE_URL)
 process.env.DATABASE_URL = url
-process.env.PGSSLMODE = 'no-verify'
+process.env.PGSSLMODE = 'verify-full'
 
 const { AppDataStore } = await import('../../db/store.js')
 const store = new AppDataStore()
 if (store.mode !== 'postgres') throw new Error('store did not come up in postgres mode')
-const pool = new Pool({ connectionString: url, ssl: { rejectUnauthorized: false }, max: 2 })
+const pool = new Pool({ connectionString: url, ssl: { rejectUnauthorized: true }, max: 2 })
 
 /** Whole minutes, remainder spread one minute at a time from the first target. */
 function evenAllocations(minutes) {

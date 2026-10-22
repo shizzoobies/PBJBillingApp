@@ -14,10 +14,9 @@
 //
 // The snapshot (every active client's id, name, payment_terms, plus the firm
 // client_defaults) is written to docs/prod-snapshots/ BEFORE the update and
-// should be committed. Connection string: DATABASE_PUBLIC_URL / DATABASE_URL
-// in the environment, else the Railway CLI.
+// should be committed. Connection: PROD_DATABASE_URL from the environment or PBJ_PROD_ENV_FILE.
 
-import { execFileSync } from 'node:child_process'
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
@@ -33,19 +32,10 @@ const undoIndex = args.indexOf('--undo')
 const undoPath = undoIndex >= 0 ? args[undoIndex + 1] : null
 
 function connectionString() {
-  const fromEnv = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL
-  if (fromEnv) return fromEnv
-  const out = execFileSync(
-    'npx',
-    ['@railway/cli@latest', 'variables', '--service', 'Postgres', '--json'],
-    { encoding: 'utf8', shell: true, stdio: ['ignore', 'pipe', 'inherit'] },
-  )
-  const url = JSON.parse(out).DATABASE_PUBLIC_URL
-  if (!url) throw new Error('DATABASE_PUBLIC_URL missing from railway variables output')
-  return url
+  return prodDatabaseUrl(prodEnv(['PROD_DATABASE_URL']).PROD_DATABASE_URL)
 }
 
-const db = new Client({ connectionString: connectionString(), ssl: { rejectUnauthorized: false } })
+const db = new Client({ connectionString: connectionString(), ssl: { rejectUnauthorized: true } })
 
 function shouldReset(terms) {
   const t = (terms ?? '').trim()
