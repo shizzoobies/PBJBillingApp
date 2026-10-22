@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-10-21. Everything below is committed on
+Written 2026-07-21, last updated 2026-10-22. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -24,6 +24,37 @@ developer you talk to; Brittany (user id `emp-patrice`!) is the client whose
 requests arrive through the Updates tracker. **This app moves real money**
 (live Stripe since 2026-08-18): sends, voids and payments are production
 actions — Alex's explicit yes, know the undo, test only on the `Test` client.
+
+**2026-10-22 (overnight) - EMERGENCY MOVE TO CLOUDFLARE + NEON, SITE UP ON THE NEW ADDRESS, DATA NOT YET COPIED; READ THIS FIRST.**
+Railway's 2026-10-21 security disclosure (incident QH8L8B3E: customer env vars read by an attacker; builds, API, SSH
+gateway `ssh.railway.com:22`, TCP-proxy creation and the dashboard console all unusable for the rest of the day) made
+Alex decide a full move: "I cannot lose this client over their failure". Plan + lane split: `docs/plans/cloudflare-migration-2026-10.md`;
+runtime docs `docs/cloudflare.md`; cutover runbook `docs/runbooks/cloudflare-cutover.md`; dump/restore/verify runbook
+`docs/runbooks/db-backup-and-restore.md`. **State at 04:30Z:** `main` = `f246b5e4` (pushed; every commit from 45436eff on is
+the migration), the Worker `pbjbillingapp` is deployed from GitHub Actions (`.github/workflows/cf-deploy.yml`, Docker build
+inside Actions works, ~10 min) and answers on **https://app.pbjsatime.com** (custom domain attached, certificate live,
+`/health` = commit `ce17b7b`, mode postgres) against the THROWAWAY Neon database `pbj_staging` (seeded demo workspace; Alex
+signed in, set up MFA there, magic link delivered via Resend). The production target `neondb` on the same Neon project
+(`pbjbillingapp`, Launch plan, PG 18.6) is EMPTY on purpose. Railway still serves her real data at app.pbjsa.com (healthy,
+old image dba630af). **Blocked:** the data copy, on Railway's gateway (Alex expects it back 5-7 am ET 10-22); he will be
+present for the cutover - do NOT freeze or copy without him. Cutover = runbook steps: hard-stop the Railway app service ->
+`scripts/migrate/dump.mjs` -> `restore.mjs` into neondb -> `verify.mjs` -> `boot-check.mjs` -> `verify --allow-missing` ->
+rotation file `DATABASE_URL`=neondb + `MAINTENANCE_MODE=1` -> `node scripts/cf/secrets-upload.mjs` -> `node scripts/cf/restart.mjs
+--expect-revision=<printed>` -> switch webhooks (Stripe endpoint for the new URL NOT created yet; Resend webhook `02202682-...`
+and ElevenLabs post-call webhook `b057c468...` already created, secrets in the rotation file; the PBJ Assistant AGENT carries
+its own post-call override - patch the agent, then re-provision the voice tools with the new VOICE_TOOL_SECRET) -> maintenance
+off -> redirect app.pbjsa.com. **Secrets:** `D:\PBJ Accounting Work\secrets\rotation-2026-10-21.env` (outside git; names only
+in chat; template comments were stripped; JWT_SECRET is not read by the app; TOTP_ENC_KEY deliberately empty; SignWell x3
+empty = e-sign stays off) and `staging-2026-10-21.env` (same values, DATABASE_URL=pbj_staging, digest/past-due/reminders off;
+delete after cutover). **Known open item (fix round 3 running at handoff time):** a restart after a secret upload came back on
+the OLD env revision four times (the Durable Object isolate keeps the env it was constructed with); the fix hands the Worker's
+current env to the container on `POST /internal/restart` and adds `uptimeSeconds` to `/health` - re-run
+`node scripts/cf/restart.mjs --expect-revision=<revision>` after it deploys and do not cut over until that proof passes.
+Gotchas learned: GitHub secrets set from PowerShell carried a BOM/newline (set with `printf '%s' | gh secret set` or `--body`);
+the image lacked `prototype-data.json` + `tmp/` and the boot DDL created `checklists`/`checklist_templates` AFTER altering
+them, so the container exited on any EMPTY database (fixed in ce17b7b7; Railway never noticed because its tables existed);
+scripts/prod + scripts/cf node:test files mention win32 paths, only `scripts/cf/*.test.mjs` run in CI. SignWell (next
+paragraph) is still built-not-deployed and now waits for the cutover + Alex's SignWell account.
 
 **2026-10-21 (afternoon, ~19:45Z) - SignWell e-signatures PUSHED, NOT YET DEPLOYED (Railway incident); READ THIS FIRST.**
 `origin/main` = `1315c9f4` (the three e-sign commits a3bb442a / d601f10c / 1315c9f4 on top of 4a0c0b87) + locally `67865bd7`
