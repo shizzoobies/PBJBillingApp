@@ -18,6 +18,25 @@ export function pickContainerEnv(env) {
   return picked
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// How long a restart waits for the app to exit on SIGTERM before it is killed.
+const GRACEFUL_STOP_MS = 20_000
+const STOP_POLL_MS = 500
+const STOPPED_STATES = new Set(['stopped', 'stopped_with_code'])
+
+const NAME_SET = new Set(CONTAINER_ENV_NAMES)
+
+/** Throws (message without values) unless `value` is a plain object of listed names with string values. */
+function assertContainerEnv(value) {
+  const plain = value !== null && typeof value === 'object' && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+  if (!plain) throw new Error('restartWith needs a plain object of environment values')
+  for (const [name, entry] of Object.entries(value)) {
+    if (!NAME_SET.has(name)) throw new Error('restartWith: a name is not in CONTAINER_ENV_NAMES')
+    if (typeof entry !== 'string') throw new Error('restartWith: every value must be a string')
+  }
+}
+
 export class AppContainer extends Container {
   // server.js listens on PORT, which the Dockerfile sets to 8080.
   defaultPort = 8080
@@ -41,6 +60,49 @@ export class AppContainer extends Container {
   async onActivityExpired() {
     this.renewActivityTimeout()
   }
+
+  /**
+   * Restart the container on the environment the CALLER holds. The Durable Object isolate that
+   * owns the container can be older than the Worker version (a secret upload does not replace
+   * it promptly), so `this.envVars` from the constructor can be stale; the stateless Worker
+   * always has the current env and hands it in here. The package reads `envVars` when it
+   * starts the container, so a value set right before destroy() is what the next start uses.
+   * The values travel over the Durable Object RPC inside this one Worker, never the network.
+   *
+   * Sends SIGTERM (so the app can finish its writes), waits up to GRACEFUL_STOP_MS for it to
+   * be gone, then destroy()s it either way. stop() itself only signals and returns, so the
+   * wait is ours. Resolves to { graceful, lastStatus }; throws if destroy() fails.
+   */
+  async restartWith(envVars) {
+    assertContainerEnv(envVars)
+    this.envVars = { ...envVars }
+    let graceful = false
+    let lastStatus = null
+    try {
+      await this.stop('SIGTERM')
+      const deadline = Date.now() + GRACEFUL_STOP_MS
+      for (;;) {
+        const state = await this.getState()
+        lastStatus = state?.status ?? null
+        if (STOPPED_STATES.has(lastStatus) || this.container?.running === false) {
+          graceful = true
+          break
+        }
+        if (Date.now() >= deadline) break
+        await sleep(STOP_POLL_MS)
+      }
+    } catch (error) {
+      console.error('[restart] graceful stop failed', error?.message)
+    }
+    try {
+      await this.destroy()
+    } catch (error) {
+      console.error('[restart] destroy failed', error?.message)
+      throw error
+    }
+    console.log('[restart] graceful=' + graceful + ' lastStatus=' + lastStatus)
+    return { graceful, lastStatus }
+  }
 }
 
 /** Length-independent, constant-time string compare (digests first, so lengths never leak). */
@@ -54,38 +116,6 @@ async function tokensMatch(presented, expected) {
 }
 
 const json = (status, body) => Response.json(body, { status })
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-
-// How long a restart waits for the app to exit on SIGTERM before it is killed.
-const GRACEFUL_STOP_MS = 20_000
-const STOP_POLL_MS = 500
-const STOPPED_STATES = new Set(['stopped', 'stopped_with_code'])
-
-/**
- * Ask the container to exit (SIGTERM, so the app can finish its writes), wait up to
- * GRACEFUL_STOP_MS for it to report stopped, then destroy() it either way. Resolves to
- * whether it stopped by itself first.
- */
-async function restartContainer(container) {
-  let graceful = false
-  try {
-    await container.stop('SIGTERM')
-    const deadline = Date.now() + GRACEFUL_STOP_MS
-    for (;;) {
-      const state = await container.getState()
-      if (STOPPED_STATES.has(state?.status)) {
-        graceful = true
-        break
-      }
-      if (Date.now() >= deadline) break
-      await sleep(STOP_POLL_MS)
-    }
-  } catch (error) {
-    console.error('[restart] graceful stop failed', error?.message)
-  }
-  await container.destroy()
-  return graceful
-}
 
 export default {
   async fetch(request, env) {
@@ -105,18 +135,30 @@ export default {
     // /internal/* is for the Worker and its cron, never for the public internet. The cron
     // reaches /internal/tick through the container stub directly (see scheduled below).
     if (pathname === '/internal' || pathname.startsWith('/internal/')) {
-      if (pathname !== '/internal/restart' || request.method !== 'POST' || !env.TICK_TOKEN) {
+      const isRestart = pathname === '/internal/restart' && request.method === 'POST'
+      const isEnvRevision = pathname === '/internal/env-revision' && request.method === 'GET'
+      if ((!isRestart && !isEnvRevision) || !env.TICK_TOKEN) {
         return json(404, { error: 'Not found' })
       }
       if (!(await tokensMatch(request.headers.get('x-tick-token') ?? '', String(env.TICK_TOKEN)))) {
         return json(401, { error: 'Unauthorized' })
       }
+      // The revision THIS Worker version carries (the last secrets upload). Answered here,
+      // never forwarded, so it proves what a restart is about to hand to the container.
+      if (isEnvRevision) return json(200, { workerEnvRevision: env.ENV_REVISION ?? null })
       // envVars is read only when the container STARTS, so a secret change reaches the app
-      // only after a restart. stop() sends SIGTERM and returns while the process may still be
-      // running, so wait for it (briefly), then destroy() to end it for certain. The next
-      // request or tick starts it with the current env.
-      const graceful = await restartContainer(getContainer(env.APP, 'app'))
-      return json(200, { restarted: true, graceful })
+      // only after a restart, and the Durable Object that owns the container may still hold
+      // an older env than this Worker. So this Worker (which has the current env) hands it
+      // to the Durable Object, which sets it, stops the container and destroys it. The next
+      // request or tick starts it with that env. The values go over the Durable Object RPC
+      // inside this Worker, never over the public network.
+      try {
+        const { graceful, lastStatus } = await getContainer(env.APP, 'app').restartWith(pickContainerEnv(env))
+        return json(200, { restarted: true, graceful, lastStatus })
+      } catch (error) {
+        console.error('[restart] restartWith failed', error?.message)
+        return json(500, { restarted: false })
+      }
     }
 
     // The app trusts the LAST x-forwarded-for hop (server.js getClientIp), so a client-sent

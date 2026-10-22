@@ -113,43 +113,122 @@ describe('POST /internal/restart', () => {
     expect(getContainer).not.toHaveBeenCalled()
   })
 
-  it('sends SIGTERM, waits for stopped, then destroys (awaited) and answers graceful: true', async () => {
-    const order = []
-    let finished = false
-    const states = [{ status: 'healthy' }, { status: 'stopping' }, { status: 'stopped_with_code' }]
-    const stop = vi.fn(async () => { order.push('stop') })
-    const getState = vi.fn(async () => { order.push('getState'); return states.shift() })
-    const destroy = vi.fn(async () => {
-      order.push('destroy')
-      await new Promise((resolve) => setTimeout(resolve, 5))
-      finished = true
-    })
-    getContainer.mockReturnValueOnce({ stop, getState, destroy, fetch: containerFetch })
-    const env = { APP: { binding: true }, TICK_TOKEN: 'tick-token-value' }
+  it('hands the Worker env to restartWith (not the stub-side stop/destroy) and relays graceful and lastStatus', async () => {
+    const restartWith = vi.fn(async () => ({ graceful: true, lastStatus: 'stopped_with_code' }))
+    const stop = vi.fn()
+    const destroy = vi.fn()
+    getContainer.mockReturnValueOnce({ restartWith, stop, destroy, fetch: containerFetch })
+    const env = {
+      APP: { binding: true },
+      TICK_TOKEN: 'tick-token-value',
+      DATABASE_URL: 'db-new',
+      ENV_REVISION: 'rev-2',
+      CLOUDFLARE_API_TOKEN: 'never-forwarded',
+    }
     const response = await worker.fetch(restart('tick-token-value'), env)
-    expect(finished).toBe(true)
-    expect(stop).toHaveBeenCalledWith('SIGTERM')
-    expect(order).toEqual(['stop', 'getState', 'getState', 'getState', 'destroy'])
-    expect(destroy).toHaveBeenCalledTimes(1)
     expect(getContainer).toHaveBeenCalledWith(env.APP, 'app')
+    expect(restartWith).toHaveBeenCalledTimes(1)
+    expect(restartWith).toHaveBeenCalledWith({
+      DATABASE_URL: 'db-new',
+      TICK_TOKEN: 'tick-token-value',
+      ENV_REVISION: 'rev-2',
+    })
+    expect(stop).not.toHaveBeenCalled()
+    expect(destroy).not.toHaveBeenCalled()
     expect(containerFetch).not.toHaveBeenCalled()
     expect(response.status).toBe(200)
-    await expect(response.json()).resolves.toEqual({ restarted: true, graceful: true })
+    await expect(response.json()).resolves.toEqual({ restarted: true, graceful: true, lastStatus: 'stopped_with_code' })
   })
 
-  it('destroys anyway and answers graceful: false when the container does not stop within 20 seconds', async () => {
+  it('answers 500 { restarted: false } and logs the message only when restartWith fails', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    getContainer.mockReturnValueOnce({ restartWith: vi.fn(async () => { throw new Error('destroy exploded') }) })
+    const response = await worker.fetch(restart('tick-token-value'), { APP: {}, TICK_TOKEN: 'tick-token-value', DATABASE_URL: 'secret-db-value' })
+    expect(response.status).toBe(500)
+    await expect(response.json()).resolves.toEqual({ restarted: false })
+    expect(spy).toHaveBeenCalledWith('[restart] restartWith failed', 'destroy exploded')
+    expect(JSON.stringify(spy.mock.calls)).not.toContain('secret-db-value')
+    spy.mockRestore()
+  })
+})
+
+describe('GET /internal/env-revision', () => {
+  const read = (token, method = 'GET') =>
+    new Request('https://app.pbjsatime.com/internal/env-revision', { method, headers: token === undefined ? {} : { 'x-tick-token': token } })
+
+  it('is 404 when TICK_TOKEN is not configured, and for any other method', async () => {
+    expect((await worker.fetch(read('anything'), { APP: {}, ENV_REVISION: 'rev-2' })).status).toBe(404)
+    expect((await worker.fetch(read('tick-token-value', 'POST'), { APP: {}, TICK_TOKEN: 'tick-token-value' })).status).toBe(404)
+    expect(getContainer).not.toHaveBeenCalled()
+  })
+
+  it('is 401 for a missing or wrong token', async () => {
+    for (const token of [undefined, '', 'wrong', 'tick-token-valuf']) {
+      const response = await worker.fetch(read(token), { APP: {}, TICK_TOKEN: 'tick-token-value', ENV_REVISION: 'rev-2' })
+      expect(response.status).toBe(401)
+      expect(await response.text()).not.toContain('rev-2')
+    }
+    expect(getContainer).not.toHaveBeenCalled()
+  })
+
+  it('answers the revision this Worker version carries, or null, without touching the container', async () => {
+    const withRevision = await worker.fetch(read('tick-token-value'), { APP: {}, TICK_TOKEN: 'tick-token-value', ENV_REVISION: 'rev-2' })
+    expect(withRevision.status).toBe(200)
+    await expect(withRevision.json()).resolves.toEqual({ workerEnvRevision: 'rev-2' })
+    const without = await worker.fetch(read('tick-token-value'), { APP: {}, TICK_TOKEN: 'tick-token-value' })
+    await expect(without.json()).resolves.toEqual({ workerEnvRevision: null })
+    expect(getContainer).not.toHaveBeenCalled()
+    expect(containerFetch).not.toHaveBeenCalled()
+  })
+})
+
+describe('AppContainer.restartWith', () => {
+  const make = ({ stop, getState, destroy, running } = {}) => {
+    const container = new AppContainer({}, { DATABASE_URL: 'stale-db' })
+    container.stop = stop ?? vi.fn(async () => {})
+    container.getState = getState ?? vi.fn(async () => ({ status: 'stopped' }))
+    container.destroy = destroy ?? vi.fn(async () => {})
+    if (running !== undefined) container.container = { running }
+    return container
+  }
+
+  it('sets the passed env BEFORE destroy, sends SIGTERM, polls until stopped, then destroys (awaited)', async () => {
+    const order = []
+    let finished = false
+    let envAtDestroy
+    const states = [{ status: 'healthy' }, { status: 'stopping' }, { status: 'stopped_with_code' }]
+    const container = make({
+      stop: vi.fn(async () => { order.push('stop') }),
+      getState: vi.fn(async () => { order.push('getState'); return states.shift() }),
+      destroy: vi.fn(async () => {
+        order.push('destroy')
+        envAtDestroy = container.envVars
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        finished = true
+      }),
+    })
+    await expect(container.restartWith({ DATABASE_URL: 'fresh-db', ENV_REVISION: 'rev-2' })).resolves.toEqual({ graceful: true, lastStatus: 'stopped_with_code' })
+    expect(finished).toBe(true)
+    expect(container.stop).toHaveBeenCalledWith('SIGTERM')
+    expect(order).toEqual(['stop', 'getState', 'getState', 'getState', 'destroy'])
+    expect(envAtDestroy).toEqual({ DATABASE_URL: 'fresh-db', ENV_REVISION: 'rev-2' })
+    expect(container.envVars).toEqual({ DATABASE_URL: 'fresh-db', ENV_REVISION: 'rev-2' })
+  })
+
+  it('counts a runtime that reports not running as stopped even while the state still says healthy', async () => {
+    const container = make({ getState: vi.fn(async () => ({ status: 'healthy' })), running: false })
+    await expect(container.restartWith({})).resolves.toEqual({ graceful: true, lastStatus: 'healthy' })
+  })
+
+  it('destroys anyway and reports graceful: false with the last status when it does not stop within 20 seconds', async () => {
     vi.useFakeTimers()
     try {
-      const stop = vi.fn(async () => {})
-      const getState = vi.fn(async () => ({ status: 'healthy' }))
-      const destroy = vi.fn(async () => {})
-      getContainer.mockReturnValueOnce({ stop, getState, destroy, fetch: containerFetch })
-      const pending = worker.fetch(restart('tick-token-value'), { APP: {}, TICK_TOKEN: 'tick-token-value' })
+      const container = make({ getState: vi.fn(async () => ({ status: 'running' })), running: true })
+      const pending = container.restartWith({ DATABASE_URL: 'fresh-db' })
       await vi.advanceTimersByTimeAsync(21_000)
-      const response = await pending
-      expect(destroy).toHaveBeenCalledTimes(1)
-      expect(getState.mock.calls.length).toBeGreaterThan(10)
-      await expect(response.json()).resolves.toEqual({ restarted: true, graceful: false })
+      await expect(pending).resolves.toEqual({ graceful: false, lastStatus: 'running' })
+      expect(container.destroy).toHaveBeenCalledTimes(1)
+      expect(container.getState.mock.calls.length).toBeGreaterThan(10)
     } finally {
       vi.useRealTimers()
     }
@@ -157,17 +236,39 @@ describe('POST /internal/restart', () => {
 
   it('still destroys, with graceful: false, when stop() throws', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const destroy = vi.fn(async () => {})
-    getContainer.mockReturnValueOnce({
-      stop: vi.fn(async () => { throw new Error('rpc failed') }),
-      getState: vi.fn(),
-      destroy,
-      fetch: containerFetch,
-    })
-    const response = await worker.fetch(restart('tick-token-value'), { APP: {}, TICK_TOKEN: 'tick-token-value' })
-    expect(destroy).toHaveBeenCalledTimes(1)
-    await expect(response.json()).resolves.toEqual({ restarted: true, graceful: false })
+    const container = make({ stop: vi.fn(async () => { throw new Error('rpc failed') }) })
+    await expect(container.restartWith({})).resolves.toEqual({ graceful: false, lastStatus: null })
+    expect(container.destroy).toHaveBeenCalledTimes(1)
     spy.mockRestore()
+  })
+
+  it('logs "[restart] destroy failed" with the message only and throws when destroy() fails', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const container = make({ destroy: vi.fn(async () => { throw new Error('destroy exploded') }) })
+    await expect(container.restartWith({ DATABASE_URL: 'secret-db-value' })).rejects.toThrow('destroy exploded')
+    expect(spy).toHaveBeenCalledWith('[restart] destroy failed', 'destroy exploded')
+    expect(JSON.stringify(spy.mock.calls)).not.toContain('secret-db-value')
+    spy.mockRestore()
+  })
+
+  it('refuses a bad env before touching the container, with messages that carry no values', async () => {
+    for (const bad of [null, undefined, 'x', 5, [], new Map(), { NOT_LISTED: 'secret-value' }, { DATABASE_URL: 5 }, { DATABASE_URL: null }]) {
+      const container = make()
+      const error = await container.restartWith(bad).then(() => null, (e) => e)
+      expect(error, String(bad)).toBeInstanceOf(Error)
+      expect(error.message).not.toContain('secret-value')
+      expect(container.stop).not.toHaveBeenCalled()
+      expect(container.destroy).not.toHaveBeenCalled()
+      expect(container.envVars).toEqual({ DATABASE_URL: 'stale-db' })
+    }
+  })
+
+  it('copies the env it is given instead of keeping the caller\'s object', async () => {
+    const container = make()
+    const given = { DATABASE_URL: 'fresh-db' }
+    await container.restartWith(given)
+    given.DATABASE_URL = 'changed-later'
+    expect(container.envVars).toEqual({ DATABASE_URL: 'fresh-db' })
   })
 })
 

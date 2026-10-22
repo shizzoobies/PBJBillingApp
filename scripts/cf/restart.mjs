@@ -5,14 +5,16 @@
 //
 // The container receives its environment only when it STARTS, and a new Worker version
 // re-attaches to the running container, so a secret upload changes nothing until this
-// runs (docs/cloudflare.md). It POSTs /internal/restart (the Worker, never the app,
-// answers it; header x-tick-token = TICK_TOKEN), then waits for /health to answer 200
-// and prints the commit and maintenance fields. The token is never printed.
+// runs (docs/cloudflare.md). Before restarting it reads /health (uptimeSeconds) and
+// GET /internal/env-revision (the revision the Worker will hand to the container). It then
+// POSTs /internal/restart (the Worker, never the app, answers both; header x-tick-token =
+// TICK_TOKEN) and waits for /health to answer 200 with an uptimeSeconds LOWER than before,
+// which proves the container really restarted. The token is never printed.
 //
-// --expect-revision=<ENV_REVISION printed by secrets-upload.mjs>: a restart served by an
-// older Worker version can bring the container back on the OLD environment, so after /health
-// answers 200 its envRevision must equal the value; if not, restart again (up to
-// MAX_EXTRA_RESTARTS more times, RESTART_GAP_MS apart) and fail with the last status if it never does.
+// --expect-revision=<ENV_REVISION printed by secrets-upload.mjs>, default: the Worker's own
+// revision when it reports one. After /health answers, its envRevision must equal the value;
+// if not, restart again (up to MAX_EXTRA_RESTARTS more times, RESTART_GAP_MS apart) and fail
+// with the last status if it never does.
 import { pathToFileURL } from 'node:url'
 import { readEnvFile } from '../prod/env.mjs'
 import { DEFAULT_ROTATION_FILE } from './secrets-upload.mjs'
@@ -20,6 +22,8 @@ import { DEFAULT_ROTATION_FILE } from './secrets-upload.mjs'
 export const DEFAULT_APP_URL = 'https://app.pbjsatime.com'
 const HEALTH_TIMEOUT_MS = 90_000
 const HEALTH_INTERVAL_MS = 3_000
+// With no uptime from before the restart to compare with, a restarted container is younger than this.
+export const FRESH_UPTIME_SECONDS = 120
 // The restart route itself waits up to 20 s for a graceful stop before it destroys the
 // container (measured 20.9 s on 2026-10-22), so the request budget has to be well above that.
 const REQUEST_TIMEOUT_MS = 60_000
@@ -41,11 +45,29 @@ export function reportedRevision(body) {
   return typeof body?.envRevision === 'string' && body.envRevision ? body.envRevision : null
 }
 
+/** The uptimeSeconds a /health answer reports, or null. */
+export function reportedUptime(body) {
+  return Number.isFinite(body?.uptimeSeconds) && body.uptimeSeconds >= 0 ? body.uptimeSeconds : null
+}
+
 /** What the last /health answer said, for a failure message; only fields that are safe to show. */
 export function describeHealth(status, body) {
   if (status === null || status === undefined) return 'no response'
+  const uptime = reportedUptime(body)
   return 'status=' + status + ' db=' + (typeof body?.db === 'string' ? body.db : 'unknown') +
-    ' maintenance=' + Boolean(body?.maintenance) + ' envRevision=' + (reportedRevision(body) ?? 'none')
+    ' maintenance=' + Boolean(body?.maintenance) + ' envRevision=' + (reportedRevision(body) ?? 'none') +
+    (uptime === null ? '' : ' uptimeSeconds=' + uptime)
+}
+
+/**
+ * Does a 200 answer show a new process? An old process keeps counting, so its uptime would be
+ * at least `before` plus the seconds since that was read; a new one is lower. true/false from
+ * that, or null when this app version reports no uptime (then the answer is accepted, because
+ * nothing can prove it). With no `before`, a new process is simply younger than FRESH_UPTIME_SECONDS.
+ */
+export function uptimeProvesRestart(before, after, elapsedSeconds = 0) {
+  if (after === null) return null
+  return before === null ? after < FRESH_UPTIME_SECONDS : after < before + elapsedSeconds - 1
 }
 
 /** The base URL to talk to: --url=, else APP_PUBLIC_URL, else the production domain. HTTPS only. */
@@ -82,9 +104,28 @@ export async function restartContainer(argv = [], {
     throw new Error(USAGE)
   }
   const base = baseUrl(argv, env)
-  const expected = expectedRevision(argv)
+  const flagRevision = expectedRevision(argv)
   const token = String(readEnvFile(positional[0] || DEFAULT_ROTATION_FILE).values.TICK_TOKEN ?? '').trim()
   if (!token) throw new Error('TICK_TOKEN is blank in the env file; run secrets-upload.mjs --generate first')
+
+  // What the container reports now, and what the Worker will hand it. Neither is required.
+  let uptimeBefore = null
+  let uptimeBeforeAt = now()
+  try {
+    const before = await timedFetch(fetchImpl, base + '/health', {})
+    if (before.status === 200) uptimeBefore = reportedUptime(await before.json().catch(() => null))
+    uptimeBeforeAt = now()
+  } catch { /* the container may be asleep; nothing to compare with */ }
+  let workerRevision = null
+  try {
+    const response = await timedFetch(fetchImpl, base + '/internal/env-revision', { headers: { 'x-tick-token': token } })
+    if (response.status === 200) {
+      const body = await response.json().catch(() => null)
+      if (typeof body?.workerEnvRevision === 'string' && body.workerEnvRevision) workerRevision = body.workerEnvRevision
+    }
+  } catch { /* an older Worker version has no such route */ }
+  print('worker env revision: ' + (workerRevision ?? 'none'))
+  const expected = flagRevision ?? workerRevision
 
   for (let restarts = 0; ; restarts++) {
     let restart
@@ -98,7 +139,9 @@ export async function restartContainer(argv = [], {
     if (restart.status === 200) {
       try { restartBody = await restart.json() } catch { /* the status is what matters */ }
     }
-    print('restart: HTTP ' + restart.status + (typeof restartBody?.graceful === 'boolean' ? ' graceful=' + restartBody.graceful : ''))
+    print('restart: HTTP ' + restart.status +
+      (typeof restartBody?.graceful === 'boolean' ? ' graceful=' + restartBody.graceful : '') +
+      (typeof restartBody?.lastStatus === 'string' ? ' lastStatus=' + restartBody.lastStatus : ''))
     if (restart.status !== 200) {
       throw new Error(
         restart.status === 404 ? 'Restart refused (404): TICK_TOKEN is not uploaded to the Worker yet' :
@@ -117,21 +160,27 @@ export async function restartContainer(argv = [], {
         let body = null
         try { body = await response.json() } catch { /* an unreadable body is still an answer */ }
         last = { status: response.status, body }
-        if (response.status === 200) answered = body ?? {}
+        // A 200 only counts once the uptime shows a NEW process (the old one may still answer).
+        if (response.status === 200 && uptimeProvesRestart(uptimeBefore, reportedUptime(body), (now() - uptimeBeforeAt) / 1000) !== false) answered = body ?? {}
       } catch { /* the container is still starting */ }
       if (answered) break
       if (now() >= deadline) {
-        throw new Error('/health did not answer 200 within 90 seconds (last: ' + describeHealth(last.status, last.body) + ')')
+        const seen = describeHealth(last.status, last.body)
+        throw new Error(last.status === 200
+          ? 'the container did not restart: /health keeps reporting an uptime that did not drop (last: ' + seen + ')'
+          : '/health did not answer 200 within 90 seconds (last: ' + seen + ')')
       }
       await sleep(HEALTH_INTERVAL_MS)
     }
 
+    const uptime = reportedUptime(answered)
+    print(uptime === null ? 'container restarted: uptime not reported by this app version' : 'container restarted: uptime ' + uptime + ' s')
     const line = healthLine(200, answered)
     print(line)
     const revision = reportedRevision(answered)
     if (expected === null || revision === expected) {
-      if (expected !== null) print('env revision: matches')
-      return { status: 200, commit: answered.commit ?? 'unknown', maintenance: Boolean(answered.maintenance), envRevision: revision, restarts: restarts + 1, line }
+      if (expected !== null) print('env revision: matches (' + revision + (uptime === null ? '' : ', uptime ' + uptime + ' s') + ')')
+      return { status: 200, commit: answered.commit ?? 'unknown', maintenance: Boolean(answered.maintenance), envRevision: revision, uptimeSeconds: uptime, restarts: restarts + 1, line }
     }
     if (restarts >= MAX_EXTRA_RESTARTS) {
       throw new Error(
@@ -140,6 +189,8 @@ export async function restartContainer(argv = [], {
       )
     }
     print('env revision: expected ' + expected + ', got ' + (revision ?? 'none') + '; restarting again in ' + RESTART_GAP_MS / 1000 + ' s (' + (restarts + 1) + ' of ' + MAX_EXTRA_RESTARTS + ')')
+    uptimeBefore = uptime
+    uptimeBeforeAt = now()
     await sleep(RESTART_GAP_MS)
   }
 }
