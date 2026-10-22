@@ -96,6 +96,9 @@ export function libpqEnv(connectionUrl) {
   if (sslmode) env.PGSSLMODE = sslmode
   const channelBinding = url.searchParams.get('channel_binding')
   if (channelBinding) env.PGCHANNELBINDING = channelBinding
+  // A root-certificate file the URL names itself (libpq's sslrootcert=<file>).
+  const rootCert = url.searchParams.get('sslrootcert')
+  if (rootCert) env.PGSSLROOTCERT = rootCert
   return env
 }
 
@@ -113,7 +116,8 @@ const tempRootCerts = new Set()
  * Node's bundled root certificates (written to a private temporary PEM file, because the
  * Windows EDB OpenSSL has no system store and `sslrootcert=system` fails there). A mode
  * that would leave the server unverified (disable, allow, prefer) is refused for such a
- * host. Call cleanupToolEnv(env) when the tool has exited.
+ * host. A `sslrootcert=<file>` in the URL is honored instead of the temporary file (and is
+ * never deleted). Call cleanupToolEnv(env) when the tool has exited.
  */
 export function toolEnv(baseEnv, connectionUrl) {
   const clean = {}
@@ -131,10 +135,12 @@ export function toolEnv(baseEnv, connectionUrl) {
         `The database URL's sslmode "${mode}" would leave the server unverified; use sslmode=require (or verify-full) for ${connection.PGHOST} (URL not shown).`,
       )
     }
-    const file = path.join(tmpdir(), `pbj-pgroot-${randomBytes(8).toString('hex')}.pem`)
-    writeFileSync(file, `${tls.rootCertificates.join('\n')}\n`, { mode: 0o600 })
-    tempRootCerts.add(file)
-    connection.PGSSLROOTCERT = file
+    if (!connection.PGSSLROOTCERT) {
+      const file = path.join(tmpdir(), `pbj-pgroot-${randomBytes(8).toString('hex')}.pem`)
+      writeFileSync(file, `${tls.rootCertificates.join('\n')}\n`, { mode: 0o600 })
+      tempRootCerts.add(file)
+      connection.PGSSLROOTCERT = file
+    }
   }
   return { ...clean, ...connection }
 }

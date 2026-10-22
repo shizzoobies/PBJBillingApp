@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readEnvFile } from '../prod/env.mjs'
 import { CONTAINER_ENV_NAMES } from '../../cloudflare/env-names.js'
+import { isMaintenanceMode } from '../../lib/host-runtime.js'
 
 export const DEFAULT_ROTATION_FILE = 'D:\\PBJ Accounting Work\\secrets\\rotation-2026-10-21.env'
 
@@ -37,16 +38,15 @@ export const WRANGLER_VARS = Object.freeze(Object.keys(parseJsonc(readFileSync(W
 // as vars. Everything else - addresses, ids, switches, keys - is uploaded as a Worker secret,
 // because the repo is public.
 export const SECRET_NAMES = Object.freeze(CONTAINER_ENV_NAMES.filter((name) => !WRANGLER_VARS.includes(name)))
-const GENERATED_NAMES = ['JWT_SECRET', 'VOICE_TOOL_SECRET', 'TICK_TOKEN']
+const GENERATED_NAMES = ['VOICE_TOOL_SECRET', 'TICK_TOKEN']
 
 // A database holding real data must never go live un-gated: the same upload has to carry
-// MAINTENANCE_MODE=1 (blocks writes, jobs and webhooks until /health is checked).
+// MAINTENANCE_MODE=1 (blocks writes, jobs and webhooks until /health is checked). The test
+// is the app's own (isMaintenanceMode: exactly "1"), so "0", "true" or " " cannot slip through.
 export function assertMaintenanceGate(values, allowLive = false) {
-  const has = (name) => String(values[name] ?? '').trim() !== ''
-  if (has('DATABASE_URL') && !has('MAINTENANCE_MODE') && !allowLive) {
-    throw new Error(
-      'Refusing to upload DATABASE_URL without MAINTENANCE_MODE (set MAINTENANCE_MODE=1 in the env file, or pass --allow-live)',
-    )
+  const hasDatabase = String(values.DATABASE_URL ?? '').trim() !== ''
+  if (hasDatabase && !isMaintenanceMode(values) && !allowLive) {
+    throw new Error('Refusing to upload DATABASE_URL: MAINTENANCE_MODE must be 1 (or pass --allow-live)')
   }
 }
 
@@ -63,7 +63,7 @@ export function selectSecrets(values) {
   return { secrets, skipped: [...skipped] }
 }
 
-export function uploadSecrets(argv = [], { run = spawnSync, print = console.log } = {}) {
+export function uploadSecrets(argv = [], { run = spawnSync, print = console.log, now = () => new Date() } = {}) {
   const positional = argv.filter((arg) => !arg.startsWith('--'))
   if (positional.length > 1 || argv.some((arg) => arg.startsWith('--') && !['--dry-run', '--generate', '--allow-live'].includes(arg))) {
     throw new Error('Usage: node scripts/cf/secrets-upload.mjs [env-file] [--dry-run] [--generate] [--allow-live]')
@@ -96,7 +96,18 @@ export function uploadSecrets(argv = [], { run = spawnSync, print = console.log 
       throw new Error('Cannot save generated names to env file')
     }
   }
-  const { secrets, skipped } = selectSecrets({ ...source.values, ...generated })
+  const selected = selectSecrets({ ...source.values, ...generated })
+  const secrets = selected.secrets
+  // ENV_REVISION is stamped below, not read from the file, so it is never "skipped".
+  const skipped = selected.skipped.filter((name) => name !== 'ENV_REVISION')
+  // Every real upload carries a fresh ENV_REVISION. /health echoes it, so restart.mjs
+  // --expect-revision can tell a container started with THIS upload from one that came
+  // back on the old environment. A dry run changes nothing, so it carries none.
+  let revision = null
+  if (!dryRun && Object.keys(secrets).length) {
+    revision = now().toISOString()
+    secrets.ENV_REVISION = revision
+  }
   const names = Object.keys(secrets)
   if (!dryRun && names.length) {
     // Wrangler stdin JSON, with no FILE argument:
@@ -119,7 +130,8 @@ export function uploadSecrets(argv = [], { run = spawnSync, print = console.log 
   }
   print((dryRun ? 'Would set: ' : 'Set: ') + (names.join(', ') || '(none)'))
   print('Skipped: ' + (skipped.join(', ') || '(none)'))
-  return { names, skipped }
+  if (revision) print('Env revision: ' + revision + ' (node scripts/cf/restart.mjs --expect-revision=' + revision + ')')
+  return { names, skipped, revision }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

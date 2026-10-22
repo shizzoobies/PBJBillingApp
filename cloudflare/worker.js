@@ -54,6 +54,38 @@ async function tokensMatch(presented, expected) {
 }
 
 const json = (status, body) => Response.json(body, { status })
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// How long a restart waits for the app to exit on SIGTERM before it is killed.
+const GRACEFUL_STOP_MS = 20_000
+const STOP_POLL_MS = 500
+const STOPPED_STATES = new Set(['stopped', 'stopped_with_code'])
+
+/**
+ * Ask the container to exit (SIGTERM, so the app can finish its writes), wait up to
+ * GRACEFUL_STOP_MS for it to report stopped, then destroy() it either way. Resolves to
+ * whether it stopped by itself first.
+ */
+async function restartContainer(container) {
+  let graceful = false
+  try {
+    await container.stop('SIGTERM')
+    const deadline = Date.now() + GRACEFUL_STOP_MS
+    for (;;) {
+      const state = await container.getState()
+      if (STOPPED_STATES.has(state?.status)) {
+        graceful = true
+        break
+      }
+      if (Date.now() >= deadline) break
+      await sleep(STOP_POLL_MS)
+    }
+  } catch (error) {
+    console.error('[restart] graceful stop failed', error?.message)
+  }
+  await container.destroy()
+  return graceful
+}
 
 export default {
   async fetch(request, env) {
@@ -80,16 +112,21 @@ export default {
         return json(401, { error: 'Unauthorized' })
       }
       // envVars is read only when the container STARTS, so a secret change reaches the app
-      // only after a restart. destroy() ends it for certain (stop() just sends SIGTERM and
-      // returns while the process may still be running on the old env); the app already
-      // survives being killed. The next request or tick starts it with the current env.
-      await getContainer(env.APP, 'app').destroy()
-      return json(200, { restarted: true })
+      // only after a restart. stop() sends SIGTERM and returns while the process may still be
+      // running, so wait for it (briefly), then destroy() to end it for certain. The next
+      // request or tick starts it with the current env.
+      const graceful = await restartContainer(getContainer(env.APP, 'app'))
+      return json(200, { restarted: true, graceful })
     }
 
-    // Forward the Request object itself: the Stripe, Resend and SignWell webhooks verify an
-    // HMAC over the exact bytes sent, so the body must not be re-read or re-encoded here.
-    return getContainer(env.APP, 'app').fetch(request)
+    // The app trusts the LAST x-forwarded-for hop (server.js getClientIp), so a client-sent
+    // header must never reach it: replace it with the address Cloudflare saw. Rebuilding only
+    // the headers keeps the body stream untouched, which the Stripe, Resend and SignWell
+    // webhooks need (they verify an HMAC over the exact bytes sent).
+    const headers = new Headers(request.headers)
+    headers.set('x-forwarded-for', request.headers.get('cf-connecting-ip') ?? '')
+    headers.delete('x-real-ip')
+    return getContainer(env.APP, 'app').fetch(new Request(request, { headers }))
   },
 
   // Cron Trigger (wrangler.jsonc triggers.crons): run the app's periodic jobs. The fetch
@@ -101,6 +138,7 @@ export default {
           method: 'POST',
           headers: { 'x-tick-token': env.TICK_TOKEN ?? '' },
         })
-        .then((response) => response.ok || console.error('[cron] tick', response.status)),
+        .then((response) => response.ok || console.error('[cron] tick', response.status))
+        .catch((error) => console.error('[cron] tick failed', error?.message)),
     ),
 }

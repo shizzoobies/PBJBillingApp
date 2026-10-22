@@ -3246,6 +3246,9 @@ const server = createServer(async (request, response) => {
         commit: resolveAppCommit(),
         // True while the app is being moved between hosts: writes answer 503, no jobs run.
         maintenance: isMaintenanceMode(),
+        // The ENV_REVISION stamped by the last secrets upload (scripts/cf/secrets-upload.mjs);
+        // scripts/cf/restart.mjs polls it to prove the container started with that upload.
+        envRevision: String(process.env.ENV_REVISION || '') || null,
       })
       return
     }

@@ -47,6 +47,8 @@ function envReads() {
   return reads
 }
 
+const readEnvReadNames = () => [...envReads().keys()]
+
 describe('environment names line up end to end', () => {
   it('finds the reads it is meant to police (the scan itself works)', () => {
     const reads = envReads()
@@ -61,6 +63,28 @@ describe('environment names line up end to end', () => {
       .filter(([name]) => !CONTAINER_ENV_NAMES.includes(name) && !HOST_ONLY.has(name))
       .map(([name, file]) => `${name} (${file})`)
     expect(missing).toEqual([])
+  })
+
+  it('no source file pulls variables out of the environment by destructuring (the scan could not see them)', () => {
+    const files = [path.join(root, 'server.js'), ...sourceFiles(path.join(root, 'lib')), ...sourceFiles(path.join(root, 'db'))]
+    const offenders = files
+      .filter((file) => /\}\s*=\s*(?:process\.)?env\b(?!\s*[.\[?])/.test(readFileSync(file, 'utf8')))
+      .map((file) => path.relative(root, file))
+    expect(offenders).toEqual([])
+  })
+
+  it('the wrangler.jsonc vars are exactly the plain settings, and each reaches the container', () => {
+    const config = parseJsonc(readFileSync(path.join(root, 'wrangler.jsonc'), 'utf8'))
+    const vars = Object.keys(config.vars ?? {})
+    for (const name of ['NODE_ENV', 'APP_PUBLIC_URL']) expect(vars, name).toContain(name)
+    expect(vars.filter((name) => !['NODE_ENV', 'APP_PUBLIC_URL', 'FIRM_TIME_ZONE'].includes(name))).toEqual([])
+    expect(vars.filter((name) => !CONTAINER_ENV_NAMES.includes(name))).toEqual([])
+  })
+
+  it('JWT_SECRET is not an app setting (sessions are database rows), so nothing carries it', () => {
+    expect(readEnvReadNames()).not.toContain('JWT_SECRET')
+    expect(CONTAINER_ENV_NAMES).not.toContain('JWT_SECRET')
+    expect(SECRET_NAMES).not.toContain('JWT_SECRET')
   })
 
   it('every container name is either a wrangler.jsonc var or uploaded as a secret', () => {

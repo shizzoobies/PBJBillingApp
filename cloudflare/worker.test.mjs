@@ -27,15 +27,43 @@ beforeEach(() => {
 })
 
 describe('fetch', () => {
-  it('hands the very same Request to the one named container', async () => {
+  it('forwards the same method, url and body bytes to the one named container', async () => {
     const response = new Response('ok')
     containerFetch.mockResolvedValue(response)
-    const request = new Request('https://app.pbjsatime.com/api/stripe/webhook', { method: 'POST', body: '{"a":1}' })
+    const request = new Request('https://app.pbjsatime.com/api/stripe/webhook?x=1', {
+      method: 'POST',
+      body: '{"a":1}',
+      headers: { 'stripe-signature': 't=1,v1=abc', 'cf-connecting-ip': '203.0.113.9' },
+    })
     const env = { APP: { binding: true } }
     await expect(worker.fetch(request, env)).resolves.toBe(response)
     expect(getContainer).toHaveBeenCalledWith(env.APP, 'app')
     expect(containerFetch).toHaveBeenCalledTimes(1)
-    expect(containerFetch.mock.calls[0][0]).toBe(request)
+    const forwarded = containerFetch.mock.calls[0][0]
+    expect(forwarded.method).toBe('POST')
+    expect(forwarded.url).toBe('https://app.pbjsatime.com/api/stripe/webhook?x=1')
+    expect(forwarded.headers.get('stripe-signature')).toBe('t=1,v1=abc')
+    await expect(forwarded.text()).resolves.toBe('{"a":1}')
+  })
+
+  it('replaces a client-sent x-forwarded-for with the address Cloudflare saw, and drops x-real-ip', async () => {
+    containerFetch.mockResolvedValue(new Response('ok'))
+    const request = new Request('https://app.pbjsatime.com/api/auth/sign-in-with-password', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'x-forwarded-for': '198.51.100.1, 198.51.100.2', 'x-real-ip': '198.51.100.3', 'cf-connecting-ip': '203.0.113.9' },
+    })
+    await worker.fetch(request, { APP: {} })
+    const forwarded = containerFetch.mock.calls[0][0]
+    expect(forwarded.headers.get('x-forwarded-for')).toBe('203.0.113.9')
+    expect(forwarded.headers.has('x-real-ip')).toBe(false)
+  })
+
+  it('sends an empty x-forwarded-for (so the app uses the socket address) when cf-connecting-ip is absent', async () => {
+    containerFetch.mockResolvedValue(new Response('ok'))
+    const request = new Request('https://app.pbjsatime.com/', { headers: { 'x-forwarded-for': '198.51.100.1' } })
+    await worker.fetch(request, { APP: {} })
+    expect(containerFetch.mock.calls[0][0].headers.get('x-forwarded-for')).toBe('')
   })
 
   it('answers 400 to a client-chosen container port without touching the container', async () => {
@@ -85,21 +113,61 @@ describe('POST /internal/restart', () => {
     expect(getContainer).not.toHaveBeenCalled()
   })
 
-  it('destroys the container (awaited) and answers { restarted: true } for the right token', async () => {
+  it('sends SIGTERM, waits for stopped, then destroys (awaited) and answers graceful: true', async () => {
+    const order = []
     let finished = false
+    const states = [{ status: 'healthy' }, { status: 'stopping' }, { status: 'stopped_with_code' }]
+    const stop = vi.fn(async () => { order.push('stop') })
+    const getState = vi.fn(async () => { order.push('getState'); return states.shift() })
     const destroy = vi.fn(async () => {
+      order.push('destroy')
       await new Promise((resolve) => setTimeout(resolve, 5))
       finished = true
     })
-    getContainer.mockReturnValueOnce({ destroy, fetch: containerFetch })
+    getContainer.mockReturnValueOnce({ stop, getState, destroy, fetch: containerFetch })
     const env = { APP: { binding: true }, TICK_TOKEN: 'tick-token-value' }
     const response = await worker.fetch(restart('tick-token-value'), env)
     expect(finished).toBe(true)
+    expect(stop).toHaveBeenCalledWith('SIGTERM')
+    expect(order).toEqual(['stop', 'getState', 'getState', 'getState', 'destroy'])
     expect(destroy).toHaveBeenCalledTimes(1)
     expect(getContainer).toHaveBeenCalledWith(env.APP, 'app')
     expect(containerFetch).not.toHaveBeenCalled()
     expect(response.status).toBe(200)
-    await expect(response.json()).resolves.toEqual({ restarted: true })
+    await expect(response.json()).resolves.toEqual({ restarted: true, graceful: true })
+  })
+
+  it('destroys anyway and answers graceful: false when the container does not stop within 20 seconds', async () => {
+    vi.useFakeTimers()
+    try {
+      const stop = vi.fn(async () => {})
+      const getState = vi.fn(async () => ({ status: 'healthy' }))
+      const destroy = vi.fn(async () => {})
+      getContainer.mockReturnValueOnce({ stop, getState, destroy, fetch: containerFetch })
+      const pending = worker.fetch(restart('tick-token-value'), { APP: {}, TICK_TOKEN: 'tick-token-value' })
+      await vi.advanceTimersByTimeAsync(21_000)
+      const response = await pending
+      expect(destroy).toHaveBeenCalledTimes(1)
+      expect(getState.mock.calls.length).toBeGreaterThan(10)
+      await expect(response.json()).resolves.toEqual({ restarted: true, graceful: false })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('still destroys, with graceful: false, when stop() throws', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const destroy = vi.fn(async () => {})
+    getContainer.mockReturnValueOnce({
+      stop: vi.fn(async () => { throw new Error('rpc failed') }),
+      getState: vi.fn(),
+      destroy,
+      fetch: containerFetch,
+    })
+    const response = await worker.fetch(restart('tick-token-value'), { APP: {}, TICK_TOKEN: 'tick-token-value' })
+    expect(destroy).toHaveBeenCalledTimes(1)
+    await expect(response.json()).resolves.toEqual({ restarted: true, graceful: false })
+    spy.mockRestore()
   })
 })
 
@@ -126,6 +194,16 @@ describe('scheduled', () => {
     spy.mockRestore()
   })
 
+  it('logs a tick that throws instead of leaving an unhandled rejection', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    containerFetch.mockRejectedValue(new Error('container down'))
+    const waitUntil = vi.fn()
+    worker.scheduled({}, { APP: {}, TICK_TOKEN: 'tick-token-value' }, { waitUntil })
+    await expect(waitUntil.mock.calls[0][0]).resolves.toBeUndefined()
+    expect(spy).toHaveBeenCalledWith('[cron] tick failed', 'container down')
+    spy.mockRestore()
+  })
+
   it('sends an empty token (which the app refuses) rather than the word "undefined"', () => {
     containerFetch.mockResolvedValue(new Response('{}'))
     worker.scheduled({}, { APP: {} }, { waitUntil: vi.fn() })
@@ -141,7 +219,6 @@ describe('pickContainerEnv', () => {
       'NODE_ENV',
       'APP_PUBLIC_URL',
       'FIRM_TIME_ZONE',
-      'JWT_SECRET',
       'VOICE_TOOL_SECRET',
       'OWNER_BOOTSTRAP_PASSWORD',
       'OWNER_EMAIL',
@@ -175,11 +252,12 @@ describe('pickContainerEnv', () => {
       'AUTOPAY_CHARGING',
       'TICK_TOKEN',
       'MAINTENANCE_MODE',
+      'ENV_REVISION',
     ])
   })
 
   it('copies the listed names that are defined and skips the rest', () => {
-    const env = { DATABASE_URL: 'x', NODE_ENV: 'production', JWT_SECRET: undefined, MAINTENANCE_MODE: '1' }
+    const env = { DATABASE_URL: 'x', NODE_ENV: 'production', VOICE_TOOL_SECRET: undefined, MAINTENANCE_MODE: '1' }
     expect(pickContainerEnv(env)).toEqual({ DATABASE_URL: 'x', NODE_ENV: 'production', MAINTENANCE_MODE: '1' })
   })
 

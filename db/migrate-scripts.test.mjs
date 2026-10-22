@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events'
 import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { REPO_ROOT, cleanupToolEnv, isCloudSyncedPath, isPoolerHost, libpqEnv, parseArgs, pgBinary, redact, toolEnv, utcStamp } from '../scripts/migrate/lib.mjs'
 import { dumpArgs, main as dumpMain } from '../scripts/migrate/dump.mjs'
 import { IGNORED_SCHEMAS, main as restoreMain, restoreArgs } from '../scripts/migrate/restore.mjs'
@@ -103,6 +104,31 @@ describe('lib', () => {
     const kept = toolEnv({}, TARGET_URL)
     expect(kept.PGCHANNELBINDING).toBe('require')
     cleanupToolEnv(kept)
+  })
+
+  it('honors sslrootcert=<file> from the URL (keeping verify-full) and never deletes that file', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'pbj-rootcert-test-'))
+    const pem = path.join(dir, 'my-root.pem')
+    writeFileSync(pem, 'not a real certificate\n')
+    try {
+      for (const mode of ['require', 'verify-full', 'verify-ca']) {
+        const url = TARGET_URL.replace('sslmode=require', 'sslmode=' + mode) + '&sslrootcert=' + encodeURIComponent(pem)
+        const env = toolEnv({ PATH: '/bin' }, url)
+        expect(env.PGSSLROOTCERT).toBe(pem)
+        expect(env.PGSSLMODE).toBe(mode === 'verify-ca' ? 'verify-ca' : 'verify-full')
+        cleanupToolEnv(env)
+        expect(existsSync(pem)).toBe(true)
+      }
+      // The same URL without the parameter still gets the temporary file, which is removed.
+      const without = toolEnv({}, TARGET_URL)
+      expect(without.PGSSLROOTCERT).not.toBe(pem)
+      cleanupToolEnv(without)
+      expect(existsSync(without.PGSSLROOTCERT)).toBe(false)
+      // A remote URL that would be unverified is still refused even with a root file named.
+      expect(() => toolEnv({}, TARGET_URL.replace('sslmode=require', 'sslmode=prefer') + '&sslrootcert=' + encodeURIComponent(pem))).toThrow(/unverified/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('refuses a remote URL that would leave the server unverified, without showing the URL', () => {
@@ -331,6 +357,19 @@ describe('restore.mjs', () => {
     expect(await restoreMain(['--file', file], { TARGET_DATABASE_URL: pooled }, { ...out, spawn, connect, access })).toBe(2)
     expect(out.text()).toContain('pooler')
     expect(connect).not.toHaveBeenCalled()
+    expect(calls).toHaveLength(0)
+  })
+
+  it('exits 2 with the refusal message (and runs nothing) when toolEnv refuses the URL, even with --force', async () => {
+    const { spawn, calls } = fakeSpawn()
+    const { connect } = fakeConnect([])
+    const unverified = TARGET_URL.replace('sslmode=require', 'sslmode=prefer')
+    const out = collector()
+    const code = await restoreMain(['--file', file, '--force'], { TARGET_DATABASE_URL: unverified }, { ...out, spawn, connect, access })
+    expect(code).toBe(2)
+    expect(out.text()).toContain('unverified')
+    expect(out.text()).not.toContain('could not start')
+    expect(out.text()).not.toContain(PASSWORD)
     expect(calls).toHaveLength(0)
   })
 

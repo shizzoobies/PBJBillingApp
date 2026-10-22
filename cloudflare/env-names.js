@@ -12,7 +12,6 @@ export const CONTAINER_ENV_NAMES = [
   'NODE_ENV',
   'APP_PUBLIC_URL',
   'FIRM_TIME_ZONE',
-  'JWT_SECRET',
   'VOICE_TOOL_SECRET',
   'OWNER_BOOTSTRAP_PASSWORD',
   'OWNER_EMAIL',
@@ -46,4 +45,7 @@ export const CONTAINER_ENV_NAMES = [
   'AUTOPAY_CHARGING',
   'TICK_TOKEN',
   'MAINTENANCE_MODE',
+  // Stamped by scripts/cf/secrets-upload.mjs on every upload; /health echoes it so
+  // scripts/cf/restart.mjs can prove the container started with that upload's environment.
+  'ENV_REVISION',
 ]

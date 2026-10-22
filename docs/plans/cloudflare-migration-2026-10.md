@@ -82,13 +82,13 @@ statement, not a comment (a bug from 2026-10-17 made the old poll crash under `s
 
 ### C3. `scripts/cf/secrets-upload.mjs`
 Reads an env file (path argument, default `D:\PBJ Accounting Work\secrets\rotation-2026-10-21.env`), keeps
-only the names in an explicit allow-list (the app's secret names: `DATABASE_URL`, `JWT_SECRET`,
+only the names in an explicit allow-list (the app's secret names: `DATABASE_URL`,
 `VOICE_TOOL_SECRET`, `OWNER_BOOTSTRAP_PASSWORD`, `TOTP_ENC_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
 `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY`, `ELEVENLABS_API_KEY`, `ELEVENLABS_WEBHOOK_SECRET`,
 `SIGNWELL_API_KEY`, `SIGNWELL_TEST_MODE`, `SIGNWELL_WEBHOOK_ID`, `TICK_TOKEN`, `INVOICE_AUTO_REMINDERS`,
 `PGSSLMODE`), skips blank values, and pipes `{ "NAME": "value", ... }` to `npx wrangler secret bulk` on
 stdin for the Worker named `pbjbillingapp` - printing ONLY the names it set and the names it skipped. Add
-`--dry-run` (names only, no upload) and `--generate` (fills `JWT_SECRET`, `VOICE_TOOL_SECRET`, `TICK_TOKEN`
+`--dry-run` (names only, no upload) and `--generate` (fills `VOICE_TOOL_SECRET`, `TICK_TOKEN`
 with fresh 64-hex values when blank, writing them back to the file). Document the exact `wrangler secret bulk`
 syntax you relied on with the docs URL.
 

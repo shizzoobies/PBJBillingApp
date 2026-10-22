@@ -130,12 +130,19 @@ export async function main(argv, env = process.env, deps = {}) {
     log('restore: target is empty, proceeding')
   }
 
-  const pgRestore = pgBinary('pg_restore', env, platform)
-  const started = Date.now()
-  let result
+  // A URL toolEnv refuses (an unverified sslmode) is not a "could not start" problem.
   let childEnv
   try {
     childEnv = toolEnv(env, target.url)
+  } catch (error) {
+    log(`restore: ${error.message}`)
+    return 2
+  }
+
+  const pgRestore = pgBinary('pg_restore', env, platform)
+  const started = Date.now()
+  let result
+  try {
     result = await runTool(spawn, pgRestore, restoreArgs(database, file), childEnv)
   } catch (error) {
     log(`restore: could not start ${pgRestore}: ${redact(error.message, [target.url])}. Set PG_BIN to the PostgreSQL 18 bin folder.`)

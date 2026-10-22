@@ -39,19 +39,24 @@ browser / Stripe / Resend / SignWell / ElevenLabs
   and nothing else; `scripts/cf/secrets-upload.mjs` uploads exactly that list minus the `vars`. A test
   (`cloudflare/env-names.test.mjs`) scans `server.js`, `lib/` and `db/` for every `process.env.NAME` the app
   reads and fails when one is neither in the list nor a known host-only name, so a new setting cannot be
-  forgotten. The current list: `DATABASE_URL, PGSSLMODE, NODE_ENV, APP_PUBLIC_URL, FIRM_TIME_ZONE, JWT_SECRET,
+  forgotten. The current list: `DATABASE_URL, PGSSLMODE, NODE_ENV, APP_PUBLIC_URL, FIRM_TIME_ZONE,
   VOICE_TOOL_SECRET, OWNER_BOOTSTRAP_PASSWORD, OWNER_EMAIL, ADMIN_EMAIL, TOTP_ENC_KEY, STRIPE_SECRET_KEY,
   STRIPE_WEBHOOK_SECRET, RESEND_API_KEY, RESEND_WEBHOOK_SECRET, EMAIL_FROM, INVOICE_EMAIL_FROM,
   INVOICE_REPLY_TO, ANTHROPIC_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_AGENT_ID, ELEVENLABS_WEBHOOK_SECRET,
   SIGNWELL_API_KEY, SIGNWELL_TEST_MODE, SIGNWELL_WEBHOOK_ID, INVOICE_AUTO_REMINDERS, INVOICE_PAST_DUE_NOTICES,
   ASSISTANT_DIGEST, ASSISTANT_DIGEST_DOW, ASSISTANT_MODEL, ASSISTANT_FALLBACK_MODEL, ASSISTANT_SUMMARY_MODEL,
   ASSISTANT_CAPACITY_TARGET, INVOICE_AI_MODEL, INVOICE_AUTO_REMINDER_MIN_DAYS, FEATURE_REQUEST_EMAIL,
-  AUTOPAY_CHARGING, TICK_TOKEN, MAINTENANCE_MODE`. `AUTOPAY_CHARGING` is left blank (autopay stays off).
+  AUTOPAY_CHARGING, TICK_TOKEN, MAINTENANCE_MODE, ENV_REVISION`. `AUTOPAY_CHARGING` is left blank (autopay stays
+  off). `JWT_SECRET` is not in the list on purpose: the app never reads it (sessions are database rows), so
+  changing or omitting it affects nothing. `ENV_REVISION` is stamped by the uploader (see "After every secret
+  upload" below), not typed.
 - **The container reads its environment only when it starts.** A new Worker version re-attaches to the
   running container, and `onActivityExpired` never stops it, so a secret upload changes nothing until the
   container is restarted. `POST /internal/restart` (header `x-tick-token` = `TICK_TOKEN`) is answered by
-  the Worker itself and destroys the container; the next request starts it with the current environment.
-  `node scripts/cf/restart.mjs` does the call and waits for `/health`. Every other `/internal/*` path is 404
+  the Worker itself: it sends SIGTERM, waits up to 20 seconds for the container to report stopped, then
+  destroys it either way and answers `{ restarted: true, graceful: <bool> }` (`graceful` is false when it had
+  to be killed). The next request starts it with the current environment. `node scripts/cf/restart.mjs` does
+  the call and waits for `/health`. Every other `/internal/*` path is 404
   from outside (the cron reaches `/internal/tick` through the Durable Object stub), and a request that
   carries a `cf-container-target-port` header is refused with 400 so a client cannot choose the port.
 - **Maintenance mode.** `MAINTENANCE_MODE=1` is the cutover switch. Nothing writes: every non-GET request
@@ -59,8 +64,9 @@ browser / Stripe / Resend / SignWell / ElevenLabs
   `[maintenance] webhook deferred <path>`), the tick answers `{ ran: [], skipped: 'maintenance' }`, the
   in-process timers do nothing. GETs and `/health` (which reports `maintenance: true`) still work, and so do
   the sign-in POSTs (password sign-in, magic-link request and redemption, the TOTP step, sign-out), so an owner
-  can sign in and look around on the new address. Those only create session or login-token rows. Everything
-  else stays 503.
+  can sign in and look around on the new address. Those only create session, login-token and activity-log rows. Everything
+  else stays 503. The desktop shell's sign-in handoff (`/api/auth/desktop-handoff`) is not one of them: it
+  waits until maintenance is off.
 - **Commit on `/health`.** `APP_COMMIT`, else `RAILWAY_GIT_COMMIT_SHA`, else `WORKERS_CI_COMMIT_SHA`, else
   the `.app-commit` file in the image, else `unknown`. The deploy workflow writes the 7-character SHA to
   `.app-commit` before the image build (wrangler's `image_vars` could pass a build arg, but
@@ -97,10 +103,28 @@ node scripts/cf/restart.mjs
 
 It reads `TICK_TOKEN` from the rotation file (or the env file you pass), POSTs
 `https://app.pbjsatime.com/internal/restart` (`--url=https://...` for the workers.dev address before the
-domain is attached), prints the HTTP status only, then polls `/health` for up to 90 seconds and prints the
-`commit` and `maintenance` fields. The token is never printed. A 404 means `TICK_TOKEN` has not been uploaded
-yet; a 401 means the file and the Worker disagree. Check that `commit` is the one you expect and
-`maintenance` is what you intended before going on.
+domain is attached), prints the HTTP status (and whether the stop was graceful) only, then polls `/health`
+for up to 90 seconds and prints the `commit` and `maintenance` fields. The token is never printed. A 404 means
+`TICK_TOKEN` has not been uploaded yet; a 401 means the file and the Worker disagree. Check that `commit` is
+the one you expect and `maintenance` is what you intended before going on. If `/health` never answers 200 the
+error names the last status, `db`, `maintenance` and `envRevision` it saw.
+
+**Prove the restart used the new environment.** The container's environment is captured when the Durable
+Object is constructed, so a restart served by an older Worker version can bring the container back on the OLD
+values. Every real (non-dry-run) `secrets-upload.mjs` therefore adds `ENV_REVISION=<ISO timestamp>` to the
+upload and prints it, together with the command to run next:
+
+```powershell
+node scripts/cf/secrets-upload.mjs
+# ... Env revision: 2026-10-21T12:00:00.000Z (node scripts/cf/restart.mjs --expect-revision=2026-10-21T12:00:00.000Z)
+node scripts/cf/restart.mjs --expect-revision=2026-10-21T12:00:00.000Z
+```
+
+`/health` echoes the running value as `envRevision` (null when none was ever uploaded). With
+`--expect-revision`, after `/health` answers 200 the script compares: on a match it prints
+`env revision: matches`; otherwise it waits 20 seconds and restarts again, up to 3 more times (4 restarts in
+total), and then fails, printing the last status, `db`, `maintenance` and `envRevision`. Without the flag the
+script behaves as before and checks nothing about the revision.
 
 ## First-deploy checklist
 
@@ -112,10 +136,12 @@ The order matters: nothing real may be reachable until the maintenance switch is
    `workers.dev` URL (the health poll in the workflow warns until the custom domain exists).
 3. Upload the secrets: `node scripts/cf/secrets-upload.mjs --generate` (values come from the rotation
    file outside git, never from chat). Whenever the uploaded `DATABASE_URL` points at a database holding
-   real data, the same upload **must** carry `MAINTENANCE_MODE=1`: the uploader refuses (exit 1, names only
-   in the message) when `DATABASE_URL` is present and `MAINTENANCE_MODE` is blank, unless `--allow-live` is
-   passed.
-4. `node scripts/cf/restart.mjs` and confirm `/health` shows the expected commit and `maintenance: true`.
+   real data, the same upload **must** carry `MAINTENANCE_MODE=1` (exactly `1`, the app's own rule: `0`, `true`
+   or a blank do not count). The uploader refuses (exit 1, names only in the message: "MAINTENANCE_MODE must
+   be 1 (or pass --allow-live)") when `DATABASE_URL` is present and `MAINTENANCE_MODE` is anything else,
+   unless `--allow-live` is passed.
+4. `node scripts/cf/restart.mjs --expect-revision=<the Env revision the upload printed>` and confirm `/health`
+   shows the expected commit and `maintenance: true`.
 5. Attach the custom domain `app.pbjsatime.com` to the Worker (Workers & Pages > pbjbillingapp > Settings >
    Domains & Routes), then re-check `/health` on it. Once it works, set `workers_dev` to `false` in
    `wrangler.jsonc` (do not flip it before) and, if you want the domain in code, declare it under `routes`
@@ -131,8 +157,9 @@ The order matters: nothing real may be reachable until the maintenance switch is
      `https://app.pbjsa.com`) needs a new `desktop-v*` release
    - Cutover follow-up: links in emails already sent point at `app.pbjsa.com`; have that host redirect
      browser GET/HEAD navigation to `https://app.pbjsatime.com` (see the cutover runbook).
-7. Turn `MAINTENANCE_MODE` off (upload `MAINTENANCE_MODE=0` with `--allow-live`, then restart) only after
-   the data cutover is checked.
+7. Turn `MAINTENANCE_MODE` off only after the data cutover is checked. Going live is the one upload that needs
+   `--allow-live` (the rotation file then holds `MAINTENANCE_MODE=0` next to `DATABASE_URL`), followed by a
+   restart with `--expect-revision`.
 
 ## Unverified until the first real deploy
 
@@ -147,7 +174,7 @@ Nothing here has run against Cloudflare yet; the first deploy should check each 
 - `max_instances: 1` holds under a rollout (an old and a new container may overlap briefly; the app's
   markers make the jobs safe, but check for double sends).
 - `standard-1` (4 GiB) is enough for PDF generation and the bulk save under real load.
-- `POST /internal/restart` really ends the container on Cloudflare (the code calls `destroy()` on the stub, checked against the package source and a mock, not against a live Durable Object) and the next request starts it with the new environment.
+- `POST /internal/restart` really ends the container on Cloudflare (the code calls `stop('SIGTERM')`, polls `getState()` for `stopped`, then `destroy()` on the stub, checked against the package source and a mock, not against a live Durable Object) and the next request starts it with the new environment (`--expect-revision` is the live proof).
 - Outbound Postgres on 5432 from the container works (`/health` shows `db: ok`).
 - `package-lock.json` as edited on Windows installs cleanly with `npm ci` on Linux; if it does not, run
   the lockfile-refresh workflow.
