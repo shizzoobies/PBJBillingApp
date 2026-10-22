@@ -1,17 +1,12 @@
 #!/usr/bin/env node
 // Read-only: the full text of the tracker items named on the command line.
 // Usage: node scripts/prod/tracker-read.mjs featreq-xxxxxxxx [featreq-yyyyyyyy ...]
-// Needs the Railway project linked, or DATABASE_PUBLIC_URL.
-import { execSync } from 'node:child_process'
+// Uses PROD_DATABASE_URL from the environment or PBJ_PROD_ENV_FILE.
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import pg from 'pg'
 
 function connectionString() {
-  if (process.env.DATABASE_PUBLIC_URL) return process.env.DATABASE_PUBLIC_URL
-  const raw = execSync('npx @railway/cli@latest variables --service Postgres --json', {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  })
-  return JSON.parse(raw).DATABASE_PUBLIC_URL
+  return prodDatabaseUrl(prodEnv(['PROD_DATABASE_URL']).PROD_DATABASE_URL)
 }
 
 const ids = process.argv.slice(2).filter((arg) => !arg.startsWith('--'))
@@ -19,7 +14,7 @@ if (ids.length === 0) {
   console.error('pass one or more featreq ids')
   process.exit(2)
 }
-const pool = new pg.Pool({ connectionString: connectionString(), ssl: { rejectUnauthorized: false }, max: 1 })
+const pool = new pg.Pool({ connectionString: connectionString(), ssl: { rejectUnauthorized: true }, max: 1 })
 try {
   const result = await pool.query(`select * from feature_requests where id = any($1::text[])`, [ids])
   for (const id of ids) {

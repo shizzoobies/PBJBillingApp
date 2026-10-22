@@ -19,8 +19,7 @@
  * <client>] — <reason>"); the earliest such row for the invoice is the failure.
  * `--at` / `--detail` override that when the notification is gone.
  *
- *   npx @railway/cli@latest variables --service Postgres --json \
- *     | node scripts/prod/backfill-payment-failure.mjs INV-2026-08-031 [--apply] \
+ *   node scripts/prod/backfill-payment-failure.mjs INV-2026-08-031 [--apply] \
  *         [--at <ISO>] [--detail "<reason>"] [--force]
  *
  * Without --apply it prints the whole preview and ROLLS BACK. With --apply it
@@ -29,8 +28,7 @@
  *
  * UNDO — puts `email_log` back to exactly what the snapshot recorded:
  *
- *   npx @railway/cli@latest variables --service Postgres --json \
- *     | node scripts/prod/backfill-payment-failure.mjs --undo docs/prod-snapshots/<file>.json [--apply]
+ *   node scripts/prod/backfill-payment-failure.mjs --undo docs/prod-snapshots/<file>.json [--apply]
  *
  * The undo refuses unless the log is still the snapshot's log plus the one
  * `kind:'payment'` entry this script added — if anything else has landed since,
@@ -39,6 +37,7 @@
  * Idempotent, and safe to run twice: an invoice that already carries a payment
  * entry for its intent prints "already logged" and writes nothing.
  */
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
@@ -46,8 +45,8 @@ const require = createRequire(import.meta.url)
 const { Client } = require('pg')
 
 const USAGE =
-  'usage: ... variables --json | node scripts/prod/backfill-payment-failure.mjs <INVOICE-NUMBER> [--apply] [--at <ISO>] [--detail "<reason>"] [--force]\n' +
-  '   or: ... variables --json | node scripts/prod/backfill-payment-failure.mjs --undo <snapshot.json> [--apply]'
+  'usage: node scripts/prod/backfill-payment-failure.mjs <INVOICE-NUMBER> [--apply] [--at <ISO>] [--detail "<reason>"] [--force]\n' +
+  '   or: node scripts/prod/backfill-payment-failure.mjs --undo <snapshot.json> [--apply]'
 
 // The store's statement, character for character (db/store.js,
 // `recordInvoicePaymentFailure`). Appended in SQL, not read-modify-write, and
@@ -85,15 +84,11 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2))
-const vars = JSON.parse(readFileSync(0, 'utf8'))
-if (!vars.DATABASE_PUBLIC_URL) {
-  console.error('DATABASE_PUBLIC_URL missing from stdin JSON')
-  process.exit(1)
-}
+const vars = prodEnv(['PROD_DATABASE_URL'])
 
 const db = new Client({
-  connectionString: vars.DATABASE_PUBLIC_URL,
-  ssl: { rejectUnauthorized: false },
+  connectionString: prodDatabaseUrl(vars.PROD_DATABASE_URL),
+  ssl: { rejectUnauthorized: true },
 })
 
 const stamp = new Date().toISOString().replace(/[:.]/g, '-')

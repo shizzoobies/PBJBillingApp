@@ -2,20 +2,15 @@
 // Read-only: is production quiet enough to deploy? Prints the invoice counts for this
 // month, how many invoices were sent in the last 15 minutes and touched in the last 5.
 // Deploy only when "touched in last 5 min" is 0 (HANDOFF section 3). Run from the
-// repo root with the Railway project linked (`railway link`), or set DATABASE_PUBLIC_URL.
-import { execSync } from 'node:child_process'
+// repo root with PROD_DATABASE_URL in the environment or PBJ_PROD_ENV_FILE.
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import pg from 'pg'
 
 function connectionString() {
-  if (process.env.DATABASE_PUBLIC_URL) return process.env.DATABASE_PUBLIC_URL
-  const raw = execSync('npx @railway/cli@latest variables --service Postgres --json', {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  })
-  return JSON.parse(raw).DATABASE_PUBLIC_URL
+  return prodDatabaseUrl(prodEnv(['PROD_DATABASE_URL']).PROD_DATABASE_URL)
 }
 
-const pool = new pg.Pool({ connectionString: connectionString(), ssl: { rejectUnauthorized: false }, max: 1 })
+const pool = new pg.Pool({ connectionString: connectionString(), ssl: { rejectUnauthorized: true }, max: 1 })
 try {
   const period = new Date().toISOString().slice(0, 7)
   const byStatus = await pool.query(

@@ -13,11 +13,9 @@
 //   node scripts/prod/i95-respawn-2026-10-17.mjs            # dry run: snapshot + plan
 //   node scripts/prod/i95-respawn-2026-10-17.mjs --apply    # do it
 //
-// Connection: DATABASE_PUBLIC_URL or DATABASE_URL, else `railway variables` for the
-// Postgres service (the project must be linked). The store is built the way the
-// server builds it; PGSSLMODE=no-verify is set here because the Railway public
-// proxy presents a certificate node-pg will not verify. The dry run reads with
-// plain SELECTs only (never `store.read()`, which can write back).
+// Connection: PROD_DATABASE_URL from the environment or PBJ_PROD_ENV_FILE.
+// TLS verifies the host certificate. Store-backed scripts use the same URL.
+// The dry run uses plain SELECTs only, never store.read(), which can write back.
 //
 // NOT done by this script (the route does them): the SSE broadcast and the
 // task_assigned notification/email to the step-2 assignee (Lisa).
@@ -30,7 +28,7 @@
 //        where checklist_id = 'check-928df429' and id = 'item-3efe0a4f';
 //      (the re-tick stamps completed_at = now; the snapshot holds 2026-10-07T20:20:30.044Z).
 
-import { execSync } from 'node:child_process'
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
@@ -47,27 +45,17 @@ const SNAPSHOT_PATH = 'docs/prod-snapshots/2026-10-17-i95-respawn.json'
 const apply = process.argv.includes('--apply')
 
 function connectionString() {
-  if (process.env.DATABASE_PUBLIC_URL) return process.env.DATABASE_PUBLIC_URL
-  if (process.env.DATABASE_URL) return process.env.DATABASE_URL
-  const raw = execSync('npx @railway/cli@latest variables --service Postgres --json', {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  })
-  return JSON.parse(raw).DATABASE_PUBLIC_URL
+  return prodDatabaseUrl(prodEnv(['PROD_DATABASE_URL']).PROD_DATABASE_URL)
 }
 
 const url = connectionString()
-if (!url) {
-  console.error('DATABASE_PUBLIC_URL (or DATABASE_URL, or a linked Railway project) is required')
-  process.exit(1)
-}
 process.env.DATABASE_URL = url
-process.env.PGSSLMODE = 'no-verify'
+process.env.PGSSLMODE = 'verify-full'
 
 const { AppDataStore } = await import('../../db/store.js')
 const store = new AppDataStore()
 if (store.mode !== 'postgres') throw new Error('store did not come up in postgres mode')
-const pool = new Pool({ connectionString: url, ssl: { rejectUnauthorized: false }, max: 2 })
+const pool = new Pool({ connectionString: url, ssl: { rejectUnauthorized: true }, max: 2 })
 
 const iso = (value) => (value instanceof Date ? value.toISOString() : value ?? null)
 const day = (value) => (value instanceof Date ? value.toISOString().slice(0, 10) : value ?? null)

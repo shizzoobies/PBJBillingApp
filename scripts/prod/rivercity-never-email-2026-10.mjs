@@ -8,23 +8,20 @@
 //   node scripts/prod/rivercity-never-email-2026-10.mjs [--apply]
 //
 // Without --apply it prints the row and rolls back. The connection string comes
-// from DATABASE_PUBLIC_URL (or DATABASE_URL).
+// from PROD_DATABASE_URL in the environment or PBJ_PROD_ENV_FILE.
 //
 // Undo: `update clients set platform_invoicing_opt_out = true, invoice_no_email = false,
 //        updated_at = now() where id = 'client-c1qdfpd'` (the snapshot holds the prior values).
 
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import pg from 'pg'
 
 const CLIENT_ID = 'client-c1qdfpd'
 const apply = process.argv.includes('--apply')
-const url = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL
-if (!url) {
-  console.error('DATABASE_PUBLIC_URL (or DATABASE_URL) is required')
-  process.exit(1)
-}
+const url = prodDatabaseUrl(prodEnv(['PROD_DATABASE_URL']).PROD_DATABASE_URL)
 
-const pool = new pg.Pool({ connectionString: url, ssl: { rejectUnauthorized: false }, max: 1 })
+const pool = new pg.Pool({ connectionString: url, ssl: { rejectUnauthorized: true }, max: 1 })
 const client = await pool.connect()
 try {
   const before = await client.query(

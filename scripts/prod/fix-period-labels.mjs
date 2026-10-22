@@ -22,12 +22,10 @@
  *       differs. A row with no label is left alone: those spawned before the
  *       feature existed and the feature stamps "every occurrence from now on".
  *
- * Modes (connection: DATABASE_PUBLIC_URL on stdin as the Railway variables JSON,
- * never printed):
- *   npx @railway/cli@latest variables --service Postgres --json \
- *     | node scripts/prod/fix-period-labels.mjs                   dry run, ROLLBACK
- *     | node scripts/prod/fix-period-labels.mjs --apply           writes
- *     | node scripts/prod/fix-period-labels.mjs --undo <snapshot> puts it back
+ * Modes (PROD_DATABASE_URL from the environment or PBJ_PROD_ENV_FILE):
+ *   node scripts/prod/fix-period-labels.mjs                   dry run, ROLLBACK
+ *   node scripts/prod/fix-period-labels.mjs --apply           writes
+ *   node scripts/prod/fix-period-labels.mjs --undo <snapshot> puts it back
  *
  * Every mode writes/reads a snapshot of every row it touches — templates AND
  * checklists, each with its before and its after — to docs/prod-snapshots/ BEFORE
@@ -35,6 +33,7 @@
  * value this script wrote, because that means somebody has been in there since
  * and an undo would throw their work away.
  */
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
@@ -54,15 +53,11 @@ if (undoAt >= 0 && !undoPath) {
   process.exit(1)
 }
 
-const vars = JSON.parse(readFileSync(0, 'utf8'))
-if (!vars.DATABASE_PUBLIC_URL) {
-  console.error('DATABASE_PUBLIC_URL missing from stdin JSON')
-  process.exit(1)
-}
+const vars = prodEnv(['PROD_DATABASE_URL'])
 
 const db = new Client({
-  connectionString: vars.DATABASE_PUBLIC_URL,
-  ssl: { rejectUnauthorized: false },
+  connectionString: prodDatabaseUrl(vars.PROD_DATABASE_URL),
+  ssl: { rejectUnauthorized: true },
 })
 
 const stamp = new Date().toISOString().replace(/[:.]/g, '-')

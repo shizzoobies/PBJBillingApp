@@ -2,22 +2,17 @@
 // Read-only: the open Updates-tracker items (feature_requests), one line each.
 // Usage: node scripts/prod/tracker-list.mjs            (new, planned, in_progress, needs_input, planned_not_eom)
 //        node scripts/prod/tracker-list.mjs --all      (every status)
-// Needs the Railway project linked, or DATABASE_PUBLIC_URL.
-import { execSync } from 'node:child_process'
+// Uses PROD_DATABASE_URL from the environment or PBJ_PROD_ENV_FILE.
+import { prodEnv, prodDatabaseUrl } from './env.mjs'
 import pg from 'pg'
 
 function connectionString() {
-  if (process.env.DATABASE_PUBLIC_URL) return process.env.DATABASE_PUBLIC_URL
-  const raw = execSync('npx @railway/cli@latest variables --service Postgres --json', {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  })
-  return JSON.parse(raw).DATABASE_PUBLIC_URL
+  return prodDatabaseUrl(prodEnv(['PROD_DATABASE_URL']).PROD_DATABASE_URL)
 }
 
 const all = process.argv.includes('--all')
 const open = ['new', 'planned', 'in_progress', 'needs_input', 'planned_not_eom', 'brainstorm']
-const pool = new pg.Pool({ connectionString: connectionString(), ssl: { rejectUnauthorized: false }, max: 1 })
+const pool = new pg.Pool({ connectionString: connectionString(), ssl: { rejectUnauthorized: true }, max: 1 })
 try {
   const result = await pool.query(
     `select id, status, type, priority, title, clarification_question, clarification_answer, updated_at
