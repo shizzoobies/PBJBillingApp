@@ -4,7 +4,13 @@ import { useAppContext } from '../AppContext'
 import { ListSearch } from '../components/ListSearch'
 import { LetterPreviewModal } from '../components/LetterPreviewModal'
 import { BoldBar, PlaceholderChips } from '../components/letters/LetterEditorKit'
-import { insertPlaceholder, isBoldShortcut, toggleBold, unknownPlaceholderSentence } from '../components/letters/letterEditing'
+import {
+  esignFieldCount,
+  insertPlaceholder,
+  isBoldShortcut,
+  toggleBold,
+  unknownPlaceholderSentence,
+} from '../components/letters/letterEditing'
 import { SaveBadge } from '../components/SectionKit'
 import { RecipientPicker } from '../components/RecipientPicker'
 import { recipientListLabel } from '../lib/recipientSelection'
@@ -658,6 +664,8 @@ export function LettersPage() {
       : "Blank lines start a new paragraph. The firm letterhead, the date and the client's address are added above it."
   }
   const fieldWord = (field: Field) => (field === 'subject' ? 'subject' : field === 'emailBody' ? 'email' : 'letter')
+  // SignWell field tags typed into the letter (task 17): a quiet count, never a warning.
+  const esignFields = esignFieldCount(letterBody)
 
   // The chips are the placeholders the Letters GET lists (the 'both' keys); an
   // engagement-only key is never offered here, even if one were listed.
@@ -846,6 +854,7 @@ export function LettersPage() {
               bold in the email and the PDF. The subject is never bold.
             </p>
             {chips('letterBody')}
+            {esignFields ? <p className="muted-text">{esignFields}</p> : null}
 
             {warnings.unknown.length > 0 ? (
               <p className="form-error" role="status">

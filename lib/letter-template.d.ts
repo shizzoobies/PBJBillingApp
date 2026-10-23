@@ -49,7 +49,7 @@ export declare function fillTemplate(
   values: LetterValues,
   /** The keys the text may use; the Letters list when omitted. */
   placeholders?: PlaceholderList | null,
-): { text: string; missing: string[]; unknown: string[]; retired: string[] }
+): { text: string; missing: string[]; unknown: string[]; retired: string[]; esignTags: string[] }
 
 export declare function templateWarnings(
   template: LetterTemplateText | null | undefined,
@@ -58,7 +58,15 @@ export declare function templateWarnings(
 ): {
   unknown: string[]
   retired: string[]
+  /** The SignWell field tags in the three boxes, as typed, every one (not a warning). */
+  esignTags: string[]
 }
+
+/** True for one whole SignWell field tag the app sends, e.g. `{{initial:1:y}}` (signer 1 only). */
+export declare function isEsignTag(token: string | null | undefined): boolean
+
+/** Why an unknown key that reads as a field tag (`initial:2:y`) cannot be sent, or null. */
+export declare function esignTagProblem(key: string): string | null
 
 /** Placeholders the app no longer fills in, with the reason a letter naming one is told. */
 export declare const retiredPlaceholders: Readonly<Record<string, string>>

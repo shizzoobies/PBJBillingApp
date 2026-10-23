@@ -3,7 +3,13 @@ import { Link, useLocation, useParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { BoldBar, PlaceholderChipsToggle } from '../components/letters/LetterEditorKit'
 import { DocumentPreviewModal } from '../components/letters/DocumentPreviewModal'
-import { insertPlaceholder, isBoldShortcut, toggleBold, unknownPlaceholderSentence } from '../components/letters/letterEditing'
+import {
+  esignFieldCount,
+  insertPlaceholder,
+  isBoldShortcut,
+  toggleBold,
+  unknownPlaceholderSentence,
+} from '../components/letters/letterEditing'
 import { SaveBadge } from '../components/SectionKit'
 import { RecipientPicker } from '../components/RecipientPicker'
 import { AddressedTo, type AddressedToFields } from '../components/engagements/AddressedTo'
@@ -417,6 +423,8 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
   /* ---- the editor ---------------------------------------------------------- */
 
   const values = { subject, emailBody, letterBody }
+  // SignWell field tags typed into the letter (task 17): a quiet count, never a warning.
+  const esignFields = esignFieldCount(letterBody)
   const setters = { subject: setSubject, emailBody: setEmailBody, letterBody: setLetterBody }
   const refs = { subject: subjectRef, emailBody: emailBodyRef, letterBody: letterBodyRef }
   const fieldWord = (field: Field) => (field === 'subject' ? 'subject' : field === 'emailBody' ? 'email' : 'letter')
@@ -796,6 +804,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
               out bold in the email and the PDF.
             </p>
             {chips('letterBody')}
+            {esignFields ? <p className="muted-text">{esignFields}</p> : null}
 
             {warnings.unknown.length > 0 ? (
               <p className="form-error" role="status">

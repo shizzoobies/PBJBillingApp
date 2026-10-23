@@ -229,6 +229,23 @@ describe('the editor', () => {
     expect(screen.queryByText(/is not a placeholder/)).not.toBeInTheDocument()
   })
 
+  // Task 17: SignWell field tags in the letter body are counted quietly, never warned about.
+  it('counts the e-sign field tags in the letter body without a warning, and says why a second signer is refused', async () => {
+    await renderPage()
+    const letter = screen.getByLabelText('Letter body')
+    expect(screen.queryByText(/E-sign fields in the body/)).not.toBeInTheDocument()
+    fireEvent.change(letter, { target: { value: 'Initial {{initial:1:y}} and {{initial:1:y}}, sign {{signature:1:y}}' } })
+    expect(screen.getByText('E-sign fields in the body: 3')).toBeInTheDocument()
+    expect(screen.queryByText(/is not a placeholder/)).not.toBeInTheDocument()
+    fireEvent.change(letter, { target: { value: 'Initial {{initial:2:y}}' } })
+    expect(screen.queryByText(/E-sign fields in the body/)).not.toBeInTheDocument()
+    expect(
+      screen.getByText(
+        '{{initial:2:y}} names signer 2, but a letter goes to one signer - use signer 1, as in {{initial:1:y}}. Send will refuse until it is changed.',
+      ),
+    ).toBeInTheDocument()
+  })
+
   it('inserts a placeholder at the caret in the box it sits under', async () => {
     await renderPage()
     const email = screen.getByLabelText('Email body') as HTMLTextAreaElement

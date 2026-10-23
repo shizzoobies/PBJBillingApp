@@ -1,5 +1,6 @@
 import type { KeyboardEvent } from 'react'
 import { wrapBold } from '../../../lib/letter-bold.js'
+import { esignTagProblem, fillTemplate } from '../../../lib/letter-template.js'
 
 /**
  * The pieces every letter editor shares (Letters, the engagement editor and the
@@ -53,10 +54,25 @@ export function isBoldShortcut(event: KeyboardEvent<HTMLElement>) {
   return (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'b'
 }
 
-/** "{{a}} is / {{a}}, {{b}} are not placeholders the app fills in. Send will refuse ..." */
+/**
+ * "{{a}} is / {{a}}, {{b}} are not placeholders the app fills in. Send will refuse ..." A key that
+ * reads as a SignWell field tag (`{{initial:2:y}}`) gets the sentence saying why instead.
+ */
 export function unknownPlaceholderSentence(unknown: string[]): string {
-  const tokens = unknown.map((key) => `{{${key}}}`)
-  return tokens.length > 1
-    ? `${tokens.join(', ')} are not placeholders the app fills in. Send will refuse until they are changed.`
-    : `${tokens[0]} is not a placeholder the app fills in. Send will refuse until it is changed.`
+  const sentences = unknown.map(esignTagProblem).filter((problem): problem is string => Boolean(problem))
+  const tokens = unknown.filter((key) => !esignTagProblem(key)).map((key) => `{{${key}}}`)
+  if (tokens.length > 0) {
+    sentences.unshift(
+      tokens.length > 1
+        ? `${tokens.join(', ')} are not placeholders the app fills in`
+        : `${tokens[0]} is not a placeholder the app fills in`,
+    )
+  }
+  return `${sentences.join('. ')}. Send will refuse until ${unknown.length > 1 ? 'they are' : 'it is'} changed.`
+}
+
+/** "E-sign fields in the body: 2" for the SignWell field tags in a letter body, or '' when it has none. */
+export function esignFieldCount(letterBody: string): string {
+  const count = fillTemplate(letterBody, {}).esignTags.length
+  return count > 0 ? `E-sign fields in the body: ${count}` : ''
 }

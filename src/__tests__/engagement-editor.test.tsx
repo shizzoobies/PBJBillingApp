@@ -428,6 +428,17 @@ describe('loading', () => {
     expect(screen.getByText(/\{\{nope\}\} is not a placeholder the app fills in/)).toBeTruthy()
   })
 
+  // Task 17: initials and extra signature fields for SignWell, typed into the letter body.
+  it('counts the e-sign field tags in the letter body quietly and never calls them typos', async () => {
+    await renderEditor()
+    expect(screen.queryByText(/E-sign fields in the body/)).toBeNull()
+    fireEvent.change(screen.getByLabelText('Letter body'), {
+      target: { value: 'Initial here {{initial:1:y}}.\n\nAn extra signature line {{signature:1:y}}' },
+    })
+    expect(screen.getByText('E-sign fields in the body: 2')).toBeTruthy()
+    expect(screen.queryByText(/is not a placeholder the app fills in/)).toBeNull()
+  })
+
   it('names a retired placeholder as retired, not as a typo', async () => {
     await renderEditor()
     fireEvent.change(screen.getByLabelText('Letter body'), { target: { value: 'At {{hourly_rate}} an hour.' } })

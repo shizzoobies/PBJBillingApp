@@ -3,7 +3,8 @@
  * the same `**bold**` rule the server renders.
  */
 
-export type BoldRun = { text: string; bold: boolean }
+/** `esignTag`: a SignWell field tag such as `{{initial:1:y}}`, printed invisibly in the PDF. */
+export type BoldRun = { text: string; bold: boolean; esignTag?: true }
 
 export declare function boldRuns(text: string | null | undefined): BoldRun[]
 
