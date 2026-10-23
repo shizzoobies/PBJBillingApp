@@ -412,6 +412,8 @@ function OwnerDashboardView() {
     const ids = new Set<string>(stalledStages.map((stage) => stage.caseId || stage.id))
     for (const c of data.checklists) {
       if (!c.caseId) continue
+      // A skipped step is closed out for its cycle, not a stale open step.
+      if (isChecklistSkipped(c)) continue
       if (isComplete(c)) continue
       if (!isInProgress(c)) continue
       const lastActivity = checklistRecency.get(c.id)
@@ -453,10 +455,13 @@ function OwnerDashboardView() {
     ? teammates
     : [...teammates, ...inactiveTeammates]
 
+  // A skipped step is neither finished nor open, so it never counts toward a
+  // case in flight: a case whose only open step is skipped drops off.
   const casesInFlight = useMemo(() => {
     const byCase = new Map<string, Checklist[]>()
     for (const c of data.checklists) {
       if (!c.caseId) continue
+      if (isChecklistSkipped(c)) continue
       const list = byCase.get(c.caseId) ?? []
       list.push(c)
       byCase.set(c.caseId, list)
@@ -989,6 +994,7 @@ function EmployeeDashboardView() {
     const ids = new Set<string>(myStalledStages.map((stage) => stage.caseId || stage.id))
     for (const c of data.checklists) {
       if (!c.caseId) continue
+      if (isChecklistSkipped(c)) continue
       if (c.assigneeId !== userId) continue
       if (isComplete(c)) continue
       const lastActivity = checklistRecency.get(c.id)
@@ -1022,11 +1028,13 @@ function EmployeeDashboardView() {
   })
 
   // My cases in flight: distinct caseIds where the user is on at least one
-  // stage (current or past) AND the case isn't fully complete.
+  // stage (current or past) AND the case isn't fully complete. Skipped steps
+  // are left out, as in the owner's Cases in flight.
   const myCases = useMemo(() => {
     const byCase = new Map<string, Checklist[]>()
     for (const c of data.checklists) {
       if (!c.caseId) continue
+      if (isChecklistSkipped(c)) continue
       const list = byCase.get(c.caseId) ?? []
       list.push(c)
       byCase.set(c.caseId, list)
