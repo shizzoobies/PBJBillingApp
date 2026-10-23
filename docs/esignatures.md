@@ -58,8 +58,8 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
        "expires_in_hours": 720,
        "metadata": "{\"engagement_id\":\"eng-...\",\"client_id\":\"client-...\",\"app\":\"pbjbillingapp\",\"esign_hash\":\"<sha256>\"}",
        "emails": {
-         "signature_request_subject": "<the letter's email subject>",
-         "signature_request_text": "<the letter's email text>",
+         "signature_request_subject": "Please sign your engagement letter - <firm>",
+         "signature_request_text": "Please review and sign your engagement letter electronically where indicated.",
          "final_contract_subject": "Your signed engagement letter",
          "final_contract_text": "Thank you for signing your engagement letter with <firm>.",
          "reply_to": "<INVOICE_REPLY_TO, the invoice emails' reply-to>"
@@ -136,7 +136,7 @@ table, no backfill. Both store backends carry them.
 5. Open a draft letter for the `Test` client (its party with an address you can read). **Send for
    signature**: the confirm names eSignatures.io, its automatic reminders and test mode. Badge "E-sign:
    sent", the letter Sent, an `esign` line in Activity.
-6. Note: does the test contract email the signer; does the email carry the letter's subject/text and the
+6. Note: does the test contract email the signer; does the email carry the fixed subject/sentence and the
    reply-to; how the Markdown looks (heading, bold, addressee, the initials checkbox); does the badge move
    to "viewed" (the webhook works).
 7. Press **Send reminder** (once a day): the signer gets the request again.

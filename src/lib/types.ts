@@ -3004,7 +3004,10 @@ export type SignatureRequest = {
   provider?: EsignProvider
   status: SignatureRequestStatus
   recipients: Array<{ id: string; name: string; email: string; status?: string }>
-  /** True while SIGNWELL_TEST_MODE is not the literal `false`: not legally binding. */
+  /**
+   * Sent in the provider's test mode (SIGNWELL_TEST_MODE / ESIGNATURES_TEST_MODE not the literal `false` at
+   * send time): not legally binding, and it signs only the Test client's letter.
+   */
   testMode: boolean
   /** The kept signed PDF, once there is one (download it through the engagement's esign route). */
   signedDocumentId: string | null
