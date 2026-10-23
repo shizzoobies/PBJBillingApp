@@ -3063,7 +3063,7 @@ const templateWorkspace = () =>
         clientId: 'c1',
         assigneeId: 'emp-1',
         frequency: 'annually',
-        nextDueDate: '2026-12-01',
+        nextDueDate: '2099-12-01',
         active: false,
         viewerIds: [],
         editorIds: [],
@@ -23182,7 +23182,9 @@ describe('a recipe copied onto a client keeps its whole setup', () => {
     dueDayOfMonth: 20,
     monthlyDueDays: { 3: 31, 6: 30 },
     repeatAnnually: false,
-    scheduleYear: 2026,
+    // A one-year recipe whose year has passed rebases to the copy's year, so a
+    // near year here flips to "expected 2027" on New Year's Day; 2099 never passes.
+    scheduleYear: 2099,
     skipAllowed: true,
     periodLabelEnabled: true,
     periodCoverageStart: '2026-01-01',
@@ -23232,7 +23234,7 @@ describe('a recipe copied onto a client keeps its whole setup', () => {
     expect(copy.dueDayOfMonth).toBe(20)
     expect(copy.monthlyDueDays).toEqual({ 3: 31, 6: 30 })
     expect(copy.repeatAnnually).toBe(false)
-    expect(copy.scheduleYear).toBe(2026)
+    expect(copy.scheduleYear).toBe(2099)
     expect(copy.leadDays).toBe(7)
     expect(copy.categoryId).toBe('cat-recon')
     expect(copy.skipAllowed).toBe(true)
@@ -23312,7 +23314,7 @@ describe('a recipe copied onto a client keeps its whole setup', () => {
           due_day_of_month: 20,
           monthly_due_days: { 3: 31, 6: 30 },
           repeat_annually: false,
-          schedule_year: 2026,
+          schedule_year: 2099,
           lead_days: 7,
         },
       ],
@@ -23355,7 +23357,7 @@ describe('a recipe copied onto a client keeps its whole setup', () => {
       scheduled_months: [3, 6, 9, 12],
       due_day_of_month: 20,
       repeat_annually: false,
-      schedule_year: 2026,
+      schedule_year: 2099,
       lead_days: 7,
       category_id: 'cat-recon',
       skip_allowed: true,
@@ -27273,7 +27275,7 @@ describe('deleteChecklistItemFromSeries', () => {
     clientId: 'c1',
     assigneeId: 'emp-1',
     frequency: 'monthly',
-    nextDueDate: '2026-12-31',
+    nextDueDate: '2099-12-31',
     active: true,
     viewerIds: [],
     editorIds: [],
@@ -28585,7 +28587,7 @@ describe('pending notes: cap, capped list, attach guards (file backend)', () => 
       clientId: 'c-ser',
       assigneeId: 'emp-1',
       frequency: 'monthly',
-      nextDueDate: '2026-12-31',
+      nextDueDate: '2099-12-31',
       active: true,
       viewerIds: [],
       editorIds: [],
@@ -29260,7 +29262,7 @@ describe('staff "This + all future" delete requests, approved by the owner (file
     clientId: 'c1',
     assigneeId: 'emp-1',
     frequency: 'monthly',
-    nextDueDate: '2026-12-31',
+    nextDueDate: '2099-12-31',
     active: true,
     viewerIds: [],
     editorIds: [],
@@ -51828,7 +51830,7 @@ describe('stage advance explains itself (file backend)', () => {
     clientId: 'c1',
     assigneeId: 'emp-1',
     frequency: 'monthly',
-    nextDueDate: '2026-10-31',
+    nextDueDate: '2099-10-31',
     active: true,
     viewerIds: [],
     editorIds: [],
@@ -52212,7 +52214,7 @@ describe('open next step now (file backend)', () => {
     clientId: 'c1',
     assigneeId: 'emp-1',
     frequency: 'monthly',
-    nextDueDate: '2026-10-31',
+    nextDueDate: '2099-10-31',
     active: true,
     viewerIds: [],
     editorIds: [],
