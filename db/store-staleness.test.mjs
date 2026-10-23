@@ -55558,6 +55558,64 @@ describe('signature requests (both backends)', () => {
     expect(await store.recordSignwellEventOnce('key-a', 'document_viewed')).toBe(true)
   })
 
+  it('file: an eSignatures.io request keeps its provider, template and signer id; an old row reads as SignWell', async () => {
+    const signwell = await newRequest()
+    expect(signwell).toMatchObject({ provider: 'signwell', providerTemplateId: null, providerSignerId: null, providerDocumentId: 'doc-1' })
+    expect((await readAuthState()).signatureRequests[0].provider).toBeNull()
+    const es = await newRequest({
+      signwellDocumentId: undefined,
+      providerDocumentId: 'ctr-1',
+      provider: 'esignatures',
+      providerTemplateId: 'tpl-1',
+      providerSignerId: 'signer-1',
+    })
+    expect(es).toMatchObject({
+      provider: 'esignatures',
+      providerDocumentId: 'ctr-1',
+      signwellDocumentId: 'ctr-1',
+      providerTemplateId: 'tpl-1',
+      providerSignerId: 'signer-1',
+    })
+    expect(await store.getSignatureRequest(es.id)).toEqual(es)
+    // An unknown provider is stored as none (SignWell).
+    expect((await newRequest({ signwellDocumentId: 'doc-x', provider: 'docusign' })).provider).toBe('signwell')
+    // A row written before task 18 (no provider keys at all) reads as SignWell.
+    const state = await readAuthState()
+    delete state.signatureRequests[0].provider
+    delete state.signatureRequests[0].providerTemplateId
+    await writeFile(localAuthPath, JSON.stringify(state, null, 2))
+    expect(await store.getSignatureRequest(signwell.id)).toMatchObject({ provider: 'signwell', providerTemplateId: null })
+  })
+
+  it('file: the document-id lookup can be held to one provider', async () => {
+    const signwell = await newRequest()
+    const es = await newRequest({ signwellDocumentId: 'ctr-1', provider: 'esignatures' })
+    expect((await store.getSignatureRequestByDocumentId('ctr-1')).id).toBe(es.id)
+    expect((await store.getSignatureRequestByDocumentId('ctr-1', 'esignatures')).id).toBe(es.id)
+    expect(await store.getSignatureRequestByDocumentId('ctr-1', 'signwell')).toBeNull()
+    expect((await store.getSignatureRequestByDocumentId('doc-1', 'signwell')).id).toBe(signwell.id)
+    expect(await store.getSignatureRequestByDocumentId('doc-1', 'esignatures')).toBeNull()
+  })
+
+  it('file: expires one provider\'s sent or viewed requests sent before the cutoff, and nothing else', async () => {
+    const old = await newRequest({ signwellDocumentId: 'ctr-old', provider: 'esignatures', sentAt: '2026-09-01T12:00:00.000Z' })
+    const viewed = await newRequest({ signwellDocumentId: 'ctr-viewed', provider: 'esignatures', sentAt: '2026-09-02T12:00:00.000Z', status: 'viewed' })
+    const fresh = await newRequest({ signwellDocumentId: 'ctr-fresh', provider: 'esignatures', sentAt: '2026-10-20T12:00:00.000Z' })
+    const done = await newRequest({ signwellDocumentId: 'ctr-done', provider: 'esignatures', sentAt: '2026-09-01T12:00:00.000Z', status: 'completed' })
+    const signwell = await newRequest({ signwellDocumentId: 'doc-old', sentAt: '2026-09-01T12:00:00.000Z' })
+    const expired = await store.expireSignatureRequestsSentBefore('esignatures', '2026-09-23T16:00:00.000Z')
+    expect(expired.sort()).toEqual([old.id, viewed.id].sort())
+    expect((await store.getSignatureRequest(old.id)).status).toBe('expired')
+    expect((await store.getSignatureRequest(viewed.id)).status).toBe('expired')
+    for (const [row, status] of [[fresh, 'sent'], [done, 'completed'], [signwell, 'sent']]) {
+      expect((await store.getSignatureRequest(row.id)).status).toBe(status)
+    }
+    // A second run finds nothing; a bad provider or cutoff does nothing.
+    expect(await store.expireSignatureRequestsSentBefore('esignatures', '2026-09-23T16:00:00.000Z')).toEqual([])
+    expect(await store.expireSignatureRequestsSentBefore('docusign', '2026-12-01T00:00:00.000Z')).toEqual([])
+    expect(await store.expireSignatureRequestsSentBefore('esignatures', 'not a date')).toEqual([])
+  })
+
   it('is never in the bulk save: not in its lock list, its tables or the workspace fingerprint', () => {
     const named = JSON.stringify([BULK_SAVE_LOCK_TABLES, BULK_SAVE_LOCK_SQL, BULK_SAVE_TABLES])
     for (const table of ['signature_requests', 'signature_documents', 'signwell_events']) {
@@ -55616,9 +55674,11 @@ describe('signature requests (both backends)', () => {
       const inserts = fake.matching(/^insert into signature_requests/i)
       expect(inserts).toHaveLength(1)
       expect(inserts[0].text.replace(/\s+/g, ' ')).toContain(
-        '(id, engagement_id, client_id, signwell_document_id, status, recipients, test_mode, sent_at, created_by, esign_hash) values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::timestamptz, $9, $10)',
+        '(id, engagement_id, client_id, signwell_document_id, status, recipients, test_mode, sent_at, created_by, esign_hash, provider, provider_template_id, provider_signer_id) values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::timestamptz, $9, $10, $11, $12, $13)',
       )
       expect(inserts[0].text).toMatch(/returning id, engagement_id, client_id, signwell_document_id, status, recipients,/)
+      // A SignWell send passes no provider: stored null (read as SignWell), no template, no signer id.
+      expect(inserts[0].params.slice(10)).toEqual([null, null, null])
       const [id, engagementId, clientId, documentId, status, recipients, testMode, sentAt, createdBy, esignHash] = inserts[0].params
       expect(id).toMatch(/^sigreq-[0-9a-f]{8}$/)
       expect([engagementId, clientId, documentId, status, testMode, sentAt, createdBy, esignHash]).toEqual([
@@ -55655,6 +55715,79 @@ describe('signature requests (both backends)', () => {
       ])
       expect(await postgresStore(fakePostgres()).getSignatureRequest('')).toBeNull()
       expect(await postgresStore(fakePostgres()).activeSignatureRequestForEngagement('')).toBeNull()
+    })
+
+    it('an eSignatures.io request INSERTs its provider, template id and signer id; the row reads them back', async () => {
+      const { fake, pg } = pgWith([
+        [
+          /^insert into signature_requests/i,
+          { rows: [row({ signwell_document_id: 'ctr-1', provider: 'esignatures', provider_template_id: 'tpl-1', provider_signer_id: 'signer-1' })], rowCount: 1 },
+        ],
+      ])
+      const created = await pg.createSignatureRequest({
+        engagementId: 'eng-1',
+        providerDocumentId: 'ctr-1',
+        provider: 'esignatures',
+        providerTemplateId: 'tpl-1',
+        providerSignerId: 'signer-1',
+        testMode: true,
+      })
+      expect(created).toMatchObject({ provider: 'esignatures', providerDocumentId: 'ctr-1', providerTemplateId: 'tpl-1', providerSignerId: 'signer-1' })
+      const params = fake.matching(/^insert into signature_requests/i)[0].params
+      expect(params[3]).toBe('ctr-1')
+      expect(params.slice(10)).toEqual(['esignatures', 'tpl-1', 'signer-1'])
+      // Every select reads the three new columns.
+      expect(fake.matching(/^insert into signature_requests/i)[0].text.replace(/\s+/g, ' ')).toContain(
+        'updated_at, provider, provider_template_id, provider_signer_id',
+      )
+      // A row from before the columns existed (null provider) is SignWell's.
+      const legacy = pgWith([[/^select id, engagement_id[\s\S]*from signature_requests/i, { rows: [row({ provider: null })] }]])
+      expect((await legacy.pg.getSignatureRequest('sigreq-aaaaaaaa')).provider).toBe('signwell')
+    })
+
+    it('the document-id lookup held to a provider adds coalesce(provider, signwell) = $2', async () => {
+      const { fake, pg } = pgWith([[/^select id, engagement_id[\s\S]*from signature_requests/i, { rows: [row()] }]])
+      await pg.getSignatureRequestByDocumentId('ctr-1', 'esignatures')
+      await pg.getSignatureRequestByDocumentId('doc-1', 'nonsense')
+      const [held, loose] = fake.matching(/^select id, engagement_id[\s\S]*from signature_requests/i)
+      expect(held.text.replace(/\s+/g, ' ')).toMatch(/where signwell_document_id = \$1 and coalesce\(provider, 'signwell'\) = \$2$/)
+      expect(held.params).toEqual(['ctr-1', 'esignatures'])
+      expect(loose.text.replace(/\s+/g, ' ')).toMatch(/where signwell_document_id = \$1$/)
+      expect(loose.params).toEqual(['doc-1'])
+    })
+
+    it('expireSignatureRequestsSentBefore is ONE guarded UPDATE .. RETURNING id', async () => {
+      const { fake, pg } = pgWith([[/^update signature_requests set status = 'expired'/i, { rows: [{ id: 'sigreq-a' }], rowCount: 1 }]])
+      expect(await pg.expireSignatureRequestsSentBefore('esignatures', '2026-09-23T16:00:00.000Z')).toEqual(['sigreq-a'])
+      const updates = fake.matching(/^update signature_requests set status = 'expired'/i)
+      expect(updates).toHaveLength(1)
+      expect(updates[0].text.replace(/\s+/g, ' ')).toBe(
+        "update signature_requests set status = 'expired', updated_at = now() where coalesce(provider, 'signwell') = $1 and status = any($2::text[]) and sent_at is not null and sent_at < $3::timestamptz returning id",
+      )
+      expect(updates[0].params).toEqual(['esignatures', ['sent', 'viewed'], '2026-09-23T16:00:00.000Z'])
+      expect(await postgresStore(fakePostgres()).expireSignatureRequestsSentBefore('esignatures', '')).toEqual([])
+    })
+
+    it('boots the provider columns: in the create statement for a fresh database and a look-first ALTER for an existing one, mirrored in schema.sql', async () => {
+      const source = await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')
+      const schema = await readFile(path.join(projectRoot, 'db', 'schema.sql'), 'utf8')
+      const ddl = source.slice(source.indexOf('create table if not exists signature_requests'), source.indexOf('create table if not exists signature_documents'))
+      for (const column of ['provider text,', 'provider_template_id text,', 'provider_signer_id text']) {
+        expect(ddl).toContain(column)
+        expect(schema).toContain(column)
+      }
+      expect(ddl).toContain("table_name = 'signature_requests'")
+      expect(ddl).toContain("[['provider', 'provider_template_id', 'provider_signer_id']]")
+      expect(ddl.replace(/\s+/g, ' ')).toContain(
+        'alter table signature_requests add column if not exists provider text, add column if not exists provider_template_id text, add column if not exists provider_signer_id text',
+      )
+      // Look-first: the ALTER runs only when a column is missing.
+      expect(ddl.indexOf('information_schema.columns')).toBeLessThan(ddl.indexOf('alter table signature_requests'))
+      expect(ddl).toContain('if ((signatureProviderColumns.rows?.length ?? 0) < 3) {')
+      expect(ddl).not.toMatch(/\breferences\b/i)
+      for (const column of ['provider', 'provider_template_id', 'provider_signer_id']) {
+        expect(schema).toContain(`alter table signature_requests add column if not exists ${column} text;`)
+      }
     })
 
     it('updateSignatureRequest is ONE guarded UPDATE: finished never changes, in-progress only forward, bounced/error recoverable, last_event_at greatest', async () => {

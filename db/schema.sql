@@ -378,8 +378,14 @@ create table if not exists signature_requests (
   last_reminded_at timestamptz,
   created_by text,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  provider text,                -- 'esignatures' or 'signwell'; null = signwell (eSignatures.io, docs/esignatures.md)
+  provider_template_id text,
+  provider_signer_id text
 );
+alter table signature_requests add column if not exists provider text;
+alter table signature_requests add column if not exists provider_template_id text;
+alter table signature_requests add column if not exists provider_signer_id text;
 create index if not exists signature_requests_engagement_idx on signature_requests (engagement_id);
 
 create table if not exists signature_documents (

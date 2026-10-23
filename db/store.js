@@ -1724,7 +1724,10 @@ const PROGRESS_SIGNATURE_STATUSES = Object.freeze(['draft', 'sent', 'viewed', 's
 const RECOVERABLE_SIGNATURE_STATUSES = Object.freeze(['bounced', 'error'])
 const SIGNATURE_REQUEST_COLUMNS = `id, engagement_id, client_id, signwell_document_id, status, recipients,
           test_mode, esign_hash, signed_document_id, sent_at, completed_at, finishing_at, last_event_at,
-          last_error, last_reminded_at, created_by, created_at, updated_at`
+          last_error, last_reminded_at, created_by, created_at, updated_at, provider, provider_template_id,
+          provider_signer_id`
+/** The e-signature providers a request can be stored with (lib/esign-provider.js); null reads as SignWell. */
+const SIGNATURE_PROVIDERS = Object.freeze(['esignatures', 'signwell'])
 const SIGNATURE_DOCUMENT_META_COLUMNS = `id, signature_request_id, file_name, byte_size, created_at`
 /** The longest dedupe ledger the file backend keeps (a ledger, not history), like the Stripe one. */
 const SIGNWELL_EVENT_LEDGER_MAX = 500
@@ -1756,6 +1759,12 @@ function mapSignatureRequestRow(row) {
     engagementId: pick('engagement_id', 'engagementId'),
     clientId: pick('client_id', 'clientId') ?? null,
     signwellDocumentId: pick('signwell_document_id', 'signwellDocumentId') ?? null,
+    // The provider's document (SignWell) or contract (eSignatures.io) id: the same column, read neutrally.
+    providerDocumentId: pick('signwell_document_id', 'signwellDocumentId') ?? null,
+    // Which provider holds it; null (every request before eSignatures.io) reads as SignWell.
+    provider: pick('provider', 'provider') === 'esignatures' ? 'esignatures' : 'signwell',
+    providerTemplateId: pick('provider_template_id', 'providerTemplateId') ?? null,
+    providerSignerId: pick('provider_signer_id', 'providerSignerId') ?? null,
     status: row.status,
     recipients: cleanSignatureRecipients(row.recipients),
     testMode: pick('test_mode', 'testMode') !== false,
@@ -8307,9 +8316,29 @@ export class AppDataStore {
           last_reminded_at timestamptz,
           created_by text,
           created_at timestamptz not null default now(),
-          updated_at timestamptz not null default now()
+          updated_at timestamptz not null default now(),
+          provider text,                            -- 'esignatures' or 'signwell'; null = signwell (task 18)
+          provider_template_id text,                -- eSignatures.io: the Markdown template the contract was made from
+          provider_signer_id text                   -- eSignatures.io: the signer's id, for Send reminder (resend)
         )
       `)
+      // eSignatures.io as a second provider (task 18; docs/esignatures.md): the provider, its template and
+      // its signer id on each request; `signwell_document_id` holds either provider's document/contract id.
+      // Nullable, no backfill (null reads as SignWell). Look-first, so a boot with the columns takes no lock.
+      const signatureProviderColumns = await this.pool.query(
+        `select column_name from information_schema.columns
+          where table_schema = current_schema() and table_name = 'signature_requests'
+            and column_name = any($1::text[])`,
+        [['provider', 'provider_template_id', 'provider_signer_id']],
+      )
+      if ((signatureProviderColumns.rows?.length ?? 0) < 3) {
+        await this.pool.query(
+          `alter table signature_requests
+             add column if not exists provider text,
+             add column if not exists provider_template_id text,
+             add column if not exists provider_signer_id text`,
+        )
+      }
       await this.pool.query(`
         create index if not exists signature_requests_engagement_idx on signature_requests (engagement_id)
       `)
@@ -28561,6 +28590,10 @@ export class AppDataStore {
     engagementId,
     clientId = null,
     signwellDocumentId = null,
+    providerDocumentId = null,
+    provider = null,
+    providerTemplateId = null,
+    providerSignerId = null,
     status = 'sent',
     recipients = [],
     testMode = true,
@@ -28574,18 +28607,38 @@ export class AppDataStore {
     const signers = cleanSignatureRecipients(recipients)
     const sent = sentAt && !Number.isNaN(new Date(sentAt).getTime()) ? new Date(sentAt).toISOString() : null
     const hash = typeof esignHash === 'string' && /^[0-9a-f]{64}$/.test(esignHash) ? esignHash : null
+    // One column holds either provider's document/contract id (the neutral name is an alias).
+    const documentId = signwellDocumentId ?? providerDocumentId ?? null
+    const providerName = SIGNATURE_PROVIDERS.includes(provider) ? provider : null
+    const templateId = providerTemplateId ? String(providerTemplateId).slice(0, 200) : null
+    const signerId = providerSignerId ? String(providerSignerId).slice(0, 200) : null
     if (this.pool) {
       const { rows } = await this.pool.query(
         `insert into signature_requests
-           (id, engagement_id, client_id, signwell_document_id, status, recipients, test_mode, sent_at, created_by, esign_hash)
-         values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::timestamptz, $9, $10)
+           (id, engagement_id, client_id, signwell_document_id, status, recipients, test_mode, sent_at, created_by, esign_hash,
+            provider, provider_template_id, provider_signer_id)
+         values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::timestamptz, $9, $10, $11, $12, $13)
          returning ${SIGNATURE_REQUEST_COLUMNS}`,
-        [id, engagementId, clientId, signwellDocumentId, status, JSON.stringify(signers), testMode !== false, sent, createdBy, hash],
+        [
+          id,
+          engagementId,
+          clientId,
+          documentId,
+          status,
+          JSON.stringify(signers),
+          testMode !== false,
+          sent,
+          createdBy,
+          hash,
+          providerName,
+          templateId,
+          signerId,
+        ],
       )
       return mapSignatureRequestRow(rows[0])
     }
     return this._mutateSignatureFile((authState) => {
-      if (signwellDocumentId && authState.signatureRequests.some((row) => row.signwellDocumentId === signwellDocumentId)) {
+      if (documentId && authState.signatureRequests.some((row) => row.signwellDocumentId === documentId)) {
         throw new Error('a signature request for that SignWell document already exists')
       }
       const now = nowIso()
@@ -28593,7 +28646,10 @@ export class AppDataStore {
         id,
         engagementId,
         clientId,
-        signwellDocumentId,
+        signwellDocumentId: documentId,
+        provider: providerName,
+        providerTemplateId: templateId,
+        providerSignerId: signerId,
         status,
         recipients: signers,
         testMode: testMode !== false,
@@ -28626,19 +28682,65 @@ export class AppDataStore {
     return found ? mapSignatureRequestRow(found) : null
   }
 
-  /** The request SignWell's document id belongs to (the webhook's lookup), or null. */
-  async getSignatureRequestByDocumentId(signwellDocumentId) {
+  /**
+   * The request a provider's document (SignWell) or contract (eSignatures.io) id belongs to - a
+   * webhook's lookup - or null. With `provider`, only a request of that provider matches (a request
+   * with no provider stored is SignWell's).
+   */
+  async getSignatureRequestByDocumentId(signwellDocumentId, provider = null) {
     if (!signwellDocumentId) return null
+    const only = SIGNATURE_PROVIDERS.includes(provider) ? provider : null
     if (this.pool) {
       const { rows } = await this.pool.query(
-        `select ${SIGNATURE_REQUEST_COLUMNS} from signature_requests where signwell_document_id = $1`,
-        [signwellDocumentId],
+        only
+          ? `select ${SIGNATURE_REQUEST_COLUMNS} from signature_requests where signwell_document_id = $1 and coalesce(provider, 'signwell') = $2`
+          : `select ${SIGNATURE_REQUEST_COLUMNS} from signature_requests where signwell_document_id = $1`,
+        only ? [signwellDocumentId, only] : [signwellDocumentId],
       )
       return rows[0] ? mapSignatureRequestRow(rows[0]) : null
     }
     const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
-    const found = (authState.signatureRequests ?? []).find((row) => row?.signwellDocumentId === signwellDocumentId)
+    const found = (authState.signatureRequests ?? []).find(
+      (row) =>
+        row?.signwellDocumentId === signwellDocumentId &&
+        (!only || (row.provider === 'esignatures' ? 'esignatures' : 'signwell') === only),
+    )
     return found ? mapSignatureRequestRow(found) : null
+  }
+
+  /**
+   * Mark `provider`'s requests still out with the signer (sent or viewed) and sent before `sentBefore`
+   * as EXPIRED - eSignatures.io sends no expiry event, so the app expires its contracts itself when
+   * their link lapses (30 days). One guarded statement; a request that moved on meanwhile is left.
+   * @returns {Promise<string[]>} the ids expired
+   */
+  async expireSignatureRequestsSentBefore(provider, sentBefore) {
+    const only = SIGNATURE_PROVIDERS.includes(provider) ? provider : null
+    const cutoff = sentBefore && !Number.isNaN(new Date(sentBefore).getTime()) ? new Date(sentBefore).toISOString() : null
+    if (!only || !cutoff) return []
+    const open = ['sent', 'viewed']
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `update signature_requests set status = 'expired', updated_at = now()
+          where coalesce(provider, 'signwell') = $1 and status = any($2::text[])
+            and sent_at is not null and sent_at < $3::timestamptz
+          returning id`,
+        [only, open, cutoff],
+      )
+      return rows.map((row) => row.id)
+    }
+    return this._mutateSignatureFile((authState) => {
+      const expired = []
+      for (const row of authState.signatureRequests) {
+        const rowProvider = row?.provider === 'esignatures' ? 'esignatures' : 'signwell'
+        if (rowProvider !== only || !open.includes(row.status) || !row.sentAt) continue
+        if (Date.parse(row.sentAt) >= Date.parse(cutoff)) continue
+        row.status = 'expired'
+        row.updatedAt = nowIso()
+        expired.push(row.id)
+      }
+      return { result: expired, changed: expired.length > 0 }
+    })
   }
 
   /** The engagement's request still out with the signer (sent, viewed or partly signed), newest first, or null. */
