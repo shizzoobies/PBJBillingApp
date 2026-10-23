@@ -8669,6 +8669,416 @@ describe('pending client notes (file backend)', () => {
 })
 
 /**
+ * The writer of a note can edit it (featreq-da3801ab): `updateClientNote` and
+ * `updateClientPendingNote`, on BOTH backends. Only the writer (`editorId ===
+ * authorId`, the owner is not an exception), the same trim and length rule as
+ * adding, `editedAt` stamped; a pending note only while it still waits for a
+ * checklist. The store decides the writer inside its own guarded write, so a
+ * route that forgot to ask could still not edit someone else's note.
+ */
+describe('editing a note: only its writer (file backend)', () => {
+  const authPersisted = async () => JSON.parse(await readFile(localAuthPath, 'utf8'))
+
+  describe('client notes log', () => {
+    it('lets the writer change the words: trimmed, stamped edited, the rest of the note kept', async () => {
+      const note = await store.addClientNote('c-ne-1', { authorId: 'emp-a', authorName: 'Ann', body: 'Teh first try' })
+      expect(note.editedAt).toBeUndefined()
+      const outcome = await store.updateClientNote(note.id, { body: '  The first try  ', editorId: 'emp-a' })
+      expect(outcome.ok).toBe(true)
+      expect(outcome.note).toEqual({ ...note, body: 'The first try', editedAt: expect.any(String) })
+      expect(Number.isNaN(Date.parse(outcome.note.editedAt))).toBe(false)
+      const [listed] = await store.listClientNotes('c-ne-1')
+      expect(listed).toEqual(outcome.note)
+      expect(await store.getClientNote(note.id)).toEqual(outcome.note)
+      const stored = (await authPersisted()).clientNotes.find((entry) => entry.id === note.id)
+      expect(stored.body).toBe('The first try')
+      expect(stored.createdAt).toBe(note.createdAt)
+    })
+
+    it('refuses anyone else - the owner included - and writes nothing', async () => {
+      const note = await store.addClientNote('c-ne-2', { authorId: 'emp-a', authorName: 'Ann', body: 'Mine' })
+      expect(await store.updateClientNote(note.id, { body: 'Hers now', editorId: 'emp-patrice' })).toEqual({
+        ok: false,
+        reason: 'not_author',
+      })
+      expect(await store.updateClientNote(note.id, { body: 'Nobody', editorId: '' })).toEqual({
+        ok: false,
+        reason: 'not_author',
+      })
+      expect(await store.getClientNote(note.id)).toEqual(note)
+    })
+
+    it('refuses a note with no recorded writer', async () => {
+      const note = await store.addClientNote('c-ne-3', { body: 'Old note with no byline' })
+      expect(await store.updateClientNote(note.id, { body: 'x', editorId: 'emp-a' })).toEqual({
+        ok: false,
+        reason: 'not_author',
+      })
+    })
+
+    it('answers not_found for a missing note and empty for a blank body (nothing written)', async () => {
+      expect(await store.updateClientNote('cnote-nope', { body: 'x', editorId: 'emp-a' })).toEqual({
+        ok: false,
+        reason: 'not_found',
+      })
+      const note = await store.addClientNote('c-ne-4', { authorId: 'emp-a', body: 'Keep me' })
+      expect(await store.updateClientNote(note.id, { body: '   ', editorId: 'emp-a' })).toEqual({
+        ok: false,
+        reason: 'empty',
+      })
+      expect((await store.getClientNote(note.id)).body).toBe('Keep me')
+    })
+
+    it('keeps the add rule: at most 5,000 characters', async () => {
+      const note = await store.addClientNote('c-ne-5', { authorId: 'emp-a', body: 'short' })
+      const long = 'y'.repeat(5100)
+      const outcome = await store.updateClientNote(note.id, { body: long, editorId: 'emp-a' })
+      expect(outcome.note.body).toBe(long.slice(0, 5000))
+    })
+  })
+
+  describe('pending notes', () => {
+    const create = (clientId, over = {}) =>
+      store.createClientPendingNote(clientId, {
+        templateId: 'tpl-1',
+        kind: 'note',
+        body: 'New hire startng',
+        authorId: 'emp-a',
+        authorName: 'Ann',
+        ...over,
+      })
+    const stamp = async (noteId, patch) => {
+      const authState = await authPersisted()
+      Object.assign(authState.clientPendingNotes.find((entry) => entry.id === noteId), patch)
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    }
+
+    it('lets the writer change a waiting note: trimmed, stamped edited, listed with the stamp', async () => {
+      const note = await create('c-pe-1')
+      expect(note.editedAt).toBeUndefined()
+      const outcome = await store.updateClientPendingNote(note.id, { body: ' New hire starting ', editorId: 'emp-a' })
+      expect(outcome.ok).toBe(true)
+      expect(outcome.note).toEqual({ ...note, body: 'New hire starting', editedAt: expect.any(String) })
+      expect((await store.listClientPendingNotes('c-pe-1'))[0]).toEqual(outcome.note)
+      expect(await store.getClientPendingNote(note.id)).toEqual(outcome.note)
+    })
+
+    it('lets the writer change a repeating note (it never attaches itself)', async () => {
+      const note = await create('c-pe-2', { repeats: true })
+      const outcome = await store.updateClientPendingNote(note.id, { body: 'Every month', editorId: 'emp-a' })
+      expect(outcome.ok).toBe(true)
+      expect(outcome.note.repeats).toBe(true)
+      expect(outcome.note.body).toBe('Every month')
+    })
+
+    it('refuses anyone else - the owner included - and writes nothing', async () => {
+      const note = await create('c-pe-3')
+      expect(await store.updateClientPendingNote(note.id, { body: 'x', editorId: 'emp-patrice' })).toEqual({
+        ok: false,
+        reason: 'not_author',
+      })
+      expect(await store.getClientPendingNote(note.id)).toEqual(note)
+    })
+
+    it('refuses the writer once the note is on a checklist, and a repeating note’s copy', async () => {
+      const attached = await create('c-pe-4')
+      await stamp(attached.id, { attachedChecklistId: 'chk-1', attachedAt: new Date().toISOString() })
+      expect(await store.updateClientPendingNote(attached.id, { body: 'late', editorId: 'emp-a' })).toEqual({
+        ok: false,
+        reason: 'attached',
+      })
+      const copy = await create('c-pe-4')
+      await stamp(copy.id, { repeatOf: 'pnote-parent' })
+      expect(await store.updateClientPendingNote(copy.id, { body: 'late', editorId: 'emp-a' })).toEqual({
+        ok: false,
+        reason: 'attached',
+      })
+      const bodies = (await authPersisted()).clientPendingNotes
+        .filter((entry) => entry.clientId === 'c-pe-4')
+        .map((entry) => [entry.body, entry.editedAt])
+      expect(bodies).toEqual([
+        ['New hire startng', undefined],
+        ['New hire startng', undefined],
+      ])
+    })
+
+    it('a stranger hears not_author even on an attached note', async () => {
+      const note = await create('c-pe-5')
+      await stamp(note.id, { attachedChecklistId: 'chk-1', attachedAt: new Date().toISOString() })
+      expect(await store.updateClientPendingNote(note.id, { body: 'x', editorId: 'emp-b' })).toEqual({
+        ok: false,
+        reason: 'not_author',
+      })
+    })
+
+    it('answers not_found and empty, and keeps the add rule of 2,000 characters', async () => {
+      expect(await store.updateClientPendingNote('pnote-nope', { body: 'x', editorId: 'emp-a' })).toEqual({
+        ok: false,
+        reason: 'not_found',
+      })
+      const note = await create('c-pe-6')
+      expect(await store.updateClientPendingNote(note.id, { body: '\n ', editorId: 'emp-a' })).toEqual({
+        ok: false,
+        reason: 'empty',
+      })
+      const long = 'z'.repeat(2100)
+      expect((await store.updateClientPendingNote(note.id, { body: long, editorId: 'emp-a' })).note.body).toBe(
+        long.slice(0, 2000),
+      )
+    })
+  })
+})
+
+/**
+ * The same two edits on Postgres: ONE guarded UPDATE each (the writer, and for a
+ * pending note "still waiting", are conditions of the statement, not a read
+ * before it), then a follow-up read that names why nothing changed. The fake
+ * honors each guard only when the SQL names it, so the pins prove the clause.
+ */
+function fakeNoteEditPostgres({ notes = [], pending = [] } = {}) {
+  const statements = []
+  const query = async (text, params = []) => {
+    const trimmed = String(text).trim()
+    statements.push({ text: trimmed, params })
+    if (/^update client_notes set body = \$3, edited_at = now\(\)/i.test(trimmed)) {
+      const row = notes.find(
+        (entry) => entry.id === params[0] && (!/and author_id = \$2/i.test(trimmed) || entry.author_id === params[1]),
+      )
+      if (!row) return { rows: [], rowCount: 0 }
+      row.body = params[2]
+      row.edited_at = new Date('2026-10-23T14:00:00.000Z')
+      return { rows: [row], rowCount: 1 }
+    }
+    if (/^select author_id from client_notes where id = \$1$/i.test(trimmed)) {
+      const rows = notes.filter((entry) => entry.id === params[0])
+      return { rows, rowCount: rows.length }
+    }
+    if (/^update client_pending_notes set body = \$3, edited_at = now\(\)/i.test(trimmed)) {
+      const row = pending.find(
+        (entry) =>
+          entry.id === params[0] &&
+          (!/and author_id = \$2/i.test(trimmed) || entry.author_id === params[1]) &&
+          (!/attached_checklist_id is null/i.test(trimmed) || !entry.attached_checklist_id) &&
+          (!/repeat_of is null/i.test(trimmed) || !entry.repeat_of) &&
+          (!/dismissed_at is null/i.test(trimmed) || !entry.dismissed_at),
+      )
+      if (!row) return { rows: [], rowCount: 0 }
+      row.body = params[2]
+      row.edited_at = new Date('2026-10-23T14:00:00.000Z')
+      return { rows: [row], rowCount: 1 }
+    }
+    if (/^select author_id, attached_checklist_id, repeat_of from client_pending_notes where id = \$1$/i.test(trimmed)) {
+      const rows = pending.filter((entry) => entry.id === params[0])
+      return { rows, rowCount: rows.length }
+    }
+    if (/^select id, client_id, author_id, author_name, body, created_at, edited_at\s+from client_notes where/i.test(trimmed)) {
+      const rows = notes.filter((entry) => entry.id === params[0] || entry.client_id === params[0])
+      return { rows, rowCount: rows.length }
+    }
+    return { rows: [], rowCount: 0 }
+  }
+  const pool = { query, async connect() { return { query, release() {} } } }
+  return { pool, statements, notes, pending, matching: (pattern) => statements.filter((s) => pattern.test(s.text)) }
+}
+
+describe('editing a note: only its writer (postgres branch)', () => {
+  const created = new Date('2026-10-01T12:00:00.000Z')
+  const noteRow = (over = {}) => ({
+    id: 'cnote-1',
+    client_id: 'c1',
+    author_id: 'emp-a',
+    author_name: 'Ann',
+    body: 'Teh words',
+    created_at: created,
+    edited_at: null,
+    ...over,
+  })
+  const pendingRow = (over = {}) => ({
+    id: 'pnote-1',
+    client_id: 'c1',
+    template_id: 'tpl-1',
+    kind: 'note',
+    body: 'New hire startng',
+    author_id: 'emp-a',
+    author_name: 'Ann',
+    created_at: created,
+    attached_checklist_id: null,
+    attached_item_id: null,
+    attached_at: null,
+    repeats: null,
+    repeat_of: null,
+    dismissed_at: null,
+    edited_at: null,
+    ...over,
+  })
+
+  it('client note: one guarded update names the writer, and returns the note stamped edited', async () => {
+    const fake = fakeNoteEditPostgres({ notes: [noteRow()] })
+    const outcome = await postgresStore(fake).updateClientNote('cnote-1', { body: '  The words ', editorId: 'emp-a' })
+    expect(outcome).toEqual({
+      ok: true,
+      note: {
+        id: 'cnote-1',
+        clientId: 'c1',
+        authorId: 'emp-a',
+        authorName: 'Ann',
+        body: 'The words',
+        createdAt: created.toISOString(),
+        editedAt: '2026-10-23T14:00:00.000Z',
+      },
+    })
+    const [update] = fake.matching(/^update client_notes/i)
+    expect(update.text.replace(/\s+/g, ' ')).toBe(
+      'update client_notes set body = $3, edited_at = now() where id = $1 and author_id = $2 returning id, client_id, author_id, author_name, body, created_at, edited_at',
+    )
+    expect(update.params).toEqual(['cnote-1', 'emp-a', 'The words'])
+    expect(fake.matching(/^select author_id from client_notes/i)).toHaveLength(0)
+  })
+
+  it('client note: someone else (the owner included) is refused by the statement itself', async () => {
+    const fake = fakeNoteEditPostgres({ notes: [noteRow()] })
+    expect(await postgresStore(fake).updateClientNote('cnote-1', { body: 'x', editorId: 'emp-patrice' })).toEqual({
+      ok: false,
+      reason: 'not_author',
+    })
+    expect(fake.notes[0].body).toBe('Teh words')
+    expect(fake.notes[0].edited_at).toBeNull()
+    expect(await postgresStore(fake).updateClientNote('cnote-nope', { body: 'x', editorId: 'emp-a' })).toEqual({
+      ok: false,
+      reason: 'not_found',
+    })
+  })
+
+  it('client note: a blank body, or no editor, never reaches the database', async () => {
+    const fake = fakeNoteEditPostgres({ notes: [noteRow()] })
+    expect(await postgresStore(fake).updateClientNote('cnote-1', { body: '  ', editorId: 'emp-a' })).toEqual({
+      ok: false,
+      reason: 'empty',
+    })
+    expect(await postgresStore(fake).updateClientNote('cnote-1', { body: 'x', editorId: '' })).toEqual({
+      ok: false,
+      reason: 'not_author',
+    })
+    expect(fake.statements).toHaveLength(0)
+  })
+
+  it('client note: reads carry edited_at, and a note never edited has no editedAt key', async () => {
+    const fake = fakeNoteEditPostgres({
+      notes: [noteRow(), noteRow({ id: 'cnote-2', edited_at: new Date('2026-10-22T10:00:00.000Z') })],
+    })
+    const pgStore = postgresStore(fake)
+    const listed = await pgStore.listClientNotes('c1')
+    expect(listed.find((note) => note.id === 'cnote-1')).not.toHaveProperty('editedAt')
+    expect(listed.find((note) => note.id === 'cnote-2').editedAt).toBe('2026-10-22T10:00:00.000Z')
+    expect((await pgStore.getClientNote('cnote-2')).editedAt).toBe('2026-10-22T10:00:00.000Z')
+  })
+
+  it('pending note: one guarded update names the writer AND "still waiting"', async () => {
+    const fake = fakeNoteEditPostgres({ pending: [pendingRow()] })
+    const outcome = await postgresStore(fake).updateClientPendingNote('pnote-1', {
+      body: ' New hire starting ',
+      editorId: 'emp-a',
+    })
+    expect(outcome.ok).toBe(true)
+    expect(outcome.note).toMatchObject({ id: 'pnote-1', body: 'New hire starting', editedAt: '2026-10-23T14:00:00.000Z' })
+    const [update] = fake.matching(/^update client_pending_notes/i)
+    expect(update.text.replace(/\s+/g, ' ')).toMatch(
+      /^update client_pending_notes set body = \$3, edited_at = now\(\) where id = \$1 and author_id = \$2 and attached_checklist_id is null and repeat_of is null and dismissed_at is null returning /,
+    )
+    expect(update.params).toEqual(['pnote-1', 'emp-a', 'New hire starting'])
+  })
+
+  it('pending note: attached, a copy, someone else, missing - each refused and named', async () => {
+    const fake = fakeNoteEditPostgres({
+      pending: [
+        pendingRow({ id: 'pnote-att', attached_checklist_id: 'chk-1', attached_at: created }),
+        pendingRow({ id: 'pnote-copy', repeat_of: 'pnote-parent', attached_checklist_id: 'chk-1' }),
+        pendingRow({ id: 'pnote-theirs', author_id: 'emp-b' }),
+        pendingRow({ id: 'pnote-theirs-att', author_id: 'emp-b', attached_checklist_id: 'chk-1' }),
+      ],
+    })
+    const pgStore = postgresStore(fake)
+    const edit = (id) => pgStore.updateClientPendingNote(id, { body: 'x', editorId: 'emp-a' })
+    expect(await edit('pnote-att')).toEqual({ ok: false, reason: 'attached' })
+    expect(await edit('pnote-copy')).toEqual({ ok: false, reason: 'attached' })
+    expect(await edit('pnote-theirs')).toEqual({ ok: false, reason: 'not_author' })
+    expect(await edit('pnote-theirs-att')).toEqual({ ok: false, reason: 'not_author' })
+    expect(await edit('pnote-nope')).toEqual({ ok: false, reason: 'not_found' })
+    expect(fake.pending.every((row) => row.body === 'New hire startng' && row.edited_at === null)).toBe(true)
+  })
+
+  it('pending note: the add rule (2,000 characters) and a blank body that writes nothing', async () => {
+    const fake = fakeNoteEditPostgres({ pending: [pendingRow()] })
+    const pgStore = postgresStore(fake)
+    expect(await pgStore.updateClientPendingNote('pnote-1', { body: ' ', editorId: 'emp-a' })).toEqual({
+      ok: false,
+      reason: 'empty',
+    })
+    expect(fake.statements).toHaveLength(0)
+    const long = 'z'.repeat(2100)
+    await pgStore.updateClientPendingNote('pnote-1', { body: long, editorId: 'emp-a' })
+    expect(fake.matching(/^update client_pending_notes/i)[0].params[2]).toBe(long.slice(0, 2000))
+  })
+
+  it('pending note: the shared mapper carries edited_at only when it is set', async () => {
+    const fake = fakePendingNotesPostgres({
+      notes: [
+        pendingRow(),
+        pendingRow({ id: 'pnote-2', edited_at: new Date('2026-10-22T10:00:00.000Z') }),
+      ],
+    })
+    const pgStore = postgresStore(fake)
+    expect(await pgStore.getClientPendingNote('pnote-1')).not.toHaveProperty('editedAt')
+    expect((await pgStore.getClientPendingNote('pnote-2')).editedAt).toBe('2026-10-22T10:00:00.000Z')
+    const reads = fake.statements.filter((s) => /^select id, client_id, template_id/i.test(s.text))
+    expect(reads.every((s) => /\bedited_at\b/.test(s.text))).toBe(true)
+    await pgStore.listClientPendingNotes('c1')
+    await pgStore.listPendingNotesForChecklists(['chk-1'])
+    const allReads = fake.statements.filter((s) => /^select id, client_id, template_id/i.test(s.text))
+    expect(allReads).toHaveLength(4)
+    expect(allReads.every((s) => /\bedited_at\b/.test(s.text))).toBe(true)
+  })
+
+  it('start-up adds edited_at to both tables only when it is missing (look first, no lock otherwise)', async () => {
+    const probe = (table) =>
+      new RegExp(
+        `^select 1 from information_schema\\.columns\\s+where table_schema = current_schema\\(\\) and table_name = '${table}'\\s+and column_name = 'edited_at'$`,
+        'i',
+      )
+    const alter = (table) => new RegExp(`^alter table ${table} add column if not exists edited_at timestamptz$`, 'i')
+
+    const missing = fakePostgres()
+    await postgresStore(missing).initialize().catch(() => {})
+    for (const table of ['client_notes', 'client_pending_notes']) {
+      expect(missing.matching(probe(table))).toHaveLength(1)
+      expect(missing.matching(alter(table))).toHaveLength(1)
+      // The alter lands after the table's own create.
+      expect(missing.indexOf(alter(table))).toBeGreaterThan(
+        missing.indexOf(new RegExp(`create table if not exists ${table} \\(`, 'i')),
+      )
+    }
+    // A fresh database gets the column from the create itself.
+    expect(missing.matching(/create table if not exists client_notes \(/i)[0].text).toMatch(/edited_at timestamptz/)
+    expect(missing.matching(/create table if not exists client_pending_notes \(/i)[0].text).toMatch(/edited_at timestamptz/)
+
+    const present = fakePostgres()
+    const inner = present.pool.query.bind(present.pool)
+    present.pool.query = async (text, params) => {
+      const result = await inner(text, params)
+      const trimmed = String(text).trim()
+      if (probe('client_notes').test(trimmed) || probe('client_pending_notes').test(trimmed)) {
+        return { rows: [{ '?column?': 1 }], rowCount: 1 }
+      }
+      return result
+    }
+    await postgresStore(present).initialize().catch(() => {})
+    expect(present.matching(probe('client_notes'))).toHaveLength(1)
+    expect(present.matching(alter('client_notes'))).toHaveLength(0)
+    expect(present.matching(alter('client_pending_notes'))).toHaveLength(0)
+  })
+})
+
+/**
  * The attach pass (`attachPendingClientNotes`) — the FILE backend. This is
  * the part the pure materializer cannot do itself: it runs independently of
  * `read()` here so each test can hand it exact `createdAt`/`dueDate` values
@@ -32773,7 +33183,7 @@ describe('a client note that repeats on every checklist (postgres branch)', () =
       .catch(() => {})
     const [created] = fake.matching(/create table if not exists client_pending_notes/i)
     expect(created.text).toMatch(
-      /released_at timestamptz,\s+repeats boolean default false,\s+repeat_of text,\s+last_attached_checklist_id text,\s+last_attached_due_date text,\s+dismissed_at timestamptz\s+\)/,
+      /released_at timestamptz,\s+repeats boolean default false,\s+repeat_of text,\s+last_attached_checklist_id text,\s+last_attached_due_date text,\s+dismissed_at timestamptz,\s+edited_at timestamptz\s+\)/,
     )
     const [alter] = fake.matching(/^alter table client_pending_notes\s+add column if not exists repeats/i)
     expect(alter.text.replace(/\s+/g, ' ')).toBe(
@@ -32872,7 +33282,7 @@ describe('a client note that repeats on every checklist (postgres branch)', () =
     })
     const listed = await pgStore.listClientPendingNotes('c1')
     expect(statements[0].text.replace(/\s+/g, ' ')).toContain(
-      'created_at, attached_checklist_id, attached_item_id, attached_at, repeats, repeat_of, last_attached_checklist_id, last_attached_due_date, dismissed_at from client_pending_notes where client_id = $1',
+      'created_at, attached_checklist_id, attached_item_id, attached_at, repeats, repeat_of, last_attached_checklist_id, last_attached_due_date, dismissed_at, edited_at from client_pending_notes where client_id = $1',
     )
     expect(statements[0].params).toEqual(['c1'])
     expect(listed[0]).toMatchObject({
@@ -33744,7 +34154,7 @@ describe('a repeating note never copies onto one checklist twice (postgres branc
       },
     })
     const columns =
-      'created_at, attached_checklist_id, attached_item_id, attached_at, repeats, repeat_of, last_attached_checklist_id, last_attached_due_date, dismissed_at from client_pending_notes'
+      'created_at, attached_checklist_id, attached_item_id, attached_at, repeats, repeat_of, last_attached_checklist_id, last_attached_due_date, dismissed_at, edited_at from client_pending_notes'
     const one = await pgStore.getClientPendingNote('pnote-r')
     expect(statements[0]).toContain(`${columns} where id = $1`)
     expect(one).toMatchObject({ repeats: true, lastAttachedChecklistId: 'chk-a', lastAttachedDueDate: '2026-10-10' })
