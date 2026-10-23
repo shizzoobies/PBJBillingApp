@@ -439,6 +439,17 @@ describe('loading', () => {
     expect(screen.queryByText(/is not a placeholder the app fills in/)).toBeNull()
   })
 
+  it('warns on an e-sign field tag in the subject or the email body: it belongs in the letter', async () => {
+    await renderEditor()
+    const sentence = 'E-sign fields belong in the letter, not the email. Send will refuse until it is changed.'
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Sign {{initial:1:y}}' } })
+    expect(screen.getByText(sentence)).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Engagement letter' } })
+    fireEvent.change(screen.getByLabelText('Email body'), { target: { value: 'Please sign {{signature:1:y}}' } })
+    expect(screen.getByText(sentence)).toBeTruthy()
+    expect(screen.queryByText(/E-sign fields in the body/)).toBeNull()
+  })
+
   it('names a retired placeholder as retired, not as a typo', async () => {
     await renderEditor()
     fireEvent.change(screen.getByLabelText('Letter body'), { target: { value: 'At {{hourly_rate}} an hour.' } })

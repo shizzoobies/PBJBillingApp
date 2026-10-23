@@ -59,7 +59,9 @@ export function isBoldShortcut(event: KeyboardEvent<HTMLElement>) {
  * reads as a SignWell field tag (`{{initial:2:y}}`) gets the sentence saying why instead.
  */
 export function unknownPlaceholderSentence(unknown: string[]): string {
-  const sentences = unknown.map(esignTagProblem).filter((problem): problem is string => Boolean(problem))
+  const sentences = [
+    ...new Set(unknown.map(esignTagProblem).filter((problem): problem is string => Boolean(problem))),
+  ]
   const tokens = unknown.filter((key) => !esignTagProblem(key)).map((key) => `{{${key}}}`)
   if (tokens.length > 0) {
     sentences.unshift(

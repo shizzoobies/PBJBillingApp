@@ -246,6 +246,19 @@ describe('the editor', () => {
     ).toBeInTheDocument()
   })
 
+  it('warns on an e-sign field tag in the subject or the email body: it belongs in the letter', async () => {
+    await renderPage()
+    const sentence = 'E-sign fields belong in the letter, not the email. Send will refuse until they are changed.'
+    fireEvent.change(screen.getByLabelText('Email body'), { target: { value: 'Initial {{initial:1:y}} {{i:1:n}}' } })
+    expect(screen.getByText(sentence)).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Email body'), { target: { value: 'Hi' } })
+    fireEvent.change(screen.getByLabelText('Subject'), { target: { value: 'Sign {{signature:1:y}}' } })
+    expect(
+      screen.getByText('E-sign fields belong in the letter, not the email. Send will refuse until it is changed.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/E-sign fields in the body/)).not.toBeInTheDocument()
+  })
+
   it('inserts a placeholder at the caret in the box it sits under', async () => {
     await renderPage()
     const email = screen.getByLabelText('Email body') as HTMLTextAreaElement

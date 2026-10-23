@@ -49,6 +49,8 @@ export declare function fillTemplate(
   values: LetterValues,
   /** The keys the text may use; the Letters list when omitted. */
   placeholders?: PlaceholderList | null,
+  /** `esignTags: false` (the subject and the email): a SignWell field tag is unknown there. */
+  options?: { esignTags?: boolean },
 ): { text: string; missing: string[]; unknown: string[]; retired: string[]; esignTags: string[] }
 
 export declare function templateWarnings(
@@ -58,7 +60,7 @@ export declare function templateWarnings(
 ): {
   unknown: string[]
   retired: string[]
-  /** The SignWell field tags in the three boxes, as typed, every one (not a warning). */
+  /** The SignWell field tags in the letter body, as typed, every one (not a warning). */
   esignTags: string[]
 }
 
