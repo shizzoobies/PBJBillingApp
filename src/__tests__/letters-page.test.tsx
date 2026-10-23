@@ -235,7 +235,10 @@ describe('the editor', () => {
     const letter = screen.getByLabelText('Letter body')
     expect(screen.queryByText(/E-sign fields in the body/)).not.toBeInTheDocument()
     fireEvent.change(letter, { target: { value: 'Initial {{initial:1:y}} and {{initial:1:y}}, sign {{signature:1:y}}' } })
-    expect(screen.getByText('E-sign fields in the body: 3')).toBeInTheDocument()
+    // A Letters send is a plain email: the count never promises fields it will not make.
+    expect(
+      screen.getByText('E-sign fields in the body: 3 (fields appear only when sent for signature from Engagements)'),
+    ).toBeInTheDocument()
     expect(screen.queryByText(/is not a placeholder/)).not.toBeInTheDocument()
     fireEvent.change(letter, { target: { value: 'Initial {{initial:2:y}}' } })
     expect(screen.queryByText(/E-sign fields in the body/)).not.toBeInTheDocument()

@@ -2,6 +2,7 @@ import { letterPreviewPdfUrl, previewLetterRequest } from '../lib/api'
 import type { LetterPreview } from '../lib/types'
 import { retiredSentence } from '../../lib/letter-template.js'
 import { DocumentPreviewModal } from './letters/DocumentPreviewModal'
+import { unknownPreviewNotes } from './letters/letterEditing'
 
 /** The sentences under the title: who it goes to, what is missing, what would make Send skip them. */
 function letterNotes(preview: LetterPreview): string[] {
@@ -17,11 +18,7 @@ function letterNotes(preview: LetterPreview): string[] {
     )
     if (preview.missingNote) notes.push(preview.missingNote)
   }
-  if (preview.unknown.length > 0) {
-    notes.push(
-      `Not a placeholder the app fills in: ${preview.unknown.map((key) => `{{${key}}}`).join(', ')}. Send refuses until it is fixed.`,
-    )
-  }
+  notes.push(...unknownPreviewNotes(preview.unknown))
   if (preview.retired.length > 0) {
     notes.push(`${retiredSentence(preview.retired)}. Send refuses until it is taken out.`)
   }

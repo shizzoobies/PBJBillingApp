@@ -140,6 +140,7 @@ import {
   sendLetterBatch,
 } from './lib/letter-send.js'
 import {
+  esignTagProblem,
   letterPlaceholders,
   letterTemplateHash,
   retiredSentence,
@@ -13642,7 +13643,8 @@ const server = createServer(async (request, response) => {
       // letter would go out with a hole in a sentence. Nothing has been claimed or sent yet.
       const { unknown: unknownPlaceholders, retired: retiredPlaceholderKeys } = templateWarnings(context.template)
       if (unknownPlaceholders.length > 0 || retiredPlaceholderKeys.length > 0) {
-        const tokens = unknownPlaceholders.map((key) => `{{${key}}}`)
+        // A key that reads as an e-sign field tag (in the email, a second signer, spaces) says why instead.
+        const tokens = unknownPlaceholders.filter((key) => !esignTagProblem(key)).map((key) => `{{${key}}}`)
         const sentences = []
         if (tokens.length > 0) {
           sentences.push(
@@ -13651,6 +13653,7 @@ const server = createServer(async (request, response) => {
               : `${tokens[0]} is not a placeholder the app fills in`,
           )
         }
+        sentences.push(...new Set(unknownPlaceholders.map(esignTagProblem).filter(Boolean)))
         if (retiredPlaceholderKeys.length > 0) sentences.push(retiredSentence(retiredPlaceholderKeys))
         sendJson(response, 409, {
           error: 'unknown_placeholder',

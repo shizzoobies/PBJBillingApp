@@ -73,6 +73,22 @@ export function unknownPlaceholderSentence(unknown: string[]): string {
   return `${sentences.join('. ')}. Send will refuse until ${unknown.length > 1 ? 'they are' : 'it is'} changed.`
 }
 
+/**
+ * The preview's notes for unknown placeholders: the plain ones in one note, and each e-sign field tag
+ * problem (a second signer, spaces, in the email) in its own words, as the editor says it.
+ */
+export function unknownPreviewNotes(unknown: string[]): string[] {
+  const notes: string[] = []
+  const plain = unknown.filter((key) => !esignTagProblem(key))
+  if (plain.length > 0) {
+    notes.push(`Not a placeholder the app fills in: ${plain.map((key) => `{{${key}}}`).join(', ')}. Send refuses until it is fixed.`)
+  }
+  for (const problem of new Set(unknown.map(esignTagProblem))) {
+    if (problem) notes.push(`${problem}. Send refuses until it is fixed.`)
+  }
+  return notes
+}
+
 /** "E-sign fields in the body: 2" for the SignWell field tags in a letter body, or '' when it has none. */
 export function esignFieldCount(letterBody: string): string {
   const count = fillTemplate(letterBody, {}).esignTags.length

@@ -9,6 +9,7 @@ import {
   isBoldShortcut,
   toggleBold,
   unknownPlaceholderSentence,
+  unknownPreviewNotes,
 } from '../components/letters/letterEditing'
 import { SaveBadge } from '../components/SectionKit'
 import { RecipientPicker } from '../components/RecipientPicker'
@@ -1174,11 +1175,7 @@ function engagementPreviewNotes(preview: EngagementPreview): string[] {
   if (preview.missing.length > 0) {
     notes.push(preview.missingNote ?? `No value for ${preview.missing.map((key) => `{{${key}}}`).join(', ')}.`)
   }
-  if (preview.unknown.length > 0) {
-    notes.push(
-      `Not a placeholder the app fills in: ${preview.unknown.map((key) => `{{${key}}}`).join(', ')}. Send refuses until it is fixed.`,
-    )
-  }
+  notes.push(...unknownPreviewNotes(preview.unknown))
   if (preview.retired.length > 0) notes.push(`${retiredSentence(preview.retired)}. Send refuses until it is taken out.`)
   if (!preview.pdfAvailable) notes.push('The PDF could not be built, so Send would not send it.')
   if (preview.refusal && !notes.includes(preview.refusal)) notes.push(`Send would refuse: ${preview.refusal}`)

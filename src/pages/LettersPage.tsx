@@ -664,8 +664,11 @@ export function LettersPage() {
       : "Blank lines start a new paragraph. The firm letterhead, the date and the client's address are added above it."
   }
   const fieldWord = (field: Field) => (field === 'subject' ? 'subject' : field === 'emailBody' ? 'email' : 'letter')
-  // SignWell field tags typed into the letter (task 17): a quiet count, never a warning.
-  const esignFields = esignFieldCount(letterBody)
+  // SignWell field tags typed into the letter (task 17): a quiet count, never a warning. A Letters send is
+  // a plain email, so the count says the fields only come with Send for signature (an amendment drafted
+  // from this letter in Engagements).
+  const esignCount = esignFieldCount(letterBody)
+  const esignFields = esignCount ? `${esignCount} (fields appear only when sent for signature from Engagements)` : ''
 
   // The chips are the placeholders the Letters GET lists (the 'both' keys); an
   // engagement-only key is never offered here, even if one were listed.

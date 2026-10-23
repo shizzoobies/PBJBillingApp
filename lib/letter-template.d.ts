@@ -67,6 +67,12 @@ export declare function templateWarnings(
 /** True for one whole SignWell field tag the app sends, e.g. `{{initial:1:y}}` (signer 1 only). */
 export declare function isEsignTag(token: string | null | undefined): boolean
 
+/** A tag as the PDF writes it: type and required flag lower case (`{{INITIAL:1:Y}}` -> `{{initial:1:y}}`). */
+export declare function esignTagText(token: string | null | undefined): string
+
+/** Said of a good tag outside the letter body (the subject or the email). */
+export declare const ESIGN_OUTSIDE_LETTER: string
+
 /** Why an unknown key that reads as a field tag (`initial:2:y`) cannot be sent, or null. */
 export declare function esignTagProblem(key: string): string | null
 

@@ -354,6 +354,8 @@ describe('the send refuses the whole batch before the first client', () => {
     expect(body).toContain('const { unknown: unknownPlaceholders, retired: retiredPlaceholderKeys } = templateWarnings(context.template)')
     expect(body).toContain('if (unknownPlaceholders.length > 0 || retiredPlaceholderKeys.length > 0) {')
     expect(body).toContain('if (retiredPlaceholderKeys.length > 0) sentences.push(retiredSentence(retiredPlaceholderKeys))')
+    // Task 17: an e-sign field tag in the subject or email, for a second signer or with spaces says why.
+    expect(body).toContain('sentences.push(...new Set(unknownPlaceholders.map(esignTagProblem).filter(Boolean)))')
     expect(body).toContain("error: 'unknown_placeholder',")
     expect(body).toContain('message: `${sentences.join(\'. \')}. Nothing was sent.`,')
     expect(at("error: 'unknown_placeholder'")).toBeLessThan(at('await sendLetterBatch('))
@@ -544,7 +546,7 @@ describe('the shared pieces are the ones the lib tests cover', () => {
     expect(serverSource).toMatch(/import \{[^}]*\bassembleLetterPreview\b[^}]*\bsendLetterBatch\b[^}]*\} from '\.\/lib\/letter-send\.js'/)
     expect(libSource).toContain("import { buildLetterDocuments } from './letter-documents.js'")
     expect(serverSource).toMatch(
-      /import \{\s*letterPlaceholders,\s*letterTemplateHash,\s*retiredSentence,\s*templateWarnings,?\s*\} from '\.\/lib\/letter-template\.js'/,
+      /import \{\s*esignTagProblem,\s*letterPlaceholders,\s*letterTemplateHash,\s*retiredSentence,\s*templateWarnings,?\s*\} from '\.\/lib\/letter-template\.js'/,
     )
     expect(serverSource).toMatch(/import \{[^}]*\bformatInvoiceSender\b[^}]*\} from '\.\/lib\/notify\.js'/)
   })
