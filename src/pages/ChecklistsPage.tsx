@@ -1880,7 +1880,10 @@ function ChecklistInProgressSection({
   ]
 
   // Client grouping: each client is a collapsible section, sorted alphabetically;
-  // checklists within a client sorted by due date.
+  // checklists within a client sorted by due date. Completed checklists (the
+  // same rule as the Due-date grouping's Completed bucket) are split out into a
+  // nested, collapsed "Completed" sub-group at the bottom of their client
+  // (featreq-5a44c051), so the client's list - and its count - is open work.
   const clientGroups = useMemo(() => {
     const byClient = new Map<string, Checklist[]>()
     for (const checklist of filtered) {
@@ -1889,13 +1892,19 @@ function ChecklistInProgressSection({
       byClient.set(checklist.clientId, list)
     }
     return [...byClient.entries()]
-      .map(([clientId, list]) => ({
-        clientId,
-        label: clientName(clients, clientId),
-        checklists: [...list].sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
-      }))
+      .map(([clientId, list]) => {
+        const sorted = [...list].sort((a, b) => a.dueDate.localeCompare(b.dueDate))
+        const isDone = (checklist: Checklist) =>
+          groupChecklist(checklist, todayDateOnly) === 'completed'
+        return {
+          clientId,
+          label: clientName(clients, clientId),
+          open: sorted.filter((checklist) => !isDone(checklist)),
+          completed: sorted.filter(isDone),
+        }
+      })
       .sort((a, b) => a.label.localeCompare(b.label))
-  }, [filtered, clients])
+  }, [filtered, clients, todayDateOnly])
 
   const renderCard = (checklist: Checklist) => (
     <ChecklistCard
@@ -1988,19 +1997,37 @@ function ChecklistInProgressSection({
                 </ChecklistGroup>
               ),
             )
-          : clientGroups.map((group) => (
-              <ChecklistGroup
-                key={group.clientId}
-                defaultOpen
-                label={group.label}
-                count={group.checklists.length}
-                focusInside={
-                  Boolean(focusId) && group.checklists.some((c) => c.id === focusId)
-                }
-              >
-                {group.checklists.map(renderCard)}
-              </ChecklistGroup>
-            ))}
+          : clientGroups.map((group) => {
+              const focusInCompleted =
+                Boolean(focusId) && group.completed.some((c) => c.id === focusId)
+              return (
+                <ChecklistGroup
+                  key={group.clientId}
+                  // A client with only completed work in the period stays
+                  // listed, but folded away.
+                  defaultOpen={group.open.length > 0}
+                  label={group.label}
+                  count={group.open.length}
+                  focusInside={
+                    focusInCompleted ||
+                    (Boolean(focusId) && group.open.some((c) => c.id === focusId))
+                  }
+                >
+                  {group.open.map(renderCard)}
+                  {group.completed.length > 0 ? (
+                    <ChecklistGroup
+                      className="checklist-group-nested"
+                      defaultOpen={false}
+                      label="Completed"
+                      count={group.completed.length}
+                      focusInside={focusInCompleted}
+                    >
+                      {group.completed.map(renderCard)}
+                    </ChecklistGroup>
+                  ) : null}
+                </ChecklistGroup>
+              )
+            })}
       </div>
     </div>
   )
@@ -2012,11 +2039,14 @@ function ChecklistGroup({
   count,
   children,
   focusInside = false,
+  className,
 }: {
   defaultOpen: boolean
   label: string
   count: number
   children: React.ReactNode
+  /** Extra class on the group, e.g. the nested per-client Completed group. */
+  className?: string
   /**
    * When the `?focus=` checklist lands inside this group, auto-expand it so a
    * just-created one-time task or just-generated instance is visible even if
@@ -2032,7 +2062,7 @@ function ChecklistGroup({
   // active — derived during render, no effect or ref mutation needed.
   const open = userOpen || focusInside
   return (
-    <div className="checklist-group">
+    <div className={className ? `checklist-group ${className}` : 'checklist-group'}>
       <button
         type="button"
         className="checklist-group-header"

@@ -11,13 +11,14 @@
 
 import { weekRangeOf } from './utils'
 
-export type ReportPreset = 'week' | 'month' | 'quarter' | 'ytd' | 'custom'
+export type ReportPreset = 'today' | 'week' | 'month' | 'quarter' | 'ytd' | 'custom'
 
 /** A selected range: a preset tag plus its resolved inclusive bounds. */
 export type ReportPeriod = { preset: ReportPreset; from: string; to: string }
 
 /** The preset options, in display order, for the control's <select>. */
 export const REPORT_PRESETS: { value: ReportPreset; label: string }[] = [
+  { value: 'today', label: 'Today' },
   { value: 'week', label: 'This week' },
   { value: 'month', label: 'This month' },
   { value: 'quarter', label: 'This quarter' },
@@ -57,7 +58,8 @@ function shortDay(dateOnly: string): string {
 /**
  * The inclusive { from, to } bounds for a non-custom preset, relative to
  * `todayDateOnly` ('YYYY-MM-DD'). All bounds are local calendar days.
- *  - week:    the Sun–Sat week containing today (via `weekRangeOf`).
+ *  - today:   today → today (a single day).
+ *  - week:   the Sun–Sat week containing today (via `weekRangeOf`).
  *  - month:   first → last day of today's month.
  *  - quarter: first day of the quarter's first month → last day of its last.
  *  - ytd:     Jan 1 of today's year → today.
@@ -68,6 +70,10 @@ export function presetRange(
 ): { from: string; to: string } {
   const year = Number(todayDateOnly.slice(0, 4))
   const month = Number(todayDateOnly.slice(5, 7))
+
+  if (preset === 'today') {
+    return { from: todayDateOnly, to: todayDateOnly }
+  }
 
   if (preset === 'week') {
     const { start, end } = weekRangeOf(todayDateOnly)
@@ -109,10 +115,14 @@ export function isInReportPeriod(dateOnly: string, p: ReportPeriod): boolean {
 /**
  * Human label for a period, e.g. "Jun 1 – Jun 30, 2026". When the bounds span
  * different years the year is shown on both ends ("Dec 1, 2025 – Jan 31, 2026").
+ * A single day (from === to, e.g. "Today") reads as one date: "Oct 23, 2026".
  */
 export function reportPeriodLabel(p: ReportPeriod): string {
   const fromYear = p.from.slice(0, 4)
   const toYear = p.to.slice(0, 4)
+  if (p.from === p.to) {
+    return `${shortDay(p.from)}, ${fromYear}`
+  }
   if (fromYear !== toYear) {
     return `${shortDay(p.from)}, ${fromYear} – ${shortDay(p.to)}, ${toYear}`
   }
@@ -138,6 +148,7 @@ export function normalizeReportPeriod(raw: unknown, todayDateOnly: string): Repo
   const preset = candidate.preset
 
   if (
+    preset === 'today' ||
     preset === 'week' ||
     preset === 'month' ||
     preset === 'quarter' ||

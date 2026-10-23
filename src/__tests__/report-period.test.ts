@@ -5,6 +5,7 @@ import {
   isSingleWeek,
   normalizeReportPeriod,
   presetRange,
+  REPORT_PRESETS,
   reportPeriodLabel,
   type ReportPeriod,
 } from '../lib/reportPeriod'
@@ -28,6 +29,23 @@ describe('presetRange', () => {
 
   it('ytd → Jan 1 .. today', () => {
     expect(presetRange('ytd', TODAY)).toEqual({ from: '2026-01-01', to: '2026-06-24' })
+  })
+
+  it('today → today..today (a single day)', () => {
+    expect(presetRange('today', TODAY)).toEqual({ from: '2026-06-24', to: '2026-06-24' })
+  })
+})
+
+describe('REPORT_PRESETS', () => {
+  it('lists Today first, then the existing presets in their order', () => {
+    expect(REPORT_PRESETS).toEqual([
+      { value: 'today', label: 'Today' },
+      { value: 'week', label: 'This week' },
+      { value: 'month', label: 'This month' },
+      { value: 'quarter', label: 'This quarter' },
+      { value: 'ytd', label: 'This year to date' },
+      { value: 'custom', label: 'Custom' },
+    ])
   })
 })
 
@@ -67,6 +85,15 @@ describe('normalizeReportPeriod', () => {
       preset: 'month',
       from: '2026-06-01',
       to: '2026-06-30',
+    })
+  })
+
+  it('re-resolves a stored "today" to the CURRENT day, never the stored date', () => {
+    const stored = { preset: 'today', from: '2026-06-20', to: '2026-06-20' }
+    expect(normalizeReportPeriod(stored, TODAY)).toEqual({
+      preset: 'today',
+      from: '2026-06-24',
+      to: '2026-06-24',
     })
   })
 
@@ -125,5 +152,11 @@ describe('reportPeriodLabel', () => {
     expect(
       reportPeriodLabel({ preset: 'custom', from: '2025-12-01', to: '2026-01-31' }),
     ).toBe('Dec 1, 2025 – Jan 31, 2026')
+  })
+
+  it('renders a single day as one date with its year', () => {
+    expect(
+      reportPeriodLabel({ preset: 'today', from: '2026-10-23', to: '2026-10-23' }),
+    ).toBe('Oct 23, 2026')
   })
 })

@@ -3997,6 +3997,15 @@ td strong {
   gap: 12px;
 }
 
+/* A client's completed checklists, folded under its open ones (group by client). */
+.checklist-group-nested {
+  padding-left: 16px;
+}
+
+.checklist-group-nested > .checklist-group-header {
+  border-bottom-style: dashed;
+}
+
 .checklist-block.focused {
   border-color: var(--berry);
   box-shadow: 0 0 0 2px rgba(142, 47, 82, 0.15);
