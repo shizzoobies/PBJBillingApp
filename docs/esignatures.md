@@ -147,7 +147,11 @@ table, no backfill. Both store backends carry them.
    sent", the letter Sent, an `esign` line in Activity.
 6. Note: does the test contract email the signer; does the email carry the fixed subject/sentence and the
    reply-to; how the Markdown looks (heading, bold, addressee, the initials checkbox); does the badge move
-   to "viewed" (the webhook works).
+   to "viewed" (the webhook works). **Check the escapes:** put a services list in the test letter (lines
+   starting "- ", "1. ", a "Fees:" bold run, an asterisk and an underscore). On the sign page AND in the
+   signed PDF they must read as typed ("- item", "1. item"), with NO backslash showing (the app sends
+   `\- item`, `1\. item`, `\*`, `\_`). If a backslash shows, the escaping in lib/letter-markdown.js must
+   change before going live.
 7. Press **Send reminder** (once a day): the signer gets the request again.
 8. Sign it. Expect "E-sign: signed", the letter Signed, **Download signed PDF** working, an owner notice.
 9. A forged POST to `/api/esignatures/webhook` answers 401; a replay answers duplicate.
