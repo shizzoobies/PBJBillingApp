@@ -13,6 +13,31 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-10-22 17:36 ET - CUTOVER LIVE on Cloudflare + Neon; AI verified after owner review.**
+Alex approved the fresh copy, inspected the data in maintenance, then authorized the integration switch and reopening.
+Live commit `7bd51e1`; `/health` HTTP 200, `db: ok`, `maintenance: false`, environment revision `2026-10-22T21:36:12.117Z`.
+Railway app stopped; original Postgres retained untouched. Fresh dump restored 56 tables; both full-row comparisons passed;
+boot-check passed with no existing table modified. Counts: 55 clients, 6 users, 173 invoices, 3399 time entries.
+New Stripe endpoint enabled and old disabled; Resend new endpoint enabled; PBJ ElevenLabs post-call override and all 16 tools
+point to app.pbjsatime.com with matching authentication. Signed voice-session URL issuance and a read-only voice tool passed.
+Live owner browser chat returned "PBJ AI is working." with no captured console errors; a microphone conversation was not tested.
+The voice provisioner initially used an inherited ELEVENLABS_API_KEY instead of the rotation file; clear that process override
+before provisioning. Retry succeeded. Local evidence and pending cleanup details are in the external secrets/cutover folder.
+Old-host redirect is now live: app.pbjsa.com GET/HEAD returns 301 to app.pbjsatime.com, preserving path and query.
+Cloudflare proxy enabled on the existing app CNAME; four HTTP/HTTPS checks passed, including encoded and repeated query values.
+**2026-10-22 18:24 ET - Nightly backups enabled; first R2 backup and restore drill PASSED.**
+GitHub run https://github.com/shizzoobies/PBJBillingApp/actions/runs/39864603471 passed both jobs.
+Private bucket `pbj-db-backups`; object `daily/pbj-2026-10-22T2223Z.dump`, 861032 bytes, downloaded from R2 and restored
+into an isolated PostgreSQL 18 service. Restored counts: clients 55, users 6, time_entries 3399, checklists 1505,
+invoices 173, feature_requests 212. No GitHub dump artifact. All five backup secrets configured; Neon uses verified TLS.
+Existing Cloudflare token supplied derived S3 credentials (token ID and SHA-256 of its value); these retain the token's
+R2 scope. Rotating/revoking that token requires updating the two R2 credential secrets. No additional token was created.
+Bucket locks verified: whole bucket 30 days, monthly/ 365 days. Active workflow runs at 08:15 UTC daily; monthly drill on day 1.
+OPEN: verify two scheduled nightly R2 backups before Railway retirement; later cleanup of staging database, local dumps,
+staging env, temporary receiver Worker and bucket. The manual successful run does not satisfy the two-nightly gate.
+SignWell remains unconfigured and inactive. Authentication has written on Neon: any rollback requires the runbook comparison
+and reconciliation, never a blind return to the old database. This handoff edit is local only; no push or new deploy was run.
+
 This section exists so a Claude with NO machine-local memory (a different
 machine, a fresh account, claude.ai) can pick up cold. It is a summary — every
 claim here is expanded in the numbered sections, which still win on detail.
