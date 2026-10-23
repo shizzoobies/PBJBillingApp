@@ -13,6 +13,35 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-10-23 (~14:30Z) - first run on the new platform: FOUR SHIPS + chores; READ THIS FIRST.** `main` = `5ec90db3` (+ this
+handoff), live on https://app.pbjsatime.com, `/health` 200, voice re-provisioned, manifest ~204,8xx of 205,000 (TRIM FIRST),
+only the primary worktree (+ a chip-session worktree under .claude/worktrees that Alex started - leave it). Deploy = push
+main -> cf-deploy.yml (~11 min) -> health; `scripts/prod/ship.sh` does that. **Shipped (one lane + Sonnet review each):**
+`d1db0f3d` Dashboard Cases in flight / Stuck cases / My cases leave skipped tasks out + her question answered in words
+(featreq-9c818fca Shipped); `73ab8354` "Today" report-period preset everywhere + group-by-client folds completed
+checklists into a collapsed Completed sub-group per client, "N done" pill (featreq-5a44c051 Shipped; her question: only
+the period or every open one?); `199cd78f` the writer of a client note / unattached pending note can edit it, author-only on
+the server, `edited_at` columns via look-first ALTER (Alex ok), rich editor on edit, attach reads current words
+(featreq-da3801ab Shipped; question: other note kinds?); `5c8a2c0d` chores: 7 store fixtures -> 2099, graceful
+SIGTERM/SIGINT in server.js (+ scripts/cf/server-shutdown.test.mjs); `5ec90db3` (chip session) Checklists-page UI fixtures
+dated from today. **Asked Brittany:** featreq-fccf901f needs_input (answers? owner question editor (a) vs named
+follow-ups (b) - questions are app-generated in lib/proposal-questionnaire.js, no editor exists). **Tooling after the
+move:** scripts/prod read `D:PBJ Accounting Worksecretsprod.env` (PROD_DATABASE_URL = Neon, sslmode=verify-full,
++ the four voice vars copied by name from rotation-2026-10-21.env); the machine env still holds an OLD
+ELEVENLABS_API_KEY that overrides the file -> run `env -u ELEVENLABS_API_KEY node scripts/prod/voice-provision.mjs` (ask
+Alex to setx it away). **Gotchas today:** removing lane worktrees wiped the primary node_modules through a junction (use
+`cmd /c rmdir <lane>
+ode_modules` before `git worktree remove`; recovery `npm ci`); a newer push CANCELS an older
+PENDING cf-deploy run (only the newest deploys, containing both) and a GitHub 502 on annotations makes ship.sh print
+"workflow failed" on a successful deploy - always confirm with curl /health. **Backups:** workflow active, cron 08:15
+UTC, but NO scheduled run had fired by 12:40Z on 10-23 (manual run + drill passed 10-22) - check `gh run list
+--workflow db-backup.yml`; two scheduled successes close featreq-4caec5d3. **SignWell (featreq-56d39567):** deployed,
+inactive; waiting on Alex: SIGNWELL_API_KEY in secrets/signwell.env -> `node scripts/cf/secrets-upload.mjs` + restart ->
+`node scripts/prod/signwell-webhook-register.mjs` -> SIGNWELL_WEBHOOK_ID secret + restart -> his test-mode run on the
+Test client (docs/signwell.md manual plan) -> SIGNWELL_TEST_MODE=false. **Chips:** task_7fcd25b4 (file-backend append
+race), task_8fb71484 (year-rollover UI fixtures - the chip session may have covered part of it in 5ec90db3; verify at
+2027-01-02 before 12-15). Still waiting on her: I-95 recipes, Allison before/after Done, once-per-client Send-invoices-to.
+
 **2026-10-22 17:36 ET - CUTOVER LIVE on Cloudflare + Neon; AI verified after owner review.**
 Alex approved the fresh copy, inspected the data in maintenance, then authorized the integration switch and reopening.
 Live commit `7bd51e1`; `/health` HTTP 200, `db: ok`, `maintenance: false`, environment revision `2026-10-22T21:36:12.117Z`.
