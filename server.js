@@ -177,6 +177,8 @@ import { engagementChangedSinceSent } from './lib/engagement-hash.js'
 import * as signwell from './lib/signwell.js'
 import * as esignatures from './lib/esignatures.js'
 import { finishSignatureRequest, handleSignwellWebhook } from './lib/signwell-webhook.js'
+import { expireEsignaturesRequests, finishEsignaturesRequest, handleEsignaturesWebhook } from './lib/esignatures-webhook.js'
+import { esignConfigured, esignProvider, esignTestMode } from './lib/esign-provider.js'
 import { remindEngagementSignature, sendEngagementForSignature } from './lib/engagement-esign.js'
 import { placeholdersFor } from './lib/letter-template.js'
 import {
@@ -638,6 +640,11 @@ async function readJsonBody(request) {
 // Raw-body variant for webhook endpoints that must verify an HMAC signature
 // computed over the exact bytes sent (parse AFTER verification).
 async function readRawBody(request, maxBytes = MAX_JSON_BODY_BYTES) {
+  return (await readRawBytes(request, maxBytes)).toString('utf8')
+}
+
+/** The body's exact bytes (a webhook whose signature covers the bytes, not their decoding). */
+async function readRawBytes(request, maxBytes = MAX_JSON_BODY_BYTES) {
   const chunks = []
   let total = 0
   for await (const chunk of request) {
@@ -648,7 +655,7 @@ async function readRawBody(request, maxBytes = MAX_JSON_BODY_BYTES) {
     }
     chunks.push(chunk)
   }
-  return Buffer.concat(chunks).toString('utf8')
+  return Buffer.concat(chunks)
 }
 
 async function requireSession(request, response) {
@@ -2099,10 +2106,31 @@ function signwellFinishDeps(request) {
   }
 }
 
+/**
+ * The same for an eSignatures.io request (task 18; lib/esignatures-webhook.js): its webhook and its "Check
+ * eSignatures.io" / "Finish e-signature" are handed eSignatures.io instead of SignWell, and the same notice
+ * and signing bookkeeping.
+ */
+function esignaturesFinishDeps(request) {
+  return {
+    store: appDataStore,
+    esignatures,
+    notifyOwners: (notice) => notifySignwellOwners(request, notice),
+    afterSigned: recordSignwellSigning,
+  }
+}
+
 /** What the sign route records after a signing, for the webhook's signing (the owner who sent the request signs). */
 async function recordSignwellSigning(result, signatureRequest, signedBy) {
   const userId = signedBy || signatureRequest.createdBy || 'system'
-  const lines = [['engagement_signed', `${engagementActivityTarget(result.engagement)} via SignWell`]]
+  const lines = [
+    [
+      'engagement_signed',
+      signatureRequest.provider === 'esignatures'
+        ? `${engagementActivityTarget(result.engagement)} via eSignatures.io`
+        : `${engagementActivityTarget(result.engagement)} via SignWell`,
+    ],
+  ]
   if (result.supersededId) {
     lines.push([
       'engagement_superseded',
@@ -7040,6 +7068,41 @@ const server = createServer(async (request, response) => {
       if (handled.after) {
         setImmediate(() => {
           handled.after().catch((error) => console.error('[signwell] finishing a document failed:', error?.message || error))
+        })
+      }
+      return
+    }
+
+    // POST /api/esignatures/webhook - eSignatures.io tells us a contract it holds for us moved
+    // (task 18; lib/esignatures-webhook.js, docs/esignatures.md). The URL is set in eSignatures.io's
+    // own dashboard (it has no webhook API).
+    //
+    // UNAUTHENTICATED BY NECESSITY, like the webhooks above: the boundary is the X-Signature-SHA256
+    // header, an HMAC-SHA256 of the raw body keyed with ESIGNATURES_SECRET_TOKEN, checked by the handler
+    // on the exact bytes before anything is parsed. Answers 503 until the token is set. A signed
+    // contract's slow part (the signed PDF, signing the letter, telling the owners) runs AFTER the 200.
+    if (normalizedPath === '/api/esignatures/webhook' && request.method === 'POST') {
+      let rawBody
+      try {
+        rawBody = await readRawBytes(request, SIGNWELL_WEBHOOK_MAX_BYTES)
+      } catch (error) {
+        if (error?.statusCode === 413) sendJson(response, 413, { error: 'Request body too large' })
+        else sendJson(response, 400, { error: 'Could not read body' })
+        return
+      }
+      const handled = await handleEsignaturesWebhook({
+        rawBody,
+        signature: request.headers['x-signature-sha256'],
+        token: process.env.ESIGNATURES_SECRET_TOKEN,
+        deps: esignaturesFinishDeps(request),
+      })
+      sendJson(response, handled.status, handled.body)
+      if (handled.body.received && !handled.body.duplicate && !handled.body.ignored) {
+        broadcastDataChanged()
+      }
+      if (handled.after) {
+        setImmediate(() => {
+          handled.after().catch((error) => console.error('[esignatures] finishing a contract failed:', error?.message || error))
         })
       }
       return
@@ -13084,7 +13147,11 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'Signature request not found' })
         return
       }
-      const finished = await finishSignatureRequest(signatureRequest.id, signwellFinishDeps(request))
+      // The request's OWN provider (what it was sent with), whatever the environment says now.
+      const finished =
+        signatureRequest.provider === 'esignatures'
+          ? await finishEsignaturesRequest(signatureRequest.id, esignaturesFinishDeps(request))
+          : await finishSignatureRequest(signatureRequest.id, signwellFinishDeps(request))
       if (finished.refused) {
         const { status, ...body } = finished.refused
         sendJson(response, status, body)
@@ -13191,6 +13258,30 @@ const server = createServer(async (request, response) => {
         response,
         200,
         { configured: signwell.signwellConfigured(process.env), testMode: signwell.isTestMode(process.env) },
+        { 'Cache-Control': 'no-store' },
+      )
+      return
+    }
+
+    // GET /api/esign/status - the same for whichever provider a send would use now (task 18;
+    // lib/esign-provider.js): { configured, provider: 'esignatures' | 'signwell' | null, testMode }.
+    // The engagement page reads this one; /api/signwell/status above stays for anything older.
+    // Owner-only; reveals no token, key or webhook id.
+    if (normalizedPath === '/api/esign/status' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see the e-signature settings' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      sendJson(
+        response,
+        200,
+        { configured: esignConfigured(process.env), provider: esignProvider(process.env), testMode: esignTestMode(process.env) },
         { 'Cache-Control': 'no-store' },
       )
       return
@@ -19771,6 +19862,13 @@ const signwellFinishingJob = registerPeriodicJob('signwell-left-finishing', () =
   warnSignwellLeftFinishing(10 * 60 * 1000),
 )
 const signwellFinishingTimer = setInterval(() => void runPeriodicJob(signwellFinishingJob), 60 * 60 * 1000)
+// eSignatures.io sends no expiry event: hourly (and once at boot), a request still sent or viewed 30 days after
+// it went out is marked expired, when its contract's link lapses (lib/esignatures-webhook.js; never throws).
+const esignaturesExpiryJob = registerPeriodicJob('esignatures-expiry', async () => {
+  if ((await expireEsignaturesRequests({ store: appDataStore })).length > 0) broadcastDataChanged()
+})
+const esignaturesExpiryBootTimer = setTimeout(() => void runPeriodicJob(esignaturesExpiryJob), 60 * 1000)
+const esignaturesExpiryTimer = setInterval(() => void runPeriodicJob(esignaturesExpiryJob), 60 * 60 * 1000)
 // Bulletproof owner recovery: if `OWNER_BOOTSTRAP_PASSWORD` is set on the
 // environment, ensure the first owner's password hash matches it. Lets an
 // owner ALWAYS sign in via /owner → "Password" tab, even when email/Resend
@@ -20012,10 +20110,10 @@ async function shutDown(signal) {
   }, SHUTDOWN_BACKSTOP_MS)
 
   const closed = new Promise((resolve) => server.close(() => resolve()))
-  for (const timer of [rateLimitSweepTimer, signwellFinishingTimer, digestTimer, pastDueTimer, autoReminderTimer]) {
+  for (const timer of [rateLimitSweepTimer, signwellFinishingTimer, esignaturesExpiryTimer, digestTimer, pastDueTimer, autoReminderTimer]) {
     clearInterval(timer)
   }
-  for (const timer of [digestBootTimer, pastDueBootTimer, autoReminderBootTimer]) clearTimeout(timer)
+  for (const timer of [digestBootTimer, pastDueBootTimer, autoReminderBootTimer, esignaturesExpiryBootTimer]) clearTimeout(timer)
   for (const heartbeat of sseHeartbeats.values()) clearInterval(heartbeat)
   sseHeartbeats.clear()
   // An event stream never ends on its own, so server.close() would wait on it
