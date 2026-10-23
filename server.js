@@ -175,6 +175,7 @@ import {
 import { engagementRecipientList } from './lib/engagement-send.js'
 import { engagementChangedSinceSent } from './lib/engagement-hash.js'
 import * as signwell from './lib/signwell.js'
+import * as esignatures from './lib/esignatures.js'
 import { finishSignatureRequest, handleSignwellWebhook } from './lib/signwell-webhook.js'
 import { remindEngagementSignature, sendEngagementForSignature } from './lib/engagement-esign.js'
 import { placeholdersFor } from './lib/letter-template.js'
@@ -12994,6 +12995,7 @@ const server = createServer(async (request, response) => {
         {
           store: appDataStore,
           signwell,
+          esignatures,
           env: process.env,
           publicUrl: getPublicAppUrl(request),
           isPureRecord: (candidate) => AppDataStore._engagementIsPureRecord(candidate),
@@ -13040,7 +13042,7 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'Engagement not found' })
         return
       }
-      const reminded = await remindEngagementSignature(engagement.id, { store: appDataStore, signwell, env: process.env })
+      const reminded = await remindEngagementSignature(engagement.id, { store: appDataStore, signwell, esignatures, env: process.env })
       if (reminded.refused) {
         const { status, ...body } = reminded.refused
         sendJson(response, status, body)

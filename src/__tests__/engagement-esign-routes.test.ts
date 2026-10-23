@@ -84,6 +84,7 @@ describe('sending for signature', () => {
     expect(block).toContain('appDataStore.getEngagement(engagementEsignMatch[1])')
     expect(block).toContain('await sendEngagementForSignature(')
     expect(block).toContain('env: process.env')
+    expect(block).toMatch(/signwell,\s*esignatures,\s*env: process\.env/)
     expect(block).toContain('publicUrl: getPublicAppUrl(request)')
     expect(block).toContain('AppDataStore._engagementIsPureRecord(candidate)')
     expect(block).toContain('const { status, ...body } = sent.refused')
@@ -99,6 +100,8 @@ describe('sending for signature', () => {
   it('reminds through the lib, and 404s an unknown engagement first', () => {
     const block = remindRoute()
     expect(block).toContain('await remindEngagementSignature(engagement.id,')
+    // Both providers' modules: an eSignatures.io request is reminded by resending it to its signer.
+    expect(block).toContain('{ store: appDataStore, signwell, esignatures, env: process.env }')
     expect(block.indexOf("sendJson(response, 404, { error: 'Engagement not found' })")).toBeLessThan(block.indexOf('await remindEngagementSignature('))
   })
 

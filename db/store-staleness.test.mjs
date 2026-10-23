@@ -56164,4 +56164,56 @@ describe('sending for signature end to end on the file backend (featreq-56d39567
     expect(engagementChangedSinceSent(after)).toBe(false)
     expect(engagementChangedSinceSent({ ...after, letterBody: `${after.letterBody} (edited)` })).toBe(true)
   })
+
+  it('through eSignatures.io: the request row carries the provider, contract, template and signer, and the webhook lookup finds it', async () => {
+    const { sendEngagementForSignature } = await import('../lib/engagement-esign.js')
+    const { engagementHash } = await import('../lib/engagement-hash.js')
+    const state = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    state.signatureRequests = []
+    state.engagements = [
+      {
+        id: 'eng-es',
+        kind: 'original',
+        status: 'draft',
+        clientId: null,
+        party: { company: 'Acme Books', contactName: 'Pat Doe', email: 'pat@example.invalid', title: '', phone: '' },
+        subject: 'Engagement letter - {{client_name}}',
+        emailBody: 'Hi {{contact_first_name}},\n\nPlease sign.',
+        letterBody: 'Dear {{contact_name}},\n\nTerms. {{initial:1:y}}\n\nSignature: ______',
+        figures: { totals: { monthly: 100 }, lines: [], hoursByRole: {}, paymentTerms: '' },
+        emailLog: [],
+        sentAt: null,
+        updatedAt: '2026-10-21T15:00:00.000Z',
+        createdAt: '2026-10-21T15:00:00.000Z',
+      },
+    ]
+    await writeFile(localAuthPath, JSON.stringify(state, null, 2))
+    const engagement = await store.getEngagement('eng-es')
+    const esignatures = {
+      createTemplate: vi.fn(async () => 'tpl-es'),
+      createContract: vi.fn(async () => ({ id: 'ctr-es', status: 'sent', signers: [{ id: 'signer-es' }] })),
+    }
+    const signwell = { createDocumentFromFile: vi.fn() }
+    const sent = await sendEngagementForSignature(
+      { data: { clients: [], contacts: [] }, firmSettings: { name: 'PB&J Strategic Accounting' }, senderName: 'Brittany', now: new Date('2026-10-21T16:00:00Z'), teamEmails: new Set(), replyTo: '' },
+      engagement,
+      { templateHash: engagementHash(engagement), userId: 'emp-patrice' },
+      { store, signwell, esignatures, env: { ESIGNATURES_SECRET_TOKEN: 'es_fake_token_1234567890' }, publicUrl: 'https://app.example.invalid', isPureRecord: () => false },
+    )
+    expect(sent.ok).toBe(true)
+    expect(signwell.createDocumentFromFile).not.toHaveBeenCalled()
+    const stored = await store.getSignatureRequest(sent.request.id)
+    expect(stored).toMatchObject({
+      provider: 'esignatures',
+      providerDocumentId: 'ctr-es',
+      providerTemplateId: 'tpl-es',
+      providerSignerId: 'signer-es',
+      status: 'sent',
+      testMode: true,
+      recipients: [{ id: 'signer-es', name: 'Pat Doe', email: 'pat@example.invalid' }],
+    })
+    expect((await store.getSignatureRequestByDocumentId('ctr-es', 'esignatures')).id).toBe(sent.request.id)
+    expect(await store.getSignatureRequestByDocumentId('ctr-es', 'signwell')).toBeNull()
+    expect((await store.getEngagement('eng-es')).status).toBe('sent')
+  })
 })
