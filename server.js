@@ -1925,6 +1925,8 @@ function sendQuestionnairePage(response, html, status = 200, extraHeaders = {}) 
 // shared workspace — so two owners (e.g. Alex + Brittany) see each other's
 // edits within a moment instead of working off stale snapshots.
 const sseClients = new Set()
+// Each open stream's heartbeat timer, so shutdown can stop them all at once.
+const sseHeartbeats = new Map()
 function broadcastDataChanged() {
   const payload = 'event: data-changed\ndata: {}\n\n'
   for (const client of [...sseClients]) {
@@ -4147,11 +4149,14 @@ const server = createServer(async (request, response) => {
           response.write(': ping\n\n')
         } catch {
           clearInterval(heartbeat)
+          sseHeartbeats.delete(response)
           sseClients.delete(response)
         }
       }, 25000)
+      sseHeartbeats.set(response, heartbeat)
       request.on('close', () => {
         clearInterval(heartbeat)
+        sseHeartbeats.delete(response)
         sseClients.delete(response)
       })
       return
@@ -19710,7 +19715,8 @@ async function maybeSendWeeklyDigest() {
 const digestJob = registerPeriodicJob('weekly-digest', maybeSendWeeklyDigest)
 const digestTimer = setInterval(() => void runPeriodicJob(digestJob), 60 * 60 * 1000)
 digestTimer.unref?.()
-setTimeout(() => void runPeriodicJob(digestJob), 30 * 1000).unref?.()
+// unref() returns the timer itself, so shutdown can still clear it.
+const digestBootTimer = setTimeout(() => void runPeriodicJob(digestJob), 30 * 1000).unref?.()
 
 // ---- Past-due invoice notices ----
 // Deterministic, like the digest above: any invoice that has passed the firm's
@@ -19794,7 +19800,8 @@ async function maybeNotifyPastDueInvoices() {
 const pastDueJob = registerPeriodicJob('past-due-notices', maybeNotifyPastDueInvoices)
 const pastDueTimer = setInterval(() => void runPeriodicJob(pastDueJob), 60 * 60 * 1000)
 pastDueTimer.unref?.()
-setTimeout(() => void runPeriodicJob(pastDueJob), 30 * 1000).unref?.()
+// unref() returns the timer itself, so shutdown can still clear it.
+const pastDueBootTimer = setTimeout(() => void runPeriodicJob(pastDueJob), 30 * 1000).unref?.()
 
 // ---- Automatic invoice reminders (featreq-3f1d63b6) ----
 // On the 15th, 20th, 25th and the last day of the month (the firm's day), at or
@@ -19869,5 +19876,60 @@ async function maybeSendAutoInvoiceReminders() {
 const autoReminderJob = registerPeriodicJob('auto-invoice-reminders', maybeSendAutoInvoiceReminders)
 const autoReminderTimer = setInterval(() => void runPeriodicJob(autoReminderJob), 60 * 60 * 1000)
 autoReminderTimer.unref?.()
-setTimeout(() => void runPeriodicJob(autoReminderJob), 30 * 1000).unref?.()
+// unref() returns the timer itself, so shutdown can still clear it.
+const autoReminderBootTimer = setTimeout(() => void runPeriodicJob(autoReminderJob), 30 * 1000).unref?.()
+
+// ---- Graceful shutdown ----
+// The Cloudflare container's restart route sends SIGTERM, waits up to 20 s for
+// the process to leave, then destroys it (2026-10-22: "graceful=false,
+// destroyed"). On SIGTERM or SIGINT: stop taking new connections, stop the
+// hourly jobs, their first-run timers and every event-stream heartbeat, end the
+// open event streams, let in-flight requests finish, end the Postgres pool
+// (a no-op on the file backend), then exit 0. A 10 s backstop forces the exit if
+// anything hangs, well inside the container's 20 s window. A signal that lands
+// during boot, before this line runs, keeps Node's default (immediate) exit.
+const SHUTDOWN_BACKSTOP_MS = 10_000
+let shutdownStartedAt = 0
+async function shutDown(signal) {
+  if (shutdownStartedAt) return
+  shutdownStartedAt = Date.now()
+  const elapsed = () => Date.now() - shutdownStartedAt
+  // Deliberately NOT unref'd: it is the one thing guaranteed to end the process.
+  setTimeout(() => {
+    console.log(`[shutdown] ${signal}: still busy after ${SHUTDOWN_BACKSTOP_MS} ms, forced exit - closed in ${elapsed()} ms`)
+    process.exit(0)
+  }, SHUTDOWN_BACKSTOP_MS)
+
+  const closed = new Promise((resolve) => server.close(() => resolve()))
+  for (const timer of [rateLimitSweepTimer, signwellFinishingTimer, digestTimer, pastDueTimer, autoReminderTimer]) {
+    clearInterval(timer)
+  }
+  for (const timer of [digestBootTimer, pastDueBootTimer, autoReminderBootTimer]) clearTimeout(timer)
+  for (const heartbeat of sseHeartbeats.values()) clearInterval(heartbeat)
+  sseHeartbeats.clear()
+  // An event stream never ends on its own, so server.close() would wait on it
+  // forever. Destroy rather than end: an ended stream's keep-alive socket would
+  // linger. The tab's EventSource reconnects (retry: 5000) to the next process.
+  for (const client of sseClients) {
+    try {
+      client.destroy()
+    } catch {
+      // Already gone.
+    }
+  }
+  sseClients.clear()
+  // Idle keep-alive sockets would also hold server.close() open until they time out.
+  server.closeIdleConnections?.()
+  await closed
+  try {
+    await appDataStore.close()
+  } catch (error) {
+    console.error('[shutdown] could not end the database pool:', error?.message || error)
+  }
+  console.log(`[shutdown] ${signal}: stopped jobs, server and store closed in ${elapsed()} ms`)
+  process.exit(0)
+}
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => void shutDown(signal))
+}
 
