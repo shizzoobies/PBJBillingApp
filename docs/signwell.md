@@ -1,5 +1,8 @@
 # E-signature through SignWell (featreq-56d39567)
 
+SignWell is now the second provider: eSignatures.io is used whenever `ESIGNATURES_SECRET_TOKEN` is set
+(unless `ESIGN_PROVIDER=signwell`) - see docs/esignatures.md. Everything below still holds for SignWell.
+
 An engagement letter can be sent for electronic signature from the letter's own page. SignWell
 emails the signer a link; when they sign, the app marks the letter signed itself (the same thing
 **Mark as signed** does), keeps the signed PDF, and tells the owners by name only. **Mark as signed**
