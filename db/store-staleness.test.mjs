@@ -9079,6 +9079,156 @@ describe('editing a note: only its writer (postgres branch)', () => {
 })
 
 /**
+ * An edit saved between the attach pass's LIST of waiting notes and its stamp
+ * (featreq-da3801ab review): the step, or a repeating note's copy, takes the words
+ * as they are when it is written, never the ones the pass listed. Both backends;
+ * the edit is slipped in right after the pass looks up the next checklists.
+ */
+describe('an edit saved between the attach pass list and its stamp', () => {
+  const editAfterLookup = (target, edit) => {
+    const lookup = target._findNextChecklistsForPendingNotes.bind(target)
+    return vi.spyOn(target, '_findNextChecklistsForPendingNotes').mockImplementation(async (pending) => {
+      const found = await lookup(pending)
+      await edit()
+      return found
+    })
+  }
+
+  describe('file backend', () => {
+    beforeEach(async () => {
+      await rm(localDataPath, { force: true })
+      await store.write(workspace({ clients: [], timeEntries: [] }))
+    })
+    const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+    const authNow = async () => JSON.parse(await readFile(localAuthPath, 'utf8'))
+    const addChecklist = async (id, clientId) => {
+      const data = await persisted()
+      data.checklists.push({
+        id,
+        title: 'Payroll',
+        clientId,
+        assigneeId: 'emp-1',
+        templateId: 'tpl-pn',
+        dueDate: '2026-11-10',
+        createdAt: new Date(Date.now() + 60_000).toISOString(),
+        viewerIds: [],
+        editorIds: [],
+        items: [{ id: `${id}-s1`, label: 'Existing step', done: false }],
+      })
+      await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    }
+    const create = (clientId, over = {}) =>
+      store.createClientPendingNote(clientId, {
+        templateId: 'tpl-pn',
+        kind: 'task',
+        body: 'New hire startng',
+        authorId: 'emp-lisa',
+        authorName: 'Lisa',
+        ...over,
+      })
+
+    it('a one-time task: the step gets the NEW words, and the note is no longer editable after', async () => {
+      const note = await create('c-ea-1')
+      await addChecklist('chk-ea-1', 'c-ea-1')
+      const spy = editAfterLookup(store, async () => {
+        expect((await store.updateClientPendingNote(note.id, { body: 'New hire starting', editorId: 'emp-lisa' })).ok).toBe(true)
+      })
+      expect(await store.attachPendingClientNotes({ clientId: 'c-ea-1' })).toBe(1)
+      spy.mockRestore()
+      const items = (await persisted()).checklists.find((entry) => entry.id === 'chk-ea-1').items
+      expect(items.at(-1)).toMatchObject({ id: `item-pn-${note.id.replace(/^pnote-/, '')}`, label: 'New hire starting' })
+      const stored = await store.getClientPendingNote(note.id)
+      expect(stored).toMatchObject({ body: 'New hire starting', attachedChecklistId: 'chk-ea-1' })
+      expect(await store.updateClientPendingNote(note.id, { body: 'late', editorId: 'emp-lisa' })).toEqual({
+        ok: false,
+        reason: 'attached',
+      })
+    })
+
+    it('a repeating task: the copy AND its step get the NEW words', async () => {
+      const note = await create('c-ea-2', { repeats: true })
+      await addChecklist('chk-ea-2', 'c-ea-2')
+      const spy = editAfterLookup(store, async () => {
+        expect((await store.updateClientPendingNote(note.id, { body: 'Send the 1099s', editorId: 'emp-lisa' })).ok).toBe(true)
+      })
+      expect(await store.attachPendingClientNotes({ clientId: 'c-ea-2' })).toBe(1)
+      spy.mockRestore()
+      const copy = (await authNow()).clientPendingNotes.find((entry) => entry.repeatOf === note.id)
+      expect(copy.body).toBe('Send the 1099s')
+      const items = (await persisted()).checklists.find((entry) => entry.id === 'chk-ea-2').items
+      expect(items.find((item) => item.id === copy.attachedItemId).label).toBe('Send the 1099s')
+    })
+  })
+
+  describe('postgres branch', () => {
+    const noteRow = (over = {}) => ({
+      id: 'pnote-ea',
+      client_id: 'c1',
+      template_id: 'tpl-pn',
+      kind: 'task',
+      body: 'New hire startng',
+      author_id: 'emp-lisa',
+      author_name: 'Lisa',
+      created_at: '2026-09-01T00:00:00.000Z',
+      attached_checklist_id: null,
+      ...over,
+    })
+    const checklists = [
+      { id: 'chk-ea', template_id: 'tpl-pn', client_id: 'c1', due_date: '2026-09-10', created_at: '2026-09-05T00:00:00.000Z' },
+    ]
+
+    it('a one-time task: the step label is read under a lock on the note, inside the attach transaction', async () => {
+      const fake = fakePendingNotesPostgres({ notes: [noteRow()], checklists })
+      const pgStore = postgresStore(fake)
+      const spy = editAfterLookup(pgStore, async () => {
+        // An edit committed after the list, before the attach.
+        fake.notes[0].body = 'New hire starting'
+      })
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+      spy.mockRestore()
+      expect(fake.items.find((entry) => entry.checklist_id === 'chk-ea')).toMatchObject({
+        id: 'item-pn-ea',
+        label: 'New hire starting',
+      })
+      const [read] = fake.matching(/^select body from client_pending_notes/i)
+      expect(read.text.replace(/\s+/g, ' ')).toBe(
+        'select body from client_pending_notes where id = $1 and attached_checklist_id is null for update',
+      )
+      expect(read.inTransaction).toBe(true)
+      const order = (pattern) => fake.statements.findIndex((s) => pattern.test(s.text))
+      expect(order(/^select body from client_pending_notes/i)).toBeLessThan(order(/^insert into checklist_items/i))
+    })
+
+    it('a one-time task the note of which attached meanwhile: nothing is inserted', async () => {
+      const fake = fakePendingNotesPostgres({ notes: [noteRow()], checklists })
+      const pgStore = postgresStore(fake)
+      const spy = editAfterLookup(pgStore, async () => {
+        fake.notes[0].attached_checklist_id = 'chk-elsewhere'
+      })
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(0)
+      spy.mockRestore()
+      expect(fake.matching(/^insert into checklist_items/i)).toHaveLength(0)
+    })
+
+    it('a repeating task: the copy and its step take the words the claim returned', async () => {
+      const fake = fakePendingNotesPostgres({
+        notes: [noteRow({ repeats: true, last_attached_checklist_id: null, last_attached_due_date: null })],
+        checklists,
+      })
+      const pgStore = postgresStore(fake)
+      const spy = editAfterLookup(pgStore, async () => {
+        fake.notes[0].body = 'Send the 1099s'
+      })
+      expect(await pgStore.attachPendingClientNotes({ clientId: 'c1' })).toBe(1)
+      spy.mockRestore()
+      const copy = fake.notes.find((entry) => entry.repeat_of === 'pnote-ea')
+      expect(copy.body).toBe('Send the 1099s')
+      expect(fake.items.find((entry) => entry.id === copy.attached_item_id).label).toBe('Send the 1099s')
+    })
+  })
+})
+
+/**
  * The attach pass (`attachPendingClientNotes`) — the FILE backend. This is
  * the part the pure materializer cannot do itself: it runs independently of
  * `read()` here so each test can hand it exact `createdAt`/`dueDate` values
@@ -10024,9 +10174,14 @@ function fakePendingNotesPostgres({ notes = [], checklists = [], items = [] } = 
       note.last_attached_checklist_id = checklistId
       note.last_attached_due_date = checklists.find((entry) => entry.id === checklistId)?.due_date ?? null
       return {
-        rows: [{ author_id: note.author_id ?? null, author_name: note.author_name ?? null }],
+        rows: [{ author_id: note.author_id ?? null, author_name: note.author_name ?? null, body: note.body }],
         rowCount: 1,
       }
+    }
+    // The one-time task attach reads the note's words under a lock on it, only while unattached.
+    if (/^select body from client_pending_notes\s+where id = \$1 and attached_checklist_id is null\s+for update$/i.test(trimmed)) {
+      const note = notes.find((entry) => entry.id === params[0] && entry.attached_checklist_id === null)
+      return { rows: note ? [{ body: note.body }] : [], rowCount: note ? 1 : 0 }
     }
     if (/^update client_pending_notes\s+set attached_checklist_id = \$2/i.test(trimmed)) {
       const [id, checklistId, itemId] = params
@@ -33377,7 +33532,7 @@ describe('a client note that repeats on every checklist (postgres branch)', () =
     const claims = fake.matching(/^update client_pending_notes\s+set last_attached_checklist_id = \$2/i)
     expect(claims).toHaveLength(2)
     expect(claims[0].text.replace(/\s+/g, ' ')).toBe(
-      "update client_pending_notes set last_attached_checklist_id = $2, last_attached_due_date = (select to_char(due_date, 'YYYY-MM-DD') from checklists where id = $2) where id = $1 and repeats = true and attached_checklist_id is null and last_attached_checklist_id is not distinct from $3::text returning author_id, author_name",
+      "update client_pending_notes set last_attached_checklist_id = $2, last_attached_due_date = (select to_char(due_date, 'YYYY-MM-DD') from checklists where id = $2) where id = $1 and repeats = true and attached_checklist_id is null and last_attached_checklist_id is not distinct from $3::text returning author_id, author_name, body",
     )
     expect(claims[0].params).toEqual(['pnote-r', 'chk-a', null])
     expect(claims[1].params).toEqual(['pnote-r', 'chk-b', 'chk-a'])

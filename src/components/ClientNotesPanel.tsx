@@ -258,22 +258,32 @@ export function ClientNotesPanel({
   const isEditing = (kind: EditTarget['kind'], noteId: string) =>
     editing?.kind === kind && editing.id === noteId
 
-  const editBox = (
-    <div className="client-note-edit">
-      <textarea
-        aria-label="Edit note"
-        className="pending-note-textarea"
-        value={editDraft}
-        onChange={(event) => setEditDraft(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape') {
-            event.preventDefault()
-            cancelEdit()
-          }
-        }}
-        rows={3}
-        autoFocus
-      />
+  // Each kind is edited with the box it was written in: a notes-log entry with the
+  // same rich-text editor as "Add a note" (toolbar; the saved body renders through
+  // `renderRichNote`), a pending note with the plain box of "For an upcoming
+  // checklist" (it shows as plain text). Esc anywhere in the box cancels.
+  const editBox = (kind: EditTarget['kind']) => (
+    <div
+      className="client-note-edit"
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          cancelEdit()
+        }
+      }}
+    >
+      {kind === 'note' ? (
+        <RichNoteEditor value={editDraft} onChange={setEditDraft} ariaLabel="Edit note" autoFocus />
+      ) : (
+        <textarea
+          aria-label="Edit note"
+          className="pending-note-textarea"
+          value={editDraft}
+          onChange={(event) => setEditDraft(event.target.value)}
+          rows={3}
+          autoFocus
+        />
+      )}
       <div className="pending-note-controls">
         <button
           type="button"
@@ -414,7 +424,7 @@ export function ClientNotesPanel({
                     }
                   >
                     {editingThis ? (
-                      editBox
+                      editBox('pending')
                     ) : (
                       <span className="client-note-body">
                         {note.body}
@@ -507,7 +517,7 @@ export function ClientNotesPanel({
                   {note.createdAt ? ` · ${noteStamp.format(new Date(note.createdAt))}` : ''}
                 </strong>
                 {editingThis ? (
-                  editBox
+                  editBox('note')
                 ) : (
                   <>
                     <span className="client-note-body">{renderRichNote(note.body)}</span>

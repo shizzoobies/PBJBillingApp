@@ -11,10 +11,15 @@ export function RichNoteEditor({
   value,
   onChange,
   placeholder,
+  ariaLabel,
+  autoFocus,
 }: {
   value: string
   onChange: (value: string) => void
   placeholder?: string
+  /** The text box's accessible name (e.g. "Edit note" when it edits a saved note). */
+  ariaLabel?: string
+  autoFocus?: boolean
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -129,6 +134,8 @@ export function RichNoteEditor({
         className="input"
         rows={3}
         placeholder={placeholder}
+        aria-label={ariaLabel}
+        autoFocus={autoFocus}
         value={value}
         onChange={(event) => onChange(event.target.value)}
       />

@@ -148,6 +148,31 @@ describe('the notes log', () => {
     expect(within(saved).queryByRole('textbox')).toBeNull()
   })
 
+  it('edits with the same rich-text editor as Add a note, starting from the saved words, and saves what it holds', async () => {
+    listNotes = vi.fn(async () => [clientNote({ body: 'Call **Tuesday**' })])
+    renderPanel()
+    const own = (await screen.findByText('Tuesday')).closest('li') as HTMLElement
+    fireEvent.click(within(own).getByRole('button', { name: 'Edit' }))
+    // The toolbar of the add path's editor, inside this note's row.
+    for (const tool of ['Bold', 'Italic', 'Bulleted list', 'Numbered list', 'Link']) {
+      expect(within(own).getByRole('button', { name: tool })).toBeInTheDocument()
+    }
+    const box = within(own).getByRole('textbox', { name: 'Edit note' })
+    expect(box).toHaveValue('Call **Tuesday**')
+    expect(box.closest('.rich-note-editor')).not.toBeNull()
+    // A toolbar button writes into the edit box's value (no selection: the
+    // wrappers go in at the caret).
+    ;(box as HTMLTextAreaElement).setSelectionRange(0, 0)
+    fireEvent.click(within(own).getByRole('button', { name: 'Bold' }))
+    expect(box).toHaveValue('****Call **Tuesday**')
+    fireEvent.change(box, { target: { value: 'Call **Wednesday**' } })
+    fireEvent.click(within(own).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(updateNote).toHaveBeenCalledWith('c1', 'cnote-lisa', 'Call **Wednesday**'))
+    // Saved, it renders through the same markdown as any note.
+    const bold = await screen.findByText('Wednesday')
+    expect(bold.tagName).toBe('STRONG')
+  })
+
   it('Cancel puts the note back as it was, and nothing is sent', async () => {
     renderPanel()
     const own = await rowOf('Teh bank changed')
