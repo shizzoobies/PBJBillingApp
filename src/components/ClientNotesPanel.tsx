@@ -2,12 +2,15 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { canAddPendingClientNote } from '../../lib/checklist-write-permission.js'
+import { canEditClientNote, canEditPendingNote } from '../../lib/note-edit-permission.js'
 import {
   addClientNote,
   addClientPendingNoteRequest,
   deleteClientNote,
   deleteClientPendingNoteRequest,
   listClientNotes,
+  updateClientNoteRequest,
+  updateClientPendingNoteRequest,
 } from '../lib/api'
 import { useClientPendingNotes, type ClientPendingNotesState } from '../hooks/useClientPendingNotes'
 import { renderRichNote } from '../lib/richText'
@@ -24,6 +27,12 @@ const noteStamp = new Intl.DateTimeFormat('en-US', {
 
 // A checklist's due date (YYYY-MM-DD), read at noon so no timezone moves the day.
 const dueStamp = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+
+// The quiet "edited Oct 23, 2026" after a note its writer changed (featreq-da3801ab).
+const editedStamp = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+
+/** Which note's words are open for editing: one at a time, in either list. */
+type EditTarget = { kind: 'note' | 'pending'; id: string }
 
 /**
  * Per-client notes: load / add / delete against the existing notes endpoints.
@@ -200,6 +209,107 @@ export function ClientNotesPanel({
     }
   }
 
+  // ---- The writer edits their own note (featreq-da3801ab) ----
+  // Only the writer sees Edit (the owner is no exception); the server refuses
+  // everyone else anyway. One note open at a time; Cancel or Esc drops the draft.
+  const [editing, setEditing] = useState<EditTarget | null>(null)
+  const [editDraft, setEditDraft] = useState('')
+  const [editBusy, setEditBusy] = useState(false)
+  const [editError, setEditError] = useState('')
+
+  const startEdit = (kind: EditTarget['kind'], note: { id: string; body: string }) => {
+    setEditing({ kind, id: note.id })
+    setEditDraft(note.body)
+    setEditError('')
+  }
+
+  const cancelEdit = () => {
+    if (editBusy) return
+    setEditing(null)
+    setEditDraft('')
+    setEditError('')
+  }
+
+  const saveEdit = async () => {
+    const body = editDraft.trim()
+    if (!editing || !body || editBusy) return
+    setEditBusy(true)
+    setEditError('')
+    try {
+      if (editing.kind === 'note') {
+        const saved = await updateClientNoteRequest(clientId, editing.id, body)
+        setNotes((current) => current.map((note) => (note.id === saved.id ? saved : note)))
+      } else {
+        const saved = await updateClientPendingNoteRequest(clientId, editing.id, body)
+        setPendingNotes((current) => current.map((note) => (note.id === saved.id ? saved : note)))
+      }
+      setEditing(null)
+      setEditDraft('')
+    } catch (err) {
+      // A refusal (not yours, already on a checklist) carries the server's sentence.
+      setEditError(
+        err instanceof ApiError && err.message ? err.message : 'Could not save that note — please try again.',
+      )
+    } finally {
+      setEditBusy(false)
+    }
+  }
+
+  const isEditing = (kind: EditTarget['kind'], noteId: string) =>
+    editing?.kind === kind && editing.id === noteId
+
+  const editBox = (
+    <div className="client-note-edit">
+      <textarea
+        aria-label="Edit note"
+        className="pending-note-textarea"
+        value={editDraft}
+        onChange={(event) => setEditDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            cancelEdit()
+          }
+        }}
+        rows={3}
+        autoFocus
+      />
+      <div className="pending-note-controls">
+        <button
+          type="button"
+          className="secondary-action"
+          disabled={editBusy || !editDraft.trim()}
+          onClick={() => void saveEdit()}
+        >
+          {editBusy ? 'Saving…' : 'Save'}
+        </button>
+        <button type="button" className="link-button" disabled={editBusy} onClick={cancelEdit}>
+          Cancel
+        </button>
+      </div>
+      {editError ? <p className="auth-error">{editError}</p> : null}
+    </div>
+  )
+
+  const editButton = (kind: EditTarget['kind'], note: { id: string; body: string }) => (
+    <button
+      type="button"
+      className="link-button"
+      disabled={Boolean(previewMode) || editBusy}
+      title={previewMode ? 'Disabled in preview mode' : undefined}
+      onClick={() => startEdit(kind, note)}
+    >
+      Edit
+    </button>
+  )
+
+  const editedMarker = (editedAt: string | undefined, className: string) =>
+    editedAt ? (
+      <span className={className} title={noteStamp.format(new Date(editedAt))}>
+        edited {editedStamp.format(new Date(editedAt))}
+      </span>
+    ) : null
+
   return (
     <div className="client-notes">
       {showPendingBlock ? (
@@ -291,6 +401,9 @@ export function ClientNotesPanel({
                 const canDelete =
                   !note.repeatOf &&
                   (ownerMode || (note.authorId === currentUserId && !note.attachedChecklistId))
+                // Only its writer, and only while it still waits for a checklist.
+                const canEdit = canEditPendingNote(note, currentUserId)
+                const editingThis = canEdit && isEditing('pending', note.id)
                 return (
                   <li
                     key={note.id}
@@ -300,11 +413,16 @@ export function ClientNotesPanel({
                         : 'pending-client-note'
                     }
                   >
-                    <span className="client-note-body">
-                      {note.body}
-                      {/* A copy a repeating note left on a checklist. */}
-                      {note.repeatOf ? <span className="pending-note-meta"> (repeat)</span> : null}
-                    </span>
+                    {editingThis ? (
+                      editBox
+                    ) : (
+                      <span className="client-note-body">
+                        {note.body}
+                        {/* A copy a repeating note left on a checklist. */}
+                        {note.repeatOf ? <span className="pending-note-meta"> (repeat)</span> : null}
+                      </span>
+                    )}
+                    {editingThis ? null : editedMarker(note.editedAt, 'pending-note-meta')}
                     <span className="pending-note-meta">
                       → {template?.title ?? 'a recurring checklist'} as{' '}
                       {note.kind === 'task' ? 'Task' : 'Note'}
@@ -332,6 +450,7 @@ export function ClientNotesPanel({
                         </Link>
                       </span>
                     ) : null}
+                    {canEdit && !editingThis ? editButton('pending', note) : null}
                     {canDelete ? (
                       <button
                         type="button"
@@ -378,13 +497,24 @@ export function ClientNotesPanel({
         <ul className="activity-list">
           {notes.map((note) => {
             const canDelete = ownerMode || note.authorId === currentUserId
+            // Only its writer - the owner is no exception (featreq-da3801ab).
+            const canEdit = canEditClientNote(note, currentUserId)
+            const editingThis = canEdit && isEditing('note', note.id)
             return (
               <li key={note.id}>
                 <strong>
                   {note.authorName || 'Unknown'}
                   {note.createdAt ? ` · ${noteStamp.format(new Date(note.createdAt))}` : ''}
                 </strong>
-                <span className="client-note-body">{renderRichNote(note.body)}</span>
+                {editingThis ? (
+                  editBox
+                ) : (
+                  <>
+                    <span className="client-note-body">{renderRichNote(note.body)}</span>
+                    {editedMarker(note.editedAt, 'client-note-edited')}
+                  </>
+                )}
+                {canEdit && !editingThis ? editButton('note', note) : null}
                 {canDelete ? (
                   <button
                     type="button"

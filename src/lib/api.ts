@@ -4090,6 +4090,28 @@ export async function deleteClientNote(clientId: string, noteId: string) {
   return (await response.json()) as { ok: boolean }
 }
 
+/**
+ * Change the words of a note YOU wrote (featreq-da3801ab). Only the writer, the
+ * owner included; anyone else is refused with a 403. Returns the saved note,
+ * stamped `editedAt`. A refusal carries the server's sentence.
+ */
+export async function updateClientNoteRequest(clientId: string, noteId: string, body: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/notes/${encodeURIComponent(noteId)}`,
+    {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    },
+  )
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(response.status, message || `Failed to save the note (${response.status})`, code)
+  }
+  return ((await response.json()) as { note: ClientNote }).note
+}
+
 // ---- Statement dates box: reference-only accounts + day-of-month per client ----
 
 /**
@@ -4200,6 +4222,29 @@ export async function deleteClientPendingNoteRequest(clientId: string, noteId: s
     )
   }
   return (await response.json()) as { ok: boolean }
+}
+
+/**
+ * Change the words of a pending note YOU wrote, while it still waits for a
+ * checklist (featreq-da3801ab). Anyone else gets a 403; once it is on a checklist
+ * a 409 `pending_note_attached` whose sentence says to edit it there. Returns the
+ * saved note, stamped `editedAt`.
+ */
+export async function updateClientPendingNoteRequest(clientId: string, noteId: string, body: string) {
+  const response = await apiFetch(
+    `/api/clients/${encodeURIComponent(clientId)}/pending-notes/${encodeURIComponent(noteId)}`,
+    {
+      method: 'PATCH',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    },
+  )
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(response.status, message || `Failed to save the note (${response.status})`, code)
+  }
+  return ((await response.json()) as { note: ClientPendingNote }).note
 }
 
 /**
