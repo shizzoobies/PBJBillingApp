@@ -11,12 +11,13 @@ export type EditableNote = {
 }
 
 export type NoteEditRefusal = {
-  status: 403 | 404 | 409
+  status: 400 | 403 | 404 | 409
   error: string
   message?: string
 }
 
 export const NOTE_NOT_FOUND: string
+export const NOTE_BODY_REQUIRED: string
 export const NOTE_EDIT_NOT_AUTHOR: string
 export const PENDING_NOTE_ALREADY_ADDED: string
 
@@ -29,6 +30,8 @@ export function pendingNoteEditRefusal(
   note: EditableNote | null | undefined,
   userId: string | null | undefined,
 ): NoteEditRefusal | null
+
+export function noteEditOutcomeRefusal(reason: string | undefined): NoteEditRefusal
 
 export function canEditClientNote(
   note: EditableNote | null | undefined,
