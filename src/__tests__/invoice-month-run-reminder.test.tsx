@@ -38,6 +38,21 @@ const mockRemind = vi.mocked(remindInvoiceRequest)
 
 const SENT_AT = '2026-08-31T16:00:00.000Z'
 
+/**
+ * "Last reminded Oct 5" carries no year only while the clock is in the log's
+ * year (formatSentOn). The tests that read those labels run under a clock
+ * pinned to October 2026, after every date in the log.
+ */
+async function inTheLogsYear(run: () => Promise<void>) {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-10-14T12:00:00-04:00'))
+  try {
+    await run()
+  } finally {
+    vi.useRealTimers()
+  }
+}
+
 function makeClients(over: Partial<Client> = {}, extra: Client[] = []): Client[] {
   return [
     {
@@ -380,9 +395,11 @@ describe('a reminder on a Payment failed invoice', () => {
   })
 
   it('keeps the history in the editor: failed on one date, cleared by a reminder on another', async () => {
-    await openRun([failedInvoice({ emailLog: clearedLog('2026-10-09T16:00:00.000Z') })], { tab: /^Sent/ })
-    expect(screen.getByText(/Payment failed Sep 5; cleared by a reminder Oct 9\./)).toBeInTheDocument()
-    expect(screen.queryByText(/The client's Pay link still works for a retry/)).not.toBeInTheDocument()
+    await inTheLogsYear(async () => {
+      await openRun([failedInvoice({ emailLog: clearedLog('2026-10-09T16:00:00.000Z') })], { tab: /^Sent/ })
+      expect(screen.getByText(/Payment failed Sep 5; cleared by a reminder Oct 9\./)).toBeInTheDocument()
+      expect(screen.queryByText(/The client's Pay link still works for a retry/)).not.toBeInTheDocument()
+    })
   })
 })
 
@@ -406,26 +423,28 @@ describe('Last reminded on the row', () => {
   })
 
   it('says "(automatic)" for a reminder the app sent by itself, on the row and in the editor', async () => {
-    await openRun(
-      [
-        makeInvoice({
-          emailLog: [
-            { at: SENT_AT, to: ['ann@acme.test'], subject: 'Invoice', ok: true },
-            { ...reminderEntry('2026-10-05T16:00:00.000Z'), auto: true },
-          ],
-        }),
-      ],
-      { open: false },
-    )
-    const row = (await screen.findByText('INV-2026-08-001')).closest('li') as HTMLElement
-    expect(within(row).getByText(/Last reminded Oct 5 \(automatic\)/)).toBeInTheDocument()
-    fireEvent.click(screen.getByText('INV-2026-08-001'))
-    const editor = await waitFor(() => {
-      const node = document.querySelector('.invoice-run-editor')
-      expect(node).not.toBeNull()
-      return node as HTMLElement
+    await inTheLogsYear(async () => {
+      await openRun(
+        [
+          makeInvoice({
+            emailLog: [
+              { at: SENT_AT, to: ['ann@acme.test'], subject: 'Invoice', ok: true },
+              { ...reminderEntry('2026-10-05T16:00:00.000Z'), auto: true },
+            ],
+          }),
+        ],
+        { open: false },
+      )
+      const row = (await screen.findByText('INV-2026-08-001')).closest('li') as HTMLElement
+      expect(within(row).getByText(/Last reminded Oct 5 \(automatic\)/)).toBeInTheDocument()
+      fireEvent.click(screen.getByText('INV-2026-08-001'))
+      const editor = await waitFor(() => {
+        const node = document.querySelector('.invoice-run-editor')
+        expect(node).not.toBeNull()
+        return node as HTMLElement
+      })
+      expect(within(editor).getByText(/Last reminded Oct 5 \(automatic\) to/)).toBeInTheDocument()
     })
-    expect(within(editor).getByText(/Last reminded Oct 5 \(automatic\) to/)).toBeInTheDocument()
   })
 
   it('a reminder the owner pressed has no "(automatic)"', async () => {

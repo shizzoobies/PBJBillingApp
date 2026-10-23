@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChecklistsPage } from '../pages/ChecklistsPage'
+import { addDays, localDateOnly } from '../lib/utils'
 import { DelayedPage } from '../pages/DelayedPage'
 import { boardChecklistStatus } from '../lib/activeBoard'
 import { waitingStepCount } from '../lib/inProgressFilter'
@@ -24,6 +25,8 @@ const OWNER = 'emp-brit'
 const WORKER = 'emp-avery'
 const BLOCKER = 'emp-lisa'
 const CLIENT = { id: 'client-acme', name: 'Acme Dental' }
+// The fixtures are dated from today so they never age into a different due bucket.
+const TODAY = localDateOnly()
 
 const wait = (over: Partial<WaitingOn> = {}): WaitingOn => ({
   id: 'wo-1',
@@ -41,7 +44,7 @@ const checklistWith = (items: unknown[]): Checklist =>
     title: 'August close',
     assigneeId: WORKER,
     // "Later" bucket: collapsed by default, opened by `renderProgress` below.
-    dueDate: '2026-12-31',
+    dueDate: addDays(TODAY, 60),
     items,
   }) as unknown as Checklist
 
@@ -76,7 +79,7 @@ function signIn(checklist: Checklist, viewerId: string) {
     pendingItemDeletionKeys: new Set<string>(),
     pendingTaskEdits: [],
     itemDeletionRequests: [],
-    reportPeriod: { from: '2026-01-01', to: '2026-12-31' },
+    reportPeriod: { from: addDays(TODAY, -30), to: addDays(TODAY, 90) },
     setReportPeriod: vi.fn(),
     addChecklist: vi.fn(),
     addSeriesChecklistItem: vi.fn(),
@@ -147,7 +150,7 @@ function readEverywhere(checklist: Checklist) {
   unmount()
   return {
     waitingCount: waitingStepCount(checklist),
-    boardPending: boardChecklistStatus(checklist, '2026-09-01').kind === 'pending',
+    boardPending: boardChecklistStatus(checklist, TODAY).kind === 'pending',
     chips,
     delayed: delayedCount(checklist, BLOCKER),
   }
@@ -184,7 +187,7 @@ describe('a step whose stored done flag lags its sub-steps', () => {
   })
 
   it('keeps the card on the Board as due, not pending', () => {
-    expect(boardChecklistStatus(lagging, '2026-09-01').kind).toBe('due')
+    expect(boardChecklistStatus(lagging, TODAY).kind).toBe('due')
   })
 })
 
@@ -217,7 +220,7 @@ describe('a step whose stored done flag is true with a sub-step still open', () 
   })
 
   it('puts the card on the Board as pending, with the wait as the reason', () => {
-    const status = boardChecklistStatus(reverse, '2026-09-01', { [BLOCKER]: 'Lisa Chen' })
+    const status = boardChecklistStatus(reverse, TODAY, { [BLOCKER]: 'Lisa Chen' })
     expect(status).toMatchObject({ kind: 'pending', waitingCount: 1 })
   })
 })

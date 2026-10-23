@@ -82,13 +82,18 @@ async function openEditor(rows: PersistedInvoice[], tab = 'Reviewed') {
   fireEvent.click(await screen.findByText(rows[0].number as string))
 }
 
+// "Sent Aug 13" carries no year only while the clock is in the log's year
+// (formatSentOn): pin it there, as the log is dated August 2026.
 beforeEach(() => {
   mockList.mockReset()
   mockSend.mockReset()
   mockSend.mockResolvedValue({ invoice: invoice({ status: 'sent' }) })
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-08-20T12:00:00-04:00'))
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 

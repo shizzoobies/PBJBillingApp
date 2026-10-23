@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChecklistsPage } from '../pages/ChecklistsPage'
+import { addDays, localDateOnly } from '../lib/utils'
 import type { AppContextValue } from '../AppContext'
 import type { AppData, Checklist } from '../lib/types'
 
@@ -24,6 +25,8 @@ const OWNER = 'emp-brit'
 // The person doing the work: the viewer in every staff expectation below.
 const WORKER = 'emp-avery'
 const CLIENT = { id: 'client-acme', name: 'Acme Dental' }
+// The fixtures are dated from today so they never age into a different due bucket.
+const TODAY = localDateOnly()
 
 const checklist = (items: Checklist['items']): Checklist =>
   ({
@@ -34,7 +37,7 @@ const checklist = (items: Checklist['items']): Checklist =>
     // Far enough out to land in the "Later" due-date bucket, which starts
     // collapsed — the "Overdue" / "This week" buckets start OPEN, and
     // `openDueGroups` below would toggle one of those CLOSED instead.
-    dueDate: '2026-12-31',
+    dueDate: addDays(TODAY, 60),
     items,
   }) as Checklist
 
@@ -74,7 +77,7 @@ function signInWith(items: Checklist['items'], viewer: 'staff' | 'owner' = 'staf
     pendingItemDeletionKeys: new Set<string>(),
     pendingTaskEdits: [],
     itemDeletionRequests: [],
-    reportPeriod: { from: '2026-01-01', to: '2026-12-31' },
+    reportPeriod: { from: addDays(TODAY, -30), to: addDays(TODAY, 90) },
     setReportPeriod: vi.fn(),
     addChecklist: vi.fn(),
     addSeriesChecklistItem: vi.fn(),

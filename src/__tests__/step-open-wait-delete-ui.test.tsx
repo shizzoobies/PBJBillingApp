@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChecklistsPage } from '../pages/ChecklistsPage'
+import { addDays, localDateOnly } from '../lib/utils'
 import type { AppContextValue } from '../AppContext'
 import type { AppData, Checklist } from '../lib/types'
 
@@ -19,6 +20,8 @@ vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
 const OWNER = 'emp-brit'
 const WORKER = 'emp-avery'
 const CLIENT = { id: 'client-acme', name: 'Acme Dental' }
+// The fixtures are dated from today so they never age into a different due bucket.
+const TODAY = localDateOnly()
 const SENTENCE =
   'This step has an open wait on it. Close the wait first (mark it done and approve it), then delete the step.'
 
@@ -76,7 +79,8 @@ const data = () =>
         clientId: CLIENT.id,
         title: 'August close',
         assigneeId: WORKER,
-        dueDate: '2026-12-31',
+        // Far enough out for the collapsed "Later" bucket (see renderProgress).
+        dueDate: addDays(TODAY, 60),
         items: items(),
       } as Checklist,
     ],
@@ -107,7 +111,7 @@ function signInAs(viewer: 'staff' | 'owner', extra: Record<string, unknown> = {}
     pendingItemDeletionKeys: new Set<string>(),
     pendingTaskEdits: [],
     itemDeletionRequests: [],
-    reportPeriod: { from: '2026-01-01', to: '2026-12-31' },
+    reportPeriod: { from: addDays(TODAY, -30), to: addDays(TODAY, 90) },
     setReportPeriod: vi.fn(),
     addChecklist: vi.fn(),
     addSeriesChecklistItem: vi.fn(),

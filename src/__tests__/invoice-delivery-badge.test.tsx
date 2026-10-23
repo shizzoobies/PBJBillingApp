@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoiceMonthRun } from '../components/InvoiceMonthRun'
 import type { Client, PersistedInvoice } from '../lib/types'
 import { latestInvoiceDelivery, latestInvoiceSend } from '../lib/utils'
@@ -84,8 +84,16 @@ async function openEditor(rows: PersistedInvoice[]) {
   fireEvent.click(await screen.findByText(rows[0].number as string))
 }
 
+// "Sent Aug 11" carries no year only while the clock is in the log's year
+// (formatSentOn): pin it there, as the log is dated August 2026.
 beforeEach(() => {
   mockList.mockReset()
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-08-20T12:00:00-04:00'))
+})
+
+afterEach(() => {
+  vi.useRealTimers()
 })
 
 describe('the delivery badge in the month run', () => {
