@@ -5,24 +5,28 @@ import {
   listEngagementEsignRequests,
   remindEngagementEsignRequest,
   sendEngagementEsignRequest,
-  signwellStatusRequest,
+  esignStatusRequest,
 } from '../../lib/api'
 import {
+  ESIGNATURES_AUTO_REMINDER_NOTE,
   ESIGN_TEST_MODE_NOTE,
   esignBadgeText,
   esignIsActive,
+  esignProviderName,
   esignRefusalSentence,
   esignWasMarkedComplete,
 } from '../../lib/engagements'
-import { ApiError, type SignatureRequest, type SignwellStatus } from '../../lib/types'
+import { ApiError, type EsignStatus, type SignatureRequest } from '../../lib/types'
 import { dateOnlyInZone, firmToday } from '../../../lib/firm-time.js'
 
 /**
- * E-signature for one engagement letter (featreq-56d39567; docs/signwell.md): the status of its
- * newest request, Send for signature, Send reminder, and Download signed PDF. Mark as signed stays
- * as the manual path beside it. SignWell emails the signer; the firm mails nothing from here.
+ * E-signature for one engagement letter (featreq-56d39567; docs/signwell.md, docs/esignatures.md): the
+ * status of its newest request, Send for signature, Send reminder, and Download signed PDF. Mark as signed
+ * stays as the manual path beside it. The provider (eSignatures.io when its token is set, else SignWell)
+ * emails the signer; the firm mails nothing from here. A request is named by its OWN provider; a new send
+ * by the one the server would use now.
  *
- * Hidden when SignWell is not configured on the server AND the letter has no request (a letter that
+ * Hidden when e-signature is not configured on the server AND the letter has no request (a letter that
  * was e-signed keeps showing its status and its download if the key is later removed).
  */
 
@@ -66,7 +70,7 @@ export function EsignPanel({
   /** After a send or a reminder: the page reads the engagement again. */
   onChanged?: () => void | Promise<void>
 }) {
-  const [status, setStatus] = useState<SignwellStatus | null>(null)
+  const [status, setStatus] = useState<EsignStatus | null>(null)
   const [requests, setRequests] = useState<SignatureRequest[] | null>(null)
   const [busy, setBusy] = useState<'' | 'send' | 'remind' | 'finish'>('')
   const [confirming, setConfirming] = useState(false)
@@ -76,12 +80,12 @@ export function EsignPanel({
 
   useEffect(() => {
     let cancelled = false
-    void signwellStatusRequest().then(
+    void esignStatusRequest().then(
       (next) => {
         if (!cancelled) setStatus(next)
       },
       () => {
-        if (!cancelled) setStatus({ configured: false, testMode: true })
+        if (!cancelled) setStatus({ configured: false, provider: null, testMode: true })
       },
     )
     return () => {
@@ -127,6 +131,10 @@ export function EsignPanel({
     (!latest.signedDocumentId || !engagementSigned)
   const canCheck = Boolean(latest) && !['completed', 'declined', 'expired', 'canceled'].includes(latest?.status ?? '')
   const target = partyEmail || 'the party'
+  // A new send goes through the server's provider now; a request is named by the provider it went to.
+  const sendProvider = esignProviderName(status.provider)
+  const latestProvider = esignProviderName(latest?.provider)
+  const activeProvider = esignProviderName(active?.provider)
 
   const send = async () => {
     setConfirming(false)
@@ -166,7 +174,7 @@ export function EsignPanel({
       } else if (result.signed) {
         setNotice('Finished: the signed PDF is kept and the letter is marked signed.')
       } else {
-        setNotice(`Checked SignWell: still ${esignBadgeText(result.request).replace(/^E-sign: /, '')}.`)
+        setNotice(`Checked ${latestProvider}: still ${esignBadgeText(result.request).replace(/^E-sign: /, '')}.`)
       }
       reload()
       await onChanged?.()
@@ -204,7 +212,7 @@ export function EsignPanel({
         </p>
       ) : (
         <p className="muted-text">
-          {`SignWell emails ${target} a link to read and sign the letter, and marks it signed here when they do. Mark as signed below stays as the manual way.`}
+          {`${sendProvider} emails ${target} a link to read and sign the letter, and marks it signed here when they do. Mark as signed below stays as the manual way.`}
         </p>
       )}
       {latest?.lastError && !engagementSigned ? (
@@ -217,7 +225,7 @@ export function EsignPanel({
       ) : null}
       {active ? (
         <p className="muted-text">
-          When the client signs, the letter is marked signed here for you. Marking it signed by hand does not cancel the document at SignWell.
+          {`When the client signs, the letter is marked signed here for you. Marking it signed by hand does not cancel the document at ${activeProvider}.`}
         </p>
       ) : null}
       {error ? (
@@ -233,7 +241,8 @@ export function EsignPanel({
 
       {confirming ? (
         <div className="esign-confirm" role="group" aria-label="Confirm send for signature">
-          <p>{`Send the engagement letter for ${partyName} to ${target} for signature? SignWell emails them a link to sign it.`}</p>
+          <p>{`Send the engagement letter for ${partyName} to ${target} for signature? ${sendProvider} emails them a link to sign it.`}</p>
+          {status.provider === 'esignatures' ? <p className="muted-text">{ESIGNATURES_AUTO_REMINDER_NOTE}</p> : null}
           {status.testMode ? <p className="muted-text">{ESIGN_TEST_MODE_NOTE}</p> : null}
           <div className="button-row">
             <button type="button" className="primary-action" disabled={busy !== ''} onClick={() => void send()}>
@@ -273,7 +282,7 @@ export function EsignPanel({
           ) : null}
           {canFinish || canCheck ? (
             <button type="button" className="secondary-action" disabled={disabled || busy !== ''} onClick={() => void finish()}>
-              {busy === 'finish' ? (canFinish ? 'Finishing...' : 'Checking...') : canFinish ? 'Finish e-signature' : 'Check SignWell'}
+              {busy === 'finish' ? (canFinish ? 'Finishing...' : 'Checking...') : canFinish ? 'Finish e-signature' : `Check ${latestProvider}`}
             </button>
           ) : null}
           {latest?.status === 'completed' && latest.signedDocumentId ? (

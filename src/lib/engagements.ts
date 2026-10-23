@@ -109,6 +109,13 @@ export const esignWasMarkedComplete = (request: Pick<SignatureRequest, 'lastErro
 export const ESIGN_TEST_MODE_NOTE =
   'Test mode - no legally binding document, the client may not receive an email, and it will not mark the letter signed unless this is the Test client.'
 
+/** "eSignatures.io" or "SignWell" for a sentence; no provider (an older request, an older server) is SignWell. */
+export const esignProviderName = (provider: string | null | undefined): string =>
+  provider === 'esignatures' ? 'eSignatures.io' : 'SignWell'
+
+/** What the send confirm adds for eSignatures.io: it reminds the signer by itself (Send reminder still works). */
+export const ESIGNATURES_AUTO_REMINDER_NOTE = 'eSignatures.io also reminds them automatically on days 2, 4, 8 and 16.'
+
 /** The statuses in which a signature request is still out with the signer. */
 export const ESIGN_ACTIVE_STATUSES = ['sent', 'viewed', 'signed_partial'] as const
 

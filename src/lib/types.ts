@@ -2992,11 +2992,16 @@ export type SignatureRequestStatus =
   | 'bounced'
   | 'error'
 
+/** The e-signature providers (lib/esign-provider.js). */
+export type EsignProvider = 'esignatures' | 'signwell'
+
 /** One engagement letter sent for e-signature. Never carries the signed PDF's bytes or a signing link. */
 export type SignatureRequest = {
   id: string
   engagementId: string
   clientId: string | null
+  /** Which provider holds it (a request from before eSignatures.io reads as SignWell). */
+  provider?: EsignProvider
   status: SignatureRequestStatus
   recipients: Array<{ id: string; name: string; email: string; status?: string }>
   /** True while SIGNWELL_TEST_MODE is not the literal `false`: not legally binding. */
@@ -3015,8 +3020,8 @@ export type SignatureRequest = {
   updatedAt: string | null
 }
 
-/** Whether e-signature is set up on the server, and whether it is in test mode. */
-export type SignwellStatus = { configured: boolean; testMode: boolean }
+/** Whether e-signature is set up on the server, through which provider a send goes, and whether it is in test mode. */
+export type EsignStatus = { configured: boolean; provider?: EsignProvider | null; testMode: boolean }
 
 /** The answer to a Send that was not refused: whether the provider took it. */
 export type EngagementSendResult = {

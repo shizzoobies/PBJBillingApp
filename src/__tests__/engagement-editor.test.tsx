@@ -26,7 +26,7 @@ vi.mock('../lib/api', () => ({
   listPackagesRequest: (...args: unknown[]) => api.listPackagesRequest(...args),
   listEngagementSectionsRequest: (...args: unknown[]) => api.listEngagementSectionsRequest(...args),
   listEngagementsRequest: (...args: unknown[]) => api.listEngagementsRequest(...args),
-  signwellStatusRequest: (...args: unknown[]) => api.signwellStatusRequest(...args),
+  esignStatusRequest: (...args: unknown[]) => api.esignStatusRequest(...args),
   listEngagementEsignRequests: (...args: unknown[]) => api.listEngagementEsignRequests(...args),
   sendEngagementEsignRequest: (...args: unknown[]) => api.sendEngagementEsignRequest(...args),
   remindEngagementEsignRequest: (...args: unknown[]) => api.remindEngagementEsignRequest(...args),
@@ -168,7 +168,7 @@ beforeEach(() => {
   api.voidEngagementRequest = vi.fn(async () => engagement({ status: 'void' }))
   api.listEngagementsRequest = vi.fn(async () => [])
   // E-signature (featreq-56d39567): not set up unless a test says so, so the panel stays out of the way.
-  api.signwellStatusRequest = vi.fn(async () => ({ configured: false, testMode: true }))
+  api.esignStatusRequest = vi.fn(async () => ({ configured: false, testMode: true }))
   api.listEngagementEsignRequests = vi.fn(async () => [])
   api.sendEngagementEsignRequest = vi.fn(async () => ({ request: signatureRequest(), engagement: engagement({ status: 'sent' }) }))
   api.remindEngagementEsignRequest = vi.fn(async () => ({ request: signatureRequest() }))
@@ -1420,7 +1420,7 @@ describe('Addressed to', () => {
  */
 describe('e-signature', () => {
   const configured = (testMode = true) => {
-    api.signwellStatusRequest = vi.fn(async () => ({ configured: true, testMode }))
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, testMode }))
   }
   const withRequests = (...requests: SignatureRequest[]) => {
     api.listEngagementEsignRequests = vi.fn(async () => requests)
@@ -1428,7 +1428,7 @@ describe('e-signature', () => {
 
   it('is hidden when SignWell is not set up and the letter has no request', async () => {
     await renderEditor()
-    await waitFor(() => expect(api.signwellStatusRequest).toHaveBeenCalled())
+    await waitFor(() => expect(api.esignStatusRequest).toHaveBeenCalled())
     await waitFor(() => expect(api.listEngagementEsignRequests).toHaveBeenCalledWith('eng-1'))
     expect(screen.queryByRole('heading', { name: 'E-signature' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Send for signature' })).toBeNull()
@@ -1474,6 +1474,40 @@ describe('e-signature', () => {
     await waitFor(() => expect(api.getEngagementRequest.mock.calls.length).toBeGreaterThan(loads))
     // The badge shows the new request.
     expect(await screen.findByText('E-sign: sent Oct 21')).toBeTruthy()
+  })
+
+  it('through eSignatures.io: the intro and the confirm name it, mention its automatic reminders, and say test mode', async () => {
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'esignatures', testMode: true }))
+    await renderEditor()
+    expect(await screen.findByText(/^eSignatures\.io emails pat@acme\.test a link to read and sign the letter/)).toBeTruthy()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
+    const confirm = screen.getByRole('group', { name: 'Confirm send for signature' })
+    expect(within(confirm).getByText(/for signature\? eSignatures\.io emails them a link to sign it\.$/)).toBeTruthy()
+    expect(within(confirm).getByText('eSignatures.io also reminds them automatically on days 2, 4, 8 and 16.')).toBeTruthy()
+    expect(within(confirm).getByText(/^Test mode - no legally binding document/)).toBeTruthy()
+  })
+
+  it('a SignWell send says nothing about automatic reminders', async () => {
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'signwell', testMode: false }))
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
+    const confirm = screen.getByRole('group', { name: 'Confirm send for signature' })
+    expect(within(confirm).getByText(/SignWell emails them a link to sign it\./)).toBeTruthy()
+    expect(within(confirm).queryByText(/reminds them automatically/)).toBeNull()
+  })
+
+  it('an eSignatures.io request keeps Send reminder (it resends), and is checked and named by its own provider', async () => {
+    // The server now uses SignWell, but this request went to eSignatures.io: it is named for eSignatures.io.
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'signwell', testMode: false }))
+    withRequests(signatureRequest({ provider: 'esignatures', status: 'viewed' }))
+    await renderEditor()
+    expect(await screen.findByRole('button', { name: 'Send reminder' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Check eSignatures.io' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Check SignWell' })).toBeNull()
+    expect(screen.getByText(/does not cancel the document at eSignatures\.io\./)).toBeTruthy()
+    api.finishEngagementEsignRequest = vi.fn(async () => ({ request: signatureRequest({ provider: 'esignatures', status: 'viewed' }), signed: false, issues: [], engagement: engagement() }))
+    fireEvent.click(screen.getByRole('button', { name: 'Check eSignatures.io' }))
+    expect(await screen.findByText('Checked eSignatures.io: still viewed.')).toBeTruthy()
   })
 
   it('Cancel closes the confirm without sending', async () => {
@@ -1625,7 +1659,7 @@ describe('e-signature', () => {
  */
 describe('e-signature: finish and the open-request warning', () => {
   const configured = () => {
-    api.signwellStatusRequest = vi.fn(async () => ({ configured: true, testMode: true }))
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, testMode: true }))
   }
   const withRequests = (...requests: SignatureRequest[]) => {
     api.listEngagementEsignRequests = vi.fn(async () => requests)

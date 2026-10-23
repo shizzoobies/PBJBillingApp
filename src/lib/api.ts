@@ -40,7 +40,7 @@
   type EngagementSection,
   type EngagementSendResult,
   type SignatureRequest,
-  type SignwellStatus,
+  type EsignStatus,
   type EngagementSignResult,
   type EngagementStatus,
   type EngagementView,
@@ -5629,9 +5629,12 @@ export function sendEngagementRequest(
   )
 }
 
-/** Whether e-signature (SignWell) is set up, and whether it is in test mode. Owner-only. */
-export function signwellStatusRequest(): Promise<SignwellStatus> {
-  return engagementRequest<SignwellStatus>('/api/signwell/status', { method: 'GET' }, 'Could not read the e-signature settings')
+/**
+ * Whether e-signature is set up, through which provider a send would go (eSignatures.io or SignWell),
+ * and whether it is in test mode. Owner-only.
+ */
+export function esignStatusRequest(): Promise<EsignStatus> {
+  return engagementRequest<EsignStatus>('/api/esign/status', { method: 'GET' }, 'Could not read the e-signature settings')
 }
 
 /** This engagement's e-signature requests, newest first (never the signed bytes). */

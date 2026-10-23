@@ -19,7 +19,7 @@ vi.mock('../lib/api', () => ({
   getEngagementRequest: (...args: unknown[]) => api.getEngagementRequest(...args),
   signEngagementRequest: (...args: unknown[]) => api.signEngagementRequest(...args),
   restoreEngagementRequest: (...args: unknown[]) => api.restoreEngagementRequest(...args),
-  signwellStatusRequest: (...args: unknown[]) => api.signwellStatusRequest(...args),
+  esignStatusRequest: (...args: unknown[]) => api.esignStatusRequest(...args),
   listEngagementEsignRequests: (...args: unknown[]) => api.listEngagementEsignRequests(...args),
   sendEngagementEsignRequest: (...args: unknown[]) => api.sendEngagementEsignRequest(...args),
   remindEngagementEsignRequest: (...args: unknown[]) => api.remindEngagementEsignRequest(...args),
@@ -100,7 +100,7 @@ function renderCard(ownerMode = true, props: Partial<Parameters<typeof ClientEng
 }
 
 beforeEach(() => {
-  api.signwellStatusRequest = vi.fn(async () => ({ configured: false, testMode: true }))
+  api.esignStatusRequest = vi.fn(async () => ({ configured: false, testMode: true }))
   api.listEngagementEsignRequests = vi.fn(async () => [])
   api.sendEngagementEsignRequest = vi.fn()
   api.remindEngagementEsignRequest = vi.fn()
