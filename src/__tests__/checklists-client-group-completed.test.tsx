@@ -5,6 +5,7 @@ import { ChecklistsPage } from '../pages/ChecklistsPage'
 import { checklistsVisibleTo } from '../lib/checklistVisibility'
 import { addDays, localDateOnly } from '../lib/utils'
 import type { AppContextValue } from '../AppContext'
+import type { ReportPeriod } from '../lib/reportPeriod'
 import type { AppData, Checklist, Client } from '../lib/types'
 
 /**
@@ -57,7 +58,10 @@ const DONE_ONLY = checklist({
 
 let contextValue: AppContextValue
 
-function signIn(checklists: Checklist[] = [OPEN, DONE, DONE_ONLY]) {
+function signIn(
+  checklists: Checklist[] = [OPEN, DONE, DONE_ONLY],
+  reportPeriod: ReportPeriod = { preset: 'custom', from: '2020-01-01', to: '2099-12-31' },
+) {
   const data = {
     clients: [SHARED, OTHER],
     employees: [{ id: OWNER, name: 'Patrice Owner', role: 'Owner' }],
@@ -84,7 +88,7 @@ function signIn(checklists: Checklist[] = [OPEN, DONE, DONE_ONLY]) {
     pendingItemDeletionKeys: new Set<string>(),
     pendingTaskEdits: [],
     itemDeletionRequests: [],
-    reportPeriod: { preset: 'custom', from: '2020-01-01', to: '2099-12-31' },
+    reportPeriod,
     setReportPeriod: vi.fn(),
     addChecklist: vi.fn(),
     addSeriesChecklistItem: vi.fn(),
@@ -114,12 +118,13 @@ function signIn(checklists: Checklist[] = [OPEN, DONE, DONE_ONLY]) {
   } as unknown as AppContextValue
 }
 
-const renderPage = (entry = '/checklists?group=client') =>
-  render(
-    <MemoryRouter initialEntries={[entry]}>
-      <ChecklistsPage />
-    </MemoryRouter>,
-  )
+const pageTree = (entry: string) => (
+  <MemoryRouter initialEntries={[entry]}>
+    <ChecklistsPage />
+  </MemoryRouter>
+)
+
+const renderPage = (entry = '/checklists?group=client') => render(pageTree(entry))
 
 const CARD_TITLE = '.checklist-card-title-sub, .checklist-card-title'
 
@@ -193,13 +198,14 @@ describe('In progress grouped by client: completed checklists in a nested Comple
     expect(countOf(shared)).toBe('1')
   })
 
-  it('keeps a client with ONLY completed checklists listed, but collapsed, with an open count of 0', () => {
+  it('keeps a client with ONLY completed checklists listed, but collapsed, its pill reading "N done"', () => {
     signIn()
     renderPage()
     const other = clientGroup('Other Co')
     expect(other).toBeTruthy()
     expect(headerOf(other)).toHaveAttribute('aria-expanded', 'false')
-    expect(countOf(other)).toBe('0')
+    // No open work: the pill says how many are done instead of a bare "0".
+    expect(countOf(other)).toBe('1 done')
     expect(titlesIn(other)).toEqual([])
 
     fireEvent.click(headerOf(other))
@@ -207,6 +213,23 @@ describe('In progress grouped by client: completed checklists in a nested Comple
     expect(completed).toBeTruthy()
     expect(headerOf(completed)).toHaveAttribute('aria-expanded', 'false')
     expect(countOf(completed)).toBe('1')
+  })
+
+  it('a client that mounts all-completed OPENS when a period change gives it open work', () => {
+    // Only DONE (due today+2) is in this window, so Shared Books is all-completed.
+    const narrow: ReportPeriod = { preset: 'custom', from: addDays(TODAY, 2), to: addDays(TODAY, 2) }
+    signIn([OPEN, DONE], narrow)
+    const { rerender } = renderPage()
+    expect(headerOf(clientGroup('Shared Books LLC'))).toHaveAttribute('aria-expanded', 'false')
+    expect(countOf(clientGroup('Shared Books LLC'))).toBe('1 done')
+
+    // Widen the period so OPEN (due today+3) is in it too.
+    signIn([OPEN, DONE], { preset: 'custom', from: TODAY, to: addDays(TODAY, 7) })
+    rerender(pageTree('/checklists?group=client'))
+    const shared = clientGroup('Shared Books LLC')
+    expect(headerOf(shared)).toHaveAttribute('aria-expanded', 'true')
+    expect(countOf(shared)).toBe('1')
+    expect(openTitlesIn(shared)).toEqual(['Bank reconciliation'])
   })
 
   it('a ?focus= on a completed card opens both its client group and the nested Completed group', () => {

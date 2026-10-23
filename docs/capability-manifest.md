@@ -114,7 +114,7 @@ Sidebar pages: those grouped in the next paragraph (Engagements, Letters and Upd
 
 - Day-by-day view of what each person worked on, scoped by the shared Report period, with a total. Owner can switch between team members; staff see their own.
 - Single-week mode (Report period = This week, or a one-week range): navigate weeks with ◀ ▶ arrows or "This week", and the approval / lock status for that week shows alongside. The "Submit timesheet" button opens the guided flow (above), which starts with the oldest past week still owed, not the week viewed.
-- Multi-week range: the day list + total are read-only (no Submit/lock); pick a single week to submit or lock.
+- Multi-week range, or a one-day Today range: the day list + total are read-only (no Submit/lock); pick a single week to submit or lock.
 - **Every duration on the page is BILLED time, not clock time**. Each row still shows the clock-in -> clock-out it came from, but the minutes beside it are that entry's own billed minutes. For a SPLIT block, each slice keeps the whole original block's clock-in/out as its audit trail, so a 25-minute block split across 20 clients shows ~1m 15s per client and a 25-minute day - not 25 minutes twenty times. For a hand-corrected entry, the page reports the corrected duration with the untouched clock times beside it. Day, range and week totals are sums of those billed minutes.
 
 ## Time Approvals (owner only)
@@ -142,7 +142,7 @@ Sidebar pages: those grouped in the next paragraph (Engagements, Letters and Upd
   - **When nothing is overdue the panel is absent** - no "all caught up" banner.
   - Each person sees their own scope: staff their own overdue tasks, the owner the whole firm's.
 - **The page is split into four TABS: "In progress", "Repeating", "Standard" and "Completed"**, each with a count.
-  - **In progress** - the live checklists, with the "Group by: Due date / Client" choice and collapsible Overdue / Due this week / Due this month / Later / Completed sections. By Client, each client lists its open checklists (count = open) and folds completed ones into a collapsed "Completed" sub-group at the bottom; a client with only completed work starts collapsed.
+  - **In progress** - the live checklists, with the "Group by: Due date / Client" choice and collapsible Overdue / Due this week / Due this month / Later / Completed sections. By Client, each client lists its open checklists (count = open) and folds completed ones into a collapsed "Completed" sub-group at the bottom; a client with only completed work starts collapsed, its count reading "N done".
   - **Repeating** - the recurring task setups (owner edits them here; staff see the recurring checklists for their assigned clients).
   - **Standard** - the firm's reusable blueprint templates.
   - **Completed** - the history of finished tasks.

@@ -2002,12 +2002,20 @@ function ChecklistInProgressSection({
                 Boolean(focusId) && group.completed.some((c) => c.id === focusId)
               return (
                 <ChecklistGroup
-                  key={group.clientId}
                   // A client with only completed work in the period stays
-                  // listed, but folded away.
+                  // listed, but folded away. `defaultOpen` is read only at
+                  // mount, so the key carries "has open work": a period change
+                  // that flips it remounts the group in the right state.
+                  key={`${group.clientId}:${group.open.length > 0}`}
                   defaultOpen={group.open.length > 0}
                   label={group.label}
-                  count={group.open.length}
+                  // Open work is the count; with none, say how many are done
+                  // rather than a bare "0".
+                  count={
+                    group.open.length > 0
+                      ? group.open.length
+                      : `${group.completed.length} done`
+                  }
                   focusInside={
                     focusInCompleted ||
                     (Boolean(focusId) && group.open.some((c) => c.id === focusId))
@@ -2043,7 +2051,8 @@ function ChecklistGroup({
 }: {
   defaultOpen: boolean
   label: string
-  count: number
+  /** The header pill: usually a number; the client grouping may say "N done". */
+  count: number | string
   children: React.ReactNode
   /** Extra class on the group, e.g. the nested per-client Completed group. */
   className?: string
