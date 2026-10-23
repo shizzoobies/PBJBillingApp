@@ -3011,6 +3011,8 @@ export type SignatureRequest = {
   testMode: boolean
   /** The kept signed PDF, once there is one (download it through the engagement's esign route). */
   signedDocumentId: string | null
+  /** Signed, but the signed PDF is not kept yet (its download failed; eSignatures.io's is retried hourly for 3 days). */
+  documentPending?: boolean
   sentAt: string | null
   completedAt: string | null
   /** Set while the work after a completed document is under way (or died half-done); null when finished. */

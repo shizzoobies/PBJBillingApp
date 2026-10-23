@@ -1772,6 +1772,8 @@ function mapSignatureRequestRow(row) {
     // refused for a letter whose text or signing details changed since.
     esignHash: pick('esign_hash', 'esignHash') ?? null,
     signedDocumentId: pick('signed_document_id', 'signedDocumentId') ?? null,
+    // Signed, but the signed PDF is not kept yet (its download failed; eSignatures.io's is retried hourly).
+    documentPending: row.status === 'completed' && !pick('signed_document_id', 'signedDocumentId'),
     sentAt: iso(pick('sent_at', 'sentAt')),
     completedAt: iso(pick('completed_at', 'completedAt')),
     // Set while the work after a completed document is under way (or died half-done); null when finished.
@@ -28706,6 +28708,37 @@ export class AppDataStore {
         (!only || (row.provider === 'esignatures' ? 'esignatures' : 'signwell') === only),
     )
     return found ? mapSignatureRequestRow(found) : null
+  }
+
+  /**
+   * `provider`'s requests that completed but hold no signed PDF yet (its download failed), oldest
+   * completion first - what the hourly job retries for eSignatures.io, whose PDF link lapses in 3 days.
+   * @returns {Promise<object[]>}
+   */
+  async listSignatureRequestsAwaitingDocument(provider) {
+    const only = SIGNATURE_PROVIDERS.includes(provider) ? provider : null
+    if (!only) return []
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${SIGNATURE_REQUEST_COLUMNS} from signature_requests
+          where coalesce(provider, 'signwell') = $1 and status = 'completed'
+            and signed_document_id is null and completed_at is not null
+          order by completed_at, id`,
+        [only],
+      )
+      return rows.map(mapSignatureRequestRow)
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    return (authState.signatureRequests ?? [])
+      .filter(
+        (row) =>
+          (row?.provider === 'esignatures' ? 'esignatures' : 'signwell') === only &&
+          row.status === 'completed' &&
+          !row.signedDocumentId &&
+          row.completedAt,
+      )
+      .map(mapSignatureRequestRow)
+      .sort((a, b) => String(a.completedAt).localeCompare(String(b.completedAt)) || String(a.id).localeCompare(String(b.id)))
   }
 
   /**

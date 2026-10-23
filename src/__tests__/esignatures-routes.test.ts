@@ -65,9 +65,9 @@ describe('POST /api/esignatures/webhook', () => {
     expect(verify).toBeLessThan(handlerSource.indexOf('JSON.parse(text)'))
     expect(verify).toBeLessThan(handlerSource.indexOf('store.getSignatureRequestByDocumentId('))
     expect(handlerSource).toContain("store.getSignatureRequestByDocumentId(contractId, 'esignatures')")
-    // The PDF comes from the RE-READ contract, never the webhook body.
-    expect(handlerSource).toContain('deps.esignatures.downloadSignedPdf(contract?.contract_pdf_url)')
-    expect(handlerSource.indexOf('contract = await esignatures.getContract(contractId)')).toBeGreaterThan(-1)
+    // The PDF comes from the RE-READ contract first, the verified event's link only as the fallback.
+    expect(handlerSource).toContain('downloadFirst(deps.esignatures, [contract?.contract_pdf_url, payloadUrl])')
+    expect(handlerSource).toContain('contract = await esignatures.getContract(contractId, { timeoutMs: ESIGNATURES_REREAD_TIMEOUT_MS })')
   })
 })
 
@@ -93,9 +93,10 @@ describe('the glue', () => {
     expect(block).toContain('await finishSignatureRequest(signatureRequest.id, signwellFinishDeps(request))')
   })
 
-  it('expires overdue eSignatures.io requests hourly and once after boot, through the periodic-job runner', () => {
-    expect(serverSource).toContain("registerPeriodicJob('esignatures-expiry', async () => {")
+  it('expires overdue eSignatures.io requests and retries pending signed PDFs hourly and once after boot, through the periodic-job runner', () => {
+    expect(serverSource).toContain("registerPeriodicJob('esignatures-upkeep', async () => {")
     expect(serverSource).toContain('await expireEsignaturesRequests({ store: appDataStore })')
+    expect(serverSource).toContain('await retryPendingEsignaturesPdfs(esignaturesFinishDeps({ headers: {} }))')
     expect(serverSource).toContain('setInterval(() => void runPeriodicJob(esignaturesExpiryJob), 60 * 60 * 1000)')
     expect(serverSource).toContain('setTimeout(() => void runPeriodicJob(esignaturesExpiryJob), 60 * 1000)')
     expect(serverSource).toMatch(/clearInterval[\s\S]*esignaturesExpiryTimer/)

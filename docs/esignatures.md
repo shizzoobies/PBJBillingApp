@@ -78,8 +78,9 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
   2026-10-23). eSignatures.io also reminds the signer on its own (days 2, 4, 8, 16, ...); a manual
   resend skips its next automatic one. A 4xx answer is "can't send this contract again right now"
   (409 `esign_cannot_remind`).
-- **Expiry**: eSignatures.io sends no expiry event, so an hourly job (and once a minute after boot)
-  marks a request still `sent` or `viewed` 30 days after it went out `expired` (badge "E-sign: expired").
+- **Expiry**: eSignatures.io sends no expiry event, so an hourly job (`esignatures-upkeep`, also once a
+  minute after boot) marks a request still `sent` or `viewed` 30 days after it went out `expired` (badge
+  "E-sign: expired"). The same job retries signed PDFs that could not be kept (below).
 - **Check eSignatures.io / Finish e-signature** re-reads `GET /api/contracts/<id>` (never polled on a
   timer: their rate limits are "adaptive") and, when it reads `signed`, downloads the PDF from that
   FRESH link and runs the same completion as the webhook.
@@ -105,17 +106,25 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
    declined; `error` with `email-delivery-failed`/`sms-delivery-failed` -> bounced ("could not deliver
    the signing email"), other errors -> error. The store keeps a finished request finished and
    in-progress statuses moving forward only;
-7. `contract-signed`: the contract is **re-read** (`GET /api/contracts/<id>`). It must read `signed` and
-   its metadata must name this request's engagement and signed-details hash (else 200 ignored). Not yet
-   signed: recorded ("reported it signed but the contract reads ..."), owners told once, key released,
-   500 for a retry. Signed: the request is completed and the answer sent; **then** the PDF is downloaded
-   from the re-read `contract_pdf_url` (it lives 3 days; sent with no credentials; https only; PDF content
-   type or a storage host's octet-stream, `%PDF` bytes, 25 MB cap), kept in `signature_documents`, and
-   the SAME completion SignWell uses runs (`completeRequest` in lib/signwell-webhook.js): the letter is
-   signed only if its text and signing details are unchanged, only for the `Test` client in test mode,
-   as the owner who sent it ("Signed electronically through eSignatures.io", activity "via
-   eSignatures.io"); owners are told by name only. A PDF that could not be fetched says "press Finish
-   e-signature to retry" (which fetches a fresh link).
+7. `contract-signed`: the contract is **re-read** (`GET /api/contracts/<id>`, at most 8 s - eSignatures.io
+   gives up on us at 15 s). It must read `signed` and its metadata must name this request's engagement
+   and signed-details hash (else 200 ignored). Not yet signed: recorded ("reported it signed but the
+   contract reads ..."), owners told once, key released, 500 for a retry. Signed, but the app had already
+   ended the request (its own 30-day expiry ran first): nothing is signed, an `[esign]` log line, and the
+   owners are told once to check and mark it signed by hand. Signed: the request is completed and the
+   answer sent; **then** the PDF is downloaded from the re-read `contract_pdf_url`, else from the link in
+   the verified event (it lives 3 days; sent with no credentials; https only, redirects followed by hand
+   and only to https, at most 3; PDF content type or a storage host's octet-stream, `%PDF` bytes, 25 MB
+   cap), kept in `signature_documents`, and the SAME completion SignWell uses runs (`completeRequest` in
+   lib/signwell-webhook.js): the letter is signed only if its text and signing details are unchanged,
+   only for the `Test` client in test mode, as the owner who sent it ("Signed electronically through
+   eSignatures.io", activity "via eSignatures.io"); owners are told by name only.
+8. A PDF that could not be kept leaves the request completed (and the letter signed) with
+   `documentPending` and "The signed PDF could not be saved - press Finish e-signature to retry". The
+   hourly job retries it for 3 days after signing (a fresh re-read link each time, then the event's link
+   if this process heard it - kept in memory only, never stored), clearing that sentence on success; after
+   3 days it says "could not be fetched for 3 days - download it from eSignatures.io" and tells the owners
+   once.
 
 ## Database
 

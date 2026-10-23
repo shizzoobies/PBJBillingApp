@@ -177,7 +177,12 @@ import { engagementChangedSinceSent } from './lib/engagement-hash.js'
 import * as signwell from './lib/signwell.js'
 import * as esignatures from './lib/esignatures.js'
 import { finishSignatureRequest, handleSignwellWebhook } from './lib/signwell-webhook.js'
-import { expireEsignaturesRequests, finishEsignaturesRequest, handleEsignaturesWebhook } from './lib/esignatures-webhook.js'
+import {
+  expireEsignaturesRequests,
+  finishEsignaturesRequest,
+  handleEsignaturesWebhook,
+  retryPendingEsignaturesPdfs,
+} from './lib/esignatures-webhook.js'
 import { esignConfigured, esignProvider, esignTestMode } from './lib/esign-provider.js'
 import { remindEngagementSignature, sendEngagementForSignature } from './lib/engagement-esign.js'
 import { placeholdersFor } from './lib/letter-template.js'
@@ -19862,10 +19867,15 @@ const signwellFinishingJob = registerPeriodicJob('signwell-left-finishing', () =
   warnSignwellLeftFinishing(10 * 60 * 1000),
 )
 const signwellFinishingTimer = setInterval(() => void runPeriodicJob(signwellFinishingJob), 60 * 60 * 1000)
-// eSignatures.io sends no expiry event: hourly (and once at boot), a request still sent or viewed 30 days after
-// it went out is marked expired, when its contract's link lapses (lib/esignatures-webhook.js; never throws).
-const esignaturesExpiryJob = registerPeriodicJob('esignatures-expiry', async () => {
-  if ((await expireEsignaturesRequests({ store: appDataStore })).length > 0) broadcastDataChanged()
+// eSignatures.io upkeep, hourly (and a minute after boot; lib/esignatures-webhook.js, both never throw):
+// it sends no expiry event, so a request still sent or viewed 30 days after it went out is marked expired;
+// and a signed PDF that could not be kept is fetched again (a fresh link each time) for up to 3 days, after
+// which the owners are told once.
+const esignaturesExpiryJob = registerPeriodicJob('esignatures-upkeep', async () => {
+  const expired = await expireEsignaturesRequests({ store: appDataStore })
+  // No HTTP request here: the owner notice's link base comes from APP_PUBLIC_URL (or a blank host).
+  const pdfs = await retryPendingEsignaturesPdfs(esignaturesFinishDeps({ headers: {} }))
+  if (expired.length > 0 || pdfs.kept.length > 0 || pdfs.gaveUp.length > 0) broadcastDataChanged()
 })
 const esignaturesExpiryBootTimer = setTimeout(() => void runPeriodicJob(esignaturesExpiryJob), 60 * 1000)
 const esignaturesExpiryTimer = setInterval(() => void runPeriodicJob(esignaturesExpiryJob), 60 * 60 * 1000)

@@ -55616,6 +55616,25 @@ describe('signature requests (both backends)', () => {
     expect(await store.expireSignatureRequestsSentBefore('esignatures', 'not a date')).toEqual([])
   })
 
+  it('file: lists one provider\'s completed requests with no signed PDF yet (documentPending), oldest first', async () => {
+    const waiting = await newRequest({ signwellDocumentId: 'ctr-wait', provider: 'esignatures' })
+    const older = await newRequest({ signwellDocumentId: 'ctr-older', provider: 'esignatures' })
+    const kept = await newRequest({ signwellDocumentId: 'ctr-kept', provider: 'esignatures' })
+    const out = await newRequest({ signwellDocumentId: 'ctr-out', provider: 'esignatures' })
+    const signwell = await newRequest({ signwellDocumentId: 'doc-done' })
+    await store.updateSignatureRequest(waiting.id, { status: 'completed', completedAt: '2026-10-22T12:00:00.000Z' })
+    await store.updateSignatureRequest(older.id, { status: 'completed', completedAt: '2026-10-21T12:00:00.000Z' })
+    await store.updateSignatureRequest(kept.id, { status: 'completed', completedAt: '2026-10-21T12:00:00.000Z', signedDocumentId: 'sigdoc-1' })
+    await store.updateSignatureRequest(signwell.id, { status: 'completed', completedAt: '2026-10-21T12:00:00.000Z' })
+    const listed = await store.listSignatureRequestsAwaitingDocument('esignatures')
+    expect(listed.map((row) => row.id)).toEqual([older.id, waiting.id])
+    expect(listed[0].documentPending).toBe(true)
+    expect((await store.getSignatureRequest(kept.id)).documentPending).toBe(false)
+    expect((await store.getSignatureRequest(out.id)).documentPending).toBe(false)
+    expect((await store.listSignatureRequestsAwaitingDocument('signwell')).map((row) => row.id)).toEqual([signwell.id])
+    expect(await store.listSignatureRequestsAwaitingDocument('nope')).toEqual([])
+  })
+
   it('is never in the bulk save: not in its lock list, its tables or the workspace fingerprint', () => {
     const named = JSON.stringify([BULK_SAVE_LOCK_TABLES, BULK_SAVE_LOCK_SQL, BULK_SAVE_TABLES])
     for (const table of ['signature_requests', 'signature_documents', 'signwell_events']) {
@@ -55754,6 +55773,17 @@ describe('signature requests (both backends)', () => {
       expect(held.params).toEqual(['ctr-1', 'esignatures'])
       expect(loose.text.replace(/\s+/g, ' ')).toMatch(/where signwell_document_id = \$1$/)
       expect(loose.params).toEqual(['doc-1'])
+    })
+
+    it('listSignatureRequestsAwaitingDocument is one SELECT of completed rows with no signed document', async () => {
+      const { fake, pg } = pgWith([[/^select id, engagement_id[\s\S]*from signature_requests/i, { rows: [row({ status: 'completed', completed_at: new Date('2026-10-22T12:00:00.000Z') })] }]])
+      const listed = await pg.listSignatureRequestsAwaitingDocument('esignatures')
+      expect(listed[0]).toMatchObject({ id: 'sigreq-aaaaaaaa', documentPending: true })
+      const [select] = fake.matching(/^select id, engagement_id[\s\S]*from signature_requests/i)
+      expect(select.text.replace(/\s+/g, ' ')).toMatch(
+        /from signature_requests where coalesce\(provider, 'signwell'\) = \$1 and status = 'completed' and signed_document_id is null and completed_at is not null order by completed_at, id$/,
+      )
+      expect(select.params).toEqual(['esignatures'])
     })
 
     it('expireSignatureRequestsSentBefore is ONE guarded UPDATE .. RETURNING id', async () => {
