@@ -1941,6 +1941,8 @@ export type ClientNote = {
   authorName: string | null
   body: string
   createdAt: string | null
+  /** When its writer last changed the words (featreq-da3801ab); absent on a note never edited. */
+  editedAt?: string
 }
 
 /**
@@ -1996,6 +1998,11 @@ export type ClientPendingNote = {
    * again; the server never lists it, so a client normally never sees this set.
    */
   dismissedAt?: string
+  /**
+   * When its writer last changed the words (featreq-da3801ab), possible only while
+   * the note waited for a checklist; absent on a note never edited.
+   */
+  editedAt?: string
 }
 
 /**

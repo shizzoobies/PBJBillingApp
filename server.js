@@ -224,6 +224,11 @@ import {
   checklistWriteDenial,
   pendingNoteWriteDenial,
 } from './lib/checklist-write-permission.js'
+import {
+  clientNoteEditRefusal,
+  noteEditOutcomeRefusal,
+  pendingNoteEditRefusal,
+} from './lib/note-edit-permission.js'
 import { checklistMonthLabel } from './lib/checklist-period-label.js'
 import {
   approvalDenial,
@@ -1257,6 +1262,18 @@ const REPEAT_TASK_COPY_NOT_DELETABLE =
   'This note was added by a repeating note. Remove the step on the checklist instead, or stop the repeating note.'
 const NOT_A_REPEAT_COPY_MESSAGE =
   'Only a note that a repeating note added to a checklist can be dismissed.'
+
+/**
+ * Answer a refusal from lib/note-edit-permission.js (editing a note, featreq-da3801ab).
+ * The 409 for a pending note already on a checklist carries a sentence for a person.
+ */
+function sendNoteEditRefusal(response, refusal) {
+  sendJson(
+    response,
+    refusal.status,
+    refusal.message ? { error: refusal.error, message: refusal.message } : { error: refusal.error },
+  )
+}
 
 // Each of these matches ONE path segment. They used to allow slashes as well,
 // which meant any deeper path under a prefix was allowlisted by a parent it has
@@ -9866,6 +9883,47 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // The writer changes the words of their own note (featreq-da3801ab), on the
+    // same path as the DELETE above. Only the writer - the OWNER included: she may
+    // delete anyone's note, but not change what someone else wrote (her words:
+    // "Only the original creator can edit a note"). The store decides the writer
+    // again inside its own guarded write.
+    if (clientNoteDeleteMatch && request.method === 'PATCH') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const clientId = decodeURIComponent(clientNoteDeleteMatch[1])
+      const noteId = decodeURIComponent(clientNoteDeleteMatch[2])
+      const data = await appDataStore.read()
+      if (!visibleClientIdSet(session, data).has(clientId)) {
+        sendJson(response, 403, { error: 'No access to that client' })
+        return
+      }
+      const existing = await appDataStore.getClientNote(noteId)
+      // The note must belong to the client the path names (a 404 otherwise).
+      const refusal = clientNoteEditRefusal(existing?.clientId === clientId ? existing : null, session.user.id)
+      if (refusal) {
+        sendNoteEditRefusal(response, refusal)
+        return
+      }
+      const payload = await readJsonBody(request)
+      const outcome = await appDataStore.updateClientNote(noteId, { body: payload?.body, editorId: session.user.id })
+      if (!outcome.ok) {
+        sendNoteEditRefusal(response, noteEditOutcomeRefusal(outcome.reason))
+        return
+      }
+      await appDataStore.recordActivity(session.user.id, 'client_note_edited', clientId)
+      sendJson(response, 200, { note: outcome.note })
+      return
+    }
+
     // Statement dates box: a reference-only per-client list of accounts and
     // the day of the month each account's statement usually appears. Nothing
     // else in the app reads it. Visible to (and savable by) the owner AND a
@@ -10132,6 +10190,54 @@ const server = createServer(async (request, response) => {
       )
       broadcastDataChanged()
       sendJson(response, 200, { ok: true })
+      return
+    }
+
+    // The writer changes the words of their own pending note (featreq-da3801ab),
+    // only while it still waits for a checklist: once it is on one (or it is the
+    // copy a repeating note left there) it is edited on the checklist - a 409 that
+    // says so. Only the writer, the OWNER included. Same gates as the DELETE above;
+    // the store decides the writer and "still waiting" again inside its write.
+    if (clientPendingNoteDeleteMatch && request.method === 'PATCH') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const clientId = decodeURIComponent(clientPendingNoteDeleteMatch[1])
+      const noteId = decodeURIComponent(clientPendingNoteDeleteMatch[2])
+      // A person who cannot see the client gets the same 404 as a missing note.
+      const data = await appDataStore.read()
+      if (!visibleClientIdSet(session, data).has(clientId)) {
+        sendJson(response, 404, { error: 'Note not found' })
+        return
+      }
+      const existing = await appDataStore.getClientPendingNote(noteId)
+      // The note must belong to the client the path names (a 404 otherwise).
+      const refusal = pendingNoteEditRefusal(existing?.clientId === clientId ? existing : null, session.user.id)
+      if (refusal) {
+        sendNoteEditRefusal(response, refusal)
+        return
+      }
+      const payload = await readJsonBody(request)
+      const outcome = await appDataStore.updateClientPendingNote(noteId, { body: payload?.body, editorId: session.user.id })
+      if (!outcome.ok) {
+        sendNoteEditRefusal(response, noteEditOutcomeRefusal(outcome.reason))
+        return
+      }
+      const client = (data.clients ?? []).find((entry) => entry.id === clientId)
+      await appDataStore.recordActivity(
+        session.user.id,
+        'pending_note_edited',
+        client?.name ?? clientId,
+      )
+      broadcastDataChanged()
+      sendJson(response, 200, { note: outcome.note })
       return
     }
 

@@ -5859,6 +5859,44 @@ function mapChecklistSkipRow(row) {
   }
 }
 
+/** The longest note body each kind keeps; adding and editing cut to the same length. */
+const CLIENT_NOTE_MAX_CHARS = 5000
+const PENDING_NOTE_MAX_CHARS = 2000
+
+/**
+ * The `edited_at` column on a notes table (featreq-da3801ab). `alter table ... add
+ * column if not exists` takes an ACCESS EXCLUSIVE lock even when the column is
+ * already there, so look first and run the DDL only on the first boot after this
+ * shipped (a fresh database has the column from its create).
+ */
+async function addEditedAtColumn(pool, table) {
+  const found = await pool.query(
+    `select 1 from information_schema.columns
+      where table_schema = current_schema() and table_name = '${table}'
+        and column_name = 'edited_at'`,
+  )
+  if ((found.rows?.length ?? 0) === 0) {
+    await pool.query(`alter table ${table} add column if not exists edited_at timestamptz`)
+  }
+}
+
+/**
+ * A `client_notes` row as the app's note. `editedAt` is present only on a note its
+ * writer changed, so a note never edited reads exactly as before.
+ */
+function mapClientNoteRow(row) {
+  const note = {
+    id: row.id,
+    clientId: row.client_id,
+    authorId: row.author_id ?? null,
+    authorName: row.author_name ?? null,
+    body: row.body,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+  }
+  if (row.edited_at) note.editedAt = new Date(row.edited_at).toISOString()
+  return note
+}
+
 /**
  * One shape for a pending-client-note record whichever backend produced it —
  * same idea as {@link mapChecklistSkipRow}. The file backend already stores
@@ -5888,6 +5926,8 @@ function mapClientPendingNoteRow(row) {
   // Only a dismissed copy carries this (a tombstone: hidden from every list, still
   // read by the "this checklist already holds a copy" guards).
   if (row.dismissed_at) note.dismissedAt = new Date(row.dismissed_at).toISOString()
+  // Only a note its writer changed carries this (featreq-da3801ab).
+  if (row.edited_at) note.editedAt = new Date(row.edited_at).toISOString()
   return note
 }
 
@@ -6442,6 +6482,8 @@ export class AppDataStore {
       // endpoint-managed (NOT part of the bulk /api/app-data wipe-and-reinsert)
       // — exactly like sales_tax_records — so staff can write notes without the
       // owner-only bulk save, and so notes can never be clobbered by an autosave.
+      // `edited_at`: when the writer last changed the words (featreq-da3801ab);
+      // null on a note never edited.
       await this.pool.query(`
         create table if not exists client_notes (
           id text primary key,
@@ -6449,9 +6491,11 @@ export class AppDataStore {
           author_id text,
           author_name text,
           body text not null,
-          created_at timestamptz not null default now()
+          created_at timestamptz not null default now(),
+          edited_at timestamptz
         )
       `)
+      await addEditedAtColumn(this.pool, 'client_notes')
       await this.pool.query(
         `create index if not exists client_notes_client_idx on client_notes (client_id)`,
       )
@@ -6508,9 +6552,13 @@ export class AppDataStore {
           repeat_of text,
           last_attached_checklist_id text,
           last_attached_due_date text,
-          dismissed_at timestamptz
+          dismissed_at timestamptz,
+          edited_at timestamptz
         )
       `)
+      // When the writer last changed the words of a note still waiting for its
+      // checklist (featreq-da3801ab); null on a note never edited.
+      await addEditedAtColumn(this.pool, 'client_pending_notes')
       // A note released from a deleted or skipped checklist stays marked
       // released until it attaches again, so it keeps skipping finished work.
       await this.pool.query(
@@ -26785,18 +26833,11 @@ export class AppDataStore {
     if (!clientId) return []
     if (this.pool) {
       const result = await this.pool.query(
-        `select id, client_id, author_id, author_name, body, created_at
+        `select id, client_id, author_id, author_name, body, created_at, edited_at
            from client_notes where client_id = $1 order by created_at desc`,
         [clientId],
       )
-      return result.rows.map((row) => ({
-        id: row.id,
-        clientId: row.client_id,
-        authorId: row.author_id ?? null,
-        authorName: row.author_name ?? null,
-        body: row.body,
-        createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
-      }))
+      return result.rows.map(mapClientNoteRow)
     }
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.clientNotes) ? authState.clientNotes : []
@@ -26809,7 +26850,7 @@ export class AppDataStore {
   /** Append a note to a client's log. Returns the created note. */
   async addClientNote(clientId, { authorId, authorName, body } = {}) {
     if (!clientId) return null
-    const clean = String(body ?? '').trim().slice(0, 5000)
+    const clean = String(body ?? '').trim().slice(0, CLIENT_NOTE_MAX_CHARS)
     if (!clean) return null
     const note = {
       id: `cnote-${randomUUID().slice(0, 8)}`,
@@ -26839,24 +26880,58 @@ export class AppDataStore {
     if (!noteId) return null
     if (this.pool) {
       const result = await this.pool.query(
-        `select id, client_id, author_id, author_name, body, created_at
+        `select id, client_id, author_id, author_name, body, created_at, edited_at
            from client_notes where id = $1`,
         [noteId],
       )
       if (!result.rowCount) return null
-      const row = result.rows[0]
-      return {
-        id: row.id,
-        clientId: row.client_id,
-        authorId: row.author_id ?? null,
-        authorName: row.author_name ?? null,
-        body: row.body,
-        createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
-      }
+      return mapClientNoteRow(result.rows[0])
     }
     const authState = await readJson(localAuthPath)
     const list = Array.isArray(authState.clientNotes) ? authState.clientNotes : []
     return list.find((note) => note.id === noteId) ?? null
+  }
+
+  /**
+   * The writer changes the words of their own note (featreq-da3801ab). Only the
+   * writer: `editorId` must be the note's `authorId` (the owner is no exception),
+   * decided INSIDE the write - one guarded UPDATE on Postgres, one queue slot on
+   * the file backend - so nothing between a route's check and this write can let
+   * someone else's edit through. Same trim and length rule as adding; stamps
+   * `editedAt`. Nothing else on the note changes.
+   *
+   * @returns {Promise<{ ok: true, note: object } | { ok: false, reason:
+   *   'empty' | 'not_found' | 'not_author' }>} a refusal wrote nothing.
+   */
+  async updateClientNote(noteId, { body, editorId } = {}) {
+    const clean = String(body ?? '').trim().slice(0, CLIENT_NOTE_MAX_CHARS)
+    if (!clean) return { ok: false, reason: 'empty' }
+    if (!noteId) return { ok: false, reason: 'not_found' }
+    if (!editorId) return { ok: false, reason: 'not_author' }
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update client_notes set body = $3, edited_at = now()
+          where id = $1 and author_id = $2
+          returning id, client_id, author_id, author_name, body, created_at, edited_at`,
+        [noteId, editorId, clean],
+      )
+      if ((result.rowCount ?? 0) > 0) return { ok: true, note: mapClientNoteRow(result.rows[0]) }
+      const current = await this.pool.query(`select author_id from client_notes where id = $1`, [noteId])
+      return { ok: false, reason: current.rows?.length ? 'not_author' : 'not_found' }
+    }
+    // File backend: read, decide and write in ONE queue slot (raw fs calls only).
+    return enqueueFileOperation(localAuthPath, async () => {
+      if (!existsSync(localAuthPath)) return { ok: false, reason: 'not_found' }
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const list = Array.isArray(authState.clientNotes) ? authState.clientNotes : []
+      const note = list.find((entry) => entry.id === noteId)
+      if (!note) return { ok: false, reason: 'not_found' }
+      if (!note.authorId || note.authorId !== editorId) return { ok: false, reason: 'not_author' }
+      note.body = clean
+      note.editedAt = nowIso()
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return { ok: true, note: { ...note } }
+    })
   }
 
   /** Delete a note by id. Returns true if a row was removed. */
@@ -30116,7 +30191,7 @@ export class AppDataStore {
         `select id, client_id, template_id, kind, body, author_id, author_name,
                 created_at, attached_checklist_id, attached_item_id, attached_at,
                 repeats, repeat_of, last_attached_checklist_id, last_attached_due_date,
-                dismissed_at
+                dismissed_at, edited_at
            from client_pending_notes
           where client_id = $1
             and (attached_checklist_id is null or attached_at > now() - interval '90 days')
@@ -30161,7 +30236,7 @@ export class AppDataStore {
         `select id, client_id, template_id, kind, body, author_id, author_name,
                 created_at, attached_checklist_id, attached_item_id, attached_at,
                 repeats, repeat_of, last_attached_checklist_id, last_attached_due_date,
-                dismissed_at
+                dismissed_at, edited_at
            from client_pending_notes
           where attached_checklist_id = any($1::text[])
             and dismissed_at is null
@@ -30195,7 +30270,7 @@ export class AppDataStore {
     if (!clientId || !templateId) return null
     const cleanKind = kind === 'task' ? 'task' : kind === 'note' ? 'note' : null
     if (!cleanKind) return null
-    const cleanBody = String(body ?? '').trim().slice(0, 2000)
+    const cleanBody = String(body ?? '').trim().slice(0, PENDING_NOTE_MAX_CHARS)
     if (!cleanBody) return null
     const note = {
       // 12 hex chars: a task-kind note's checklist item takes its id from this
@@ -30255,7 +30330,7 @@ export class AppDataStore {
         `select id, client_id, template_id, kind, body, author_id, author_name,
                 created_at, attached_checklist_id, attached_item_id, attached_at,
                 repeats, repeat_of, last_attached_checklist_id, last_attached_due_date,
-                dismissed_at
+                dismissed_at, edited_at
            from client_pending_notes where id = $1`,
         [noteId],
       )
@@ -30266,6 +30341,65 @@ export class AppDataStore {
     const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
     const found = list.find((note) => note.id === noteId)
     return found ? publicPendingNote(found) : null
+  }
+
+  /**
+   * The writer changes the words of their own pending note (featreq-da3801ab),
+   * only while it still waits for a checklist. Once it is on one - or it is the
+   * copy a repeating note left there - the checklist holds it (a task became a
+   * step), so it is edited there: `attached`. The repeating note itself is never
+   * attached, so its writer can change it (later months' copies take the new
+   * words). Only the writer, the owner included, decided INSIDE the write (one
+   * guarded UPDATE on Postgres, one queue slot on the file backend). Same trim and
+   * length rule as adding; stamps `editedAt`.
+   *
+   * @returns {Promise<{ ok: true, note: object } | { ok: false, reason:
+   *   'empty' | 'not_found' | 'not_author' | 'attached' }>} a refusal wrote
+   *   nothing; someone else hears `not_author` whether or not the note is attached.
+   */
+  async updateClientPendingNote(noteId, { body, editorId } = {}) {
+    const clean = String(body ?? '').trim().slice(0, PENDING_NOTE_MAX_CHARS)
+    if (!clean) return { ok: false, reason: 'empty' }
+    if (!noteId) return { ok: false, reason: 'not_found' }
+    if (!editorId) return { ok: false, reason: 'not_author' }
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update client_pending_notes set body = $3, edited_at = now()
+          where id = $1 and author_id = $2
+            and attached_checklist_id is null and repeat_of is null and dismissed_at is null
+          returning id, client_id, template_id, kind, body, author_id, author_name,
+                    created_at, attached_checklist_id, attached_item_id, attached_at,
+                    repeats, repeat_of, last_attached_checklist_id, last_attached_due_date,
+                    dismissed_at, edited_at`,
+        [noteId, editorId, clean],
+      )
+      if ((result.rowCount ?? 0) > 0) {
+        return { ok: true, note: mapClientPendingNoteRow(result.rows[0]) }
+      }
+      const current = await this.pool.query(
+        `select author_id, attached_checklist_id, repeat_of from client_pending_notes where id = $1`,
+        [noteId],
+      )
+      const row = current.rows?.[0]
+      if (!row) return { ok: false, reason: 'not_found' }
+      return { ok: false, reason: row.author_id !== editorId ? 'not_author' : 'attached' }
+    }
+    // File backend: read, decide and write in ONE queue slot (raw fs calls only).
+    return enqueueFileOperation(localAuthPath, async () => {
+      if (!existsSync(localAuthPath)) return { ok: false, reason: 'not_found' }
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+      const note = list.find((entry) => entry.id === noteId)
+      if (!note) return { ok: false, reason: 'not_found' }
+      if (!note.authorId || note.authorId !== editorId) return { ok: false, reason: 'not_author' }
+      if (note.attachedChecklistId || note.repeatOf || note.dismissedAt) {
+        return { ok: false, reason: 'attached' }
+      }
+      note.body = clean
+      note.editedAt = nowIso()
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return { ok: true, note: publicPendingNote(note) }
+    })
   }
 
   /** Delete a pending note by id. Returns true if a row was removed. */
@@ -30643,6 +30777,21 @@ export class AppDataStore {
           await client.query('rollback')
           return false
         }
+        // The step takes the note's words as they are NOW, read under a lock on the
+        // note: its writer may have edited it since the pass listed it
+        // (featreq-da3801ab), and an edit that lands after this waits for the
+        // commit and is then refused as already attached.
+        const lockedNote = await client.query(
+          `select body from client_pending_notes
+            where id = $1 and attached_checklist_id is null
+              for update`,
+          [noteId],
+        )
+        if ((lockedNote.rowCount ?? 0) === 0) {
+          await client.query('rollback')
+          return false
+        }
+        const stepLabel = lockedNote.rows[0]?.body ?? label
         // Item ids share one primary-key space, and a deleted checklist keeps
         // its rows. A note whose first checklist was deleted attaches again
         // (see `_listUnattachedPendingNotes`), and its old `item-pn-*` row must
@@ -30667,7 +30816,7 @@ export class AppDataStore {
           `insert into checklist_items (id, checklist_id, label, done, sort_order, created_at, updated_at)
            values ($1, $2, $3, false, $4, now(), now())
            on conflict (id) do nothing`,
-          [finalItemId, checklistId, label, nextOrder],
+          [finalItemId, checklistId, stepLabel, nextOrder],
         )
         const stamp = await client.query(
           `update client_pending_notes
@@ -30712,29 +30861,41 @@ export class AppDataStore {
     const finalItemId = takenByOther
       ? `${itemId}-${String(checklistId).replace(/^check-/, '')}`
       : itemId
-    let itemAdded = false
-    if (checklist) {
-      if (!Array.isArray(checklist.items)) checklist.items = []
-      if (!checklist.items.some((item) => item.id === finalItemId)) {
-        checklist.items.push({ id: finalItemId, label, done: false })
-        itemAdded = true
-      }
-    }
-    if (itemAdded) {
-      await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    }
-    const authState = await readJson(localAuthPath)
-    const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
-    const note = list.find((entry) => entry.id === noteId)
-    if (note && !note.attachedChecklistId) {
+    // The claim first, in ONE slot of the auth file's queue: stamp the note
+    // attached and take its words as they are NOW. Its writer may have edited it
+    // since the pass listed it (featreq-da3801ab), and from this stamp on an edit
+    // is refused as already attached, so the step below can never carry stale
+    // words. Then, in ONE slot of the data file's queue, the step goes in
+    // (idempotent: keyed by its item id). Same order and the same trade-off as the
+    // repeating note's copy: a crash between the two slots leaves an attached note
+    // with no step, never a step whose note can still change.
+    const claimedBody = await enqueueFileOperation(localAuthPath, async () => {
+      if (!existsSync(localAuthPath)) return null
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const list = Array.isArray(authState.clientPendingNotes) ? authState.clientPendingNotes : []
+      const note = list.find((entry) => entry.id === noteId)
+      if (!note || note.attachedChecklistId) return null
       note.attachedChecklistId = checklistId
       note.attachedItemId = finalItemId
       note.attachedAt = nowIso()
       note.releasedAt = null
-      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-      return true
-    }
-    return false
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return typeof note.body === 'string' ? note.body : label
+    })
+    if (claimedBody === null) return false
+    await enqueueFileOperation(localDataPath, async () => {
+      if (!existsSync(localDataPath)) return
+      const fresh = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const target = (fresh.checklists ?? []).find((entry) => entry.id === checklistId)
+      // Gone, skipped or split since the check above: no step on it (the next pass
+      // releases the note from a deleted or skipped checklist, as for any other).
+      if (!target || target.deletedAt || target.skippedAt || target.pushedToChecklistId) return
+      if (!Array.isArray(target.items)) target.items = []
+      if (target.items.some((item) => item.id === finalItemId)) return
+      target.items.push({ id: finalItemId, label: claimedBody, done: false })
+      await fsWriteFile(localDataPath, JSON.stringify(fresh, null, 2))
+    })
+    return true
   }
 
   /** Attach a note-kind note: stamp the checklist id only, no item. True when the stamp changed a row. */
@@ -30907,13 +31068,17 @@ export class AppDataStore {
                   last_attached_due_date = (select to_char(due_date, 'YYYY-MM-DD') from checklists where id = $2)
             where id = $1 and repeats = true and attached_checklist_id is null
               and last_attached_checklist_id is not distinct from $3::text
-            returning author_id, author_name`,
+            returning author_id, author_name, body`,
           [note.id, checklistId, note.lastChecklistId ?? null],
         )
         if ((claim.rowCount ?? 0) === 0) {
           await client.query('rollback')
           return false
         }
+        // The copy and its step take the repeating note's words as the claim (which
+        // locks the row) read them NOW, not as the pass listed them: its writer may
+        // have edited it in between (featreq-da3801ab).
+        const copyBody = claim.rows[0]?.body ?? note.body
         // The parent row is locked now. A checklist that already holds a copy of
         // this note (its due date moved later and it looked new) gets no second one.
         const alreadyThere = await client.query(
@@ -30934,7 +31099,7 @@ export class AppDataStore {
           await client.query(
             `insert into checklist_items (id, checklist_id, label, done, sort_order, created_at, updated_at)
              values ($1, $2, $3, false, $4, now(), now())`,
-            [itemId, checklistId, note.body, nextOrder],
+            [itemId, checklistId, copyBody, nextOrder],
           )
         }
         await client.query(
@@ -30947,7 +31112,7 @@ export class AppDataStore {
             note.clientId,
             note.templateId,
             note.kind,
-            note.body,
+            copyBody,
             claim.rows[0]?.author_id ?? null,
             claim.rows[0]?.author_name ?? null,
             checklistId,
@@ -31020,7 +31185,9 @@ export class AppDataStore {
       parent.lastAttachedDueDate = dueDate
       authState.clientPendingNotes = list
       await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
-      return true
+      // The words the copy took, read in this slot: the step below carries the
+      // same ones, even if the writer edited the note after the pass listed it.
+      return { body: parent.body }
     })
     if (!claimed) return false
     if (itemId) {
@@ -31030,7 +31197,7 @@ export class AppDataStore {
         if (!target || target.deletedAt || target.skippedAt || target.pushedToChecklistId) return
         if (!Array.isArray(target.items)) target.items = []
         if (target.items.some((item) => item.id === itemId)) return
-        target.items.push({ id: itemId, label: note.body, done: false })
+        target.items.push({ id: itemId, label: claimed.body ?? note.body, done: false })
         await fsWriteFile(localDataPath, JSON.stringify(fresh, null, 2))
       })
     }
