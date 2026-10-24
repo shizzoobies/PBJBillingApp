@@ -13,6 +13,49 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-10-24 (~14:00Z) - E-SIGN IS LIVE IN TEST MODE THROUGH eSignatures.io; READ THIS FIRST.** `main` = `19a8563d` (+ this
+handoff), live on https://app.pbjsatime.com, `/health` 200, env revision 2026-10-23T21:14:20.357Z, voice re-provisioned, only the
+primary worktree (+ Alex's chip-session worktree under .claude/worktrees - leave it). **Decision (Alex, 10-23):** SignWell put its
+API key behind a paid plan, so the provider is eSignatures.io (esignatures.com; $0.49/contract, free test mode, one letter a
+month). Shipped `19a8563d` (two review rounds + a Neon rolled-back SQL trial): `lib/esign-provider.js` switch (eSignatures
+when ESIGNATURES_SECRET_TOKEN is set, else SignWell; `ESIGN_PROVIDER` overrides), `lib/esignatures.js` (Basic auth, templates
++ contracts, withdraw, per-signer resend POST /api/contracts/<id>/signers/<signer_id>/send_contract, HMAC webhook verify hex|
+base64, PDF download with https-only manual redirects), `lib/letter-markdown.js` (filled letter -> Markdown; `{{initial:...}}`
+tags -> REQUIRED CHECKBOX lines - Alex chose to KEEP checkboxes over typed initials, legally equivalent; Signature/Date lines
+stripped - the platform renders the signature block), `lib/esignatures-webhook.js` (503 no token -> 401 bad HMAC -> 400 ->
+ledger in signwell_events with `es:` keys; contract-signed re-reads the contract, checks app/engagement_id/esign_hash, downloads
+the 3-day PDF (payload URL fallback), completes via SignWell's shared completeRequest = same test-mode rule: only the client
+named exactly Test is marked signed), hourly `esignatures-upkeep` (30-day expiry, PDF retry up to 3 days, stale finishing >10
+min retried, one give-up notice), routes POST /api/esignatures/webhook + GET /api/esign/status, columns
+signature_requests.provider / provider_template_id / provider_signer_id (nullable, look-first; Alex ok), docs/esignatures.md.
+Also `ebd51461` e-sign field tags inside a letter body (SignWell path: white inline tags; refused in the email boxes; no
+spaces; unbreakable runs). **Secrets:** token in `D:PBJ Accounting Worksecretsesignatures.env` (uploaded as a Worker
+secret); SignWell key + webhook id still uploaded but inactive; ESIGNATURES_TEST_MODE unset = TEST. **Account settings set via
+the eSignatures MCP (update_account_settings, Alex's yes):** name PB&J Strategic Accounting, reply-to Bferguson@pbjsa.com,
+Eastern time, webhook https://app.pbjsatime.com/api/esignatures/webhook. **Test run in progress:** request
+`sigreq-c8f4e0a9` (Test client, the joke saved letter letter-de252225 "Attestation of Maximum Awesomeness", contract
+c8cec5cd-1cab-4d3e-9ea3-1d4240866475) is VIEWED with all three checkboxes ticked; Brittany has not signed yet. **NEXT, in
+order:** (1) when she signs: confirm `signature_requests` status completed + a `signature_documents` row + the engagement
+Signed (read-only query); (2) one more test send of the REAL default engagement letter to the Test client and read the
+contract content via the MCP query_contract_content - the services list must not show literal backslashes (`- item`); if it
+does, fix letter-markdown escaping BEFORE live; (3) check whether eSignatures.io emails the final signed PDF to the account
+owner (Alex must not receive client tax documents - memory alex-no-sensitive-email); (4) go live: a file with
+`ESIGNATURES_TEST_MODE=false` -> `node scripts/cf/secrets-upload.mjs <file>` -> `node scripts/cf/restart.mjs
+--expect-revision=<printed>` (the restart route can 500 right after a deploy - retry after 20 s); (5) featreq-56d39567 ->
+Shipped with the drafted note (session scratchpad note-56d39567.txt; otherwise rewrite it: eSignatures.io, one signature at
+the end, initials = required checkbox, auto reminders days 2/4/8/16 + Send reminder = resend, test mode until flipped);
+(6) tidy: delete the SignWell webhook on Alex's account (`node scripts/prod/signwell-webhook-register.mjs --delete
+04cfe77e-6488-435a-a4ea-d99eda59ae42` with SIGNWELL_API_KEY from secrets/signwell.env), Alex cancels his SignWell Business
+trial; one eSignatures template accumulates per send (nothing deletes them). **Leftovers on the e-sign ticket family:**
+featreq-60118b28 (SignWell-era review leftovers; many no longer apply - triage). **Tooling after the move:** scripts/prod read
+`secrets/prod.env` (Neon verify-full + voice vars); run voice-provision with `env -u ELEVENLABS_API_KEY` (stale machine var).
+Lanes: `cmd /c mklink /J` to create, `cmd /c rmdir <lane>
+ode_modules` BEFORE `git worktree remove`. Ship one commit at
+a time and confirm with curl /health (a newer push cancels an older pending cf-deploy run; ship.sh can print a false
+"workflow failed" on a GitHub 502). **Still waiting on Brittany:** group-by-client period scope (5a44c051), other note
+kinds (da3801ab), questionnaire editor vs named follow-ups (fccf901f needs_input), I-95 recipes, Allison before/after Done,
+once-per-client Send-invoices-to. **Backups:** confirm two scheduled db-backup runs then featreq-4caec5d3 -> Shipped.
+
 **2026-10-23 (~14:30Z) - first run on the new platform: FOUR SHIPS + chores; READ THIS FIRST.** `main` = `5ec90db3` (+ this
 handoff), live on https://app.pbjsatime.com, `/health` 200, voice re-provisioned, manifest ~204,8xx of 205,000 (TRIM FIRST),
 only the primary worktree (+ a chip-session worktree under .claude/worktrees that Alex started - leave it). Deploy = push
