@@ -21936,16 +21936,19 @@ export class AppDataStore {
       }
     }
 
-    const data = await readJson(localDataPath)
-    data.checklists = [
-      {
-        ...nextChecklist,
-        items: nextChecklist.items.map(({ sortOrder, ...item }) => item),
-      },
-      ...data.checklists,
-    ]
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return data.checklists[0]
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      data.checklists = [
+        {
+          ...nextChecklist,
+          items: nextChecklist.items.map(({ sortOrder, ...item }) => item),
+        },
+        ...data.checklists,
+      ]
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return data.checklists[0]
+    })
   }
 
   /**
@@ -22725,27 +22728,30 @@ export class AppDataStore {
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedChecklist = null
-    data.checklists = data.checklists.map((checklist) => {
-      if (checklist.id !== checklistId) {
-        return checklist
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      let updatedChecklist = null
+      data.checklists = data.checklists.map((checklist) => {
+        if (checklist.id !== checklistId) {
+          return checklist
+        }
+
+        updatedChecklist = {
+          ...checklist,
+          viewerIds: safeViewerIds,
+          editorIds: safeEditorIds,
+        }
+        return updatedChecklist
+      })
+
+      if (!updatedChecklist) {
+        return null
       }
 
-      updatedChecklist = {
-        ...checklist,
-        viewerIds: safeViewerIds,
-        editorIds: safeEditorIds,
-      }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       return updatedChecklist
     })
-
-    if (!updatedChecklist) {
-      return null
-    }
-
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedChecklist
   }
 
   async setChecklistTemplateViewers(templateId, viewerIds, editorIds) {
@@ -22775,27 +22781,30 @@ export class AppDataStore {
       return data.checklistTemplates.find((template) => template.id === templateId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedTemplate = null
-    data.checklistTemplates = (data.checklistTemplates ?? []).map((template) => {
-      if (template.id !== templateId) {
-        return template
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      let updatedTemplate = null
+      data.checklistTemplates = (data.checklistTemplates ?? []).map((template) => {
+        if (template.id !== templateId) {
+          return template
+        }
+
+        updatedTemplate = {
+          ...template,
+          viewerIds: safeViewerIds,
+          editorIds: safeEditorIds,
+        }
+        return updatedTemplate
+      })
+
+      if (!updatedTemplate) {
+        return null
       }
 
-      updatedTemplate = {
-        ...template,
-        viewerIds: safeViewerIds,
-        editorIds: safeEditorIds,
-      }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       return updatedTemplate
     })
-
-    if (!updatedTemplate) {
-      return null
-    }
-
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedTemplate
   }
 
   /**
@@ -22832,23 +22841,26 @@ export class AppDataStore {
       return data.checklistTemplates.find((template) => template.id === templateId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedTemplate = null
-    data.checklistTemplates = (data.checklistTemplates ?? []).map((template) => {
-      if (template.id !== templateId) {
-        return template
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      let updatedTemplate = null
+      data.checklistTemplates = (data.checklistTemplates ?? []).map((template) => {
+        if (template.id !== templateId) {
+          return template
+        }
+
+        updatedTemplate = { ...template, active: nextActive }
+        return updatedTemplate
+      })
+
+      if (!updatedTemplate) {
+        return null
       }
 
-      updatedTemplate = { ...template, active: nextActive }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       return updatedTemplate
     })
-
-    if (!updatedTemplate) {
-      return null
-    }
-
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedTemplate
   }
 
   async reorderChecklistItems(checklistId, orderedIds) {
@@ -22876,24 +22888,27 @@ export class AppDataStore {
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedChecklist = null
-    data.checklists = data.checklists.map((checklist) => {
-      if (checklist.id !== checklistId) {
-        return checklist
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      let updatedChecklist = null
+      data.checklists = data.checklists.map((checklist) => {
+        if (checklist.id !== checklistId) {
+          return checklist
+        }
+        const byId = new Map(checklist.items.map((item) => [item.id, item]))
+        const reordered = orderedIds.map((id) => byId.get(id)).filter(Boolean)
+        const seen = new Set(orderedIds)
+        const tail = checklist.items.filter((item) => !seen.has(item.id))
+        updatedChecklist = { ...checklist, items: [...reordered, ...tail] }
+        return updatedChecklist
+      })
+      if (!updatedChecklist) {
+        return null
       }
-      const byId = new Map(checklist.items.map((item) => [item.id, item]))
-      const reordered = orderedIds.map((id) => byId.get(id)).filter(Boolean)
-      const seen = new Set(orderedIds)
-      const tail = checklist.items.filter((item) => !seen.has(item.id))
-      updatedChecklist = { ...checklist, items: [...reordered, ...tail] }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       return updatedChecklist
     })
-    if (!updatedChecklist) {
-      return null
-    }
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedChecklist
   }
 
   async appendChecklistItems(checklistId, labels) {
@@ -22931,25 +22946,28 @@ export class AppDataStore {
       return data.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updatedChecklist = null
-    data.checklists = data.checklists.map((checklist) => {
-      if (checklist.id !== checklistId) {
-        return checklist
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      let updatedChecklist = null
+      data.checklists = data.checklists.map((checklist) => {
+        if (checklist.id !== checklistId) {
+          return checklist
+        }
+        const newItems = labels.map((label) => ({
+          id: `item-${randomUUID().slice(0, 8)}`,
+          label,
+          done: false,
+        }))
+        updatedChecklist = { ...checklist, items: [...checklist.items, ...newItems] }
+        return updatedChecklist
+      })
+      if (!updatedChecklist) {
+        return null
       }
-      const newItems = labels.map((label) => ({
-        id: `item-${randomUUID().slice(0, 8)}`,
-        label,
-        done: false,
-      }))
-      updatedChecklist = { ...checklist, items: [...checklist.items, ...newItems] }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       return updatedChecklist
     })
-    if (!updatedChecklist) {
-      return null
-    }
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updatedChecklist
   }
 
   async updateChecklistItem(checklistId, itemId, patch) {
@@ -23500,15 +23518,18 @@ export class AppDataStore {
       return result.rowCount ? checklistId : null
     }
 
-    const data = await readJson(localDataPath)
-    const target = data.checklists.find((checklist) => checklist.id === checklistId)
-    if (!target) return null
-    const deletedAt = nowIso()
-    data.checklists = data.checklists.filter((checklist) => checklist.id !== checklistId)
-    data.recycledChecklists = Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []
-    data.recycledChecklists.push({ ...target, deletedAt })
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return checklistId
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const target = data.checklists.find((checklist) => checklist.id === checklistId)
+      if (!target) return null
+      const deletedAt = nowIso()
+      data.checklists = data.checklists.filter((checklist) => checklist.id !== checklistId)
+      data.recycledChecklists = Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []
+      data.recycledChecklists.push({ ...target, deletedAt })
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return checklistId
+    })
   }
 
   /**
@@ -23530,13 +23551,16 @@ export class AppDataStore {
       return fresh.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    const target = data.checklists.find((checklist) => checklist.id === checklistId)
-    if (!target) return null
-    target.deletionRequestedBy = userId
-    target.deletionRequestedAt = nowIso()
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return target
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const target = data.checklists.find((checklist) => checklist.id === checklistId)
+      if (!target) return null
+      target.deletionRequestedBy = userId
+      target.deletionRequestedAt = nowIso()
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return target
+    })
   }
 
   /**
@@ -23556,13 +23580,16 @@ export class AppDataStore {
       return fresh.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    const target = data.checklists.find((checklist) => checklist.id === checklistId)
-    if (!target) return null
-    target.deletionRequestedBy = null
-    target.deletionRequestedAt = null
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return target
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const target = data.checklists.find((checklist) => checklist.id === checklistId)
+      if (!target) return null
+      target.deletionRequestedBy = null
+      target.deletionRequestedAt = null
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return target
+    })
   }
 
   /**
@@ -23582,16 +23609,19 @@ export class AppDataStore {
       return fresh.checklists.find((checklist) => checklist.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    const recycled = Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []
-    const target = recycled.find((checklist) => checklist.id === checklistId)
-    if (!target) return null
-    data.recycledChecklists = recycled.filter((checklist) => checklist.id !== checklistId)
-    const { deletedAt: _deletedAt, ...rest } = target
-    const restored = { ...rest, deletedAt: null }
-    data.checklists = Array.isArray(data.checklists) ? [...data.checklists, restored] : [restored]
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return restored
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const recycled = Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []
+      const target = recycled.find((checklist) => checklist.id === checklistId)
+      if (!target) return null
+      data.recycledChecklists = recycled.filter((checklist) => checklist.id !== checklistId)
+      const { deletedAt: _deletedAt, ...rest } = target
+      const restored = { ...rest, deletedAt: null }
+      data.checklists = Array.isArray(data.checklists) ? [...data.checklists, restored] : [restored]
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return restored
+    })
   }
 
   /**
@@ -23609,13 +23639,16 @@ export class AppDataStore {
       return result.rowCount ?? 0
     }
 
-    const data = await readJson(localDataPath)
-    const recycled = Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []
-    const removed = recycled.length
-    if (removed === 0) return 0
-    data.recycledChecklists = []
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return removed
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const recycled = Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []
+      const removed = recycled.length
+      if (removed === 0) return 0
+      data.recycledChecklists = []
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return removed
+    })
   }
 
   /**
@@ -25025,15 +25058,18 @@ export class AppDataStore {
       return created
     }
 
-    const data = await readJson(localDataPath)
-    const template = (data.checklistTemplates ?? []).find((item) => item.id === templateId)
-    if (!template) return null
-    const stage = (template.stages ?? []).find((item) => item.id === stageId)
-    if (!stage) return null
-    const created = clean.map((label) => ({ id: `template-item-${randomUUID().slice(0, 8)}`, label }))
-    stage.items = [...(stage.items ?? []), ...created]
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return created
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const template = (data.checklistTemplates ?? []).find((item) => item.id === templateId)
+      if (!template) return null
+      const stage = (template.stages ?? []).find((item) => item.id === stageId)
+      if (!stage) return null
+      const created = clean.map((label) => ({ id: `template-item-${randomUUID().slice(0, 8)}`, label }))
+      stage.items = [...(stage.items ?? []), ...created]
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return created
+    })
   }
 
   /**
@@ -31546,27 +31582,30 @@ export class AppDataStore {
       return data.checklists.find((c) => c.id === checklistId) ?? null
     }
 
-    const data = await readJson(localDataPath)
-    let updated = null
-    data.checklists = (data.checklists ?? []).map((checklist) => {
-      if (checklist.id !== checklistId) return checklist
-      const next = { ...checklist }
-      if (title !== undefined) next.title = String(title)
-      if (dueDate !== undefined && dueDate !== '' && dueDate !== null) next.dueDate = dueDate
-      if (assigneeId !== undefined && assigneeId !== '' && assigneeId !== null) {
-        next.assigneeId = assigneeId
-      }
-      // categoryId: an explicit null/'' clears it (→ Uncategorized), so it's
-      // applied even when empty (unlike due/assignee above).
-      if (categoryId !== undefined) {
-        next.categoryId = categoryId === '' || categoryId === null ? null : categoryId
-      }
-      updated = next
-      return next
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      let updated = null
+      data.checklists = (data.checklists ?? []).map((checklist) => {
+        if (checklist.id !== checklistId) return checklist
+        const next = { ...checklist }
+        if (title !== undefined) next.title = String(title)
+        if (dueDate !== undefined && dueDate !== '' && dueDate !== null) next.dueDate = dueDate
+        if (assigneeId !== undefined && assigneeId !== '' && assigneeId !== null) {
+          next.assigneeId = assigneeId
+        }
+        // categoryId: an explicit null/'' clears it (→ Uncategorized), so it's
+        // applied even when empty (unlike due/assignee above).
+        if (categoryId !== undefined) {
+          next.categoryId = categoryId === '' || categoryId === null ? null : categoryId
+        }
+        updated = next
+        return next
+      })
+      if (!updated) return null
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return updated
     })
-    if (!updated) return null
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updated
   }
 
   // ---- Pending task edits (non-creator edit → creator/owner approves) ----
@@ -31764,13 +31803,16 @@ export class AppDataStore {
       const data = await this.read()
       return (data.checklists ?? []).find((checklist) => checklist.id === checklistId) ?? null
     }
-    const data = await readJson(localDataPath)
-    const target = (data.checklists ?? []).find((checklist) => checklist.id === checklistId)
-    if (!target || target.deletedAt || target.skippedAt) return null
-    target.skippedAt = nowIso()
-    target.skippedBy = userId ?? null
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return target
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const target = (data.checklists ?? []).find((checklist) => checklist.id === checklistId)
+      if (!target || target.deletedAt || target.skippedAt) return null
+      target.skippedAt = nowIso()
+      target.skippedBy = userId ?? null
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return target
+    })
   }
 
   /**
@@ -32052,74 +32094,82 @@ export class AppDataStore {
       return { checklist, completed }
     }
 
-    const data = await readJson(localDataPath)
-    const target = (data.checklists ?? []).find((checklist) => checklist.id === checklistId)
-    if (!target || target.deletedAt || target.skippedAt) return null
-    if (target.pushedToChecklistId) {
-      throw new PushedRecordError(
-        'This is the completed record of a pushed checklist. Push the live copy instead.',
-      )
-    }
-    const items = Array.isArray(target.items) ? target.items : []
-    const openItems = items.filter((item) => !rollUpItemDone(item))
-    const doneItems = items.filter((item) => rollUpItemDone(item))
-
-    if (items.length > 0 && openItems.length === 0) {
-      throw new NothingToPushError('Everything here is done. Nothing to push.')
-    }
-
-    if (doneItems.length === 0) {
-      target.cycleDueDate = target.cycleDueDate ?? target.dueDate
-      target.dueDate = newDueDate
-      target.pushedAt = nowIso()
-      target.pushedBy = userId ?? null
-      await writeFile(localDataPath, JSON.stringify(data, null, 2))
-      return { checklist: target, completed: null }
-    }
-
-    // A genuine mix: split, the same shape as the Postgres branch.
-    const now = nowIso()
-    const newChecklist = {
-      id: `check-${randomUUID().slice(0, 8)}`,
-      title: target.title,
-      clientId: target.clientId,
-      assigneeId: target.assigneeId,
-      templateId: target.templateId ?? null,
-      frequency: target.frequency ?? null,
-      dueDate: newDueDate,
-      viewerIds: Array.isArray(target.viewerIds) ? [...target.viewerIds] : [],
-      editorIds: Array.isArray(target.editorIds) ? [...target.editorIds] : [],
-      caseId: target.caseId ?? target.id,
-      stageId: target.stageId ?? null,
-      stageIndex: target.stageIndex,
-      stageCount: target.stageCount,
-      categoryId: target.categoryId ?? null,
-      periodLabel: target.periodLabel ?? null,
-      onboardingForClientId: target.onboardingForClientId ?? null,
-      createdBy: target.createdBy ?? null,
-      createdAt: now,
-      cycleDueDate: target.cycleDueDate ?? target.dueDate,
-      pushedAt: now,
-      pushedBy: userId ?? null,
-      pushedFromChecklistId: target.id,
-      items: openItems,
-    }
-    target.items = doneItems
-    target.pushedAt = now
-    target.pushedBy = userId ?? null
-    target.pushedToChecklistId = newChecklist.id
-
-    // Waits on this task, held by steps elsewhere, follow the open work -
-    // including steps on recycled checklists (the Postgres update has no
-    // deleted_at filter, so a restored checklist must not differ by backend).
-    for (const other of [...(data.checklists ?? []), ...(data.recycledChecklists ?? [])]) {
-      for (const item of other.items ?? []) {
-        if (item.waitingForChecklistId === target.id) item.waitingForChecklistId = newChecklist.id
-        repointWaitingForChecklist(item.subItems, target.id, newChecklist.id)
+    // Read and write the workspace in ONE file-queue slot, raw fs calls only (see
+    // `_withFileChecklistItem`): a tick landing mid-push must not be put back unticked.
+    const split = await enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const target = (data.checklists ?? []).find((checklist) => checklist.id === checklistId)
+      if (!target || target.deletedAt || target.skippedAt) return null
+      if (target.pushedToChecklistId) {
+        throw new PushedRecordError(
+          'This is the completed record of a pushed checklist. Push the live copy instead.',
+        )
       }
-    }
-    data.checklists = [...(data.checklists ?? []), newChecklist]
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+      const items = Array.isArray(target.items) ? target.items : []
+      const openItems = items.filter((item) => !rollUpItemDone(item))
+      const doneItems = items.filter((item) => rollUpItemDone(item))
+
+      if (items.length > 0 && openItems.length === 0) {
+        throw new NothingToPushError('Everything here is done. Nothing to push.')
+      }
+
+      if (doneItems.length === 0) {
+        target.cycleDueDate = target.cycleDueDate ?? target.dueDate
+        target.dueDate = newDueDate
+        target.pushedAt = nowIso()
+        target.pushedBy = userId ?? null
+        await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+        return { done: { checklist: target, completed: null } }
+      }
+
+      // A genuine mix: split, the same shape as the Postgres branch.
+      const now = nowIso()
+      const newChecklist = {
+        id: `check-${randomUUID().slice(0, 8)}`,
+        title: target.title,
+        clientId: target.clientId,
+        assigneeId: target.assigneeId,
+        templateId: target.templateId ?? null,
+        frequency: target.frequency ?? null,
+        dueDate: newDueDate,
+        viewerIds: Array.isArray(target.viewerIds) ? [...target.viewerIds] : [],
+        editorIds: Array.isArray(target.editorIds) ? [...target.editorIds] : [],
+        caseId: target.caseId ?? target.id,
+        stageId: target.stageId ?? null,
+        stageIndex: target.stageIndex,
+        stageCount: target.stageCount,
+        categoryId: target.categoryId ?? null,
+        periodLabel: target.periodLabel ?? null,
+        onboardingForClientId: target.onboardingForClientId ?? null,
+        createdBy: target.createdBy ?? null,
+        createdAt: now,
+        cycleDueDate: target.cycleDueDate ?? target.dueDate,
+        pushedAt: now,
+        pushedBy: userId ?? null,
+        pushedFromChecklistId: target.id,
+        items: openItems,
+      }
+      target.items = doneItems
+      target.pushedAt = now
+      target.pushedBy = userId ?? null
+      target.pushedToChecklistId = newChecklist.id
+
+      // Waits on this task, held by steps elsewhere, follow the open work -
+      // including steps on recycled checklists (the Postgres update has no
+      // deleted_at filter, so a restored checklist must not differ by backend).
+      for (const other of [...(data.checklists ?? []), ...(data.recycledChecklists ?? [])]) {
+        for (const item of other.items ?? []) {
+          if (item.waitingForChecklistId === target.id) item.waitingForChecklistId = newChecklist.id
+          repointWaitingForChecklist(item.subItems, target.id, newChecklist.id)
+        }
+      }
+      data.checklists = [...(data.checklists ?? []), newChecklist]
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return { target, newChecklist, openItems }
+    })
+    if (!split) return null
+    if (split.done) return split.done
+    const { target, newChecklist, openItems } = split
 
     // Pending requests follow the work they are about (see the Postgres branch).
     const authState = await readJson(localAuthPath)
@@ -33172,22 +33222,28 @@ export class AppDataStore {
       return (after.checklistTemplates ?? []).find((row) => row.id === templateId) ?? null
     }
 
-    const file = await readJson(localDataPath)
-    let updated = null
-    file.checklistTemplates = (file.checklistTemplates ?? []).map((row) => {
-      if (row.id !== templateId) return row
-      updated = {
-        ...row,
-        frequency: schedule.frequency,
-        scheduledMonths,
-        nextDueDate,
-        ...(dueDayOfMonth === null ? {} : { dueDayOfMonth }),
-        ...(specificMonths ? { createdAt: nowIso(), repeatAnnually: true } : {}),
-      }
-      return updated
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    // The re-read below is outside it: `read()` goes through the queue itself.
+    const updated = await enqueueFileOperation(localDataPath, async () => {
+      const file = JSON.parse(await readFile(localDataPath, 'utf8'))
+      let changed = null
+      file.checklistTemplates = (file.checklistTemplates ?? []).map((row) => {
+        if (row.id !== templateId) return row
+        changed = {
+          ...row,
+          frequency: schedule.frequency,
+          scheduledMonths,
+          nextDueDate,
+          ...(dueDayOfMonth === null ? {} : { dueDayOfMonth }),
+          ...(specificMonths ? { createdAt: nowIso(), repeatAnnually: true } : {}),
+        }
+        return changed
+      })
+      if (!changed) return null
+      await fsWriteFile(localDataPath, JSON.stringify(file, null, 2))
+      return changed
     })
     if (!updated) return null
-    await writeFile(localDataPath, JSON.stringify(file, null, 2))
     const after = await this.read()
     return (after.checklistTemplates ?? []).find((row) => row.id === templateId) ?? updated
   }

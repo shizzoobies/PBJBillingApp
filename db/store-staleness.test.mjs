@@ -11694,6 +11694,182 @@ describe('quiet skip (file backend)', () => {
 })
 
 /**
+ * Checklist writes on the FILE backend read and write in ONE file-queue slot
+ * (chip task_7fcd25b4). "Add task - This + all future" sends the checklist
+ * append and the recipe append at the same instant (one recipe append per
+ * label), and a tick can land between any of them. When a path read the file
+ * in one queue slot and wrote it back in another, the second writer put back
+ * the copy it had read: the other request's step, tick or spawned next stage
+ * was erased although that request had already answered "saved". These pin
+ * that every such pair now lands in full. (Postgres writes separate rows in
+ * their own statements or transactions; there is no whole-file copy to race.)
+ */
+describe('checklist writes share one file-queue slot (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  const stagedTemplate = {
+    id: 'tmpl-race',
+    title: 'Onboarding',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2026-08-31',
+    active: true,
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      { id: 'st-0', name: 'Prep', assigneeId: 'emp-1', offsetDays: 0, items: [{ id: 'ti-0', label: 'Gather documents' }] },
+      { id: 'st-1', name: 'Review', assigneeId: 'emp-1', offsetDays: 3, items: [{ id: 'ti-1', label: 'Review the books' }] },
+    ],
+  }
+
+  const stageOne = (over = {}) => ({
+    id: 'cl-race',
+    title: 'Onboarding',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    templateId: 'tmpl-race',
+    dueDate: '2026-08-31',
+    caseId: 'cl-race',
+    stageId: 'st-0',
+    stageIndex: 0,
+    stageCount: 2,
+    viewerIds: [],
+    editorIds: [],
+    items: [{ id: 'item-a', label: 'Gather documents', done: false }],
+    ...over,
+  })
+
+  const raceChecklist = async () =>
+    (await persisted()).checklists.find((entry) => entry.id === 'cl-race')
+  const stageLabels = async (stageId) =>
+    (await persisted()).checklistTemplates
+      .find((entry) => entry.id === 'tmpl-race')
+      .stages.find((stage) => stage.id === stageId)
+      .items.map((item) => item.label)
+  const nextStages = async () =>
+    (await persisted()).checklists.filter(
+      (entry) => entry.caseId === 'cl-race' && entry.stageIndex === 1,
+    )
+
+  beforeEach(async () => {
+    await store.write(workspace({ checklists: [stageOne()], checklistTemplates: [stagedTemplate] }))
+  })
+
+  it('"This + all future" keeps the step on the checklist AND on the recipe', async () => {
+    await Promise.all([
+      store.appendChecklistItems('cl-race', ['Sign the letter']),
+      store.appendChecklistTemplateStageItems('tmpl-race', 'st-0', ['Sign the letter']),
+    ])
+
+    expect((await raceChecklist()).items.map((item) => item.label)).toEqual([
+      'Gather documents',
+      'Sign the letter',
+    ])
+    expect(await stageLabels('st-0')).toEqual(['Gather documents', 'Sign the letter'])
+  })
+
+  it('keeps every label when several recipe appends arrive at once', async () => {
+    await Promise.all([
+      store.appendChecklistTemplateStageItems('tmpl-race', 'st-0', ['One']),
+      store.appendChecklistTemplateStageItems('tmpl-race', 'st-0', ['Two']),
+      store.appendChecklistTemplateStageItems('tmpl-race', 'st-0', ['Three']),
+    ])
+
+    expect(await stageLabels('st-0')).toEqual(['Gather documents', 'One', 'Two', 'Three'])
+  })
+
+  it('keeps both steps when two checklist appends arrive at once', async () => {
+    await Promise.all([
+      store.appendChecklistItems('cl-race', ['One']),
+      store.appendChecklistItems('cl-race', ['Two']),
+    ])
+
+    expect((await raceChecklist()).items.map((item) => item.label)).toEqual([
+      'Gather documents',
+      'One',
+      'Two',
+    ])
+  })
+
+  it('a tick racing an added step leaves the file agreeing with what the tick answered', async () => {
+    const [, ticked] = await Promise.all([
+      store.appendChecklistItems('cl-race', ['Late step']),
+      store.toggleChecklistItem('cl-race', 'item-a'),
+    ])
+
+    const onDisk = await raceChecklist()
+    // The tick is saved, and so is the step added just before it...
+    expect(onDisk.items.find((item) => item.id === 'item-a').done).toBe(true)
+    expect(onDisk.items.map((item) => item.label)).toContain('Late step')
+    // ...so the stage is NOT finished, and nothing claims a next stage the file lacks.
+    expect(ticked.spawned).toBeNull()
+    expect(await nextStages()).toHaveLength(ticked.spawned ? 1 : 0)
+  })
+
+  it('a stage finished while a step is added to the recipe opens its next stage, and keeps it', async () => {
+    const [ticked] = await Promise.all([
+      store.toggleChecklistItem('cl-race', 'item-a'),
+      store.appendChecklistTemplateStageItems('tmpl-race', 'st-1', ['Sign the letter']),
+    ])
+
+    expect(ticked.spawned).not.toBeNull()
+    expect(await nextStages()).toHaveLength(1)
+    expect((await raceChecklist()).items[0].done).toBe(true)
+    expect(await stageLabels('st-1')).toEqual(['Review the books', 'Sign the letter'])
+  })
+
+  it('reordering steps does not undo a tick that lands mid-reorder', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          stageOne({
+            items: [
+              { id: 'item-a', label: 'Gather documents', done: false },
+              { id: 'item-b', label: 'Sign the letter', done: false },
+            ],
+          }),
+        ],
+        checklistTemplates: [stagedTemplate],
+      }),
+    )
+
+    await Promise.all([
+      store.reorderChecklistItems('cl-race', ['item-b', 'item-a']),
+      store.toggleChecklistItem('cl-race', 'item-a'),
+    ])
+
+    const onDisk = await raceChecklist()
+    expect(onDisk.items.map((item) => item.id)).toEqual(['item-b', 'item-a'])
+    expect(onDisk.items.find((item) => item.id === 'item-a').done).toBe(true)
+  })
+
+  it('renaming the checklist does not undo a tick, or the next stage it opened', async () => {
+    const [, ticked] = await Promise.all([
+      store.updateChecklistMeta('cl-race', { title: 'Onboarding - Acme' }),
+      store.toggleChecklistItem('cl-race', 'item-a'),
+    ])
+
+    const onDisk = await raceChecklist()
+    expect(onDisk.title).toBe('Onboarding - Acme')
+    expect(onDisk.items[0].done).toBe(true)
+    expect(ticked.spawned).not.toBeNull()
+    expect(await nextStages()).toHaveLength(1)
+  })
+
+  it('sharing the checklist does not undo a step added at the same instant', async () => {
+    await Promise.all([
+      store.setChecklistViewers('cl-race', ['emp-1'], []),
+      store.appendChecklistItems('cl-race', ['Late step']),
+    ])
+
+    const onDisk = await raceChecklist()
+    expect(onDisk.viewerIds).toEqual(['emp-1'])
+    expect(onDisk.items.map((item) => item.label)).toContain('Late step')
+  })
+})
+
+/**
  * Quiet skip — the POSTGRES branch, at statement level.
  *
  * NEW SQL SHAPES, flagged for the rolled-back production validation:
