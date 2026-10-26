@@ -132,7 +132,8 @@ describe('SignWell knowledge lives in two files', () => {
     const files: string[] = []
     const walk = (dir: string) => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        if (['node_modules', 'dist', '.git', 'tmp', 'output', 'docs', '.superpowers'].includes(entry.name)) continue
+        // Dot-folders hold tooling state and sibling worktrees (.claude/worktrees has a whole checkout).
+        if (entry.name.startsWith('.') || ['node_modules', 'dist', 'tmp', 'output', 'docs'].includes(entry.name)) continue
         const full = path.join(dir, entry.name)
         if (entry.isDirectory()) walk(full)
         else if (/\.(js|mjs|ts|tsx)$/.test(entry.name) && !/\.test\./.test(entry.name)) files.push(full)
