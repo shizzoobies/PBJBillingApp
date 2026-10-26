@@ -19,7 +19,8 @@
  * re-implementation here would prove nothing about the code that ships.
  */
 // @ts-expect-error - plain-JS module without type declarations
-import { materializeRecurringChecklists } from '../../db/store.js'
+// The store's own month step, so the expected next cycle is the one it makes.
+import { addMonths, materializeRecurringChecklists } from '../../db/store.js'
 import { isChecklistSkipped } from '../../lib/checklist-skip.js'
 import { firmToday } from '../../lib/firm-time.js'
 import { describe, expect, it } from 'vitest'
@@ -41,14 +42,6 @@ function dateOffset(days: number): string {
   return d.toISOString().slice(0, 10)
 }
 
-/** `dateString` + n calendar months, the way the store's own helper steps. */
-function addMonths(dateString: string, months: number): string {
-  const [year, month, day] = dateString.split('-').map(Number)
-  const date = new Date(year, month - 1 + months, day)
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
-    date.getDate(),
-  ).padStart(2, '0')}`
-}
 
 function makeTemplate(nextDueDate: string) {
   return {

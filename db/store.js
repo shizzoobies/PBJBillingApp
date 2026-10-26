@@ -217,6 +217,9 @@ import { poolOptions } from './pool-options.js'
 export { normalizeWaitingOns }
 // TLS rules for the pool (Neon needs verify-full; Railway's internal URL has none).
 export { poolOptions }
+// The cadence step, exported so the browser copy (src/lib/utils.ts) can be
+// pinned against it (db/month-end-cadence.test.mjs).
+export { addMonths, advanceChecklistFrequency }
 
 const { Pool } = pg
 
@@ -2236,7 +2239,7 @@ function addDays(dateString, days) {
  * keeps the cadence's PHASE, so a monthly recipe dated the 15th produces client
  * copies due on the 15th. Clamped to the month's real length, so "the 31st" in
  * a 30-day month lands on the 30th rather than overflowing into the next one
- * (the `new Date(y, m + 1, day)` trap documented on `advanceChecklistFrequency`).
+ * (the `new Date(y, m + 1, day)` trap `addMonths` used to fall into).
  */
 function nextDateOnDayOfMonth(day, today = firmToday()) {
   const wanted = Math.min(Math.max(Math.trunc(day) || 1, 1), 31)
@@ -2253,10 +2256,43 @@ function nextDateOnDayOfMonth(day, today = firmToday()) {
   return formatDateOnly(new Date(Date.UTC(year, month + 1, clamp(year, month + 1))))
 }
 
+/**
+ * `dateString` plus `months` calendar months, never leaving the target month.
+ *
+ * The day of the month is kept, clamped to the target month's length, and a
+ * date that IS the last day of its month goes to the last day of the target
+ * month: a quarterly January 31st runs April 30th, July 31st, October 31st; a
+ * monthly November 30th runs December 31st, January 31st, February 28th, March
+ * 31st. It used to be `new Date(y, m - 1 + n, d)`, which overflows instead -
+ * "April 31st" became May 1st and the recipe ran May / August / November from
+ * then on (28 production quarterly recipes due 2027-01-31, found 2026-10-26).
+ *
+ * The date alone cannot say whether an April 30th began on the 30th or the
+ * 31st, so a 29th-30th recipe that lands on a month end follows the month ends
+ * from there - and so does a 28th once it meets a non-leap February 28th (the
+ * trade-off chosen 2026-10-26; an exact anchor needs a stored column). The MONTH is always right, which is what a recipe with pinned
+ * step due days depends on. Plain integer math, no Date in local time, so the
+ * host's time zone cannot move it.
+ *
+ * TWO COPIES, ONE ALGORITHM: src/lib/utils.ts (`addMonths`, the browser's materializer)
+ * holds the same function and the two must stay identical
+ * (db/month-end-cadence.test.mjs runs both over every day of three years).
+ * Malformed input comes back unchanged, which every caller's loop already
+ * treats as "the cadence will not advance".
+ */
 function addMonths(dateString, months) {
-  const [year, month, day] = dateString.split('-').map(Number)
-  const date = new Date(year, month - 1 + months, day)
-  return formatDateOnly(date)
+  const [year, month, day] = String(dateString).split('-').map(Number)
+  if (![year, month, day, months].every(Number.isInteger) || month < 1 || month > 12 || day < 1) {
+    return dateString
+  }
+  const daysInMonth = (y, monthIndex) => new Date(Date.UTC(y, monthIndex + 1, 0)).getUTCDate()
+  const targetIndex = year * 12 + (month - 1) + months
+  const targetYear = Math.floor(targetIndex / 12)
+  const targetMonthIndex = targetIndex - targetYear * 12
+  const targetLength = daysInMonth(targetYear, targetMonthIndex)
+  const isMonthEnd = day >= daysInMonth(year, month - 1)
+  const targetDay = isMonthEnd ? targetLength : Math.min(day, targetLength)
+  return `${String(targetYear).padStart(4, '0')}-${String(targetMonthIndex + 1).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`
 }
 
 function advanceChecklistFrequency(dateString, frequency) {

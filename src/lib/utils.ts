@@ -635,9 +635,43 @@ export function addDays(dateString: string, days: number) {
   return date.toISOString().slice(0, 10)
 }
 
-export function addMonths(dateString: string, months: number) {
-  const [year, month, day] = dateString.split('-').map(Number)
-  return new Date(year, month - 1 + months, day).toISOString().slice(0, 10)
+/**
+ * `dateString` plus `months` calendar months, never leaving the target month.
+ *
+ * The day of the month is kept, clamped to the target month's length, and a
+ * date that IS the last day of its month goes to the last day of the target
+ * month: a quarterly January 31st runs April 30th, July 31st, October 31st; a
+ * monthly November 30th runs December 31st, January 31st, February 28th, March
+ * 31st. It used to be `new Date(y, m - 1 + n, d)`, which overflows instead -
+ * "April 31st" became May 1st and the recipe ran May / August / November from
+ * then on (28 production quarterly recipes due 2027-01-31, found 2026-10-26).
+ *
+ * The date alone cannot say whether an April 30th began on the 30th or the
+ * 31st, so a 29th-30th recipe that lands on a month end follows the month ends
+ * from there - and so does a 28th once it meets a non-leap February 28th (the
+ * trade-off chosen 2026-10-26; an exact anchor needs a stored column). The MONTH is always right, which is what a recipe with pinned
+ * step due days depends on. Plain integer math, no Date in local time, so the
+ * host's time zone cannot move it.
+ *
+ * TWO COPIES, ONE ALGORITHM: db/store.js (`addMonths`, the server's materializer)
+ * holds the same function and the two must stay identical
+ * (db/month-end-cadence.test.mjs runs both over every day of three years).
+ * Malformed input comes back unchanged, which every caller's loop already
+ * treats as "the cadence will not advance".
+ */
+export function addMonths(dateString: string, months: number): string {
+  const [year, month, day] = String(dateString).split('-').map(Number)
+  if (![year, month, day, months].every(Number.isInteger) || month < 1 || month > 12 || day < 1) {
+    return dateString
+  }
+  const daysInMonth = (y: number, monthIndex: number) => new Date(Date.UTC(y, monthIndex + 1, 0)).getUTCDate()
+  const targetIndex = year * 12 + (month - 1) + months
+  const targetYear = Math.floor(targetIndex / 12)
+  const targetMonthIndex = targetIndex - targetYear * 12
+  const targetLength = daysInMonth(targetYear, targetMonthIndex)
+  const isMonthEnd = day >= daysInMonth(year, month - 1)
+  const targetDay = isMonthEnd ? targetLength : Math.min(day, targetLength)
+  return `${String(targetYear).padStart(4, '0')}-${String(targetMonthIndex + 1).padStart(2, '0')}-${String(targetDay).padStart(2, '0')}`
 }
 
 export function advanceChecklistFrequency(dateString: string, frequency: ChecklistFrequency) {

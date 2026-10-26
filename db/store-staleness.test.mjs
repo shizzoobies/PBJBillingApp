@@ -22709,10 +22709,10 @@ describe('copyTemplateToClient starts the copy today, not at the blueprint’s s
   })
 
   /**
-   * `advanceChecklistFrequency` builds its monthly step with `new Date(y, m + 1,
-   * day)`, which overflows instead of clamping — Jan 31 advances to Mar 3, and
-   * every step after that walks off the month end for good. A month-end recipe
-   * that got floored used to land on the 3rd of some month.
+   * `advanceChecklistFrequency` used to build its monthly step with `new Date(y,
+   * m + 1, day)`, which overflowed instead of clamping — Jan 31 advanced to Mar
+   * 3, and every step after that walked off the month end for good. A month-end
+   * recipe that got floored used to land on the 3rd of some month.
    */
   it('keeps a month-end recipe near the month end instead of drifting to the 3rd', async () => {
     const twoYearsAgoJan31 = `${new Date().getFullYear() - 2}-01-31`
@@ -22771,8 +22771,10 @@ describe('copyTemplateToClient starts the copy today, not at the blueprint’s s
       const after = await store.read()
       const spawned = after.checklists.filter((c) => c.templateId === copy.id)
       expect(spawned.map((c) => c.dueDate)).toEqual(['2026-09-30'])
-      // And the cycle moved on to October, where it belongs.
-      expect(after.checklistTemplates.find((t) => t.id === copy.id).nextDueDate).toBe('2026-10-30')
+      // And the cycle moved on to October, where it belongs. September 30th is
+      // the last day of September, so the step lands on October's last day
+      // (the month-end rule of 2026-10-26, db/month-end-cadence.test.mjs).
+      expect(after.checklistTemplates.find((t) => t.id === copy.id).nextDueDate).toBe('2026-10-31')
     })
 
     it('treats a first due date of that same evening’s day as today, not the past', async () => {
@@ -56422,5 +56424,83 @@ describe('sending for signature end to end on the file backend (featreq-56d39567
     expect((await store.getSignatureRequestByDocumentId('ctr-es', 'esignatures')).id).toBe(sent.request.id)
     expect(await store.getSignatureRequestByDocumentId('ctr-es', 'signwell')).toBeNull()
     expect((await store.getEngagement('eng-es')).status).toBe('sent')
+  })
+})
+
+/**
+ * MONTH-END CADENCE ON THE FILE BACKEND (2026-10-26).
+ *
+ * The cadence step used to overflow: a quarterly recipe due 2027-01-31 stepped
+ * to "April 31" = May 1 and ran May / Aug / Nov / Feb from then on. Production
+ * held 28 of them. Read through the real `read()` (the materializer's write-back
+ * path) with the firm's clock pinned to April 2nd, 2027 and 30 lead days.
+ */
+describe('a quarterly recipe due January 31st generates in April, not May (file backend)', () => {
+  const quarterly = {
+    id: 'tpl-eom-quarterly',
+    title: 'Quarterly payroll filings',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'quarterly',
+    nextDueDate: '2027-01-31',
+    leadDays: 30,
+    active: true,
+    isStandard: false,
+    createdAt: '2026-12-01T15:00:00.000Z',
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      {
+        id: 'stage-eom-1',
+        name: 'Prepare',
+        assigneeId: 'emp-1',
+        offsetDays: 0,
+        viewerIds: [],
+        editorIds: [],
+        items: [{ id: 'item-eom-1', label: 'File the returns' }],
+      },
+    ],
+  }
+
+  beforeEach(() => {
+    // Date only: the file backend's own I/O must keep its real timers.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    // 2027-04-02 at 10 am Eastern.
+    vi.setSystemTime(new Date('2027-04-02T14:00:00.000Z'))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('makes the April occurrence and moves Next due to July 31st', async () => {
+    await store.write(workspace({ checklistTemplates: [quarterly] }))
+    const after = await store.read()
+    const dues = after.checklists
+      .filter((c) => c.templateId === 'tpl-eom-quarterly' && c.stageIndex === 0)
+      .map((c) => c.dueDate)
+      .sort()
+    expect(dues).toEqual(['2027-01-31', '2027-04-30'])
+    expect(dues.some((due) => due.slice(5, 7) === '05')).toBe(false)
+    expect(after.checklistTemplates.find((t) => t.id === 'tpl-eom-quarterly').nextDueDate).toBe('2027-07-31')
+  })
+
+  it('with the January occurrence already made, Next due 2027-04-30 generates April 30th', async () => {
+    await store.write(
+      workspace({ checklistTemplates: [{ ...quarterly, nextDueDate: '2027-04-30' }] }),
+    )
+    const after = await store.read()
+    const dues = after.checklists
+      .filter((c) => c.templateId === 'tpl-eom-quarterly' && c.stageIndex === 0)
+      .map((c) => c.dueDate)
+    expect(dues).toEqual(['2027-04-30'])
+    expect(after.checklistTemplates.find((t) => t.id === 'tpl-eom-quarterly').nextDueDate).toBe('2027-07-31')
+  })
+
+  it('before April is within the lead days, Next due rests on April 30th', async () => {
+    vi.setSystemTime(new Date('2027-02-15T15:00:00.000Z'))
+    await store.write(workspace({ checklistTemplates: [quarterly] }))
+    const after = await store.read()
+    expect(after.checklistTemplates.find((t) => t.id === 'tpl-eom-quarterly').nextDueDate).toBe('2027-04-30')
   })
 })
