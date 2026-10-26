@@ -13,6 +13,36 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-10-26 - PICK UP HERE: e-sign through eSignatures.io is PROVEN end to end in test mode; three go-live steps remain.**
+`main` = `05a6603d` (+ this handoff), live on https://app.pbjsatime.com, `/health` 200, env revision 2026-10-23T21:14:20.357Z, clean
+tree, only the primary worktree (+ Alex's chip-session worktree under .claude/worktrees - leave it), nothing in flight, no
+subagents. **Proven since 10-24:** request `sigreq-c8f4e0a9` (Test client, the Attestation letter) went sent -> viewed ->
+COMPLETED through the eSignatures webhook; engagement `eng-3275be1e` is Signed (10-24 16:00Z); the signed PDF
+`sigdoc-40c58237` (200,358 bytes) was stored within a minute; 3 `es:` ledger events; no last_error. **Backups DONE:**
+scheduled db-backup runs succeeded 10-23/24/25 (featreq-4caec5d3 -> done). **Remaining before live (in order):** (1) one
+test send of the REAL default engagement letter (Letters -> the saved "Engagement letter" / a proposal Accept on the Test
+client) and read the contract content with the eSignatures MCP `query_contract_content` (contract id =
+signature_requests.signwell_document_id) - the services list must not show literal backslashes (`- item`); if it does,
+fix lib/letter-markdown.js escaping first; (2) confirm the eSignatures account does NOT email the final signed PDF to Alex
+(account owner) - Alex checks his inbox for the 10-24 completion; if it did, the setting is under the eSignatures dashboard
+(the MCP `query_account_settings` showed contract_pdf_cc_email_addresses null - the owner copy is a per-user notification
+setting); memory alex-no-sensitive-email; (3) go live: write `ESIGNATURES_TEST_MODE=false` into a file (e.g.
+secrets/esignatures-live.env), `node scripts/cf/secrets-upload.mjs <file>`, `node scripts/cf/restart.mjs
+--expect-revision=<printed>` (a 500 right after a deploy = retry after 20 s); then featreq-56d39567 -> Shipped with the
+drafted note (session scratchpad note-56d39567.txt; rewrite if gone: eSignatures.io, one signature at the end, initials =
+required checkbox, auto reminders days 2/4/8/16 + Send reminder resends, started in test mode). **Tidy after live:** delete
+the SignWell webhook on Alex's account (`node scripts/prod/signwell-webhook-register.mjs --delete
+04cfe77e-6488-435a-a4ea-d99eda59ae42` with SIGNWELL_API_KEY from secrets/signwell.env in the environment), Alex cancels
+his SignWell Business trial, triage featreq-60118b28 (SignWell-era leftovers, many moot). **Decisions on record:** initials
+stay REQUIRED CHECKBOXES (Alex, 10-24; typed-initials change discarded); eSignatures account settings set via MCP (name,
+reply-to Bferguson@pbjsa.com, Eastern, webhook URL). **Still waiting on Brittany (unchanged):** 5a44c051 group-by-client
+period scope, da3801ab other note kinds, fccf901f questionnaire editor vs named follow-ups (needs_input), I-95 recipes,
+Allison before/after Done, once-per-client Send-invoices-to. Her Shipped queue: 9c818fca, 5a44c051, da3801ab, 34627da1,
+2b067744, and the 10-15 set. **For Alex, no rush:** Saylor case-b2ce4441 malformed rows, 188 old stalled cases, chips
+task_7fcd25b4 (file-backend append race) and the year-rollover test probe (clock-shift-test-probe memory), remove the stale
+machine ELEVENLABS_API_KEY (setx) so voice-provision stops needing `env -u ELEVENLABS_API_KEY`. The 10-24 and 10-23
+paragraphs below carry the detail for everything above.
+
 **2026-10-24 (~14:00Z) - E-SIGN IS LIVE IN TEST MODE THROUGH eSignatures.io; READ THIS FIRST.** `main` = `19a8563d` (+ this
 handoff), live on https://app.pbjsatime.com, `/health` 200, env revision 2026-10-23T21:14:20.357Z, voice re-provisioned, only the
 primary worktree (+ Alex's chip-session worktree under .claude/worktrees - leave it). **Decision (Alex, 10-23):** SignWell put its
