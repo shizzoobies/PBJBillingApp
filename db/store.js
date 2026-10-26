@@ -2296,6 +2296,12 @@ function addMonths(dateString, months) {
 }
 
 function advanceChecklistFrequency(dateString, frequency) {
+  // Server only, so `addMonths` stays identical to the browser's copy: a date
+  // that cannot be parsed comes back from it unchanged, which stops the
+  // materializer's loop quietly - say so in the log.
+  if (typeof dateString !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
+    console.warn('[cadence] unparseable date', dateString)
+  }
   if (frequency === 'daily') {
     return addDays(dateString, 1)
   }

@@ -147,13 +147,24 @@ describe.each(COPIES)('addMonths keeps a month-end recipe in its month - %s', (_
     expect(advance('2027-01-31', 'annually')).toBe('2028-01-31')
   })
 
-  it('never produces a date outside the target month', () => {
+  it('lands every day of 2026-2028 on the expected day of the target month', () => {
+    // Worked out independently of addMonths (a month-length table, no Date), so
+    // the grid proves the rule and not just that the two copies agree.
+    const isLeap = (y) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0
+    const monthLength = (y, m) => [31, isLeap(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]
+    const pad = (n) => String(n).padStart(2, '0')
     for (const day of everyDay('2026-01-01', '2028-12-31')) {
-      const [year, month] = day.split('-').map(Number)
+      const [year, month, dayOfMonth] = day.split('-').map(Number)
       for (const months of [1, 3, 12]) {
         const index = year * 12 + (month - 1) + months
-        const expectedMonth = `${Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, '0')}`
-        expect(addMonths(day, months).slice(0, 7), `${day} + ${months}`).toBe(expectedMonth)
+        const targetYear = Math.floor(index / 12)
+        const targetMonth = (index % 12) + 1
+        const targetLength = monthLength(targetYear, targetMonth)
+        const expectedDay =
+          dayOfMonth === monthLength(year, month) ? targetLength : Math.min(dayOfMonth, targetLength)
+        expect(addMonths(day, months), `${day} + ${months}`).toBe(
+          `${targetYear}-${pad(targetMonth)}-${pad(expectedDay)}`,
+        )
       }
     }
   })

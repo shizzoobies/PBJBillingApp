@@ -19,8 +19,7 @@
  * re-implementation here would prove nothing about the code that ships.
  */
 // @ts-expect-error - plain-JS module without type declarations
-// The store's own month step, so the expected next cycle is the one it makes.
-import { addMonths, materializeRecurringChecklists } from '../../db/store.js'
+import { materializeRecurringChecklists } from '../../db/store.js'
 import { isChecklistSkipped } from '../../lib/checklist-skip.js'
 import { firmToday } from '../../lib/firm-time.js'
 import { describe, expect, it } from 'vitest'
@@ -41,7 +40,6 @@ function dateOffset(days: number): string {
   d.setDate(d.getDate() + days)
   return d.toISOString().slice(0, 10)
 }
-
 
 function makeTemplate(nextDueDate: string) {
   return {
@@ -119,12 +117,19 @@ function makeData(overrides: Record<string, unknown> = {}) {
 
 const forTemplate = (rows: Row[]) => rows.filter((row) => row.templateId === TEMPLATE_ID)
 
+// The two monthly-push blocks run on a fixed clock with fixed dates, both in
+// that clock's past. The pushed-out cycle is a month end on purpose: August
+// 31st steps to September 30th, the last day of September, not October 1st.
+const TODAY = '2026-10-10'
+const CYCLE_DUE = '2026-08-31'
+const NEXT_CYCLE_DUE = '2026-09-30'
+
 describe('a monthly occurrence pushed onto the next cycle', () => {
   // The worst case and the DEFAULT one: the dialog pre-fills exactly this date.
   // Both dates are in the past so a single materialize pass covers the cycle
   // that was pushed out of AND the cycle that was pushed onto.
-  const cycleDue = dateOffset(-40)
-  const nextCycleDue = addMonths(cycleDue, 1)
+  const cycleDue = CYCLE_DUE
+  const nextCycleDue = NEXT_CYCLE_DUE
 
   it('does not respawn the cycle it was pushed out of', () => {
     const result = materializeRecurringChecklists(
@@ -132,6 +137,7 @@ describe('a monthly occurrence pushed onto the next cycle', () => {
         checklistTemplates: [makeTemplate(cycleDue)],
         checklists: [pushedInstance(cycleDue, nextCycleDue)],
       }),
+      { today: TODAY },
     )
 
     const sameCycle = forTemplate(result.data.checklists).filter(
@@ -147,6 +153,7 @@ describe('a monthly occurrence pushed onto the next cycle', () => {
         checklistTemplates: [makeTemplate(cycleDue)],
         checklists: [pushedInstance(cycleDue, nextCycleDue)],
       }),
+      { today: TODAY },
     )
 
     // The next cycle's own due date is the very date the pushed task now sits
@@ -170,8 +177,9 @@ describe('a monthly occurrence pushed onto the next cycle', () => {
         checklistTemplates: [makeTemplate(cycleDue)],
         checklists: [pushedInstance(cycleDue, nextCycleDue)],
       }),
+      { today: TODAY },
     )
-    const second = materializeRecurringChecklists(first.data)
+    const second = materializeRecurringChecklists(first.data, { today: TODAY })
     expect(second.data.checklists).toHaveLength(first.data.checklists.length)
   })
 })
@@ -183,7 +191,8 @@ describe('a specific-months occurrence pushed across a month boundary', () => {
   // ahead of on the last evening of a month.
   const [year, month] = firmToday().split('-').map(Number)
   const dayInMonth = `${year}-${String(month).padStart(2, '0')}-01`
-  const nextMonth = addMonths(dayInMonth, 1)
+  const nextMonth =
+    month === 12 ? `${year + 1}-01-01` : `${year}-${String(month + 1).padStart(2, '0')}-01`
 
   const specificTemplate = {
     ...makeTemplate(''),
@@ -259,8 +268,8 @@ describe('what a push is NOT', () => {
  * refused outright.
  */
 describe('a SPLIT push — mixed done/open — does not respawn the cycle either', () => {
-  const cycleDue = dateOffset(-40)
-  const nextCycleDue = addMonths(cycleDue, 1)
+  const cycleDue = CYCLE_DUE
+  const nextCycleDue = NEXT_CYCLE_DUE
 
   function completedOriginal(over: Record<string, unknown> = {}) {
     return {
@@ -315,6 +324,7 @@ describe('a SPLIT push — mixed done/open — does not respawn the cycle either
         checklistTemplates: [makeTemplate(cycleDue)],
         checklists: [completedOriginal(), splitOpen()],
       }),
+      { today: TODAY },
     )
     const sameCycle = forTemplate(result.data.checklists).filter(
       (row: Row) => (row.cycleDueDate ?? row.dueDate) === cycleDue,
@@ -328,6 +338,7 @@ describe('a SPLIT push — mixed done/open — does not respawn the cycle either
         checklistTemplates: [makeTemplate(cycleDue)],
         checklists: [completedOriginal(), splitOpen()],
       }),
+      { today: TODAY },
     )
     const fresh = forTemplate(result.data.checklists).filter(
       (row: Row) => row.id !== 'cl-original' && row.id !== 'cl-split',
@@ -343,8 +354,9 @@ describe('a SPLIT push — mixed done/open — does not respawn the cycle either
         checklistTemplates: [makeTemplate(cycleDue)],
         checklists: [completedOriginal(), splitOpen()],
       }),
+      { today: TODAY },
     )
-    const second = materializeRecurringChecklists(first.data)
+    const second = materializeRecurringChecklists(first.data, { today: TODAY })
     expect(second.data.checklists).toHaveLength(first.data.checklists.length)
   })
 })
