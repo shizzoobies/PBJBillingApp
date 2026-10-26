@@ -57,7 +57,9 @@ const TEMPLATE = {
   clientId: 'client-clover',
   assigneeId: 'emp-jordan',
   frequency: 'monthly',
-  nextDueDate: '2027-01-31',
+  // Far future: a near-future date goes overdue within a year, and the load-time
+  // materializer then spawns a second "Monthly close" for the current month.
+  nextDueDate: '2099-01-31',
   active: true,
   viewerIds: [],
   editorIds: [],
