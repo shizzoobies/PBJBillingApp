@@ -13,6 +13,8 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-10-26 20:25Z - E-SIGN IS LIVE; the rotated ElevenLabs key is in the Worker.** Alex ran both `secrets-upload.mjs` calls and `restart.mjs` himself (the classifier blocks the upload AND the restart for the session): env revision `2026-10-26T20:20:12.411Z`, both restarts "env revision: matches", `/health` 200 on `055f51d`. `ESIGNATURES_TEST_MODE=false` is set, so every e-sign send is real and billed; featreq-56d39567 is Shipped with the live note and the per-client 1099 steps. **Still Alex's:** the SignWell webhook delete (command in the paragraph below) and confirming that no owner copy of a signed PDF reaches his inbox (eSignatures dashboard notification setting) BEFORE Brittany sends 1099 letters. Next session starts from the paragraph below plus this one.
+
 **2026-10-26 (~19:45Z) - THREE SHIPS + the e-sign render check; READ THIS FIRST.** `main` = `f0a9d0a3` (+ this handoff),
 live on https://app.pbjsatime.com, `/health` 200, voice re-provisioned (with the ROTATED ElevenLabs key from secrets/prod.env -
 it works), only the primary worktree (+ Alex's chip worktree), manifest 204,983 of 205,000 (17 bytes - TRIM FIRST). **Shipped:**
