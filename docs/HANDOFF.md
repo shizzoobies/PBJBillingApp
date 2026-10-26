@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-10-22. Everything below is committed on
+Written 2026-07-21, last updated 2026-10-26. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -13,7 +13,38 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
-**2026-10-26 - PICK UP HERE: e-sign through eSignatures.io is PROVEN end to end in test mode; three go-live steps remain.**
+**2026-10-26 (~19:45Z) - THREE SHIPS + the e-sign render check; READ THIS FIRST.** `main` = `f0a9d0a3` (+ this handoff),
+live on https://app.pbjsatime.com, `/health` 200, voice re-provisioned (with the ROTATED ElevenLabs key from secrets/prod.env -
+it works), only the primary worktree (+ Alex's chip worktree), manifest 204,983 of 205,000 (17 bytes - TRIM FIRST). **Shipped:**
+`80adca6e` file-backend append race (16 checklist writers in one file-queue slot + 8 concurrency tests; Postgres unaffected;
+noted on featreq-05e1610d); `513a312d` year-rollover probe (every boundary date already green; one fixture to 2099; probe recipe
+in memory clock-shift-test-probe); `f0a9d0a3` **month-end cadence fix** (REAL bug found by the probe: `addMonths` in db/store.js
+and src/lib/utils.ts rolled Jan 31 + 3 months to May 1, so the 28 quarterly "Reconciliations with Review" recipes on 2027-01-31
+would have put April's work in May; rule now: clamp the day, last day -> last day, the month never changes, Feb 28 counts as
+month-end = accepted trade-off; both copies byte-identical + a 2026-2028 parity grid; Opus review, 5 fixes; featreq-23b8a16c
+Shipped with a QUESTION to Brittany: should "Monthly Review" (Dobco template-4xspe43, Flourish template-8aff2bf1, already
+drifted to the 1st) be month-end -> approved data fix: Next due 2026-11-30 + re-date the open Nov task; seven recipes on the
+30th move to month-end from their next cycle - named on the ticket). **E-sign: render check PASSED** (the saved "Engagement
+letter" IS the 1099 addendum; built its Markdown with lib/letter-markdown.js, created a TEST contract via REST with
+`signature_request_delivery_methods: []` and a no-mailbox signer, read the sign page: list lines render with no backslash,
+one signature block; withdrawn). **BLOCKED FOR THE SESSION BY THE AUTO-MODE CLASSIFIER, Alex runs or approves:** (1)
+`node scripts/cf/secrets-upload.mjs "D:\PBJ Accounting Work\secrets\elevenlabs-rotate-2026-10-26.env"` then
+`node scripts/cf/restart.mjs --expect-revision=<printed>` - URGENT if the old ElevenLabs key was revoked at rotation: the
+Worker still holds the OLD key, so voice sessions in the app may be failing until this runs; (2) e-sign live:
+`node scripts/cf/secrets-upload.mjs "D:\PBJ Accounting Work\secrets\esignatures-live.env"` (file holds
+ESIGNATURES_TEST_MODE=false) + restart, then featreq-56d39567 -> Shipped (note in the 10-26 session scratchpad
+note-56d39567.txt, reword "starts in TEST mode" to live) and Alex confirms the 10-24 completion did NOT email him the signed PDF
+(owner-copy setting in the eSignatures dashboard; Brittany is about to send 1099s = tax documents); (3)
+`env $(grep '^SIGNWELL_API_KEY=' "/d/PBJ Accounting Work/secrets/signwell.env") node scripts/prod/signwell-webhook-register.mjs --delete 04cfe77e-6488-435a-a4ea-d99eda59ae42`.
+**1099s for Brittany:** nothing to build - per client: Billing tab -> Engagements card -> New amendment from the saved letter ->
+Send for signature; the Letters page bulk send is plain email + PDF (a bulk send-for-signature would be a new feature).
+**Decided today:** Saylor case-b2ce4441 is cosmetic only (every live stage done; stage 0 says "of 5") - one-row fix if Alex
+wants; the 187 old stalled cases (170 > 90 days, mostly Jan-May import copies, all steps done) are LEFT ALONE; stale user-level
+ELEVENLABS_API_KEY removed from the machine (Alex rotated the key; `env -u` no longer needed in a new shell).
+**Still waiting on Brittany:** 23b8a16c Monthly Review month-end?, 5a44c051, da3801ab, fccf901f (needs_input), I-95 recipes,
+Allison before/after Done, once-per-client Send-invoices-to. Leftover: ~45 non-checklist file-backend writers still use the
+split read/write pattern (chip-worthy, CI-only risk).
+**Earlier (2026-10-26 morning):** e-sign through eSignatures.io is PROVEN end to end in test mode; three go-live steps remain.
 `main` = `05a6603d` (+ this handoff), live on https://app.pbjsatime.com, `/health` 200, env revision 2026-10-23T21:14:20.357Z, clean
 tree, only the primary worktree (+ Alex's chip-session worktree under .claude/worktrees - leave it), nothing in flight, no
 subagents. **Proven since 10-24:** request `sigreq-c8f4e0a9` (Test client, the Attestation letter) went sent -> viewed ->
