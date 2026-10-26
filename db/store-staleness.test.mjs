@@ -11804,13 +11804,14 @@ describe('checklist writes share one file-queue slot (file backend)', () => {
     expect(onDisk.items.map((item) => item.label)).toContain('Late step')
     // ...so the stage is NOT finished, and nothing claims a next stage the file lacks.
     expect(ticked.spawned).toBeNull()
-    expect(await nextStages()).toHaveLength(ticked.spawned ? 1 : 0)
+    expect(await nextStages()).toHaveLength(0)
   })
 
   it('a stage finished while a step is added to the recipe opens its next stage, and keeps it', async () => {
-    const [ticked] = await Promise.all([
-      store.toggleChecklistItem('cl-race', 'item-a'),
+    // The recipe append is called FIRST, so its read is queued ahead of the tick.
+    const [, ticked] = await Promise.all([
       store.appendChecklistTemplateStageItems('tmpl-race', 'st-1', ['Sign the letter']),
+      store.toggleChecklistItem('cl-race', 'item-a'),
     ])
 
     expect(ticked.spawned).not.toBeNull()
