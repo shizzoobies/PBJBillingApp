@@ -28,6 +28,29 @@ export type QuestionnaireQuestion = {
   prospect?: keyof ProposalProspect
   /** The calculator input this count fills. */
   inputKey?: string
+  /** One of her own follow-up questions (featreq-fccf901f). */
+  custom?: boolean
+  /** A follow-up she marked required: needed on the link whenever it is asked. */
+  required?: boolean
+  /** Asked only when that question was answered this way (`any` = answered at all). */
+  when?: QuestionnaireCondition
+}
+
+export type QuestionnaireCondition = { questionId: string; answer: string }
+
+export type CustomQuestionType = 'yes_no' | 'short_text' | 'long_text' | 'choice'
+
+/** One of her follow-up questions as Settings stores it (featreq-fccf901f). */
+export type QuestionnaireCustomQuestion = {
+  id: string
+  label: string
+  help?: string
+  type: CustomQuestionType
+  /** Choice only. */
+  options?: string[]
+  required: boolean
+  active: boolean
+  when?: QuestionnaireCondition
 }
 
 export type QuestionnaireSection = {
@@ -45,6 +68,30 @@ export declare const QUESTIONNAIRE_EXPIRY_DAYS: number
 export declare function buildQuestionnaire(
   catalog: Pick<ProposalPricing, 'inputs' | 'services'> | null | undefined,
 ): Questionnaire
+export declare const CUSTOM_QUESTION_TYPES: readonly CustomQuestionType[]
+export declare const CUSTOM_QUESTION_SECTION_ID: string
+export declare const CUSTOM_QUESTION_SECTION_TITLE: string
+export declare const ANY_ANSWER: 'any'
+export declare function newCustomQuestionId(): string
+export declare function cleanCustomQuestions(raw: unknown): QuestionnaireCustomQuestion[]
+export declare function withCustomQuestions(
+  questionnaire: Questionnaire,
+  customQuestions: unknown,
+): Questionnaire
+export declare function questionConditionMet(
+  question: Pick<QuestionnaireQuestion, 'id' | 'when'>,
+  questions: QuestionnaireQuestion[],
+  answers: Record<string, unknown> | null | undefined,
+): boolean
+export declare function customConditionAnswers(
+  questionId: string,
+  appQuestions: QuestionnaireQuestion[],
+  customQuestions: unknown,
+): Array<{ value: string; label: string }>
+export declare function customQuestionProblems(
+  customQuestions: unknown,
+  appQuestions: QuestionnaireQuestion[],
+): string[]
 export declare function flattenQuestions(
   questionnaire: Questionnaire | null | undefined,
 ): QuestionnaireQuestion[]
