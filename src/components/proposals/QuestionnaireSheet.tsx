@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { saveQuestionnaireAnswersRequest, submitQuestionnaireRequest } from '../../lib/api'
+import { flattenQuestions, questionConditionMet } from '../../../lib/proposal-questionnaire.js'
 import {
   ApiError,
   type ProposalQuestionnaire,
@@ -80,6 +81,12 @@ export function QuestionnaireSheet({
       setSubmitting(false)
     }
   }
+
+  // Her follow-ups (featreq-fccf901f) appear only once the answer they depend on
+  // is given, here as on the link; the server drops an answer to one that is not.
+  const allQuestions = flattenQuestions(questionnaire.questions)
+  const asked = (question: QuestionnaireQuestion) =>
+    questionConditionMet(question, allQuestions, values)
 
   const field = (question: QuestionnaireQuestion) => {
     const value = values[question.id]
@@ -179,12 +186,16 @@ export function QuestionnaireSheet({
 
       {/* A blur anywhere in the sheet saves what is on screen. */}
       <div onBlur={persist}>
-        {questionnaire.questions.sections.map((section) => (
-          <div key={section.id} className="questionnaire-section">
-            <h4>{section.title}</h4>
-            <div className="form-grid two-col">{section.questions.map(field)}</div>
-          </div>
-        ))}
+        {questionnaire.questions.sections.map((section) => {
+          const shown = section.questions.filter(asked)
+          if (shown.length === 0) return null
+          return (
+            <div key={section.id} className="questionnaire-section">
+              <h4>{section.title}</h4>
+              <div className="form-grid two-col">{shown.map(field)}</div>
+            </div>
+          )
+        })}
       </div>
 
       {error ? (

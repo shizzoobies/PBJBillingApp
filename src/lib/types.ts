@@ -1,5 +1,6 @@
 import type { PlanCadence } from '../../lib/plan-cadence.js'
 import type { RateHistoryEntry } from '../../lib/rate-history.js'
+import type { QuestionnaireCustomQuestion } from '../../lib/proposal-questionnaire.js'
 import type {
   HoursByRole,
   PricedLine,
@@ -493,6 +494,12 @@ export type QuestionnaireQuestion = {
   options?: Array<{ value: string; label: string }>
   /** Only asked on a call - a prospect cannot know it. */
   callOnly?: boolean
+  /** One of the owner's own follow-up questions (featreq-fccf901f). */
+  custom?: boolean
+  /** A follow-up marked required: needed on the link whenever it is asked. */
+  required?: boolean
+  /** Asked only when that question was answered this way (`any` = answered at all). */
+  when?: { questionId: string; answer: string }
 }
 
 export type QuestionnaireSection = {
@@ -2034,6 +2041,12 @@ export type FirmSettings = {
    * The server always answers with one — the seed when nothing is saved.
    */
   proposalPricing?: ProposalPricing
+  /**
+   * The owner's own follow-up questionnaire questions (featreq-fccf901f), frozen
+   * onto each questionnaire when it is made. The server always answers with a
+   * list (empty when none).
+   */
+  questionnaireCustomQuestions?: QuestionnaireCustomQuestion[]
   /**
    * Color used for text rendered on top of the brand color (sidebar, etc).
    * Defaults to white so any brand color picked still has legible text.

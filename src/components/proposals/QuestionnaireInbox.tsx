@@ -142,9 +142,11 @@ export function QuestionnaireAnswersPanel({ questionnaire }: { questionnaire: Pr
           const answer = questionnaire.answers[question.id]
           if (answer === undefined || answer === '') return null
           const labels = new Map((question.options ?? []).map((option) => [option.value, option.label]))
+          // A one-pick answer reads as its option's words too (a follow-up's
+          // "yes" is "Yes"); the app's own choices say the same either way.
           const text = Array.isArray(answer)
             ? answer.map((entry) => labels.get(entry) ?? entry).join(', ')
-            : String(answer)
+            : (labels.get(String(answer)) ?? String(answer))
           return { id: question.id, label: question.label, text }
         })
         .filter((row): row is { id: string; label: string; text: string } => row !== null),

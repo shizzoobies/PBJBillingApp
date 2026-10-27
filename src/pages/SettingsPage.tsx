@@ -4,6 +4,7 @@ import { useAppContext } from '../AppContext'
 import { ChangePasswordCard } from '../components/ChangePasswordCard'
 import { EmailNotificationPrefsSection } from '../components/EmailNotificationPrefs'
 import { EngagementSectionsSection } from '../components/EngagementSectionsSection'
+import { QuestionnaireQuestionsSection } from '../components/QuestionnaireQuestionsSection'
 import {
   CollapsibleSection,
   SavingNumberInput,
@@ -140,6 +141,7 @@ export function SettingsPage() {
       <BusinessSection settings={settings} onCommit={commit} />
       <ClientDefaultsSection settings={settings} onCommit={commit} />
       <ProposalPricingSection settings={settings} onCommit={commit} />
+      <QuestionnaireQuestionsSection settings={settings} onCommit={commit} />
       <EngagementSectionsSection pricing={settings.proposalPricing ?? defaultProposalPricing()} />
       <AuthenticationSection />
       <EmailNotificationPrefsSection />
