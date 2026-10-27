@@ -23,12 +23,12 @@ import {
 vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
 vi.mock('../lib/api', () => ({
   listClientNotes: (...args: unknown[]) => listNotes(...args),
-  addClientNote: vi.fn(),
-  deleteClientNote: vi.fn(),
+  addClientNote: (...args: unknown[]) => addNote(...args),
+  deleteClientNote: (...args: unknown[]) => deleteNote(...args),
   updateClientNoteRequest: (...args: unknown[]) => updateNote(...args),
   listClientPendingNotesRequest: (...args: unknown[]) => listPending(...args),
-  addClientPendingNoteRequest: vi.fn(),
-  deleteClientPendingNoteRequest: vi.fn(),
+  addClientPendingNoteRequest: (...args: unknown[]) => addPending(...args),
+  deleteClientPendingNoteRequest: (...args: unknown[]) => deletePending(...args),
   updateClientPendingNoteRequest: (...args: unknown[]) => updatePending(...args),
 }))
 
@@ -36,6 +36,10 @@ let listNotes = vi.fn()
 let updateNote = vi.fn()
 let listPending = vi.fn()
 let updatePending = vi.fn()
+let addNote = vi.fn()
+let deleteNote = vi.fn()
+let addPending = vi.fn()
+let deletePending = vi.fn()
 let contextValue: AppContextValue
 
 const template = {
@@ -76,15 +80,30 @@ const pendingNote = (over: Partial<ClientPendingNote> = {}): ClientPendingNote =
   ...over,
 })
 
-function renderPanel({ ownerMode = false, currentUserId = 'emp-lisa', previewMode = false } = {}) {
+const NAMES: Record<string, string> = { 'emp-lisa': 'Lisa', 'emp-patrice': 'Brittany' }
+
+/**
+ * The panel reads who is looking from the app context. `currentUserId` and
+ * `ownerMode` here are the EFFECTIVE identity (in preview: the previewed person,
+ * never an owner); `sessionUserId` is who is actually signed in.
+ */
+function renderPanel({
+  ownerMode = false,
+  currentUserId = 'emp-lisa',
+  previewMode = false,
+  sessionUserId = currentUserId,
+}: { ownerMode?: boolean; currentUserId?: string; previewMode?: boolean; sessionUserId?: string } = {}) {
   contextValue = {
     data: { checklistTemplates: [template], checklists: [] } as unknown as AppData,
     dataRefreshCount: 0,
     previewMode,
+    ownerMode,
+    sessionUser: { id: sessionUserId, name: NAMES[sessionUserId], role: previewMode || ownerMode ? 'owner' : 'employee' },
+    effectiveUser: { id: currentUserId, name: NAMES[currentUserId], role: ownerMode ? 'owner' : 'employee' },
   } as unknown as AppContextValue
   return render(
     <MemoryRouter>
-      <ClientNotesPanel clientId="c1" ownerMode={ownerMode} currentUserId={currentUserId} />
+      <ClientNotesPanel clientId="c1" />
     </MemoryRouter>,
   )
 }
@@ -113,6 +132,10 @@ beforeEach(() => {
   updatePending = vi.fn(async (_clientId: string, noteId: string, body: string) =>
     pendingNote({ id: noteId, body, editedAt: '2026-10-23T14:00:00.000Z' }),
   )
+  addNote = vi.fn(async (_clientId: string, body: string) => clientNote({ id: 'cnote-new', body }))
+  deleteNote = vi.fn(async () => ({ ok: true }))
+  addPending = vi.fn(async () => pendingNote({ id: 'pnote-new' }))
+  deletePending = vi.fn(async () => ({ ok: true }))
 })
 
 afterEach(() => cleanup())
@@ -273,5 +296,99 @@ describe('pending notes', () => {
     fireEvent.click(within(own).getByRole('button', { name: 'Cancel' }))
     expect(await screen.findByText('New hire startng')).toBeInTheDocument()
     expect(updatePending).not.toHaveBeenCalled()
+  })
+})
+
+describe('an owner previewing a teammate (send-back: "I went in as Lisa and was not able to edit her note")', () => {
+  // Brittany (emp-patrice, the owner) is signed in and previewing Lisa. The box
+  // must show what Lisa sees - Edit and Delete on Lisa's notes - switched off,
+  // with the reason. Every caller once handed the panel the SESSION id next to
+  // the effective ownerMode, so this row showed no buttons at all.
+  const previewLisa = () =>
+    renderPanel({ ownerMode: false, currentUserId: 'emp-lisa', sessionUserId: 'emp-patrice', previewMode: true })
+
+  it('shows Edit on Lisa’s own note, switched off, saying only Lisa can edit it', async () => {
+    previewLisa()
+    const lisas = await rowOf('Teh bank changed')
+    const edit = within(lisas).getByRole('button', { name: 'Edit' })
+    expect(edit).toBeDisabled()
+    expect(edit).toHaveAttribute('title', 'Preview: only Lisa can edit this note')
+    fireEvent.click(edit)
+    expect(screen.queryByRole('textbox', { name: 'Edit note' })).toBeNull()
+    expect(updateNote).not.toHaveBeenCalled()
+  })
+
+  it('shows no Edit and no Delete on Brittany’s own note - Lisa would see neither there', async () => {
+    previewLisa()
+    const hers = await rowOf('Her note')
+    expect(within(hers).queryByRole('button', { name: 'Edit' })).toBeNull()
+    expect(within(hers).queryByRole('button', { name: 'Delete' })).toBeNull()
+  })
+
+  it('Lisa’s Delete is shown but off and sends nothing, and so is her pending note’s Edit and Delete', async () => {
+    previewLisa()
+    const del = within(await rowOf('Teh bank changed')).getByRole('button', { name: 'Delete' })
+    expect(del).toBeDisabled()
+    // Not "only Lisa": the owner may delete anyone's note.
+    expect(del).toHaveAttribute('title', 'Preview: buttons are off')
+    fireEvent.click(del)
+    const pendingRow = await rowOf('New hire startng')
+    expect(within(pendingRow).getByRole('button', { name: 'Edit' })).toBeDisabled()
+    const pendingDel = within(pendingRow).getByRole('button', { name: 'Delete' })
+    expect(pendingDel).toBeDisabled()
+    expect(pendingDel).toHaveAttribute('title', 'Preview: buttons are off')
+    fireEvent.click(pendingDel)
+    expect(within(await rowOf('Her pending')).queryByRole('button', { name: 'Edit' })).toBeNull()
+    expect(deleteNote).not.toHaveBeenCalled()
+    expect(deletePending).not.toHaveBeenCalled()
+    expect(await screen.findByText('Teh bank changed')).toBeInTheDocument()
+  })
+
+  it('a repeating note’s Stop repeating is off too, and its tooltip does not say "delete"', async () => {
+    listPending = vi.fn(async () => [pendingNote({ id: 'pnote-rep', body: 'Every month', repeats: true })])
+    previewLisa()
+    const stop = within(await rowOf('Every month')).getByRole('button', { name: 'Stop repeating' })
+    expect(stop).toBeDisabled()
+    expect(stop.getAttribute('title')).toBe('Preview: buttons are off')
+    fireEvent.click(stop)
+    expect(deletePending).not.toHaveBeenCalled()
+  })
+
+  it('says in words that this is a preview, and Add note is off and sends nothing', async () => {
+    previewLisa()
+    await rowOf('Teh bank changed')
+    expect(
+      screen.getByText(
+        'Preview: these are the notes and buttons Lisa sees. The buttons are off here; only Lisa can edit their own notes.',
+      ),
+    ).toBeInTheDocument()
+    fireEvent.change(screen.getByPlaceholderText(/^Jot a note for this client/), { target: { value: 'From the preview' } })
+    const add = screen.getByRole('button', { name: 'Add note' })
+    expect(add).toBeDisabled()
+    fireEvent.click(add)
+    expect(addNote).not.toHaveBeenCalled()
+    // The pending note's Add (Lisa may add to her payroll checklist) is off too.
+    fireEvent.change(screen.getByRole('textbox', { name: 'Note for an upcoming checklist' }), {
+      target: { value: 'Pending from the preview' },
+    })
+    const addPendingButton = screen.getByRole('button', { name: 'Add' })
+    expect(addPendingButton).toBeDisabled()
+    fireEvent.click(addPendingButton)
+    expect(addPending).not.toHaveBeenCalled()
+  })
+
+  it('signed in as Lisa herself (no preview), Edit is on and saves', async () => {
+    renderPanel({ ownerMode: false, currentUserId: 'emp-lisa' })
+    const own = await rowOf('Teh bank changed')
+    const edit = within(own).getByRole('button', { name: 'Edit' })
+    expect(edit).toBeEnabled()
+    expect(edit).not.toHaveAttribute('title')
+    expect(screen.queryByText(/^Preview:/)).toBeNull()
+    fireEvent.click(edit)
+    fireEvent.change(within(own).getByRole('textbox', { name: 'Edit note' }), {
+      target: { value: 'The bank changed' },
+    })
+    fireEvent.click(within(own).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(updateNote).toHaveBeenCalledWith('c1', 'cnote-lisa', 'The bank changed'))
   })
 })

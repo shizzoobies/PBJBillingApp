@@ -41,7 +41,7 @@ const pendingNote = (over: Partial<ClientPendingNote> = {}): ClientPendingNote =
 function renderSection() {
   return render(
     <MemoryRouter>
-      <ClientNotesSection clientId="c1" ownerMode currentUserId="emp-owner" />
+      <ClientNotesSection clientId="c1" />
     </MemoryRouter>,
   )
 }
@@ -53,6 +53,8 @@ beforeEach(() => {
   contextValue = {
     data: { checklistTemplates: [], checklists: [] } as unknown as AppData,
     dataRefreshCount: 0,
+    ownerMode: true,
+    effectiveUser: { id: 'emp-owner', name: 'Owner', role: 'owner' },
   } as unknown as AppContextValue
 })
 
@@ -115,7 +117,7 @@ describe('the pending-notes count pill', () => {
     contextValue = { ...contextValue, dataRefreshCount: 1 } as unknown as AppContextValue
     view.rerender(
       <MemoryRouter>
-        <ClientNotesSection clientId="c1" ownerMode currentUserId="emp-owner" />
+        <ClientNotesSection clientId="c1" />
       </MemoryRouter>,
     )
     expect(await screen.findByText('1 waiting for a checklist')).toBeInTheDocument()

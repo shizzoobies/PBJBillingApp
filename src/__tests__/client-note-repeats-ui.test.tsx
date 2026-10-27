@@ -50,10 +50,12 @@ function renderPanel({
   contextValue = {
     data: { checklistTemplates: [template], checklists: [] as Checklist[] } as unknown as AppData,
     dataRefreshCount: 0,
+    ownerMode: ownerMode,
+    effectiveUser: { id: currentUserId, role: ownerMode ? 'owner' : 'employee' },
   } as unknown as AppContextValue
   return render(
     <MemoryRouter>
-      <ClientNotesPanel clientId="c1" ownerMode={ownerMode} currentUserId={currentUserId} />
+      <ClientNotesPanel clientId="c1" />
     </MemoryRouter>,
   )
 }

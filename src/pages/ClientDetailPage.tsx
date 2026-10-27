@@ -162,15 +162,7 @@ import { startFirstRecipeStep } from '../lib/recipeFirstStep'
  * the box fetched and reported up would vanish exactly when the section is
  * folded away. The box is handed this state rather than fetching its own.
  */
-export function ClientNotesSection({
-  clientId,
-  ownerMode,
-  currentUserId,
-}: {
-  clientId: string
-  ownerMode: boolean
-  currentUserId: string
-}) {
+export function ClientNotesSection({ clientId }: { clientId: string }) {
   const pendingNotesState = useClientPendingNotes(clientId)
   const waiting = pendingNoteCountOf(pendingNotesState.notes)
   return (
@@ -184,12 +176,7 @@ export function ClientNotesSection({
         ) : undefined
       }
     >
-      <ClientNotesPanel
-        clientId={clientId}
-        ownerMode={ownerMode}
-        currentUserId={currentUserId}
-        pendingState={pendingNotesState}
-      />
+      <ClientNotesPanel clientId={clientId} pendingState={pendingNotesState} />
     </CollapsibleSection>
   )
 }
@@ -201,7 +188,7 @@ export function ClientNotesSection({
 export function ClientDetailPage() {
   const { clientId } = useParams<{ clientId: string }>()
   const navigate = useNavigate()
-  const { data, ownerMode, sessionUser, updateClient, deleteClient, setClientLifecycle, dataRefreshCount } =
+  const { data, ownerMode, updateClient, deleteClient, setClientLifecycle, dataRefreshCount } =
     useAppContext()
   const [assignedTeamError, setAssignedTeamError] = useState('')
   // Whether the shared "Track time" modal is open for this client.
@@ -520,11 +507,7 @@ export function ClientDetailPage() {
         <ClientStatementsPanel clientId={client.id} />
       </CollapsibleSection>
 
-      <ClientNotesSection
-        clientId={client.id}
-        ownerMode={ownerMode}
-        currentUserId={sessionUser.id}
-      />
+      <ClientNotesSection clientId={client.id} />
       </div>
       ) : null}
 

@@ -63,10 +63,12 @@ function renderPanel({
   contextValue = {
     data: { checklistTemplates: templates, checklists } as unknown as AppData,
     dataRefreshCount: 0,
+    ownerMode: ownerMode,
+    effectiveUser: { id: currentUserId, role: ownerMode ? 'owner' : 'employee' },
   } as unknown as AppContextValue
   return render(
     <MemoryRouter>
-      <ClientNotesPanel clientId={clientId} ownerMode={ownerMode} currentUserId={currentUserId} />
+      <ClientNotesPanel clientId={clientId} />
     </MemoryRouter>,
   )
 }
@@ -99,7 +101,7 @@ describe('refetching the pending notes', () => {
     contextValue = { ...contextValue, ...over } as AppContextValue
     view.rerender(
       <MemoryRouter>
-        <ClientNotesPanel clientId="c1" ownerMode currentUserId="emp-owner" />
+        <ClientNotesPanel clientId="c1" />
       </MemoryRouter>,
     )
   }
@@ -299,10 +301,12 @@ describe('the "for an upcoming checklist" block', () => {
     contextValue = {
       data: { checklistTemplates: [payrollTemplate()], checklists: [] } as unknown as AppData,
       dataRefreshCount: 0,
+      ownerMode: true,
+      effectiveUser: { id: 'emp-owner', role: 'owner' },
     } as unknown as AppContextValue
     rerender(
       <MemoryRouter>
-        <ClientNotesPanel clientId="c1" ownerMode currentUserId="emp-owner" />
+        <ClientNotesPanel clientId="c1" />
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getAllByRole('button', { name: 'Delete' })).toHaveLength(2))
@@ -338,7 +342,7 @@ describe('accessibility, preview mode, the 100-note cap and a stale load error',
     cleanup()
     render(
       <MemoryRouter>
-        <ClientNotesPanel clientId="c1" ownerMode currentUserId="emp-owner" />
+        <ClientNotesPanel clientId="c1" />
       </MemoryRouter>,
     )
     await waitFor(() => expect(listPending).toHaveBeenCalled())
@@ -382,7 +386,7 @@ describe('accessibility, preview mode, the 100-note cap and a stale load error',
     listPending = vi.fn(() => new Promise<ClientPendingNote[]>(() => {}))
     view.rerender(
       <MemoryRouter>
-        <ClientNotesPanel clientId="c2" ownerMode currentUserId="emp-owner" />
+        <ClientNotesPanel clientId="c2" />
       </MemoryRouter>,
     )
     await waitFor(() => expect(listPending).toHaveBeenCalled())

@@ -23,7 +23,7 @@ export function ClientChecklistModal({
   client: Client
   onClose: () => void
 }) {
-  const { data, ownerMode, sessionUser } = useAppContext()
+  const { data } = useAppContext()
 
   // Close on Escape.
   useEffect(() => {
@@ -69,11 +69,7 @@ export function ClientChecklistModal({
 
           <section className="client-checklist-modal-section">
             <h3 className="mini-heading">Notes</h3>
-            <ClientNotesPanel
-              clientId={client.id}
-              ownerMode={ownerMode}
-              currentUserId={sessionUser.id}
-            />
+            <ClientNotesPanel clientId={client.id} />
           </section>
         </div>
       </div>

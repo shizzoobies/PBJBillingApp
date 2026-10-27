@@ -40,23 +40,34 @@ type EditTarget = { kind: 'note' | 'pending'; id: string }
  * body through `renderRichNote` (safe markdown subset, no HTML injection).
  *
  * Shared between the client detail page and the client-list checklist modal.
+ *
+ * WHO is looking comes from the app context, never from the caller: the
+ * EFFECTIVE user and role, so an owner previewing a teammate sees exactly the
+ * controls that teammate sees. The callers once passed the session (owner) id
+ * next to the effective `ownerMode`, and an owner previewing Lisa saw no Edit
+ * and no Delete on Lisa's own notes (featreq-da3801ab send-back). In preview
+ * every control that would write stays visible but switched off - the server
+ * refuses preview writes anyway, and a preview never acts as someone else.
  */
 export function ClientNotesPanel({
   clientId,
-  ownerMode,
-  currentUserId,
   pendingState,
 }: {
   clientId: string
-  ownerMode: boolean
-  currentUserId: string
   /** The client's pending notes, when the page owns them (the client page
    *  keeps them so the "N waiting for a checklist" pill in the section header
    *  shows even while this box is collapsed and unmounted). Without it the box
    *  loads its own. */
   pendingState?: ClientPendingNotesState
 }) {
-  const { data, previewMode } = useAppContext()
+  const { data, previewMode, ownerMode, effectiveUser } = useAppContext()
+  const currentUserId = effectiveUser?.id ?? ''
+  const previewName = effectiveUser?.name || 'the person you are previewing'
+  // Tooltips on the switched-off controls while previewing. Edit names the
+  // writer (only they may edit); Delete and Stop repeating do not, since the
+  // owner may remove anyone's note.
+  const previewEditTitle = `Preview: only ${previewName} can edit this note`
+  const previewOffTitle = 'Preview: buttons are off'
   const [notes, setNotes] = useState<ClientNote[]>([])
   const [draft, setDraft] = useState('')
   const [loading, setLoading] = useState(true)
@@ -146,6 +157,7 @@ export function ClientNotesPanel({
   const canAddSelected = canAddForTemplate(selectedTemplate)
 
   const submitPendingNote = async () => {
+    if (previewMode) return
     const body = pendingBody.trim()
     if (!body || !selectedTemplate || !canAddSelected || pendingBusy) return
     setPendingBusy(true)
@@ -174,6 +186,7 @@ export function ClientNotesPanel({
   }
 
   const removePendingNote = async (noteId: string) => {
+    if (previewMode) return
     setPendingActionError('')
     try {
       await deleteClientPendingNoteRequest(clientId, noteId)
@@ -184,6 +197,7 @@ export function ClientNotesPanel({
   }
 
   const submit = async () => {
+    if (previewMode) return
     const body = draft.trim()
     if (!body || busy) return
     setBusy(true)
@@ -200,6 +214,7 @@ export function ClientNotesPanel({
   }
 
   const remove = async (noteId: string) => {
+    if (previewMode) return
     setError('')
     try {
       await deleteClientNote(clientId, noteId)
@@ -231,6 +246,7 @@ export function ClientNotesPanel({
   }
 
   const saveEdit = async () => {
+    if (previewMode) return
     const body = editDraft.trim()
     if (!editing || !body || editBusy) return
     setEditBusy(true)
@@ -306,7 +322,7 @@ export function ClientNotesPanel({
       type="button"
       className="link-button"
       disabled={Boolean(previewMode) || editBusy}
-      title={previewMode ? 'Disabled in preview mode' : undefined}
+      title={previewMode ? previewEditTitle : undefined}
       onClick={() => startEdit(kind, note)}
     >
       Edit
@@ -465,6 +481,8 @@ export function ClientNotesPanel({
                       <button
                         type="button"
                         className="link-button"
+                        disabled={Boolean(previewMode)}
+                        title={previewMode ? previewOffTitle : undefined}
                         onClick={() => void removePendingNote(note.id)}
                       >
                         {note.repeats ? 'Stop repeating' : 'Delete'}
@@ -489,7 +507,8 @@ export function ClientNotesPanel({
           <button
             type="button"
             className="primary-action"
-            disabled={busy || !draft.trim()}
+            disabled={Boolean(previewMode) || busy || !draft.trim()}
+            title={previewMode ? 'Disabled in preview mode' : undefined}
             onClick={() => void submit()}
           >
             {busy ? 'Adding…' : 'Add note'}
@@ -498,6 +517,13 @@ export function ClientNotesPanel({
       </div>
 
       {error ? <p className="auth-error">{error}</p> : null}
+
+      {previewMode ? (
+        <p className="field-helper">
+          Preview: these are the notes and buttons {previewName} sees. The buttons are off here;
+          only {previewName} can edit their own notes.
+        </p>
+      ) : null}
 
       {loading ? (
         <p className="muted-text">Loading notes…</p>
@@ -529,6 +555,8 @@ export function ClientNotesPanel({
                   <button
                     type="button"
                     className="link-button"
+                    disabled={Boolean(previewMode)}
+                    title={previewMode ? previewOffTitle : undefined}
                     onClick={() => void remove(note.id)}
                   >
                     Delete

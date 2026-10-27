@@ -965,7 +965,7 @@ function ClientTable({
   plans: SubscriptionPlan[]
   query?: string
 }) {
-  const { sessionUser, data, applyTemplateToClient, setClientLifecycle } = useAppContext()
+  const { data, applyTemplateToClient, setClientLifecycle } = useAppContext()
   const [modalClient, setModalClient] = useState<Client | null>(null)
   const [notesClient, setNotesClient] = useState<Client | null>(null)
   // Client whose "Track time" modal is open (start a timer without leaving the list).
@@ -1254,11 +1254,7 @@ function ClientTable({
       ) : null}
       {notesClient ? (
         <AddModal title={`Notes · ${notesClient.name}`} onClose={() => setNotesClient(null)}>
-          <ClientNotesPanel
-            clientId={notesClient.id}
-            ownerMode={ownerMode}
-            currentUserId={sessionUser.id}
-          />
+          <ClientNotesPanel clientId={notesClient.id} />
         </AddModal>
       ) : null}
       {statementsClient ? (
