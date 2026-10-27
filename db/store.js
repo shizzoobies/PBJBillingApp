@@ -159,6 +159,7 @@ import {
   unhandledAmountMismatches,
 } from '../lib/payment-amount-mismatch.js'
 import { editChangesWhatClientSees, totalsDiffer } from '../lib/invoice-sent-change.js'
+import { FINISHED_SIGNATURE_STATUSES } from '../lib/signature-statuses.js'
 import {
   anchorDayFromRange,
   anchorDayOf,
@@ -1722,8 +1723,20 @@ export const SIGNATURE_STATUS_ORDER = Object.freeze([
 ])
 /** The statuses in which a request is still out with the signer (one active request per engagement). */
 export const ACTIVE_SIGNATURE_STATUSES = Object.freeze(['sent', 'viewed', 'signed_partial'])
-/** Statuses a request never leaves. */
-export const FINISHED_SIGNATURE_STATUSES = Object.freeze(['completed', 'declined', 'expired', 'canceled', 'withdrawn'])
+/** Statuses a request never leaves (lib/signature-statuses.js, shared with the webhooks and the letter page). */
+export { FINISHED_SIGNATURE_STATUSES }
+/**
+ * When an update's `status` ($2) applies (updateSignatureRequest's Postgres statement uses it twice: for the
+ * status and for completed_at): not older than the newest event unless finished, never from a finished
+ * status, in-progress only forward, bounced/error recoverable.
+ */
+const SIGNATURE_STATUS_APPLIES = `($2::text is not null
+               and ($7::timestamptz is null or last_event_at is null or $7::timestamptz >= last_event_at
+                    or $2::text = any($9::text[]))
+               and status <> all($9::text[])
+               and ($2::text <> all($10::text[])
+                    or status = any($11::text[])
+                    or array_position($10::text[], $2::text) >= array_position($10::text[], status)))`
 /** The in-progress statuses, in the order they are reached (never backward among themselves). */
 const PROGRESS_SIGNATURE_STATUSES = Object.freeze(['draft', 'sent', 'viewed', 'signed_partial'])
 /** Statuses a re-fetched in-progress status may replace. */
@@ -28954,18 +28967,13 @@ export class AppDataStore {
     if (this.pool) {
       const { rows } = await this.pool.query(
         `update signature_requests set
-            status = case
-              when $2::text is not null
-               and ($7::timestamptz is null or last_event_at is null or $7::timestamptz >= last_event_at
-                    or $2::text = any($9::text[]))
-               and status <> all($9::text[])
-               and ($2::text <> all($10::text[])
-                    or status = any($11::text[])
-                    or array_position($10::text[], $2::text) >= array_position($10::text[], status))
-              then $2::text else status end,
+            status = case when ${SIGNATURE_STATUS_APPLIES} then $2::text else status end,
             recipients = coalesce($3::jsonb, recipients),
             signed_document_id = coalesce($4::text, signed_document_id),
-            completed_at = coalesce($5::timestamptz, completed_at),
+            completed_at = case
+              when $5::timestamptz is not null
+               and (status = 'completed' or ($2::text = 'completed' and ${SIGNATURE_STATUS_APPLIES}))
+              then $5::timestamptz else completed_at end,
             last_event_at = case when $7::timestamptz is null then last_event_at
                                  else greatest(coalesce(last_event_at, $7::timestamptz), $7::timestamptz) end,
             last_error = case when $6::boolean then $8::text else last_error end,
@@ -29012,7 +29020,8 @@ export class AppDataStore {
       if (setsFinishing) row.finishingAt = finishingAt
       if (patch.recipients !== undefined) row.recipients = cleanSignatureRecipients(patch.recipients)
       if (signedDocumentId) row.signedDocumentId = signedDocumentId
-      if (completedAt) row.completedAt = completedAt
+      // Only a request that IS completed (now, or already) takes a completion time: a refused move does not.
+      if (completedAt && row.status === 'completed') row.completedAt = completedAt
       if (lastEventAt && (!row.lastEventAt || Date.parse(lastEventAt) > Date.parse(row.lastEventAt))) {
         row.lastEventAt = lastEventAt
       }

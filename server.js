@@ -2129,14 +2129,23 @@ function esignaturesFinishDeps(request) {
  * Withdraw the open e-signature requests of letters that no longer stand (`[engagementId, reason]` pairs:
  * reason 'void', 'signed' or 'superseded'): the void, Mark as signed and the superseding flip call it after
  * their own change is saved. Best-effort through each request's OWN provider; never throws, and a provider
- * failure never undoes the void or the signing (lib/engagement-esign.js `withdrawSignatureRequest`).
+ * failure never undoes the void or the signing (lib/engagement-esign.js `withdrawSignatureRequest`). When
+ * a request changed, the other sessions are told.
  */
 async function withdrawSignatureRequestsFor(targets) {
   try {
-    await withdrawOpenSignatureRequests(targets, { store: appDataStore, esignatures })
+    const results = await withdrawOpenSignatureRequests(targets, { store: appDataStore, esignatures })
+    if (results.length > 0) broadcastDataChanged()
   } catch (error) {
     console.error('[esign] could not withdraw the open signature requests:', error?.message || error)
   }
+}
+
+/** The same, AFTER the route has answered (the provider calls take up to ~8 s): never awaited, never throws. */
+function withdrawSignatureRequestsLater(targets) {
+  setImmediate(() => {
+    withdrawSignatureRequestsFor(targets).catch(() => {})
+  })
 }
 
 /** What the sign route records after a signing, for the webhook's signing (the owner who sent the request signs). */
@@ -12957,15 +12966,15 @@ const server = createServer(async (request, response) => {
           console.error('[engagements] could not record the replaced amendment:', error)
         }
       }
+      broadcastDataChanged()
+      sendJson(response, 200, result)
       // Signed by hand: an e-signature request still open on this letter (or on a letter it superseded) is
-      // withdrawn, so the client cannot sign it after all. Best-effort; never undoes the signing.
-      await withdrawSignatureRequestsFor([
+      // withdrawn after the answer, so the client cannot sign it after all. Best-effort; never undoes the signing.
+      withdrawSignatureRequestsLater([
         [result.engagement.id, 'signed'],
         ...(result.supersededId ? [[result.supersededId, 'superseded']] : []),
         ...(result.supersededAmendmentIds ?? []).map((id) => [id, 'superseded']),
       ])
-      broadcastDataChanged()
-      sendJson(response, 200, result)
       return
     }
 
@@ -13002,10 +13011,11 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         console.error('[engagements] could not record the void:', error)
       }
-      // A voided letter cannot be signed: its open e-signature request is withdrawn. Best-effort; never undoes the void.
-      await withdrawSignatureRequestsFor([[voided.id, 'void']])
       broadcastDataChanged()
       sendJson(response, 200, { engagement: voided })
+      // A voided letter cannot be signed: its open e-signature request is withdrawn after the answer.
+      // Best-effort; never undoes the void.
+      withdrawSignatureRequestsLater([[voided.id, 'void']])
       return
     }
 
@@ -13250,7 +13260,12 @@ const server = createServer(async (request, response) => {
         sendJson(response, 403, { error: 'Origin not allowed' })
         return
       }
-      const clientId = decodeURIComponent(clientEsignListMatch[1])
+      // normalizedPath is decoded already: the id is used as it is.
+      const clientId = clientEsignListMatch[1]
+      if (!(await appDataStore.getClientById(clientId))) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
       const engagements = await appDataStore.listEngagements({ clientId })
       sendJson(
         response,

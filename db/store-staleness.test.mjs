@@ -1,3 +1,4 @@
+import { withdrawOpenSignatureRequests } from '../lib/engagement-esign.js'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -55843,6 +55844,31 @@ describe('signature requests (both backends)', () => {
     expect(await store.latestSignatureRequestsForEngagements(undefined)).toEqual([])
   })
 
+  it('file: a voided letter\'s open request is withdrawn through the real store, and a late completion cannot undo it (featreq-60118b28)', async () => {
+    const open = await newRequest({ engagementId: 'eng-void', signwellDocumentId: 'ctr-void', provider: 'esignatures', status: 'viewed' })
+    const signedOther = await newRequest({ engagementId: 'eng-void', signwellDocumentId: 'ctr-done', provider: 'esignatures', status: 'completed' })
+    const esignatures = { withdrawContract: vi.fn(async () => null), getContract: vi.fn() }
+    const results = await withdrawOpenSignatureRequests([['eng-void', 'void']], { store, esignatures, log: { info() {}, warn() {}, error() {} } })
+    expect(results.map((result) => [result.request.id, result.withdrawn])).toEqual([[open.id, true]])
+    expect(esignatures.withdrawContract).toHaveBeenCalledWith('ctr-void', expect.objectContaining({ timeoutMs: 8000 }))
+    expect((await store.getSignatureRequest(open.id)).status).toBe('withdrawn')
+    expect((await store.getSignatureRequest(signedOther.id)).status).toBe('completed')
+    // The provider's own withdrawn event that follows is a duplicate in the ledger.
+    expect(await store.recordSignwellEventOnce('es:ctr-void:contract-withdrawn', 'esignatures:contract-withdrawn')).toBe(false)
+    // A late completion (webhook or Finish) stays withdrawn and takes no completion time.
+    const late = await store.updateSignatureRequest(open.id, { status: 'completed', completedAt: '2026-10-27T15:00:00.000Z', lastEventAt: '2026-10-27T15:00:00.000Z' })
+    expect(late.status).toBe('withdrawn')
+    expect(late.completedAt).toBeNull()
+    expect(await store.listSignatureRequestsAwaitingDocument('esignatures')).toEqual([])
+  })
+
+  it('file: completed_at is stamped only on a request that is (or becomes) completed', async () => {
+    const request = await newRequest({ status: 'sent' })
+    expect((await store.updateSignatureRequest(request.id, { status: 'viewed', completedAt: '2026-10-27T15:00:00.000Z' })).completedAt).toBeNull()
+    const done = await store.updateSignatureRequest(request.id, { status: 'completed', completedAt: '2026-10-27T16:00:00.000Z' })
+    expect(done.completedAt).toBe('2026-10-27T16:00:00.000Z')
+  })
+
   it('is never in the bulk save: not in its lock list, its tables or the workspace fingerprint', () => {
     const named = JSON.stringify([BULK_SAVE_LOCK_TABLES, BULK_SAVE_LOCK_SQL, BULK_SAVE_TABLES])
     for (const table of ['signature_requests', 'signature_documents', 'signwell_events']) {
@@ -56086,6 +56112,40 @@ describe('signature requests (both backends)', () => {
         true,
         '2026-10-21T15:08:00.000Z',
       ])
+    })
+
+    it('updateSignatureRequest: the ONE status predicate moves sent -> withdrawn and refuses completed -> withdrawn; completed_at follows the same predicate', async () => {
+      const { fake, pg } = pgWith([[/^update signature_requests set/i, { rows: [row({ status: 'withdrawn' })], rowCount: 1 }]])
+      await pg.updateSignatureRequest('sigreq-aaaaaaaa', { status: 'withdrawn' })
+      await pg.updateSignatureRequest('sigreq-aaaaaaaa', { status: 'completed', completedAt: '2026-10-27T15:00:00.000Z' })
+      const [toWithdrawn, toCompleted] = fake.matching(/^update signature_requests set/i)
+      const sql = toWithdrawn.text.replace(/\s+/g, ' ')
+      // The predicate, word for word, used for BOTH the status and completed_at.
+      const predicate =
+        '($2::text is not null and ($7::timestamptz is null or last_event_at is null or $7::timestamptz >= last_event_at or $2::text = any($9::text[])) and status <> all($9::text[]) and ($2::text <> all($10::text[]) or status = any($11::text[]) or array_position($10::text[], $2::text) >= array_position($10::text[], status)))'
+      expect(sql).toContain(`status = case when ${predicate} then $2::text else status end`)
+      expect(sql).toContain(
+        `completed_at = case when $5::timestamptz is not null and (status = 'completed' or ($2::text = 'completed' and ${predicate})) then $5::timestamptz else completed_at end`,
+      )
+      // The same predicate, evaluated on the parameters the statement was given, for a row in each status.
+      const applies = (params, status, lastEventAt = null) => {
+        const [, next, , , , , eventAt, , finished, progress, recoverable] = params
+        const at = (list, value) => list.indexOf(value)
+        return (
+          next !== null &&
+          (eventAt === null || lastEventAt === null || eventAt >= lastEventAt || finished.includes(next)) &&
+          !finished.includes(status) &&
+          (!progress.includes(next) || recoverable.includes(status) || at(progress, next) >= at(progress, status))
+        )
+      }
+      expect(toWithdrawn.params[1]).toBe('withdrawn')
+      expect(toWithdrawn.params[8]).toContain('withdrawn')
+      for (const open of ['sent', 'viewed', 'signed_partial', 'bounced', 'error']) expect(applies(toWithdrawn.params, open), open).toBe(true)
+      for (const done of ['completed', 'declined', 'expired', 'canceled', 'withdrawn']) expect(applies(toWithdrawn.params, done), done).toBe(false)
+      // completed -> withdrawn refused above; withdrawn -> completed refused here (so no completed_at either).
+      expect(applies(toCompleted.params, 'withdrawn')).toBe(false)
+      expect(applies(toCompleted.params, 'viewed')).toBe(true)
+      expect(toCompleted.params[4]).toBe('2026-10-27T15:00:00.000Z')
     })
 
     it('an empty patch keeps everything: null parameters, both set-flags off', async () => {

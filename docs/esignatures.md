@@ -88,13 +88,19 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
   (below) is refused as ended; its completion never runs.
 - **Withdrawal** (featreq-60118b28; `withdrawSignatureRequest` in lib/engagement-esign.js): **Void**, **Mark
   as signed** and the superseding flip (the predecessor and the replaced amendments, by hand or by an
-  e-signed superseding letter) withdraw every request of that letter that has not finished.
-  eSignatures.io: `POST /api/contracts/<id>/withdraw` (at most 8 s) and the `es:<id>:contract-withdrawn`
-  ledger row (so its own withdrawn event that follows is a duplicate); SignWell: the app has no cancel
-  call, so the request is withdrawn in the app only and its note says to cancel it at SignWell. Either way
-  the request ends `withdrawn` (badge "E-sign: withdrawn"; a finished status); a provider refusal is kept
-  in `last_error` and never undoes the void or the signing. A contract signed after it was withdrawn
-  signs nothing; the owners are told to check it, as for one signed after the app's own expiry.
+  e-signed superseding letter) withdraw every request of that letter that has not finished - AFTER the
+  route has answered (the requests side by side, each provider call capped at 8 s; the other sessions are
+  told when one changed). eSignatures.io: `POST /api/contracts/<id>/withdraw`. If it refuses or times
+  out, the contract is re-read (8 s): one that reads signed, or cannot be read, is LEFT OPEN with the
+  refusal in `last_error` ("press Check eSignatures.io"), so the webhook or Finish completes it (a letter
+  signed by hand keeps the PDF; a voided one is refused signing and the owners are told). Only a confirmed
+  withdrawal, or a re-read that shows it not signed, ends the request `withdrawn` (badge "E-sign:
+  withdrawn"; a finished status), and only then is the `es:<id>:contract-withdrawn` ledger row written
+  (so its own withdrawn event that follows is a duplicate). SignWell: the app has no cancel call, so a
+  voided or superseded letter's request is withdrawn in the app only (its note says to cancel it at
+  SignWell); Mark as signed leaves a SignWell request as it is. Nothing here ever undoes the void or the
+  signing. A contract signed after it was withdrawn signs nothing; the owners are told the signed copy is
+  in eSignatures.io and nothing was changed (never "mark it signed by hand").
 
 ## How the webhook is made safe
 

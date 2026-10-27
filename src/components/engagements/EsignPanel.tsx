@@ -18,6 +18,7 @@ import {
 } from '../../lib/engagements'
 import { ApiError, type EsignStatus, type SignatureRequest } from '../../lib/types'
 import { dateOnlyInZone, firmToday } from '../../../lib/firm-time.js'
+import { FINISHED_SIGNATURE_STATUSES } from '../../../lib/signature-statuses.js'
 
 /**
  * E-signature for one engagement letter (featreq-56d39567; docs/signwell.md, docs/esignatures.md): the
@@ -129,7 +130,7 @@ export function EsignPanel({
     latest?.status === 'completed' &&
     !esignWasMarkedComplete(latest) &&
     (!latest.signedDocumentId || !engagementSigned)
-  const canCheck = Boolean(latest) && !['completed', 'declined', 'expired', 'canceled', 'withdrawn'].includes(latest?.status ?? '')
+  const canCheck = Boolean(latest) && !FINISHED_SIGNATURE_STATUSES.includes(latest?.status ?? '')
   const target = partyEmail || 'the party'
   // A new send goes through the server's provider now; a request is named by the provider it went to.
   const sendProvider = esignProviderName(status.provider)

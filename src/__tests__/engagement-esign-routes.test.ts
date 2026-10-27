@@ -249,6 +249,10 @@ describe('GET /api/clients/:id/esign (the client card, one call)', () => {
     expect(block).toContain('normalizedPath.match(/^\\/api\\/clients\\/([^/]+)\\/esign$/)')
     expect(block).toContain("request.method === 'GET'")
     expect(block).toContain('appDataStore.listEngagements({ clientId })')
+    // An unknown client is a 404 (like an unknown engagement); the path is decoded once, upstream.
+    expect(block).toContain("sendJson(response, 404, { error: 'Client not found' })")
+    expect(block.indexOf('appDataStore.getClientById(clientId)')).toBeLessThan(block.indexOf('appDataStore.listEngagements('))
+    expect(block).not.toContain('decodeURIComponent')
     expect(block).toContain('appDataStore.latestSignatureRequestsForEngagements(engagements.map((row) => row.id))')
     expect(block).toContain("'Cache-Control': 'no-store'")
     expect(block).not.toContain('getSignedDocument')
@@ -262,31 +266,38 @@ describe('withdrawing an open request when its letter no longer stands', () => {
   const voidRoute = () => between('// POST /api/engagements/:id/void', '// POST /api/engagements/:id/restore')
   const signRoute = () => between('// POST /api/engagements/:id/sign - ', '// POST /api/engagements/:id/void')
 
-  it('the helper hands the lib the store and the eSignatures module, and never throws', () => {
+  it('the helper hands the lib the store and the eSignatures module, tells the other sessions when something changed, and never throws', () => {
     const block = helper()
-    expect(block).toContain('await withdrawOpenSignatureRequests(targets, { store: appDataStore, esignatures })')
+    expect(block).toContain('const results = await withdrawOpenSignatureRequests(targets, { store: appDataStore, esignatures })')
+    expect(block).toContain('if (results.length > 0) broadcastDataChanged()')
     expect(block).toContain('} catch (error) {')
+    // The routes' version runs AFTER the answer, never awaited, never throwing.
+    const later = between('function withdrawSignatureRequestsLater(targets) {', '/** What the sign route records')
+    expect(later).toContain('setImmediate(() => {')
+    expect(later).toContain('withdrawSignatureRequestsFor(targets).catch(() => {})')
   })
 
-  it('the void withdraws the letter\'s open request AFTER the void is saved and before the answer', () => {
+  it('the void answers first, then withdraws the letter\'s open request (the provider calls never hold the answer)', () => {
     const block = voidRoute()
     const voided = block.indexOf('appDataStore.voidEngagement(')
-    const withdraw = block.indexOf("await withdrawSignatureRequestsFor([[voided.id, 'void']])")
+    const withdraw = block.indexOf("withdrawSignatureRequestsLater([[voided.id, 'void']])")
     expect(voided).toBeGreaterThan(-1)
     expect(withdraw).toBeGreaterThan(voided)
     expect(withdraw).toBeGreaterThan(block.indexOf("sendJson(response, 404, { error: 'Engagement not found' })"))
-    expect(withdraw).toBeLessThan(block.indexOf('sendJson(response, 200, { engagement: voided })'))
+    expect(withdraw).toBeGreaterThan(block.indexOf('sendJson(response, 200, { engagement: voided })'))
+    expect(block).not.toContain('await withdrawSignatureRequests')
   })
 
-  it('Mark as signed withdraws the letter\'s own open request and those of the letters it superseded, after signing', () => {
+  it('Mark as signed answers first, then withdraws the letter\'s own open request and those of the letters it superseded', () => {
     const block = signRoute()
     const signed = block.indexOf('appDataStore.signEngagement(')
-    const withdraw = block.indexOf('await withdrawSignatureRequestsFor([')
+    const withdraw = block.indexOf('withdrawSignatureRequestsLater([')
     expect(withdraw).toBeGreaterThan(signed)
     expect(block).toContain("[result.engagement.id, 'signed'],")
     expect(block).toContain("...(result.supersededId ? [[result.supersededId, 'superseded']] : []),")
     expect(block).toContain("...(result.supersededAmendmentIds ?? []).map((id) => [id, 'superseded']),")
-    expect(withdraw).toBeLessThan(block.indexOf('sendJson(response, 200, result)'))
+    expect(withdraw).toBeGreaterThan(block.indexOf('sendJson(response, 200, result)'))
+    expect(block).not.toContain('await withdrawSignatureRequests')
   })
 
   it('an e-signed superseding letter withdraws the open requests of the letters it superseded', () => {
