@@ -1457,7 +1457,7 @@ describe('e-signature', () => {
     await renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
     const confirm = screen.getByRole('group', { name: 'Confirm send for signature' })
-    expect(within(confirm).getByText(/Send the engagement letter for Acme Books to pat@acme\.test for signature\?/)).toBeTruthy()
+    expect(within(confirm).getByText(/^Who signs the engagement letter for Acme Books\?/)).toBeTruthy()
     expect(
       within(confirm).getByText(
         'Test mode - no legally binding document, the client may not receive an email, and it will not mark the letter signed unless this is the Test client.',
@@ -1468,8 +1468,10 @@ describe('e-signature', () => {
     const loads = api.getEngagementRequest.mock.calls.length
 
     withRequests(signatureRequest())
-    fireEvent.click(within(confirm).getByRole('button', { name: 'Send now' }))
-    await waitFor(() => expect(api.sendEngagementEsignRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-1' }))
+    fireEvent.click(await within(confirm).findByRole('button', { name: 'Send for signature to pat@acme.test' }))
+    await waitFor(() =>
+      expect(api.sendEngagementEsignRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-1', signer: { email: 'pat@acme.test' } }),
+    )
     expect(await screen.findByText(/Sent for signature to pat@acme\.test\. Test mode - no legally binding document/)).toBeTruthy()
     await waitFor(() => expect(api.getEngagementRequest.mock.calls.length).toBeGreaterThan(loads))
     // The badge shows the new request.
@@ -1479,10 +1481,12 @@ describe('e-signature', () => {
   it('through eSignatures.io: the intro and the confirm name it, mention its automatic reminders, and say test mode', async () => {
     api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'esignatures', testMode: true }))
     await renderEditor()
-    expect(await screen.findByText(/^eSignatures\.io emails pat@acme\.test a link to read and sign the letter/)).toBeTruthy()
+    expect(
+      await screen.findByText(/^eSignatures\.io emails the signer a link to read and sign the letter.*You confirm who signs first: pat@acme\.test, another of the client's contacts, or an address for this send only\./),
+    ).toBeTruthy()
     fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
     const confirm = screen.getByRole('group', { name: 'Confirm send for signature' })
-    expect(within(confirm).getByText(/for signature\? eSignatures\.io emails them a link to sign it\.$/)).toBeTruthy()
+    expect(within(confirm).getByText(/One person signs; eSignatures\.io emails them a link to sign it\.$/)).toBeTruthy()
     expect(within(confirm).getByText('eSignatures.io also reminds them automatically on days 2, 4, 8 and 16.')).toBeTruthy()
     expect(within(confirm).getByText(/^Test mode - no legally binding document/)).toBeTruthy()
   })
@@ -1527,7 +1531,7 @@ describe('e-signature', () => {
     expect(within(confirm).queryByText(/Test mode/)).toBeNull()
     withRequests(signatureRequest({ testMode: false }))
     api.sendEngagementEsignRequest = vi.fn(async () => ({ request: signatureRequest({ testMode: false }), engagement: engagement({ status: 'sent' }) }))
-    fireEvent.click(within(confirm).getByRole('button', { name: 'Send now' }))
+    fireEvent.click(await within(confirm).findByRole('button', { name: 'Send for signature to pat@acme.test' }))
     expect(await screen.findByText('Sent for signature to pat@acme.test.')).toBeTruthy()
     expect(screen.queryByText('Test mode', { selector: '.status-pill' })).toBeNull()
   })
@@ -1539,8 +1543,122 @@ describe('e-signature', () => {
     })
     await renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Send now' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Send for signature to pat@acme.test' }))
     expect(await screen.findByText(/belongs to someone on your team\. An engagement letter goes to the client only\. Nothing was sent\./)).toBeTruthy()
+  })
+
+  /**
+   * Who signs (Alex, 2026-10-27): the confirm offers the party's address (chosen), the client's other
+   * contacts by name, and one address for this send only; the button names the address it goes to.
+   */
+  describe('who signs', () => {
+    const DETAILS = [
+      { email: 'pat@acme.test', source: 'Pat Doe' },
+      { email: 'cfo@acme.test', source: 'Casey Fox' },
+      { email: 'books@acme.test', source: 'client record' },
+    ]
+    beforeEach(() => {
+      api.engagementRecipientsRequest = vi.fn(async () => ({ details: DETAILS, defaultTo: ['pat@acme.test'] }))
+    })
+    const open = async () => {
+      configured(false)
+      await renderEditor()
+      fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
+      const confirm = screen.getByRole('group', { name: 'Confirm send for signature' })
+      await within(confirm).findByRole('radiogroup', { name: 'Who signs' })
+      return confirm
+    }
+
+    it("pre-selects the party's address, lists the contacts by name and email, and names the signer", async () => {
+      const confirm = await open()
+      expect(api.engagementRecipientsRequest).toHaveBeenCalledWith('eng-1')
+      const party = within(confirm).getByRole('radio', { name: /Pat Doe\s*pat@acme\.test/ })
+      expect(party).toBeChecked()
+      expect(within(confirm).getByRole('radio', { name: /Casey Fox\s*cfo@acme\.test/ })).not.toBeChecked()
+      expect(within(confirm).getByRole('radio', { name: /Client record\s*books@acme\.test/ })).not.toBeChecked()
+      expect(within(confirm).getByText('Signer: Pat Doe (pat@acme.test)')).toBeTruthy()
+      expect(within(confirm).getByRole('button', { name: 'Send for signature to pat@acme.test' })).toBeEnabled()
+    })
+
+    it('a contact picked: the button names their address and the POST carries it', async () => {
+      const confirm = await open()
+      fireEvent.click(within(confirm).getByRole('radio', { name: /Casey Fox/ }))
+      expect(within(confirm).getByText('Signer: Casey Fox (cfo@acme.test)')).toBeTruthy()
+      api.sendEngagementEsignRequest = vi.fn(async () => ({
+        request: signatureRequest({ testMode: false, recipients: [{ id: '1', name: 'Casey Fox', email: 'cfo@acme.test' }] }),
+        engagement: engagement({ status: 'sent' }),
+      }))
+      fireEvent.click(within(confirm).getByRole('button', { name: 'Send for signature to cfo@acme.test' }))
+      await waitFor(() =>
+        expect(api.sendEngagementEsignRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-1', signer: { email: 'cfo@acme.test' } }),
+      )
+      expect(await screen.findByText('Sent for signature to cfo@acme.test.')).toBeTruthy()
+    })
+
+    it('a one-time address: typed (with an optional name), named on the button, posted as oneTime', async () => {
+      const confirm = await open()
+      fireEvent.click(within(confirm).getByRole('radio', { name: 'Another address for this send only' }))
+      // Nothing typed yet: nothing to send to.
+      expect(within(confirm).getByRole('button', { name: 'Choose who signs' })).toBeDisabled()
+      const typed = within(confirm).getByLabelText("Signer's email for this send only")
+      fireEvent.change(typed, { target: { value: 'not an address' } })
+      expect(within(confirm).getByRole('alert')).toHaveTextContent('Type one valid email address')
+      expect(within(confirm).getByRole('button', { name: 'Choose who signs' })).toBeDisabled()
+      fireEvent.change(typed, { target: { value: 'owner@elsewhere.test' } })
+      expect(within(confirm).getByText('Signer: Pat Doe (owner@elsewhere.test)')).toBeTruthy()
+      fireEvent.change(within(confirm).getByLabelText("Signer's name (optional)"), { target: { value: 'Jo Owner' } })
+      expect(within(confirm).getByText('Signer: Jo Owner (owner@elsewhere.test)')).toBeTruthy()
+      fireEvent.click(within(confirm).getByRole('button', { name: 'Send for signature to owner@elsewhere.test' }))
+      await waitFor(() =>
+        expect(api.sendEngagementEsignRequest).toHaveBeenCalledWith('eng-1', {
+          templateHash: 'hash-1',
+          signer: { email: 'owner@elsewhere.test', oneTime: true, name: 'Jo Owner' },
+        }),
+      )
+      // The party's address is not changed by a one-time signer.
+      expect(api.updateEngagementRequest).not.toHaveBeenCalled()
+    })
+
+    it('an address no longer on file reopens the choice on the list as it is now', async () => {
+      const confirm = await open()
+      fireEvent.click(within(confirm).getByRole('radio', { name: /Casey Fox/ }))
+      api.sendEngagementEsignRequest = vi.fn(async () => {
+        const error = new ApiError(409, 'cfo@acme.test is no longer on file for this letter. Choose who signs again. Nothing was sent.', 'recipients_changed')
+        error.recipients = [{ email: 'pat@acme.test', source: 'Pat Doe' }]
+        throw error
+      })
+      fireEvent.click(within(confirm).getByRole('button', { name: 'Send for signature to cfo@acme.test' }))
+      expect(await screen.findByText(/no longer on file for this letter/)).toBeTruthy()
+      const again = await screen.findByRole('group', { name: 'Confirm send for signature' })
+      expect(within(again).queryByRole('radio', { name: /Casey Fox/ })).toBeNull()
+      expect(within(again).getByRole('radio', { name: /Pat Doe/ })).toBeChecked()
+    })
+
+    it("a list that cannot be read still offers the party's address, and says so", async () => {
+      api.engagementRecipientsRequest = vi.fn(async () => {
+        throw new ApiError(500, 'Could not read who this letter can go to.')
+      })
+      const confirm = await open()
+      expect(within(confirm).getByRole('radio', { name: /Pat Doe\s*pat@acme\.test/ })).toBeChecked()
+      expect(await screen.findByText("Could not read who this letter can go to. You can still send to the party's address or type one.")).toBeTruthy()
+      expect(within(confirm).getByRole('button', { name: 'Send for signature to pat@acme.test' })).toBeEnabled()
+    })
+
+    it('a party with no address on file opens on the one-time field', async () => {
+      api.engagementRecipientsRequest = vi.fn(async () => ({ details: [], defaultTo: [] }))
+      const confirm = await open()
+      expect(within(confirm).getByRole('radio', { name: 'Another address for this send only' })).toBeChecked()
+      expect(within(confirm).getByLabelText("Signer's email for this send only")).toBeTruthy()
+    })
+
+    it('the status names the address the request went to, and Send reminder says it too', async () => {
+      configured(false)
+      withRequests(signatureRequest({ recipients: [{ id: '1', name: 'Casey Fox', email: 'cfo@acme.test' }] }))
+      await renderEditor()
+      expect(await screen.findByText(/Sent to cfo@acme\.test/)).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: 'Send reminder' }))
+      expect(await screen.findByText('Reminder sent to cfo@acme.test.')).toBeTruthy()
+    })
   })
 
   it('shows the status badge and the Test mode tag; Send for signature gives way to Send reminder while the request is out', async () => {

@@ -26,7 +26,7 @@ function between(startAnchor: string, endAnchor: string, source = serverSource):
 
 const routes = () =>
   between('// ---- Engagement e-signature routes (featreq-56d39567; docs/signwell.md)', '// ---- end of the engagement e-signature routes')
-const sendRoute = () => between('// POST /api/engagements/:id/esign - { templateHash }', '// POST /api/engagements/:id/esign/remind')
+const sendRoute = () => between('// POST /api/engagements/:id/esign - { templateHash, signer? }', '// POST /api/engagements/:id/esign/remind')
 const remindRoute = () => between('// POST /api/engagements/:id/esign/remind', '// POST /api/engagements/:id/esign/:requestId/finish')
 const finishRoute = () => between('// POST /api/engagements/:id/esign/:requestId/finish', '// GET /api/engagements/:id/esign - this engagement')
 const listRoute = () => between('// GET /api/engagements/:id/esign - this engagement', '// GET /api/clients/:id/esign')
@@ -97,6 +97,20 @@ describe('sending for signature', () => {
     const block = sendRoute()
     expect(block).toContain('sendJson(response, status, body)')
     expect(block).not.toMatch(/signing_url|file_base64|\.bytes/)
+  })
+
+  // Alex 2026-10-27: Send for signature confirms (or changes) the signer first.
+  it('hands the confirmed signer to the lib as posted (it decides: party, contact or one-time) and never writes the party', () => {
+    const block = sendRoute()
+    expect(block).toContain('{ templateHash: payload.templateHash, userId: session.user.id, signer: payload.signer }')
+    // The route does not judge the address itself, and a one-time address never reaches the party record.
+    expect(block).not.toMatch(/isOneEmailAddress|chooseEsignSigner|updateEngagement|party\.email\s*=/)
+    // The activity names who it went to.
+    expect(block).toContain('`, to ${sent.request.recipients[0].email}`')
+    const lib = esignSource
+    expect(lib).toContain("import { chooseEsignSigner, esignSignerChoiceOf } from './esign-signer.js'")
+    expect(lib).toContain("refuse(400, 'signer_invalid'")
+    expect(lib).toContain('details: engagementRecipientList(context, engagement).details')
   })
 
   it('reminds through the lib, and 404s an unknown engagement first', () => {

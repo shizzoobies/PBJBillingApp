@@ -36,9 +36,25 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
 
 ## What the app does
 
+- **Who signs** (Alex, 2026-10-27; `lib/esign-signer.js`, the page's `SignerPicker.tsx`): pressing **Send for
+  signature** first opens a confirm naming ONE signer, name and email. It lists the letter's addresses on
+  file (`GET /api/engagements/:id/recipients`, the same list as Send's recipient picker: the party's address,
+  then the linked client's contacts and record, never a team member's) with the party's address chosen, plus
+  "Another address for this send only" (one address and an optional name). The button reads **Send for
+  signature to <email>**. The body is `{ templateHash, signer: { email, name?, oneTime? } }`. The server takes
+  exactly one plain address that is on file for the letter (case-insensitive; its stored spelling is used)
+  or marked `oneTime`; a team/app-user mailbox is refused (`team_address`, the reply-to mailbox excepted as
+  for every engagement send), two addresses or a named one `invalid_recipient`, an address no longer on file
+  and not one-time `recipients_changed` (with the list as it is now; the page reopens the choice on it), an
+  unreadable `signer` 400 `signer_invalid`. No `signer` (an older tab) = the party's address, exactly as
+  before. The name: a typed one, else the matching contact's name, else the party's contact name, else its
+  company. The chosen address is what goes to the provider, what `signature_requests.recipients` and the
+  letter's `esign` log entry carry, what the badge shows ("Sent to ...") and what Send reminder and the webhook
+  use (they read the stored request). The letter itself is still addressed to the party, and the party record
+  is never changed by a one-time address. No new column.
 - **Send for signature** (`POST /api/engagements/:id/esign`): the same refusals as SignWell (not set
   up, stale page, signed/void/superseded letter, master or retired client, a request already out, an
-  unfilled placeholder, no single plain party address, a team address). Then:
+  unfilled placeholder, no single plain party address when no signer is chosen, a team address). Then:
   1. the FILLED letter (Send's own builder, the closing reworded "please sign electronically where
      indicated") is written as Markdown: the firm name as a heading, the date, the addressee, the
      paragraphs with bold as `**bold**`. `{{initial:...}}` tags become a mandatory checkbox line
@@ -53,7 +69,7 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
      {
        "template_id": "<from step 2>",
        "title": "<party> - Engagement letter <date>",
-       "signers": [{ "name": "<contact, else company>", "email": "<party email>" }],
+       "signers": [{ "name": "<the signer's name>", "email": "<the address confirmed at Send for signature>" }],
        "test": "yes",
        "expires_in_hours": 720,
        "metadata": "{\"engagement_id\":\"eng-...\",\"client_id\":\"client-...\",\"app\":\"pbjbillingapp\",\"esign_hash\":\"<sha256>\"}",
@@ -164,7 +180,8 @@ table, no backfill. Both store backends carry them.
 4. In the eSignatures.io account settings, check who receives the signed contract by email: it must be
    the signer only - never your own mailbox (client tax documents never go to Alex).
 5. Open a draft letter for the `Test` client (its party with an address you can read). **Send for
-   signature**: the confirm names eSignatures.io, its automatic reminders and test mode. Badge "E-sign:
+   signature**: the confirm asks who signs (keep the party's address, or pick a contact or a one-time
+   address to test that path) and names eSignatures.io, its automatic reminders and test mode. Badge "E-sign:
    sent", the letter Sent, an `esign` line in Activity.
 6. Note: does the test contract email the signer; does the email carry the fixed subject/sentence and the
    reply-to; how the Markdown looks (heading, bold, addressee, the initials checkbox); does the badge move

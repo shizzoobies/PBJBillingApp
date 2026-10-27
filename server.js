@@ -13114,9 +13114,12 @@ const server = createServer(async (request, response) => {
     // above on purpose: those pin "a letter goes to the client and nowhere else" by their
     // text. SignWell, not the firm, emails the signer; nothing here mails or notifies anyone.
 
-    // POST /api/engagements/:id/esign - { templateHash }. Every refusal is decided in
-    // lib/engagement-esign.js before SignWell is called; then ONE document is created for
-    // the party and a signature_requests row written. Answers { request, engagement }.
+    // POST /api/engagements/:id/esign - { templateHash, signer? }. `signer` = { email, name?,
+    // oneTime? }, the one signer she confirmed (the party's address, a client contact's, or one
+    // for this send only; lib/esign-signer.js decides it); none = the party's, as before. Every
+    // refusal is decided in lib/engagement-esign.js before the provider is called; then ONE
+    // document is created for that signer and a signature_requests row written (the party
+    // record is never changed). Answers { request, engagement }.
     const engagementEsignMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/esign$/)
     if (engagementEsignMatch && request.method === 'POST') {
       const session = await requireSession(request, response)
@@ -13146,7 +13149,7 @@ const server = createServer(async (request, response) => {
       const sent = await sendEngagementForSignature(
         await loadEngagementContext(session),
         engagement,
-        { templateHash: payload.templateHash, userId: session.user.id },
+        { templateHash: payload.templateHash, userId: session.user.id, signer: payload.signer },
         {
           store: appDataStore,
           signwell,
@@ -13165,7 +13168,7 @@ const server = createServer(async (request, response) => {
         await appDataStore.recordActivity(
           session.user.id,
           'engagement_esign_sent',
-          `${engagementActivityTarget(engagement)}${sent.request.testMode ? ' (test mode)' : ''}`,
+          `${engagementActivityTarget(engagement)}${sent.request.recipients?.[0]?.email ? `, to ${sent.request.recipients[0].email}` : ''}${sent.request.testMode ? ' (test mode)' : ''}`,
         )
       } catch (error) {
         console.error('[esign] could not record the send:', error)

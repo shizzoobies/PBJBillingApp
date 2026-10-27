@@ -227,6 +227,36 @@ describe('ClientEngagementsCard: Mark as signed', () => {
 
   const rowsOf = async () => within(await screen.findByRole('table')).getAllByRole('row').slice(1)
 
+  // Alex 2026-10-27: the dialog's e-signature status names who the request went to; sending stays on the letter's page.
+  it("the dialog's e-signature status says who it was sent to, and offers no send of its own", async () => {
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'esignatures', testMode: false }))
+    api.listEngagementEsignRequests = vi.fn(async () => [
+      {
+        id: 'sigreq-1',
+        engagementId: 'eng-amend',
+        clientId: 'c-acme',
+        provider: 'esignatures',
+        status: 'sent',
+        recipients: [{ id: 'signer-1', name: 'Jo Owner', email: 'owner@elsewhere.test' }],
+        testMode: false,
+        signedDocumentId: null,
+        sentAt: '2026-10-21T15:00:00.000Z',
+        completedAt: null,
+        lastEventAt: null,
+        lastError: null,
+        lastRemindedAt: null,
+        createdAt: '2026-10-21T15:00:00.000Z',
+        updatedAt: '2026-10-21T15:00:00.000Z',
+      },
+    ])
+    renderCard()
+    const [row] = await rowsOf()
+    fireEvent.click(within(row).getByRole('button', { name: 'Mark as signed' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByText(/Sent to owner@elsewhere\.test/)).toBeTruthy()
+    expect(within(dialog).queryByRole('button', { name: /^Send for signature/ })).toBeNull()
+  })
+
   it('a sent row has Mark as signed (a signed one does not); it opens the dialog, posts the day and shows what signing did', async () => {
     renderCard(true, { client: { name: 'Acme', billingMode: 'hourly', monthlyRate: 0 } })
     const [sentRow, signedRow] = await rowsOf()
@@ -709,6 +739,16 @@ describe('e-signature status on the card', () => {
     expect(within(signed).queryByText('Test mode')).toBeNull()
     const other = screen.getByText('Your 2027 1099s').closest('tr') as HTMLElement
     expect(within(other).queryByText(/E-sign/)).toBeNull()
+  })
+
+  // Alex 2026-10-27: the signer is confirmed (or changed) at Send for signature, so the row says who it went to.
+  it('names the address the request went to, a contact or a one-time address rather than the party', async () => {
+    api.listClientEsignRequests = vi.fn(async () => [request({ recipients: [{ id: 'signer-1', name: 'Casey Fox', email: 'cfo@acme.test' }] })])
+    renderCard()
+    const row = (await screen.findByText('Your 2027 1099s')).closest('tr') as HTMLElement
+    expect(await within(row).findByText('E-sign: sent Oct 21')).toBeTruthy()
+    expect(within(row).getByText(/Sent to cfo@acme\.test/)).toBeTruthy()
+    expect(within(row).queryByText(/pat@acme\.test/)).toBeNull()
   })
 
   it('a failed read of the requests leaves the card as it was', async () => {

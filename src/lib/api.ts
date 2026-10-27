@@ -5687,10 +5687,14 @@ export async function listClientEsignRequests(clientId: string): Promise<Signatu
   return Array.isArray(body.requests) ? body.requests : []
 }
 
-/** Send the engagement letter for e-signature to its party. `templateHash` is the hash the page loaded. */
+/**
+ * Send the engagement letter for e-signature. `templateHash` is the hash the page loaded; `signer` is the ONE
+ * signer she confirmed (an address on file for the letter, or one marked `oneTime` for this send only - the
+ * party record is not changed). No signer: the party's own address, as before.
+ */
 export function sendEngagementEsignRequest(
   id: string,
-  input: { templateHash: string },
+  input: { templateHash: string; signer?: { email: string; name?: string; oneTime?: boolean } },
 ): Promise<{ request: SignatureRequest; engagement: Engagement }> {
   return engagementRequest(engagementPath(id, 'esign'), proposalJson('POST', input), 'Failed to send the letter for signature')
 }

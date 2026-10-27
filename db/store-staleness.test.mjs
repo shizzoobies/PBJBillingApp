@@ -1,4 +1,4 @@
-import { withdrawOpenSignatureRequests } from '../lib/engagement-esign.js'
+import { sendEngagementForSignature, withdrawOpenSignatureRequests } from '../lib/engagement-esign.js'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -56411,6 +56411,105 @@ describe('markEngagementEsigned (both backends)', () => {
     ])
     expect(updates[0].params[2]).toBe('2026-10-21T16:00:00.000Z')
     expect(row.emailLog[0].kind).toBe('esign')
+  })
+})
+
+/**
+ * Who signs (Alex, 2026-10-27): a send for signature to the signer she confirmed, run against the FILE
+ * backend - the request row and the letter's email log carry the chosen address, and the party record is
+ * never changed. No column is added (recipients is already jsonb; the log entry already has `to`), so the
+ * Postgres statements are the ones pinned above.
+ */
+describe('send for signature to a chosen signer (file backend)', () => {
+  const ES_ENV = { ESIGNATURES_SECRET_TOKEN: 'es_fake_token_1234567890' }
+  const PARTY = { company: 'Acme Books', contactName: 'Pat Doe', title: '', email: 'pat@example.invalid', phone: '', addressLine1: '', addressLine2: '', city: '', state: '', postalCode: '' }
+  const seed = async () => {
+    const state = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    state.signatureRequests = []
+    state.signatureDocuments = []
+    state.engagements = [
+      {
+        id: 'eng-signer',
+        kind: 'original',
+        status: 'draft',
+        clientId: 'c-signer',
+        party: PARTY,
+        subject: 'Engagement letter',
+        emailBody: 'Hi,\n\nAttached.',
+        letterBody: 'Dear {{contact_name}},\n\nThank you.',
+        sectionKeys: [],
+        figures: null,
+        planIds: [],
+        emailLog: [],
+        sentAt: null,
+        updatedAt: '2026-10-27T15:00:00.000Z',
+        createdAt: '2026-10-27T15:00:00.000Z',
+      },
+    ]
+    await writeFile(localAuthPath, JSON.stringify(state, null, 2))
+  }
+  const context = {
+    data: {
+      clients: [{ id: 'c-signer', name: 'Acme Books', isBillingMaster: false, lifecycleStage: 'active', contactIds: ['ct-cfo'], email: '' }],
+      contacts: [{ id: 'ct-cfo', name: 'Casey Fox', email: 'cfo@example.invalid' }],
+    },
+    firmSettings: { name: 'PB&J Strategic Accounting', email: 'hello@pbjsa.com', clientDefaults: { paymentTerms: '' } },
+    senderName: 'Brittany',
+    now: new Date('2026-10-27T16:00:00Z'),
+    teamEmails: new Set(['alex@ka-performancefl.example']),
+    replyTo: 'brittany@pbjsa.example',
+  }
+  const esignatures = () => ({
+    createTemplate: vi.fn(async () => 'tpl-1'),
+    createContract: vi.fn(async () => ({ id: 'ctr-signer', status: 'sent', signers: [{ id: 'signer-1' }] })),
+  })
+  const sendTo = async (signer, provider = esignatures()) => {
+    const engagement = await store.getEngagement('eng-signer')
+    const result = await sendEngagementForSignature(
+      context,
+      engagement,
+      { templateHash: engagementHash(engagement), userId: 'emp-patrice', signer },
+      { store, esignatures: provider, signwell: {}, env: ES_ENV, isPureRecord: () => false },
+    )
+    return { result, provider }
+  }
+
+  beforeEach(seed)
+
+  it("a client contact: the stored request and the log entry name the contact's address; the party keeps its own", async () => {
+    const { result, provider } = await sendTo({ email: 'CFO@example.invalid' })
+    expect(result.ok).toBe(true)
+    expect(provider.createContract.mock.calls[0][0].signers).toEqual([{ name: 'Casey Fox', email: 'cfo@example.invalid' }])
+    const [request] = await store.listSignatureRequestsForEngagement('eng-signer')
+    expect(request.recipients).toEqual([{ id: 'signer-1', name: 'Casey Fox', email: 'cfo@example.invalid' }])
+    expect(request.provider).toBe('esignatures')
+    const stored = await store.getEngagement('eng-signer')
+    expect(stored.emailLog.at(-1)).toMatchObject({ kind: 'esign', to: ['cfo@example.invalid'], signatureRequestId: request.id })
+    expect(stored.party.email).toBe('pat@example.invalid')
+    expect(stored.status).toBe('sent')
+  })
+
+  it('a one-time address is stored on the request and the log only - never on the party', async () => {
+    const { result } = await sendTo({ email: 'owner@elsewhere.invalid', oneTime: true })
+    expect(result.ok).toBe(true)
+    const [request] = await store.listSignatureRequestsForEngagement('eng-signer')
+    expect(request.recipients).toEqual([{ id: 'signer-1', name: 'Pat Doe', email: 'owner@elsewhere.invalid' }])
+    const stored = await store.getEngagement('eng-signer')
+    expect(stored.emailLog.at(-1).to).toEqual(['owner@elsewhere.invalid'])
+    expect(stored.party).toEqual(expect.objectContaining({ email: 'pat@example.invalid', contactName: 'Pat Doe' }))
+  })
+
+  it('no signer posted (an older tab): the party, as before; a refused signer writes nothing', async () => {
+    const refused = await sendTo({ email: 'alex@ka-performancefl.example', oneTime: true })
+    expect(refused.result.refused).toMatchObject({ status: 409, error: 'team_address' })
+    expect(await store.listSignatureRequestsForEngagement('eng-signer')).toEqual([])
+    expect((await store.getEngagement('eng-signer')).emailLog).toEqual([])
+
+    const { result } = await sendTo(undefined)
+    expect(result.ok).toBe(true)
+    const [request] = await store.listSignatureRequestsForEngagement('eng-signer')
+    expect(request.recipients[0].email).toBe('pat@example.invalid')
+    expect((await store.getEngagement('eng-signer')).emailLog.at(-1).to).toEqual(['pat@example.invalid'])
   })
 })
 
