@@ -2452,7 +2452,8 @@ export async function pushChecklistOccurrence(
  * Open next step now (featreq-8b54d117): start the case's next stage while every
  * open step of this one is waiting. This checklist stays open; `spawned` is the
  * new next-stage checklist. A refusal is a 409 whose `message` says why ("Step 3
- * is already open.") and becomes the ApiError's message.
+ * is already open.") and becomes the ApiError's message; its `error` code
+ * (next_stage_refused) and `reason` (already_spawned, ...) ride along.
  */
 export async function openNextStageEarly(checklistId: string) {
   const response = await apiFetch(
@@ -2465,8 +2466,17 @@ export async function openNextStageEarly(checklistId: string) {
     },
   )
   if (!response.ok) {
-    const message = await safeErrorMessage(response)
-    throw new ApiError(response.status, message || `Failed to open the next step (${response.status})`)
+    type RefusalBody = { message?: unknown; error?: unknown; reason?: unknown }
+    const body = (await response.json().catch(() => null)) as RefusalBody | null
+    const code = typeof body?.error === 'string' ? body.error : undefined
+    const message =
+      typeof body?.message === 'string' && body.message.trim() ? body.message : (code ?? '')
+    throw new ApiError(
+      response.status,
+      message || `Failed to open the next step (${response.status})`,
+      code,
+      typeof body?.reason === 'string' ? body.reason : undefined,
+    )
   }
   return (await response.json()) as { checklist: Checklist; spawned: Checklist }
 }

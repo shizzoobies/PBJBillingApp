@@ -419,15 +419,44 @@ export function ChecklistsPage() {
   // lasted only while the param was in the URL, so a jump to a finished step
   // from an earlier month showed the card for a moment and then dropped it
   // again: the Dashboard's "Open step" looked like it did nothing
-  // (featreq-9c818fca). Held until another jump, an area change or leaving the
-  // page; the shared report period is never touched.
+  // (featreq-9c818fca). The shared report period is never touched.
+  //
+  // Held only while the view the jump landed in is unchanged: the filter set
+  // (area, assignee, client, status, report period) is captured with it, and
+  // the hold is released the moment any of them changes - or the search box is
+  // typed in, or another jump arrives - so a held row never leaks past a filter
+  // the person has since chosen, nor into the tab count.
   const focusParam = searchParams.get('focus')
-  const [heldFocusId, setHeldFocusId] = useState<string | null>(focusParam)
-  if (focusParam && focusParam !== heldFocusId) setHeldFocusId(focusParam)
+  const focusViewKey = JSON.stringify([
+    searchParams.get('area'),
+    areaAssignee,
+    areaClient,
+    areaStatus,
+    reportPeriod.preset,
+    reportPeriod.from,
+    reportPeriod.to,
+  ])
+  const [heldFocus, setHeldFocus] = useState<{ id: string; viewKey: string } | null>(
+    focusParam ? { id: focusParam, viewKey: focusViewKey } : null,
+  )
+  if (focusParam && (heldFocus?.id !== focusParam || heldFocus.viewKey !== focusViewKey)) {
+    setHeldFocus({ id: focusParam, viewKey: focusViewKey })
+  } else if (!focusParam && heldFocus && heldFocus.viewKey !== focusViewKey) {
+    setHeldFocus(null)
+  }
+  // Every jump - even a second one to the same task - counts, so a group the
+  // person folded after the first opens again for the next (`ChecklistGroup`).
+  const [seenFocusParam, setSeenFocusParam] = useState<string | null>(focusParam)
+  const [focusJump, setFocusJump] = useState(0)
+  if (focusParam !== seenFocusParam) {
+    setSeenFocusParam(focusParam)
+    if (focusParam) setFocusJump((count) => count + 1)
+  }
+  const heldFocusId = heldFocus?.id ?? null
   const admittedFocusId = focusParam ?? heldFocusId
 
   const setArea = (next: TaskArea) => {
-    setHeldFocusId(null)
+    setHeldFocus(null)
     const params = new URLSearchParams(searchParams)
     // 'progress' is the default, so keep it out of the URL — a bare
     // /checklists link should land somewhere sensible, not carry state.
@@ -759,6 +788,8 @@ export function ChecklistsPage() {
           role={role}
           timeEntries={data.timeEntries}
           heldFocusId={heldFocusId}
+          focusJump={focusJump}
+          onReleaseHeldFocus={() => setHeldFocus(null)}
         />
         )}
       </section>
@@ -1724,6 +1755,8 @@ function ChecklistInProgressSection({
   role,
   timeEntries,
   heldFocusId = null,
+  focusJump = 0,
+  onReleaseHeldFocus,
 }: {
   activeEmployeeId: string
   checklists: Checklist[]
@@ -1784,6 +1817,10 @@ function ChecklistInProgressSection({
   timeEntries: TimeEntry[]
   /** The last `?focus=` row, kept in view after the param clears (see the page). */
   heldFocusId?: string | null
+  /** Counts jumps, so a second jump to the same row re-opens its group. */
+  focusJump?: number
+  /** Typing a search releases the held row (the page owns the hold). */
+  onReleaseHeldFocus?: () => void
 }) {
   const todayDateOnly = localDateOnly()
   const { reportPeriod, setReportPeriod } = useAppContext()
@@ -1792,8 +1829,12 @@ function ChecklistInProgressSection({
   const [searchParams, setSearchParams] = useSearchParams()
   const focusId = searchParams.get('focus')
   // Admitted past the period and filters, and opens the group it sits in:
-  // the live param, else the held one (featreq-9c818fca).
-  const admittedFocusId = focusId ?? heldFocusId ?? null
+  // the live param, else the held one while no search is typed (featreq-9c818fca).
+  const admittedFocusId = focusId ?? (query.trim() ? null : heldFocusId) ?? null
+  /** Changes with every jump and every newly admitted row (see `ChecklistGroup`). */
+  const focusToken = admittedFocusId ? `${admittedFocusId}#${focusJump}` : null
+  const focusTokenIfIn = (rows: Checklist[]) =>
+    focusToken && rows.some((c) => c.id === admittedFocusId) ? focusToken : null
   const focusRef = useRef<HTMLElement | null>(null)
 
   // Group-by choice is persisted in a URL search param (?group=client), the
@@ -1987,7 +2028,10 @@ function ChecklistInProgressSection({
         <ReportPeriodControl value={reportPeriod} onChange={setReportPeriod} />
         <ListSearch
           value={query}
-          onChange={setQuery}
+          onChange={(value) => {
+            setQuery(value)
+            if (value.trim()) onReleaseHeldFocus?.()
+          }}
           placeholder="Search checklists…"
           resultCount={filtered.length}
           total={checklists.length}
@@ -2009,18 +2053,14 @@ function ChecklistInProgressSection({
                   defaultOpen={group.defaultOpen}
                   label={group.label}
                   count={groupedByStatus[group.key].length}
-                  focusInside={
-                    Boolean(admittedFocusId) &&
-                    groupedByStatus[group.key].some((c) => c.id === admittedFocusId)
-                  }
+                  focusToken={focusTokenIfIn(groupedByStatus[group.key])}
                 >
                   {groupedByStatus[group.key].map(renderCard)}
                 </ChecklistGroup>
               ),
             )
           : clientGroups.map((group) => {
-              const focusInCompleted =
-                Boolean(admittedFocusId) && group.completed.some((c) => c.id === admittedFocusId)
+              const completedFocusToken = focusTokenIfIn(group.completed)
               return (
                 <ChecklistGroup
                   // A client with only completed work in the period stays
@@ -2037,10 +2077,7 @@ function ChecklistInProgressSection({
                       ? group.open.length
                       : `${group.completed.length} done`
                   }
-                  focusInside={
-                    focusInCompleted ||
-                    (Boolean(admittedFocusId) && group.open.some((c) => c.id === admittedFocusId))
-                  }
+                  focusToken={completedFocusToken ?? focusTokenIfIn(group.open)}
                 >
                   {group.open.map(renderCard)}
                   {group.completed.length > 0 ? (
@@ -2049,7 +2086,7 @@ function ChecklistInProgressSection({
                       defaultOpen={false}
                       label="Completed"
                       count={group.completed.length}
-                      focusInside={focusInCompleted}
+                      focusToken={completedFocusToken}
                     >
                       {group.completed.map(renderCard)}
                     </ChecklistGroup>
@@ -2067,7 +2104,7 @@ function ChecklistGroup({
   label,
   count,
   children,
-  focusInside = false,
+  focusToken = null,
   className,
 }: {
   defaultOpen: boolean
@@ -2078,23 +2115,24 @@ function ChecklistGroup({
   /** Extra class on the group, e.g. the nested per-client Completed group. */
   className?: string
   /**
-   * When the `?focus=` checklist lands inside this group, auto-expand it so a
-   * just-created one-time task or just-generated instance is visible even if
-   * it landed in a collapsed group ("Later" / "Completed").
+   * Set while the `?focus=` checklist (or the row the page holds after the
+   * param clears) is inside this group, so a just-created one-time task, a
+   * just-generated instance or a jumped-to finished step is visible even if it
+   * landed in a collapsed group ("Later" / "Completed"). A NEW token - another
+   * row, or another jump to the same one - opens the group again.
    */
-  focusInside?: boolean
+  focusToken?: string | null
 }) {
-  // Auto-expand when the `?focus=` checklist lands inside this group, so a
-  // just-created one-time task or just-generated instance is visible even if
-  // it landed in a collapsed group. The page HOLDS the focused row after the
-  // param clears (featreq-9c818fca), so `focusInside` can stay true: it opens
-  // the group once, as it turns true, rather than forcing it open - the person
-  // can still fold it away. Adjusted during render, no effect needed.
-  const [userOpen, setUserOpen] = useState(defaultOpen || focusInside)
-  const [sawFocusInside, setSawFocusInside] = useState(focusInside)
-  if (focusInside !== sawFocusInside) {
-    setSawFocusInside(focusInside)
-    if (focusInside) setUserOpen(true)
+  // Opens the group whenever a new focus token arrives, rather than forcing it
+  // open: the page HOLDS the focused row after the param clears
+  // (featreq-9c818fca), so the token can stay set and the person must still be
+  // able to fold the group away. A second jump into a folded group opens it
+  // again. Adjusted during render, no effect needed.
+  const [userOpen, setUserOpen] = useState(defaultOpen || Boolean(focusToken))
+  const [seenFocusToken, setSeenFocusToken] = useState(focusToken)
+  if (focusToken !== seenFocusToken) {
+    setSeenFocusToken(focusToken)
+    if (focusToken) setUserOpen(true)
   }
   const open = userOpen
   return (

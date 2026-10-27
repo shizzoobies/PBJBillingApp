@@ -10,9 +10,14 @@ import type { Checklist } from './types'
  * `openNextStageEarly` (POST /api/checklists/:id/open-next-stage, merged into
  * the workspace) - with the same states: `opening` while it runs ("Opening…"),
  * `error` holding the server's sentence on a refusal. `onOpened` gets the new
- * step; nothing is called when the action was a no-op (preview).
+ * step; nothing is called when the action was a no-op (preview). `onRefused`
+ * gets the same sentence, for a caller that must keep it after its row leaves.
  */
-export function useOpenNextStage(checklistId: string, onOpened: (spawned: Checklist) => void) {
+export function useOpenNextStage(
+  checklistId: string,
+  onOpened: (spawned: Checklist) => void,
+  onRefused?: (sentence: string) => void,
+) {
   const { openNextStageEarly } = useAppContext()
   const [opening, setOpening] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -23,7 +28,9 @@ export function useOpenNextStage(checklistId: string, onOpened: (spawned: Checkl
       const spawned = await openNextStageEarly(checklistId)
       if (spawned) onOpened(spawned)
     } catch (caught) {
-      setError(openNextStageErrorText(caught))
+      const sentence = openNextStageErrorText(caught)
+      setError(sentence)
+      onRefused?.(sentence)
     } finally {
       setOpening(false)
     }

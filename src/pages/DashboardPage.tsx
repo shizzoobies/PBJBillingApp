@@ -98,8 +98,61 @@ function isInProgress(checklist: Checklist) {
  */
 const STALLED_CASE_WINDOW_DAYS = 90
 
-/** A step Open next step now just created from the Dashboard, for the confirmation line. */
-type OpenedStep = { stageId: string; spawnedId: string; step: number; title: string; clientId: string }
+/**
+ * What a press of Open next step now on the Dashboard left to say about a case
+ * (featreq-9c818fca): "Step N opened." after it worked, or the server's
+ * sentence after a refusal. Kept by the view, not the row, because the row
+ * leaves: on success the case is no longer stalled, and on "already open" the
+ * workspace refresh drops it. The note then sits on the case's own row in the
+ * in-flight list, or on a line of its own when that list does not show the case.
+ */
+type CaseNote = {
+  caseId: string
+  stageId: string
+  title: string
+  clientId: string
+  kind: 'opened' | 'refused'
+  text: string
+  link: { to: string; label: string }
+}
+
+/** One note per stalled step: the latest press wins. */
+function useCaseNotes() {
+  const [notes, setNotes] = useState<CaseNote[]>([])
+  const addNote = (note: CaseNote) =>
+    setNotes((current) => [...current.filter((entry) => entry.stageId !== note.stageId), note])
+  return { notes, addNote }
+}
+
+/** The note, as the full-width line under a case row. */
+function CaseNoteLine({ note }: { note: CaseNote | undefined }) {
+  if (!note) return null
+  return note.kind === 'opened' ? (
+    <p className="dashboard-case-note" role="status">
+      {note.text}
+    </p>
+  ) : (
+    <p className="waiting-editor-error dashboard-case-note" role="alert">
+      {note.text}
+    </p>
+  )
+}
+
+/** A case's note for its in-flight row: only once its stalled row has left (else that row shows it). */
+function caseNoteOutsideRows(notes: CaseNote[], stalledStages: Checklist[], caseId: string) {
+  return notes.find(
+    (note) =>
+      note.caseId === caseId &&
+      (note.kind === 'opened' || !stalledStages.some((stage) => stage.id === note.stageId)),
+  )
+}
+
+/** The case link: the case timeline, or the step itself for a row without a case. */
+function caseLinkFor(stage: Checklist) {
+  return stage.caseId
+    ? { to: `/cases/${encodeURIComponent(stage.caseId)}`, label: 'Open case →' }
+    : { to: `/checklists?focus=${encodeURIComponent(stage.id)}`, label: 'Open step →' }
+}
 
 /**
  * featreq-ed73d181 / featreq-9c818fca: cases whose step is finished but whose
@@ -109,37 +162,53 @@ type OpenedStep = { stageId: string; spawnedId: string; step: number; title: str
  * the button on the step's card (POST /api/checklists/:id/open-next-stage), so
  * the Dashboard is where the problem is fixed, not only where it is found. On
  * success the row leaves (the new step is live, so the case is no longer
- * stalled) and a short line links to the new step; a refusal shows the
- * server's sentence. `canOpen` mirrors the card and the route: the owner, or
- * the step's assignee, never in preview.
+ * stalled) and "Step N opened." shows on the case's in-flight row; a refusal
+ * shows the server's sentence. `canOpen` mirrors the card and the route: the
+ * owner, or the step's assignee, never in preview. `listedCaseIds`: the cases
+ * the in-flight list below shows, which carry their own note.
  */
 function StalledCaseRows({
   stages,
   clients,
   canOpen,
+  notes,
+  addNote,
+  listedCaseIds,
 }: {
   stages: Checklist[]
   clients: Parameters<typeof clientName>[0]
   canOpen: (stage: Checklist) => boolean
+  notes: CaseNote[]
+  addNote: (note: CaseNote) => void
+  listedCaseIds: ReadonlySet<string>
 }) {
-  const [opened, setOpened] = useState<OpenedStep[]>([])
-  const openedIds = new Set(opened.map((entry) => entry.stageId))
-  const rows = stages.filter((stage) => !openedIds.has(stage.id))
-  if (rows.length === 0 && opened.length === 0) return null
+  const openedStageIds = new Set(notes.filter((note) => note.kind === 'opened').map((note) => note.stageId))
+  const rows = stages.filter((stage) => !openedStageIds.has(stage.id))
+  const rowIds = new Set(rows.map((stage) => stage.id))
+  // A note whose row has left and whose case the in-flight list does not show.
+  const loose = notes.filter((note) => !rowIds.has(note.stageId) && !listedCaseIds.has(note.caseId))
+  if (rows.length === 0 && loose.length === 0) return null
+  const noteFor = (stage: Checklist, kind: CaseNote['kind'], text: string, link: CaseNote['link']): CaseNote => ({
+    caseId: stage.caseId || stage.id,
+    stageId: stage.id,
+    title: stage.title,
+    clientId: stage.clientId,
+    kind,
+    text,
+    link,
+  })
   return (
     <ul className="dashboard-cases dashboard-cases-stalled">
-      {opened.map((entry) => (
-        <li key={`opened-${entry.stageId}`} className="dashboard-case-row">
+      {loose.map((note) => (
+        <li key={`note-${note.stageId}`} className="dashboard-case-row">
           <div className="dashboard-case-main">
-            <strong>{entry.title}</strong>
-            <span className="dashboard-case-client">{clientName(clients, entry.clientId)}</span>
+            <strong>{note.title}</strong>
+            <span className="dashboard-case-client">{clientName(clients, note.clientId)}</span>
           </div>
-          <div className="dashboard-case-stage" role="status">
-            Step {entry.step} opened.
-          </div>
-          <Link to={`/checklists?focus=${encodeURIComponent(entry.spawnedId)}`} className="dashboard-case-link">
-            Open step {entry.step} →
+          <Link to={note.link.to} className="dashboard-case-link">
+            {note.link.label}
           </Link>
+          <CaseNoteLine note={note} />
         </li>
       ))}
       {rows.map((stage) => (
@@ -148,18 +217,17 @@ function StalledCaseRows({
           stage={stage}
           clients={clients}
           canOpen={canOpen(stage)}
-          onOpened={(spawned) =>
-            setOpened((current) => [
-              ...current,
-              {
-                stageId: stage.id,
-                spawnedId: spawned.id,
-                step: (spawned.stageIndex ?? (stage.stageIndex ?? 0) + 1) + 1,
-                title: spawned.title || stage.title,
-                clientId: spawned.clientId || stage.clientId,
-              },
-            ])
-          }
+          refusal={notes.find((note) => note.stageId === stage.id && note.kind === 'refused')}
+          onOpened={(spawned) => {
+            const step = (spawned.stageIndex ?? (stage.stageIndex ?? 0) + 1) + 1
+            addNote(
+              noteFor(stage, 'opened', `Step ${step} opened.`, {
+                to: `/checklists?focus=${encodeURIComponent(spawned.id)}`,
+                label: `Open step ${step} →`,
+              }),
+            )
+          }}
+          onRefused={(sentence) => addNote(noteFor(stage, 'refused', sentence, caseLinkFor(stage)))}
         />
       ))}
     </ul>
@@ -170,22 +238,24 @@ function StalledCaseRow({
   stage,
   clients,
   canOpen,
+  refusal,
   onOpened,
+  onRefused,
 }: {
   stage: Checklist
   clients: Parameters<typeof clientName>[0]
   canOpen: boolean
+  refusal: CaseNote | undefined
   onOpened: (spawned: Checklist) => void
+  onRefused: (sentence: string) => void
 }) {
   const stageIndex = stage.stageIndex ?? 0
   const stageCount = stage.stageCount ?? 1
-  const { opening, error, open } = useOpenNextStage(stage.id, onOpened)
+  const { opening, open } = useOpenNextStage(stage.id, onOpened, onRefused)
   // The case page lists every step of the case, finished ones included. The
   // Checklists page's In-progress list files a finished step out of sight
   // (featreq-9c818fca), so it is the fallback for a row without a case id only.
-  const caseLink = stage.caseId
-    ? { to: `/cases/${encodeURIComponent(stage.caseId)}`, label: 'Open case →' }
-    : { to: `/checklists?focus=${encodeURIComponent(stage.id)}`, label: 'Open step →' }
+  const caseLink = caseLinkFor(stage)
   return (
     <li className="dashboard-case-row">
       <div className="dashboard-case-main">
@@ -205,11 +275,8 @@ function StalledCaseRow({
         {caseLink.label}
       </Link>
       <p className="dashboard-case-note">{stalledStageSentence(stage, canOpen)}</p>
-      {error ? (
-        <p className="waiting-editor-error dashboard-case-note" role="alert">
-          {error}
-        </p>
-      ) : null}
+      {/* While the press runs, the earlier refusal is stale. */}
+      {opening ? null : <CaseNoteLine note={refusal} />}
     </li>
   )
 }
@@ -483,6 +550,7 @@ function OwnerDashboardView() {
     () => stalledCaseStages(data.checklists, stalledSince),
     [data.checklists, stalledSince],
   )
+  const caseNotes = useCaseNotes()
 
   const stuckCaseIds = useMemo(() => {
     const checklistRecency = new Map<string, string>()
@@ -828,7 +896,14 @@ function OwnerDashboardView() {
           Multi-step cases under way, step by step; a red row needs a hand and says what to do.
         </p>
         {/* The owner may open any next step (the route's rule). */}
-        <StalledCaseRows stages={stalledStages} clients={data.clients} canOpen={() => true} />
+        <StalledCaseRows
+          stages={stalledStages}
+          clients={data.clients}
+          canOpen={() => true}
+          notes={caseNotes.notes}
+          addNote={caseNotes.addNote}
+          listedCaseIds={new Set(limitedCases.map((row) => row.caseId))}
+        />
         {limitedCases.length === 0 && stalledStages.length === 0 ? (
           <p className="empty-state">No multi-step cases in flight.</p>
         ) : limitedCases.length === 0 ? null : (
@@ -855,6 +930,7 @@ function OwnerDashboardView() {
                   <Link to={`/cases/${row.caseId}`} className="dashboard-case-link">
                     Open case →
                   </Link>
+                  <CaseNoteLine note={caseNoteOutsideRows(caseNotes.notes, stalledStages, row.caseId)} />
                 </li>
               )
             })}
@@ -1069,6 +1145,7 @@ function EmployeeDashboardView() {
     () => stalledCaseStages(data.checklists, stalledSince).filter((stage) => stage.assigneeId === userId),
     [data.checklists, userId, stalledSince],
   )
+  const caseNotes = useCaseNotes()
   const stuckCaseIds = useMemo(() => {
     const checklistRecency = new Map<string, string>()
     for (const entry of activity) {
@@ -1328,6 +1405,9 @@ function EmployeeDashboardView() {
           stages={myStalledStages}
           clients={data.clients}
           canOpen={(stage) => !previewMode && stage.assigneeId === userId}
+          notes={caseNotes.notes}
+          addNote={caseNotes.addNote}
+          listedCaseIds={new Set(myCases.map((row) => row.caseId))}
         />
         {myCases.length === 0 && myStalledStages.length === 0 ? (
           <p className="empty-state">No cases in flight.</p>
@@ -1356,6 +1436,7 @@ function EmployeeDashboardView() {
                   <Link to={`/cases/${row.caseId}`} className="dashboard-case-link">
                     Open case →
                   </Link>
+                  <CaseNoteLine note={caseNoteOutsideRows(caseNotes.notes, myStalledStages, row.caseId)} />
                 </li>
               )
             })}

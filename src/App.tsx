@@ -1546,7 +1546,19 @@ function App() {
    */
   const openNextStageEarly = useCallback(async (checklistId: string) => {
     if (previewActiveRef.current) return null
-    const { checklist, spawned } = await openNextStageEarlyRequest(checklistId)
+    let result: Awaited<ReturnType<typeof openNextStageEarlyRequest>>
+    try {
+      result = await openNextStageEarlyRequest(checklistId)
+    } catch (error) {
+      // "Step N is already open": this tab's copy is stale (the step was opened
+      // elsewhere). Pull the workspace the ordinary way so the stale stalled row
+      // leaves; the caller still shows the server's sentence (featreq-9c818fca).
+      if (error instanceof ApiError && error.status === 409 && error.reason === 'already_spawned') {
+        requestLiveRefetchRef.current?.()
+      }
+      throw error
+    }
+    const { checklist, spawned } = result
     applyServerDataUpdate((current) => {
       const merged = current.checklists.map((entry) =>
         entry.id === checklist.id ? checklist : entry.id === spawned.id ? spawned : entry,

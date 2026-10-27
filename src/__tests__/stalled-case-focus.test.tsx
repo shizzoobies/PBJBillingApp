@@ -1,5 +1,5 @@
-import { act, render, screen } from '@testing-library/react'
-import { MemoryRouter, useLocation } from 'react-router-dom'
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChecklistsPage } from '../pages/ChecklistsPage'
 import { checklistsVisibleTo } from '../lib/checklistVisibility'
@@ -125,6 +125,24 @@ function LocationProbe() {
   return <output data-testid="url">{`${location.pathname}${location.search}`}</output>
 }
 
+/** Navigates to a jump link, the way a second click on a Dashboard or case link does. */
+function JumpButton() {
+  const navigate = useNavigate()
+  return (
+    <button type="button" data-testid="jump" onClick={() => navigate('/checklists?focus=cl-stalled')}>
+      jump
+    </button>
+  )
+}
+
+const tree = () => (
+  <MemoryRouter initialEntries={['/checklists?focus=cl-stalled']}>
+    <ChecklistsPage />
+    <LocationProbe />
+    <JumpButton />
+  </MemoryRouter>
+)
+
 const renderAt = (entry: string) =>
   render(
     <MemoryRouter initialEntries={[entry]}>
@@ -132,6 +150,27 @@ const renderAt = (entry: string) =>
       <LocationProbe />
     </MemoryRouter>,
   )
+
+/** Jump in, then let the page clear ?focus= so only the hold keeps the row. */
+const jumpAndSettle = () => {
+  const view = render(tree())
+  act(() => {
+    vi.advanceTimersByTime(2000)
+  })
+  expect(screen.getByTestId('url').textContent).not.toContain('focus=')
+  expect(cardFor('Quarterly close')).toBeTruthy()
+  return view
+}
+
+const completedHeader = () =>
+  [...document.querySelectorAll<HTMLButtonElement>('.checklist-group-header')].find((button) =>
+    button.textContent?.startsWith('Completed'),
+  )
+
+const filterSelect = (name: string) =>
+  [...document.querySelectorAll('label.filter-field')]
+    .find((label) => label.querySelector('span')?.textContent === name)
+    ?.querySelector('select') as HTMLSelectElement
 
 const CARD_TITLE = '.checklist-card-title-sub, .checklist-card-title'
 const cardFor = (title: string) =>
@@ -187,5 +226,52 @@ describe('a jump to a finished step outside the report period (featreq-9c818fca)
     })
     expect(header.getAttribute('aria-expanded')).toBe('false')
     expect(cardFor('Quarterly close')).toBeUndefined()
+  })
+})
+
+describe('the held row is let go when the view changes (review M1)', () => {
+  it('a client filter change releases it, even to its own client', () => {
+    jumpAndSettle()
+    act(() => {
+      fireEvent.change(filterSelect('Client'), { target: { value: CLIENT.id } })
+    })
+    expect(screen.getByTestId('url').textContent).toContain('client=client-1')
+    // Still outside the report period, and no longer held: gone.
+    expect(cardFor('Quarterly close')).toBeUndefined()
+    expect(cardFor('Monthly bookkeeping')).toBeTruthy()
+  })
+
+  it('a report period change releases it', () => {
+    const view = jumpAndSettle()
+    contextValue = {
+      ...contextValue,
+      reportPeriod: { preset: 'custom', from: PERIOD.from, to: addDays(PERIOD.to, 1) },
+    } as AppContextValue
+    view.rerender(tree())
+    expect(cardFor('Quarterly close')).toBeUndefined()
+    expect(cardFor('Monthly bookkeeping')).toBeTruthy()
+  })
+
+  it('typing a search releases it', () => {
+    jumpAndSettle()
+    act(() => {
+      fireEvent.change(screen.getByPlaceholderText('Search checklists…'), { target: { value: 'Quarterly' } })
+    })
+    expect(cardFor('Quarterly close')).toBeUndefined()
+  })
+})
+
+describe('a second jump re-opens a folded group (review M2)', () => {
+  it('opens the Completed group again for another jump to the same row', () => {
+    jumpAndSettle()
+    act(() => {
+      completedHeader()?.click()
+    })
+    expect(completedHeader()?.getAttribute('aria-expanded')).toBe('false')
+    act(() => {
+      screen.getByTestId('jump').click()
+    })
+    expect(completedHeader()?.getAttribute('aria-expanded')).toBe('true')
+    expect(cardFor('Quarterly close')).toBeTruthy()
   })
 })

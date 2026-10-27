@@ -45,23 +45,36 @@ const SPAWNED: Checklist = {
   items: [{ id: 'sp-1', label: 'Review', done: false }],
 } as unknown as Checklist
 
-function appData(): AppData {
+function appData(withSpawned = false): AppData {
   const seed = createSeedData()
-  return { ...seed, checklists: [...seed.checklists, STALLED] }
+  return { ...seed, checklists: [...seed.checklists, STALLED, ...(withSpawned ? [SPAWNED] : [])] }
 }
 
 const calls: Array<{ path: string; method: string }> = []
+let appDataReads = 0
 
+/**
+ * Boots the app. `openNext` answers the POST; once it has answered, a workspace
+ * re-read gets the server's truth, in which the next step IS open (it was opened
+ * elsewhere - the "already open" refusal's case).
+ */
 function boot(openNext: () => Response) {
   calls.length = 0
+  appDataReads = 0
+  let answered = false
   installFetchMock({
     sessionUser: OWNER_SESSION,
-    appData: appData(),
     extraRoutes: [
       (path, method) => {
         if (!path.endsWith(OPEN_PATH)) return undefined
         calls.push({ path, method })
+        answered = true
         return openNext()
+      },
+      (path, method) => {
+        if (!path.endsWith('/api/app-data') || method !== 'GET') return undefined
+        appDataReads += 1
+        return json(appData(answered))
       },
     ],
   })
@@ -105,12 +118,15 @@ describe('the Dashboard stalled row (featreq-9c818fca)', () => {
 
     await waitFor(() => expect(within(container).queryByText('Finished, next step never opened')).toBeNull())
     expect(calls).toEqual([{ path: OPEN_PATH, method: 'POST' }])
-    const status = within(container).getByRole('status')
-    expect(status.textContent).toBe('Step 3 opened.')
-    const confirmation = status.closest('li') as HTMLElement
-    expect(within(confirmation).getByRole('link', { name: 'Open step 3 →' }).getAttribute('href')).toBe(
-      '/checklists?focus=cl-spawned',
-    )
+    // The case is now in flight; the note sits on ITS row, not on a second one
+    // beside it (review L2).
+    expect(within(container).getAllByText('Step 3 opened.')).toHaveLength(1)
+    const status = within(container).getByText('Step 3 opened.')
+    expect(status.getAttribute('role')).toBe('status')
+    const caseRow = status.closest('li') as HTMLElement
+    expect(within(caseRow).getByText('Quarterly close review')).toBeTruthy()
+    expect(within(caseRow).getByRole('link', { name: 'Open case →' }).getAttribute('href')).toBe('/cases/case-stalled')
+    expect(within(container).queryByRole('link', { name: 'Open step 3 →' })).toBeNull()
   })
 
   it("shows the server's sentence when it refuses, and keeps the row", async () => {
@@ -131,5 +147,28 @@ describe('the Dashboard stalled row (featreq-9c818fca)', () => {
     expect(calls).toHaveLength(1)
     expect(within(container).getByText('Finished, next step never opened')).toBeTruthy()
     expect(within(row).getByRole('button', { name: 'Open next step now' })).toHaveProperty('disabled', false)
+  })
+
+  it('on "already open", re-reads the workspace: the stale row leaves and the sentence stays on the case', async () => {
+    // The live refresh rides the server's event stream; jsdom has none.
+    class FakeEventSource {
+      addEventListener() {}
+      close() {}
+    }
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const { container } = boot(() =>
+      json({ error: 'next_stage_refused', reason: 'already_spawned', message: 'Step 3 is already open.' }, 409),
+    )
+    const row = await stalledRow(container)
+    const readsBefore = appDataReads
+    fireEvent.click(within(row).getByRole('button', { name: 'Open next step now' }))
+
+    await waitFor(() => expect(within(container).queryByText('Finished, next step never opened')).toBeNull(), {
+      timeout: 4000,
+    })
+    expect(appDataReads).toBeGreaterThan(readsBefore)
+    const alert = within(container).getByText('Step 3 is already open.')
+    expect(alert.getAttribute('role')).toBe('alert')
+    expect(within(alert.closest('li') as HTMLElement).getByText('Quarterly close review')).toBeTruthy()
   })
 })
