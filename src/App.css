@@ -6047,6 +6047,17 @@ td strong {
 .dashboard-arrange-row.is-hidden .dashboard-arrange-name {
   color: var(--muted);
 }
+.dashboard-arrange-title {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* A move that would do nothing (the top panel's Up, the last one's Down). */
+.dashboard-arrange-tools button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 .dashboard-arrange-tools {
   display: flex;
   align-items: center;

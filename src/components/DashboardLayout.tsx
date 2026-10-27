@@ -157,12 +157,15 @@ function ArrangeList({ arrangement, draft }: { arrangement: DashboardArrangement
               className={`dashboard-arrange-row${setting.hidden ? ' is-hidden' : ''}`}
               aria-label={label}
             >
-              <strong className="dashboard-arrange-name">{label}</strong>
+              {/* The Hidden pill sits with the name, so the controls keep one shape. */}
+              <span className="dashboard-arrange-title">
+                <strong className="dashboard-arrange-name">{label}</strong>
+                {setting.hidden ? <span className="status-pill">Hidden</span> : null}
+              </span>
               {pinned ? (
                 <span className="dashboard-arrange-note">Always first and always shown</span>
               ) : (
                 <div className="dashboard-arrange-tools">
-                  {setting.hidden ? <span className="status-pill">Hidden</span> : null}
                   <button
                     type="button"
                     className="secondary-action"
