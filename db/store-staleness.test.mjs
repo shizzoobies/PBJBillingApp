@@ -9,6 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTes
 import {
   AccountCreditError,
   AppDataStore,
+  addQuestionnaireCustomQuestionsColumn,
   BULK_SAVE_LOCK_SQL,
   BULK_SAVE_LOCK_TABLES,
   BULK_SAVE_LOCK_TIMEOUTS,
@@ -56636,6 +56637,14 @@ describe('questionnaire follow-up questions in firm settings (file backend)', ()
     expect((await store.getFirmSettings()).questionnaireCustomQuestions).toEqual([])
   })
 
+  it('the workspace read() carries the list through the same cleaner as getFirmSettings()', async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.firmSettings = { name: 'PB&J', questionnaireCustomQuestions: [followUp(), { id: 'junk' }, 'nonsense'] }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    expect((await store.read()).firmSettings.questionnaireCustomQuestions).toEqual([followUp()])
+    expect((await store.getFirmSettings()).questionnaireCustomQuestions).toEqual([followUp()])
+  })
+
   it('saves the list through the cleaner, reads it back, and an unrelated save leaves it alone', async () => {
     await store.updateFirmSettings({
       questionnaireCustomQuestions: [
@@ -56724,11 +56733,35 @@ describe('questionnaire follow-up questions in firm settings (postgres branch)',
     }
   }
 
-  it('adds the column look-first in initialize()', async () => {
-    const source = await readFile(path.join(path.dirname(fileURLToPath(import.meta.url)), 'store.js'), 'utf8')
-    expect(source).toContain(
+  // Look-first (review M2): the ALTER takes a table lock even when it changes
+  // nothing, so it runs only when information_schema says the column is missing.
+  it('adds the column look-first: checks information_schema, ALTERs only when it is missing', async () => {
+    const statementsWhen = async (present) => {
+      const statements = []
+      await addQuestionnaireCustomQuestionsColumn({
+        async query(text) {
+          statements.push(String(text).replace(/\s+/g, ' ').trim())
+          return { rows: /information_schema\.columns/.test(text) && present ? [{ '?column?': 1 }] : [] }
+        },
+      })
+      return statements
+    }
+    const missing = await statementsWhen(false)
+    expect(missing).toHaveLength(2)
+    expect(missing[0]).toMatch(
+      /from information_schema\.columns where table_schema = current_schema\(\) and table_name = 'firm_settings' and column_name = 'questionnaire_custom_questions'/,
+    )
+    expect(missing[1]).toBe(
       'alter table firm_settings add column if not exists questionnaire_custom_questions jsonb',
     )
+    const present = await statementsWhen(true)
+    expect(present).toHaveLength(1)
+    expect(present[0]).toMatch(/information_schema\.columns/)
+
+    const source = await readFile(path.join(path.dirname(fileURLToPath(import.meta.url)), 'store.js'), 'utf8')
+    expect(source).toContain('await addQuestionnaireCustomQuestionsColumn(this.pool)')
+    // The guarded helper is the only place the ALTER is issued.
+    expect(source.split('add column if not exists questionnaire_custom_questions').length).toBe(2)
   })
 
   it('selects the column and reads NULL as none, and a stored list through the cleaner', async () => {

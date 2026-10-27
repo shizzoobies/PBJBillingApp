@@ -149,6 +149,7 @@ import {
 import { buildQuestionnaireEmail } from './lib/proposal-questionnaire-email.js'
 import {
   buildQuestionnaire,
+  cleanCustomQuestions,
   customQuestionProblems,
   flattenQuestions,
 } from './lib/proposal-questionnaire.js'
@@ -1706,7 +1707,12 @@ function scopeAppDataForSession(session, data) {
   // The proposal pricing catalog is the firm's pricing, owner-only
   // (featreq-311473e2, spec §6). `read()` carries the whole firm settings row,
   // so it is stripped here rather than trusting every page not to show it.
-  const { proposalPricing: _proposalPricing, ...firmSettings } = data.firmSettings ?? {}
+  // Her follow-up questionnaire questions (featreq-fccf901f) are owner settings too.
+  const {
+    proposalPricing: _proposalPricing,
+    questionnaireCustomQuestions: _questionnaireCustomQuestions,
+    ...firmSettings
+  } = data.firmSettings ?? {}
 
   return {
     ...data,
@@ -5621,9 +5627,11 @@ const server = createServer(async (request, response) => {
         if (Object.prototype.hasOwnProperty.call(firmPatch, 'questionnaireCustomQuestions')) {
           const list = firmPatch.questionnaireCustomQuestions
           const pricing = (await appDataStore.getFirmSettings()).proposalPricing
-          const problems = Array.isArray(list)
-            ? customQuestionProblems(list, flattenQuestions(buildQuestionnaire(pricing)))
-            : ['The follow-up questions must be a list.']
+          const problems = customQuestionProblems(list, flattenQuestions(buildQuestionnaire(pricing)))
+          // Belt and braces: nothing the cleaner would silently drop is saved.
+          if (problems.length === 0 && cleanCustomQuestions(list).length !== list.length) {
+            problems.push('Some follow-up questions could not be read. Reload the page and try again.')
+          }
           if (problems.length > 0) {
             sendJson(response, 400, { error: 'invalid_custom_questions', message: problems[0], problems })
             return

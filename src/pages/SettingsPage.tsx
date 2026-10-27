@@ -99,7 +99,8 @@ export function SettingsPage() {
     savedTimeoutRef.current = window.setTimeout(() => setSavedFlash(false), 1500)
   }
 
-  const commit = async (patch: Partial<FirmSettings>) => {
+  /** Save, rolling back on failure and passing the refusal on to the caller. */
+  const commitOrThrow = async (patch: Partial<FirmSettings>) => {
     if (!settings) return
     const optimistic = { ...settings, ...patch }
     setSettings(optimistic)
@@ -108,9 +109,18 @@ export function SettingsPage() {
       setSettings({ ...DEFAULT_FIRM_SETTINGS, ...updated })
       setFirmSettings({ ...DEFAULT_FIRM_SETTINGS, ...updated })
       flashSaved()
-    } catch {
+    } catch (error) {
       // Roll back on failure.
       setSettings(settings)
+      throw error
+    }
+  }
+
+  const commit = async (patch: Partial<FirmSettings>) => {
+    try {
+      await commitOrThrow(patch)
+    } catch {
+      // Rolled back already; these sections show nothing more.
     }
   }
 
@@ -141,7 +151,8 @@ export function SettingsPage() {
       <BusinessSection settings={settings} onCommit={commit} />
       <ClientDefaultsSection settings={settings} onCommit={commit} />
       <ProposalPricingSection settings={settings} onCommit={commit} />
-      <QuestionnaireQuestionsSection settings={settings} onCommit={commit} />
+      {/* This card shows the server's reasons when a save is refused, so it gets the refusal. */}
+      <QuestionnaireQuestionsSection settings={settings} onCommit={commitOrThrow} />
       <EngagementSectionsSection pricing={settings.proposalPricing ?? defaultProposalPricing()} />
       <AuthenticationSection />
       <EmailNotificationPrefsSection />

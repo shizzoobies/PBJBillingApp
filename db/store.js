@@ -5953,6 +5953,20 @@ const PENDING_NOTE_MAX_CHARS = 2000
  * already there, so look first and run the DDL only on the first boot after this
  * shipped (a fresh database has the column from its create).
  */
+/** The firm_settings column for her follow-up questions, added only when missing. */
+export async function addQuestionnaireCustomQuestionsColumn(pool) {
+  const found = await pool.query(
+    `select 1 from information_schema.columns
+      where table_schema = current_schema() and table_name = 'firm_settings'
+        and column_name = 'questionnaire_custom_questions'`,
+  )
+  if ((found.rows?.length ?? 0) === 0) {
+    await pool.query(
+      `alter table firm_settings add column if not exists questionnaire_custom_questions jsonb`,
+    )
+  }
+}
+
 async function addEditedAtColumn(pool, table) {
   const found = await pool.query(
     `select 1 from information_schema.columns
@@ -6275,10 +6289,10 @@ export class AppDataStore {
         `alter table firm_settings add column if not exists proposal_pricing jsonb`,
       )
       // Her own follow-up questionnaire questions (featreq-fccf901f). NULL reads
-      // as none, so the column needs no backfill. Additive + idempotent.
-      await this.pool.query(
-        `alter table firm_settings add column if not exists questionnaire_custom_questions jsonb`,
-      )
+      // as none, so the column needs no backfill. Look-first: the ALTER (which
+      // takes a table lock even when it changes nothing) runs only when the
+      // column is missing.
+      await addQuestionnaireCustomQuestionsColumn(this.pool)
 
       // Phase 5: notifications (in-app bell + email-ready).
       await this.pool.query(`
@@ -10099,6 +10113,8 @@ export class AppDataStore {
       // Same seed-and-sanitize as `getFirmSettings()`, so file-mode
       // `/api/app-data` never disagrees with Postgres about the catalog.
       proposalPricing: sanitizeProposalPricing(data.firmSettings?.proposalPricing),
+      // And her follow-up questions through the same cleaner (featreq-fccf901f).
+      questionnaireCustomQuestions: cleanCustomQuestions(data.firmSettings?.questionnaireCustomQuestions),
     }
 
     // Carry each employee's BILL rate onto `data.employees` so it reaches the

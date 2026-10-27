@@ -14,7 +14,7 @@ import {
   type CustomQuestionType,
   type QuestionnaireCustomQuestion,
 } from '../../lib/proposal-questionnaire.js'
-import type { FirmSettings } from '../lib/types'
+import { ApiError, type FirmSettings } from '../lib/types'
 
 const TYPE_LABELS: Record<CustomQuestionType, string> = {
   yes_no: 'Yes or no',
@@ -103,16 +103,33 @@ export function QuestionnaireQuestionsSection({
   const list = cleanCustomQuestions(settings.questionnaireCustomQuestions ?? [])
   const [draft, setDraft] = useState<Draft | null>(null)
   const [problems, setProblems] = useState<string[]>([])
+  const [saving, setSaving] = useState(false)
 
-  const save = (next: QuestionnaireCustomQuestion[]): boolean => {
+  /**
+   * Check, then save and WAIT: a refusal from the server (its reasons in
+   * `problems`) keeps the editor open with what she typed.
+   */
+  const save = async (next: QuestionnaireCustomQuestion[]): Promise<boolean> => {
     const found = customQuestionProblems(next, appQuestions)
     if (found.length > 0) {
       setProblems(found)
       return false
     }
     setProblems([])
-    void onCommit({ questionnaireCustomQuestions: next })
-    return true
+    setSaving(true)
+    try {
+      await onCommit({ questionnaireCustomQuestions: next })
+      return true
+    } catch (error) {
+      setProblems(
+        error instanceof ApiError && error.problems && error.problems.length > 0
+          ? error.problems
+          : [error instanceof Error && error.message ? error.message : 'Could not save. Please try again.'],
+      )
+      return false
+    } finally {
+      setSaving(false)
+    }
   }
 
   const labelOf = (questionId: string) =>
@@ -136,7 +153,9 @@ export function QuestionnaireQuestionsSection({
     const entry = entryOf(draft)
     const editing = list.some((item) => item.id === entry.id)
     const next = editing ? list.map((item) => (item.id === entry.id ? entry : item)) : [...list, entry]
-    if (save(next)) setDraft(null)
+    void save(next).then((saved) => {
+      if (saved) setDraft(null)
+    })
   }
 
   const answerChoices = draft?.whenQuestionId
@@ -202,8 +221,9 @@ export function QuestionnaireQuestionsSection({
                 type="button"
                 className="secondary-action"
                 aria-label={`${entry.active ? 'Turn off' : 'Turn on'} ${entry.label}`}
+                disabled={saving}
                 onClick={() =>
-                  save(list.map((item) => (item.id === entry.id ? { ...item, active: !item.active } : item)))
+                  void save(list.map((item) => (item.id === entry.id ? { ...item, active: !item.active } : item)))
                 }
               >
                 {entry.active ? 'Turn off' : 'Turn on'}
@@ -212,7 +232,8 @@ export function QuestionnaireQuestionsSection({
                 type="button"
                 className="ghost-action"
                 aria-label={`Delete ${entry.label}`}
-                onClick={() => save(list.filter((item) => item.id !== entry.id))}
+                disabled={saving}
+                onClick={() => void save(list.filter((item) => item.id !== entry.id))}
               >
                 Delete
               </button>
@@ -344,7 +365,7 @@ export function QuestionnaireQuestionsSection({
             ) : null}
           </div>
           <div className="button-row">
-            <button type="button" className="primary-action" onClick={submitDraft}>
+            <button type="button" className="primary-action" disabled={saving} onClick={submitDraft}>
               Save question
             </button>
             <button

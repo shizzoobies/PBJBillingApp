@@ -443,6 +443,8 @@ describe('the Resend webhook', () => {
     expect(check).toBeGreaterThan(-1)
     expect(put).toContain("sendJson(response, 400, { error: 'invalid_custom_questions'")
     expect(check).toBeLessThan(put.indexOf('appDataStore.updateFirmSettings(firmPatch)'))
+    // Nothing the cleaner would silently drop gets saved either.
+    expect(put).toContain('cleanCustomQuestions(list).length !== list.length')
   })
 
   it('freezes her active follow-ups with the app questions when a questionnaire is made', () => {

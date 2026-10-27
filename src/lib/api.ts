@@ -119,8 +119,25 @@ export async function updateFirmSettingsRequest(patch: Partial<FirmSettings>) {
     body: JSON.stringify(patch),
   })
   if (!response.ok) {
-    const message = await safeErrorMessage(response)
-    throw new ApiError(response.status, message || `Failed to save firm settings (${response.status})`)
+    // A refused follow-up question list (featreq-fccf901f) names every reason.
+    const body = (await response.json().catch(() => null)) as
+      | { error?: unknown; message?: unknown; problems?: unknown }
+      | null
+    const message =
+      typeof body?.message === 'string' && body.message.trim()
+        ? body.message
+        : typeof body?.error === 'string'
+          ? body.error
+          : ''
+    const error = new ApiError(
+      response.status,
+      message || `Failed to save firm settings (${response.status})`,
+      typeof body?.error === 'string' ? body.error : undefined,
+    )
+    if (Array.isArray(body?.problems)) {
+      error.problems = body.problems.filter((line): line is string => typeof line === 'string')
+    }
+    throw error
   }
   return (await response.json()) as FirmSettings
 }

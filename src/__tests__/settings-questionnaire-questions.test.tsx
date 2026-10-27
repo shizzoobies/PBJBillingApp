@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { defaultProposalPricing } from '../../lib/proposal-pricing.js'
@@ -13,7 +13,7 @@ import {
 import { QuestionnaireQuestionsSection } from '../components/QuestionnaireQuestionsSection'
 import { QuestionnaireSheet } from '../components/proposals/QuestionnaireSheet'
 import { QuestionnaireAnswersPanel } from '../components/proposals/QuestionnaireInbox'
-import { DEFAULT_FIRM_SETTINGS, type FirmSettings, type ProposalQuestionnaire } from '../lib/types'
+import { ApiError, DEFAULT_FIRM_SETTINGS, type FirmSettings, type ProposalQuestionnaire } from '../lib/types'
 
 vi.mock('../lib/api', () => ({
   saveQuestionnaireAnswersRequest: vi.fn(() => Promise.resolve({})),
@@ -57,7 +57,13 @@ function lastSaved(onCommit: ReturnType<typeof vi.fn>): QuestionnaireCustomQuest
   return patch.questionnaireCustomQuestions ?? []
 }
 
-function addQuestion(label: string, type: string, when?: { question: string; answer: string }, required = false) {
+/** Save the open editor and wait for the awaited save to close it. */
+async function saveDraft() {
+  fireEvent.click(screen.getByRole('button', { name: 'Save question' }))
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Save question' })).toBeNull())
+}
+
+async function addQuestion(label: string, type: string, when?: { question: string; answer: string }, required = false) {
   fireEvent.click(screen.getByRole('button', { name: 'Add a follow-up question' }))
   fireEvent.change(screen.getByLabelText('Question'), { target: { value: label } })
   fireEvent.change(screen.getByLabelText('Answer type'), { target: { value: type } })
@@ -66,7 +72,7 @@ function addQuestion(label: string, type: string, when?: { question: string; ans
     fireEvent.change(screen.getByLabelText('Ask only when'), { target: { value: when.question } })
     fireEvent.change(screen.getByLabelText('is'), { target: { value: when.answer } })
   }
-  fireEvent.click(screen.getByRole('button', { name: 'Save question' }))
+  await saveDraft()
 }
 
 describe('the Questionnaire card on Settings', () => {
@@ -81,9 +87,9 @@ describe('the Questionnaire card on Settings', () => {
     expect(within(app).queryByRole('button')).toBeNull()
   })
 
-  it('adds a required follow-up asked only when a service was picked, and saves what the server keeps', () => {
+  it('adds a required follow-up asked only when a service was picked, and saves what the server keeps', async () => {
     const onCommit = renderCard()
-    addQuestion('Do you run payroll in-house?', 'yes_no', { question: 'services', answer: 'Payroll' }, true)
+    await addQuestion('Do you run payroll in-house?', 'yes_no', { question: 'services', answer: 'Payroll' }, true)
     const saved = lastSaved(onCommit)
     expect(saved).toHaveLength(1)
     expect(saved[0]).toMatchObject({
@@ -99,9 +105,9 @@ describe('the Questionnaire card on Settings', () => {
     expect(screen.getByText(/Asked only when “What would you like help with\?” is “Payroll”/)).toBeTruthy()
   })
 
-  it('offers the picked question’s answers, and can depend on another follow-up', () => {
+  it('offers the picked question’s answers, and can depend on another follow-up', async () => {
     const onCommit = renderCard()
-    addQuestion('Do you have a bookkeeper today?', 'yes_no')
+    await addQuestion('Do you have a bookkeeper today?', 'yes_no')
     const first = lastSaved(onCommit)[0]
     fireEvent.click(screen.getByRole('button', { name: 'Add a follow-up question' }))
     fireEvent.change(screen.getByLabelText('Ask only when'), { target: { value: first.id } })
@@ -110,12 +116,12 @@ describe('the Questionnaire card on Settings', () => {
     fireEvent.change(screen.getByLabelText('Question'), { target: { value: 'Who is it?' } })
     fireEvent.change(screen.getByLabelText('Answer type'), { target: { value: 'short_text' } })
     fireEvent.change(screen.getByLabelText('is'), { target: { value: 'yes' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save question' }))
+    await saveDraft()
     expect(lastSaved(onCommit)[1].when).toEqual({ questionId: first.id, answer: 'yes' })
     expect(screen.getByText(/Asked only when “Do you have a bookkeeper today\?” is “Yes”/)).toBeTruthy()
   })
 
-  it('a pick-one question saves its options, and is refused without any', () => {
+  it('a pick-one question saves its options, and is refused without any', async () => {
     const onCommit = renderCard()
     fireEvent.click(screen.getByRole('button', { name: 'Add a follow-up question' }))
     fireEvent.change(screen.getByLabelText('Question'), { target: { value: 'Which bank?' } })
@@ -124,27 +130,64 @@ describe('the Questionnaire card on Settings', () => {
     expect(onCommit).not.toHaveBeenCalled()
     expect(screen.getByRole('alert').textContent).toMatch(/needs at least one option/)
     fireEvent.change(screen.getByLabelText('Options, one per line'), { target: { value: 'Chase\n\nPNC\n' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save question' }))
+    await saveDraft()
     expect(lastSaved(onCommit)[0].options).toEqual(['Chase', 'PNC'])
   })
 
-  it('turns a question off and on, edits it, and deletes it', () => {
+  it('turns a question off and on, edits it, and deletes it', async () => {
     const onCommit = renderCard([
       { id: 'cq-0000000a', label: 'Old wording', type: 'short_text', required: false, active: true },
     ])
     fireEvent.click(screen.getByRole('button', { name: 'Turn off Old wording' }))
     expect(lastSaved(onCommit)[0].active).toBe(false)
     expect(screen.getByText('(turned off)')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Turn on Old wording' }))
-    expect(lastSaved(onCommit)[0].active).toBe(true)
-    fireEvent.click(screen.getByRole('button', { name: 'Edit Old wording' }))
+    const turnOn = await screen.findByRole('button', { name: 'Turn on Old wording' })
+    await waitFor(() => expect((turnOn as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(turnOn)
+    await waitFor(() => expect(lastSaved(onCommit)[0].active).toBe(true))
+    const edit = screen.getByRole('button', { name: 'Edit Old wording' })
+    fireEvent.click(edit)
     fireEvent.change(screen.getByLabelText('Question'), { target: { value: 'New wording' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save question' }))
+    await saveDraft()
     expect(lastSaved(onCommit)).toEqual([
       { id: 'cq-0000000a', label: 'New wording', type: 'short_text', required: false, active: true },
     ])
-    fireEvent.click(screen.getByRole('button', { name: 'Delete New wording' }))
-    expect(lastSaved(onCommit)).toEqual([])
+    const del = screen.getByRole('button', { name: 'Delete New wording' })
+    await waitFor(() => expect((del as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(del)
+    await waitFor(() => expect(lastSaved(onCommit)).toEqual([]))
+  })
+
+  // Review M3: switching off a question another one depends on is refused.
+  it('will not turn off a question an active one depends on', () => {
+    const onCommit = renderCard([
+      { id: 'cq-0000000a', label: 'Bookkeeper?', type: 'yes_no', required: false, active: true },
+      { id: 'cq-0000000b', label: 'Who?', type: 'short_text', required: false, active: true, when: { questionId: 'cq-0000000a', answer: 'yes' } },
+    ])
+    fireEvent.click(screen.getByRole('button', { name: 'Turn off Bookkeeper?' }))
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert').textContent).toContain('"Who?" asks only after a question that is turned off.')
+  })
+
+  // Review LOW: the save is awaited; a refusal keeps what she typed and shows the server's reasons.
+  it('keeps the editor open with the server’s reasons when the save is refused', async () => {
+    const refusal = new ApiError(400, 'first reason', 'invalid_custom_questions')
+    refusal.problems = ['first reason', 'second reason']
+    const onCommit = vi.fn(() => Promise.reject(refusal))
+    render(
+      <QuestionnaireQuestionsSection
+        settings={{ ...DEFAULT_FIRM_SETTINGS, proposalPricing: defaultProposalPricing(), questionnaireCustomQuestions: [] }}
+        onCommit={onCommit}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Add a follow-up question' }))
+    fireEvent.change(screen.getByLabelText('Question'), { target: { value: 'Kept wording' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save question' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('first reason')
+    expect(alert.textContent).toContain('second reason')
+    expect((screen.getByLabelText('Question') as HTMLInputElement).value).toBe('Kept wording')
+    expect(onCommit).toHaveBeenCalledTimes(1)
   })
 
   it('will not delete a question another one depends on', () => {

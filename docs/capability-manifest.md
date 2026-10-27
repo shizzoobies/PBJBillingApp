@@ -672,7 +672,7 @@ Header actions: **Accept** marks the proposal Won, drafts its engagement letter 
 - Mailing address, contact details, EIN (invoices).
 - **Proposal pricing** - the three proposal rates (Bookkeeper B, Accountant A, Controller C; not the team's bill rates; seeded at her confirmed $75, $115 and $125; a zero rate shows a warning beside it), labels for the counts collected, and the service catalog: each row is count x factor x role rate x multiplier, a flat amount typed per proposal, or the payroll / sales tax block. Rows can be edited, added or retired (Retire / Restore); editing never reprices a proposal already written. An input's standard value fills in a new proposal; a flat/per-count row's standard fills in only when she first picks it.
 - **Engagement sections** - the ordered library letters are assembled from at Accept: title, when it goes in (Always, a service group, or a catalog line), text (B, engagement placeholders; unknown ones warn), Up/Down, **Add section**, **In use** (off, never deleted), **Save all** (refused if saved elsewhere meanwhile: reload); Email is the cover email, always in use; drafted letters keep their text until re-assembled.
-- **Questionnaire** - the app's questions (read-only) and her **follow-up questions** (**Add a follow-up question**, Edit, Turn off/on, Delete): words, optional help, type (Yes or no, Short/Long answer, Pick one from a list + options), **Required when asked**, **Ask only when** [a question a prospect sees or another follow-up] **is** [one of its answers, or answered at all]. An unaskable list (blank, no options, a missing question or answer, a loop, deleting one another needs) is refused with why. Each NEW questionnaire freezes the active ones under **More about you** on step 2; sent ones keep theirs. A follow-up shows only while its condition holds (a step-2 one as its answer is picked; call sheet too), is required only then, and an unasked one's answer is dropped. Answers show by her words; yes reads Yes.
+- **Questionnaire** - the app's questions (read-only) and her **follow-up questions** (**Add a follow-up question**, Edit, Turn off/on, Delete): words, optional help, type (Yes or no, Short/Long answer, Pick one from a list + options), **Required when asked**, **Ask only when** [a question a prospect sees or another follow-up] **is** [one of its answers, or answered at all]. An unaskable list (blank, no options, an option called "any", a missing or turned-off question, an answer it lacks, a loop, deleting or turning off one another needs) is refused with why. Each NEW questionnaire freezes the active ones under **More about you** on step 2; sent ones keep theirs. A follow-up shows only while its condition holds (a step-2 one as its answer is picked; call sheet too), is required only then, and an unasked one's answer is dropped. Answers show by her words; yes reads Yes.
 - Sections can be locked to prevent accidental edits.
 
 ## Security & sign-in
@@ -706,26 +706,26 @@ Header actions: **Accept** marks the proposal Won, drafts its engagement letter 
 
 ## Billing month concept
 
-- The top-bar billing month selector scopes Invoices, Reports, and unbilled hours to that month. Time entries belong to the month of their date.
+- The top-bar billing month selector scopes Invoices, Reports and unbilled hours to that month; time entries belong to their date's month.
 
 ## AI Assistant (this assistant)
 
-- Owner-only chat: answers questions about how to use the app, grounded in this manifest.
+- Owner-only chat: answers how-to questions about the app, grounded in this manifest.
 - Voice (owner-only): the panel's microphone button starts a real-time spoken conversation (it speaks back); tap again to end. Typing still works alongside it.
 - Voice can set things up too, same guardrail as text: a voice ask only FILES A CONFIRMATION CARD in the panel for one of the four actions below (adding a team member = the client's ASSIGNED TEAM, the owner-picked list that also decides who sees its invoices). Nothing changes until the owner taps "Run it"; it never acts on its own, by voice or text.
 - The voice assistant pulls LIVE firm data when asked: client profitability, hours by client/staff, what's overdue or due soon, who's at capacity, and the current workspace setup (the app's report numbers); the "why isn't this working?" diagnostics below work by voice too.
 - Voice REMEMBERS across calls: "remember that…" saves a fact for future conversations (older memories are recalled on request); each call's summary is kept.
-- Can draft a feature request to Alex (the developer / admin) for something unsupported; the owner confirms the draft before it is emailed to the admin address; a sent one is in the activity log AND on the owner's "Updates" page (the tracker).
+- Can draft a feature request to Alex (the developer / admin) for something unsupported; the owner confirms it before it goes to the admin address; a sent one is in the activity log AND on the owner's "Updates" page (the tracker).
 - Generates reports on request from any data it can read (profitability, hours, deadlines, capacity, clients, workspace setup), e.g. "give me a Q2 profitability report": sections, key figures and tables in a modal with "Save as PDF", by text or voice (it pops up on screen during a call). With no data behind it, it says so and offers a feature request to Alex (you confirm before it sends).
 - After a report or analysis, offers to email it to the owner: "yes" shows a confirm card; only on confirm is it emailed to the owner's address, and it never claims "sent" when the email was rejected.
 - Watches for repeated manual work: up to 3 suggestion cards when the panel opens (tasks created by hand month after month = recurring template candidates; the same time entry logged manually 3+ times; recurring templates whose schedule looks stalled), each deep-linking to its page; "Don't show again" dismisses one for good. Or ask "what do I do repeatedly?" in chat.
-- Replies stream in; the conversation is saved (there on reload and on another device) and the trash icon in the panel header clears it.
+- Replies stream in; the conversation is saved (there on reload and on another device) and the panel header's trash icon clears it.
 - Can DO a few things directly, each behind a confirmation card (nothing happens until the owner clicks "Run it"):
   - Make a template recurring for a client (attach an existing template on a weekly / monthly / quarterly / annual schedule).
   - Assign a client to a team member (give them access).
   - Generate a task list now from a template.
   - Turn a switched-off recurring checklist back on.
-  For anything else it offers a feature request to Alex rather than pretending to act.
+  Anything else: it offers a feature request to Alex rather than pretending to act.
 - Optional weekly digest email (Mondays, configurable; needs email configured): the top automation opportunities (the panel's patterns).
 - Answers analytical questions about the firm's real data (owner-only, read-only, pre-aggregated):
   - Client profitability for a month - revenue, hours, realized rate (fee ÷ hours), and true margin where team cost rates are set; surfaces fixed-fee clients eating more time than their fee implies. An hourly client's revenue is priced as its invoice is (from June 2026 on, each person's bill rate in the client's rate month at the time; before that, the old single hourly rate x billable hours), and cost at each person's cost rate on the DAY worked - the same rules as the Client Recap and payroll report.
@@ -753,8 +753,8 @@ Header actions: **Accept** marks the proposal Won, drafts its engagement letter 
 - Ship + approve workflow: a pushed update is set to "Shipped" (violet badge; still open, awaiting sign-off; the Shipped tab reads "Awaiting your approval"), showing "Mark approved" (-> "Done", recording "Approved by <name> · <date>") AND "Not approved" (a reason box). "Send back" first runs an **AI read-back** restating the reason in the owner's own terms ("So the change you want is …", or which of two readings she means); only after "Yes - send back" is it filed, back to **Planned** with an amber "Not approved - <date>: <reason>" note plus the confirmed dev-ready rework spec. "Send back without the read-back" works when the AI is unavailable. An In-Progress item's whole card pulses.
 - **"Walk me through it"** (beside "Mark approved" and "Not approved" on every Shipped item) opens a plain-language walkthrough on the card: **What changed** (a few sentences), **Where to find it** (the page and controls by name), **Try it** (a short numbered list to follow now), **What did NOT change** (the approval's scope). The AI writes it from the developer's shipped notes plus the matching part of this manifest (never code or commit details) and SAVES it with the item (re-opening is instant; "Regenerate" asks for a fresh one). Reading only: it never approves, sends back or changes status; if the AI is unavailable the panel says so and both review buttons still work.
 - Editing an item: the title or "Edit" edits title + description in place; Save commits (no auto-save). Status, priority and type change at once from their dropdowns.
-- "Refine for dev": the AI rewrites a rough item into an implementation-ready spec (Problem / Desired behavior / Where in the app / Acceptance); the owner accepts or discards it.
-- "Copy for Claude Code" (per item) and "Copy all (prioritized)" put a paste-ready markdown spec on the clipboard for the developer's build tool.
+- "Refine for dev": the AI rewrites a rough item into an implementation-ready spec (Problem / Desired behavior / Where in the app / Acceptance); she accepts or discards it.
+- "Copy for Claude Code" (per item) and "Copy all (prioritized)" put a paste-ready markdown spec on the clipboard for the developer.
 
 ## NOT supported (yet) - common asks
 
@@ -771,4 +771,4 @@ The app currently has NO:
 - Public API or webhooks
 - Email inbox integration
 
-If the owner asks for one of these (or anything else missing), say it's not supported yet and offer to send Alex a feature request.
+If the owner asks for one of these (or anything else missing), say it's not supported yet and offer a feature request to Alex.

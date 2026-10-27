@@ -136,8 +136,8 @@ describe('PUT /api/firm-settings whitelists in the handler (L2)', () => {
   // staff-scoped copy has to drop the catalog explicitly.
   it('strips the proposal catalog from the workspace a non-owner receives', () => {
     const scope = functionSource('function scopeAppDataForSession(', 6000)
-    expect(scope).toContain(
-      'const { proposalPricing: _proposalPricing, ...firmSettings } = data.firmSettings ?? {}',
+    expect(scope).toMatch(
+      /const \{\s*proposalPricing: _proposalPricing,\s*questionnaireCustomQuestions: _questionnaireCustomQuestions,\s*\.\.\.firmSettings\s*\} = data\.firmSettings \?\? \{\}/,
     )
     expect(scope).toContain('...(data.firmSettings ? { firmSettings } : {}),')
   })

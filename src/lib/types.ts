@@ -2496,6 +2496,9 @@ export class ApiError extends Error {
    */
   recipients?: Array<{ email: string; source: string }>
 
+  /** Every reason a save was refused, when the endpoint lists them (firm settings' follow-up questions). */
+  problems?: string[]
+
   constructor(status: number, message: string, code?: string, reason?: string) {
     super(message)
     this.status = status
