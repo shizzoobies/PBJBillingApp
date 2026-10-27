@@ -1,8 +1,117 @@
-import { useId } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { CLIENT_RECORD_SOURCE, isPlausibleEmail } from '../../../lib/invoice-recipients.js'
 import { esignSignerName } from '../../../lib/esign-signer.js'
-import type { SignerParty, SignerSelection } from '../../lib/esignSigner'
+import { engagementRecipientsRequest } from '../../lib/api'
+import { ESIGNATURES_AUTO_REMINDER_NOTE, ESIGN_TEST_MODE_NOTE, esignProviderName } from '../../lib/engagements'
+import {
+  chosenSigner,
+  initialSignerSelection,
+  type EsignSignerPost,
+  type SignerParty,
+  type SignerSelection,
+} from '../../lib/esignSigner'
+import { ApiError, type EsignProvider } from '../../lib/types'
 import type { InvoiceRecipientDetail } from '../../lib/utils'
+
+/**
+ * The whole confirm of Send for signature, shared by the letter's page (EsignPanel) and the client's Billing
+ * tab (ClientEngagementsCard) so the two never drift: it reads who may sign (the server's on-file list for
+ * the letter), offers the choices, names the signer, says what the provider does, and hands the chosen
+ * signer to `onSend`. `fresh` (a refusal's list as it is now) opens it on that list without reading again.
+ */
+export function EsignSendConfirm({
+  engagementId,
+  partyName,
+  party,
+  provider,
+  testMode,
+  fresh = null,
+  busy = false,
+  onSend,
+  onCancel,
+}: {
+  engagementId: string
+  partyName: string
+  party: SignerParty
+  provider: EsignProvider | null | undefined
+  testMode: boolean
+  fresh?: InvoiceRecipientDetail[] | null
+  busy?: boolean
+  onSend: (signer: EsignSignerPost) => void
+  onCancel: () => void
+}) {
+  const partyEmail = String(party.email ?? '').trim()
+  const [signers, setSigners] = useState<InvoiceRecipientDetail[] | null>(fresh)
+  const [selection, setSelection] = useState<SignerSelection>(() =>
+    fresh ? initialSignerSelection(fresh, partyEmail ? [partyEmail] : []) : null,
+  )
+  const [loadError, setLoadError] = useState('')
+
+  useEffect(() => {
+    if (fresh) return
+    let cancelled = false
+    engagementRecipientsRequest(engagementId).then(
+      (list) => {
+        if (cancelled) return
+        setSigners(list.details)
+        setSelection(initialSignerSelection(list.details, list.defaultTo))
+      },
+      (err: unknown) => {
+        if (cancelled) return
+        // The contacts could not be read: the party's address (the server still checks it) or a typed one.
+        const fallback = partyEmail ? [{ email: partyEmail, source: String(party.contactName || partyName) }] : []
+        setSigners(fallback)
+        setSelection(initialSignerSelection(fallback, partyEmail ? [partyEmail] : []))
+        const why = (err instanceof ApiError ? err.message : "Could not read the client's contacts").replace(/\.$/, '')
+        setLoadError(`${why}. You can still send to the party's address or type one.`)
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [engagementId, fresh, partyEmail, party.contactName, partyName])
+
+  const signer = signers ? chosenSigner(selection, signers, party) : null
+  const providerName = esignProviderName(provider)
+
+  return (
+    <div className="esign-confirm" role="group" aria-label="Confirm send for signature">
+      <p>{`Who signs the engagement letter for ${partyName}? One person signs; ${providerName} emails them a link to sign it.`}</p>
+      {loadError ? (
+        <p className="form-error" role="alert">
+          {loadError}
+        </p>
+      ) : null}
+      {signers === null ? (
+        <p className="muted-text">Reading who can sign...</p>
+      ) : (
+        <SignerChoices details={signers} selection={selection} party={party} onChange={setSelection} busy={busy} />
+      )}
+      {signer ? <p className="recipient-picker-final">{`Signer: ${signer.name} (${signer.email})`}</p> : null}
+      {provider === 'esignatures' ? <p className="muted-text">{ESIGNATURES_AUTO_REMINDER_NOTE}</p> : null}
+      {testMode ? <p className="muted-text">{ESIGN_TEST_MODE_NOTE}</p> : null}
+      <div className="button-row">
+        <button
+          type="button"
+          className="primary-action"
+          disabled={busy || !signer}
+          onClick={() => {
+            if (!signer) return
+            onSend({
+              email: signer.email,
+              ...(signer.oneTime ? { oneTime: true as const, ...(signer.typedName ? { name: signer.typedName } : {}) } : {}),
+            })
+          }}
+        >
+          {signer ? `Send for signature to ${signer.email}` : 'Choose who signs'}
+        </button>
+        <button type="button" className="ghost-action" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
 
 /**
  * "Who signs?" - the confirm step of Send for signature (Alex, 2026-10-27: "confirm or specify the email

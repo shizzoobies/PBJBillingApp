@@ -188,7 +188,7 @@ export function ClientNotesSection({ clientId }: { clientId: string }) {
 export function ClientDetailPage() {
   const { clientId } = useParams<{ clientId: string }>()
   const navigate = useNavigate()
-  const { data, ownerMode, updateClient, deleteClient, setClientLifecycle, dataRefreshCount } =
+  const { data, ownerMode, previewMode, updateClient, deleteClient, setClientLifecycle, dataRefreshCount } =
     useAppContext()
   const [assignedTeamError, setAssignedTeamError] = useState('')
   // Whether the shared "Track time" modal is open for this client.
@@ -624,6 +624,7 @@ export function ClientDetailPage() {
             <ClientEngagementsCard
               clientId={client.id}
               ownerMode={ownerMode}
+              previewMode={previewMode}
               refreshKey={dataRefreshCount}
               client={client}
               plans={data.plans ?? []}

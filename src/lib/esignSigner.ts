@@ -15,6 +15,9 @@ export type SignerSelection =
   | { mode: 'oneTime'; email: string; name: string }
   | null
 
+/** The signer as Send for signature posts it (lib/esign-signer.js reads it). */
+export type EsignSignerPost = { email: string; name?: string; oneTime?: true }
+
 /** Who the letter is for, to name a signer the way the server will. */
 export type SignerParty = { email?: string | null; contactName?: string | null; company?: string | null }
 

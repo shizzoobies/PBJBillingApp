@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   engagementEsignPdfUrl,
-  engagementRecipientsRequest,
   finishEngagementEsignRequest,
   listEngagementEsignRequests,
   remindEngagementEsignRequest,
@@ -9,7 +8,6 @@ import {
   esignStatusRequest,
 } from '../../lib/api'
 import {
-  ESIGNATURES_AUTO_REMINDER_NOTE,
   ESIGN_TEST_MODE_NOTE,
   esignBadgeText,
   esignIsActive,
@@ -21,8 +19,8 @@ import { ApiError, type EsignStatus, type SignatureRequest } from '../../lib/typ
 import { dateOnlyInZone, firmToday } from '../../../lib/firm-time.js'
 import { FINISHED_SIGNATURE_STATUSES } from '../../../lib/signature-statuses.js'
 import type { InvoiceRecipientDetail } from '../../lib/utils'
-import { chosenSigner, esignSignerEmail, initialSignerSelection, type SignerSelection } from '../../lib/esignSigner'
-import { SignerChoices } from './SignerPicker'
+import { esignSignerEmail, type EsignSignerPost } from '../../lib/esignSigner'
+import { EsignSendConfirm } from './SignerPicker'
 
 /**
  * E-signature for one engagement letter (featreq-56d39567; docs/signwell.md, docs/esignatures.md): the
@@ -93,9 +91,9 @@ export function EsignPanel({
   const [requests, setRequests] = useState<SignatureRequest[] | null>(null)
   const [busy, setBusy] = useState<'' | 'send' | 'remind' | 'finish'>('')
   const [confirming, setConfirming] = useState(false)
-  // Who may sign (the server's on-file list for the letter) while the confirm is open; null while it loads.
-  const [signers, setSigners] = useState<InvoiceRecipientDetail[] | null>(null)
-  const [selection, setSelection] = useState<SignerSelection>(null)
+  // A refusal's list of who may sign as it is now (the confirm reopens on it), and a key that remounts the confirm.
+  const [freshSigners, setFreshSigners] = useState<InvoiceRecipientDetail[] | null>(null)
+  const [confirmKey, setConfirmKey] = useState(0)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [reloads, setReloads] = useState(0)
@@ -158,44 +156,23 @@ export function EsignPanel({
   const canCheck = Boolean(latest) && !FINISHED_SIGNATURE_STATUSES.includes(latest?.status ?? '')
   const target = partyEmail || 'the party'
   const party = { email: partyEmail, contactName: partyContactName, company: partyName }
-  const signer = signers ? chosenSigner(selection, signers, party) : null
 
-  // Send for signature, step one: who may sign, from the server (the same list the send checks against).
-  const openConfirm = async (fresh?: InvoiceRecipientDetail[]) => {
+  // Send for signature, step one: the confirm (EsignSendConfirm) reads who may sign and asks.
+  const openConfirm = (fresh: InvoiceRecipientDetail[] | null = null) => {
+    setFreshSigners(fresh)
+    setConfirmKey((count) => count + 1)
     setConfirming(true)
-    if (fresh) {
-      setSigners(fresh)
-      setSelection(initialSignerSelection(fresh, partyEmail ? [partyEmail] : []))
-      return
-    }
-    setSigners(null)
-    setSelection(null)
-    try {
-      const list = await engagementRecipientsRequest(engagementId)
-      setSigners(list.details)
-      setSelection(initialSignerSelection(list.details, list.defaultTo))
-    } catch (err) {
-      // The contacts could not be read: the party's address (the server still checks it) or a typed one.
-      const fallback = partyEmail ? [{ email: partyEmail, source: partyContactName || partyName }] : []
-      setSigners(fallback)
-      setSelection(initialSignerSelection(fallback, partyEmail ? [partyEmail] : []))
-      const why = (err instanceof ApiError ? err.message : "Could not read the client's contacts").replace(/\.$/, '')
-      setError(`${why}. You can still send to the party's address or type one.`)
-    }
   }
   const closeConfirm = () => {
     setConfirming(false)
-    setSigners(null)
-    setSelection(null)
+    setFreshSigners(null)
   }
   // A new send goes through the server's provider now; a request is named by the provider it went to.
   const sendProvider = esignProviderName(status.provider)
   const latestProvider = esignProviderName(latest?.provider)
   const activeProvider = esignProviderName(active?.provider)
 
-  const send = async () => {
-    if (!signer) return
-    const chosen = signer
+  const send = async (chosen: EsignSignerPost) => {
     closeConfirm()
     setBusy('send')
     setError('')
@@ -204,10 +181,7 @@ export function EsignPanel({
       // Always the signer she just confirmed, never one the server picks.
       const result = await sendEngagementEsignRequest(engagementId, {
         templateHash,
-        signer: {
-          email: chosen.email,
-          ...(chosen.oneTime ? { oneTime: true, ...(chosen.typedName ? { name: chosen.typedName } : {}) } : {}),
-        },
+        signer: chosen,
       })
       setNotice(
         `Sent for signature to ${esignSignerEmail(result.request) || chosen.email}.${result.request.testMode ? ` ${ESIGN_TEST_MODE_NOTE}` : ''}`,
@@ -217,7 +191,7 @@ export function EsignPanel({
     } catch (err) {
       setError(esignRefusalSentence(err, 'send'))
       // The address she chose is no longer on file: ask again, on the list as it is now.
-      if (err instanceof ApiError && err.code === 'recipients_changed') await openConfirm(err.recipients)
+      if (err instanceof ApiError && err.code === 'recipients_changed') openConfirm(err.recipients ?? null)
       // Another tab got there first, or the stored letter moved: show what is stored now.
       if (err instanceof ApiError && ['signature_active', 'engagement_changed', 'engagement_refused'].includes(err.code ?? '')) {
         reload()
@@ -314,25 +288,18 @@ export function EsignPanel({
       ) : null}
 
       {confirming ? (
-        <div className="esign-confirm" role="group" aria-label="Confirm send for signature">
-          <p>{`Who signs the engagement letter for ${partyName}? One person signs; ${sendProvider} emails them a link to sign it.`}</p>
-          {signers === null ? (
-            <p className="muted-text">Reading who can sign...</p>
-          ) : (
-            <SignerChoices details={signers} selection={selection} party={party} onChange={setSelection} busy={busy !== ''} />
-          )}
-          {signer ? <p className="recipient-picker-final">{`Signer: ${signer.name} (${signer.email})`}</p> : null}
-          {status.provider === 'esignatures' ? <p className="muted-text">{ESIGNATURES_AUTO_REMINDER_NOTE}</p> : null}
-          {status.testMode ? <p className="muted-text">{ESIGN_TEST_MODE_NOTE}</p> : null}
-          <div className="button-row">
-            <button type="button" className="primary-action" disabled={busy !== '' || !signer} onClick={() => void send()}>
-              {signer ? `Send for signature to ${signer.email}` : 'Choose who signs'}
-            </button>
-            <button type="button" className="ghost-action" onClick={closeConfirm}>
-              Cancel
-            </button>
-          </div>
-        </div>
+        <EsignSendConfirm
+          key={confirmKey}
+          engagementId={engagementId}
+          partyName={partyName}
+          party={party}
+          provider={status.provider}
+          testMode={status.testMode}
+          fresh={freshSigners}
+          busy={busy !== ''}
+          onSend={(chosen) => void send(chosen)}
+          onCancel={closeConfirm}
+        />
       ) : (
         <div className="button-row">
           {canStart ? (
@@ -343,7 +310,7 @@ export function EsignPanel({
               onClick={() => {
                 setError('')
                 setNotice('')
-                void openConfirm()
+                openConfirm()
               }}
             >
               {busy === 'send' ? 'Sending...' : 'Send for signature'}

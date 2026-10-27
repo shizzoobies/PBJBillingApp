@@ -23,6 +23,7 @@ vi.mock('../lib/api', () => ({
   listEngagementEsignRequests: (...args: unknown[]) => api.listEngagementEsignRequests(...args),
   listClientEsignRequests: (...args: unknown[]) => api.listClientEsignRequests(...args),
   sendEngagementEsignRequest: (...args: unknown[]) => api.sendEngagementEsignRequest(...args),
+  engagementRecipientsRequest: (...args: unknown[]) => api.engagementRecipientsRequest(...args),
   remindEngagementEsignRequest: (...args: unknown[]) => api.remindEngagementEsignRequest(...args),
   engagementEsignPdfUrl: (id: string, requestId: string) => `/api/engagements/${id}/esign/${requestId}/pdf`,
 }))
@@ -758,5 +759,182 @@ describe('e-signature status on the card', () => {
     renderCard()
     expect(await screen.findByText('Your 2027 1099s')).toBeTruthy()
     expect(screen.queryByText(/E-sign/)).toBeNull()
+  })
+})
+
+/**
+ * Send for signature from the client's Billing tab (Alex, 2026-10-27): the editor's own confirm (who signs, the
+ * party's address chosen) on each draft or sent letter that could be sent, posted with the stored letter's hash.
+ */
+describe('Send for signature from the card', () => {
+  const signatureRequest = (over: Record<string, unknown> = {}) => ({
+    id: 'sigreq-1',
+    engagementId: 'eng-amend',
+    clientId: 'c-acme',
+    provider: 'esignatures',
+    status: 'sent',
+    recipients: [{ id: 'signer-1', name: 'Casey Fox', email: 'cfo@acme.test' }],
+    testMode: false,
+    signedDocumentId: null,
+    sentAt: '2026-10-21T15:00:00.000Z',
+    completedAt: null,
+    lastEventAt: null,
+    lastError: null,
+    lastRemindedAt: null,
+    createdAt: '2026-10-21T15:00:00.000Z',
+    updatedAt: '2026-10-21T15:00:00.000Z',
+    ...over,
+  })
+  const viewOf = (row: Engagement) => ({
+    engagement: row,
+    placeholders: [],
+    warnings: { unknown: [], retired: [] },
+    hash: `hash-${row.id}`,
+    sender: { from: '', replyTo: '' },
+    changedSinceSent: false,
+  })
+  const configured = () => {
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'esignatures', testMode: false }))
+  }
+  const rowOf = async (subject: string) => (await screen.findByText(subject)).closest('tr') as HTMLElement
+
+  beforeEach(() => {
+    api.getEngagementRequest = vi.fn(async (id: string) => viewOf(ROWS.find((row) => row.id === id) ?? ROWS[0]))
+    api.engagementRecipientsRequest = vi.fn(async () => ({
+      details: [
+        { email: 'pat@acme.test', source: 'Pat Doe' },
+        { email: 'cfo@acme.test', source: 'Casey Fox' },
+      ],
+      defaultTo: ['pat@acme.test'],
+    }))
+    api.sendEngagementEsignRequest = vi.fn(async () => ({
+      request: signatureRequest(),
+      engagement: { ...ROWS[0], status: 'sent' },
+    }))
+  })
+
+  it('shows only on a draft or sent letter, once e-signature is set up, with no request out, outside preview', async () => {
+    // Not set up: no button anywhere.
+    renderCard()
+    await rowOf('Your 2027 1099s')
+    await waitFor(() => expect(api.esignStatusRequest).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole('button', { name: 'Send for signature' })).toBeNull()
+    cleanup()
+
+    // Set up: the sent letter has it, the signed one does not; draft yes, void and superseded no.
+    configured()
+    const draft = engagementFixture({ id: 'eng-draft', status: 'draft', subject: 'Draft letter', sentAt: null, signedAt: null, signedBy: null })
+    const voided = engagementFixture({ id: 'eng-void', status: 'void', subject: 'Void letter', signedAt: null, signedBy: null })
+    const replaced = engagementFixture({ id: 'eng-sup', kind: 'amendment', status: 'superseded', subject: 'Replaced letter', signedAt: null, signedBy: null })
+    api.listEngagementsRequest = vi.fn(async () => [...ROWS, draft, voided, replaced])
+    renderCard()
+    expect(await within(await rowOf('Your 2027 1099s')).findByRole('button', { name: 'Send for signature' })).toBeTruthy()
+    expect(within(await rowOf('Draft letter')).getByRole('button', { name: 'Send for signature' })).toBeTruthy()
+    for (const subject of ['Engagement letter - {{client_name}}', 'Void letter', 'Replaced letter']) {
+      expect(within(await rowOf(subject)).queryByRole('button', { name: 'Send for signature' }), subject).toBeNull()
+    }
+    cleanup()
+
+    // A request still out: Send reminder lives on the letter's page, so no new send here.
+    api.listEngagementsRequest = vi.fn(async () => ROWS)
+    api.listClientEsignRequests = vi.fn(async () => [signatureRequest({ status: 'viewed' })])
+    renderCard()
+    const out = await rowOf('Your 2027 1099s')
+    await within(out).findByText('E-sign: viewed')
+    expect(within(out).queryByRole('button', { name: 'Send for signature' })).toBeNull()
+    cleanup()
+
+    // A declined one can be sent again; preview never sends.
+    api.listClientEsignRequests = vi.fn(async () => [signatureRequest({ status: 'declined' })])
+    renderCard()
+    expect(await within(await rowOf('Your 2027 1099s')).findByRole('button', { name: 'Send for signature' })).toBeTruthy()
+    cleanup()
+    renderCard(true, { previewMode: true })
+    await rowOf('Your 2027 1099s')
+    await waitFor(() => expect(api.esignStatusRequest).toHaveBeenCalled())
+    expect(screen.queryByRole('button', { name: 'Send for signature' })).toBeNull()
+  })
+
+  it('reads the stored letter, asks who signs (party chosen), sends a contact with the hash, and badges the row', async () => {
+    configured()
+    renderCard()
+    const row = await rowOf('Your 2027 1099s')
+    fireEvent.click(await within(row).findByRole('button', { name: 'Send for signature' }))
+    await waitFor(() => expect(api.getEngagementRequest).toHaveBeenCalledWith('eng-amend'))
+    const dialog = await screen.findByRole('dialog')
+    const confirm = within(dialog).getByRole('group', { name: 'Confirm send for signature' })
+    expect(await within(confirm).findByRole('radio', { name: /Pat Doe\s*pat@acme\.test/ })).toBeChecked()
+    expect(within(confirm).getByText('eSignatures.io also reminds them automatically on days 2, 4, 8 and 16.')).toBeTruthy()
+    expect(api.engagementRecipientsRequest).toHaveBeenCalledWith('eng-amend')
+
+    fireEvent.click(within(confirm).getByRole('radio', { name: /Casey Fox/ }))
+    expect(within(confirm).getByText('Signer: Casey Fox (cfo@acme.test)')).toBeTruthy()
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send for signature to cfo@acme.test' }))
+    await waitFor(() =>
+      expect(api.sendEngagementEsignRequest).toHaveBeenCalledWith('eng-amend', { templateHash: 'hash-eng-amend', signer: { email: 'cfo@acme.test' } }),
+    )
+    expect(await screen.findByText('Sent for signature to cfo@acme.test.')).toBeTruthy()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    const badged = await rowOf('Your 2027 1099s')
+    expect(within(badged).getByText('E-sign: sent Oct 21')).toBeTruthy()
+    expect(within(badged).getByText(/Sent to cfo@acme\.test/)).toBeTruthy()
+    // Out for signature now: no second send from the row.
+    expect(within(badged).queryByRole('button', { name: 'Send for signature' })).toBeNull()
+    // Still the card's single list call for the badges.
+    expect(api.listClientEsignRequests).toHaveBeenCalledTimes(1)
+  })
+
+  it('a one-time address is posted as oneTime with the typed name', async () => {
+    configured()
+    renderCard()
+    fireEvent.click(await within(await rowOf('Your 2027 1099s')).findByRole('button', { name: 'Send for signature' }))
+    const confirm = within(await screen.findByRole('dialog')).getByRole('group', { name: 'Confirm send for signature' })
+    fireEvent.click(await within(confirm).findByRole('radio', { name: 'Another address for this send only' }))
+    fireEvent.change(within(confirm).getByLabelText("Signer's email for this send only"), { target: { value: 'owner@elsewhere.test' } })
+    fireEvent.change(within(confirm).getByLabelText("Signer's name (optional)"), { target: { value: 'Jo Owner' } })
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send for signature to owner@elsewhere.test' }))
+    await waitFor(() =>
+      expect(api.sendEngagementEsignRequest).toHaveBeenCalledWith('eng-amend', {
+        templateHash: 'hash-eng-amend',
+        signer: { email: 'owner@elsewhere.test', oneTime: true, name: 'Jo Owner' },
+      }),
+    )
+  })
+
+  it('an address no longer on file reopens the choice on the fresh list; another refusal says why and closes', async () => {
+    configured()
+    api.sendEngagementEsignRequest = vi.fn(async () => {
+      const error = new ApiError(409, 'cfo@acme.test is no longer on file for this letter. Choose who signs again. Nothing was sent.', 'recipients_changed')
+      error.recipients = [{ email: 'pat@acme.test', source: 'Pat Doe' }]
+      throw error
+    })
+    renderCard()
+    fireEvent.click(await within(await rowOf('Your 2027 1099s')).findByRole('button', { name: 'Send for signature' }))
+    let confirm = within(await screen.findByRole('dialog')).getByRole('group', { name: 'Confirm send for signature' })
+    fireEvent.click(await within(confirm).findByRole('radio', { name: /Casey Fox/ }))
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send for signature to cfo@acme.test' }))
+    expect(await screen.findByText(/no longer on file for this letter/)).toBeTruthy()
+    await waitFor(() =>
+      expect(within(screen.getByRole('dialog')).queryByRole('radio', { name: /Casey Fox/ })).toBeNull(),
+    )
+    confirm = within(screen.getByRole('dialog')).getByRole('group', { name: 'Confirm send for signature' })
+    expect(within(confirm).getByRole('radio', { name: /Pat Doe/ })).toBeChecked()
+
+    api.sendEngagementEsignRequest = vi.fn(async () => {
+      throw new ApiError(409, 'pat@acme.test belongs to a team member. An engagement letter goes to the client only.', 'team_address')
+    })
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send for signature to pat@acme.test' }))
+    expect(await screen.findByText(/belongs to someone on your team\. An engagement letter goes to the client only\. Nothing was sent\./)).toBeTruthy()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('a letter that is no longer draft or sent when read says so and sends nothing', async () => {
+    configured()
+    api.getEngagementRequest = vi.fn(async () => viewOf({ ...ROWS[0], status: 'void' }))
+    renderCard()
+    fireEvent.click(await within(await rowOf('Your 2027 1099s')).findByRole('button', { name: 'Send for signature' }))
+    expect(await screen.findByText('This letter is void now, so it cannot be sent for signature.')).toBeTruthy()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(api.sendEngagementEsignRequest).not.toHaveBeenCalled()
   })
 })

@@ -52,6 +52,9 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
   letter's `esign` log entry carry, what the badge shows ("Sent to ...") and what Send reminder and the webhook
   use (they read the stored request). The letter itself is still addressed to the party, and the party record
   is never changed by a one-time address. No new column.
+  The same confirm (`EsignSendConfirm`) is on the client's Billing tab (Engagements card): a draft or sent letter
+  with no request out has **Send for signature** once e-signature is set up (never in preview); the card reads
+  the stored letter first and sends with its hash, then badges the row with the request it got back.
 - **Send for signature** (`POST /api/engagements/:id/esign`): the same refusals as SignWell (not set
   up, stale page, signed/void/superseded letter, master or retired client, a request already out, an
   unfilled placeholder, no single plain party address when no signer is chosen, a team address). Then:
