@@ -55814,6 +55814,35 @@ describe('signature requests (both backends)', () => {
     expect(await store.listSignatureRequestsAwaitingDocument('nope')).toEqual([])
   })
 
+  it('file: withdrawn is a finished status - reached from any open status, then never left (featreq-60118b28)', async () => {
+    for (const from of ['sent', 'viewed', 'signed_partial', 'bounced', 'error']) {
+      await resetSignatureState()
+      const request = await newRequest({ status: from })
+      expect((await store.updateSignatureRequest(request.id, { status: 'withdrawn' })).status, from).toBe('withdrawn')
+      for (const later of ['sent', 'viewed', 'completed', 'declined', 'expired']) {
+        expect((await store.updateSignatureRequest(request.id, { status: later })).status, `${from} -> ${later}`).toBe('withdrawn')
+      }
+      expect(await store.activeSignatureRequestForEngagement('eng-1')).toBeNull()
+    }
+    // A completed request is never withdrawn.
+    await resetSignatureState()
+    const done = await newRequest({ status: 'completed' })
+    expect((await store.updateSignatureRequest(done.id, { status: 'withdrawn' })).status).toBe('completed')
+  })
+
+  it('file: the newest request of each named letter, in one read (the client card), and nothing for an empty list', async () => {
+    const old = await newRequest({ engagementId: 'eng-1', signwellDocumentId: 'doc-old', status: 'declined' })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const newest = await newRequest({ engagementId: 'eng-1', signwellDocumentId: 'doc-new' })
+    const other = await newRequest({ engagementId: 'eng-2', signwellDocumentId: 'doc-2' })
+    await newRequest({ engagementId: 'eng-elsewhere', signwellDocumentId: 'doc-3' })
+    const rows = await store.latestSignatureRequestsForEngagements(['eng-1', 'eng-2', 'eng-none', 'eng-1'])
+    expect(rows.map((row) => row.id).sort()).toEqual([newest.id, other.id].sort())
+    expect(rows.find((row) => row.engagementId === 'eng-1').id).not.toBe(old.id)
+    expect(await store.latestSignatureRequestsForEngagements([])).toEqual([])
+    expect(await store.latestSignatureRequestsForEngagements(undefined)).toEqual([])
+  })
+
   it('is never in the bulk save: not in its lock list, its tables or the workspace fingerprint', () => {
     const named = JSON.stringify([BULK_SAVE_LOCK_TABLES, BULK_SAVE_LOCK_SQL, BULK_SAVE_TABLES])
     for (const table of ['signature_requests', 'signature_documents', 'signwell_events']) {
@@ -55913,6 +55942,21 @@ describe('signature requests (both backends)', () => {
       ])
       expect(await postgresStore(fakePostgres()).getSignatureRequest('')).toBeNull()
       expect(await postgresStore(fakePostgres()).activeSignatureRequestForEngagement('')).toBeNull()
+    })
+
+    it('latestSignatureRequestsForEngagements is ONE select distinct on (engagement_id), newest first per letter; none for no ids', async () => {
+      const { fake, pg } = pgWith([[/^select distinct on \(engagement_id\)/i, { rows: [row()] }]])
+      const rows = await pg.latestSignatureRequestsForEngagements(['eng-1', 'eng-2', 'eng-1', '', null])
+      expect(rows.map((entry) => entry.id)).toEqual(['sigreq-aaaaaaaa'])
+      const selects = fake.matching(/^select distinct on \(engagement_id\)/i)
+      expect(selects).toHaveLength(1)
+      const sql = selects[0].text.replace(/\s+/g, ' ')
+      expect(sql).toMatch(/^select distinct on \(engagement_id\) id, engagement_id, client_id, signwell_document_id, status,/)
+      expect(sql).toContain('from signature_requests where engagement_id = any($1::text[]) order by engagement_id, created_at desc, id desc')
+      expect(selects[0].params).toEqual([['eng-1', 'eng-2']])
+      const empty = pgWith([])
+      expect(await empty.pg.latestSignatureRequestsForEngagements([])).toEqual([])
+      expect(empty.fake.matching(/signature_requests/i)).toHaveLength(0)
     })
 
     it('an eSignatures.io request INSERTs its provider, template id and signer id; the row reads them back', async () => {
@@ -56035,7 +56079,7 @@ describe('signature requests (both backends)', () => {
         true,
         '2026-10-21T15:05:00.000Z',
         'boom',
-        ['completed', 'declined', 'expired', 'canceled'],
+        ['completed', 'declined', 'expired', 'canceled', 'withdrawn'],
         ['draft', 'sent', 'viewed', 'signed_partial'],
         ['bounced', 'error'],
         '2026-10-21T15:07:00.000Z',

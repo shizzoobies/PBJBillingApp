@@ -21,6 +21,7 @@ vi.mock('../lib/api', () => ({
   restoreEngagementRequest: (...args: unknown[]) => api.restoreEngagementRequest(...args),
   esignStatusRequest: (...args: unknown[]) => api.esignStatusRequest(...args),
   listEngagementEsignRequests: (...args: unknown[]) => api.listEngagementEsignRequests(...args),
+  listClientEsignRequests: (...args: unknown[]) => api.listClientEsignRequests(...args),
   sendEngagementEsignRequest: (...args: unknown[]) => api.sendEngagementEsignRequest(...args),
   remindEngagementEsignRequest: (...args: unknown[]) => api.remindEngagementEsignRequest(...args),
   engagementEsignPdfUrl: (id: string, requestId: string) => `/api/engagements/${id}/esign/${requestId}/pdf`,
@@ -102,6 +103,7 @@ function renderCard(ownerMode = true, props: Partial<Parameters<typeof ClientEng
 beforeEach(() => {
   api.esignStatusRequest = vi.fn(async () => ({ configured: false, testMode: true }))
   api.listEngagementEsignRequests = vi.fn(async () => [])
+  api.listClientEsignRequests = vi.fn(async () => [])
   api.sendEngagementEsignRequest = vi.fn()
   api.remindEngagementEsignRequest = vi.fn()
   api.listEngagementsRequest = vi.fn(async () => ROWS)
@@ -686,19 +688,21 @@ describe('e-signature status on the card', () => {
   })
 
   it('shows "E-sign: sent Oct 21" and the Test mode tag on a sent letter that went out for signature', async () => {
-    api.listEngagementEsignRequests = vi.fn(async (id: string) => (id === 'eng-amend' ? [request()] : []))
+    api.listClientEsignRequests = vi.fn(async () => [request()])
     renderCard()
     const row = (await screen.findByText('Your 2027 1099s')).closest('tr') as HTMLElement
     expect(await within(row).findByText('E-sign: sent Oct 21')).toBeTruthy()
     expect(within(row).getByText('Test mode')).toBeTruthy()
-    // Only sent and signed letters are asked about: no per-draft calls.
-    expect(api.listEngagementEsignRequests.mock.calls.map((call) => call[0]).sort()).toEqual(['eng-1', 'eng-amend'])
+    // ONE call for the whole client (featreq-60118b28 item 4), never one per letter.
+    expect(api.listClientEsignRequests).toHaveBeenCalledTimes(1)
+    expect(api.listClientEsignRequests).toHaveBeenCalledWith('c-acme')
+    expect(api.listEngagementEsignRequests).not.toHaveBeenCalled()
   })
 
   it('shows signed for a letter signed electronically, and nothing for a letter with no request', async () => {
-    api.listEngagementEsignRequests = vi.fn(async (id: string) =>
-      id === 'eng-1' ? [request({ id: 'sigreq-2', engagementId: 'eng-1', status: 'completed', testMode: false, completedAt: '2026-10-05T15:00:00.000Z' })] : [],
-    )
+    api.listClientEsignRequests = vi.fn(async () => [
+      request({ id: 'sigreq-2', engagementId: 'eng-1', status: 'completed', testMode: false, completedAt: '2026-10-05T15:00:00.000Z' }),
+    ])
     renderCard()
     const signed = (await screen.findByText('Engagement letter - {{client_name}}')).closest('tr') as HTMLElement
     expect(await within(signed).findByText('E-sign: signed Oct 5')).toBeTruthy()
@@ -708,7 +712,7 @@ describe('e-signature status on the card', () => {
   })
 
   it('a failed read of the requests leaves the card as it was', async () => {
-    api.listEngagementEsignRequests = vi.fn(async () => {
+    api.listClientEsignRequests = vi.fn(async () => {
       throw new ApiError(500, 'boom')
     })
     renderCard()

@@ -83,7 +83,18 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
   "E-sign: expired"). The same job retries signed PDFs that could not be kept (below).
 - **Check eSignatures.io / Finish e-signature** re-reads `GET /api/contracts/<id>` (never polled on a
   timer: their rate limits are "adaptive") and, when it reads `signed`, downloads the PDF from that
-  FRESH link and runs the same completion as the webhook.
+  FRESH link and runs the same completion as the webhook. A check that reads the contract as not signed
+  clears an older "reported it signed but the contract reads ..." note. A request withdrawn meanwhile
+  (below) is refused as ended; its completion never runs.
+- **Withdrawal** (featreq-60118b28; `withdrawSignatureRequest` in lib/engagement-esign.js): **Void**, **Mark
+  as signed** and the superseding flip (the predecessor and the replaced amendments, by hand or by an
+  e-signed superseding letter) withdraw every request of that letter that has not finished.
+  eSignatures.io: `POST /api/contracts/<id>/withdraw` (at most 8 s) and the `es:<id>:contract-withdrawn`
+  ledger row (so its own withdrawn event that follows is a duplicate); SignWell: the app has no cancel
+  call, so the request is withdrawn in the app only and its note says to cancel it at SignWell. Either way
+  the request ends `withdrawn` (badge "E-sign: withdrawn"; a finished status); a provider refusal is kept
+  in `last_error` and never undoes the void or the signing. A contract signed after it was withdrawn
+  signs nothing; the owners are told to check it, as for one signed after the app's own expiry.
 
 ## How the webhook is made safe
 

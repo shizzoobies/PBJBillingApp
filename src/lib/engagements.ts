@@ -150,6 +150,8 @@ export function esignBadgeText(request: Pick<SignatureRequest, 'status' | 'sentA
       return 'E-sign: expired'
     case 'canceled':
       return 'E-sign: canceled'
+    case 'withdrawn':
+      return 'E-sign: withdrawn'
     case 'bounced':
       return 'E-sign: email bounced'
     case 'error':

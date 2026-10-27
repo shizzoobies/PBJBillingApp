@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   createAmendmentRequest,
-  listEngagementEsignRequests,
+  listClientEsignRequests,
   listEngagementsRequest,
   listLettersRequest,
   restoreEngagementRequest,
@@ -41,7 +41,7 @@ export function ClientEngagementsCard({
 }) {
   const navigate = useNavigate()
   const [engagements, setEngagements] = useState<Engagement[] | null>(null)
-  // The newest e-signature request of each sent or signed letter (a failed read shows no badge).
+  // The newest e-signature request of each sent or signed letter, read in ONE call (a failed read shows no badge).
   const [esign, setEsign] = useState<Record<string, SignatureRequest>>({})
   const [loadError, setLoadError] = useState('')
   const [letters, setLetters] = useState<LetterSummary[] | null>(null)
@@ -63,19 +63,20 @@ export function ClientEngagementsCard({
         if (cancelled) return
         setEngagements(rows)
         setLoadError('')
-        void Promise.all(
-          rows
-            .filter((row) => row.status === 'sent' || row.status === 'signed')
-            .map((row) =>
-              listEngagementEsignRequests(row.id).then(
-                (requests) => [row.id, requests[0]] as const,
-                () => [row.id, undefined] as const,
-              ),
-            ),
-        ).then((pairs) => {
-          if (cancelled) return
-          setEsign(Object.fromEntries(pairs.filter(([, request]) => request)) as Record<string, SignatureRequest>)
-        })
+        const badged = new Set(rows.filter((row) => row.status === 'sent' || row.status === 'signed').map((row) => row.id))
+        if (badged.size === 0) {
+          setEsign({})
+          return
+        }
+        listClientEsignRequests(clientId).then(
+          (requests) => {
+            if (cancelled) return
+            setEsign(Object.fromEntries(requests.filter((request) => badged.has(request.engagementId)).map((request) => [request.engagementId, request])))
+          },
+          () => {
+            if (!cancelled) setEsign({})
+          },
+        )
       },
       (err) => {
         if (cancelled) return

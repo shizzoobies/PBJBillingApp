@@ -5657,6 +5657,19 @@ export async function listEngagementEsignRequests(id: string): Promise<Signature
   return Array.isArray(body.requests) ? body.requests : []
 }
 
+/**
+ * The NEWEST e-signature request of each of a client's letters, in one call (the client card's badges;
+ * never the signed bytes). Owner-only.
+ */
+export async function listClientEsignRequests(clientId: string): Promise<SignatureRequest[]> {
+  const body = await engagementRequest<{ requests?: SignatureRequest[] }>(
+    `/api/clients/${encodeURIComponent(clientId)}/esign`,
+    { method: 'GET' },
+    'Could not read the signature requests',
+  )
+  return Array.isArray(body.requests) ? body.requests : []
+}
+
 /** Send the engagement letter for e-signature to its party. `templateHash` is the hash the page loaded. */
 export function sendEngagementEsignRequest(
   id: string,

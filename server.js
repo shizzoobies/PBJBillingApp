@@ -184,7 +184,7 @@ import {
   retryPendingEsignaturesPdfs,
 } from './lib/esignatures-webhook.js'
 import { esignConfigured, esignProvider, esignTestMode } from './lib/esign-provider.js'
-import { remindEngagementSignature, sendEngagementForSignature } from './lib/engagement-esign.js'
+import { remindEngagementSignature, sendEngagementForSignature, withdrawOpenSignatureRequests } from './lib/engagement-esign.js'
 import { placeholdersFor } from './lib/letter-template.js'
 import {
   cardProcessingFeeLine,
@@ -2125,6 +2125,20 @@ function esignaturesFinishDeps(request) {
   }
 }
 
+/**
+ * Withdraw the open e-signature requests of letters that no longer stand (`[engagementId, reason]` pairs:
+ * reason 'void', 'signed' or 'superseded'): the void, Mark as signed and the superseding flip call it after
+ * their own change is saved. Best-effort through each request's OWN provider; never throws, and a provider
+ * failure never undoes the void or the signing (lib/engagement-esign.js `withdrawSignatureRequest`).
+ */
+async function withdrawSignatureRequestsFor(targets) {
+  try {
+    await withdrawOpenSignatureRequests(targets, { store: appDataStore, esignatures })
+  } catch (error) {
+    console.error('[esign] could not withdraw the open signature requests:', error?.message || error)
+  }
+}
+
 /** What the sign route records after a signing, for the webhook's signing (the owner who sent the request signs). */
 async function recordSignwellSigning(result, signatureRequest, signedBy) {
   const userId = signedBy || signatureRequest.createdBy || 'system'
@@ -2155,6 +2169,11 @@ async function recordSignwellSigning(result, signatureRequest, signedBy) {
       console.error('[signwell] could not record the signing:', error?.message || error)
     }
   }
+  // The letters this signing superseded can no longer be signed: withdraw their open requests.
+  await withdrawSignatureRequestsFor([
+    ...(result.supersededId ? [[result.supersededId, 'superseded']] : []),
+    ...(result.supersededAmendmentIds ?? []).map((id) => [id, 'superseded']),
+  ])
   broadcastDataChanged()
 }
 // ---- end of the SignWell glue ------------------------------------------------
@@ -12938,6 +12957,13 @@ const server = createServer(async (request, response) => {
           console.error('[engagements] could not record the replaced amendment:', error)
         }
       }
+      // Signed by hand: an e-signature request still open on this letter (or on a letter it superseded) is
+      // withdrawn, so the client cannot sign it after all. Best-effort; never undoes the signing.
+      await withdrawSignatureRequestsFor([
+        [result.engagement.id, 'signed'],
+        ...(result.supersededId ? [[result.supersededId, 'superseded']] : []),
+        ...(result.supersededAmendmentIds ?? []).map((id) => [id, 'superseded']),
+      ])
       broadcastDataChanged()
       sendJson(response, 200, result)
       return
@@ -12976,6 +13002,8 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         console.error('[engagements] could not record the void:', error)
       }
+      // A voided letter cannot be signed: its open e-signature request is withdrawn. Best-effort; never undoes the void.
+      await withdrawSignatureRequestsFor([[voided.id, 'void']])
       broadcastDataChanged()
       sendJson(response, 200, { engagement: voided })
       return
@@ -13203,6 +13231,31 @@ const server = createServer(async (request, response) => {
         response,
         200,
         { requests: await appDataStore.listSignatureRequestsForEngagement(engagement.id) },
+        { 'Cache-Control': 'no-store' },
+      )
+      return
+    }
+
+    // GET /api/clients/:id/esign - the NEWEST signature request of each of this client's letters in one call
+    // (the client card's badges), never the signed bytes. The same visibility as the per-engagement list.
+    const clientEsignListMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/esign$/)
+    if (clientEsignListMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see signature requests' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const clientId = decodeURIComponent(clientEsignListMatch[1])
+      const engagements = await appDataStore.listEngagements({ clientId })
+      sendJson(
+        response,
+        200,
+        { requests: await appDataStore.latestSignatureRequestsForEngagements(engagements.map((row) => row.id)) },
         { 'Cache-Control': 'no-store' },
       )
       return

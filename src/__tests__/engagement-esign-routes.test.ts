@@ -29,7 +29,8 @@ const routes = () =>
 const sendRoute = () => between('// POST /api/engagements/:id/esign - { templateHash }', '// POST /api/engagements/:id/esign/remind')
 const remindRoute = () => between('// POST /api/engagements/:id/esign/remind', '// POST /api/engagements/:id/esign/:requestId/finish')
 const finishRoute = () => between('// POST /api/engagements/:id/esign/:requestId/finish', '// GET /api/engagements/:id/esign - this engagement')
-const listRoute = () => between('// GET /api/engagements/:id/esign - this engagement', '// GET /api/engagements/:id/esign/:requestId/pdf')
+const listRoute = () => between('// GET /api/engagements/:id/esign - this engagement', '// GET /api/clients/:id/esign')
+const clientListRoute = () => between('// GET /api/clients/:id/esign', '// GET /api/engagements/:id/esign/:requestId/pdf')
 const pdfRoute = () => between('// GET /api/engagements/:id/esign/:requestId/pdf', '// ---- end of the engagement e-signature routes')
 
 type Route = { name: string; block: () => string; write: boolean }
@@ -38,6 +39,7 @@ const ROUTES: Route[] = [
   { name: 'POST /api/engagements/:id/esign/remind', block: remindRoute, write: true },
   { name: 'POST /api/engagements/:id/esign/:requestId/finish', block: finishRoute, write: true },
   { name: 'GET /api/engagements/:id/esign', block: listRoute, write: false },
+  { name: 'GET /api/clients/:id/esign', block: clientListRoute, write: false },
   { name: 'GET /api/engagements/:id/esign/:requestId/pdf', block: pdfRoute, write: false },
 ]
 
@@ -234,5 +236,62 @@ describe('GET /api/signwell/status', () => {
     expect(block).toContain('{ configured: signwell.signwellConfigured(process.env), testMode: signwell.isTestMode(process.env) }')
     expect(block).not.toMatch(/SIGNWELL_API_KEY|SIGNWELL_WEBHOOK_ID/)
     expect(block).toContain("'Cache-Control': 'no-store'")
+  })
+})
+
+/**
+ * featreq-60118b28: the client card's ONE call, and a letter that no longer stands withdraws its open request.
+ * The behavior runs in lib/engagement-esign.test.mjs (withdrawSignatureRequest) and db/store-staleness.test.mjs.
+ */
+describe('GET /api/clients/:id/esign (the client card, one call)', () => {
+  it('reads this client\'s letters, then the newest request of each in ONE store call - never the signed bytes', () => {
+    const block = clientListRoute()
+    expect(block).toContain('normalizedPath.match(/^\\/api\\/clients\\/([^/]+)\\/esign$/)')
+    expect(block).toContain("request.method === 'GET'")
+    expect(block).toContain('appDataStore.listEngagements({ clientId })')
+    expect(block).toContain('appDataStore.latestSignatureRequestsForEngagements(engagements.map((row) => row.id))')
+    expect(block).toContain("'Cache-Control': 'no-store'")
+    expect(block).not.toContain('getSignedDocument')
+    expect(block).not.toContain('listSignatureRequestsForEngagement(')
+  })
+})
+
+describe('withdrawing an open request when its letter no longer stands', () => {
+  const helper = () => between('async function withdrawSignatureRequestsFor(targets) {', '/** What the sign route records')
+  const signing = () => between('async function recordSignwellSigning(', '// ---- end of the SignWell glue')
+  const voidRoute = () => between('// POST /api/engagements/:id/void', '// POST /api/engagements/:id/restore')
+  const signRoute = () => between('// POST /api/engagements/:id/sign - ', '// POST /api/engagements/:id/void')
+
+  it('the helper hands the lib the store and the eSignatures module, and never throws', () => {
+    const block = helper()
+    expect(block).toContain('await withdrawOpenSignatureRequests(targets, { store: appDataStore, esignatures })')
+    expect(block).toContain('} catch (error) {')
+  })
+
+  it('the void withdraws the letter\'s open request AFTER the void is saved and before the answer', () => {
+    const block = voidRoute()
+    const voided = block.indexOf('appDataStore.voidEngagement(')
+    const withdraw = block.indexOf("await withdrawSignatureRequestsFor([[voided.id, 'void']])")
+    expect(voided).toBeGreaterThan(-1)
+    expect(withdraw).toBeGreaterThan(voided)
+    expect(withdraw).toBeGreaterThan(block.indexOf("sendJson(response, 404, { error: 'Engagement not found' })"))
+    expect(withdraw).toBeLessThan(block.indexOf('sendJson(response, 200, { engagement: voided })'))
+  })
+
+  it('Mark as signed withdraws the letter\'s own open request and those of the letters it superseded, after signing', () => {
+    const block = signRoute()
+    const signed = block.indexOf('appDataStore.signEngagement(')
+    const withdraw = block.indexOf('await withdrawSignatureRequestsFor([')
+    expect(withdraw).toBeGreaterThan(signed)
+    expect(block).toContain("[result.engagement.id, 'signed'],")
+    expect(block).toContain("...(result.supersededId ? [[result.supersededId, 'superseded']] : []),")
+    expect(block).toContain("...(result.supersededAmendmentIds ?? []).map((id) => [id, 'superseded']),")
+    expect(withdraw).toBeLessThan(block.indexOf('sendJson(response, 200, result)'))
+  })
+
+  it('an e-signed superseding letter withdraws the open requests of the letters it superseded', () => {
+    const block = signing()
+    expect(block).toContain('await withdrawSignatureRequestsFor([')
+    expect(block).toContain("...(result.supersededAmendmentIds ?? []).map((id) => [id, 'superseded']),")
   })
 })

@@ -2989,6 +2989,8 @@ export type SignatureRequestStatus =
   | 'declined'
   | 'expired'
   | 'canceled'
+  /** The app withdrew it: the letter was voided, marked signed by hand or superseded while it was open. */
+  | 'withdrawn'
   | 'bounced'
   | 'error'
 

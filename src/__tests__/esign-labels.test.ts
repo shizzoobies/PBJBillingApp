@@ -28,6 +28,7 @@ describe('esignBadgeText', () => {
     ['declined', 'E-sign: declined'],
     ['expired', 'E-sign: expired'],
     ['canceled', 'E-sign: canceled'],
+    ['withdrawn', 'E-sign: withdrawn'],
     ['bounced', 'E-sign: email bounced'],
     ['error', 'E-sign: problem'],
   ] as const)('%s reads "%s"', (status, text) => {
@@ -45,7 +46,7 @@ describe('esignWarnsOnEdit', () => {
     for (const status of ['sent', 'viewed', 'signed_partial', 'bounced', 'error'] as const) {
       expect(esignWarnsOnEdit({ status }), status).toBe(true)
     }
-    for (const status of ['draft', 'completed', 'declined', 'expired', 'canceled'] as const) {
+    for (const status of ['draft', 'completed', 'declined', 'expired', 'canceled', 'withdrawn'] as const) {
       expect(esignWarnsOnEdit({ status }), status).toBe(false)
     }
     expect(esignWarnsOnEdit(null)).toBe(false)
@@ -55,7 +56,7 @@ describe('esignWarnsOnEdit', () => {
 describe('esignIsActive', () => {
   it('is true only while the request is out with the signer', () => {
     for (const status of ESIGN_ACTIVE_STATUSES) expect(esignIsActive({ status })).toBe(true)
-    for (const status of ['draft', 'completed', 'declined', 'expired', 'canceled', 'bounced', 'error'] as const) {
+    for (const status of ['draft', 'completed', 'declined', 'expired', 'canceled', 'withdrawn', 'bounced', 'error'] as const) {
       expect(esignIsActive({ status })).toBe(false)
     }
     expect(esignIsActive(null)).toBe(false)

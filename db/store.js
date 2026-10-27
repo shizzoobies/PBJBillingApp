@@ -1699,7 +1699,9 @@ export class EngagementStateError extends Error {
 /**
  * Electronic signature requests (featreq-56d39567; docs/signwell.md). Every status a request can
  * hold, and the rules for moving between them (`updateSignatureRequest`):
- *  - a FINISHED request (completed, declined, expired, canceled) never changes status again;
+ *  - a FINISHED request (completed, declined, expired, canceled, withdrawn) never changes status again;
+ *    `withdrawn` is the app's own end: the letter was voided, marked signed by hand or superseded while
+ *    the request was still open (lib/engagement-esign.js `withdrawSignatureRequest`);
  *  - an event older than the newest one applied never changes status;
  *  - the in-progress statuses (draft, sent, viewed, signed_partial) only move forward, except that
  *    bounced and error are RECOVERABLE: a re-fetched in-progress status replaces them;
@@ -1715,12 +1717,13 @@ export const SIGNATURE_STATUS_ORDER = Object.freeze([
   'expired',
   'canceled',
   'declined',
+  'withdrawn',
   'completed',
 ])
 /** The statuses in which a request is still out with the signer (one active request per engagement). */
 export const ACTIVE_SIGNATURE_STATUSES = Object.freeze(['sent', 'viewed', 'signed_partial'])
 /** Statuses a request never leaves. */
-export const FINISHED_SIGNATURE_STATUSES = Object.freeze(['completed', 'declined', 'expired', 'canceled'])
+export const FINISHED_SIGNATURE_STATUSES = Object.freeze(['completed', 'declined', 'expired', 'canceled', 'withdrawn'])
 /** The in-progress statuses, in the order they are reached (never backward among themselves). */
 const PROGRESS_SIGNATURE_STATUSES = Object.freeze(['draft', 'sent', 'viewed', 'signed_partial'])
 /** Statuses a re-fetched in-progress status may replace. */
@@ -28872,6 +28875,37 @@ export class AppDataStore {
         ACTIVE_SIGNATURE_STATUSES.includes(request.status),
       ) ?? null
     )
+  }
+
+  /**
+   * The NEWEST request of each of `engagementIds` (no signed bytes), in no particular order - the
+   * client card's one call (GET /api/clients/:id/esign) instead of one read per letter.
+   * @returns {Promise<object[]>}
+   */
+  async latestSignatureRequestsForEngagements(engagementIds) {
+    const ids = [...new Set((Array.isArray(engagementIds) ? engagementIds : []).filter((id) => typeof id === 'string' && id))]
+    if (ids.length === 0) return []
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select distinct on (engagement_id) ${SIGNATURE_REQUEST_COLUMNS} from signature_requests
+          where engagement_id = any($1::text[])
+          order by engagement_id, created_at desc, id desc`,
+        [ids],
+      )
+      return rows.map(mapSignatureRequestRow)
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const newest = new Map()
+    for (const row of authState.signatureRequests ?? []) {
+      if (!row || !ids.includes(row.engagementId)) continue
+      const held = newest.get(row.engagementId)
+      const newer =
+        !held ||
+        String(row.createdAt).localeCompare(String(held.createdAt)) > 0 ||
+        (String(row.createdAt) === String(held.createdAt) && String(row.id).localeCompare(String(held.id)) > 0)
+      if (newer) newest.set(row.engagementId, row)
+    }
+    return [...newest.values()].map(mapSignatureRequestRow)
   }
 
   /** Every request for an engagement, newest first (no signed bytes). */

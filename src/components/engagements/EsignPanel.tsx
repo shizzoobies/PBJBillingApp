@@ -129,7 +129,7 @@ export function EsignPanel({
     latest?.status === 'completed' &&
     !esignWasMarkedComplete(latest) &&
     (!latest.signedDocumentId || !engagementSigned)
-  const canCheck = Boolean(latest) && !['completed', 'declined', 'expired', 'canceled'].includes(latest?.status ?? '')
+  const canCheck = Boolean(latest) && !['completed', 'declined', 'expired', 'canceled', 'withdrawn'].includes(latest?.status ?? '')
   const target = partyEmail || 'the party'
   // A new send goes through the server's provider now; a request is named by the provider it went to.
   const sendProvider = esignProviderName(status.provider)
@@ -225,7 +225,9 @@ export function EsignPanel({
       ) : null}
       {active ? (
         <p className="muted-text">
-          {`When the client signs, the letter is marked signed here for you. Marking it signed by hand does not cancel the document at ${activeProvider}.`}
+          {`When the client signs, the letter is marked signed here for you. Marking it signed by hand or voiding it withdraws the request${
+            active.provider === 'esignatures' ? ` at ${activeProvider}` : ` here only - cancel it at ${activeProvider} yourself`
+          }.`}
         </p>
       ) : null}
       {error ? (

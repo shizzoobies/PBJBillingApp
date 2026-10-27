@@ -1504,7 +1504,7 @@ describe('e-signature', () => {
     expect(await screen.findByRole('button', { name: 'Send reminder' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Check eSignatures.io' })).toBeEnabled()
     expect(screen.queryByRole('button', { name: 'Check SignWell' })).toBeNull()
-    expect(screen.getByText(/does not cancel the document at eSignatures\.io\./)).toBeTruthy()
+    expect(screen.getByText(/Marking it signed by hand or voiding it withdraws the request at eSignatures\.io\./)).toBeTruthy()
     api.finishEngagementEsignRequest = vi.fn(async () => ({ request: signatureRequest({ provider: 'esignatures', status: 'viewed' }), signed: false, issues: [], engagement: engagement() }))
     fireEvent.click(screen.getByRole('button', { name: 'Check eSignatures.io' }))
     expect(await screen.findByText('Checked eSignatures.io: still viewed.')).toBeTruthy()
@@ -1620,6 +1620,7 @@ describe('e-signature', () => {
     ['declined', 'E-sign: declined'],
     ['expired', 'E-sign: expired'],
     ['canceled', 'E-sign: canceled'],
+    ['withdrawn', 'E-sign: withdrawn'],
     ['bounced', 'E-sign: email bounced'],
     ['signed_partial', 'E-sign: partly signed'],
   ] as const)('a %s request reads "%s"', async (status, text) => {
@@ -1734,8 +1735,10 @@ describe('e-signature: finish and the open-request warning', () => {
     await screen.findByText('E-sign: viewed')
     expect(screen.queryByRole('button', { name: 'Finish e-signature' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Check SignWell' })).toBeEnabled()
+    // SignWell has no cancel call in the app: the withdrawal is local only, and the page says so.
+    expect(screen.getByText(/withdraws the request here only - cancel it at SignWell yourself\./)).toBeTruthy()
     cleanup()
-    for (const status of ['declined', 'expired', 'canceled'] as const) {
+    for (const status of ['declined', 'expired', 'canceled', 'withdrawn'] as const) {
       withRequests(signatureRequest({ status }))
       await renderEditor()
       await screen.findByText(/^E-sign: /)
