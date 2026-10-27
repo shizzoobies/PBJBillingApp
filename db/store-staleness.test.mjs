@@ -56490,10 +56490,10 @@ describe('send for signature to a chosen signer (file backend)', () => {
   })
 
   it('a one-time address is stored on the request and the log only - never on the party', async () => {
-    const { result } = await sendTo({ email: 'owner@elsewhere.invalid', oneTime: true })
+    const { result } = await sendTo({ email: 'owner@elsewhere.invalid', name: 'Jo Owner', oneTime: true })
     expect(result.ok).toBe(true)
     const [request] = await store.listSignatureRequestsForEngagement('eng-signer')
-    expect(request.recipients).toEqual([{ id: 'signer-1', name: 'Pat Doe', email: 'owner@elsewhere.invalid' }])
+    expect(request.recipients).toEqual([{ id: 'signer-1', name: 'Jo Owner', email: 'owner@elsewhere.invalid' }])
     const stored = await store.getEngagement('eng-signer')
     expect(stored.emailLog.at(-1).to).toEqual(['owner@elsewhere.invalid'])
     expect(stored.party).toEqual(expect.objectContaining({ email: 'pat@example.invalid', contactName: 'Pat Doe' }))

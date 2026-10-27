@@ -891,7 +891,7 @@ describe('Send for signature from the card', () => {
     const confirm = within(await screen.findByRole('dialog')).getByRole('group', { name: 'Confirm send for signature' })
     fireEvent.click(await within(confirm).findByRole('radio', { name: 'Another address for this send only' }))
     fireEvent.change(within(confirm).getByLabelText("Signer's email for this send only"), { target: { value: 'owner@elsewhere.test' } })
-    fireEvent.change(within(confirm).getByLabelText("Signer's name (optional)"), { target: { value: 'Jo Owner' } })
+    fireEvent.change(within(confirm).getByLabelText("Signer's name"), { target: { value: 'Jo Owner' } })
     fireEvent.click(within(confirm).getByRole('button', { name: 'Send for signature to owner@elsewhere.test' }))
     await waitFor(() =>
       expect(api.sendEngagementEsignRequest).toHaveBeenCalledWith('eng-amend', {

@@ -40,18 +40,24 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
   signature** first opens a confirm naming ONE signer, name and email. It lists the letter's addresses on
   file (`GET /api/engagements/:id/recipients`, the same list as Send's recipient picker: the party's address,
   then the linked client's contacts and record, never a team member's) with the party's address chosen, plus
-  "Another address for this send only" (one address and an optional name). The button reads **Send for
-  signature to <email>**. The body is `{ templateHash, signer: { email, name?, oneTime? } }`. The server takes
-  exactly one plain address that is on file for the letter (case-insensitive; its stored spelling is used)
-  or marked `oneTime`; a team/app-user mailbox is refused (`team_address`, the reply-to mailbox excepted as
-  for every engagement send), two addresses or a named one `invalid_recipient`, an address no longer on file
-  and not one-time `recipients_changed` (with the list as it is now; the page reopens the choice on it), an
-  unreadable `signer` 400 `signer_invalid`. No `signer` (an older tab) = the party's address, exactly as
-  before. The name: a typed one, else the matching contact's name, else the party's contact name, else its
-  company. The chosen address is what goes to the provider, what `signature_requests.recipients` and the
-  letter's `esign` log entry carry, what the badge shows ("Sent to ...") and what Send reminder and the webhook
-  use (they read the stored request). The letter itself is still addressed to the party, and the party record
-  is never changed by a one-time address. No new column.
+  "Another address for this send only". An address on file that is not one plain address is listed but can't
+  be chosen. The button reads **Send for signature to <email>**. The body is
+  `{ templateHash, signer: { email, name?, oneTime? } }`. The server takes exactly one plain address (also
+  plausible, no control or invisible characters) that is on file for the letter (case-insensitive; its stored
+  spelling is used) or marked `oneTime`; a team/app-user mailbox is refused (`team_address`) - for e-signature
+  the firm's reply-to mailbox too, also as the party's own address - two addresses or a named one
+  `invalid_recipient`, an address no longer on file and not one-time `recipients_changed` (with the list as it
+  is now; the page reopens the choice on it), an unreadable `signer` 400 `signer_invalid`. No `signer` (an older
+  tab) = the party's address, as before. **The name goes on a binding document, so it is never borrowed:** the
+  party's own address signs under the party's contact name (else its company), a named contact under that
+  name (a posted name is ignored for both); the client record's address, an unnamed contact, a one-time
+  address and a party with no name need a name typed at the confirm (else 409 `signer_name_required`). The
+  page and the server use the same helpers (`esignSignerName`, `isSignerEmail`), so the confirm's "Signer:"
+  line is exactly what the provider gets. The chosen address is what goes to the provider, what
+  `signature_requests.recipients` and the letter's `esign` log entry carry, what the badge shows ("Sent to
+  ..."), what a delivery failure names ("could not deliver the signing email to <address>") and what Send
+  reminder and the webhook use (they read the stored request). The letter itself is still addressed to the
+  party, and the party record is never changed by a one-time address. No new column.
   The same confirm (`EsignSendConfirm`) is on the client's Billing tab (Engagements card): a draft or sent letter
   with no request out has **Send for signature** once e-signature is set up (never in preview); the card reads
   the stored letter first and sends with its hash, then badges the row with the request it got back.
@@ -144,7 +150,7 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
 6. events: `contract-sent-to-signer` -> sent; `signer-viewed-the-contract` -> viewed;
    `contract-reminder-sent-to-signer` -> logged only; `contract-withdrawn` (also a signer's decline) ->
    declined; `error` with `email-delivery-failed`/`sms-delivery-failed` -> bounced ("could not deliver
-   the signing email"), other errors -> error. The store keeps a finished request finished and
+   the signing email to <the request's signer>"), other errors -> error. The store keeps a finished request finished and
    in-progress statuses moving forward only;
 7. `contract-signed`: the contract is **re-read** (`GET /api/contracts/<id>`, at most 8 s - eSignatures.io
    gives up on us at 15 s). It must read `signed` and its metadata must name this request's engagement

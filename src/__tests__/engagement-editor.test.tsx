@@ -1595,7 +1595,7 @@ describe('e-signature', () => {
       expect(await screen.findByText('Sent for signature to cfo@acme.test.')).toBeTruthy()
     })
 
-    it('a one-time address: typed (with an optional name), named on the button, posted as oneTime', async () => {
+    it("a one-time address: typed with the signer's name (required), named on the button, posted as oneTime", async () => {
       const confirm = await open()
       fireEvent.click(within(confirm).getByRole('radio', { name: 'Another address for this send only' }))
       // Nothing typed yet: nothing to send to.
@@ -1605,8 +1605,11 @@ describe('e-signature', () => {
       expect(within(confirm).getByRole('alert')).toHaveTextContent('Type one valid email address')
       expect(within(confirm).getByRole('button', { name: 'Choose who signs' })).toBeDisabled()
       fireEvent.change(typed, { target: { value: 'owner@elsewhere.test' } })
-      expect(within(confirm).getByText('Signer: Pat Doe (owner@elsewhere.test)')).toBeTruthy()
-      fireEvent.change(within(confirm).getByLabelText("Signer's name (optional)"), { target: { value: 'Jo Owner' } })
+      // The party contact's name is never borrowed for someone else: the name must be typed first.
+      expect(within(confirm).queryByText(/^Signer:/)).toBeNull()
+      expect(within(confirm).getByText('Type the name of the person who signs: it goes on the signed letter.')).toBeTruthy()
+      expect(within(confirm).getByRole('button', { name: 'Choose who signs' })).toBeDisabled()
+      fireEvent.change(within(confirm).getByLabelText("Signer's name"), { target: { value: 'Jo Owner' } })
       expect(within(confirm).getByText('Signer: Jo Owner (owner@elsewhere.test)')).toBeTruthy()
       fireEvent.click(within(confirm).getByRole('button', { name: 'Send for signature to owner@elsewhere.test' }))
       await waitFor(() =>
@@ -1642,6 +1645,46 @@ describe('e-signature', () => {
       expect(within(confirm).getByRole('radio', { name: /Pat Doe\s*pat@acme\.test/ })).toBeChecked()
       expect(await screen.findByText("Could not read who this letter can go to. You can still send to the party's address or type one.")).toBeTruthy()
       expect(within(confirm).getByRole('button', { name: 'Send for signature to pat@acme.test' })).toBeEnabled()
+    })
+
+    it("the client record's address asks for the signer's name and posts it; a named contact never does", async () => {
+      const confirm = await open()
+      fireEvent.click(within(confirm).getByRole('radio', { name: /Client record\s*books@acme\.test/ }))
+      expect(within(confirm).getByRole('button', { name: 'Choose who signs' })).toBeDisabled()
+      fireEvent.change(within(confirm).getByLabelText("Signer's name"), { target: { value: 'Robin Books' } })
+      expect(within(confirm).getByText('Signer: Robin Books (books@acme.test)')).toBeTruthy()
+      fireEvent.click(within(confirm).getByRole('radio', { name: /Casey Fox/ }))
+      expect(within(confirm).queryByLabelText("Signer's name")).toBeNull()
+      fireEvent.click(within(confirm).getByRole('radio', { name: /Client record/ }))
+      fireEvent.change(within(confirm).getByLabelText("Signer's name"), { target: { value: 'Robin Books' } })
+      fireEvent.click(within(confirm).getByRole('button', { name: 'Send for signature to books@acme.test' }))
+      await waitFor(() =>
+        expect(api.sendEngagementEsignRequest).toHaveBeenCalledWith('eng-1', {
+          templateHash: 'hash-1',
+          signer: { email: 'books@acme.test', name: 'Robin Books' },
+        }),
+      )
+    })
+
+    it("nothing chosen yet (the party's address is not on file): the button waits and says so", async () => {
+      api.engagementRecipientsRequest = vi.fn(async () => ({ details: [{ email: 'cfo@acme.test', source: 'Casey Fox' }], defaultTo: [] }))
+      const confirm = await open()
+      expect(within(confirm).getByRole('radio', { name: /Casey Fox/ })).not.toBeChecked()
+      expect(within(confirm).getByText('Choose who signs.')).toBeTruthy()
+      expect(within(confirm).getByRole('button', { name: 'Choose who signs' })).toBeDisabled()
+    })
+
+    it('an address on file that is not one plain address cannot be chosen, and says why', async () => {
+      api.engagementRecipientsRequest = vi.fn(async () => ({
+        details: [
+          { email: 'pat@acme.test', source: 'Pat Doe' },
+          { email: 'cfo@acme.test, ap@acme.test', source: 'Casey Fox' },
+        ],
+        defaultTo: ['pat@acme.test'],
+      }))
+      const confirm = await open()
+      expect(within(confirm).getByRole('radio', { name: /Casey Fox/ })).toBeDisabled()
+      expect(within(confirm).getByText('(not one plain address - fix it on file to use it)')).toBeTruthy()
     })
 
     it('a party with no address on file opens on the one-time field', async () => {

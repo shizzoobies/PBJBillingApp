@@ -1,11 +1,12 @@
 import { useEffect, useId, useState } from 'react'
-import { CLIENT_RECORD_SOURCE, isPlausibleEmail } from '../../../lib/invoice-recipients.js'
-import { esignSignerName } from '../../../lib/esign-signer.js'
+import { CLIENT_RECORD_SOURCE } from '../../../lib/invoice-recipients.js'
+import { esignSignerName, isSignerEmail } from '../../../lib/esign-signer.js'
 import { engagementRecipientsRequest } from '../../lib/api'
 import { ESIGNATURES_AUTO_REMINDER_NOTE, ESIGN_TEST_MODE_NOTE, esignProviderName } from '../../lib/engagements'
 import {
   chosenSigner,
   initialSignerSelection,
+  selectionNeedsName,
   type EsignSignerPost,
   type SignerParty,
   type SignerSelection,
@@ -14,10 +15,23 @@ import { ApiError, type EsignProvider } from '../../lib/types'
 import type { InvoiceRecipientDetail } from '../../lib/utils'
 
 /**
- * The whole confirm of Send for signature, shared by the letter's page (EsignPanel) and the client's Billing
- * tab (ClientEngagementsCard) so the two never drift: it reads who may sign (the server's on-file list for
- * the letter), offers the choices, names the signer, says what the provider does, and hands the chosen
- * signer to `onSend`. `fresh` (a refusal's list as it is now) opens it on that list without reading again.
+ * "Who signs?" - the confirm of Send for signature (Alex, 2026-10-27: "confirm or specify the email before
+ * sending"), shared by the letter's page (EsignPanel) and the client's Billing tab (ClientEngagementsCard) so
+ * the two never drift. An engagement letter is signed by exactly ONE person, so this is a single choice, not
+ * the recipient picker's checkboxes (RecipientPicker must keep one address on file ticked and allows three
+ * extras - neither fits one signer). It is built from the same pieces: the server's on-file list for the letter
+ * (`GET /api/engagements/:id/recipients`: the party's address, then the linked client's contacts and record;
+ * never a team member's) and the same row styling.
+ *
+ * The party's address is chosen when it opens; any other address on file can be chosen; or one address typed
+ * for this send only - saved nowhere, the party record is not changed. The signer's name goes on a binding
+ * document, so it is never borrowed: the party's own address and a named contact sign under their own names;
+ * the client record's address, an unnamed contact and a one-time address ask for the name (lib/esign-signer.js,
+ * whose helpers this uses, so the name shown is the name the provider gets). An address on file that is not one
+ * plain address can't be chosen. The server checks everything again and refuses a team mailbox.
+ *
+ * `fresh` (a refusal's list as it is now) opens it on that list without reading again; the caller remounts it
+ * (a `key`) to reopen.
  */
 export function EsignSendConfirm({
   engagementId,
@@ -87,7 +101,11 @@ export function EsignSendConfirm({
       ) : (
         <SignerChoices details={signers} selection={selection} party={party} onChange={setSelection} busy={busy} />
       )}
-      {signer ? <p className="recipient-picker-final">{`Signer: ${signer.name} (${signer.email})`}</p> : null}
+      {signer ? (
+        <p className="recipient-picker-final">{`Signer: ${signer.name} (${signer.email})`}</p>
+      ) : signers !== null && !selection ? (
+        <p className="muted-text">Choose who signs.</p>
+      ) : null}
       {provider === 'esignatures' ? <p className="muted-text">{ESIGNATURES_AUTO_REMINDER_NOTE}</p> : null}
       {testMode ? <p className="muted-text">{ESIGN_TEST_MODE_NOTE}</p> : null}
       <div className="button-row">
@@ -96,11 +114,7 @@ export function EsignSendConfirm({
           className="primary-action"
           disabled={busy || !signer}
           onClick={() => {
-            if (!signer) return
-            onSend({
-              email: signer.email,
-              ...(signer.oneTime ? { oneTime: true as const, ...(signer.typedName ? { name: signer.typedName } : {}) } : {}),
-            })
+            if (signer) onSend(signer.post)
           }}
         >
           {signer ? `Send for signature to ${signer.email}` : 'Choose who signs'}
@@ -113,20 +127,7 @@ export function EsignSendConfirm({
   )
 }
 
-/**
- * "Who signs?" - the confirm step of Send for signature (Alex, 2026-10-27: "confirm or specify the email
- * before sending"). An engagement letter is signed by exactly ONE person, so this is a single choice, not
- * the recipient picker's checkboxes (RecipientPicker must keep one address on file ticked and allows three
- * extras - neither fits one signer). It is built from the same pieces: the server's on-file list for the
- * letter (the party's address, then the linked client's contacts and record; never a team member's), the
- * same row styling, and the same plausibility check on a typed address.
- *
- * The party's address is chosen when it opens; any other address on file can be chosen instead; or one
- * address (and, optionally, the signer's name) typed for this send only - saved nowhere, the party record is
- * not changed. The server checks the choice again (lib/esign-signer.js) and refuses a team mailbox.
- */
-
-/** The choices: one radio per address on file (name and address), and one for an address for this send only. */
+/** The choices: one radio per address on file (name and address), one for an address for this send only, and the name when one is needed. */
 export function SignerChoices({
   details,
   selection,
@@ -142,31 +143,37 @@ export function SignerChoices({
 }) {
   const group = useId()
   const typedId = useId()
-  const typedNameId = useId()
+  const nameId = useId()
   const typed = selection?.mode === 'oneTime' ? selection : null
   const typedEmail = typed?.email ?? ''
-  const typedProblem = typed && typedEmail.trim() !== '' && !isPlausibleEmail(typedEmail) ? 'Type one valid email address, like name@company.com.' : ''
+  const typedProblem = typed && typedEmail.trim() !== '' && !isSignerEmail(typedEmail) ? 'Type one valid email address, like name@company.com.' : ''
+  const needsName = selectionNeedsName(selection, details, party)
 
   return (
     <div role="radiogroup" aria-label="Who signs">
       <ul className="invoice-recipient-picker">
-        {details.map((detail) => (
-          <li key={detail.email}>
-            <label className="invoice-recipient-choice">
-              <input
-                type="radio"
-                name={group}
-                checked={selection?.mode === 'onFile' && selection.email === detail.email}
-                disabled={busy}
-                onChange={() => onChange({ mode: 'onFile', email: detail.email })}
-              />
-              <span className="invoice-recipient-who">
-                {detail.source.toLowerCase() === CLIENT_RECORD_SOURCE ? 'Client record' : esignSignerName({ email: detail.email, details, party })}
-              </span>
-              <span className="invoice-recipient-email">{detail.email}</span>
-            </label>
-          </li>
-        ))}
+        {details.map((detail) => {
+          const plain = isSignerEmail(detail.email)
+          const named = esignSignerName({ email: detail.email, details, party })
+          return (
+            <li key={detail.email}>
+              <label className="invoice-recipient-choice">
+                <input
+                  type="radio"
+                  name={group}
+                  checked={selection?.mode === 'onFile' && selection.email === detail.email}
+                  disabled={busy || !plain}
+                  onChange={() => onChange({ mode: 'onFile', email: detail.email, name: '' })}
+                />
+                <span className="invoice-recipient-who">
+                  {detail.source.toLowerCase() === CLIENT_RECORD_SOURCE ? 'Client record' : named || 'Unnamed contact'}
+                </span>
+                <span className="invoice-recipient-email">{detail.email}</span>
+                {plain ? null : <span className="muted-text">(not one plain address - fix it on file to use it)</span>}
+              </label>
+            </li>
+          )
+        })}
         <li>
           <label className="invoice-recipient-choice">
             <input
@@ -180,30 +187,41 @@ export function SignerChoices({
           </label>
         </li>
       </ul>
-      {typed ? (
+      {typed || needsName ? (
         <div className="invoice-recipient-add">
-          <label htmlFor={typedId}>Signer&apos;s email for this send only</label>
-          <input
-            id={typedId}
-            className="input"
-            type="email"
-            value={typedEmail}
-            disabled={busy}
-            placeholder="name@company.com"
-            onChange={(event) => onChange({ mode: 'oneTime', email: event.target.value, name: typed.name })}
-          />
-          <label htmlFor={typedNameId}>Signer&apos;s name (optional)</label>
-          <input
-            id={typedNameId}
-            className="input"
-            type="text"
-            value={typed.name}
-            disabled={busy}
-            maxLength={200}
-            placeholder={esignSignerName({ email: '', details: [], party })}
-            onChange={(event) => onChange({ mode: 'oneTime', email: typedEmail, name: event.target.value })}
-          />
-          <p className="muted-text">Used for this send only; the party&apos;s address is not changed.</p>
+          {typed ? (
+            <>
+              <label htmlFor={typedId}>Signer&apos;s email for this send only</label>
+              <input
+                id={typedId}
+                className="input"
+                type="email"
+                value={typedEmail}
+                disabled={busy}
+                placeholder="name@company.com"
+                onChange={(event) => onChange({ mode: 'oneTime', email: event.target.value, name: typed.name })}
+              />
+            </>
+          ) : null}
+          {needsName && selection ? (
+            <>
+              <label htmlFor={nameId}>Signer&apos;s name</label>
+              <input
+                id={nameId}
+                className="input"
+                type="text"
+                value={selection.name}
+                disabled={busy}
+                maxLength={200}
+                placeholder="Full name, as it goes on the signed letter"
+                onChange={(event) => onChange({ ...selection, name: event.target.value })}
+              />
+              {selection.name.trim() === '' ? (
+                <p className="muted-text">Type the name of the person who signs: it goes on the signed letter.</p>
+              ) : null}
+            </>
+          ) : null}
+          {typed ? <p className="muted-text">Used for this send only; the party&apos;s address is not changed.</p> : null}
           {typedProblem ? (
             <p className="invoice-run-error" role="alert">
               {typedProblem}

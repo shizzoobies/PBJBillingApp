@@ -103,6 +103,12 @@ describe('sending for signature', () => {
   it('hands the confirmed signer to the lib as posted (it decides: party, contact or one-time) and never writes the party', () => {
     const block = sendRoute()
     expect(block).toContain('{ templateHash: payload.templateHash, userId: session.user.id, signer: payload.signer }')
+    // The owner gate, the origin guard and the JSON check all come before the signer is read.
+    for (const gate of ["session.user.role !== 'owner'", 'isCrossSiteOrigin(request)', 'isJsonContentType(request)']) {
+      expect(block.indexOf(gate), gate).toBeLessThan(block.indexOf('payload.signer'))
+    }
+    // A refusal (recipients_changed with its list, signer_name_required, team_address) is answered as the lib gave it.
+    expect(block.indexOf('const { status, ...body } = sent.refused')).toBeGreaterThan(block.indexOf('payload.signer'))
     // The route does not judge the address itself, and a one-time address never reaches the party record.
     expect(block).not.toMatch(/isOneEmailAddress|chooseEsignSigner|updateEngagement|party\.email\s*=/)
     // The activity names who it went to.
