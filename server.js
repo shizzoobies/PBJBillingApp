@@ -217,9 +217,11 @@ import { recapStaffTier } from './lib/staff-tiers.js'
 import { EMAIL_PREF_TYPES, sanitizeEmailPrefs } from './lib/notification-prefs.js'
 import {
   dashboardViewForRole,
+  isDashboardLayoutPayload,
   isDefaultDashboardLayout,
   sanitizeDashboardLayout,
 } from './lib/dashboard-layout.js'
+import { writeBroadcastsDataChange } from './lib/data-change-broadcast.js'
 import {
   listBlockingWeeks,
   normalizeTimeEntryMethod,
@@ -3451,9 +3453,7 @@ const server = createServer(async (request, response) => {
       method !== 'GET' &&
       method !== 'HEAD' &&
       method !== 'OPTIONS' &&
-      normalizedPath.startsWith('/api/') &&
-      !normalizedPath.startsWith('/api/auth') &&
-      normalizedPath !== '/api/events'
+      writeBroadcastsDataChange(normalizedPath)
     if (isDataMutation) {
       const originalEnd = response.end.bind(response)
       response.end = (...args) => {
@@ -19697,6 +19697,10 @@ const server = createServer(async (request, response) => {
         return
       }
       const payload = await readJsonBody(request)
+      if (!isDashboardLayoutPayload(payload?.layout)) {
+        sendJson(response, 400, { error: 'layout must be { version: 1, panels: [...] }' })
+        return
+      }
       const view = dashboardViewForRole(session.user.role)
       const clean = sanitizeDashboardLayout(payload?.layout, view)
       // The default is kept as NULL, so a panel added later lands in its

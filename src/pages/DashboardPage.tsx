@@ -596,8 +596,11 @@ function OwnerDashboardView() {
     : { ...removeCaseControls, rowsOf: (caseId, clientId) => rowsOfCase(data.checklists, caseId, clientId) }
   // Her own arrangement of the panels below (order, shown, starts collapsed).
   const arrangement = useDashboardArrangement({ view: 'owner', userId: sessionUser.id, readOnly: false })
-  const teamShown = arrangement.shows('team')
-  const kpiShown = arrangement.shows('kpi')
+  // A panel's own fetch waits until the saved layout is known (this browser's
+  // hint or the server's answer), so a hidden panel asks for nothing.
+  const teamShown = arrangement.known && arrangement.shows('team')
+  const kpiShown = arrangement.known && arrangement.shows('kpi')
+  const activityShown = arrangement.shows('activity')
 
   const [activity, setActivity] = useState<ActivityEntry[]>([])
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
@@ -635,7 +638,8 @@ function OwnerDashboardView() {
     return () => controller.abort()
   }, [teamShown])
 
-  // Initial + 60s polling for global activity feed.
+  // Initial + 60s polling for global activity feed. The first load always runs:
+  // the Stuck cases alert reads it. The poll only while the panel is shown.
   useEffect(() => {
     const controller = new AbortController()
     let cancelled = false
@@ -652,16 +656,18 @@ function OwnerDashboardView() {
     }
 
     void load()
-    const intervalId = window.setInterval(() => {
-      void load()
-    }, 60_000)
+    const intervalId = activityShown
+      ? window.setInterval(() => {
+          void load()
+        }, 60_000)
+      : null
 
     return () => {
       cancelled = true
       controller.abort()
-      window.clearInterval(intervalId)
+      if (intervalId !== null) window.clearInterval(intervalId)
     }
-  }, [])
+  }, [activityShown])
 
   const todayIso = today()
   const weekEndIso = addDays(todayIso, 7)

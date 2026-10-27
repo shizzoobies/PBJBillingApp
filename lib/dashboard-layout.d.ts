@@ -47,6 +47,7 @@ export declare const DASHBOARD_PANELS: Record<
 export declare function dashboardViewForRole(role: string | null | undefined): DashboardView
 export declare function dashboardPanelKeys(view: DashboardView): DashboardPanelKey[]
 export declare function defaultDashboardLayout(view: DashboardView): DashboardLayout
+export declare function isDashboardLayoutPayload(raw: unknown): raw is DashboardLayout
 export declare function sanitizeDashboardLayout(raw: unknown, view: DashboardView): DashboardLayout
 export declare function isDefaultDashboardLayout(layout: unknown, view: DashboardView): boolean
 export declare function moveDashboardPanel(

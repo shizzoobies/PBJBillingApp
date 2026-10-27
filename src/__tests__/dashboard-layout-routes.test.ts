@@ -76,10 +76,29 @@ describe('PUT /api/me/dashboard-layout', () => {
     expect(block).toContain('sendJson(response, 200, { layout: clean })')
   })
 
+  it('answers 400 when the body’s layout is not shaped like one, after reading it and before cleaning', () => {
+    const block = putRoute()
+    const read = block.indexOf('await readJsonBody(request)')
+    const shape = block.indexOf('if (!isDashboardLayoutPayload(payload?.layout)) {')
+    const refused = block.indexOf("sendJson(response, 400, { error: 'layout must be { version: 1, panels: [...] }' })")
+    const clean = block.indexOf('sanitizeDashboardLayout(payload?.layout, view)')
+    expect(read).toBeGreaterThan(-1)
+    expect(shape).toBeGreaterThan(read)
+    expect(refused).toBeGreaterThan(shape)
+    expect(clean).toBeGreaterThan(refused)
+  })
+
   it('imports the shared cleaner rather than re-deciding the rules', () => {
     expect(serverSource).toMatch(
-      /import \{\s+dashboardViewForRole,\s+isDefaultDashboardLayout,\s+sanitizeDashboardLayout,\s+\} from '\.\/lib\/dashboard-layout\.js'/,
+      /import \{\s+dashboardViewForRole,\s+isDashboardLayoutPayload,\s+isDefaultDashboardLayout,\s+sanitizeDashboardLayout,\s+\} from '\.\/lib\/dashboard-layout\.js'/,
     )
+  })
+
+  it('a save does not ping every open tab: the broadcast hook asks the shared path rule', () => {
+    const at = serverSource.indexOf('const isDataMutation =')
+    expect(at).toBeGreaterThan(-1)
+    expect(serverSource.slice(at, at + 300)).toContain('writeBroadcastsDataChange(normalizedPath)')
+    expect(serverSource).toContain("import { writeBroadcastsDataChange } from './lib/data-change-broadcast.js'")
   })
 })
 

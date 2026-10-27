@@ -57290,6 +57290,20 @@ describe('dashboard layout on the user row (file backend)', () => {
     expect(authState.users.find((user) => user.id === 'emp-patrice')).not.toHaveProperty('dashboardLayout')
   })
 
+  it('two saves at once both land (each read and write share one queue slot)', async () => {
+    const other = {
+      version: 1,
+      panels: [
+        { key: 'alerts', hidden: false, collapsed: false },
+        { key: 'my_kpi', hidden: true, collapsed: false },
+      ],
+    }
+    await Promise.all([store.setDashboardLayout('emp-patrice', layout), store.setDashboardLayout('emp-lisa', other)])
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    expect(authState.users.find((user) => user.id === 'emp-patrice').dashboardLayout).toEqual(layout)
+    expect(authState.users.find((user) => user.id === 'emp-lisa').dashboardLayout).toEqual(other)
+  })
+
   it('answers undefined for a user who does not exist', async () => {
     expect(await store.setDashboardLayout('emp-nobody', layout)).toBeUndefined()
     expect(await store.setDashboardLayout('', layout)).toBeUndefined()

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   DASHBOARD_PANELS,
   defaultDashboardLayout,
@@ -75,6 +75,14 @@ export type DashboardArrangement = {
   layout: DashboardLayout
   /** True once the saved layout is known: a hint was on hand or the server answered. */
   known: boolean
+  /**
+   * True only once the server has answered with the saved layout. Arrange waits
+   * for it: a draft built from the default or the hint would overwrite her
+   * saved arrangement on Done.
+   */
+  serverAnswered: boolean
+  /** The GET failed: Arrange stays off until a reload. */
+  loadFailed: boolean
   /** The layout being arranged, or null outside Arrange. */
   draft: DashboardLayout | null
   saving: boolean
@@ -109,13 +117,18 @@ export function useDashboardArrangement({
       userId,
       layout: sanitizeDashboardLayout(hint, view),
       known: hint !== null,
+      serverAnswered: false,
+      loadFailed: false,
     }
   })
   // A previewed person can change while the view stays mounted: start over.
   if (loaded.userId !== userId) {
     const hint = readOnly ? null : readHint(userId)
-    setLoaded({ userId, layout: sanitizeDashboardLayout(hint, view), known: hint !== null })
+    setLoaded({ userId, layout: sanitizeDashboardLayout(hint, view), known: hint !== null, serverAnswered: false, loadFailed: false })
   }
+  // Bumped by every save: a GET that set out before it answers with the layout
+  // the save just replaced, so its answer is dropped.
+  const saveGeneration = useRef(0)
   const [overrides, setOverrides] = useState<Record<string, boolean>>({})
   const [draft, setDraft] = useState<DashboardLayout | null>(null)
   const [saving, setSaving] = useState(false)
@@ -124,16 +137,24 @@ export function useDashboardArrangement({
   useEffect(() => {
     const controller = new AbortController()
     let cancelled = false
+    const startedAt = saveGeneration.current
     void (async () => {
       try {
         const { layout } = await fetchDashboardLayout(controller.signal)
         if (cancelled) return
+        if (saveGeneration.current !== startedAt) {
+          // A save landed meanwhile and is newer than this answer.
+          setLoaded((current) => (current.userId === userId ? { ...current, serverAnswered: true } : current))
+          return
+        }
         const clean = sanitizeDashboardLayout(layout, view)
         if (!readOnly) writeHint(userId, clean)
-        setLoaded({ userId, layout: clean, known: true })
+        setLoaded({ userId, layout: clean, known: true, serverAnswered: true, loadFailed: false })
       } catch {
-        // Non-fatal: the Dashboard keeps the hint or the default.
-        if (!cancelled) setLoaded((current) => (current.userId === userId ? { ...current, known: true } : current))
+        // Non-fatal: the Dashboard keeps the hint or the default (not arrangeable).
+        if (!cancelled) {
+          setLoaded((current) => (current.userId === userId ? { ...current, known: true, loadFailed: true } : current))
+        }
       }
     })()
     return () => {
@@ -165,6 +186,7 @@ export function useDashboardArrangement({
     }
     setSaving(true)
     setError(null)
+    saveGeneration.current += 1
     try {
       const { layout: stored } = await saveDashboardLayoutRequest(draft)
       const clean = sanitizeDashboardLayout(stored, view)
@@ -172,7 +194,7 @@ export function useDashboardArrangement({
       // The new "starts open / collapsed" choices take effect now.
       forgetDashboardCollapseMemory(memoryPrefix)
       setOverrides({})
-      setLoaded({ userId, layout: clean, known: true })
+      setLoaded({ userId, layout: clean, known: true, serverAnswered: true, loadFailed: false })
       setDraft(null)
     } catch {
       setError('Your arrangement could not be saved. Try Done again.')
@@ -186,6 +208,8 @@ export function useDashboardArrangement({
     readOnly,
     layout,
     known: loaded.known,
+    serverAnswered: loaded.serverAnswered,
+    loadFailed: loaded.loadFailed,
     draft,
     saving,
     error,
@@ -193,7 +217,7 @@ export function useDashboardArrangement({
     isCollapsed,
     toggleCollapsed,
     startArranging: () => {
-      if (readOnly) return
+      if (readOnly || !loaded.serverAnswered) return
       setError(null)
       setDraft(layout)
     },

@@ -25282,13 +25282,17 @@ export class AppDataStore {
       return result.rowCount ? clean : undefined
     }
 
-    const authState = await readJson(localAuthPath)
-    const user = (authState.users ?? []).find((u) => u.id === userId)
-    if (!user) return undefined
-    if (clean === null) delete user.dashboardLayout
-    else user.dashboardLayout = clean
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
-    return clean
+    // One queue slot for the read and the write, so a save that lands between
+    // them (a sign-in's bookkeeping, say) is not overwritten with a stale copy.
+    return enqueueFileOperation(localAuthPath, async () => {
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const user = (authState.users ?? []).find((u) => u.id === userId)
+      if (!user) return undefined
+      if (clean === null) delete user.dashboardLayout
+      else user.dashboardLayout = clean
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return clean
+    })
   }
 
   /**

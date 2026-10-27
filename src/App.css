@@ -6053,8 +6053,15 @@ td strong {
   flex-wrap: wrap;
   gap: 8px;
 }
+/* Arrange waits for the saved arrangement to load. */
+button.quick-action:disabled {
+  opacity: 0.55;
+  cursor: progress;
+  transform: none;
+  box-shadow: none;
+}
 /* A move that would do nothing (the top panel's Up, the last one's Down). */
-.dashboard-arrange-tools button:disabled {
+.dashboard-arrange-tools button[aria-disabled='true'] {
   opacity: 0.4;
   cursor: not-allowed;
 }

@@ -24,11 +24,28 @@ import {
 
 const ArrangementContext = createContext<DashboardArrangement | null>(null)
 
-/** The "Arrange" button for the Dashboard header; nothing in preview or while arranging. */
+/**
+ * The "Arrange" button for the Dashboard header; nothing in preview or while
+ * arranging. Off until the server has answered with the saved arrangement, so
+ * a draft is never built from the default or this browser's hint.
+ */
 export function DashboardArrangeButton({ arrangement }: { arrangement: DashboardArrangement }) {
   if (arrangement.readOnly || arrangement.draft) return null
+  const ready = arrangement.serverAnswered
   return (
-    <button type="button" className="quick-action" onClick={arrangement.startArranging}>
+    <button
+      type="button"
+      className="quick-action"
+      disabled={!ready}
+      title={
+        ready
+          ? undefined
+          : arrangement.loadFailed
+            ? 'Your arrangement could not be loaded. Reload the page to arrange.'
+            : 'Loading…'
+      }
+      onClick={arrangement.startArranging}
+    >
       <LayoutGrid size={16} /> Arrange
     </button>
   )
@@ -171,8 +188,12 @@ function ArrangeList({ arrangement, draft }: { arrangement: DashboardArrangement
                     className="secondary-action"
                     aria-label={`Move ${label} up`}
                     title="Move up"
-                    disabled={index <= 1}
-                    onClick={() => arrangement.moveInDraft(setting.key, -1)}
+                    // aria-disabled, not disabled: a disabled button drops
+                    // keyboard focus when a move lands it at the top.
+                    aria-disabled={index <= 1}
+                    onClick={() => {
+                      if (index > 1) arrangement.moveInDraft(setting.key, -1)
+                    }}
                   >
                     <ArrowUp size={14} />
                   </button>
@@ -181,8 +202,10 @@ function ArrangeList({ arrangement, draft }: { arrangement: DashboardArrangement
                     className="secondary-action"
                     aria-label={`Move ${label} down`}
                     title="Move down"
-                    disabled={index >= last}
-                    onClick={() => arrangement.moveInDraft(setting.key, 1)}
+                    aria-disabled={index >= last}
+                    onClick={() => {
+                      if (index < last) arrangement.moveInDraft(setting.key, 1)
+                    }}
                   >
                     <ArrowDown size={14} />
                   </button>

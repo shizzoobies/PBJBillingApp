@@ -74,6 +74,13 @@ function panelNames(container: HTMLElement) {
   return Array.from(page.querySelectorAll(':scope > section')).map((section) => section.getAttribute('aria-label'))
 }
 
+/** Arrange, once the saved arrangement has loaded (the button is off until then). */
+async function openArrange(container: HTMLElement) {
+  const button = await within(container).findByRole('button', { name: 'Arrange' })
+  await waitFor(() => expect(button).toHaveProperty('disabled', false))
+  fireEvent.click(button)
+}
+
 async function dashboardLoaded(container: HTMLElement) {
   await within(container).findByRole('heading', { name: 'Dashboard', level: 1 })
   await waitFor(() => expect(layoutCalls('GET').length).toBeGreaterThan(0))
@@ -195,12 +202,23 @@ describe('Arrange', () => {
     await dashboardLoaded(container)
     await waitFor(() => expect(panelNames(container)).toEqual(OWNER_DEFAULT_ORDER))
 
-    fireEvent.click(within(container).getByRole('button', { name: 'Arrange' }))
+    await openArrange(container)
     const list = within(container).getByRole('region', { name: 'Arrange your dashboard' })
     // Alerts has no controls: it is always first and always shown.
     const alertsRow = within(list).getByRole('listitem', { name: 'Alerts' })
     expect(within(alertsRow).queryAllByRole('button')).toEqual([])
-    expect(within(list).getByRole('button', { name: 'Move Your queue up' })).toHaveProperty('disabled', true)
+    // At the top, Up does nothing - and stays focusable (aria-disabled, not disabled).
+    const up = within(list).getByRole('button', { name: 'Move Your queue up' })
+    expect(up.getAttribute('aria-disabled')).toBe('true')
+    expect(up).toHaveProperty('disabled', false)
+    up.focus()
+    fireEvent.click(up)
+    expect(document.activeElement).toBe(up)
+    expect(within(list).getAllByRole('listitem').map((row) => row.getAttribute('aria-label')).slice(0, 3)).toEqual([
+      'Alerts',
+      'Your queue',
+      'Team',
+    ])
 
     fireEvent.click(within(list).getByRole('button', { name: 'Move Your queue down' }))
     fireEvent.change(within(list).getByRole('combobox', { name: 'How Recent activity starts' }), {
@@ -237,7 +255,7 @@ describe('Arrange', () => {
   it('hides a panel', async () => {
     const { container } = boot(null)
     await dashboardLoaded(container)
-    fireEvent.click(await within(container).findByRole('button', { name: 'Arrange' }))
+    await openArrange(container)
     const list = within(container).getByRole('region', { name: 'Arrange your dashboard' })
     fireEvent.click(within(list).getByRole('button', { name: 'Hide Team' }))
     expect(within(list).getByRole('button', { name: 'Show Team' })).toBeTruthy()
@@ -256,7 +274,7 @@ describe('Arrange', () => {
     await dashboardLoaded(container)
     await waitFor(() => expect(within(container).queryByRole('region', { name: 'Team' })).toBeNull())
 
-    fireEvent.click(within(container).getByRole('button', { name: 'Arrange' }))
+    await openArrange(container)
     const list = within(container).getByRole('region', { name: 'Arrange your dashboard' })
     fireEvent.click(within(list).getByRole('button', { name: 'Reset to default' }))
     fireEvent.click(within(list).getByRole('button', { name: 'Done' }))
@@ -269,7 +287,7 @@ describe('Arrange', () => {
   it('Cancel leaves the saved arrangement alone and saves nothing', async () => {
     const { container } = boot(null)
     await dashboardLoaded(container)
-    fireEvent.click(await within(container).findByRole('button', { name: 'Arrange' }))
+    await openArrange(container)
     const list = within(container).getByRole('region', { name: 'Arrange your dashboard' })
     fireEvent.click(within(list).getByRole('button', { name: 'Move Your queue down' }))
     fireEvent.click(within(list).getByRole('button', { name: 'Cancel' }))
@@ -332,7 +350,7 @@ describe('preview and staff', () => {
     }
     const { container } = boot(null, jordan)
     await dashboardLoaded(container)
-    fireEvent.click(await within(container).findByRole('button', { name: 'Arrange' }))
+    await openArrange(container)
     const list = within(container).getByRole('region', { name: 'Arrange your dashboard' })
     fireEvent.click(within(list).getByRole('button', { name: 'Hide Watching' }))
     fireEvent.click(within(list).getByRole('button', { name: 'Done' }))
@@ -359,5 +377,75 @@ describe('the first paint', () => {
 
     expect(panelNames(container).slice(0, 2)).toEqual(['Alerts', 'This month at a glance'])
     expect(within(container).queryByRole('region', { name: 'Team' })).toBeNull()
+  })
+})
+
+describe('Arrange waits for the saved arrangement', () => {
+  it('is off ("Loading…") while the server has not answered, even with a hint on hand, then on', async () => {
+    window.localStorage.setItem(
+      `pbj.dashboardLayout.${OWNER_SESSION.id}`,
+      JSON.stringify({ version: 1, panels: [panel('alerts'), panel('kpi')] }),
+    )
+    let answer: (response: Response) => void = () => {}
+    const pending = new Promise<Response>((resolve) => {
+      answer = resolve
+    })
+    installFetchMock({
+      sessionUser: OWNER_SESSION,
+      extraRoutes: [(path, method) => (path.endsWith(LAYOUT_PATH) && method === 'GET' ? (pending as unknown as Response) : undefined)],
+    })
+    const { container } = render(<App />)
+    const button = await within(container).findByRole('button', { name: 'Arrange' })
+    expect(button).toHaveProperty('disabled', true)
+    expect(button.getAttribute('title')).toBe('Loading…')
+    fireEvent.click(button)
+    expect(within(container).queryByRole('region', { name: 'Arrange your dashboard' })).toBeNull()
+
+    // The server's saved arrangement differs from the hint: Arrange starts from IT.
+    answer(json({ layout: { version: 1, panels: [panel('alerts'), panel('activity')] } }))
+    await waitFor(() => expect(button).toHaveProperty('disabled', false))
+    fireEvent.click(button)
+    const list = within(container).getByRole('region', { name: 'Arrange your dashboard' })
+    expect(within(list).getAllByRole('listitem').map((row) => row.getAttribute('aria-label')).slice(0, 2)).toEqual([
+      'Alerts',
+      'Recent activity',
+    ])
+  })
+
+  it('stays off when the arrangement could not be loaded, and says why', async () => {
+    installFetchMock({
+      sessionUser: OWNER_SESSION,
+      extraRoutes: [(path) => (path.endsWith(LAYOUT_PATH) ? json({ error: 'boom' }, 500) : undefined)],
+    })
+    const { container } = render(<App />)
+    await within(container).findByRole('region', { name: 'Your queue' })
+    const button = within(container).getByRole('button', { name: 'Arrange' })
+    await waitFor(() =>
+      expect(button.getAttribute('title')).toBe('Your arrangement could not be loaded. Reload the page to arrange.'),
+    )
+    expect(button).toHaveProperty('disabled', true)
+  })
+})
+
+describe('a hidden panel’s own fetch', () => {
+  it('Team and This month at a glance hidden: no /api/team and no /api/rate-versions', async () => {
+    const { container } = boot({
+      version: 1,
+      panels: [panel('alerts'), panel('team', { hidden: true }), panel('kpi', { hidden: true })],
+    })
+    await dashboardLoaded(container)
+    await waitFor(() => expect(within(container).queryByRole('region', { name: 'Team' })).toBeNull())
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(calls.some((call) => call.path.endsWith('/api/team'))).toBe(false)
+    expect(calls.some((call) => call.path.endsWith('/api/rate-versions'))).toBe(false)
+  })
+
+  it('shown (the default), both are fetched', async () => {
+    const { container } = boot(null)
+    await dashboardLoaded(container)
+    await waitFor(() => {
+      expect(calls.some((call) => call.path.endsWith('/api/team'))).toBe(true)
+      expect(calls.some((call) => call.path.endsWith('/api/rate-versions'))).toBe(true)
+    })
   })
 })

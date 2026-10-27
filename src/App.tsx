@@ -201,6 +201,7 @@ import { TimeApprovalsPage } from './pages/TimeApprovalsPage'
 import { SecurityPage } from './pages/SecurityPage'
 import { TwoFactorPage } from './pages/TwoFactorPage'
 import { TwoFactorSetupPage } from './pages/TwoFactorSetupPage'
+import { forgetDashboardCollapseMemory } from './lib/useDashboardArrangement'
 
 function OwnerOnly({
   ownerMode,
@@ -4255,6 +4256,8 @@ function App() {
     // sign-out actually revoke the session.
     setPreviewUserId(null)
     setPreviewUser(null)
+    // The Dashboard's chevron presses are this visit's; the next person starts clean.
+    forgetDashboardCollapseMemory()
     try {
       await logoutSession()
     } finally {
