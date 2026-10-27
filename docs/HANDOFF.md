@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-10-26. Everything below is committed on
+Written 2026-07-21, last updated 2026-10-27. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -13,6 +13,40 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-10-27 (~14:30Z) - EIGHT SHIPS since the 20:25Z paragraph, nothing in flight; READ THIS FIRST.** `main` = `0d929b7f` (+ this
+handoff), live on https://app.pbjsatime.com, `/health` 200, voice re-provisioned after every manifest change, only the primary
+worktree (+ Alex's chip worktree under .claude/worktrees - leave it), manifest ~204,95x of 205,000 (TRIM FIRST). Every ship below
+ran as one lane (Opus builder) + an independent review + a fix round, shipped one at a time with `bash scripts/prod/ship.sh <hash>`
+from the primary tree (the classifier allowed ship.sh, tracker writes, read-only Neon, rolled-back trials and `git rebase main` in
+the lanes all night; it blocks `secrets-upload.mjs`, `restart.mjs` and external-account writes - Alex runs those). **Shipped:**
+`80adca6e` file-backend append race (16 checklist writers in one file-queue slot; CI-only risk, Postgres unaffected) ·
+`513a312d` year-rollover probe (all boundary dates green; one fixture to 2099) · `f0a9d0a3` MONTH-END CADENCE (real bug: `addMonths`
+in db/store.js and src/lib/utils.ts rolled Jan 31 + 3 months to May 1, so the 28 quarterly recipes on 2027-01-31 would have put
+April's work in May; rule now: clamp the day, last day -> last day, Feb 28 counts as month-end; both copies byte-identical + a
+2026-2028 parity grid; featreq-23b8a16c Shipped with a QUESTION to Brittany: should the two drifted "Monthly Review" recipes
+(Dobco template-4xspe43, Flourish template-8aff2bf1, now on the 1st) go back to month-end -> approved data fix) · `a1b5cc6b` notes
+Preview identity (featreq-da3801ab: callers passed the signed-in id while previewing; the panel now derives identity itself; preview
+shows the previewed person's controls disabled) · `68ab2270` Dashboard stalled cases (featreq-9c818fca: "Open step" vanished because
+`?focus=` clears after 1.5 s and the finished step sits outside the filters; inline Open next step now on the row, CaseDetailPage
+"Never opened", held focus released on any filter/period/area change) · `0c326bce` e-sign leftovers (featreq-60118b28 done: void /
+Mark as signed / supersede withdraw an open request AFTER the route answers, NEVER when the contract already reads signed (re-read
+after every withdraw answer; left open with "press Check"), Finish-vs-manual guard, GET /api/clients/:id/esign, completed_at only
+when the status change applies - rolled-back prod trial of the UPDATE passed 5 cases) · `4e39386f` questionnaire follow-up editor
+(featreq-fccf901f: Settings -> Questionnaire card; NEW COLUMN `firm_settings.questionnaire_custom_questions jsonb`, look-first,
+Alex yes 10-27, confirmed present after deploy; frozen into a "More about you" step-2 section at create; step-2 show/hide by CSS
+`:has()` because the public page is script-free; emoji-safe escapes; turned-off triggers refused) · `0d929b7f` e-sign SIGNER
+CONFIRM (featreq-48a9525f, Alex 10-27: Send for signature first shows who signs - party pre-selected, client contacts, client record
+address, or a one-time address; a typed name is REQUIRED unless the signer is the party or a named contact; the firm's reply-to and
+team mailboxes are refused; the chosen address is stored on the request + email log and shown as "Sent to"; the same button + confirm
+now also on the client Billing card; server `lib/esign-signer.js`, UI `src/components/engagement/SignerPicker.tsx` EsignSendConfirm;
+old tabs posting `{templateHash}` alone keep the party path). **Still waiting on Brittany (in-app):** 23b8a16c Monthly Review
+month-end?, da3801ab other note kinds?, 5a44c051 period scope, I-95 recipes, Allison before/after Done, once-per-client
+Send-invoices-to (34627da1 stage 2). **For Alex, no rush:** Saylor case-b2ce4441 cosmetic stage_count (one-row fix if wanted); the
+187 old stalled cases stay hidden by design (decided: leave); ~45 non-checklist file-backend writers still use the split read/write
+pattern (CI-only); e-sign follow-ups named on featreq-60118b28 (SignWell silent 200 after withdrawal, Send-vs-Void race, ledger-row
+order on a confirmed withdrawal, shutdown does not drain a deferred withdrawal). **Lessons tonight:** reproduce the reporter's exact
+surface first (two of four send-backs were a 1.5 s focus timer and a prop mix-up); a withdrawal of a binding request needs positive
+evidence before ending it; review rounds on money/legal paths find real defects every time (the lost-PDF HIGH, the reply-to signer).
 **2026-10-26 20:25Z - E-SIGN IS LIVE; the rotated ElevenLabs key is in the Worker.** Alex ran both `secrets-upload.mjs` calls and `restart.mjs` himself (the classifier blocks the upload AND the restart for the session): env revision `2026-10-26T20:20:12.411Z`, both restarts "env revision: matches", `/health` 200 on `055f51d`. `ESIGNATURES_TEST_MODE=false` is set, so every e-sign send is real and billed; featreq-56d39567 is Shipped with the live note and the per-client 1099 steps. **Both follow-ups CLOSED 20:40Z:** Alex confirmed no copy of the 10-24 signed PDF reached his inbox (the account does not email the owner the final document - Brittany may send 1099 addenda); the SignWell key now answers 401 (trial lapsed), so the leftover webhook is inert and dies with the trial - nothing to run. NOTHING is open on Alex's side from this session. Next session starts from the paragraph below plus this one.
 
 **2026-10-26 (~19:45Z) - THREE SHIPS + the e-sign render check; READ THIS FIRST.** `main` = `f0a9d0a3` (+ this handoff),
