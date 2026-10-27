@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ApiError, type ActivityEntry } from '../lib/types'
+import { ApiError, type ActivityEntry, type Checklist } from '../lib/types'
 import type { CaseDetail } from '../lib/api'
 import { fetchCase } from '../lib/api'
 import { useAppContext } from '../AppContext'
+import { nextStageNeverOpened, stalledStageSentence } from '../lib/stalledCase'
+import { useOpenNextStage } from '../lib/useOpenNextStage'
 import {
   describeActivityAction,
   employeeName,
@@ -21,11 +23,48 @@ function stageStatus(checklist: CaseDetail['stages'][number]['checklist']) {
   return 'Open'
 }
 
+/**
+ * featreq-9c818fca: a step that never opened although the step before it is
+ * finished (a stall, `nextStageNeverOpened`). It is not "Awaiting previous
+ * stage" - nothing is left to wait for - so it says what happened in the
+ * Dashboard's own sentence and, for the owner or the finished step's assignee
+ * (not in preview), carries the same Open next step now as the Dashboard row
+ * and the step's card. The Dashboard's "Open case" lands here.
+ */
+function NeverOpenedStep({
+  previous,
+  canOpen,
+  onOpened,
+}: {
+  previous: Checklist
+  canOpen: boolean
+  onOpened: (spawned: Checklist) => void
+}) {
+  const { opening, error, open } = useOpenNextStage(previous.id, onOpened)
+  return (
+    <>
+      <div className="case-timeline-meta">{stalledStageSentence(previous, canOpen)}</div>
+      {canOpen ? (
+        <button type="button" className="secondary-action" disabled={opening} onClick={() => void open()}>
+          {opening ? 'Opening…' : 'Open next step now'}
+        </button>
+      ) : null}
+      {error ? (
+        <p className="waiting-editor-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </>
+  )
+}
+
 export function CaseDetailPage() {
   const params = useParams<{ caseId: string }>()
   const caseId = params.caseId ?? ''
-  const { data } = useAppContext()
+  const { data, role, previewMode, effectiveUser } = useAppContext()
   const [caseRecord, setCaseRecord] = useState<CaseDetail | null>(null)
+  // Stages opened from this page, so the new step's row says "Step N opened."
+  const [openedStageIds, setOpenedStageIds] = useState<string[]>([])
   const [error, setError] = useState('')
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
 
@@ -66,6 +105,32 @@ export function CaseDetailPage() {
 
   const { template, client, stages, activity } = caseRecord
   const openedAt = stages[0]?.checklist?.createdAt || stages[0]?.checklist?.dueDate
+  // The stall rule reads the live workspace (fresher than this page's fetch),
+  // plus this case's own rows in case the workspace does not hold one.
+  const caseRows = stages.flatMap(({ checklist }) => (checklist ? [checklist] : []))
+  const workspace = data.checklists ?? []
+  const liveRows = [...workspace, ...caseRows.filter((row) => !workspace.some((entry) => entry.id === row.id))]
+  const live = (row: Checklist) => workspace.find((entry) => entry.id === row.id) ?? row
+  /** The finished step before stage `idx` when stage `idx` never opened, else null. */
+  const stalledBefore = (idx: number): Checklist | null => {
+    const previous = idx > 0 ? stages[idx - 1]?.checklist : null
+    if (stages[idx]?.checklist || !previous) return null
+    const current = live(previous)
+    return nextStageNeverOpened(current, liveRows) ? current : null
+  }
+  const markOpened = (stageId: string, spawned: Checklist) => {
+    setCaseRecord((record) =>
+      record
+        ? {
+            ...record,
+            stages: record.stages.map((entry) =>
+              entry.stage.id === stageId ? { ...entry, checklist: spawned } : entry,
+            ),
+          }
+        : record,
+    )
+    setOpenedStageIds((ids) => [...ids, stageId])
+  }
   return (
     <section className="content-grid case-detail">
       <section className="panel">
@@ -88,6 +153,7 @@ export function CaseDetailPage() {
                   .filter((entry) => entry.taskId === checklist.id)
                   .reduce((sum, entry) => sum + entry.minutes, 0)
               : 0
+            const stalledFrom = stalledBefore(idx)
             return (
               <li key={stage.id} className="case-timeline-row">
                 <div className="case-timeline-dot" aria-hidden="true">
@@ -96,7 +162,14 @@ export function CaseDetailPage() {
                 <div className="case-timeline-body">
                   <div className="case-timeline-title">
                     <strong>{stage.name}</strong>
-                    <span className="status-pill">{stageStatus(checklist)}</span>
+                    <span className={stalledFrom ? 'status-pill status-pill-red' : 'status-pill'}>
+                      {stalledFrom ? 'Never opened' : stageStatus(checklist)}
+                    </span>
+                    {openedStageIds.includes(stage.id) ? (
+                      <span className="status-pill" role="status">
+                        Step {idx + 1} opened.
+                      </span>
+                    ) : null}
                   </div>
                   <div className="case-timeline-meta">
                     Assignee: {employeeName(data.employees, stage.assigneeId)}
@@ -104,8 +177,19 @@ export function CaseDetailPage() {
                       ? ` · ${done}/${total} items done · Due ${shortDate.format(
                           new Date(`${checklist.dueDate}T12:00:00`),
                         )}`
-                      : ' · Awaiting previous stage'}
+                      : stalledFrom
+                        ? ''
+                        : ' · Awaiting previous stage'}
                   </div>
+                  {stalledFrom ? (
+                    <NeverOpenedStep
+                      previous={stalledFrom}
+                      canOpen={
+                        !previewMode && (role === 'owner' || stalledFrom.assigneeId === effectiveUser?.id)
+                      }
+                      onOpened={(spawned) => markOpened(stage.id, spawned)}
+                    />
+                  ) : null}
                   {loggedMinutes > 0 ? (
                     <div className="case-timeline-meta">
                       Time logged: {formatHoursMinutes(loggedMinutes)}

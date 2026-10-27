@@ -38,7 +38,8 @@ import {
   fetchTeamActivity,
   listInvoicesRequest,
 } from '../lib/api'
-import { openNextStageErrorText, stalledCaseStages, stalledStageSentence } from '../lib/stalledCase'
+import { stalledCaseStages, stalledStageSentence } from '../lib/stalledCase'
+import { useOpenNextStage } from '../lib/useOpenNextStage'
 import type {
   ActivityEntry,
   BillRateVersion,
@@ -121,7 +122,6 @@ function StalledCaseRows({
   clients: Parameters<typeof clientName>[0]
   canOpen: (stage: Checklist) => boolean
 }) {
-  const { openNextStageEarly } = useAppContext()
   const [opened, setOpened] = useState<OpenedStep[]>([])
   const openedIds = new Set(opened.map((entry) => entry.stageId))
   const rows = stages.filter((stage) => !openedIds.has(stage.id))
@@ -148,7 +148,6 @@ function StalledCaseRows({
           stage={stage}
           clients={clients}
           canOpen={canOpen(stage)}
-          onOpen={openNextStageEarly}
           onOpened={(spawned) =>
             setOpened((current) => [
               ...current,
@@ -171,31 +170,16 @@ function StalledCaseRow({
   stage,
   clients,
   canOpen,
-  onOpen,
   onOpened,
 }: {
   stage: Checklist
   clients: Parameters<typeof clientName>[0]
   canOpen: boolean
-  onOpen: (checklistId: string) => Promise<Checklist | null>
   onOpened: (spawned: Checklist) => void
 }) {
   const stageIndex = stage.stageIndex ?? 0
   const stageCount = stage.stageCount ?? 1
-  const [opening, setOpening] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const open = async () => {
-    setOpening(true)
-    setError(null)
-    try {
-      const spawned = await onOpen(stage.id)
-      if (spawned) onOpened(spawned)
-    } catch (caught) {
-      setError(openNextStageErrorText(caught))
-    } finally {
-      setOpening(false)
-    }
-  }
+  const { opening, error, open } = useOpenNextStage(stage.id, onOpened)
   // The case page lists every step of the case, finished ones included. The
   // Checklists page's In-progress list files a finished step out of sight
   // (featreq-9c818fca), so it is the fallback for a row without a case id only.
