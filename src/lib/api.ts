@@ -69,6 +69,7 @@
 import type { GroupAllocationMode } from '../../lib/group-allocation.js'
 import type { ScopeTag } from '../../lib/invoice-scope-retag.js'
 import type { SkipReasonCategory } from '../../lib/checklist-skip.js'
+import type { DashboardLayout } from '../../lib/dashboard-layout.js'
 
 /**
  * Module-level preview state: WHO the owner is previewing, not merely THAT
@@ -3110,6 +3111,36 @@ export async function updateNotificationPrefsRequest(prefs: EmailNotificationPre
     throw new ApiError(response.status, message || `Failed to save notification preferences (${response.status})`)
   }
   return (await response.json()) as { prefs: EmailNotificationPrefs }
+}
+
+/**
+ * The signed-in person's Dashboard layout (lib/dashboard-layout.js), already
+ * cleaned by the server. In preview it is the PREVIEWED person's, read-only.
+ */
+export async function fetchDashboardLayout(signal?: AbortSignal) {
+  const response = await apiFetch('/api/me/dashboard-layout', {
+    credentials: 'same-origin',
+    signal,
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, `Failed to load the dashboard layout (${response.status})`)
+  }
+  return (await response.json()) as { layout: DashboardLayout }
+}
+
+/** Save the Dashboard layout; answers the layout as the server cleaned and kept it. */
+export async function saveDashboardLayoutRequest(layout: DashboardLayout) {
+  const response = await apiFetch('/api/me/dashboard-layout', {
+    credentials: 'same-origin',
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ layout }),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to save the dashboard layout (${response.status})`)
+  }
+  return (await response.json()) as { layout: DashboardLayout }
 }
 
 export async function markAllNotificationsReadRequest() {

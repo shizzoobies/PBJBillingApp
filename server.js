@@ -216,6 +216,11 @@ import { rateInvoiceDraft } from './lib/invoice-confidence.js'
 import { recapStaffTier } from './lib/staff-tiers.js'
 import { EMAIL_PREF_TYPES, sanitizeEmailPrefs } from './lib/notification-prefs.js'
 import {
+  dashboardViewForRole,
+  isDefaultDashboardLayout,
+  sanitizeDashboardLayout,
+} from './lib/dashboard-layout.js'
+import {
   listBlockingWeeks,
   normalizeTimeEntryMethod,
   normalizeWorkSessions,
@@ -1237,7 +1242,10 @@ function teamClientIdSet(session, clients) {
  *     the REAL signed-in owner by definition — `/api/me/notification-prefs`
  *     manages the owner's own email toggles and is deliberately NOT scoped to
  *     the previewed person; the banner says whose session it is, and preview
- *     never claims to re-authenticate.
+ *     never claims to re-authenticate. The one exception is the GET of
+ *     `/api/me/dashboard-layout`: preview shows the previewed person's
+ *     Dashboard, so it answers with THEIR saved arrangement (panel names and
+ *     flags only; the PUT is refused like every write).
  *  3. ONE EXPLICITLY-NAMED RECORD, reachable only from the previewed
  *     workspace, AND scoped by the previewed person. `/api/team/:id/activity`
  *     gates on the previewed role; `/api/cases/:id` and a client's notes gate
@@ -19657,6 +19665,51 @@ const server = createServer(async (request, response) => {
         return
       }
       sendJson(response, 200, { prefs: stored })
+      return
+    }
+
+    // Per-user Dashboard layout (panel order, shown/hidden, starts open or
+    // collapsed). Any signed-in user reads and saves their own; the cleaner in
+    // lib/dashboard-layout.js runs on both sides, keyed by the view their role
+    // gets (owner or staff). In preview the GET answers the previewed person's.
+    if (normalizedPath === '/api/me/dashboard-layout' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const scoped = await previewScopedSession(request, session, response)
+      if (!scoped) return
+      const member = await appDataStore.getTeamMember(scoped.user.id)
+      sendJson(response, 200, {
+        layout: sanitizeDashboardLayout(member?.dashboardLayout, dashboardViewForRole(scoped.user.role)),
+      })
+      return
+    }
+
+    if (normalizedPath === '/api/me/dashboard-layout' && request.method === 'PUT') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const contentType = String(request.headers['content-type'] || '')
+      if (!contentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const view = dashboardViewForRole(session.user.role)
+      const clean = sanitizeDashboardLayout(payload?.layout, view)
+      // The default is kept as NULL, so a panel added later lands in its
+      // default place for anyone who never rearranged.
+      const stored = await appDataStore.setDashboardLayout(
+        session.user.id,
+        isDefaultDashboardLayout(clean, view) ? null : clean,
+      )
+      if (stored === undefined) {
+        sendJson(response, 404, { error: 'User not found' })
+        return
+      }
+      sendJson(response, 200, { layout: clean })
       return
     }
 

@@ -24,6 +24,9 @@ alter table users add column if not exists last_active_at timestamptz;
 -- Per-user EMAIL notification toggles (sparse map of prefKey -> boolean;
 -- missing key = enabled). See lib/notification-prefs.js.
 alter table users add column if not exists email_notification_prefs jsonb;
+-- Per-user Dashboard layout (panel order, shown/hidden, starts open or collapsed;
+-- NULL = the default). See lib/dashboard-layout.js.
+alter table users add column if not exists dashboard_layout jsonb;
 create unique index if not exists users_magic_token_unique on users (magic_token) where magic_token is not null;
 
 create table if not exists activity_log (

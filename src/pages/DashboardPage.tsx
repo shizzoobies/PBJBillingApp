@@ -32,6 +32,12 @@ import {
 } from '../../lib/waiting-on-state.js'
 import { useAppContext } from '../AppContext'
 import {
+  DashboardArrangeButton,
+  DashboardPanel,
+  DashboardPanels,
+} from '../components/DashboardLayout'
+import { useDashboardArrangement } from '../lib/useDashboardArrangement'
+import {
   fetchGlobalActivity,
   fetchRateVersions,
   fetchTeam,
@@ -425,7 +431,7 @@ export function DashboardPage() {
  * "Reviewed" clears the row from this list and keeps the record forever — the
  * same audit-trail decision as the completed-tasks history.
  */
-function SkippedTasksReviewSection() {
+function SkippedTasksReviewSection({ panel }: { panel: 'skipped' }) {
   const { checklistSkips, reviewChecklistSkip, data, role, previewMode } = useAppContext()
   const [busyId, setBusyId] = useState<string | null>(null)
 
@@ -438,8 +444,11 @@ function SkippedTasksReviewSection() {
   if (rows.length === 0) return null
 
   return (
-    <section className="dashboard-section" aria-label="Skipped and pushed tasks to review">
-      <h2>Skipped and pushed tasks to review ({rows.length})</h2>
+    <DashboardPanel
+      panel={panel}
+      label="Skipped and pushed tasks to review"
+      title={`Skipped and pushed tasks to review (${rows.length})`}
+    >
       <ul className="dashboard-cases">
         {rows.map((skip) => (
           <li key={skip.id} className="dashboard-case-row">
@@ -479,7 +488,7 @@ function SkippedTasksReviewSection() {
           </li>
         ))}
       </ul>
-    </section>
+    </DashboardPanel>
   )
 }
 
@@ -502,7 +511,7 @@ function SkippedTasksReviewSection() {
  * Renders nothing for staff, nothing while an owner is previewing as somebody
  * else, and nothing when the list is empty — a clean dashboard stays clean.
  */
-function PastDueInvoicesSection() {
+function PastDueInvoicesSection({ panel }: { panel: 'past_due' }) {
   const { data, role, previewMode } = useAppContext()
   const [invoices, setInvoices] = useState<PastDueInvoiceRow[]>([])
   const hidden = role !== 'owner' || previewMode
@@ -540,8 +549,7 @@ function PastDueInvoicesSection() {
   if (hidden || rows.length === 0) return null
 
   return (
-    <section className="dashboard-section" aria-label="Invoices past due">
-      <h2>Invoices past due ({rows.length})</h2>
+    <DashboardPanel panel={panel} label="Invoices past due" title={`Invoices past due (${rows.length})`}>
       <ul className="dashboard-cases">
         {rows.map(({ invoice, pastDue }) => (
           <li key={invoice.id} className="dashboard-case-row">
@@ -564,7 +572,7 @@ function PastDueInvoicesSection() {
           </li>
         ))}
       </ul>
-    </section>
+    </DashboardPanel>
   )
 }
 
@@ -586,6 +594,10 @@ function OwnerDashboardView() {
   const caseRemoval: CaseRemoval | undefined = previewMode
     ? undefined
     : { ...removeCaseControls, rowsOf: (caseId, clientId) => rowsOfCase(data.checklists, caseId, clientId) }
+  // Her own arrangement of the panels below (order, shown, starts collapsed).
+  const arrangement = useDashboardArrangement({ view: 'owner', userId: sessionUser.id, readOnly: false })
+  const teamShown = arrangement.shows('team')
+  const kpiShown = arrangement.shows('kpi')
 
   const [activity, setActivity] = useState<ActivityEntry[]>([])
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
@@ -597,19 +609,23 @@ function OwnerDashboardView() {
    * included, and used to inflate this figure past what the invoice will say
    * for every client still on older rates. Owner-only, like this whole view;
    * a 403 answers empty lists and the fallback chain prices as before.
+   * Only the month-at-a-glance panel reads them, so a hidden one asks for none.
    */
   const [billRateVersions, setBillRateVersions] = useState<BillRateVersion[]>([])
   useEffect(() => {
+    if (!kpiShown) return
     const controller = new AbortController()
     fetchRateVersions(controller.signal)
       .then((versions) => setBillRateVersions(versions.billRateVersions))
       // Non-fatal: the estimate falls back to live rates, exactly as before.
       .catch(() => {})
     return () => controller.abort()
-  }, [])
+  }, [kpiShown])
 
-  // Fetch team once so we can show lastActiveAt per member.
+  // Fetch team once so we can show lastActiveAt per member (not while the Team
+  // panel is hidden: nothing else reads it).
   useEffect(() => {
+    if (!teamShown) return
     const controller = new AbortController()
     fetchTeam(controller.signal)
       .then((result) => setTeamMembers(result.users))
@@ -617,7 +633,7 @@ function OwnerDashboardView() {
         /* non-fatal */
       })
     return () => controller.abort()
-  }, [])
+  }, [teamShown])
 
   // Initial + 60s polling for global activity feed.
   useEffect(() => {
@@ -825,7 +841,7 @@ function OwnerDashboardView() {
   const activeClientCount = new Set(monthEntries.map((e) => e.clientId)).size
 
   return (
-    <div className="dashboard-page">
+    <DashboardPanels arrangement={arrangement} className="dashboard-page">
       <div className="dashboard-view-as">
         <label>
           <Eye size={14} />
@@ -868,10 +884,11 @@ function OwnerDashboardView() {
           <Link className="quick-action" to="/notifications">
             <Bell size={16} /> Notifications
           </Link>
+          <DashboardArrangeButton arrangement={arrangement} />
         </div>
       </header>
 
-      <section className="dashboard-alerts" aria-label="Alerts">
+      <DashboardPanel panel="alerts" label="Alerts" className="dashboard-alerts" collapsible={false}>
         <button
           type="button"
           className="alert-card alert-red"
@@ -913,10 +930,9 @@ function OwnerDashboardView() {
           <span>Unbilled hours</span>
           <small>hours</small>
         </button>
-      </section>
+      </DashboardPanel>
 
-      <section className="dashboard-section" aria-label="Your queue">
-        <h2>Your queue</h2>
+      <DashboardPanel panel="queue" label="Your queue">
         {myChecklists.length === 0 ? (
           <p className="empty-state">Nothing in your queue. Nicely done.</p>
         ) : (
@@ -944,19 +960,13 @@ function OwnerDashboardView() {
             />
           </div>
         )}
-      </section>
+      </DashboardPanel>
 
-      <section className="dashboard-section" aria-label="Team">
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'baseline',
-            justifyContent: 'space-between',
-            gap: 12,
-          }}
-        >
-          <h2 style={{ margin: 0 }}>Team</h2>
-          {inactiveTeammates.length > 0 ? (
+      <DashboardPanel
+        panel="team"
+        label="Team"
+        headerExtra={
+          inactiveTeammates.length > 0 ? (
             <label
               style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}
               title={`${inactiveTeammates.length} former team member${
@@ -970,8 +980,9 @@ function OwnerDashboardView() {
               />
               <span>Current team only</span>
             </label>
-          ) : null}
-        </div>
+          ) : null
+        }
+      >
         {analyticsMembers.length === 0 ? (
           <p className="empty-state">
             No bookkeepers yet. <Link to="/team">Invite one →</Link>
@@ -1012,10 +1023,9 @@ function OwnerDashboardView() {
             })}
           </div>
         )}
-      </section>
+      </DashboardPanel>
 
-      <section className="dashboard-section" aria-label="Cases in flight">
-        <h2>Cases in flight</h2>
+      <DashboardPanel panel="cases" label="Cases in flight">
         <p className="dashboard-section-caption">
           Multi-step cases under way, step by step; a red row needs a hand and says what to do.
         </p>
@@ -1075,14 +1085,13 @@ function OwnerDashboardView() {
             View all cases →
           </Link>
         ) : null}
-      </section>
+      </DashboardPanel>
 
-      <SkippedTasksReviewSection />
+      <SkippedTasksReviewSection panel="skipped" />
 
-      <PastDueInvoicesSection />
+      <PastDueInvoicesSection panel="past_due" />
 
-      <section className="dashboard-section" aria-label="Recent activity">
-        <h2>Recent activity</h2>
+      <DashboardPanel panel="activity" label="Recent activity">
         {activity.length === 0 ? (
           <p className="empty-state">No recent activity.</p>
         ) : (
@@ -1107,10 +1116,9 @@ function OwnerDashboardView() {
             })}
           </ul>
         )}
-      </section>
+      </DashboardPanel>
 
-      <section className="dashboard-kpi" aria-label="This month at a glance">
-        <h2>This month at a glance</h2>
+      <DashboardPanel panel="kpi" label="This month at a glance" className="dashboard-kpi">
         <div className="dashboard-kpi-row">
           <div className="kpi-stat">
             <Clock3 size={16} />
@@ -1136,8 +1144,8 @@ function OwnerDashboardView() {
         <Link to="/reports" className="dashboard-section-more">
           View full report →
         </Link>
-      </section>
-    </div>
+      </DashboardPanel>
+    </DashboardPanels>
   )
 }
 
@@ -1224,6 +1232,8 @@ function EmployeeDashboardView() {
 
   const userId = effectiveUser.id
   const firstName = effectiveUser.name.split(' ')[0]
+  // Their own arrangement; in preview, the previewed person's, read-only.
+  const arrangement = useDashboardArrangement({ view: 'staff', userId, readOnly: previewMode })
 
   const [activity, setActivity] = useState<ActivityEntry[]>([])
 
@@ -1378,7 +1388,7 @@ function EmployeeDashboardView() {
   const showTwofaBanner = !previewMode && role !== 'owner' && sessionUser.totpEnabled === false
 
   return (
-    <div className="dashboard-page">
+    <DashboardPanels arrangement={arrangement} className="dashboard-page">
       <header className="dashboard-header">
         <div>
           <h1>Dashboard</h1>
@@ -1391,12 +1401,13 @@ function EmployeeDashboardView() {
           <Link className="quick-action" to="/time">
             <Clock3 size={16} /> My time
           </Link>
+          <DashboardArrangeButton arrangement={arrangement} />
         </div>
       </header>
 
       {showTwofaBanner ? <TwoFaBanner userId={sessionUser.id} /> : null}
 
-      <section className="dashboard-alerts" aria-label="Alerts">
+      <DashboardPanel panel="alerts" label="Alerts" className="dashboard-alerts" collapsible={false}>
         <button
           type="button"
           className="alert-card alert-red"
@@ -1427,46 +1438,43 @@ function EmployeeDashboardView() {
           <span>Stuck</span>
           <small>cases</small>
         </button>
-      </section>
+      </DashboardPanel>
 
-      {waitingOnMe.length > 0 ? (
-        <section className="dashboard-section" aria-label="Waiting on you">
-          <h2>Waiting on you</h2>
-          <ul className="dashboard-waiting-on-you">
-            {waitingOnMe.map((row) => (
-              <li key={row.waitingOnId} className="waiting-on-you-row">
-                <div className="waiting-on-you-main">
-                  {/* Her Delayed page, not the checklist: she may not be on the
-                      task, and Checklists lists only the tasks she is on. */}
-                  <Link className="waiting-on-you-step" to={blockerWaitLink(row.waitingOnId)}>
-                    {row.checklistTitle}
-                    <span className="waiting-on-you-sub">
-                      {' › '}
-                      {row.itemLabel}
-                      {row.subLabel ? ` › ${row.subLabel}` : ''}
-                    </span>
-                  </Link>
-                  <span className="waiting-on-you-meta">
-                    {row.clientName} · {row.requestedByName} is waiting
-                    {row.note ? ` · ${row.note}` : ''}
+      {/* Shows only while somebody is waiting on them. */}
+      <DashboardPanel panel="waiting" label="Waiting on you" empty={waitingOnMe.length === 0}>
+        <ul className="dashboard-waiting-on-you">
+          {waitingOnMe.map((row) => (
+            <li key={row.waitingOnId} className="waiting-on-you-row">
+              <div className="waiting-on-you-main">
+                {/* Her Delayed page, not the checklist: she may not be on the
+                    task, and Checklists lists only the tasks she is on. */}
+                <Link className="waiting-on-you-step" to={blockerWaitLink(row.waitingOnId)}>
+                  {row.checklistTitle}
+                  <span className="waiting-on-you-sub">
+                    {' › '}
+                    {row.itemLabel}
+                    {row.subLabel ? ` › ${row.subLabel}` : ''}
                   </span>
-                </div>
-                <button
-                  type="button"
-                  className="waiting-on-you-done"
-                  disabled={previewMode}
-                  onClick={() => void waitingOnDone(row.checklistId, row.waitingOnId)}
-                >
-                  Mark done
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
+                </Link>
+                <span className="waiting-on-you-meta">
+                  {row.clientName} · {row.requestedByName} is waiting
+                  {row.note ? ` · ${row.note}` : ''}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="waiting-on-you-done"
+                disabled={previewMode}
+                onClick={() => void waitingOnDone(row.checklistId, row.waitingOnId)}
+              >
+                Mark done
+              </button>
+            </li>
+          ))}
+        </ul>
+      </DashboardPanel>
 
-      <section className="dashboard-section" aria-label="My queue">
-        <h2>My queue</h2>
+      <DashboardPanel panel="my_queue" label="My queue">
         {myChecklists.length === 0 ? (
           <p className="empty-state">Nothing in your queue. Nicely done.</p>
         ) : (
@@ -1494,10 +1502,9 @@ function EmployeeDashboardView() {
             />
           </div>
         )}
-      </section>
+      </DashboardPanel>
 
-      <section className="dashboard-section" aria-label="Watching">
-        <h2>Watching</h2>
+      <DashboardPanel panel="watching" label="Watching">
         {watching.length === 0 ? (
           <p className="empty-state">Nothing you're watching.</p>
         ) : (
@@ -1527,10 +1534,9 @@ function EmployeeDashboardView() {
             })}
           </ul>
         )}
-      </section>
+      </DashboardPanel>
 
-      <section className="dashboard-section" aria-label="My cases in flight">
-        <h2>My cases in flight</h2>
+      <DashboardPanel panel="my_cases" label="My cases in flight">
         <p className="dashboard-section-caption">
           Multi-step cases you have a step on; a red row needs a hand and says what to do.
         </p>
@@ -1576,10 +1582,9 @@ function EmployeeDashboardView() {
             })}
           </ul>
         )}
-      </section>
+      </DashboardPanel>
 
-      <section className="dashboard-section" aria-label="My recent activity">
-        <h2>My recent activity</h2>
+      <DashboardPanel panel="my_activity" label="My recent activity">
         {activity.length === 0 ? (
           <p className="empty-state">No recent activity.</p>
         ) : (
@@ -1598,10 +1603,9 @@ function EmployeeDashboardView() {
             ))}
           </ul>
         )}
-      </section>
+      </DashboardPanel>
 
-      <section className="dashboard-kpi" aria-label="My month at a glance">
-        <h2>My month at a glance</h2>
+      <DashboardPanel panel="my_kpi" label="My month at a glance" className="dashboard-kpi">
         <div className="dashboard-kpi-row">
           <div className="kpi-stat">
             <Clock3 size={16} />
@@ -1627,8 +1631,8 @@ function EmployeeDashboardView() {
         <Link to={kpiHref} className="dashboard-section-more">
           {role === 'owner' ? 'View full report →' : 'Open my time →'}
         </Link>
-      </section>
-    </div>
+      </DashboardPanel>
+    </DashboardPanels>
   )
 }
 

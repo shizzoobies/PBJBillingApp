@@ -6006,6 +6006,63 @@ td strong {
 .dashboard-section-more:hover {
   text-decoration: underline;
 }
+/* A panel's heading row: the collapse chevron, the title, then any control
+   the panel keeps beside its title (Team's "Current team only"). */
+.dashboard-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px -6px;
+}
+.dashboard-section .dashboard-panel-head h2,
+.dashboard-kpi .dashboard-panel-head h2 {
+  margin: 0;
+}
+.dashboard-panel-head-extra {
+  margin-left: auto;
+}
+.dashboard-panel-collapsed .dashboard-panel-head {
+  margin-bottom: 0;
+}
+/* Arrange: the panels as a short list with their controls. */
+.dashboard-arrange-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dashboard-arrange-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.dashboard-arrange-row.is-hidden .dashboard-arrange-name {
+  color: var(--muted);
+}
+.dashboard-arrange-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dashboard-arrange-note {
+  color: var(--muted);
+  font-size: 13px;
+}
+.dashboard-arrange-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
 .dashboard-queue {
   display: flex;
   flex-direction: column;

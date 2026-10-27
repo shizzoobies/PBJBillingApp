@@ -1416,6 +1416,10 @@ function mapTeamMemberRow(row) {
       row.email_notification_prefs && typeof row.email_notification_prefs === 'object'
         ? row.email_notification_prefs
         : {},
+    // The Dashboard layout as stored (NULL = the default). Readers clean it
+    // with lib/dashboard-layout.js; the raw value is kept so nothing is lost.
+    dashboardLayout:
+      row.dashboard_layout && typeof row.dashboard_layout === 'object' ? row.dashboard_layout : null,
   }
 }
 
@@ -5961,6 +5965,22 @@ const CLIENT_NOTE_MAX_CHARS = 5000
 const PENDING_NOTE_MAX_CHARS = 2000
 
 /**
+ * `users.dashboard_layout` (lib/dashboard-layout.js), added only when missing: the
+ * ALTER takes a table lock even when it changes nothing, and every request that
+ * checks a session reads `users`.
+ */
+export async function addDashboardLayoutColumn(pool) {
+  const found = await pool.query(
+    `select 1 from information_schema.columns
+      where table_schema = current_schema() and table_name = 'users'
+        and column_name = 'dashboard_layout'`,
+  )
+  if ((found.rows?.length ?? 0) === 0) {
+    await pool.query(`alter table users add column if not exists dashboard_layout jsonb`)
+  }
+}
+
+/**
  * The `edited_at` column on a notes table (featreq-da3801ab). `alter table ... add
  * column if not exists` takes an ACCESS EXCLUSIVE lock even when the column is
  * already there, so look first and run the DDL only on the first boot after this
@@ -6785,6 +6805,9 @@ export class AppDataStore {
       // Per-user EMAIL notification toggles (sparse map of prefKey -> boolean;
       // missing key = enabled). See lib/notification-prefs.js.
       await this.pool.query(`alter table users add column if not exists email_notification_prefs jsonb`)
+      // Per-user Dashboard layout (panel order, shown/hidden, starts open or
+      // collapsed). NULL = the default layout, so no backfill. Look-first.
+      await addDashboardLayoutColumn(this.pool)
       // Per-employee BILL rate ($/hour charged to clients for this person's
       // time). Separate from cost_rate (a cost/pay rate, margin-only). Unlike
       // cost_rate, bill_rate DOES feed invoices: hourly clients are billed off
@@ -25068,7 +25091,7 @@ export class AppDataStore {
       // admin page. Owner re-adds with a fresh invite to undo a removal.
       const result = await this.pool.query(`
         select id, name, email, role, staff_role, magic_token, token_revoked_at, last_active_at, created_at,
-               totp_enabled, cost_rate, bill_rate, email_notification_prefs
+               totp_enabled, cost_rate, bill_rate, email_notification_prefs, dashboard_layout
         from users
         where inactive_at is null
         order by sort_order asc nulls last, name asc
@@ -25095,6 +25118,8 @@ export class AppDataStore {
         user.emailNotificationPrefs && typeof user.emailNotificationPrefs === 'object'
           ? user.emailNotificationPrefs
           : {},
+      dashboardLayout:
+        user.dashboardLayout && typeof user.dashboardLayout === 'object' ? user.dashboardLayout : null,
     }))
   }
 
@@ -25202,7 +25227,7 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, name, email, role, staff_role, magic_token, token_revoked_at, last_active_at,
-                created_at, totp_enabled, cost_rate, bill_rate, email_notification_prefs
+                created_at, totp_enabled, cost_rate, bill_rate, email_notification_prefs, dashboard_layout
            from users
           where id = $1 and inactive_at is null`,
         [userId],
@@ -25235,6 +25260,33 @@ export class AppDataStore {
     const user = (authState.users ?? []).find((u) => u.id === userId)
     if (!user) return null
     user.emailNotificationPrefs = clean
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    return clean
+  }
+
+  /**
+   * Replace a user's Dashboard layout with an already-cleaned one
+   * (lib/dashboard-layout.js; the route cleans before calling), or clear it with
+   * null, which reads as the default layout. Returns what is now stored (the
+   * layout, or null), or undefined when the user doesn't exist.
+   */
+  async setDashboardLayout(userId, layout) {
+    if (!userId) return undefined
+    const clean = layout && typeof layout === 'object' && !Array.isArray(layout) ? layout : null
+
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update users set dashboard_layout = $2::jsonb, updated_at = now() where id = $1 returning id`,
+        [userId, clean === null ? null : JSON.stringify(clean)],
+      )
+      return result.rowCount ? clean : undefined
+    }
+
+    const authState = await readJson(localAuthPath)
+    const user = (authState.users ?? []).find((u) => u.id === userId)
+    if (!user) return undefined
+    if (clean === null) delete user.dashboardLayout
+    else user.dashboardLayout = clean
     await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
     return clean
   }

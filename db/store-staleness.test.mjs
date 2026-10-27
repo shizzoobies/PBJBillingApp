@@ -9,6 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTes
 import {
   AccountCreditError,
   AppDataStore,
+  addDashboardLayoutColumn,
   addQuestionnaireCustomQuestionsColumn,
   BULK_SAVE_LOCK_SQL,
   BULK_SAVE_LOCK_TABLES,
@@ -57240,5 +57241,137 @@ describe('remove a case (postgres branch)', () => {
       throw Object.assign(new Error('connection lost'), { code: '08006' })
     })
     await expect(postgresStore(other).restoreChecklist('a-1')).rejects.toThrow('connection lost')
+  })
+})
+
+/**
+ * Per-user Dashboard layout (2026-10-27): `users.dashboard_layout` jsonb, NULL =
+ * the default. Stored as handed (the route cleans it with lib/dashboard-layout.js
+ * first) and read back raw on the team-member row, on both backends.
+ */
+describe('dashboard layout on the user row (file backend)', () => {
+  const layout = {
+    version: 1,
+    panels: [
+      { key: 'alerts', hidden: false, collapsed: false },
+      { key: 'kpi', hidden: false, collapsed: true },
+      { key: 'queue', hidden: true, collapsed: false },
+    ],
+  }
+
+  beforeEach(async () => {
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    authState.users = [
+      { id: 'emp-patrice', name: 'Brittany', role: 'owner' },
+      { id: 'emp-lisa', name: 'Lisa', role: 'employee' },
+    ]
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  })
+
+  it('reads null before anything is saved', async () => {
+    expect((await store.getTeamMember('emp-patrice')).dashboardLayout).toBeNull()
+  })
+
+  it('saves a layout, reads it back on a fresh store, and touches no one else', async () => {
+    expect(await store.setDashboardLayout('emp-patrice', layout)).toEqual(layout)
+    const reopened = new AppDataStore()
+    await reopened.initialize()
+    expect((await reopened.getTeamMember('emp-patrice')).dashboardLayout).toEqual(layout)
+    const roster = await reopened.getTeamMembers()
+    expect(roster.find((member) => member.id === 'emp-patrice').dashboardLayout).toEqual(layout)
+    expect(roster.find((member) => member.id === 'emp-lisa').dashboardLayout).toBeNull()
+  })
+
+  it('clears it with null', async () => {
+    await store.setDashboardLayout('emp-patrice', layout)
+    expect(await store.setDashboardLayout('emp-patrice', null)).toBeNull()
+    expect((await store.getTeamMember('emp-patrice')).dashboardLayout).toBeNull()
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    expect(authState.users.find((user) => user.id === 'emp-patrice')).not.toHaveProperty('dashboardLayout')
+  })
+
+  it('answers undefined for a user who does not exist', async () => {
+    expect(await store.setDashboardLayout('emp-nobody', layout)).toBeUndefined()
+    expect(await store.setDashboardLayout('', layout)).toBeUndefined()
+  })
+})
+
+describe('dashboard layout on the user row (postgres branch)', () => {
+  const layout = { version: 1, panels: [{ key: 'alerts', hidden: false, collapsed: false }] }
+
+  function pool({ userRow = null, updateRowCount = 1, columnExists = false } = {}) {
+    const statements = []
+    return {
+      statements,
+      pool: {
+        async query(text, params) {
+          const trimmed = String(text).trim()
+          statements.push({ text: trimmed, params })
+          if (/column_name = 'dashboard_layout'/i.test(trimmed)) {
+            return { rows: columnExists ? [{ '?column?': 1 }] : [], rowCount: columnExists ? 1 : 0 }
+          }
+          if (/^select id, name, email, role/i.test(trimmed)) return { rows: userRow ? [userRow] : [], rowCount: 1 }
+          if (/^update users set dashboard_layout/i.test(trimmed)) return { rows: [], rowCount: updateRowCount }
+          return { rows: [], rowCount: 0 }
+        },
+      },
+    }
+  }
+
+  it('adds the column look-first: the ALTER runs only when the column is missing', async () => {
+    const alter = /^alter table users add column if not exists dashboard_layout jsonb$/i
+    const missing = pool()
+    await addDashboardLayoutColumn(missing.pool)
+    expect(missing.statements.map((s) => s.text)).toHaveLength(2)
+    expect(missing.statements[0].text).toMatch(
+      /^select 1 from information_schema\.columns\s+where table_schema = current_schema\(\) and table_name = 'users'\s+and column_name = 'dashboard_layout'$/i,
+    )
+    expect(missing.statements[1].text).toMatch(alter)
+
+    const present = pool({ columnExists: true })
+    await addDashboardLayoutColumn(present.pool)
+    expect(present.statements).toHaveLength(1)
+    expect(present.statements.some((s) => alter.test(s.text))).toBe(false)
+  })
+
+  it('initialize() runs the look-first step after the users table exists', async () => {
+    const fake = fakePostgres()
+    await postgresStore(fake).initialize().catch(() => {})
+    expect(fake.matching(/column_name = 'dashboard_layout'/i)).toHaveLength(1)
+    expect(fake.matching(/^alter table users add column if not exists dashboard_layout jsonb$/i)).toHaveLength(1)
+    expect(fake.indexOf(/column_name = 'dashboard_layout'/i)).toBeGreaterThan(
+      fake.indexOf(/create table if not exists users \(/i),
+    )
+  })
+
+  it('selects the column on both team-member reads and maps it', async () => {
+    const row = { id: 'emp-patrice', name: 'Brittany', role: 'owner', dashboard_layout: layout }
+    const fake = pool({ userRow: row })
+    const pgStore = postgresStore(fake)
+    expect((await pgStore.getTeamMember('emp-patrice')).dashboardLayout).toEqual(layout)
+    expect((await pgStore.getTeamMembers())[0].dashboardLayout).toEqual(layout)
+    const selects = fake.statements.filter((s) => /^select id, name, email, role/i.test(s.text))
+    expect(selects).toHaveLength(2)
+    expect(selects.every((s) => /\bdashboard_layout\b/.test(s.text))).toBe(true)
+
+    const unset = pool({ userRow: { ...row, dashboard_layout: null } })
+    expect((await postgresStore(unset).getTeamMember('emp-patrice')).dashboardLayout).toBeNull()
+  })
+
+  it('writes the layout as $2 jsonb, NULL to clear, and undefined when no row matched', async () => {
+    const fake = pool()
+    const pgStore = postgresStore(fake)
+    expect(await pgStore.setDashboardLayout('emp-patrice', layout)).toEqual(layout)
+    const update = fake.statements.find((s) => /^update users set dashboard_layout/i.test(s.text))
+    expect(update.text).toBe(
+      'update users set dashboard_layout = $2::jsonb, updated_at = now() where id = $1 returning id',
+    )
+    expect(update.params[0]).toBe('emp-patrice')
+    expect(JSON.parse(update.params[1])).toEqual(layout)
+
+    expect(await pgStore.setDashboardLayout('emp-patrice', null)).toBeNull()
+    expect(fake.statements.filter((s) => /^update users set dashboard_layout/i.test(s.text))[1].params[1]).toBeNull()
+
+    expect(await postgresStore(pool({ updateRowCount: 0 })).setDashboardLayout('emp-gone', layout)).toBeUndefined()
   })
 })
