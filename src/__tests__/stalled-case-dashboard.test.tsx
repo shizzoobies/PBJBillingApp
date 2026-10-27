@@ -181,14 +181,23 @@ describe('the Dashboard lists a case whose next step never opened', () => {
   it('owner: every stalled case, labeled, linking to its card, and counted as stuck', () => {
     signIn('owner')
     renderDashboard()
-    for (const [title, id] of [
-      ['Quarterly stalled', 'cl-stalled'],
-      ['Quarterly Britts', 'cl-britts'],
-      ['Quarterly edge', 'cl-edge'],
+    for (const [title, caseId] of [
+      ['Quarterly stalled', 'case-stalled'],
+      ['Quarterly Britts', 'case-britts'],
+      ['Quarterly edge', 'case-edge'],
     ]) {
       const row = rowFor(title)
       expect(within(row).getByText(LABEL)).not.toBeNull()
-      expect(within(row).getByRole('link').getAttribute('href')).toBe(`/checklists?focus=${id}`)
+      // featreq-9c818fca: the case page shows the finished step; the Checklists list filed it away.
+      expect(within(row).getByRole('link').getAttribute('href')).toBe(`/cases/${caseId}`)
+      // The owner may open any next step, from the row itself.
+      expect(within(row).getByRole('button', { name: 'Open next step now' })).not.toBeNull()
+      // No completion stamp on these rows, so the sentence gives the due day.
+      expect(
+        within(row).getByText(
+          /^Step 1 \(due [A-Z][a-z]{2} \d{1,2}\) is finished but step 2 was never created\. Press Open next step now to create it\.$/,
+        ),
+      ).not.toBeNull()
     }
     expect(screen.queryByText('Quarterly handed')).toBeNull()
     expect(screen.queryByText('Quarterly last')).toBeNull()
@@ -213,10 +222,23 @@ describe('the Dashboard lists a case whose next step never opened', () => {
     renderDashboard()
     const row = rowFor('Quarterly stalled')
     expect(within(row).getByText(LABEL)).not.toBeNull()
-    expect(within(row).getByRole('link').getAttribute('href')).toBe('/checklists?focus=cl-stalled')
+    expect(within(row).getByRole('link').getAttribute('href')).toBe('/cases/case-stalled')
+    // Their own step: the button is theirs too.
+    expect(within(row).getByRole('button', { name: 'Open next step now' })).not.toBeNull()
     expect(screen.queryByText('Quarterly Britts')).toBeNull()
     // Hers: the recent one and the one due 89 days ago.
     expect(screen.getAllByText(LABEL)).toHaveLength(2)
     expect(stuckCount()).toBe('2')
+  })
+
+  it('in preview: the row and its sentence, but no button (preview is read-only)', () => {
+    signIn('staff')
+    contextValue = { ...contextValue, previewMode: true } as AppContextValue
+    renderDashboard()
+    const row = rowFor('Quarterly stalled')
+    expect(within(row).queryByRole('button', { name: 'Open next step now' })).toBeNull()
+    expect(
+      within(row).getByText(/The owner or the person this step is assigned to can create it with Open next step now\.$/),
+    ).not.toBeNull()
   })
 })

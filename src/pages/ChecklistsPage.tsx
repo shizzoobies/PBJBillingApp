@@ -103,7 +103,7 @@ import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
 import { completedTaskRows } from '../lib/completedTasks'
 import { filterInProgressChecklists, waitingStepCount } from '../lib/inProgressFilter'
 import { overdueChecklists } from '../lib/overdueChecklists'
-import { nextStageNeverOpened as isNextStageNeverOpened } from '../lib/stalledCase'
+import { nextStageNeverOpened as isNextStageNeverOpened, openNextStageErrorText } from '../lib/stalledCase'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
 import { inactiveClientIdSet, workableClients } from '../lib/clientLifecycle'
 import {
@@ -413,7 +413,21 @@ export function ChecklistsPage() {
     focusTemplate: searchParams.get('focusTemplate'),
   })
 
+  // The checklist a `?focus=` jump landed on, HELD after the param clears
+  // itself (~1.5 s later, so the scroll does not re-fire). The list admits the
+  // focused row past the report period and the filters; before this hold that
+  // lasted only while the param was in the URL, so a jump to a finished step
+  // from an earlier month showed the card for a moment and then dropped it
+  // again: the Dashboard's "Open step" looked like it did nothing
+  // (featreq-9c818fca). Held until another jump, an area change or leaving the
+  // page; the shared report period is never touched.
+  const focusParam = searchParams.get('focus')
+  const [heldFocusId, setHeldFocusId] = useState<string | null>(focusParam)
+  if (focusParam && focusParam !== heldFocusId) setHeldFocusId(focusParam)
+  const admittedFocusId = focusParam ?? heldFocusId
+
   const setArea = (next: TaskArea) => {
+    setHeldFocusId(null)
     const params = new URLSearchParams(searchParams)
     // 'progress' is the default, so keep it out of the URL — a bare
     // /checklists link should land somewhere sensible, not carry state.
@@ -443,11 +457,11 @@ export function ChecklistsPage() {
         client: areaClient,
         status: areaStatus,
         today: localDateOnly(),
-        // The list admits the focused row past the report period; the count has
-        // to admit it too, or it contradicts what is under it for that ~1.5s.
-        focusId: searchParams.get('focus'),
+        // The list admits the focused (or held) row past the report period; the
+        // count has to admit it too, or it contradicts what is under it.
+        focusId: admittedFocusId,
       }).length,
-    [visibleChecklists, reportPeriod, areaAssignee, areaClient, areaStatus, searchParams],
+    [visibleChecklists, reportPeriod, areaAssignee, areaClient, areaStatus, admittedFocusId],
   )
   // Completed history. Built from `data.checklists` (the server's client-scoped
   // feed), NOT `visibleChecklists` — that one is already narrowed to "mine",
@@ -744,6 +758,7 @@ export function ChecklistsPage() {
           ownerMode={ownerMode}
           role={role}
           timeEntries={data.timeEntries}
+          heldFocusId={heldFocusId}
         />
         )}
       </section>
@@ -1708,6 +1723,7 @@ function ChecklistInProgressSection({
   ownerMode,
   role,
   timeEntries,
+  heldFocusId = null,
 }: {
   activeEmployeeId: string
   checklists: Checklist[]
@@ -1766,6 +1782,8 @@ function ChecklistInProgressSection({
   ownerMode: boolean
   role: Role
   timeEntries: TimeEntry[]
+  /** The last `?focus=` row, kept in view after the param clears (see the page). */
+  heldFocusId?: string | null
 }) {
   const todayDateOnly = localDateOnly()
   const { reportPeriod, setReportPeriod } = useAppContext()
@@ -1773,6 +1791,9 @@ function ChecklistInProgressSection({
   const [query, setQuery] = useState('')
   const [searchParams, setSearchParams] = useSearchParams()
   const focusId = searchParams.get('focus')
+  // Admitted past the period and filters, and opens the group it sits in:
+  // the live param, else the held one (featreq-9c818fca).
+  const admittedFocusId = focusId ?? heldFocusId ?? null
   const focusRef = useRef<HTMLElement | null>(null)
 
   // Group-by choice is persisted in a URL search param (?group=client), the
@@ -1824,9 +1845,9 @@ function ChecklistInProgressSection({
         today: todayDateOnly,
         query,
         clients,
-        focusId,
+        focusId: admittedFocusId,
       }),
-    [checklists, assignee, client, status, todayDateOnly, query, clients, reportPeriod, focusId],
+    [checklists, assignee, client, status, todayDateOnly, query, clients, reportPeriod, admittedFocusId],
   )
 
   // The notes attached to the rendered cards, fetched ONCE for all of them (a
@@ -1844,9 +1865,9 @@ function ChecklistInProgressSection({
         today: todayDateOnly,
         query: '',
         clients,
-        focusId,
+        focusId: admittedFocusId,
       }),
-    [checklists, assignee, client, status, todayDateOnly, clients, reportPeriod, focusId],
+    [checklists, assignee, client, status, todayDateOnly, clients, reportPeriod, admittedFocusId],
   )
   const attachedNotesFor = useAttachedClientNotes(
     notesScope.filter((checklist) => !checklist.projected).map((checklist) => checklist.id),
@@ -1989,8 +2010,8 @@ function ChecklistInProgressSection({
                   label={group.label}
                   count={groupedByStatus[group.key].length}
                   focusInside={
-                    Boolean(focusId) &&
-                    groupedByStatus[group.key].some((c) => c.id === focusId)
+                    Boolean(admittedFocusId) &&
+                    groupedByStatus[group.key].some((c) => c.id === admittedFocusId)
                   }
                 >
                   {groupedByStatus[group.key].map(renderCard)}
@@ -1999,7 +2020,7 @@ function ChecklistInProgressSection({
             )
           : clientGroups.map((group) => {
               const focusInCompleted =
-                Boolean(focusId) && group.completed.some((c) => c.id === focusId)
+                Boolean(admittedFocusId) && group.completed.some((c) => c.id === admittedFocusId)
               return (
                 <ChecklistGroup
                   // A client with only completed work in the period stays
@@ -2018,7 +2039,7 @@ function ChecklistInProgressSection({
                   }
                   focusInside={
                     focusInCompleted ||
-                    (Boolean(focusId) && group.open.some((c) => c.id === focusId))
+                    (Boolean(admittedFocusId) && group.open.some((c) => c.id === admittedFocusId))
                   }
                 >
                   {group.open.map(renderCard)}
@@ -2063,13 +2084,19 @@ function ChecklistGroup({
    */
   focusInside?: boolean
 }) {
-  const [userOpen, setUserOpen] = useState(defaultOpen)
   // Auto-expand when the `?focus=` checklist lands inside this group, so a
   // just-created one-time task or just-generated instance is visible even if
-  // it landed in a collapsed group. `focusInside` is transient (the focus URL
-  // param self-clears after ~1.5s), so it simply forces the group open while
-  // active — derived during render, no effect or ref mutation needed.
-  const open = userOpen || focusInside
+  // it landed in a collapsed group. The page HOLDS the focused row after the
+  // param clears (featreq-9c818fca), so `focusInside` can stay true: it opens
+  // the group once, as it turns true, rather than forcing it open - the person
+  // can still fold it away. Adjusted during render, no effect needed.
+  const [userOpen, setUserOpen] = useState(defaultOpen || focusInside)
+  const [sawFocusInside, setSawFocusInside] = useState(focusInside)
+  if (focusInside !== sawFocusInside) {
+    setSawFocusInside(focusInside)
+    if (focusInside) setUserOpen(true)
+  }
+  const open = userOpen
   return (
     <div className={className ? `checklist-group ${className}` : 'checklist-group'}>
       <button
@@ -2782,7 +2809,7 @@ export function ChecklistCard({
       const spawned = await openNextStageEarly(checklist.id)
       if (spawned) setOpenedNextStage({ id: spawned.id, number: stageNumber + 1 })
     } catch (error) {
-      setOpenNextStageError(error instanceof Error ? error.message : 'Could not open the next step.')
+      setOpenNextStageError(openNextStageErrorText(error))
     } finally {
       setOpeningNextStage(false)
     }

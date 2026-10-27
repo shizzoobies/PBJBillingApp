@@ -38,7 +38,7 @@ import {
   fetchTeamActivity,
   listInvoicesRequest,
 } from '../lib/api'
-import { stalledCaseStages } from '../lib/stalledCase'
+import { openNextStageErrorText, stalledCaseStages, stalledStageSentence } from '../lib/stalledCase'
 import type {
   ActivityEntry,
   BillRateVersion,
@@ -91,21 +91,117 @@ function isInProgress(checklist: Checklist) {
 }
 
 /**
- * featreq-ed73d181: a case whose step is finished but whose next step never
- * opened (`stalledCaseStages`). It has no open row anywhere, so it is listed
- * with the cases and links to the finished step's card, where Open next step
- * now revives it.
- */
-/**
  * The Dashboard lists a stall only when its finished step was due in the last
  * this-many days: 188 older ones (mostly the August imports) would flood Stuck
  * cases. The card's Open next step now is offered on every stall regardless.
  */
 const STALLED_CASE_WINDOW_DAYS = 90
 
-function StalledCaseRow({ stage, clients }: { stage: Checklist; clients: Parameters<typeof clientName>[0] }) {
+/** A step Open next step now just created from the Dashboard, for the confirmation line. */
+type OpenedStep = { stageId: string; spawnedId: string; step: number; title: string; clientId: string }
+
+/**
+ * featreq-ed73d181 / featreq-9c818fca: cases whose step is finished but whose
+ * next step never opened (`stalledCaseStages`). Such a case has no open row
+ * anywhere, so it is listed with the cases, says in one sentence what happened
+ * and what to do, and carries Open next step now itself - the same action as
+ * the button on the step's card (POST /api/checklists/:id/open-next-stage), so
+ * the Dashboard is where the problem is fixed, not only where it is found. On
+ * success the row leaves (the new step is live, so the case is no longer
+ * stalled) and a short line links to the new step; a refusal shows the
+ * server's sentence. `canOpen` mirrors the card and the route: the owner, or
+ * the step's assignee, never in preview.
+ */
+function StalledCaseRows({
+  stages,
+  clients,
+  canOpen,
+}: {
+  stages: Checklist[]
+  clients: Parameters<typeof clientName>[0]
+  canOpen: (stage: Checklist) => boolean
+}) {
+  const { openNextStageEarly } = useAppContext()
+  const [opened, setOpened] = useState<OpenedStep[]>([])
+  const openedIds = new Set(opened.map((entry) => entry.stageId))
+  const rows = stages.filter((stage) => !openedIds.has(stage.id))
+  if (rows.length === 0 && opened.length === 0) return null
+  return (
+    <ul className="dashboard-cases dashboard-cases-stalled">
+      {opened.map((entry) => (
+        <li key={`opened-${entry.stageId}`} className="dashboard-case-row">
+          <div className="dashboard-case-main">
+            <strong>{entry.title}</strong>
+            <span className="dashboard-case-client">{clientName(clients, entry.clientId)}</span>
+          </div>
+          <div className="dashboard-case-stage" role="status">
+            Step {entry.step} opened.
+          </div>
+          <Link to={`/checklists?focus=${encodeURIComponent(entry.spawnedId)}`} className="dashboard-case-link">
+            Open step {entry.step} →
+          </Link>
+        </li>
+      ))}
+      {rows.map((stage) => (
+        <StalledCaseRow
+          key={stage.id}
+          stage={stage}
+          clients={clients}
+          canOpen={canOpen(stage)}
+          onOpen={openNextStageEarly}
+          onOpened={(spawned) =>
+            setOpened((current) => [
+              ...current,
+              {
+                stageId: stage.id,
+                spawnedId: spawned.id,
+                step: (spawned.stageIndex ?? (stage.stageIndex ?? 0) + 1) + 1,
+                title: spawned.title || stage.title,
+                clientId: spawned.clientId || stage.clientId,
+              },
+            ])
+          }
+        />
+      ))}
+    </ul>
+  )
+}
+
+function StalledCaseRow({
+  stage,
+  clients,
+  canOpen,
+  onOpen,
+  onOpened,
+}: {
+  stage: Checklist
+  clients: Parameters<typeof clientName>[0]
+  canOpen: boolean
+  onOpen: (checklistId: string) => Promise<Checklist | null>
+  onOpened: (spawned: Checklist) => void
+}) {
   const stageIndex = stage.stageIndex ?? 0
   const stageCount = stage.stageCount ?? 1
+  const [opening, setOpening] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const open = async () => {
+    setOpening(true)
+    setError(null)
+    try {
+      const spawned = await onOpen(stage.id)
+      if (spawned) onOpened(spawned)
+    } catch (caught) {
+      setError(openNextStageErrorText(caught))
+    } finally {
+      setOpening(false)
+    }
+  }
+  // The case page lists every step of the case, finished ones included. The
+  // Checklists page's In-progress list files a finished step out of sight
+  // (featreq-9c818fca), so it is the fallback for a row without a case id only.
+  const caseLink = stage.caseId
+    ? { to: `/cases/${encodeURIComponent(stage.caseId)}`, label: 'Open case →' }
+    : { to: `/checklists?focus=${encodeURIComponent(stage.id)}`, label: 'Open step →' }
   return (
     <li className="dashboard-case-row">
       <div className="dashboard-case-main">
@@ -116,9 +212,20 @@ function StalledCaseRow({ stage, clients }: { stage: Checklist; clients: Paramet
         Step {stageIndex + 1} of {stageCount} done
       </div>
       <span className="status-pill status-pill-red">Finished, next step never opened</span>
-      <Link to={`/checklists?focus=${encodeURIComponent(stage.id)}`} className="dashboard-case-link">
-        Open step →
+      {canOpen ? (
+        <button type="button" className="secondary-action" disabled={opening} onClick={() => void open()}>
+          {opening ? 'Opening…' : 'Open next step now'}
+        </button>
+      ) : null}
+      <Link to={caseLink.to} className="dashboard-case-link">
+        {caseLink.label}
       </Link>
+      <p className="dashboard-case-note">{stalledStageSentence(stage, canOpen)}</p>
+      {error ? (
+        <p className="waiting-editor-error dashboard-case-note" role="alert">
+          {error}
+        </p>
+      ) : null}
     </li>
   )
 }
@@ -733,13 +840,15 @@ function OwnerDashboardView() {
 
       <section className="dashboard-section" aria-label="Cases in flight">
         <h2>Cases in flight</h2>
+        <p className="dashboard-section-caption">
+          Multi-step cases under way, step by step; a red row needs a hand and says what to do.
+        </p>
+        {/* The owner may open any next step (the route's rule). */}
+        <StalledCaseRows stages={stalledStages} clients={data.clients} canOpen={() => true} />
         {limitedCases.length === 0 && stalledStages.length === 0 ? (
           <p className="empty-state">No multi-step cases in flight.</p>
-        ) : (
+        ) : limitedCases.length === 0 ? null : (
           <ul className="dashboard-cases">
-            {stalledStages.map((stage) => (
-              <StalledCaseRow key={stage.id} stage={stage} clients={data.clients} />
-            ))}
             {limitedCases.map((row) => {
               const stuck = stuckCaseIds.has(row.caseId)
               const stageIndex = row.current.stageIndex ?? row.completedCount
@@ -1227,13 +1336,19 @@ function EmployeeDashboardView() {
 
       <section className="dashboard-section" aria-label="My cases in flight">
         <h2>My cases in flight</h2>
+        <p className="dashboard-section-caption">
+          Multi-step cases you have a step on; a red row needs a hand and says what to do.
+        </p>
+        {/* Theirs to open: the list is filtered to their own steps; never in preview. */}
+        <StalledCaseRows
+          stages={myStalledStages}
+          clients={data.clients}
+          canOpen={(stage) => !previewMode && stage.assigneeId === userId}
+        />
         {myCases.length === 0 && myStalledStages.length === 0 ? (
           <p className="empty-state">No cases in flight.</p>
-        ) : (
+        ) : myCases.length === 0 ? null : (
           <ul className="dashboard-cases">
-            {myStalledStages.map((stage) => (
-              <StalledCaseRow key={stage.id} stage={stage} clients={data.clients} />
-            ))}
             {myCases.map((row) => {
               const stageIndex = row.current.stageIndex ?? 0
               const stageCount = row.current.stageCount ?? 1
