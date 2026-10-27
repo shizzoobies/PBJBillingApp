@@ -879,6 +879,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                   partyEmail={engagement.party.email}
                   templateHash={view.hash}
                   canSend
+                  engagementStatus={engagement.status}
                   disabled={unsaved || busy !== ''}
                   refreshKey={dataRefreshCount}
                   onRequests={setEsignRequests}
@@ -915,6 +916,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                   canSend={false}
                   refreshKey={dataRefreshCount}
                   engagementSigned={engagement.status === 'signed'}
+                  engagementStatus={engagement.status}
                   onChanged={() => refresh({ overwrite: false, advanceStamp: true })}
                 />
               </>

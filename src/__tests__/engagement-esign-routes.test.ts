@@ -103,7 +103,7 @@ describe('sending for signature', () => {
     const block = remindRoute()
     expect(block).toContain('await remindEngagementSignature(engagement.id,')
     // Both providers' modules: an eSignatures.io request is reminded by resending it to its signer.
-    expect(block).toContain('{ store: appDataStore, signwell, esignatures, env: process.env }')
+    expect(block).toContain('{ store: appDataStore, signwell, esignatures, env: process.env, engagement }')
     expect(block.indexOf("sendJson(response, 404, { error: 'Engagement not found' })")).toBeLessThan(block.indexOf('await remindEngagementSignature('))
   })
 
@@ -302,7 +302,9 @@ describe('withdrawing an open request when its letter no longer stands', () => {
 
   it('an e-signed superseding letter withdraws the open requests of the letters it superseded', () => {
     const block = signing()
-    expect(block).toContain('await withdrawSignatureRequestsFor([')
+    // After the webhook's answer already, and never awaited (it is the provider's round-trips).
+    expect(block).toContain('withdrawSignatureRequestsLater([')
+    expect(block).not.toContain('await withdrawSignatureRequests')
     expect(block).toContain("...(result.supersededAmendmentIds ?? []).map((id) => [id, 'superseded']),")
   })
 })

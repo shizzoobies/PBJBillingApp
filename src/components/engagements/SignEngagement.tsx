@@ -453,6 +453,7 @@ export function SignEngagementDialog({
             partyEmail={engagement.party.email}
             templateHash={hash}
             canSend={false}
+            engagementStatus={engagement.status}
           />
           {feeLine ? (
             <p className="muted-text" aria-label="Monthly fee when signed">

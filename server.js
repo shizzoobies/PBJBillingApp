@@ -184,7 +184,12 @@ import {
   retryPendingEsignaturesPdfs,
 } from './lib/esignatures-webhook.js'
 import { esignConfigured, esignProvider, esignTestMode } from './lib/esign-provider.js'
-import { remindEngagementSignature, sendEngagementForSignature, withdrawOpenSignatureRequests } from './lib/engagement-esign.js'
+import {
+  remindEngagementSignature,
+  sendEngagementForSignature,
+  withdrawOpenSignatureRequests,
+  withdrawSignatureRequest,
+} from './lib/engagement-esign.js'
 import { placeholdersFor } from './lib/letter-template.js'
 import {
   cardProcessingFeeLine,
@@ -2122,6 +2127,8 @@ function esignaturesFinishDeps(request) {
     esignatures,
     notifyOwners: (notice) => notifySignwellOwners(request, notice),
     afterSigned: recordSignwellSigning,
+    // Check eSignatures.io withdraws a request still out whose letter no longer stands (an earlier withdrawal failed).
+    withdrawSignatureRequest,
   }
 }
 
@@ -2141,7 +2148,10 @@ async function withdrawSignatureRequestsFor(targets) {
   }
 }
 
-/** The same, AFTER the route has answered (the provider calls take up to ~8 s): never awaited, never throws. */
+/**
+ * The same, AFTER the route has answered (each provider call waits up to 8 s per attempt; a 429 retry can stretch
+ * one request to about 52 s): never awaited, never throws.
+ */
 function withdrawSignatureRequestsLater(targets) {
   setImmediate(() => {
     withdrawSignatureRequestsFor(targets).catch(() => {})
@@ -2178,8 +2188,8 @@ async function recordSignwellSigning(result, signatureRequest, signedBy) {
       console.error('[signwell] could not record the signing:', error?.message || error)
     }
   }
-  // The letters this signing superseded can no longer be signed: withdraw their open requests.
-  await withdrawSignatureRequestsFor([
+  // The letters this signing superseded can no longer be signed: withdraw their open requests (afterwards).
+  withdrawSignatureRequestsLater([
     ...(result.supersededId ? [[result.supersededId, 'superseded']] : []),
     ...(result.supersededAmendmentIds ?? []).map((id) => [id, 'superseded']),
   ])
@@ -13148,7 +13158,8 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'Engagement not found' })
         return
       }
-      const reminded = await remindEngagementSignature(engagement.id, { store: appDataStore, signwell, esignatures, env: process.env })
+      // The stored letter goes with it: a void, superseded or signed letter is never reminded.
+      const reminded = await remindEngagementSignature(engagement.id, { store: appDataStore, signwell, esignatures, env: process.env, engagement })
       if (reminded.refused) {
         const { status, ...body } = reminded.refused
         sendJson(response, status, body)

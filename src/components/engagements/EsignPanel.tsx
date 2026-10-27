@@ -50,6 +50,7 @@ export function EsignPanel({
   disabled = false,
   refreshKey = 0,
   engagementSigned = false,
+  engagementStatus,
   onRequests,
   onChanged,
 }: {
@@ -66,6 +67,11 @@ export function EsignPanel({
   refreshKey?: number
   /** The letter is marked signed: a leftover "needs attention" note is no longer shown. */
   engagementSigned?: boolean
+  /**
+   * The stored letter's status. A signed, void or superseded letter offers no reminder and no "when the client
+   * signs" sentence; a void or superseded one offers no Finish (signing it is refused; its PDF is kept).
+   */
+  engagementStatus?: string
   /** Told the requests whenever they are read (a stable callback), so the page can warn while one is open. */
   onRequests?: (requests: SignatureRequest[]) => void
   /** After a send or a reminder: the page reads the engagement again. */
@@ -124,12 +130,16 @@ export function EsignPanel({
     active?.lastRemindedAt && dateOnlyInZone(new Date(active.lastRemindedAt)) === firmToday(),
   )
   const canStart = canSend && status.configured && !active
+  // The letter no longer stands: nothing to remind about, nothing to finish into it.
+  const letterGone = engagementStatus === 'void' || engagementStatus === 'superseded'
+  const letterClosed = engagementSigned || engagementStatus === 'signed' || letterGone
   // Completed at SignWell but not finished here (no signed PDF kept, or the letter not marked signed):
   // "Finish e-signature". Any other request that has not ended: "Check SignWell" re-reads its document.
   const canFinish =
     latest?.status === 'completed' &&
     !esignWasMarkedComplete(latest) &&
-    (!latest.signedDocumentId || !engagementSigned)
+    (!latest.signedDocumentId || !engagementSigned) &&
+    !letterGone
   const canCheck = Boolean(latest) && !FINISHED_SIGNATURE_STATUSES.includes(latest?.status ?? '')
   const target = partyEmail || 'the party'
   // A new send goes through the server's provider now; a request is named by the provider it went to.
@@ -216,7 +226,9 @@ export function EsignPanel({
           {`${sendProvider} emails ${target} a link to read and sign the letter, and marks it signed here when they do. Mark as signed below stays as the manual way.`}
         </p>
       )}
-      {latest?.lastError && !engagementSigned ? (
+      {/* A request still open always shows its note (e.g. a withdrawal eSignatures.io refused on a letter marked
+          signed); a finished one's leftover note is dropped once the letter is signed. */}
+      {latest?.lastError && (!FINISHED_SIGNATURE_STATUSES.includes(latest.status) || !engagementSigned) ? (
         <p className="form-error" role="status">
           {`Needs attention: ${latest.lastError}.`}
         </p>
@@ -224,11 +236,13 @@ export function EsignPanel({
       {latest?.finishingAt && latest.status === 'completed' && (!latest.signedDocumentId || !engagementSigned) ? (
         <p className="muted-text">Finishing this signature (keeping the signed PDF and marking the letter signed)...</p>
       ) : null}
-      {active ? (
+      {active && !letterClosed ? (
         <p className="muted-text">
-          {`When the client signs, the letter is marked signed here for you. Marking it signed by hand or voiding it withdraws the request${
-            active.provider === 'esignatures' ? ` at ${activeProvider}` : ` here only - cancel it at ${activeProvider} yourself`
-          }.`}
+          {`When the client signs, the letter is marked signed here for you. ${
+            active.provider === 'esignatures'
+              ? `Marking it signed by hand or voiding it withdraws the request at ${activeProvider}.`
+              : `Voiding it withdraws the request here only - cancel it at ${activeProvider} yourself; marking it signed by hand leaves it as it is.`
+          }`}
         </p>
       ) : null}
       {error ? (
@@ -272,7 +286,7 @@ export function EsignPanel({
               {busy === 'send' ? 'Sending...' : 'Send for signature'}
             </button>
           ) : null}
-          {active ? (
+          {active && !letterClosed ? (
             <button
               type="button"
               className="secondary-action"

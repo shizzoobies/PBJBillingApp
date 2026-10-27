@@ -89,12 +89,16 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
 - **Withdrawal** (featreq-60118b28; `withdrawSignatureRequest` in lib/engagement-esign.js): **Void**, **Mark
   as signed** and the superseding flip (the predecessor and the replaced amendments, by hand or by an
   e-signed superseding letter) withdraw every request of that letter that has not finished - AFTER the
-  route has answered (the requests side by side, each provider call capped at 8 s; the other sessions are
-  told when one changed). eSignatures.io: `POST /api/contracts/<id>/withdraw`. If it refuses or times
-  out, the contract is re-read (8 s): one that reads signed, or cannot be read, is LEFT OPEN with the
-  refusal in `last_error` ("press Check eSignatures.io"), so the webhook or Finish completes it (a letter
-  signed by hand keeps the PDF; a voided one is refused signing and the owners are told). Only a confirmed
-  withdrawal, or a re-read that shows it not signed, ends the request `withdrawn` (badge "E-sign:
+  route has answered (the requests side by side, each provider call capped at 8 s per attempt - a 429
+  retry can stretch one request to about 52 s; the other sessions are told when one changed). eSignatures.io: `POST /api/contracts/<id>/withdraw`, then the contract is
+  re-read (8 s) WHATEVER the withdraw answered (a 2xx could be a no-op on a signed contract): one that
+  reads signed, or cannot be read, is LEFT OPEN with a note in `last_error` ("press Check
+  eSignatures.io"; shown even on a signed letter), so the webhook or Finish completes it (a letter signed
+  by hand keeps the PDF; a void or superseded one is never signed, its PDF is kept, the owners are told
+  "Signed after the letter was voided; the signed PDF is kept, nothing was changed here" and Finish is
+  not offered). Check eSignatures.io on a request still out whose letter no longer stands withdraws it
+  again; Send reminder is refused (409 `engagement_closed`) and hidden for a signed, void or superseded
+  letter. Only a contract that reads withdrawn, or still out, ends the request `withdrawn` (badge "E-sign:
   withdrawn"; a finished status), and only then is the `es:<id>:contract-withdrawn` ledger row written
   (so its own withdrawn event that follows is a duplicate). SignWell: the app has no cancel call, so a
   voided or superseded letter's request is withdrawn in the app only (its note says to cancel it at

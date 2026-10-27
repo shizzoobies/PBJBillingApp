@@ -1736,7 +1736,7 @@ describe('e-signature: finish and the open-request warning', () => {
     expect(screen.queryByRole('button', { name: 'Finish e-signature' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Check SignWell' })).toBeEnabled()
     // SignWell has no cancel call in the app: the withdrawal is local only, and the page says so.
-    expect(screen.getByText(/withdraws the request here only - cancel it at SignWell yourself\./)).toBeTruthy()
+    expect(screen.getByText(/Voiding it withdraws the request here only - cancel it at SignWell yourself; marking it signed by hand leaves it as it is\./)).toBeTruthy()
     cleanup()
     for (const status of ['declined', 'expired', 'canceled', 'withdrawn'] as const) {
       withRequests(signatureRequest({ status }))
@@ -1926,5 +1926,63 @@ describe('e-signature: finish and the open-request warning', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(api.updateEngagementRequest).toHaveBeenCalledTimes(1))
     expect(confirm).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * featreq-60118b28 round 2: a request the withdrawal LEFT OPEN (eSignatures.io refused, the contract may be
+ * signed) keeps its note in view even on a signed letter; a letter that no longer stands offers no reminder and
+ * no "when the client signs" sentence, and a void or superseded one no Finish.
+ */
+describe('e-signature on a letter that no longer stands', () => {
+  const configured = () => {
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'esignatures', testMode: false }))
+  }
+  const withRequests = (...requests: SignatureRequest[]) => {
+    api.listEngagementEsignRequests = vi.fn(async () => requests)
+  }
+  const NOTE = 'eSignatures.io did not withdraw it when the letter is marked signed (eSignatures.io answered 422) - press Check eSignatures.io'
+
+  it('a signed letter whose request was left open shows the note and Check, but no reminder and no "when the client signs"', async () => {
+    configured()
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'signed', signedAt: '2026-10-22T16:00:00.000Z', clientId: 'client-9' }))
+    withRequests(signatureRequest({ provider: 'esignatures', status: 'viewed', lastError: NOTE }))
+    await renderEditor()
+    expect(await screen.findByText(`Needs attention: ${NOTE}.`)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Check eSignatures.io' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Send reminder' })).toBeNull()
+    expect(screen.queryByText(/When the client signs, the letter is marked signed here/)).toBeNull()
+  })
+
+  it('a void letter offers no reminder, and no Finish for a request signed after the void (its PDF is kept)', async () => {
+    configured()
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'void' }))
+    withRequests(signatureRequest({ provider: 'esignatures', status: 'viewed' }))
+    await renderEditor()
+    await screen.findByText('E-sign: viewed')
+    expect(screen.queryByRole('button', { name: 'Send reminder' })).toBeNull()
+    cleanup()
+
+    withRequests(
+      signatureRequest({
+        provider: 'esignatures',
+        status: 'completed',
+        signedDocumentId: 'sigdoc-1',
+        lastError: 'Signed after the letter was voided; the signed PDF is kept, nothing was changed here',
+      }),
+    )
+    await renderEditor()
+    await screen.findByRole('link', { name: 'Download signed PDF' })
+    expect(screen.queryByRole('button', { name: 'Finish e-signature' })).toBeNull()
+    expect(screen.getByText(/Needs attention: Signed after the letter was voided/)).toBeTruthy()
+  })
+
+  it('a sent letter still offers the reminder and the sentence, per provider', async () => {
+    configured()
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent' }))
+    withRequests(signatureRequest({ provider: 'esignatures', status: 'viewed' }))
+    await renderEditor()
+    expect(await screen.findByRole('button', { name: 'Send reminder' })).toBeTruthy()
+    expect(screen.getByText(/Marking it signed by hand or voiding it withdraws the request at eSignatures\.io\./)).toBeTruthy()
   })
 })

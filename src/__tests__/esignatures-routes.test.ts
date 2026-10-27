@@ -78,6 +78,8 @@ describe('the glue', () => {
     expect(helper).toContain('esignatures,')
     expect(helper).toContain('notifyOwners: (notice) => notifySignwellOwners(request, notice)')
     expect(helper).toContain('afterSigned: recordSignwellSigning')
+    // Check eSignatures.io withdraws a request still out whose letter no longer stands (featreq-60118b28).
+    expect(helper).toMatch(/^ {4}withdrawSignatureRequest,\r?$/m)
   })
 
   it('records a signing "via eSignatures.io" for its requests', () => {

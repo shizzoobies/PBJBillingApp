@@ -55847,7 +55847,7 @@ describe('signature requests (both backends)', () => {
   it('file: a voided letter\'s open request is withdrawn through the real store, and a late completion cannot undo it (featreq-60118b28)', async () => {
     const open = await newRequest({ engagementId: 'eng-void', signwellDocumentId: 'ctr-void', provider: 'esignatures', status: 'viewed' })
     const signedOther = await newRequest({ engagementId: 'eng-void', signwellDocumentId: 'ctr-done', provider: 'esignatures', status: 'completed' })
-    const esignatures = { withdrawContract: vi.fn(async () => null), getContract: vi.fn() }
+    const esignatures = { withdrawContract: vi.fn(async () => null), getContract: vi.fn(async (id) => ({ id, status: 'withdrawn' })) }
     const results = await withdrawOpenSignatureRequests([['eng-void', 'void']], { store, esignatures, log: { info() {}, warn() {}, error() {} } })
     expect(results.map((result) => [result.request.id, result.withdrawn])).toEqual([[open.id, true]])
     expect(esignatures.withdrawContract).toHaveBeenCalledWith('ctr-void', expect.objectContaining({ timeoutMs: 8000 }))
