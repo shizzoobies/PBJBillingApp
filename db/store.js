@@ -38,7 +38,7 @@ import {
   checklistMonthKey,
   findChecklistInstance,
 } from '../lib/checklist-identity.js'
-import { caseKeyOf, removedCaseSet } from '../lib/case-removal.js'
+import { RESTORE_CONFLICT_MESSAGE, caseKeyOf, removedCaseSet, restoreConflicts } from '../lib/case-removal.js'
 import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
 import { latestBillRate, latestCostRate, ratePeriodAsOf } from '../lib/rate-history.js'
 import {
@@ -4882,6 +4882,18 @@ export class StepIsWaitingError extends Error {
  * words, sent as it is). The route turns the rest into a sentence. Nothing was
  * written.
  */
+/**
+ * A restore that would put back a step whose cycle exists again as a live step
+ * (Postgres: the partial unique instance index's 23505; the file backend checks
+ * the same key first). Nothing was restored. The route answers 409.
+ */
+export class RestoreConflictError extends Error {
+  constructor() {
+    super(RESTORE_CONFLICT_MESSAGE)
+    this.name = 'RestoreConflictError'
+  }
+}
+
 export class NextStageRefusedError extends Error {
   constructor(reason, sentence = null) {
     super(`The next step cannot be opened: ${reason}`)
@@ -23703,25 +23715,35 @@ export class AppDataStore {
    * matching recycled row (already restored, never deleted, or wrong id).
    *
    * A step removed by Remove case (`removeCase`) comes back WITH its case: every
-   * recycled row of the same case carrying the exact same `deleted_at` stamp is
-   * restored in the same statement (lib/case-removal.js `removedCaseSet`). A row
-   * deleted on its own has a stamp of its own, so it still restores alone.
+   * recycled row of the same case AND client carrying the exact same
+   * `deleted_at` stamp is restored in the same statement (lib/case-removal.js
+   * `removedCaseSet`). A row deleted on its own has a stamp of its own, so it
+   * still restores alone. When a live step already holds one of those cycles
+   * (generated again since), nothing is restored: RestoreConflictError.
    */
   async restoreChecklist(checklistId) {
     if (this.pool) {
-      const result = await this.pool.query(
-        `with target as (
-           select id, coalesce(case_id, id) as case_key, deleted_at
-             from checklists
-            where id = $1 and deleted_at is not null
-         )
-         update checklists c set deleted_at = null
-           from target t
-          where c.deleted_at is not null
-            and (c.id = t.id or (coalesce(c.case_id, c.id) = t.case_key and c.deleted_at = t.deleted_at))
-          returning c.id`,
-        [checklistId],
-      )
+      let result
+      try {
+        result = await this.pool.query(
+          `with target as (
+             select id, coalesce(nullif(case_id, ''), id) as case_key, client_id, deleted_at
+               from checklists
+              where id = $1 and deleted_at is not null
+           )
+           update checklists c set deleted_at = null
+             from target t
+            where c.deleted_at is not null
+              and (c.id = t.id or (coalesce(nullif(c.case_id, ''), c.id) = t.case_key
+                   and c.client_id = t.client_id and c.deleted_at = t.deleted_at))
+            returning c.id`,
+          [checklistId],
+        )
+      } catch (error) {
+        // The partial unique instance index: one of these cycles is live again.
+        if (error?.code === '23505') throw new RestoreConflictError()
+        throw error
+      }
       if (!result.rowCount) return null
       const fresh = await this.read()
       return fresh.checklists.find((checklist) => checklist.id === checklistId) ?? null
@@ -23734,6 +23756,9 @@ export class AppDataStore {
       const target = recycled.find((checklist) => checklist.id === checklistId)
       if (!target) return null
       const set = removedCaseSet(target, recycled)
+      // Parity with the Postgres index refusal: nothing comes back when a live
+      // step already holds one of these cycles.
+      if (restoreConflicts(set, data.checklists).length > 0) throw new RestoreConflictError()
       const setIds = new Set(set.map((checklist) => checklist.id))
       data.recycledChecklists = recycled.filter((checklist) => !setIds.has(checklist.id))
       const back = set.map(({ deletedAt: _deletedAt, ...rest }) => ({ ...rest, deletedAt: null }))
@@ -23745,11 +23770,14 @@ export class AppDataStore {
 
   /**
    * Remove case (2026-10-27, Alex for Brittany: "since she is owner she should
-   * be able to just remove the case"). Moves EVERY live row of the case - every
-   * step, open, finished, skipped or pushed - to the recycle bin with ONE
-   * `deleted_at` stamp, so a restore of any of them brings the set back
-   * together (`restoreChecklist`). A legacy row without a `case_id` is its own
-   * case (the id the workspace reads as its caseId). Owner-gated at the route.
+   * be able to just remove the case"). Moves EVERY live row of the case on
+   * `clientId` - every step, open, finished, skipped or pushed - to the recycle
+   * bin with ONE `deleted_at` stamp, so a restore of any of them brings the set
+   * back together (`restoreChecklist`). A legacy row without a `case_id` is its
+   * own case (the id the workspace reads as its caseId). The client is REQUIRED:
+   * a case id is not unique across clients (the 2026-08-14 import's recipe copy
+   * kept its case ids, so 11 ids hold steps of two clients), and another
+   * client's steps must never go. Owner-gated at the route.
    *
    * No respawn: the materializer counts recycled rows as "this cycle already
    * happened" (`buildChecklistInstanceKeys(checklists, recycled)`), so the
@@ -23761,10 +23789,11 @@ export class AppDataStore {
    * step order: id, title, clientId, templateId, stageIndex), or null when no live row has
    * that case. `userId` is the remover, recorded by the route's activity row.
    */
-  async removeCase(caseId, { userId } = {}) {
+  async removeCase(caseId, { clientId, userId } = {}) {
     void userId
     const key = typeof caseId === 'string' ? caseId.trim() : ''
-    if (!key) return null
+    const client = typeof clientId === 'string' ? clientId.trim() : ''
+    if (!key || !client) return null
     const answer = (rows, deletedAt) => {
       const ordered = rows.slice().sort((a, b) => a.stageIndex - b.stageIndex || a.id.localeCompare(b.id))
       return { caseId: key, removedIds: ordered.map((row) => row.id), deletedAt, rows: ordered }
@@ -23772,9 +23801,9 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `update checklists set deleted_at = now()
-          where deleted_at is null and coalesce(case_id, id) = $1
+          where deleted_at is null and coalesce(nullif(case_id, ''), id) = $1 and client_id = $2
           returning id, title, client_id, template_id, stage_index, deleted_at`,
-        [key],
+        [key, client],
       )
       if (!result.rowCount) return null
       const rows = result.rows.map((row) => ({
@@ -23791,7 +23820,9 @@ export class AppDataStore {
     return enqueueFileOperation(localDataPath, async () => {
       const data = JSON.parse(await readFile(localDataPath, 'utf8'))
       const live = Array.isArray(data.checklists) ? data.checklists : []
-      const removed = live.filter((checklist) => checklist && caseKeyOf(checklist) === key)
+      const removed = live.filter(
+        (checklist) => checklist && caseKeyOf(checklist) === key && checklist.clientId === client,
+      )
       if (removed.length === 0) return null
       const deletedAt = nowIso()
       const removedIds = new Set(removed.map((checklist) => checklist.id))

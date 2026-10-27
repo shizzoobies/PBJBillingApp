@@ -59,7 +59,7 @@ const CASE: CaseDetail = {
 function renderAs(viewerId: string, { previewMode = false } = {}) {
   fetchCaseMock = vi.fn().mockResolvedValue(CASE)
   removeCase = vi.fn().mockResolvedValue({ removed: ['cl-1', 'cl-2'], deletedAt: '2026-10-27T15:00:00.123Z' })
-  restoreChecklist = vi.fn().mockResolvedValue(undefined)
+  restoreChecklist = vi.fn().mockResolvedValue({ ok: true })
   contextValue = {
     data: {
       employees: [{ id: LISA, name: 'Lisa Chen', role: 'Bookkeeper' }],
@@ -100,7 +100,7 @@ describe('Remove case on the case page', () => {
       'Remove Quarterly close for I-95 Logistics? Its 2 steps go to the recycle bin (you can restore them there). The recipe keeps running on its next cycle.',
     )
     expect(removeCase).toHaveBeenCalledTimes(1)
-    expect(removeCase).toHaveBeenCalledWith('case-1')
+    expect(removeCase).toHaveBeenCalledWith('case-1', 'client-1')
     const status = await screen.findByRole('status')
     expect(status.textContent).toMatch(/^Case removed: its 2 steps are in the\s+recycle bin\. Undo$/)
     expect(screen.queryByText('Prep')).toBeNull()
@@ -110,6 +110,18 @@ describe('Remove case on the case page', () => {
     // The case is read again and the timeline is back.
     await waitFor(() => expect(screen.getByText('Prep')).toBeTruthy())
     expect(fetchCaseMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('a failed Undo keeps the page as it is and says why; the case is not read again', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    renderAs(OWNER)
+    restoreChecklist.mockResolvedValueOnce({ ok: false, message: 'Restore is not possible.' })
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove case' }))
+    await screen.findByRole('status')
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
+    expect((await screen.findByRole('alert')).textContent).toBe('Restore is not possible.')
+    expect(screen.getByRole('status').textContent).toMatch(/^Case removed:/)
+    expect(fetchCaseMock).toHaveBeenCalledTimes(1)
   })
 
   it('does nothing when the owner says no', async () => {

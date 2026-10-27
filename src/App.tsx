@@ -161,6 +161,7 @@ import { workableClients } from './lib/clientLifecycle'
 import { checklistsVisibleTo } from './lib/checklistVisibility'
 import { isChecklistSkipped } from '../lib/checklist-skip.js'
 import { removedCaseSet } from '../lib/case-removal.js'
+import type { RestoreOutcome } from './AppContext'
 import type { SkipReasonCategory } from '../lib/checklist-skip.js'
 import { visibleClientIdsForUser } from '../lib/data-scope.js'
 import { entryFlagsForScopeTag, type ScopeTag } from '../lib/invoice-scope-retag.js'
@@ -1573,18 +1574,19 @@ function App() {
 
   /**
    * Remove case (owner only, 2026-10-27): every live step of the case goes to
-   * the recycle bin. Merged like `openNextStageEarly`: the removed rows move from
+   * the recycle bin - that client's steps only (a case id can span two
+   * clients). Merged like `openNextStageEarly`: the removed rows move from
    * the active list to the bin with the server's stamp, so the case leaves every
    * list without a reload and the bin's restore (the Dashboard's Undo) knows the
    * set. Resolves with the removed ids, or null in preview. A 404 means this tab
    * is out of date (already removed elsewhere): the workspace is re-read and the
    * error rethrown for the caller to word.
    */
-  const removeCase = useCallback(async (caseId: string) => {
+  const removeCase = useCallback(async (caseId: string, clientId: string) => {
     if (previewActiveRef.current) return null
     let result: Awaited<ReturnType<typeof removeCaseRequest>>
     try {
-      result = await removeCaseRequest(caseId)
+      result = await removeCaseRequest(caseId, clientId)
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) requestLiveRefetchRef.current?.()
       throw error
@@ -3593,8 +3595,8 @@ function App() {
    * with its case (Remove case) comes back with every step removed alongside it
    * - the server restores that set (same case, same stamp) and we mirror it.
    */
-  const restoreChecklist = async (checklistId: string) => {
-    if (previewActiveRef.current) return
+  const restoreChecklist = async (checklistId: string): Promise<RestoreOutcome> => {
+    if (previewActiveRef.current) return { ok: false, message: 'Preview mode is read-only.' }
     try {
       setDataSyncState('saving')
       const restored = await restoreChecklistRequest(checklistId)
@@ -3617,14 +3619,19 @@ function App() {
         }
       })
       setDataSyncState('synced')
+      return { ok: true }
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setSessionUser(null)
         setServerPersistenceEnabled(false)
         setDataSyncState('offline')
-        return
+        return { ok: false, message: 'You are signed out. Sign in and try again.' }
       }
       setDataSyncState('error')
+      // A 409 carries the server's sentence (a step's cycle was created again since).
+      const message =
+        error instanceof ApiError && error.message ? error.message : 'The case could not be restored. Try again.'
+      return { ok: false, message }
     }
   }
 

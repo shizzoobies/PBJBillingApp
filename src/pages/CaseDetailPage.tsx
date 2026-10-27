@@ -6,8 +6,8 @@ import { fetchCase } from '../lib/api'
 import { useAppContext } from '../AppContext'
 import { nextStageNeverOpened, stalledStageSentence } from '../lib/stalledCase'
 import { useOpenNextStage } from '../lib/useOpenNextStage'
-import { useRemoveCase } from '../lib/useRemoveCase'
-import { rowsOfCase, stepCountLabel } from '../../lib/case-removal.js'
+import { caseRemovalKey, useRemoveCase } from '../lib/useRemoveCase'
+import { caseTitleOf, rowsOfCase, stepCountLabel } from '../../lib/case-removal.js'
 import {
   describeActivityAction,
   employeeName,
@@ -110,7 +110,11 @@ export function CaseDetailPage() {
 
   const { template, client, stages, activity } = caseRecord
   const canRemove = role === 'owner' && !previewMode
-  const removedEntry = removal.removed.find((entry) => entry.caseId === caseId)
+  // The case's client: a case id can span two clients (an imported recipe copy
+  // kept its ids), so only this client's steps are removed.
+  const caseClientId = client?.id ?? stages.find(({ checklist }) => checklist)?.checklist?.clientId ?? ''
+  const removalKey = caseRemovalKey(caseId, caseClientId)
+  const removedEntry = removal.removed.find((entry) => entry.key === removalKey)
   const clientLabel = client?.name ?? 'Unknown client'
   if (removedEntry) {
     return (
@@ -124,16 +128,22 @@ export function CaseDetailPage() {
             <button
               type="button"
               className="link-button"
-              disabled={removal.restoring === caseId}
+              disabled={removal.restoring === removalKey}
               onClick={() =>
-                void removal.undo(caseId).then(() => {
-                  setReloadKey((key) => key + 1)
+                void removal.undo(removalKey).then((restored) => {
+                  // Read the case again only once it is really back.
+                  if (restored) setReloadKey((key) => key + 1)
                 })
               }
             >
-              {removal.restoring === caseId ? 'Restoring…' : 'Undo'}
+              {removal.restoring === removalKey ? 'Restoring…' : 'Undo'}
             </button>
           </p>
+          {removal.undoError?.key === removalKey ? (
+            <p className="waiting-editor-error" role="alert">
+              {removal.undoError.text}
+            </p>
+          ) : null}
           <Link className="secondary-action" to="/dashboard">
             Back to the Dashboard
           </Link>
@@ -184,22 +194,26 @@ export function CaseDetailPage() {
             <button
               type="button"
               className="ghost-action"
-              disabled={removal.removing === caseId}
+              disabled={removal.removing === removalKey || !caseClientId}
               title="Move every step of this case to the recycle bin"
-              onClick={() =>
+              onClick={() => {
+                const live = rowsOfCase(workspace, caseId, caseClientId)
+                const rows = live.length > 0 ? live : caseRows.filter((row) => row.clientId === caseClientId)
                 void removal.remove({
                   caseId,
-                  title: template.title,
+                  clientId: caseClientId,
+                  // The first step's title, as the Dashboard row names it.
+                  title: caseTitleOf(rows, template.title),
                   clientName: clientLabel,
-                  stepCount: rowsOfCase(workspace, caseId).length || caseRows.length,
+                  stepCount: rows.length,
                 })
-              }
+              }}
             >
-              {removal.removing === caseId ? 'Removing…' : 'Remove case'}
+              {removal.removing === removalKey ? 'Removing…' : 'Remove case'}
             </button>
           ) : null}
         </div>
-        {removal.error?.caseId === caseId ? (
+        {removal.error?.key === removalKey ? (
           <p className="waiting-editor-error" role="alert">
             {removal.error.text}
           </p>

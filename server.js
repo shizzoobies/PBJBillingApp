@@ -19,6 +19,7 @@ import {
   InvoicePaymentProcessingError,
   ManualPaymentError,
   NextStageRefusedError,
+  RestoreConflictError,
   NothingToPushError,
   RETAINER_PAID_ON_FLOOR,
   PackageApplyError,
@@ -15252,7 +15253,17 @@ const server = createServer(async (request, response) => {
       const checklistId = checklistRestoreMatch[1]
       // A step removed with its case (POST /api/cases/:id/remove) comes back
       // with every step removed alongside it; the response stays this row.
-      const restored = await appDataStore.restoreChecklist(checklistId)
+      let restored
+      try {
+        restored = await appDataStore.restoreChecklist(checklistId)
+      } catch (error) {
+        // One of the steps' cycles is live again (generated since the removal).
+        if (error instanceof RestoreConflictError) {
+          sendJson(response, 409, { error: 'restore_conflict', message: error.message })
+          return
+        }
+        throw error
+      }
       if (!restored) {
         sendJson(response, 404, { error: 'Recycled checklist not found' })
         return
@@ -18876,7 +18887,10 @@ const server = createServer(async (request, response) => {
     // store call (`removeCase`), with one stamp, so restoring any of them from
     // the bin (or the Dashboard's Undo) brings the whole case back. The bin rows
     // keep their cycle, so the recipe does not regenerate it; its next cycle
-    // generates as usual. 404 when no live step has that case.
+    // generates as usual. 404 when no live step has that case. The body names
+    // the client ({ clientId }, 400 without): a case id is not unique across
+    // clients (the 2026-08-14 import's recipe copy kept its case ids), and only
+    // that client's steps go.
     const caseRemoveMatch = normalizedPath.match(/^\/api\/cases\/([^/]+)\/remove$/)
     if (caseRemoveMatch) {
       const session = await requireSession(request, response)
@@ -18900,33 +18914,55 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const caseId = decodeURIComponent(caseRemoveMatch[1])
-      const removal = await appDataStore.removeCase(caseId, { userId: session.user.id })
+      let caseId
+      try {
+        caseId = decodeURIComponent(caseRemoveMatch[1])
+      } catch {
+        sendJson(response, 404, { error: 'Case not found' })
+        return
+      }
+      let payload
+      try {
+        payload = await readJsonBody(request)
+      } catch {
+        sendJson(response, 400, { error: 'The request body must be JSON' })
+        return
+      }
+      const clientId = typeof payload?.clientId === 'string' ? payload.clientId.trim() : ''
+      if (!clientId) {
+        sendJson(response, 400, { error: 'Say which client the case belongs to (clientId)' })
+        return
+      }
+      const removal = await appDataStore.removeCase(caseId, { clientId, userId: session.user.id })
       if (!removal) {
         sendJson(response, 404, { error: 'Case not found' })
         return
       }
-      const data = await appDataStore.read()
-      const first = removal.rows[0]
-      const template = (data.checklistTemplates ?? []).find((entry) => entry.id === first?.templateId)
-      const caseTitle = template?.title || first?.title || 'Case'
-      const clientLabel = (data.clients ?? []).find((client) => client.id === first?.clientId)?.name ?? 'Unknown client'
-      // A pending note stamped onto one of these steps is waiting again now;
-      // re-run the attach pass so it shows on the client page or moves on.
-      const clientIds = [...new Set(removal.rows.map((row) => row.clientId).filter(Boolean))]
-      for (const clientId of clientIds) {
+      // The steps are in the bin: what follows is bookkeeping, and a failure in
+      // it must not turn a done removal into an error.
+      try {
+        const data = await appDataStore.read()
+        // The case's first step's title, the same one the confirm sentence named.
+        const first = removal.rows[0]
+        const caseTitle = first?.title || 'Case'
+        const clientLabel = (data.clients ?? []).find((client) => client.id === clientId)?.name ?? 'Unknown client'
+        // A pending note stamped onto one of these steps is waiting again now;
+        // re-run the attach pass so it shows on the client page or moves on
+        // (as the deletion-approve route does).
         try {
           await appDataStore.attachPendingClientNotes({ clientId })
         } catch (error) {
           console.error('[case-remove] pending-notes attach pass failed:', error)
         }
+        const stepCount = removal.removedIds.length
+        await appDataStore.recordActivity(
+          session.user.id,
+          'case_removed',
+          `${caseTitle} · ${clientLabel} · case ${caseId} · ${stepCount} step${stepCount === 1 ? '' : 's'} to the recycle bin`,
+        )
+      } catch (error) {
+        console.error(`[case-remove] case ${caseId} removed; activity/notes bookkeeping failed:`, error)
       }
-      const stepCount = removal.removedIds.length
-      await appDataStore.recordActivity(
-        session.user.id,
-        'case_removed',
-        `${caseTitle} · ${clientLabel} · case ${caseId} · ${stepCount} step${stepCount === 1 ? '' : 's'} to the recycle bin`,
-      )
       sendJson(response, 200, {
         ok: true,
         caseId,

@@ -40,8 +40,8 @@ import {
 } from '../lib/api'
 import { stalledCaseStages, stalledStageSentence } from '../lib/stalledCase'
 import { useOpenNextStage } from '../lib/useOpenNextStage'
-import { useRemoveCase } from '../lib/useRemoveCase'
-import { rowsOfCase } from '../../lib/case-removal.js'
+import { caseRemovalKey, useRemoveCase } from '../lib/useRemoveCase'
+import { caseTitleOf, rowsOfCase } from '../../lib/case-removal.js'
 import type {
   ActivityEntry,
   BillRateVersion,
@@ -154,30 +154,47 @@ function caseNoteOutsideRows(notes: CaseNote[], stalledStages: Checklist[], case
  * old stuff and there is no way to get rid of it"). The owner view only, never
  * in preview (the preview shows the staff view, which passes no `removal`).
  */
-type CaseRemoval = ReturnType<typeof useRemoveCase> & { stepCount: (caseId: string) => number }
+type CaseRemoval = ReturnType<typeof useRemoveCase> & {
+  /** The case's live steps on that client: what goes to the bin. */
+  rowsOf: (caseId: string, clientId: string) => Checklist[]
+}
 
+/**
+ * The button. The case is named by its first step's title (`caseTitleOf`), the
+ * same as on the case page, and scoped to the row's client: a case id can span
+ * two clients (an imported recipe copy kept its ids).
+ */
 function RemoveCaseButton({
   removal,
   caseId,
-  title,
+  clientId,
+  fallbackTitle,
   clientLabel,
 }: {
   removal: CaseRemoval | undefined
   caseId: string
-  title: string
+  clientId: string
+  fallbackTitle: string
   clientLabel: string
 }) {
   if (!removal) return null
-  const busy = removal.removing === caseId
+  const busy = removal.removing === caseRemovalKey(caseId, clientId)
   return (
     <button
       type="button"
       className="ghost-action dashboard-case-remove"
       disabled={busy}
       title="Move every step of this case to the recycle bin"
-      onClick={() =>
-        void removal.remove({ caseId, title, clientName: clientLabel, stepCount: removal.stepCount(caseId) })
-      }
+      onClick={() => {
+        const rows = removal.rowsOf(caseId, clientId)
+        void removal.remove({
+          caseId,
+          clientId,
+          title: caseTitleOf(rows, fallbackTitle),
+          clientName: clientLabel,
+          stepCount: rows.length,
+        })
+      }}
     >
       {busy ? 'Removing…' : 'Remove case'}
     </button>
@@ -185,8 +202,16 @@ function RemoveCaseButton({
 }
 
 /** The server's sentence when a removal was refused, under the case's row. */
-function RemoveCaseError({ removal, caseId }: { removal: CaseRemoval | undefined; caseId: string }) {
-  if (!removal?.error || removal.error.caseId !== caseId) return null
+function RemoveCaseError({
+  removal,
+  caseId,
+  clientId,
+}: {
+  removal: CaseRemoval | undefined
+  caseId: string
+  clientId: string
+}) {
+  if (!removal?.error || removal.error.key !== caseRemovalKey(caseId, clientId)) return null
   return (
     <p className="waiting-editor-error dashboard-case-note" role="alert">
       {removal.error.text}
@@ -194,23 +219,33 @@ function RemoveCaseError({ removal, caseId }: { removal: CaseRemoval | undefined
   )
 }
 
-/** "Case removed: <title> for <client>. Undo" - outlives the row it removed. */
+/**
+ * "Case removed: <title> for <client>. Undo" - outlives the row it removed. A
+ * failed Undo keeps the line and says why under it.
+ */
 function RemovedCaseLines({ removal }: { removal: CaseRemoval | undefined }) {
   if (!removal || removal.removed.length === 0) return null
   return (
     <>
       {removal.removed.map((entry) => (
-        <p key={entry.caseId} className="dashboard-case-removed" role="status">
-          Case removed: {entry.title} for {entry.clientName}.{' '}
-          <button
-            type="button"
-            className="link-button"
-            disabled={removal.restoring === entry.caseId}
-            onClick={() => void removal.undo(entry.caseId)}
-          >
-            {removal.restoring === entry.caseId ? 'Restoring…' : 'Undo'}
-          </button>
-        </p>
+        <div key={entry.key}>
+          <p className="dashboard-case-removed" role="status">
+            Case removed: {entry.title} for {entry.clientName}.{' '}
+            <button
+              type="button"
+              className="link-button"
+              disabled={removal.restoring === entry.key}
+              onClick={() => void removal.undo(entry.key)}
+            >
+              {removal.restoring === entry.key ? 'Restoring…' : 'Undo'}
+            </button>
+          </p>
+          {removal.undoError?.key === entry.key ? (
+            <p className="waiting-editor-error dashboard-case-removed" role="alert">
+              {removal.undoError.text}
+            </p>
+          ) : null}
+        </div>
       ))}
     </>
   )
@@ -352,13 +387,14 @@ function StalledCaseRow({
       <RemoveCaseButton
         removal={removal}
         caseId={stage.caseId || stage.id}
-        title={stage.title}
+        clientId={stage.clientId}
+        fallbackTitle={stage.title}
         clientLabel={clientName(clients, stage.clientId)}
       />
       <p className="dashboard-case-note">{stalledStageSentence(stage, canOpen)}</p>
       {/* While the press runs, the earlier refusal is stale. */}
       {opening ? null : <CaseNoteLine note={refusal} />}
-      <RemoveCaseError removal={removal} caseId={stage.caseId || stage.id} />
+      <RemoveCaseError removal={removal} caseId={stage.caseId || stage.id} clientId={stage.clientId} />
     </li>
   )
 }
@@ -549,7 +585,7 @@ function OwnerDashboardView() {
   const removeCaseControls = useRemoveCase()
   const caseRemoval: CaseRemoval | undefined = previewMode
     ? undefined
-    : { ...removeCaseControls, stepCount: (caseId) => rowsOfCase(data.checklists, caseId).length }
+    : { ...removeCaseControls, rowsOf: (caseId, clientId) => rowsOfCase(data.checklists, caseId, clientId) }
 
   const [activity, setActivity] = useState<ActivityEntry[]>([])
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
@@ -1023,11 +1059,12 @@ function OwnerDashboardView() {
                   <RemoveCaseButton
                     removal={caseRemoval}
                     caseId={row.caseId}
-                    title={row.current.title}
+                    clientId={row.current.clientId}
+                    fallbackTitle={row.current.title}
                     clientLabel={clientName(data.clients, row.current.clientId)}
                   />
                   <CaseNoteLine note={caseNoteOutsideRows(caseNotes.notes, stalledStages, row.caseId)} />
-                  <RemoveCaseError removal={caseRemoval} caseId={row.caseId} />
+                  <RemoveCaseError removal={caseRemoval} caseId={row.caseId} clientId={row.current.clientId} />
                 </li>
               )
             })}

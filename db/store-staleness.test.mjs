@@ -36,6 +36,7 @@ import {
   ProposalStateError,
   PushConflictError,
   PushedRecordError,
+  RestoreConflictError,
   RateVersionError,
   StaleStatementAccountsError,
   StepHasOpenWaitError,
@@ -56903,9 +56904,11 @@ describe('questionnaire follow-up questions in firm settings (postgres branch)',
 /**
  * Remove case (2026-10-27, Alex for Brittany): "a way to manually just remove
  * stuff from her Cases in flight; we have old stuff and there is no way to get
- * rid of it." `removeCase` moves EVERY live row of a case to the recycle bin in
- * one store call with one `deletedAt`; a restore of any of them brings the set
- * back together. The materializer counts recycled rows as "this cycle already
+ * rid of it." `removeCase` moves EVERY live row of a case ON ONE CLIENT to the
+ * recycle bin in one store call with one `deletedAt`; a restore of any of them
+ * brings the set back together. A case id is not unique across clients (the
+ * 2026-08-14 import's recipe copy kept its case ids), so the client is part of
+ * every match. The materializer counts recycled rows as "this cycle already
  * happened" (`buildChecklistInstanceKeys(checklists, recycled)`), so the removed
  * cycle does not respawn, and the recipe's NEXT cycle still generates.
  */
@@ -56954,6 +56957,7 @@ describe('remove a case (file backend)', () => {
     row({ id: 'a-1', caseId: 'case-a', stageIndex: 1, stageId: 'st-1', dueDate: '2026-10-05' }),
   ]
   const caseB = () => [row({ id: 'b-0', caseId: 'case-b', stageIndex: 0, stageId: 'st-0', dueDate: '2026-10-31' })]
+  const as = { clientId: 'c1', userId: 'emp-1' }
 
   let logSpy
   beforeEach(() => {
@@ -56965,7 +56969,7 @@ describe('remove a case (file backend)', () => {
 
   it('moves every live row of the case to the bin with ONE stamp, and leaves other cases alone', async () => {
     await seed([...caseA(), ...caseB()])
-    const result = await store.removeCase('case-a', { userId: 'emp-1' })
+    const result = await store.removeCase('case-a', as)
     expect(result.caseId).toBe('case-a')
     expect(result.removedIds).toEqual(['a-0', 'a-1'])
     expect(result.deletedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
@@ -56983,15 +56987,18 @@ describe('remove a case (file backend)', () => {
     expect(binned.find((entry) => entry.id === 'a-0').items[0]).toMatchObject({ id: 'i-a0', done: true })
   })
 
-  it('answers null and writes nothing for a case with no live row', async () => {
-    await seed(caseB(), {
+  it('answers null and writes nothing for a case with no live row, or without a client', async () => {
+    await seed([...caseA(), ...caseB()], {
       recycled: [row({ id: 'z-0', caseId: 'case-z', stageIndex: 0, deletedAt: '2026-01-01T00:00:00.000Z' })],
     })
     const before = await readFile(localDataPath, 'utf8')
-    expect(await store.removeCase('case-unknown', { userId: 'emp-1' })).toBeNull()
+    expect(await store.removeCase('case-unknown', as)).toBeNull()
     // Every row of case-z is already in the bin: nothing live to remove.
-    expect(await store.removeCase('case-z', { userId: 'emp-1' })).toBeNull()
-    expect(await store.removeCase('', { userId: 'emp-1' })).toBeNull()
+    expect(await store.removeCase('case-z', as)).toBeNull()
+    expect(await store.removeCase('', as)).toBeNull()
+    // The client is required, and must be the case's.
+    expect(await store.removeCase('case-a', { userId: 'emp-1' })).toBeNull()
+    expect(await store.removeCase('case-a', { clientId: 'c2', userId: 'emp-1' })).toBeNull()
     expect(await readFile(localDataPath, 'utf8')).toBe(before)
   })
 
@@ -56999,9 +57006,35 @@ describe('remove a case (file backend)', () => {
     const legacy = row({ id: 'legacy-1', stageIndex: 0 })
     delete legacy.caseId
     await seed([legacy, ...caseB()])
-    const result = await store.removeCase('legacy-1', { userId: 'emp-1' })
+    const result = await store.removeCase('legacy-1', as)
     expect(result.removedIds).toEqual(['legacy-1'])
     expect((await persisted()).checklists.map((entry) => entry.id)).toEqual(['b-0'])
+  })
+
+  it('a case id shared by two clients: remove and set-restore touch only the named client', async () => {
+    // The 2026-08-14 import: a recipe copy for another client kept the case id.
+    const otherClient = [
+      row({ id: 'o-0', caseId: 'case-a', clientId: 'c2', stageIndex: 0, templateId: 'tmpl-copy' }),
+      row({ id: 'o-1', caseId: 'case-a', clientId: 'c2', stageIndex: 1, templateId: 'tmpl-copy' }),
+    ]
+    await seed([...caseA(), ...otherClient])
+    const result = await store.removeCase('case-a', as)
+    expect(result.removedIds).toEqual(['a-0', 'a-1'])
+    let data = await persisted()
+    expect(data.checklists.map((entry) => entry.id).sort()).toEqual(['o-0', 'o-1'])
+
+    // The other client's case later removed in the same instant (same stamp)
+    // still restores on its own: the set matches the client too.
+    data.checklists = []
+    data.recycledChecklists = [
+      ...data.recycledChecklists,
+      ...otherClient.map((entry) => ({ ...entry, deletedAt: result.deletedAt })),
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await store.restoreChecklist('a-1')
+    data = await persisted()
+    expect(data.checklists.map((entry) => entry.id).sort()).toEqual(['a-0', 'a-1'])
+    expect(data.recycledChecklists.map((entry) => entry.id).sort()).toEqual(['o-0', 'o-1'])
   })
 
   it('restoring any one removed step brings the whole case back, and nothing else', async () => {
@@ -57013,7 +57046,7 @@ describe('remove a case (file backend)', () => {
       deletedAt: '2026-01-01T00:00:00.000Z',
     })
     await seed([...caseA(), ...caseB()], { recycled: [deletedOnItsOwn] })
-    await store.removeCase('case-a', { userId: 'emp-1' })
+    await store.removeCase('case-a', as)
 
     const restored = await store.restoreChecklist('a-1')
     expect(restored).toMatchObject({ id: 'a-1', caseId: 'case-a', deletedAt: null })
@@ -57027,6 +57060,26 @@ describe('remove a case (file backend)', () => {
     expect((await persisted()).recycledChecklists).toEqual([])
   })
 
+  it('refuses a restore when one of the cycles is live again, and restores nothing', async () => {
+    await seed([...caseA(), ...caseB()])
+    await store.removeCase('case-a', as)
+    // "Generate a task now" made the same cycle's step 1 again since.
+    const data = await persisted()
+    data.checklists.push(row({ id: 'again-0', caseId: 'case-new', stageIndex: 0 }))
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    const before = await readFile(localDataPath, 'utf8')
+
+    const error = await store.restoreChecklist('a-1').then(
+      () => null,
+      (caught) => caught,
+    )
+    expect(error).toBeInstanceOf(RestoreConflictError)
+    expect(error.message).toBe(
+      "That step's cycle was created again since; restore is not possible - remove the newer one first.",
+    )
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
   it('does NOT respawn the removed cycle of a specific-months recipe (month keys count the bin)', async () => {
     const month = Number(firmToday().slice(5, 7))
     await seed([], {
@@ -57037,7 +57090,7 @@ describe('remove a case (file backend)', () => {
     expect(spawned).toHaveLength(1)
     const caseId = spawned[0].caseId
 
-    expect((await store.removeCase(caseId, { userId: 'emp-1' })).removedIds).toEqual([spawned[0].id])
+    expect((await store.removeCase(caseId, as)).removedIds).toEqual([spawned[0].id])
     const after = await store.read()
     expect(after.checklists.filter((entry) => entry.templateId === 'tmpl-rm')).toEqual([])
     expect(after.recycledChecklists.filter((entry) => entry.caseId === caseId)).toHaveLength(1)
@@ -57060,7 +57113,7 @@ describe('remove a case (file backend)', () => {
     const spawned = first.checklists.filter((entry) => entry.templateId === 'tmpl-rm')
     expect(spawned).toHaveLength(1)
     expect(spawned[0].dueDate).toBe(today)
-    await store.removeCase(spawned[0].caseId, { userId: 'emp-1' })
+    await store.removeCase(spawned[0].caseId, as)
 
     // The recipe's next due date put back on the removed cycle (an edit, a
     // stale save): the bin still says that cycle happened.
@@ -57081,6 +57134,32 @@ describe('remove a case (file backend)', () => {
     const next = materializeRecurringChecklists(stored, { today: nextCycle })
     const fresh = next.data.checklists.filter((entry) => entry.templateId === 'tmpl-rm')
     expect(fresh.map((entry) => [entry.dueDate, entry.stageIndex])).toEqual([[nextCycle, 0]])
+  })
+
+  it('a TWO-stage case removed at step 2: the materializer run creates nothing for that cycle', async () => {
+    const today = firmToday()
+    await seed([], { templates: [rmTemplate({ nextDueDate: today })] })
+    const first = await store.read()
+    const stepOne = first.checklists.find((entry) => entry.templateId === 'tmpl-rm')
+    // Step 1 finished, step 2 under way: the case is at stage index 1.
+    const data = await persisted()
+    data.checklists = data.checklists.map((entry) =>
+      entry.id === stepOne.id ? { ...entry, items: entry.items.map((item) => ({ ...item, done: true })) } : entry,
+    )
+    data.checklists.push(
+      row({ id: 'step-2', caseId: stepOne.caseId, stageIndex: 1, stageId: 'st-1', dueDate: today, stageCount: 2 }),
+    )
+    // The recipe's date set back onto the cycle, so the run really considers it.
+    data.checklistTemplates = data.checklistTemplates.map((entry) =>
+      entry.id === 'tmpl-rm' ? { ...entry, nextDueDate: today } : entry,
+    )
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    expect((await store.removeCase(stepOne.caseId, as)).removedIds).toEqual([stepOne.id, 'step-2'])
+    const after = await store.read()
+    expect(after.checklists.filter((entry) => entry.templateId === 'tmpl-rm')).toEqual([])
+    const run = materializeRecurringChecklists(await persisted(), { today })
+    expect(run.data.checklists.filter((entry) => entry.templateId === 'tmpl-rm')).toEqual([])
   })
 })
 
@@ -57103,7 +57182,7 @@ describe('remove a case (postgres branch)', () => {
     }
   }
 
-  it('moves every live row of the case in ONE update (one transaction), matching legacy rows by id', async () => {
+  it('moves every live row of the case ON THE CLIENT in ONE update (one transaction), matching legacy rows by id', async () => {
     const fake = recordingPool(() => ({
       rows: [
         { id: 'a-1', title: 'Review', client_id: 'c1', template_id: 'tmpl-rm', stage_index: 1, deleted_at: STAMP },
@@ -57111,12 +57190,12 @@ describe('remove a case (postgres branch)', () => {
       ],
       rowCount: 2,
     }))
-    const result = await postgresStore(fake).removeCase('case-a', { userId: 'emp-1' })
+    const result = await postgresStore(fake).removeCase('case-a', { clientId: 'c1', userId: 'emp-1' })
     expect(fake.statements).toHaveLength(1)
     expect(fake.statements[0].text).toBe(
-      'update checklists set deleted_at = now() where deleted_at is null and coalesce(case_id, id) = $1 returning id, title, client_id, template_id, stage_index, deleted_at',
+      "update checklists set deleted_at = now() where deleted_at is null and coalesce(nullif(case_id, ''), id) = $1 and client_id = $2 returning id, title, client_id, template_id, stage_index, deleted_at",
     )
-    expect(fake.statements[0].params).toEqual(['case-a'])
+    expect(fake.statements[0].params).toEqual(['case-a', 'c1'])
     expect(result).toEqual({
       caseId: 'case-a',
       removedIds: ['a-0', 'a-1'],
@@ -57128,19 +57207,38 @@ describe('remove a case (postgres branch)', () => {
     })
   })
 
-  it('answers null when no live row has that case', async () => {
+  it('answers null when no live row has that case, and issues nothing without a client', async () => {
     const fake = recordingPool(() => ({ rows: [], rowCount: 0 }))
-    expect(await postgresStore(fake).removeCase('case-unknown', { userId: 'emp-1' })).toBeNull()
+    expect(await postgresStore(fake).removeCase('case-unknown', { clientId: 'c1', userId: 'emp-1' })).toBeNull()
+    expect(fake.statements).toHaveLength(1)
+    expect(await postgresStore(fake).removeCase('case-a', { userId: 'emp-1' })).toBeNull()
     expect(fake.statements).toHaveLength(1)
   })
 
-  it('a restore brings back the rows of the case that share the exact stamp, in one statement', async () => {
+  it('a restore brings back the rows of the case on the same client with the exact stamp, in one statement', async () => {
     const fake = recordingPool(() => ({ rows: [], rowCount: 0 }))
     expect(await postgresStore(fake).restoreChecklist('a-1')).toBeNull()
     expect(fake.statements).toHaveLength(1)
     expect(fake.statements[0].text).toBe(
-      'with target as ( select id, coalesce(case_id, id) as case_key, deleted_at from checklists where id = $1 and deleted_at is not null ) update checklists c set deleted_at = null from target t where c.deleted_at is not null and (c.id = t.id or (coalesce(c.case_id, c.id) = t.case_key and c.deleted_at = t.deleted_at)) returning c.id',
+      "with target as ( select id, coalesce(nullif(case_id, ''), id) as case_key, client_id, deleted_at from checklists where id = $1 and deleted_at is not null ) update checklists c set deleted_at = null from target t where c.deleted_at is not null and (c.id = t.id or (coalesce(nullif(c.case_id, ''), c.id) = t.case_key and c.client_id = t.client_id and c.deleted_at = t.deleted_at)) returning c.id",
     )
     expect(fake.statements[0].params).toEqual(['a-1'])
+  })
+
+  it('turns the instance index refusal (23505) into a RestoreConflictError', async () => {
+    const fake = recordingPool(() => {
+      throw Object.assign(new Error('duplicate key value violates unique constraint "checklists_template_instance_uniq_v3"'), {
+        code: '23505',
+      })
+    })
+    const error = await postgresStore(fake).restoreChecklist('a-1').then(
+      () => null,
+      (caught) => caught,
+    )
+    expect(error).toBeInstanceOf(RestoreConflictError)
+    const other = recordingPool(() => {
+      throw Object.assign(new Error('connection lost'), { code: '08006' })
+    })
+    await expect(postgresStore(other).restoreChecklist('a-1')).rejects.toThrow('connection lost')
   })
 })

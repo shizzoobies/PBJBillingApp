@@ -18,11 +18,11 @@ import type { AppData, Checklist } from '../lib/types'
  */
 
 const TODAY = localDateOnly()
-const REMOVE_PATH = '/api/cases/case-old/remove'
 const STAMP = '2026-10-27T15:00:00.123Z'
+const CLIENT = 'client-clover'
 
 const base = {
-  clientId: 'client-clover',
+  clientId: CLIENT,
   assigneeId: 'emp-jordan',
   templateId: 'tmpl-old',
   caseId: 'case-old',
@@ -71,23 +71,25 @@ function appData(): AppData {
   return { ...seed, checklists: [...seed.checklists, STEP_1, STEP_2, STALLED] }
 }
 
-const calls: Array<{ path: string; method: string }> = []
+const calls: Array<{ path: string; method: string; body?: unknown }> = []
+const REMOVED: Record<string, string[]> = { 'case-old': ['cl-old-1', 'cl-old-2'], 'case-stalled': ['cl-stalled'] }
 
-function boot() {
+function boot({ restore = () => json({ ...STEP_1, deletedAt: null }) }: { restore?: () => Response } = {}) {
   calls.length = 0
   installFetchMock({
     sessionUser: OWNER_SESSION,
     appData: appData(),
     extraRoutes: [
-      (path, method) => {
-        if (!path.endsWith(REMOVE_PATH)) return undefined
-        calls.push({ path, method })
-        return json({ ok: true, caseId: 'case-old', removed: ['cl-old-1', 'cl-old-2'], deletedAt: STAMP })
+      (path, method, body) => {
+        const match = /\/api\/cases\/([^/]+)\/remove$/.exec(path)
+        if (!match) return undefined
+        calls.push({ path, method, body })
+        return json({ ok: true, caseId: match[1], removed: REMOVED[match[1]], deletedAt: STAMP })
       },
       (path, method) => {
         if (!/\/api\/checklists\/[^/]+\/restore$/.test(path)) return undefined
         calls.push({ path, method })
-        return json({ ...STEP_1, deletedAt: null })
+        return restore()
       },
     ],
   })
@@ -122,7 +124,7 @@ describe('Remove case on the Dashboard (owner)', () => {
     expect(within(stalled).getByRole('button', { name: 'Remove case' })).toBeTruthy()
   })
 
-  it('asks first, sends ONE POST, the row leaves without a reload, and Undo restores the case', async () => {
+  it("asks (naming the case by its first step), sends ONE POST with the client, the row leaves, and Undo restores", async () => {
     const confirm = vi.fn(() => true)
     vi.stubGlobal('confirm', confirm)
     const { container } = boot()
@@ -130,22 +132,48 @@ describe('Remove case on the Dashboard (owner)', () => {
     fireEvent.click(within(row).getByRole('button', { name: 'Remove case' }))
 
     expect(confirm).toHaveBeenCalledWith(
-      'Remove Old close review for Clover Ridge Dental? Its 2 steps go to the recycle bin (you can restore them there). The recipe keeps running on its next cycle.',
+      'Remove Old close for Clover Ridge Dental? Its 2 steps go to the recycle bin (you can restore them there). The recipe keeps running on its next cycle.',
     )
     await waitFor(() => expect(within(container).queryByText('Old close review')).toBeNull())
-    expect(calls).toEqual([{ path: REMOVE_PATH, method: 'POST' }])
-    const status = within(container).getByText(/^Case removed: Old close review for Clover Ridge Dental\./)
+    expect(calls).toEqual([{ path: '/api/cases/case-old/remove', method: 'POST', body: { clientId: CLIENT } }])
+    const status = within(container).getByText(/^Case removed: Old close for Clover Ridge Dental\./)
     expect(status.getAttribute('role')).toBe('status')
     // The stalled case is untouched.
     expect(within(container).getByText('Finished, next step never opened')).toBeTruthy()
 
     fireEvent.click(within(status).getByRole('button', { name: 'Undo' }))
     await waitFor(() => expect(within(container).getByText('Old close review')).toBeTruthy())
-    expect(calls).toEqual([
-      { path: REMOVE_PATH, method: 'POST' },
-      { path: '/api/checklists/cl-old-1/restore', method: 'POST' },
-    ])
+    expect(calls.slice(1)).toEqual([{ path: '/api/checklists/cl-old-1/restore', method: 'POST' }])
     expect(within(container).queryByText(/^Case removed:/)).toBeNull()
+  })
+
+  it('removes a stalled (red) row: it leaves, and the case in flight stays', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const { container } = boot()
+    await oldCaseRow(container)
+    const stalled = within(container).getByText('Finished, next step never opened').closest('li') as HTMLElement
+    fireEvent.click(within(stalled).getByRole('button', { name: 'Remove case' }))
+
+    await waitFor(() => expect(within(container).queryByText('Finished, next step never opened')).toBeNull())
+    expect(calls).toEqual([{ path: '/api/cases/case-stalled/remove', method: 'POST', body: { clientId: CLIENT } }])
+    expect(within(container).getByText(/^Case removed: Quarterly close for Clover Ridge Dental\./)).toBeTruthy()
+    expect(within(container).getByText('Old close review')).toBeTruthy()
+  })
+
+  it('a failed Undo keeps the line and says why', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const refusal =
+      "That step's cycle was created again since; restore is not possible - remove the newer one first."
+    const { container } = boot({ restore: () => json({ error: 'restore_conflict', message: refusal }, 409) })
+    const row = await oldCaseRow(container)
+    fireEvent.click(within(row).getByRole('button', { name: 'Remove case' }))
+    const status = await within(container).findByText(/^Case removed: Old close for Clover Ridge Dental\./)
+
+    fireEvent.click(within(status).getByRole('button', { name: 'Undo' }))
+    await waitFor(() => expect(within(container).getByRole('alert').textContent).toBe(refusal))
+    expect(within(container).getByText(/^Case removed: Old close for Clover Ridge Dental\./)).toBeTruthy()
+    expect(within(container).queryByText('Old close review')).toBeNull()
+    expect(within(status).getByRole('button', { name: 'Undo' })).toHaveProperty('disabled', false)
   })
 
   it('does nothing when the owner says no', async () => {

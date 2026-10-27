@@ -47,7 +47,7 @@ import {
   canOfferSkip,
   type SkipReasonCategory,
 } from '../../lib/checklist-skip.js'
-import { useAppContext } from '../AppContext'
+import { useAppContext, type RestoreOutcome } from '../AppContext'
 import { dismissClientPendingNoteRequest } from '../lib/api'
 import { canAddPendingClientNote } from '../../lib/checklist-write-permission.js'
 import { KEPT_REASON_WORK_STARTED, keptNoticeSentence } from '../../lib/series-step-delete.js'
@@ -1626,10 +1626,17 @@ function RecycleBinSection({
   clients: Client[]
   employees: Employee[]
   onEmptyBin: () => Promise<void>
-  onRestore: (checklistId: string) => Promise<void>
+  onRestore: (checklistId: string) => Promise<RestoreOutcome>
   recycledChecklists: Checklist[]
 }) {
   const [open, setOpen] = useState(false)
+  // A refused restore's sentence, under its row (e.g. the step's cycle exists again).
+  const [restoreError, setRestoreError] = useState<{ id: string; text: string } | null>(null)
+  const restore = async (checklistId: string) => {
+    setRestoreError(null)
+    const outcome = await onRestore(checklistId)
+    if (!outcome.ok) setRestoreError({ id: checklistId, text: outcome.message })
+  }
   const count = recycledChecklists.length
 
   const handleEmpty = () => {
@@ -1731,11 +1738,16 @@ function RecycleBinSection({
                       Removed with its case ({stepCountLabel(caseSet.length)}): restoring brings back all of them.
                     </div>
                   ) : null}
+                  {restoreError?.id === checklist.id ? (
+                    <p className="waiting-editor-error" role="alert">
+                      {restoreError.text}
+                    </p>
+                  ) : null}
                 </div>
                 <button
                   type="button"
                   className="secondary-action"
-                  onClick={() => void onRestore(checklist.id)}
+                  onClick={() => void restore(checklist.id)}
                   title={
                     withCase
                       ? 'Restore every step of this case to the in-progress list'

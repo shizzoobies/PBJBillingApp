@@ -2612,12 +2612,14 @@ export async function restoreChecklistRequest(checklistId: string) {
  * case back. `removed` is the ids that moved. A 404 means no live step has that
  * case (already removed, or this tab is out of date).
  */
-export async function removeCaseRequest(caseId: string) {
+export async function removeCaseRequest(caseId: string, clientId: string) {
   const response = await apiFetch(`/api/cases/${encodeURIComponent(caseId)}/remove`, {
     credentials: 'same-origin',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: '{}',
+    // A case id can span two clients (an imported recipe copy kept its ids):
+    // only this client's steps go.
+    body: JSON.stringify({ clientId }),
   })
   if (!response.ok) {
     const message = await safeErrorMessage(response)

@@ -33,6 +33,12 @@ import type {
   SeriesItemDeleteResult,
 } from './lib/api'
 
+/**
+ * What a recycle-bin restore answered: ok, or the sentence saying why not (a
+ * 409 when a step's cycle was created again since, a lost connection...).
+ */
+export type RestoreOutcome = { ok: true } | { ok: false; message: string }
+
 export type AppContextValue = {
   data: AppData
   sessionUser: SessionUser
@@ -556,7 +562,7 @@ export type AppContextValue = {
    * with the removed ids (restoring any one of them brings the case back), or
    * null in preview. Throws the server's sentence on a refusal (404: no live step).
    */
-  removeCase: (caseId: string) => Promise<{ removed: string[]; deletedAt: string } | null>
+  removeCase: (caseId: string, clientId: string) => Promise<{ removed: string[]; deletedAt: string } | null>
   /** Owner-only: mark a skip reviewed — clears it off the dashboard, keeps the record. */
   reviewChecklistSkip: (skipId: string) => Promise<void>
   /**
@@ -615,7 +621,7 @@ export type AppContextValue = {
   ) => Promise<void>
   /* No cancel: a saved wait is a permanent record and nothing removes one. */
   /** Owner-only: restore a recycled checklist back to the active list. */
-  restoreChecklist: (checklistId: string) => Promise<void>
+  restoreChecklist: (checklistId: string) => Promise<RestoreOutcome>
   /** Owner-only: permanently delete every recycled checklist. Not reversible. */
   emptyChecklistRecycleBin: () => Promise<void>
   /**
