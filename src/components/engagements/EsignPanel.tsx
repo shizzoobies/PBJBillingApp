@@ -53,6 +53,7 @@ export function EsignPanel({
   partyName,
   partyEmail,
   partyContactName = '',
+  replyTo = '',
   templateHash,
   canSend,
   disabled = false,
@@ -67,6 +68,8 @@ export function EsignPanel({
   partyEmail: string
   /** The party's contact, the name a one-time signer is given unless one is typed (else the party name). */
   partyContactName?: string
+  /** The firm's reply-to mailbox: offered as the signer only when it is the party's own address. */
+  replyTo?: string
   /** The hash the page loaded: the server refuses a send from a stale page. */
   templateHash: string
   /** The letter can be sent (a draft or sent letter, saved). Signed and void ones only show their status. */
@@ -295,6 +298,7 @@ export function EsignPanel({
           party={party}
           provider={status.provider}
           testMode={status.testMode}
+          replyTo={replyTo}
           fresh={freshSigners}
           busy={busy !== ''}
           onSend={(chosen) => void send(chosen)}

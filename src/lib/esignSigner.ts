@@ -1,4 +1,4 @@
-import { cleanSignerName, esignSignerName, isSignerEmail } from '../../lib/esign-signer.js'
+import { cleanSignerName, esignSignerName, isReplyToSigner, isSignerEmail } from '../../lib/esign-signer.js'
 import type { InvoiceRecipientDetail } from './utils'
 import type { SignatureRequest } from './types'
 
@@ -42,16 +42,18 @@ export function selectionNeedsName(selection: SignerSelection, details: InvoiceR
 
 /**
  * The signer the choice names - the name the provider will get and what the send posts - or null while there is
- * none to send to (nothing chosen, an address that is not one plain address, or a name still to be typed).
+ * none to send to (nothing chosen, an address that is not one plain address, the firm's reply-to mailbox as anyone
+ * but the party, or a name still to be typed).
  */
 export function chosenSigner(
   selection: SignerSelection,
   details: InvoiceRecipientDetail[],
   party: SignerParty,
+  replyTo = '',
 ): { email: string; name: string; post: EsignSignerPost } | null {
   if (!selection) return null
   const email = selection.email.trim()
-  if (!isSignerEmail(email)) return null
+  if (!isSignerEmail(email) || isReplyToSigner({ email, party, replyTo })) return null
   const typed = cleanSignerName(selection.name)
   if (selection.mode === 'onFile') {
     if (!details.some((detail) => detail.email === email)) return null

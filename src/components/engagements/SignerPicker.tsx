@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from 'react'
 import { CLIENT_RECORD_SOURCE } from '../../../lib/invoice-recipients.js'
-import { esignSignerName, isSignerEmail } from '../../../lib/esign-signer.js'
+import { esignSignerName, isReplyToSigner, isSignerEmail } from '../../../lib/esign-signer.js'
 import { engagementRecipientsRequest } from '../../lib/api'
 import { ESIGNATURES_AUTO_REMINDER_NOTE, ESIGN_TEST_MODE_NOTE, esignProviderName } from '../../lib/engagements'
 import {
@@ -28,7 +28,8 @@ import type { InvoiceRecipientDetail } from '../../lib/utils'
  * document, so it is never borrowed: the party's own address and a named contact sign under their own names;
  * the client record's address, an unnamed contact and a one-time address ask for the name (lib/esign-signer.js,
  * whose helpers this uses, so the name shown is the name the provider gets). An address on file that is not one
- * plain address can't be chosen. The server checks everything again and refuses a team mailbox.
+ * plain address can't be chosen, nor can the firm's reply-to mailbox unless it is the party's own address. The
+ * server checks everything again and refuses a team mailbox.
  *
  * `fresh` (a refusal's list as it is now) opens it on that list without reading again; the caller remounts it
  * (a `key`) to reopen.
@@ -39,6 +40,7 @@ export function EsignSendConfirm({
   party,
   provider,
   testMode,
+  replyTo = '',
   fresh = null,
   busy = false,
   onSend,
@@ -47,6 +49,8 @@ export function EsignSendConfirm({
   engagementId: string
   partyName: string
   party: SignerParty
+  /** The firm's reply-to mailbox (the engagement view's sender.replyTo): it signs only as the party's own address. */
+  replyTo?: string
   provider: EsignProvider | null | undefined
   testMode: boolean
   fresh?: InvoiceRecipientDetail[] | null
@@ -85,7 +89,7 @@ export function EsignSendConfirm({
     }
   }, [engagementId, fresh, partyEmail, party.contactName, partyName])
 
-  const signer = signers ? chosenSigner(selection, signers, party) : null
+  const signer = signers ? chosenSigner(selection, signers, party, replyTo) : null
   const providerName = esignProviderName(provider)
 
   return (
@@ -99,7 +103,7 @@ export function EsignSendConfirm({
       {signers === null ? (
         <p className="muted-text">Reading who can sign...</p>
       ) : (
-        <SignerChoices details={signers} selection={selection} party={party} onChange={setSelection} busy={busy} />
+        <SignerChoices details={signers} selection={selection} party={party} replyTo={replyTo} onChange={setSelection} busy={busy} />
       )}
       {signer ? (
         <p className="recipient-picker-final">{`Signer: ${signer.name} (${signer.email})`}</p>
@@ -132,12 +136,14 @@ export function SignerChoices({
   details,
   selection,
   party,
+  replyTo = '',
   onChange,
   busy = false,
 }: {
   details: InvoiceRecipientDetail[]
   selection: SignerSelection
   party: SignerParty
+  replyTo?: string
   onChange: (next: SignerSelection) => void
   busy?: boolean
 }) {
@@ -146,7 +152,14 @@ export function SignerChoices({
   const nameId = useId()
   const typed = selection?.mode === 'oneTime' ? selection : null
   const typedEmail = typed?.email ?? ''
-  const typedProblem = typed && typedEmail.trim() !== '' && !isSignerEmail(typedEmail) ? 'Type one valid email address, like name@company.com.' : ''
+  const typedProblem =
+    typed && typedEmail.trim() !== ''
+      ? !isSignerEmail(typedEmail)
+        ? 'Type one valid email address, like name@company.com.'
+        : isReplyToSigner({ email: typedEmail, party, replyTo })
+          ? "That is the firm's reply-to mailbox: it signs only as the party's own address."
+          : ''
+      : ''
   const needsName = selectionNeedsName(selection, details, party)
 
   return (
@@ -154,6 +167,7 @@ export function SignerChoices({
       <ul className="invoice-recipient-picker">
         {details.map((detail) => {
           const plain = isSignerEmail(detail.email)
+          const firmMailbox = isReplyToSigner({ email: detail.email, party, replyTo })
           const named = esignSignerName({ email: detail.email, details, party })
           return (
             <li key={detail.email}>
@@ -162,14 +176,18 @@ export function SignerChoices({
                   type="radio"
                   name={group}
                   checked={selection?.mode === 'onFile' && selection.email === detail.email}
-                  disabled={busy || !plain}
+                  disabled={busy || !plain || firmMailbox}
                   onChange={() => onChange({ mode: 'onFile', email: detail.email, name: '' })}
                 />
                 <span className="invoice-recipient-who">
                   {detail.source.toLowerCase() === CLIENT_RECORD_SOURCE ? 'Client record' : named || 'Unnamed contact'}
                 </span>
                 <span className="invoice-recipient-email">{detail.email}</span>
-                {plain ? null : <span className="muted-text">(not one plain address - fix it on file to use it)</span>}
+                {!plain ? (
+                  <span className="muted-text">(not one plain address - fix it on file to use it)</span>
+                ) : firmMailbox ? (
+                  <span className="muted-text">(the firm&apos;s reply-to mailbox - only as the party&apos;s own address)</span>
+                ) : null}
               </label>
             </li>
           )

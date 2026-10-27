@@ -18,6 +18,8 @@ export declare function esignSignerName(args: {
   party?: SignerParty
 }): string
 
+export declare function isReplyToSigner(args: { email: string; party?: SignerParty; replyTo?: string | null }): boolean
+
 export declare function esignSignerNeedsName(args: {
   email: string
   details?: Array<{ email: string; source: string }>
@@ -30,6 +32,7 @@ export declare function chooseEsignSigner(args: {
   details?: Array<{ email: string; source: string }>
   party?: SignerParty
   teamEmails?: Set<string>
+  replyTo?: string | null
 }):
   | { ok: true; email: string; name: string; oneTime: boolean }
   | { ok: false; status: number; error: string; message: string; recipients?: Array<{ email: string; source: string }> }

@@ -41,11 +41,15 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
   file (`GET /api/engagements/:id/recipients`, the same list as Send's recipient picker: the party's address,
   then the linked client's contacts and record, never a team member's) with the party's address chosen, plus
   "Another address for this send only". An address on file that is not one plain address is listed but can't
-  be chosen. The button reads **Send for signature to <email>**. The body is
+  be chosen; nor can the firm's reply-to mailbox unless it is the party's own address (a short note says so;
+  typed, it is refused on the page). The button reads **Send for signature to <email>**. The body is
   `{ templateHash, signer: { email, name?, oneTime? } }`. The server takes exactly one plain address (also
   plausible, no control or invisible characters) that is on file for the letter (case-insensitive; its stored
-  spelling is used) or marked `oneTime`; a team/app-user mailbox is refused (`team_address`) - for e-signature
-  the firm's reply-to mailbox too, also as the party's own address - two addresses or a named one
+  spelling is used) or marked `oneTime`; a team/app-user mailbox is refused (`team_address`). The firm's
+  reply-to mailbox signs ONLY as the engagement party's own stored address (deliberate and visible on the
+  engagement - the Test client's party is that mailbox, as for every engagement send); as a picked contact,
+  the client record's address or a typed one-time address it is refused (`team_address`,
+  `isReplyToSigner`). Two addresses or a named one
   `invalid_recipient`, an address no longer on file and not one-time `recipients_changed` (with the list as it
   is now; the page reopens the choice on it), an unreadable `signer` 400 `signer_invalid`. No `signer` (an older
   tab) = the party's address, as before. **The name goes on a binding document, so it is never borrowed:** the

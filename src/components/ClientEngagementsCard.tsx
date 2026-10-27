@@ -83,6 +83,7 @@ export function ClientEngagementsCard({
   const [esignFor, setEsignFor] = useState<{
     engagement: Engagement
     hash: string
+    replyTo: string
     fresh: InvoiceRecipientDetail[] | null
     key: number
   } | null>(null)
@@ -188,7 +189,7 @@ export function ClientEngagementsCard({
         setReloads((count) => count + 1)
         return
       }
-      setEsignFor({ engagement: view.engagement, hash: view.hash, fresh: null, key: 1 })
+      setEsignFor({ engagement: view.engagement, hash: view.hash, replyTo: view.sender?.replyTo ?? '', fresh: null, key: 1 })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not read the letter.')
     } finally {
@@ -383,12 +384,13 @@ export function ClientEngagementsCard({
           }}
         >
           <EsignSendConfirm
-            key={esignFor.key}
+            key={`${esignFor.engagement.id}:${esignFor.key}`}
             engagementId={esignFor.engagement.id}
             partyName={engagementPartyName(esignFor.engagement)}
             party={esignFor.engagement.party}
             provider={esignStatus.provider}
             testMode={esignStatus.testMode}
+            replyTo={esignFor.replyTo}
             fresh={esignFor.fresh}
             busy={esignBusy}
             onSend={(chosen) => void sendEsign(chosen)}

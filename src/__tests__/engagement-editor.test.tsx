@@ -1687,6 +1687,40 @@ describe('e-signature', () => {
       expect(within(confirm).getByText('(not one plain address - fix it on file to use it)')).toBeTruthy()
     })
 
+    it("the firm's reply-to mailbox is offered only as the party's own address: disabled as a contact, refused when typed", async () => {
+      api.engagementRecipientsRequest = vi.fn(async () => ({
+        details: [
+          { email: 'pat@acme.test', source: 'Pat Doe' },
+          { email: 'brittany@pbjsa.com', source: 'Brittany Ferguson' },
+        ],
+        defaultTo: ['pat@acme.test'],
+      }))
+      const confirm = await open()
+      expect(within(confirm).getByRole('radio', { name: /Brittany Ferguson/ })).toBeDisabled()
+      expect(within(confirm).getByText("(the firm's reply-to mailbox - only as the party's own address)")).toBeTruthy()
+      fireEvent.click(within(confirm).getByRole('radio', { name: 'Another address for this send only' }))
+      fireEvent.change(within(confirm).getByLabelText("Signer's email for this send only"), { target: { value: 'Brittany@pbjsa.com' } })
+      fireEvent.change(within(confirm).getByLabelText("Signer's name"), { target: { value: 'Brittany' } })
+      expect(within(confirm).getByRole('alert')).toHaveTextContent("That is the firm's reply-to mailbox: it signs only as the party's own address.")
+      expect(within(confirm).getByRole('button', { name: 'Choose who signs' })).toBeDisabled()
+    })
+
+    it("the Test client's case: the party's own address is the reply-to mailbox, chosen and sendable", async () => {
+      api.getEngagementRequest = vi.fn(async () =>
+        view({ party: { ...engagement().party, company: 'Test', contactName: 'Brittany Ferguson', email: 'brittany@pbjsa.com' } }),
+      )
+      api.engagementRecipientsRequest = vi.fn(async () => ({
+        details: [{ email: 'brittany@pbjsa.com', source: 'Brittany Ferguson' }],
+        defaultTo: ['brittany@pbjsa.com'],
+      }))
+      const confirm = await open()
+      expect(within(confirm).getByRole('radio', { name: /Brittany Ferguson/ })).toBeChecked()
+      fireEvent.click(within(confirm).getByRole('button', { name: 'Send for signature to brittany@pbjsa.com' }))
+      await waitFor(() =>
+        expect(api.sendEngagementEsignRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-1', signer: { email: 'brittany@pbjsa.com' } }),
+      )
+    })
+
     it('a party with no address on file opens on the one-time field', async () => {
       api.engagementRecipientsRequest = vi.fn(async () => ({ details: [], defaultTo: [] }))
       const confirm = await open()

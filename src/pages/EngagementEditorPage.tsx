@@ -878,6 +878,7 @@ function EngagementEditor({ engagementId }: { engagementId: string }) {
                   partyName={partyName}
                   partyEmail={engagement.party.email}
                   partyContactName={engagement.party.contactName}
+                  replyTo={view.sender.replyTo}
                   templateHash={view.hash}
                   canSend
                   engagementStatus={engagement.status}
