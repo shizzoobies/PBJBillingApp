@@ -33,6 +33,8 @@ const ROUTES: [string, string][] = [
   ['POST /api/checklists/:id/skip', 'if (checklistSkipMatch) {'],
   ['POST /api/checklists/:id/push', 'if (checklistPushMatch) {'],
   ['POST /api/checklists/:id/open-next-stage', 'if (checklistOpenNextStageMatch) {'],
+  // Remove case moves every step of a case to the checklist recycle bin.
+  ['POST /api/cases/:caseId/remove', 'if (caseRemoveMatch) {'],
   ["PATCH /api/checklists/:id", "if (checklistMetaPatchMatch && request.method === 'PATCH') {"],
   ['DELETE /api/checklists/:id', 'if (checklistDeleteMatch) {'],
   ['POST /api/checklists/:id/items/:itemId/toggle', 'if (checklistToggleMatch) {'],

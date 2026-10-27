@@ -34,6 +34,7 @@ import {
   rejectChecklistDeletionRequest,
   emptyChecklistRecycleBinRequest,
   restoreChecklistRequest,
+  removeCaseRequest,
   deleteTeamMember as deleteTeamMemberRequest,
   deleteTimeEntryRequest,
   splitTimeEntryRequest,
@@ -159,6 +160,7 @@ import {
 import { workableClients } from './lib/clientLifecycle'
 import { checklistsVisibleTo } from './lib/checklistVisibility'
 import { isChecklistSkipped } from '../lib/checklist-skip.js'
+import { removedCaseSet } from '../lib/case-removal.js'
 import type { SkipReasonCategory } from '../lib/checklist-skip.js'
 import { visibleClientIdsForUser } from '../lib/data-scope.js'
 import { entryFlagsForScopeTag, type ScopeTag } from '../lib/invoice-scope-retag.js'
@@ -1567,6 +1569,39 @@ function App() {
       return { ...current, checklists: spawnedIsNew ? [...merged, spawned] : merged }
     })
     return spawned
+  }, [])
+
+  /**
+   * Remove case (owner only, 2026-10-27): every live step of the case goes to
+   * the recycle bin. Merged like `openNextStageEarly`: the removed rows move from
+   * the active list to the bin with the server's stamp, so the case leaves every
+   * list without a reload and the bin's restore (the Dashboard's Undo) knows the
+   * set. Resolves with the removed ids, or null in preview. A 404 means this tab
+   * is out of date (already removed elsewhere): the workspace is re-read and the
+   * error rethrown for the caller to word.
+   */
+  const removeCase = useCallback(async (caseId: string) => {
+    if (previewActiveRef.current) return null
+    let result: Awaited<ReturnType<typeof removeCaseRequest>>
+    try {
+      result = await removeCaseRequest(caseId)
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) requestLiveRefetchRef.current?.()
+      throw error
+    }
+    const removedIds = new Set(result.removed)
+    applyServerDataUpdate((current) => {
+      const moving = current.checklists.filter((checklist) => removedIds.has(checklist.id))
+      return {
+        ...current,
+        checklists: current.checklists.filter((checklist) => !removedIds.has(checklist.id)),
+        recycledChecklists: [
+          ...moving.map((checklist) => ({ ...checklist, deletedAt: result.deletedAt })),
+          ...(current.recycledChecklists ?? []).filter((checklist) => !removedIds.has(checklist.id)),
+        ],
+      }
+    })
+    return { removed: result.removed, deletedAt: result.deletedAt }
   }, [])
 
   /** Owner: "Reviewed" — clears the skip off the dashboard, keeps the record. */
@@ -3554,20 +3589,33 @@ function App() {
   /**
    * Owner-only restore from the recycle bin. The server clears `deleted_at`
    * and returns the freshly-active Checklist; we drop it back into the
-   * active list and remove it from the bin in one local update.
+   * active list and remove it from the bin in one local update. A step removed
+   * with its case (Remove case) comes back with every step removed alongside it
+   * - the server restores that set (same case, same stamp) and we mirror it.
    */
   const restoreChecklist = async (checklistId: string) => {
     if (previewActiveRef.current) return
     try {
       setDataSyncState('saving')
       const restored = await restoreChecklistRequest(checklistId)
-      applyServerDataUpdate((current) => ({
-        ...current,
-        checklists: [...current.checklists, restored],
-        recycledChecklists: (current.recycledChecklists ?? []).filter(
-          (checklist) => checklist.id !== checklistId,
-        ),
-      }))
+      applyServerDataUpdate((current) => {
+        const bin = current.recycledChecklists ?? []
+        const target = bin.find((checklist) => checklist.id === checklistId)
+        const set = target ? removedCaseSet(target, bin) : []
+        const setIds = new Set([checklistId, ...set.map((checklist) => checklist.id)])
+        const siblings = set
+          .filter((checklist) => checklist.id !== checklistId)
+          .map((checklist) => ({ ...checklist, deletedAt: null }))
+        return {
+          ...current,
+          checklists: [
+            ...current.checklists.filter((checklist) => !setIds.has(checklist.id)),
+            restored,
+            ...siblings,
+          ],
+          recycledChecklists: bin.filter((checklist) => !setIds.has(checklist.id)),
+        }
+      })
       setDataSyncState('synced')
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -4436,6 +4484,7 @@ function App() {
     skipChecklistOccurrence,
     pushChecklistOccurrence,
     openNextStageEarly,
+    removeCase,
     reviewChecklistSkip,
     waitingOnMe,
     addWaitingOn,

@@ -2607,6 +2607,26 @@ export async function restoreChecklistRequest(checklistId: string) {
 }
 
 /**
+ * Remove case (owner only): every live step of the case goes to the recycle bin
+ * with one stamp (`deletedAt`), so restoring any one of them brings the whole
+ * case back. `removed` is the ids that moved. A 404 means no live step has that
+ * case (already removed, or this tab is out of date).
+ */
+export async function removeCaseRequest(caseId: string) {
+  const response = await apiFetch(`/api/cases/${encodeURIComponent(caseId)}/remove`, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `Failed to remove the case (${response.status})`)
+  }
+  return (await response.json()) as { ok: true; caseId: string; removed: string[]; deletedAt: string }
+}
+
+/**
  * Permanently delete every checklist in the owner's recycle bin. Owner-only.
  * Returns the count of removed rows so the UI can confirm what happened.
  */

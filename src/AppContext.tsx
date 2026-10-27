@@ -550,6 +550,13 @@ export type AppContextValue = {
    * server's sentence on a refusal.
    */
   openNextStageEarly: (checklistId: string) => Promise<Checklist | null>
+  /**
+   * Owner-only Remove case (2026-10-27): every live step of the case goes to the
+   * recycle bin with one stamp; the rows leave the active list at once. Resolves
+   * with the removed ids (restoring any one of them brings the case back), or
+   * null in preview. Throws the server's sentence on a refusal (404: no live step).
+   */
+  removeCase: (caseId: string) => Promise<{ removed: string[]; deletedAt: string } | null>
   /** Owner-only: mark a skip reviewed — clears it off the dashboard, keeps the record. */
   reviewChecklistSkip: (skipId: string) => Promise<void>
   /**

@@ -51,6 +51,7 @@ import { useAppContext } from '../AppContext'
 import { dismissClientPendingNoteRequest } from '../lib/api'
 import { canAddPendingClientNote } from '../../lib/checklist-write-permission.js'
 import { KEPT_REASON_WORK_STARTED, keptNoticeSentence } from '../../lib/series-step-delete.js'
+import { removedCaseSet, stepCountLabel } from '../../lib/case-removal.js'
 import { useAttachedClientNotes } from '../hooks/useAttachedClientNotes'
 import { useStartFirstNote } from '../hooks/useStartFirstNote'
 import { ChecklistOutliner } from '../components/ChecklistOutliner'
@@ -1686,11 +1687,23 @@ function RecycleBinSection({
         count === 0 ? (
           <p className="checklist-empty-hint">The recycle bin is empty.</p>
         ) : (
+          <>
+          {/* Remove case (Dashboard / case page) sends every step of a case here
+              together; those steps restore together too. */}
+          {sorted.some((checklist) => removedCaseSet(checklist, recycledChecklists).length > 1) ? (
+            <p className="checklist-meta-line">
+              Steps removed with their case come back together: restoring any one of them restores the whole case.
+            </p>
+          ) : null}
           <ul
             className="recycle-bin-list"
             style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}
           >
-            {sorted.map((checklist) => (
+            {sorted.map((checklist) => {
+              // The other steps removed with this one (same case, same stamp).
+              const caseSet = removedCaseSet(checklist, recycledChecklists)
+              const withCase = caseSet.length > 1
+              return (
               <li
                 key={checklist.id}
                 className="recycle-bin-item"
@@ -1713,18 +1726,29 @@ function RecycleBinSection({
                       ? shortDate.format(new Date(checklist.deletedAt))
                       : 'recently'}
                   </div>
+                  {withCase ? (
+                    <div className="checklist-meta-line">
+                      Removed with its case ({stepCountLabel(caseSet.length)}): restoring brings back all of them.
+                    </div>
+                  ) : null}
                 </div>
                 <button
                   type="button"
                   className="secondary-action"
                   onClick={() => void onRestore(checklist.id)}
-                  title="Restore this task to the in-progress list"
+                  title={
+                    withCase
+                      ? 'Restore every step of this case to the in-progress list'
+                      : 'Restore this task to the in-progress list'
+                  }
                 >
-                  Restore
+                  {withCase ? `Restore case (${stepCountLabel(caseSet.length)})` : 'Restore'}
                 </button>
               </li>
-            ))}
+              )
+            })}
           </ul>
+          </>
         )
       ) : null}
     </section>

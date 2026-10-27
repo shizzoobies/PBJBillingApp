@@ -40,6 +40,8 @@ import {
 } from '../lib/api'
 import { stalledCaseStages, stalledStageSentence } from '../lib/stalledCase'
 import { useOpenNextStage } from '../lib/useOpenNextStage'
+import { useRemoveCase } from '../lib/useRemoveCase'
+import { rowsOfCase } from '../../lib/case-removal.js'
 import type {
   ActivityEntry,
   BillRateVersion,
@@ -147,6 +149,73 @@ function caseNoteOutsideRows(notes: CaseNote[], stalledStages: Checklist[], case
   )
 }
 
+/**
+ * Remove case on a Dashboard case row (2026-10-27, Alex for Brittany: "we have
+ * old stuff and there is no way to get rid of it"). The owner view only, never
+ * in preview (the preview shows the staff view, which passes no `removal`).
+ */
+type CaseRemoval = ReturnType<typeof useRemoveCase> & { stepCount: (caseId: string) => number }
+
+function RemoveCaseButton({
+  removal,
+  caseId,
+  title,
+  clientLabel,
+}: {
+  removal: CaseRemoval | undefined
+  caseId: string
+  title: string
+  clientLabel: string
+}) {
+  if (!removal) return null
+  const busy = removal.removing === caseId
+  return (
+    <button
+      type="button"
+      className="ghost-action dashboard-case-remove"
+      disabled={busy}
+      title="Move every step of this case to the recycle bin"
+      onClick={() =>
+        void removal.remove({ caseId, title, clientName: clientLabel, stepCount: removal.stepCount(caseId) })
+      }
+    >
+      {busy ? 'Removing…' : 'Remove case'}
+    </button>
+  )
+}
+
+/** The server's sentence when a removal was refused, under the case's row. */
+function RemoveCaseError({ removal, caseId }: { removal: CaseRemoval | undefined; caseId: string }) {
+  if (!removal?.error || removal.error.caseId !== caseId) return null
+  return (
+    <p className="waiting-editor-error dashboard-case-note" role="alert">
+      {removal.error.text}
+    </p>
+  )
+}
+
+/** "Case removed: <title> for <client>. Undo" - outlives the row it removed. */
+function RemovedCaseLines({ removal }: { removal: CaseRemoval | undefined }) {
+  if (!removal || removal.removed.length === 0) return null
+  return (
+    <>
+      {removal.removed.map((entry) => (
+        <p key={entry.caseId} className="dashboard-case-removed" role="status">
+          Case removed: {entry.title} for {entry.clientName}.{' '}
+          <button
+            type="button"
+            className="link-button"
+            disabled={removal.restoring === entry.caseId}
+            onClick={() => void removal.undo(entry.caseId)}
+          >
+            {removal.restoring === entry.caseId ? 'Restoring…' : 'Undo'}
+          </button>
+        </p>
+      ))}
+    </>
+  )
+}
+
 /** The case link: the case timeline, or the step itself for a row without a case. */
 function caseLinkFor(stage: Checklist) {
   return stage.caseId
@@ -174,6 +243,7 @@ function StalledCaseRows({
   notes,
   addNote,
   listedCaseIds,
+  removal,
 }: {
   stages: Checklist[]
   clients: Parameters<typeof clientName>[0]
@@ -181,6 +251,8 @@ function StalledCaseRows({
   notes: CaseNote[]
   addNote: (note: CaseNote) => void
   listedCaseIds: ReadonlySet<string>
+  /** Remove case: the owner view only. */
+  removal?: CaseRemoval
 }) {
   const openedStageIds = new Set(notes.filter((note) => note.kind === 'opened').map((note) => note.stageId))
   const rows = stages.filter((stage) => !openedStageIds.has(stage.id))
@@ -218,6 +290,7 @@ function StalledCaseRows({
           clients={clients}
           canOpen={canOpen(stage)}
           refusal={notes.find((note) => note.stageId === stage.id && note.kind === 'refused')}
+          removal={removal}
           onOpened={(spawned) => {
             const step = (spawned.stageIndex ?? (stage.stageIndex ?? 0) + 1) + 1
             addNote(
@@ -239,6 +312,7 @@ function StalledCaseRow({
   clients,
   canOpen,
   refusal,
+  removal,
   onOpened,
   onRefused,
 }: {
@@ -246,6 +320,7 @@ function StalledCaseRow({
   clients: Parameters<typeof clientName>[0]
   canOpen: boolean
   refusal: CaseNote | undefined
+  removal: CaseRemoval | undefined
   onOpened: (spawned: Checklist) => void
   onRefused: (sentence: string) => void
 }) {
@@ -274,9 +349,16 @@ function StalledCaseRow({
       <Link to={caseLink.to} className="dashboard-case-link">
         {caseLink.label}
       </Link>
+      <RemoveCaseButton
+        removal={removal}
+        caseId={stage.caseId || stage.id}
+        title={stage.title}
+        clientLabel={clientName(clients, stage.clientId)}
+      />
       <p className="dashboard-case-note">{stalledStageSentence(stage, canOpen)}</p>
       {/* While the press runs, the earlier refusal is stale. */}
       {opening ? null : <CaseNoteLine note={refusal} />}
+      <RemoveCaseError removal={removal} caseId={stage.caseId || stage.id} />
     </li>
   )
 }
@@ -459,9 +541,15 @@ function OwnerDashboardView() {
     toggleChecklistItem,
     setPreviewUserId,
     firmSettings,
+    previewMode,
   } = useAppContext()
   const navigate = useNavigate()
   const defaultHourlyRate = firmSettings.clientDefaults?.hourlyRate ?? 0
+  // Remove case (owner only; this view never renders in preview, said again).
+  const removeCaseControls = useRemoveCase()
+  const caseRemoval: CaseRemoval | undefined = previewMode
+    ? undefined
+    : { ...removeCaseControls, stepCount: (caseId) => rowsOfCase(data.checklists, caseId).length }
 
   const [activity, setActivity] = useState<ActivityEntry[]>([])
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
@@ -895,6 +983,7 @@ function OwnerDashboardView() {
         <p className="dashboard-section-caption">
           Multi-step cases under way, step by step; a red row needs a hand and says what to do.
         </p>
+        <RemovedCaseLines removal={caseRemoval} />
         {/* The owner may open any next step (the route's rule). */}
         <StalledCaseRows
           stages={stalledStages}
@@ -903,6 +992,7 @@ function OwnerDashboardView() {
           notes={caseNotes.notes}
           addNote={caseNotes.addNote}
           listedCaseIds={new Set(limitedCases.map((row) => row.caseId))}
+          removal={caseRemoval}
         />
         {limitedCases.length === 0 && stalledStages.length === 0 ? (
           <p className="empty-state">No multi-step cases in flight.</p>
@@ -930,7 +1020,14 @@ function OwnerDashboardView() {
                   <Link to={`/cases/${row.caseId}`} className="dashboard-case-link">
                     Open case →
                   </Link>
+                  <RemoveCaseButton
+                    removal={caseRemoval}
+                    caseId={row.caseId}
+                    title={row.current.title}
+                    clientLabel={clientName(data.clients, row.current.clientId)}
+                  />
                   <CaseNoteLine note={caseNoteOutsideRows(caseNotes.notes, stalledStages, row.caseId)} />
+                  <RemoveCaseError removal={caseRemoval} caseId={row.caseId} />
                 </li>
               )
             })}

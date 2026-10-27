@@ -15250,6 +15250,8 @@ const server = createServer(async (request, response) => {
       }
 
       const checklistId = checklistRestoreMatch[1]
+      // A step removed with its case (POST /api/cases/:id/remove) comes back
+      // with every step removed alongside it; the response stays this row.
       const restored = await appDataStore.restoreChecklist(checklistId)
       if (!restored) {
         sendJson(response, 404, { error: 'Recycled checklist not found' })
@@ -18865,6 +18867,72 @@ const server = createServer(async (request, response) => {
       const limit = Math.min(Math.max(1, Number(requestUrl.searchParams.get('limit')) || 20), 500)
       const entries = await appDataStore.getRecentActivity(userId, limit)
       sendJson(response, 200, { entries })
+      return
+    }
+
+    // POST /api/cases/:caseId/remove - Remove case (2026-10-27, Alex for
+    // Brittany: "a way to manually just remove stuff from her Cases in flight").
+    // Owner only. Every live step of the case goes to the recycle bin in one
+    // store call (`removeCase`), with one stamp, so restoring any of them from
+    // the bin (or the Dashboard's Undo) brings the whole case back. The bin rows
+    // keep their cycle, so the recipe does not regenerate it; its next cycle
+    // generates as usual. 404 when no live step has that case.
+    const caseRemoveMatch = normalizedPath.match(/^\/api\/cases\/([^/]+)\/remove$/)
+    if (caseRemoveMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can remove a case' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      // The global guard already refuses writes in preview; said again here so
+      // this route can never run as the real owner under someone else's view.
+      if (request.headers['x-preview-mode'] === '1' || request.headers['x-preview-as']) {
+        sendJson(response, 403, { error: 'Preview mode is read-only' })
+        return
+      }
+
+      const caseId = decodeURIComponent(caseRemoveMatch[1])
+      const removal = await appDataStore.removeCase(caseId, { userId: session.user.id })
+      if (!removal) {
+        sendJson(response, 404, { error: 'Case not found' })
+        return
+      }
+      const data = await appDataStore.read()
+      const first = removal.rows[0]
+      const template = (data.checklistTemplates ?? []).find((entry) => entry.id === first?.templateId)
+      const caseTitle = template?.title || first?.title || 'Case'
+      const clientLabel = (data.clients ?? []).find((client) => client.id === first?.clientId)?.name ?? 'Unknown client'
+      // A pending note stamped onto one of these steps is waiting again now;
+      // re-run the attach pass so it shows on the client page or moves on.
+      const clientIds = [...new Set(removal.rows.map((row) => row.clientId).filter(Boolean))]
+      for (const clientId of clientIds) {
+        try {
+          await appDataStore.attachPendingClientNotes({ clientId })
+        } catch (error) {
+          console.error('[case-remove] pending-notes attach pass failed:', error)
+        }
+      }
+      const stepCount = removal.removedIds.length
+      await appDataStore.recordActivity(
+        session.user.id,
+        'case_removed',
+        `${caseTitle} · ${clientLabel} · case ${caseId} · ${stepCount} step${stepCount === 1 ? '' : 's'} to the recycle bin`,
+      )
+      sendJson(response, 200, {
+        ok: true,
+        caseId,
+        removed: removal.removedIds,
+        deletedAt: removal.deletedAt,
+      })
       return
     }
 

@@ -6,6 +6,8 @@ import { fetchCase } from '../lib/api'
 import { useAppContext } from '../AppContext'
 import { nextStageNeverOpened, stalledStageSentence } from '../lib/stalledCase'
 import { useOpenNextStage } from '../lib/useOpenNextStage'
+import { useRemoveCase } from '../lib/useRemoveCase'
+import { rowsOfCase, stepCountLabel } from '../../lib/case-removal.js'
 import {
   describeActivityAction,
   employeeName,
@@ -67,6 +69,9 @@ export function CaseDetailPage() {
   const [openedStageIds, setOpenedStageIds] = useState<string[]>([])
   const [error, setError] = useState('')
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
+  // Remove case (owner only, not in preview); `reloadKey` re-reads the case after an Undo.
+  const removal = useRemoveCase()
+  const [reloadKey, setReloadKey] = useState(0)
 
   useEffect(() => {
     if (!caseId) return
@@ -83,7 +88,7 @@ export function CaseDetailPage() {
         setStatus('error')
       })
     return () => controller.abort()
-  }, [caseId])
+  }, [caseId, reloadKey])
 
   const loading = status === 'loading'
 
@@ -104,6 +109,38 @@ export function CaseDetailPage() {
   }
 
   const { template, client, stages, activity } = caseRecord
+  const canRemove = role === 'owner' && !previewMode
+  const removedEntry = removal.removed.find((entry) => entry.caseId === caseId)
+  const clientLabel = client?.name ?? 'Unknown client'
+  if (removedEntry) {
+    return (
+      <section className="content-grid case-detail">
+        <section className="panel">
+          <p className="section-kicker">Case timeline</p>
+          <h2>{template.title}</h2>
+          <p className="checklist-meta-line" role="status">
+            Case removed: its {stepCountLabel(removedEntry.stepCount)} {removedEntry.stepCount === 1 ? 'is' : 'are'} in the
+            recycle bin.{' '}
+            <button
+              type="button"
+              className="link-button"
+              disabled={removal.restoring === caseId}
+              onClick={() =>
+                void removal.undo(caseId).then(() => {
+                  setReloadKey((key) => key + 1)
+                })
+              }
+            >
+              {removal.restoring === caseId ? 'Restoring…' : 'Undo'}
+            </button>
+          </p>
+          <Link className="secondary-action" to="/dashboard">
+            Back to the Dashboard
+          </Link>
+        </section>
+      </section>
+    )
+  }
   const openedAt = stages[0]?.checklist?.createdAt || stages[0]?.checklist?.dueDate
   // The stall rule reads the live workspace (fresher than this page's fetch),
   // plus this case's own rows in case the workspace does not hold one.
@@ -143,7 +180,30 @@ export function CaseDetailPage() {
               {openedAt ? ` · Case opened ${shortDate.format(new Date(`${openedAt.slice(0, 10)}T12:00:00`))}` : ''}
             </p>
           </div>
+          {canRemove ? (
+            <button
+              type="button"
+              className="ghost-action"
+              disabled={removal.removing === caseId}
+              title="Move every step of this case to the recycle bin"
+              onClick={() =>
+                void removal.remove({
+                  caseId,
+                  title: template.title,
+                  clientName: clientLabel,
+                  stepCount: rowsOfCase(workspace, caseId).length || caseRows.length,
+                })
+              }
+            >
+              {removal.removing === caseId ? 'Removing…' : 'Remove case'}
+            </button>
+          ) : null}
         </div>
+        {removal.error?.caseId === caseId ? (
+          <p className="waiting-editor-error" role="alert">
+            {removal.error.text}
+          </p>
+        ) : null}
         <ol className="case-timeline">
           {stages.map(({ stage, checklist }, idx) => {
             const total = checklist?.items.length ?? 0

@@ -6121,7 +6121,7 @@ td strong {
 }
 .dashboard-case-row {
   display: grid;
-  grid-template-columns: 2fr 1fr 1fr auto auto;
+  grid-template-columns: 2fr 1fr 1fr auto auto auto;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
@@ -6152,6 +6152,16 @@ td strong {
 .dashboard-case-note {
   grid-column: 1 / -1;
   margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+/* Remove case (owner): a quiet button on the row, and the Undo line it leaves. */
+.dashboard-case-remove {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.dashboard-case-removed {
+  margin: 0 0 8px;
   color: var(--muted);
   font-size: 12px;
 }

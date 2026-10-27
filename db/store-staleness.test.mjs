@@ -56899,3 +56899,248 @@ describe('questionnaire follow-up questions in firm settings (postgres branch)',
     expect(section.questions.map((question) => question.id)).toEqual(['cq-0000000a'])
   })
 })
+
+/**
+ * Remove case (2026-10-27, Alex for Brittany): "a way to manually just remove
+ * stuff from her Cases in flight; we have old stuff and there is no way to get
+ * rid of it." `removeCase` moves EVERY live row of a case to the recycle bin in
+ * one store call with one `deletedAt`; a restore of any of them brings the set
+ * back together. The materializer counts recycled rows as "this cycle already
+ * happened" (`buildChecklistInstanceKeys(checklists, recycled)`), so the removed
+ * cycle does not respawn, and the recipe's NEXT cycle still generates.
+ */
+describe('remove a case (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const rmTemplate = (over = {}) => ({
+    id: 'tmpl-rm',
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    nextDueDate: '2099-10-31',
+    active: true,
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      { id: 'st-0', name: 'Prep', assigneeId: 'emp-1', offsetDays: 0, items: [{ id: 'ti-0', label: 'Gather' }] },
+      { id: 'st-1', name: 'Review', assigneeId: 'emp-1', offsetDays: 0, items: [{ id: 'ti-1', label: 'Review' }] },
+    ],
+    ...over,
+  })
+  const row = (over) => ({
+    title: 'Monthly close',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    templateId: 'tmpl-rm',
+    dueDate: '2026-09-30',
+    stageCount: 2,
+    viewerIds: [],
+    editorIds: [],
+    items: [{ id: `item-${over.id}`, label: 'Do', done: false }],
+    ...over,
+  })
+  // The rows go into the file as-is (the bulk save would not write the
+  // recycled stamps), with the templates written alongside.
+  const seed = async (checklists, { templates = [rmTemplate()], recycled = [] } = {}) => {
+    await store.write(workspace())
+    const data = await persisted()
+    data.checklistTemplates = templates
+    data.checklists = checklists
+    data.recycledChecklists = recycled
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const caseA = () => [
+    row({ id: 'a-0', caseId: 'case-a', stageIndex: 0, stageId: 'st-0', items: [{ id: 'i-a0', label: 'Gather', done: true }] }),
+    row({ id: 'a-1', caseId: 'case-a', stageIndex: 1, stageId: 'st-1', dueDate: '2026-10-05' }),
+  ]
+  const caseB = () => [row({ id: 'b-0', caseId: 'case-b', stageIndex: 0, stageId: 'st-0', dueDate: '2026-10-31' })]
+
+  let logSpy
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    logSpy.mockRestore()
+  })
+
+  it('moves every live row of the case to the bin with ONE stamp, and leaves other cases alone', async () => {
+    await seed([...caseA(), ...caseB()])
+    const result = await store.removeCase('case-a', { userId: 'emp-1' })
+    expect(result.caseId).toBe('case-a')
+    expect(result.removedIds).toEqual(['a-0', 'a-1'])
+    expect(result.deletedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    expect(result.rows.map((entry) => entry.stageIndex)).toEqual([0, 1])
+    expect(result.rows[0]).toMatchObject({ id: 'a-0', title: 'Monthly close', clientId: 'c1', templateId: 'tmpl-rm' })
+
+    const data = await persisted()
+    expect(data.checklists.map((entry) => entry.id)).toEqual(['b-0'])
+    const binned = data.recycledChecklists.filter((entry) => entry.caseId === 'case-a')
+    expect(binned.map((entry) => entry.id).sort()).toEqual(['a-0', 'a-1'])
+    // The rows keep their case and step, and share the one stamp.
+    expect(binned.every((entry) => entry.deletedAt === result.deletedAt)).toBe(true)
+    expect(binned.find((entry) => entry.id === 'a-1')).toMatchObject({ caseId: 'case-a', stageIndex: 1 })
+    // The work inside a removed step is kept, ready for a restore.
+    expect(binned.find((entry) => entry.id === 'a-0').items[0]).toMatchObject({ id: 'i-a0', done: true })
+  })
+
+  it('answers null and writes nothing for a case with no live row', async () => {
+    await seed(caseB(), {
+      recycled: [row({ id: 'z-0', caseId: 'case-z', stageIndex: 0, deletedAt: '2026-01-01T00:00:00.000Z' })],
+    })
+    const before = await readFile(localDataPath, 'utf8')
+    expect(await store.removeCase('case-unknown', { userId: 'emp-1' })).toBeNull()
+    // Every row of case-z is already in the bin: nothing live to remove.
+    expect(await store.removeCase('case-z', { userId: 'emp-1' })).toBeNull()
+    expect(await store.removeCase('', { userId: 'emp-1' })).toBeNull()
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('removes a legacy row with no caseId by its own id', async () => {
+    const legacy = row({ id: 'legacy-1', stageIndex: 0 })
+    delete legacy.caseId
+    await seed([legacy, ...caseB()])
+    const result = await store.removeCase('legacy-1', { userId: 'emp-1' })
+    expect(result.removedIds).toEqual(['legacy-1'])
+    expect((await persisted()).checklists.map((entry) => entry.id)).toEqual(['b-0'])
+  })
+
+  it('restoring any one removed step brings the whole case back, and nothing else', async () => {
+    const deletedOnItsOwn = row({
+      id: 'a-old',
+      caseId: 'case-a',
+      stageIndex: 0,
+      dueDate: '2026-08-31',
+      deletedAt: '2026-01-01T00:00:00.000Z',
+    })
+    await seed([...caseA(), ...caseB()], { recycled: [deletedOnItsOwn] })
+    await store.removeCase('case-a', { userId: 'emp-1' })
+
+    const restored = await store.restoreChecklist('a-1')
+    expect(restored).toMatchObject({ id: 'a-1', caseId: 'case-a', deletedAt: null })
+    const data = await persisted()
+    expect(data.checklists.map((entry) => entry.id).sort()).toEqual(['a-0', 'a-1', 'b-0'])
+    expect(data.checklists.every((entry) => !entry.deletedAt)).toBe(true)
+    // The step deleted on its own months ago stays in the bin...
+    expect(data.recycledChecklists.map((entry) => entry.id)).toEqual(['a-old'])
+    // ...and still restores on its own.
+    await store.restoreChecklist('a-old')
+    expect((await persisted()).recycledChecklists).toEqual([])
+  })
+
+  it('does NOT respawn the removed cycle of a specific-months recipe (month keys count the bin)', async () => {
+    const month = Number(firmToday().slice(5, 7))
+    await seed([], {
+      templates: [rmTemplate({ frequency: 'specific-months', scheduledMonths: [month], nextDueDate: null })],
+    })
+    const first = await store.read()
+    const spawned = first.checklists.filter((entry) => entry.templateId === 'tmpl-rm')
+    expect(spawned).toHaveLength(1)
+    const caseId = spawned[0].caseId
+
+    expect((await store.removeCase(caseId, { userId: 'emp-1' })).removedIds).toEqual([spawned[0].id])
+    const after = await store.read()
+    expect(after.checklists.filter((entry) => entry.templateId === 'tmpl-rm')).toEqual([])
+    expect(after.recycledChecklists.filter((entry) => entry.caseId === caseId)).toHaveLength(1)
+    const stored = await persisted()
+    expect(stored.checklists.filter((entry) => entry.templateId === 'tmpl-rm')).toEqual([])
+
+    // Next year's designated month still generates as usual.
+    const nextYear = `${Number(firmToday().slice(0, 4)) + 1}-${firmToday().slice(5, 7)}-28`
+    const next = materializeRecurringChecklists(stored, { today: nextYear })
+    const fresh = next.data.checklists.filter((entry) => entry.templateId === 'tmpl-rm')
+    expect(fresh).toHaveLength(1)
+    expect(fresh[0].dueDate.slice(0, 4)).toBe(nextYear.slice(0, 4))
+    expect(fresh[0].caseId).not.toBe(caseId)
+  })
+
+  it('does NOT respawn the removed cycle of a cadence recipe even when its date is set back; the next cycle spawns', async () => {
+    const today = firmToday()
+    await seed([], { templates: [rmTemplate({ nextDueDate: today })] })
+    const first = await store.read()
+    const spawned = first.checklists.filter((entry) => entry.templateId === 'tmpl-rm')
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0].dueDate).toBe(today)
+    await store.removeCase(spawned[0].caseId, { userId: 'emp-1' })
+
+    // The recipe's next due date put back on the removed cycle (an edit, a
+    // stale save): the bin still says that cycle happened.
+    const rolledBack = await persisted()
+    const advancedTo = rolledBack.checklistTemplates.find((entry) => entry.id === 'tmpl-rm').nextDueDate
+    expect(advancedTo > today).toBe(true)
+    rolledBack.checklistTemplates = rolledBack.checklistTemplates.map((entry) =>
+      entry.id === 'tmpl-rm' ? { ...entry, nextDueDate: today } : entry,
+    )
+    await writeFile(localDataPath, JSON.stringify(rolledBack, null, 2))
+    const after = await store.read()
+    expect(after.checklists.filter((entry) => entry.templateId === 'tmpl-rm')).toEqual([])
+
+    // The next cycle generates normally once its day comes.
+    const stored = await persisted()
+    const nextCycle = stored.checklistTemplates.find((entry) => entry.id === 'tmpl-rm').nextDueDate
+    expect(nextCycle).toBe(advancedTo)
+    const next = materializeRecurringChecklists(stored, { today: nextCycle })
+    const fresh = next.data.checklists.filter((entry) => entry.templateId === 'tmpl-rm')
+    expect(fresh.map((entry) => [entry.dueDate, entry.stageIndex])).toEqual([[nextCycle, 0]])
+  })
+})
+
+describe('remove a case (postgres branch)', () => {
+  const STAMP = new Date('2026-10-27T15:00:00.123Z')
+  const recordingPool = (answer) => {
+    const statements = []
+    const query = async (text, params) => {
+      statements.push({ text: String(text).trim().replace(/\s+/g, ' '), params })
+      return answer(String(text), params)
+    }
+    return {
+      statements,
+      pool: {
+        query,
+        async connect() {
+          return { query, release() {} }
+        },
+      },
+    }
+  }
+
+  it('moves every live row of the case in ONE update (one transaction), matching legacy rows by id', async () => {
+    const fake = recordingPool(() => ({
+      rows: [
+        { id: 'a-1', title: 'Review', client_id: 'c1', template_id: 'tmpl-rm', stage_index: 1, deleted_at: STAMP },
+        { id: 'a-0', title: 'Prep', client_id: 'c1', template_id: 'tmpl-rm', stage_index: 0, deleted_at: STAMP },
+      ],
+      rowCount: 2,
+    }))
+    const result = await postgresStore(fake).removeCase('case-a', { userId: 'emp-1' })
+    expect(fake.statements).toHaveLength(1)
+    expect(fake.statements[0].text).toBe(
+      'update checklists set deleted_at = now() where deleted_at is null and coalesce(case_id, id) = $1 returning id, title, client_id, template_id, stage_index, deleted_at',
+    )
+    expect(fake.statements[0].params).toEqual(['case-a'])
+    expect(result).toEqual({
+      caseId: 'case-a',
+      removedIds: ['a-0', 'a-1'],
+      deletedAt: '2026-10-27T15:00:00.123Z',
+      rows: [
+        { id: 'a-0', title: 'Prep', clientId: 'c1', templateId: 'tmpl-rm', stageIndex: 0 },
+        { id: 'a-1', title: 'Review', clientId: 'c1', templateId: 'tmpl-rm', stageIndex: 1 },
+      ],
+    })
+  })
+
+  it('answers null when no live row has that case', async () => {
+    const fake = recordingPool(() => ({ rows: [], rowCount: 0 }))
+    expect(await postgresStore(fake).removeCase('case-unknown', { userId: 'emp-1' })).toBeNull()
+    expect(fake.statements).toHaveLength(1)
+  })
+
+  it('a restore brings back the rows of the case that share the exact stamp, in one statement', async () => {
+    const fake = recordingPool(() => ({ rows: [], rowCount: 0 }))
+    expect(await postgresStore(fake).restoreChecklist('a-1')).toBeNull()
+    expect(fake.statements).toHaveLength(1)
+    expect(fake.statements[0].text).toBe(
+      'with target as ( select id, coalesce(case_id, id) as case_key, deleted_at from checklists where id = $1 and deleted_at is not null ) update checklists c set deleted_at = null from target t where c.deleted_at is not null and (c.id = t.id or (coalesce(c.case_id, c.id) = t.case_key and c.deleted_at = t.deleted_at)) returning c.id',
+    )
+    expect(fake.statements[0].params).toEqual(['a-1'])
+  })
+})

@@ -38,6 +38,7 @@ import {
   checklistMonthKey,
   findChecklistInstance,
 } from '../lib/checklist-identity.js'
+import { caseKeyOf, removedCaseSet } from '../lib/case-removal.js'
 import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
 import { latestBillRate, latestCostRate, ratePeriodAsOf } from '../lib/rate-history.js'
 import {
@@ -23700,11 +23701,25 @@ export class AppDataStore {
    * and returns the freshly-active checklist object so the caller can drop it
    * straight back into the active list. Returns `null` when there's no
    * matching recycled row (already restored, never deleted, or wrong id).
+   *
+   * A step removed by Remove case (`removeCase`) comes back WITH its case: every
+   * recycled row of the same case carrying the exact same `deleted_at` stamp is
+   * restored in the same statement (lib/case-removal.js `removedCaseSet`). A row
+   * deleted on its own has a stamp of its own, so it still restores alone.
    */
   async restoreChecklist(checklistId) {
     if (this.pool) {
       const result = await this.pool.query(
-        `update checklists set deleted_at = null where id = $1 and deleted_at is not null returning id`,
+        `with target as (
+           select id, coalesce(case_id, id) as case_key, deleted_at
+             from checklists
+            where id = $1 and deleted_at is not null
+         )
+         update checklists c set deleted_at = null
+           from target t
+          where c.deleted_at is not null
+            and (c.id = t.id or (coalesce(c.case_id, c.id) = t.case_key and c.deleted_at = t.deleted_at))
+          returning c.id`,
         [checklistId],
       )
       if (!result.rowCount) return null
@@ -23718,12 +23733,84 @@ export class AppDataStore {
       const recycled = Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []
       const target = recycled.find((checklist) => checklist.id === checklistId)
       if (!target) return null
-      data.recycledChecklists = recycled.filter((checklist) => checklist.id !== checklistId)
-      const { deletedAt: _deletedAt, ...rest } = target
-      const restored = { ...rest, deletedAt: null }
-      data.checklists = Array.isArray(data.checklists) ? [...data.checklists, restored] : [restored]
+      const set = removedCaseSet(target, recycled)
+      const setIds = new Set(set.map((checklist) => checklist.id))
+      data.recycledChecklists = recycled.filter((checklist) => !setIds.has(checklist.id))
+      const back = set.map(({ deletedAt: _deletedAt, ...rest }) => ({ ...rest, deletedAt: null }))
+      data.checklists = Array.isArray(data.checklists) ? [...data.checklists, ...back] : back
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
-      return restored
+      return back[0]
+    })
+  }
+
+  /**
+   * Remove case (2026-10-27, Alex for Brittany: "since she is owner she should
+   * be able to just remove the case"). Moves EVERY live row of the case - every
+   * step, open, finished, skipped or pushed - to the recycle bin with ONE
+   * `deleted_at` stamp, so a restore of any of them brings the set back
+   * together (`restoreChecklist`). A legacy row without a `case_id` is its own
+   * case (the id the workspace reads as its caseId). Owner-gated at the route.
+   *
+   * No respawn: the materializer counts recycled rows as "this cycle already
+   * happened" (`buildChecklistInstanceKeys(checklists, recycled)`), so the
+   * removed cycle is not generated again; the recipe's next cycle is.
+   *
+   * Postgres: ONE update statement - its own transaction, so every row of the
+   * case moves or none does, all stamped with the same `now()`. File: one
+   * file-queue slot. Returns `{ caseId, removedIds, deletedAt, rows }` (rows in
+   * step order: id, title, clientId, templateId, stageIndex), or null when no live row has
+   * that case. `userId` is the remover, recorded by the route's activity row.
+   */
+  async removeCase(caseId, { userId } = {}) {
+    void userId
+    const key = typeof caseId === 'string' ? caseId.trim() : ''
+    if (!key) return null
+    const answer = (rows, deletedAt) => {
+      const ordered = rows.slice().sort((a, b) => a.stageIndex - b.stageIndex || a.id.localeCompare(b.id))
+      return { caseId: key, removedIds: ordered.map((row) => row.id), deletedAt, rows: ordered }
+    }
+    if (this.pool) {
+      const result = await this.pool.query(
+        `update checklists set deleted_at = now()
+          where deleted_at is null and coalesce(case_id, id) = $1
+          returning id, title, client_id, template_id, stage_index, deleted_at`,
+        [key],
+      )
+      if (!result.rowCount) return null
+      const rows = result.rows.map((row) => ({
+        id: row.id,
+        title: row.title ?? '',
+        clientId: row.client_id ?? null,
+        templateId: row.template_id ?? null,
+        stageIndex: typeof row.stage_index === 'number' ? row.stage_index : 0,
+      }))
+      return answer(rows, new Date(result.rows[0].deleted_at).toISOString())
+    }
+
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const live = Array.isArray(data.checklists) ? data.checklists : []
+      const removed = live.filter((checklist) => checklist && caseKeyOf(checklist) === key)
+      if (removed.length === 0) return null
+      const deletedAt = nowIso()
+      const removedIds = new Set(removed.map((checklist) => checklist.id))
+      data.checklists = live.filter((checklist) => !removedIds.has(checklist?.id))
+      data.recycledChecklists = [
+        ...(Array.isArray(data.recycledChecklists) ? data.recycledChecklists : []),
+        ...removed.map((checklist) => ({ ...checklist, deletedAt })),
+      ]
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return answer(
+        removed.map((checklist) => ({
+          id: checklist.id,
+          title: checklist.title ?? '',
+          clientId: checklist.clientId ?? null,
+          templateId: checklist.templateId ?? null,
+          stageIndex: typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0,
+        })),
+        deletedAt,
+      )
     })
   }
 
