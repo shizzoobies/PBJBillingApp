@@ -76,11 +76,14 @@ describe('the three routes the audit found without a content-type guard (M2)', (
  * store method, which leaves the only whitelist one refactor away from gone.
  */
 describe('PUT /api/firm-settings whitelists in the handler (L2)', () => {
-  const block = () => routeBlock(/Only owners can update firm settings/, 1500)
+  // Widened from 1,500 to 2,500 characters when the route grew the follow-up
+  // question check (featreq-fccf901f) between the picker and the store call.
+  const block = () => routeBlock(/Only owners can update firm settings/, 2500)
 
   it('never passes the raw body to the store', () => {
     const text = block()
-    expect(text).toContain('appDataStore.updateFirmSettings(pickFirmSettingsPatch(payload))')
+    expect(text).toContain('const firmPatch = pickFirmSettingsPatch(payload)')
+    expect(text).toContain('appDataStore.updateFirmSettings(firmPatch)')
     expect(text).not.toContain('updateFirmSettings(payload')
   })
 
@@ -111,10 +114,10 @@ describe('PUT /api/firm-settings whitelists in the handler (L2)', () => {
       ?.map((pair) => (pair.match(/\['([^']+)'/) as RegExpMatchArray)[1])
 
     expect(storeList?.length).toBeGreaterThan(0)
-    // Plus `clientDefaults` and `proposalPricing`, which the store merges
-    // separately rather than listing beside the flat columns.
+    // Plus `clientDefaults`, `proposalPricing` and `questionnaireCustomQuestions`,
+    // which the store merges separately rather than listing beside the flat columns.
     expect(handlerList?.slice().sort()).toEqual(
-      [...(storeList ?? []), 'clientDefaults', 'proposalPricing'].sort(),
+      [...(storeList ?? []), 'clientDefaults', 'proposalPricing', 'questionnaireCustomQuestions'].sort(),
     )
   })
 

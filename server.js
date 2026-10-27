@@ -148,10 +148,16 @@ import {
 } from './lib/letter-template.js'
 import { buildQuestionnaireEmail } from './lib/proposal-questionnaire-email.js'
 import {
+  buildQuestionnaire,
+  customQuestionProblems,
+  flattenQuestions,
+} from './lib/proposal-questionnaire.js'
+import {
   QUESTIONNAIRE_RESPONSE_HEADERS,
   answersFromFormValues,
   formValuesFromAnswers,
   postedQuestionnaireStep,
+  questionnaireRefusalStep,
   readQuestionnaireForm,
   renderQuestionnaireAlreadyPage,
   renderQuestionnaireClosedPage,
@@ -617,6 +623,8 @@ const FIRM_SETTINGS_PATCH_FIELDS = [
   // The proposal pricing catalog (featreq-311473e2). Owner-only like the rest
   // of this route; `/api/firm-settings/public` never carries it.
   'proposalPricing',
+  // Her follow-up questionnaire questions (featreq-fccf901f), saved whole.
+  'questionnaireCustomQuestions',
 ]
 
 function pickFirmSettingsPatch(payload) {
@@ -4817,14 +4825,21 @@ const server = createServer(async (request, response) => {
         } catch (error) {
           if (!(error instanceof ProposalQuestionnaireError)) throw error
           if (error.reason === 'invalid') {
-            // Their own input, put back on step 1 (where every required answer
-            // is), with what is missing. Nothing stored.
+            // Their own input, put back with what is missing, on the step where
+            // it is: step 1, unless all of step 1 is there and what is missing
+            // is one of her required follow-ups on step 2. Nothing stored.
+            const refusedStep =
+              Object.keys(record.partialAnswers).length > 0
+                ? questionnaireRefusalStep(record.questions, sent)
+                : 1
             sendQuestionnairePage(
               response,
               renderQuestionnairePage({
                 questionnaire: record.questions,
                 errors: error.problems.length > 0 ? error.problems : [error.message],
                 values: sent,
+                step: refusedStep,
+                saved: record.partialAnswers,
               }),
               400,
             )
@@ -5598,7 +5613,23 @@ const server = createServer(async (request, response) => {
         // and keeps the prior value for anything malformed). Two layers on
         // purpose: see FIRM_SETTINGS_PATCH_FIELDS.
         const payload = await readJsonBody(request)
-        const updated = await appDataStore.updateFirmSettings(pickFirmSettingsPatch(payload))
+        const firmPatch = pickFirmSettingsPatch(payload)
+        // Her follow-up questions (featreq-fccf901f): a list that cannot be
+        // asked as written - a blank question, a choice with no options, a
+        // condition on a question or answer that does not exist, a loop - is
+        // refused with the reasons, never half-saved.
+        if (Object.prototype.hasOwnProperty.call(firmPatch, 'questionnaireCustomQuestions')) {
+          const list = firmPatch.questionnaireCustomQuestions
+          const pricing = (await appDataStore.getFirmSettings()).proposalPricing
+          const problems = Array.isArray(list)
+            ? customQuestionProblems(list, flattenQuestions(buildQuestionnaire(pricing)))
+            : ['The follow-up questions must be a list.']
+          if (problems.length > 0) {
+            sendJson(response, 400, { error: 'invalid_custom_questions', message: problems[0], problems })
+            return
+          }
+        }
+        const updated = await appDataStore.updateFirmSettings(firmPatch)
         await appDataStore.recordActivity(session.user.id, 'firm_settings_updated', 'branding')
         sendJson(response, 200, updated)
         return

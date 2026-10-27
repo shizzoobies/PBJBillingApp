@@ -60,9 +60,12 @@ import {
   QUESTIONNAIRE_EXPIRY_DAYS,
   answersToProposalSeed,
   buildQuestionnaire,
+  cleanCustomQuestions,
   cleanQuestionnaireAnswers,
   flattenQuestions,
   questionnaireProblems,
+  questionnaireStepOne,
+  withCustomQuestions,
 } from '../lib/proposal-questionnaire.js'
 import {
   deletionOpenWaitRefusal,
@@ -309,7 +312,13 @@ const FIRM_SETTINGS_FIELDS = [
 ]
 
 function rowToFirmSettings(row) {
-  if (!row) return { ...DEFAULT_FIRM_SETTINGS, proposalPricing: sanitizeProposalPricing(null) }
+  if (!row) {
+    return {
+      ...DEFAULT_FIRM_SETTINGS,
+      proposalPricing: sanitizeProposalPricing(null),
+      questionnaireCustomQuestions: [],
+    }
+  }
   const settings = { ...DEFAULT_FIRM_SETTINGS }
   for (const [appKey, dbCol] of FIRM_SETTINGS_FIELDS) {
     if (row[dbCol] !== null && row[dbCol] !== undefined) {
@@ -335,6 +344,12 @@ function rowToFirmSettings(row) {
       ? safeJsonParse(row.proposal_pricing)
       : row.proposal_pricing
   settings.proposalPricing = sanitizeProposalPricing(rawPricing)
+  // Her follow-up questionnaire questions (featreq-fccf901f). NULL = none.
+  const rawFollowUps =
+    typeof row.questionnaire_custom_questions === 'string'
+      ? safeJsonParse(row.questionnaire_custom_questions)
+      : row.questionnaire_custom_questions
+  settings.questionnaireCustomQuestions = cleanCustomQuestions(rawFollowUps)
   return settings
 }
 
@@ -6258,6 +6273,11 @@ export class AppDataStore {
       // column needs no backfill. Additive + idempotent.
       await this.pool.query(
         `alter table firm_settings add column if not exists proposal_pricing jsonb`,
+      )
+      // Her own follow-up questionnaire questions (featreq-fccf901f). NULL reads
+      // as none, so the column needs no backfill. Additive + idempotent.
+      await this.pool.query(
+        `alter table firm_settings add column if not exists questionnaire_custom_questions jsonb`,
       )
 
       // Phase 5: notifications (in-app bell + email-ready).
@@ -17860,14 +17880,18 @@ export class AppDataStore {
     if (mode !== 'link' && mode !== 'call') {
       throw new ProposalQuestionnaireError('A questionnaire is a link or a call.', 'invalid')
     }
-    const pricing = (await this.getFirmSettings()).proposalPricing
+    const firm = await this.getFirmSettings()
     const now = nowIso()
     const record = {
       id: `pq-${randomUUID().slice(0, 8)}`,
       token: mode === 'link' ? randomBytes(32).toString('base64url') : null,
       mode,
       status: 'open',
-      questions: buildQuestionnaire(pricing),
+      // Her active follow-up questions are frozen with the app's (featreq-fccf901f).
+      questions: withCustomQuestions(
+        buildQuestionnaire(firm.proposalPricing),
+        firm.questionnaireCustomQuestions,
+      ),
       answers: {},
       partialAnswers: {},
       emailLog: [],
@@ -18028,7 +18052,12 @@ export class AppDataStore {
     if (current.status !== 'open' || current.expired) throw AppDataStore.questionnaireClosedError(current)
 
     const partial = AppDataStore.cleanQuestionnaireAnswersFor(current, rawAnswers)
-    const problems = questionnaireProblems(flattenQuestions(current.questions), partial, { mode: 'link' })
+    // Only step 1's questions: a follow-up she marked required is on step 2.
+    const problems = questionnaireProblems(
+      flattenQuestions(questionnaireStepOne(current.questions)),
+      partial,
+      { mode: 'link' },
+    )
     if (problems.length > 0) {
       throw new ProposalQuestionnaireError(problems[0], 'invalid', problems)
     }
@@ -33643,7 +33672,7 @@ export class AppDataStore {
                 sidebar_active_text_color,
                 address_line1, address_line2,
                 city, state, postal_code, phone, email, website, ein,
-                client_defaults, proposal_pricing
+                client_defaults, proposal_pricing, questionnaire_custom_questions
            from firm_settings where id = 'singleton'`,
       )
       return rowToFirmSettings(result.rows[0])
@@ -33658,6 +33687,7 @@ export class AppDataStore {
         ...sanitizeClientDefaults(stored.clientDefaults),
       },
       proposalPricing: sanitizeProposalPricing(stored.proposalPricing),
+      questionnaireCustomQuestions: cleanCustomQuestions(stored.questionnaireCustomQuestions),
     }
   }
 
@@ -33718,13 +33748,25 @@ export class AppDataStore {
       next.proposalPricing = sanitizeProposalPricing(merged)
     }
 
+    // Her follow-up questionnaire questions are saved WHOLE (the Settings card
+    // sends the full list) and always through the cleaner. Like the catalog, an
+    // unrelated save binds NULL on Postgres and the coalesce keeps the column.
+    const patchTouchesFollowUps = Boolean(
+      patch && Object.prototype.hasOwnProperty.call(patch, 'questionnaireCustomQuestions'),
+    )
+    if (patchTouchesFollowUps) {
+      next.questionnaireCustomQuestions = cleanCustomQuestions(patch.questionnaireCustomQuestions)
+    }
+
     if (this.pool) {
       await this.pool.query(
         `insert into firm_settings (id, name, tagline, logo_url, brand_color, sidebar_text_color,
             sidebar_active_text_color,
             address_line1, address_line2, city, state, postal_code,
-            phone, email, website, ein, client_defaults, proposal_pricing, updated_at)
-         values ('singleton', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17::jsonb, now())
+            phone, email, website, ein, client_defaults, proposal_pricing,
+            questionnaire_custom_questions, updated_at)
+         values ('singleton', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17::jsonb,
+            $18::jsonb, now())
          on conflict (id) do update set
             name = excluded.name,
             tagline = excluded.tagline,
@@ -33743,6 +33785,7 @@ export class AppDataStore {
             ein = excluded.ein,
             client_defaults = excluded.client_defaults,
             proposal_pricing = coalesce(excluded.proposal_pricing, firm_settings.proposal_pricing),
+            questionnaire_custom_questions = coalesce(excluded.questionnaire_custom_questions, firm_settings.questionnaire_custom_questions),
             updated_at = now()`,
         [
           next.name,
@@ -33766,6 +33809,7 @@ export class AppDataStore {
           // coalesce above keeps whatever is already stored rather than
           // permanently writing the seed the first time someone saves anything.
           patchTouchesPricing ? JSON.stringify(sanitizeProposalPricing(next.proposalPricing)) : null,
+          patchTouchesFollowUps ? JSON.stringify(next.questionnaireCustomQuestions) : null,
         ],
       )
       return next

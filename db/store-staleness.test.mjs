@@ -56608,3 +56608,162 @@ describe('a quarterly recipe due January 31st generates in April, not May (file 
     expect(after.checklistTemplates.find((t) => t.id === 'tpl-eom-quarterly').nextDueDate).toBe('2027-04-30')
   })
 })
+
+/**
+ * Her follow-up questionnaire questions (featreq-fccf901f): a firm setting kept
+ * in `firm_settings.questionnaire_custom_questions` on Postgres and a plain
+ * `questionnaireCustomQuestions` field on the file, always through
+ * `cleanCustomQuestions`, and frozen onto a questionnaire when it is made.
+ */
+const followUp = (extra = {}) => ({
+  id: 'cq-0000000a',
+  label: 'Do you have a bookkeeper today?',
+  type: 'yes_no',
+  required: true,
+  active: true,
+  ...extra,
+})
+
+describe('questionnaire follow-up questions in firm settings (file backend)', () => {
+  beforeEach(async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    delete data.firmSettings
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await clearQuestionnaires()
+  })
+
+  it('reads none before anything is saved', async () => {
+    expect((await store.getFirmSettings()).questionnaireCustomQuestions).toEqual([])
+  })
+
+  it('saves the list through the cleaner, reads it back, and an unrelated save leaves it alone', async () => {
+    await store.updateFirmSettings({
+      questionnaireCustomQuestions: [
+        followUp({ when: { questionId: 'services', answer: 'Payroll' } }),
+        { id: 'bad', label: 'dropped', type: 'yes_no' },
+      ],
+    })
+    await store.updateFirmSettings({ name: 'PB&J' })
+    const reopened = new AppDataStore()
+    await reopened.initialize()
+    expect((await reopened.getFirmSettings()).questionnaireCustomQuestions).toEqual([
+      followUp({ when: { questionId: 'services', answer: 'Payroll' } }),
+    ])
+  })
+
+  it('freezes the active follow-ups onto a new questionnaire; one made before keeps its questions', async () => {
+    const before = await store.createProposalQuestionnaire({ mode: 'link' })
+    await store.updateFirmSettings({
+      questionnaireCustomQuestions: [followUp(), followUp({ id: 'cq-0000000b', label: 'Off', active: false })],
+    })
+    const after = await store.createProposalQuestionnaire({ mode: 'link' })
+    const idsOf = (record) => record.questions.sections.flatMap((section) => section.questions.map((q) => q.id))
+    expect(idsOf(after)).toContain('cq-0000000a')
+    expect(idsOf(after)).not.toContain('cq-0000000b')
+    const untouched = await store.getProposalQuestionnaire(before.id)
+    expect(idsOf(untouched).some((id) => id.startsWith('cq-'))).toBe(false)
+    expect(untouched.questions).toEqual(before.questions)
+  })
+
+  it('a required follow-up is required on the send, and step 1 is kept without it', async () => {
+    await store.updateFirmSettings({ questionnaireCustomQuestions: [followUp()] })
+    const created = await store.createProposalQuestionnaire({ mode: 'link' })
+    const stepOne = {
+      company: 'Acme',
+      contactName: 'Pat',
+      email: 'pat@example.com',
+      phone: '555',
+      addressLine1: '1 Main',
+      city: 'Town',
+      state: 'VA',
+      postalCode: '12345',
+      whatTheyDo: 'Widgets',
+      entityType: 'LLC',
+    }
+    await store.saveProposalQuestionnairePartial({ token: created.token }, stepOne)
+    await expect(
+      store.submitProposalQuestionnaire({ token: created.token }, stepOne),
+    ).rejects.toMatchObject({ reason: 'invalid', problems: ['Please answer: Do you have a bookkeeper today?'] })
+    const submitted = await store.submitProposalQuestionnaire(
+      { token: created.token },
+      { ...stepOne, 'cq-0000000a': 'no' },
+    )
+    expect(submitted.answers['cq-0000000a']).toBe('no')
+  })
+})
+
+describe('questionnaire follow-up questions in firm settings (postgres branch)', () => {
+  function pool(row) {
+    const statements = []
+    return {
+      statements,
+      pool: {
+        async query(text, params) {
+          statements.push({ text: String(text).trim(), params })
+          if (/from firm_settings where id = 'singleton'/i.test(text)) return { rows: row ? [row] : [] }
+          if (/^insert into proposal_questionnaires/i.test(String(text).trim())) {
+            return {
+              rows: [
+                {
+                  id: params[0],
+                  token: params[1],
+                  mode: params[2],
+                  status: 'open',
+                  questions: params[3],
+                  answers: {},
+                  email_log: [],
+                  expires_at: params[4],
+                },
+              ],
+              rowCount: 1,
+            }
+          }
+          return { rows: [], rowCount: 1 }
+        },
+      },
+    }
+  }
+
+  it('adds the column look-first in initialize()', async () => {
+    const source = await readFile(path.join(path.dirname(fileURLToPath(import.meta.url)), 'store.js'), 'utf8')
+    expect(source).toContain(
+      'alter table firm_settings add column if not exists questionnaire_custom_questions jsonb',
+    )
+  })
+
+  it('selects the column and reads NULL as none, and a stored list through the cleaner', async () => {
+    const empty = pool({ name: 'PB&J', questionnaire_custom_questions: null })
+    expect((await postgresStore(empty).getFirmSettings()).questionnaireCustomQuestions).toEqual([])
+    expect(empty.statements[0].text).toMatch(/proposal_pricing, questionnaire_custom_questions/)
+    const stored = pool({
+      name: 'PB&J',
+      questionnaire_custom_questions: [followUp(), { id: 'junk' }],
+    })
+    expect((await postgresStore(stored).getFirmSettings()).questionnaireCustomQuestions).toEqual([followUp()])
+  })
+
+  it('writes the cleaned list as $18 jsonb, and binds NULL (coalesce keeps it) on an unrelated save', async () => {
+    const fake = pool({ name: 'PB&J' })
+    await postgresStore(fake).updateFirmSettings({ questionnaireCustomQuestions: [followUp(), { id: 'junk' }] })
+    const insert = fake.statements.find((s) => /^insert into firm_settings/i.test(s.text))
+    expect(insert.text).toMatch(/\$18::jsonb/)
+    expect(insert.text).toMatch(
+      /questionnaire_custom_questions = coalesce\(excluded\.questionnaire_custom_questions, firm_settings\.questionnaire_custom_questions\)/,
+    )
+    expect(JSON.parse(insert.params[17])).toEqual([followUp()])
+
+    const other = pool({ name: 'PB&J' })
+    await postgresStore(other).updateFirmSettings({ name: 'New Name' })
+    const unrelated = other.statements.find((s) => /^insert into firm_settings/i.test(s.text))
+    expect(unrelated.params[17]).toBeNull()
+  })
+
+  it('freezes the stored follow-ups into the inserted questionnaire', async () => {
+    const fake = pool({ name: 'PB&J', questionnaire_custom_questions: [followUp()] })
+    await postgresStore(fake).createProposalQuestionnaire({ mode: 'link' })
+    const insert = fake.statements.find((s) => /^insert into proposal_questionnaires/i.test(s.text))
+    const frozen = JSON.parse(insert.params[3])
+    const section = frozen.sections.find((entry) => entry.id === 'custom')
+    expect(section.questions.map((question) => question.id)).toEqual(['cq-0000000a'])
+  })
+})

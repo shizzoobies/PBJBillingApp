@@ -271,14 +271,18 @@ describe('the public questionnaire route', () => {
   // A send the store refuses (a required answer missing - including one from a page
   // opened before that answer was required, or a step 1 that was never kept) comes
   // back as step 1, with every problem listed and flagged on its field, and what
-  // they typed kept.
-  it('answers a refused send with step 1, every problem and their own input, as a 400', () => {
+  // they typed kept. Only when step 1 was kept and is complete - the missing answer
+  // is one of her required follow-ups (featreq-fccf901f) - does it come back as step 2.
+  it('answers a refused send with the step the problem is on, every problem and their own input, as a 400', () => {
     const send = publicBlock.slice(publicBlock.indexOf('// ---- POST step 2'))
     const refusal = between(send, "if (error.reason === 'invalid') {", "if (error.reason === 'submitted')")
     expect(refusal).toContain('renderQuestionnairePage({')
     expect(refusal).toContain('questionnaire: record.questions')
     expect(refusal).toContain('errors: error.problems.length > 0 ? error.problems : [error.message]')
-    expect(refusal).toMatch(/values: sent,\s*\}\),\s*400,/)
+    expect(refusal).toMatch(
+      /Object\.keys\(record\.partialAnswers\)\.length > 0\s*\?\s*questionnaireRefusalStep\(record\.questions, sent\)\s*:\s*1/,
+    )
+    expect(refusal).toMatch(/values: sent,\s*step: refusedStep,\s*saved: record\.partialAnswers,\s*\}\),\s*400,/)
   })
 
   it('reads the form against the frozen questions and submits by token', () => {
@@ -429,6 +433,23 @@ describe('the Resend webhook', () => {
     )
     // The proposal branch is untouched and still ahead of it.
     expect(webhook.indexOf("typeof tagBag.proposal_id === 'string'")).toBeLessThan(branch)
+  })
+
+  // Her follow-up questions (featreq-fccf901f) are a firm setting: the owner-only
+  // PUT checks the whole list against the app's questions before the store sees it.
+  it('refuses a follow-up list that cannot be asked, before anything is saved', () => {
+    const put = between(serverSource, 'Only owners can update firm settings', 'firm_settings_updated')
+    const check = put.indexOf('customQuestionProblems(list, flattenQuestions(buildQuestionnaire(pricing)))')
+    expect(check).toBeGreaterThan(-1)
+    expect(put).toContain("sendJson(response, 400, { error: 'invalid_custom_questions'")
+    expect(check).toBeLessThan(put.indexOf('appDataStore.updateFirmSettings(firmPatch)'))
+  })
+
+  it('freezes her active follow-ups with the app questions when a questionnaire is made', () => {
+    const create = between(storeSource, 'async createProposalQuestionnaire(', 'async listProposalQuestionnaires(')
+    expect(create).toMatch(
+      /withCustomQuestions\(\s*buildQuestionnaire\(firm\.proposalPricing\),\s*firm\.questionnaireCustomQuestions,\s*\)/,
+    )
   })
 
   it('files the event on the questionnaire, never on its status, and tells owners once about a bounce', () => {
