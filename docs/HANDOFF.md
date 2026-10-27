@@ -13,6 +13,31 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-10-27 (~15:20Z) - TWO MORE SHIPS (Remove case, Dashboard Arrange); nothing in flight; READ THIS FIRST, then the
+14:30Z paragraph.** `main` = `d4982c94` (+ this handoff), live, `/health` 200, voice re-provisioned, only the primary worktree
+(+ Alex's chip worktree - leave it), manifest 204,953 of 205,000 (TRIM FIRST). **`e95c7013` Remove case** (featreq-a46c8ab3
+Shipped; Alex 10-27 "she should be able to just remove the case"): owner-only "Remove case" on every Dashboard case row (in-flight
+and stalled) and the case page header; `POST /api/cases/:caseId/remove` with `{ clientId }` REQUIRED - production has 11 case
+ids shared by TWO clients (2026-08-14 import, a recipe copy kept the id), so `removeCase` and the set-restore are scoped by
+`client_id` (statements use `coalesce(nullif(case_id,''), id)`); all live rows of the case go to the recycle bin with ONE
+`deleted_at` stamp; `restoreChecklist` restores the whole same-stamp set of that case (4 old bin groups from a 2026-08-04 bulk
+delete now restore together - said in the manifest); a restore that hits the live instance unique index answers 409
+`restore_conflict`; Undo failures keep the line and say why; the materializer keys off live + recycled rows so a removed cycle
+is not respawned while in the bin (Empty bin hard-deletes -> it can come back); rolled-back prod trials passed (5-step case,
+shared-id case, wrong client = 0 rows). **`d4982c94` Dashboard Arrange** (featreq-a5cc8188 Shipped; Alex 10-27): per-user
+`users.dashboard_layout jsonb` (look-first; Alex yes; rolled-back trial 41 ms; column confirmed after deploy); GET/PUT
+`/api/me/dashboard-layout` (preview = previewed person's layout read-only; PUT refused in preview; 400 on a malformed body;
+`/api/me/` writes no longer broadcast a data change - `lib/data-change-broadcast.js`); `lib/dashboard-layout.js` sanitizer
+(alerts always first, shown, open; NULL stored when equal to default); UI `src/components/DashboardLayout.tsx` +
+`src/lib/useDashboardArrangement.ts`: chevrons on every panel (hand collapse = until reload), Arrange mode list with Move
+up/down, Hide/Show, Starts open/collapsed, Done/Reset/Cancel (Arrange disabled until the GET answered), hidden panels never
+mount or fetch, a per-user localStorage hint for first paint; checked in a real browser at 1280 and 420 px. **Gate note:** the
+quiet-production check in ship.sh refuses while Brittany is working because her bulk save rewrites every invoice row
+(`updated_at`), not because anything is being sent; Alex said "ship anyway" - the push was done by hand (ff + `git push`,
+then watch cf-deploy + /health). Consider teaching `scripts/prod/quiet-check.mjs` to ignore bulk-save touches (same second,
+all rows) and key on `sent_at` / status changes instead. **Seen in Activity 14:55Z:** `bulk_save_refused_stale` for
+emp-patrice right after a checklist delete - the staleness guard doing its job (two tabs). **Still waiting on Brittany:** as in
+the 14:30Z paragraph. **For Alex, no rush:** as in the 14:30Z paragraph.
 **2026-10-27 (~14:30Z) - EIGHT SHIPS since the 20:25Z paragraph, nothing in flight; READ THIS FIRST.** `main` = `0d929b7f` (+ this
 handoff), live on https://app.pbjsatime.com, `/health` 200, voice re-provisioned after every manifest change, only the primary
 worktree (+ Alex's chip worktree under .claude/worktrees - leave it), manifest ~204,95x of 205,000 (TRIM FIRST). Every ship below
