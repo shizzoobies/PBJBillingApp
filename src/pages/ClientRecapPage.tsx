@@ -420,7 +420,7 @@ export function ClientRecapPage() {
                 Service value = this period&apos;s billable hours priced as an hourly invoice
                 would price them (each person&apos;s bill rate, month by month). Invoice = what
                 was actually billed once a month&apos;s invoice has been sent (its fees, without
-                reimbursements, prepayments or credit applied); until then, the period&apos;s
+                reimbursements, prepayments, credit applied or card fees); until then, the period&apos;s
                 service revenue as invoicing would price it (a monthly client&apos;s plan rate; an
                 hourly client&apos;s service value). Over/Under = service value − invoice: a positive
                 figure means the work was worth more than what was billed.

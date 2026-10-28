@@ -2801,6 +2801,16 @@ function MonthlyInvoiceEstimate({
       </p>
     )
   }
+  // Hours but not one rate to price them: a $0.00 headline would be a lie.
+  if (estimate.unrated.length > 0 && estimate.total === 0) {
+    const roles = estimate.unrated.join(' and ')
+    const who = estimate.unrated.length === 1 ? `a ${estimate.unrated[0]}-tier person` : 'someone in those tiers'
+    return (
+      <p className="muted-text">
+        Estimated monthly invoice: no rate for the {roles} hours; assign {who} or set rates.
+      </p>
+    )
+  }
   // Bookkeeper first, as the fields above read; a role with no hours is named
   // with 0 h and no rate.
   const breakdown = [...estimate.tiers]
@@ -2821,7 +2831,8 @@ function MonthlyInvoiceEstimate({
       <small className="field-helper">{breakdown}</small>
       {estimate.unrated.length > 0 ? (
         <small className="field-helper">
-          (not counted: assign a {estimate.unrated.join(' / ')}-tier person or set rates)
+          (not counted: no rate for the {estimate.unrated.join(' and ')}{' '}
+          {estimate.unrated.length === 1 ? 'role' : 'roles'}; assign someone or set rates)
         </small>
       ) : null}
     </div>
