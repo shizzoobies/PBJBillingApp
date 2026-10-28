@@ -82,7 +82,7 @@ describe('the store’s billing-master types are imported at all', () => {
       /import \{[\s\S]*?BillingMasterError,[\s\S]*?\} from '\.\/db\/store\.js'/,
     )
     expect(serverSource).toContain(
-      "import { buildClientRecap, buildMasterRecap } from './lib/client-recap.js'",
+      "import { buildClientRecap, buildMasterRecap, recapMonths } from './lib/client-recap.js'",
     )
   })
 })
@@ -259,7 +259,8 @@ describe('a sub can see the invoice its work was billed ON', () => {
 
 describe('the Recap branches to the roll-up for a master and to nothing else', () => {
   const block = () =>
-    routeBlock(/if \(normalizedPath === '\/api\/client-recap' && request\.method === 'GET'\)/, 4600)
+    // 5400: the route grew by the owner's stored-invoice load (featreq-50a059cd).
+    routeBlock(/if \(normalizedPath === '\/api\/client-recap' && request\.method === 'GET'\)/, 5400)
 
   it('builds every ACTIVE sub’s recap the ordinary way, then rolls them up', () => {
     const text = block()
@@ -331,7 +332,7 @@ describe('the Recap branches to the roll-up for a master and to nothing else', (
   it('leaves the ordinary answer exactly as it was', () => {
     const text = block()
     expect(text).toMatch(
-      /const recap = buildClientRecap\(data, \{\s*clientId,\s*periodType,\s*period,\s*today: todayIso\(\),\s*includeFinancials,\s*billRateVersions,\s*costRateVersions,\s*salesTaxRecord,\s*\}\)/,
+      /const recap = buildClientRecap\(data, \{\s*clientId,\s*periodType,\s*period,\s*today: todayIso\(\),\s*includeFinancials,\s*billRateVersions,\s*costRateVersions,\s*salesTaxRecord,\s*invoices: recapInvoices,\s*\}\)/,
     )
     expect(text).toContain("sendJson(response, 404, { error: 'Client not found' })")
     expect(text).toContain('sendJson(response, 200, recap)')

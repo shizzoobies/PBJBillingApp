@@ -388,8 +388,15 @@ export function ClientRecapPage() {
                   <span className="recap-stat-label">Service value</span>
                 </div>
                 <div className="recap-stat">
-                  <span className="recap-stat-value">{money(recap.billing.revenue)}</span>
+                  <span className="recap-stat-value">
+                    {money(recap.billing.invoice?.amount ?? recap.billing.revenue)}
+                  </span>
                   <span className="recap-stat-label">Invoice</span>
+                  {/* Where the figure comes from: the sent invoice itself, or
+                      the live number while nothing has gone out. */}
+                  {recap.billing.invoice ? (
+                    <span className="recap-stat-sub">{recap.billing.invoice.caption}</span>
+                  ) : null}
                 </div>
                 <div className="recap-stat">
                   <span
@@ -410,10 +417,11 @@ export function ClientRecapPage() {
               </div>
               <p className="recap-estimate-caption">
                 Service value = this period&apos;s billable hours priced as an hourly invoice
-                would price them (each person&apos;s bill rate, month by month). Invoice = the
-                period&apos;s service revenue as invoicing prices it, the same figure
-                Profitability measures against (ad hoc work at its default; edits made on a
-                draft are not reflected). Over/Under = service value − invoice: a positive
+                would price them (each person&apos;s bill rate, month by month). Invoice = what
+                was actually billed once a month&apos;s invoice has been sent (its fees, without
+                reimbursements, prepayments or credit applied); until then, the period&apos;s
+                service revenue as invoicing would price it (a monthly client&apos;s plan rate; an
+                hourly client&apos;s service value). Over/Under = service value − invoice: a positive
                 figure means the work was worth more than what was billed.
               </p>
               {recap.billing.planNames.length > 0 ? (

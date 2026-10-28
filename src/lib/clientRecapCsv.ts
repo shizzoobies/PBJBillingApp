@@ -98,7 +98,8 @@ export function buildClientRecapCsv(recap: ClientRecap): {
   if (recap.billing) {
     const profit = recap.estimates?.profit ?? null
     add('Billing', '', 'Service value', cell(profit?.serviceValue))
-    add('Billing', '', 'Invoice', recap.billing.revenue)
+    add('Billing', '', 'Invoice', recap.billing.invoice?.amount ?? recap.billing.revenue)
+    if (recap.billing.invoice) add('Billing', '', 'Invoice source', recap.billing.invoice.caption)
     add('Billing', '', 'Over/Under', cell(profit?.serviceValueDelta))
     add(
       'Billing',

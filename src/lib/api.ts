@@ -3616,7 +3616,21 @@ export type ClientRecap = {
     monthlyRate: number | null
     monthsInPeriod: number
     planNames: string[]
+    /** The live service revenue (what Profitability measures against). */
     revenue: number
+    /**
+     * The Billing tile's Invoice: the live figure until a month's invoice has been sent,
+     * then that invoice's accounting total (featreq-50a059cd). Absent on a billing master,
+     * whose tile stays `revenue`.
+     */
+    invoice?: {
+      amount: number
+      /** Months in the period with a sent monthly invoice, out of `months`. */
+      sentMonths: number
+      months: number
+      /** "From invoice #N, sent <date>" / "Not invoiced yet" / "N of M months from sent invoices". */
+      caption: string
+    }
     reimbursements: Array<{ date: string; description: string; amount: number }>
     reimbursementTotal: number
   } | null

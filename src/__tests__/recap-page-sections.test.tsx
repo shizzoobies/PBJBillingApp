@@ -190,6 +190,31 @@ describe('Client Recap page layout', () => {
     expect(await screen.findByText('Matches invoice')).toBeInTheDocument()
     expect(screen.queryByText('On estimate')).not.toBeInTheDocument()
   })
+
+  // featreq-50a059cd: the Invoice tile says where its figure came from.
+  it('prints where the Invoice figure comes from: a sent invoice or "Not invoiced yet"', async () => {
+    mockFetch.mockResolvedValue({
+      ...RECAP,
+      billing: {
+        ...RECAP.billing!,
+        invoice: { amount: 2300, sentMonths: 1, months: 1, caption: 'From invoice #12, sent 2026-09-02' },
+      },
+    })
+    const { unmount } = render(<ClientRecapPage />)
+    expect(await screen.findByText('From invoice #12, sent 2026-09-02')).toBeInTheDocument()
+    expect(screen.getByText('$2,300.00')).toBeInTheDocument()
+    unmount()
+
+    mockFetch.mockResolvedValue({
+      ...RECAP,
+      billing: {
+        ...RECAP.billing!,
+        invoice: { amount: 2202, sentMonths: 0, months: 1, caption: 'Not invoiced yet' },
+      },
+    })
+    render(<ClientRecapPage />)
+    expect(await screen.findByText('Not invoiced yet')).toBeInTheDocument()
+  })
 })
 
 /**
