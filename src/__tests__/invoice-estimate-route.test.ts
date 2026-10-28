@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { resolveEstimatePeriod } from '../../lib/invoice-estimate.js'
 
 /**
  * GET /api/invoice-recap/estimate (featreq-a5e14899): the owner's estimate of the
@@ -58,7 +59,26 @@ describe('GET /api/invoice-recap/estimate', () => {
     expect(block).toContain('appDataStore.listInvoices({ period })')
   })
 
-  it('validates the period', () => {
-    expect(block).toContain('period must look like')
+  it('answers a bad period with a 400 from the shared resolver', () => {
+    expect(block).toContain("resolveEstimatePeriod(requestUrl.searchParams.get('period') || '', todayIso())")
+    expect(block).toContain('sendJson(response, 400')
+  })
+})
+
+describe('resolveEstimatePeriod (the route period rule, run for real)', () => {
+  it('accepts a real month', () => {
+    expect(resolveEstimatePeriod('2026-10', '2026-10-28')).toBe('2026-10')
+    expect(resolveEstimatePeriod('2026-01', '2026-10-28')).toBe('2026-01')
+    expect(resolveEstimatePeriod('2026-12', '2026-10-28')).toBe('2026-12')
+  })
+
+  it('answers this month when none is asked for', () => {
+    expect(resolveEstimatePeriod('', '2026-10-28')).toBe('2026-10')
+  })
+
+  it('refuses anything that is not a month (the route turns null into a 400)', () => {
+    for (const bad of ['2026-13', '2026-00', '26-10', '2026-1', '2026-Q3', '2026', 'abc', '2026-10-01']) {
+      expect(resolveEstimatePeriod(bad, '2026-10-28'), bad).toBeNull()
+    }
   })
 })

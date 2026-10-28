@@ -85,7 +85,7 @@ import {
   tickRefusal,
 } from './lib/periodic-jobs.js'
 import { buildInvoiceRecap } from './lib/invoice-recap.js'
-import { buildInvoiceEstimate } from './lib/invoice-estimate.js'
+import { buildInvoiceEstimate, resolveEstimatePeriod } from './lib/invoice-estimate.js'
 import { currentPeriod, isValidPeriod, isValidPeriodType } from './lib/periods.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
 import { firmToday } from './lib/firm-time.js'
@@ -5988,12 +5988,11 @@ const server = createServer(async (request, response) => {
         sendJson(response, 403, { error: 'preview_unsupported' })
         return
       }
-      const periodParam = requestUrl.searchParams.get('period') || ''
-      if (periodParam && !/^d{4}-(0[1-9]|1[0-2])$/.test(periodParam)) {
+      const period = resolveEstimatePeriod(requestUrl.searchParams.get('period') || '', todayIso())
+      if (!period) {
         sendJson(response, 400, { error: 'period must look like 2026-08' })
         return
       }
-      const period = periodParam || currentPeriod('month', todayIso())
       const data = await appDataStore.read()
       const { billRateVersions } = await loadRateVersions(session)
       const invoices = await appDataStore.listInvoices({ period })

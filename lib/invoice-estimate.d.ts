@@ -29,6 +29,9 @@ export function isInvoiceRunClient(client: {
   billToClientId?: string | null
 }): boolean
 
+/** The period to answer for: the asked month if valid, this month if none, else null (a 400). */
+export function resolveEstimatePeriod(periodParam: string, todayIso: string): string | null
+
 export function buildInvoiceEstimate(args: {
   period: string
   data: Record<string, unknown>
