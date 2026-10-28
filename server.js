@@ -85,6 +85,7 @@ import {
   tickRefusal,
 } from './lib/periodic-jobs.js'
 import { buildInvoiceRecap } from './lib/invoice-recap.js'
+import { buildInvoiceEstimate } from './lib/invoice-estimate.js'
 import { currentPeriod, isValidPeriod, isValidPeriodType } from './lib/periods.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
 import { firmToday } from './lib/firm-time.js'
@@ -5964,6 +5965,43 @@ const server = createServer(async (request, response) => {
         visibleClientIds: teamClientIds,
       })
       sendJson(response, 200, { period, rows })
+      return
+    }
+
+    // GET /api/invoice-recap/estimate?period=YYYY-MM — the OWNER's estimate of
+    // the month's invoices (featreq-a5e14899): sent invoices as they stand,
+    // everyone else as the Client Recap projects them. See lib/invoice-estimate.js.
+    //
+    // OWNER ONLY, and not preview-aware (it is not in PREVIEW_AWARE_API_PATHS,
+    // and it refuses a preview header itself): this is firm-wide money before
+    // anything has been sent, "not to be seen by others other than me" - the
+    // staff recap above only ever shows actuals. Staff get a 403, not a
+    // trimmed payload.
+    if (normalizedPath === '/api/invoice-recap/estimate' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'The invoice estimate is owner-only' })
+        return
+      }
+      if (request.headers['x-preview-mode'] === '1' || request.headers['x-preview-as']) {
+        sendJson(response, 403, { error: 'preview_unsupported' })
+        return
+      }
+      const periodParam = requestUrl.searchParams.get('period') || ''
+      if (periodParam && !/^d{4}-(0[1-9]|1[0-2])$/.test(periodParam)) {
+        sendJson(response, 400, { error: 'period must look like 2026-08' })
+        return
+      }
+      const period = periodParam || currentPeriod('month', todayIso())
+      const data = await appDataStore.read()
+      const { billRateVersions } = await loadRateVersions(session)
+      const invoices = await appDataStore.listInvoices({ period })
+      sendJson(
+        response,
+        200,
+        buildInvoiceEstimate({ period, data, invoices, billRateVersions, today: todayIso() }),
+      )
       return
     }
 
