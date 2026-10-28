@@ -99,7 +99,22 @@ describe('Estimated monthly invoice (Billing tab)', () => {
     renderHours({ ...hourly, estimatedCfoHours: 2 } as unknown as Client)
     expect(await screen.findByText('Estimated monthly invoice: $1,250.00')).toBeInTheDocument()
     expect(screen.getByText(/CFO 2 h × no rate/)).toBeInTheDocument()
-    expect(screen.getByText(/not counted: assign a CFO-tier person or set rates/)).toBeInTheDocument()
+    expect(screen.getByText(/not counted: no rate for the CFO role; assign someone or set rates/)).toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('$0.00')
+  })
+
+  it('with only unrated hours, says so instead of a $0.00 headline', async () => {
+    renderHours({
+      ...hourly,
+      estimatedBookkeeperHours: undefined,
+      estimatedAccountantHours: undefined,
+      estimatedCfoHours: 2,
+    } as unknown as Client)
+    expect(
+      await screen.findByText(
+        'Estimated monthly invoice: no rate for the CFO hours; assign a CFO-tier person or set rates.',
+      ),
+    ).toBeInTheDocument()
     expect(document.body.textContent).not.toContain('$0.00')
   })
 
