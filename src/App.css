@@ -9556,6 +9556,11 @@ button.repeating-task-toggle-pill {
   font-size: 12px;
 }
 
+.recap-stat-sub {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
 .recap-list {
   display: flex;
   flex-direction: column;

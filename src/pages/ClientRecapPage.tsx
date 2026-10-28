@@ -374,8 +374,9 @@ export function ClientRecapPage() {
               {/* Service Value | Invoice | Over/Under (featreq-6c27b7c5, Alex).
                   Service value is the hourly invoice the period's billable
                   hours would have produced (each person at their own rate,
-                  month by month); Invoice is the period's service revenue as
-                  invoicing prices it; Over/Under = service value − invoice,
+                  month by month); Invoice is what was billed once a
+                  month's invoice is sent, else the live service revenue
+                  (Profitability keeps the live revenue); Over/Under = service value − invoice,
                   positive when the work was worth more than what was billed.
                   Reimbursements are excluded from both and keep their own
                   line + list below. UNDER is the good direction here: the firm
@@ -388,8 +389,15 @@ export function ClientRecapPage() {
                   <span className="recap-stat-label">Service value</span>
                 </div>
                 <div className="recap-stat">
-                  <span className="recap-stat-value">{money(recap.billing.revenue)}</span>
+                  <span className="recap-stat-value">
+                    {money(recap.billing.invoice?.amount ?? recap.billing.revenue)}
+                  </span>
                   <span className="recap-stat-label">Invoice</span>
+                  {/* Where the figure comes from: the sent invoice itself, or
+                      the live number while nothing has gone out. */}
+                  {recap.billing.invoice ? (
+                    <span className="recap-stat-sub">{recap.billing.invoice.caption}</span>
+                  ) : null}
                 </div>
                 <div className="recap-stat">
                   <span
@@ -410,10 +418,11 @@ export function ClientRecapPage() {
               </div>
               <p className="recap-estimate-caption">
                 Service value = this period&apos;s billable hours priced as an hourly invoice
-                would price them (each person&apos;s bill rate, month by month). Invoice = the
-                period&apos;s service revenue as invoicing prices it, the same figure
-                Profitability measures against (ad hoc work at its default; edits made on a
-                draft are not reflected). Over/Under = service value − invoice: a positive
+                would price them (each person&apos;s bill rate, month by month). Invoice = what
+                was actually billed once a month&apos;s invoice has been sent (its fees, without
+                reimbursements, prepayments or credit applied); until then, the period&apos;s
+                service revenue as invoicing would price it (a monthly client&apos;s plan rate; an
+                hourly client&apos;s service value). Over/Under = service value − invoice: a positive
                 figure means the work was worth more than what was billed.
               </p>
               {recap.billing.planNames.length > 0 ? (
@@ -454,11 +463,10 @@ export function ClientRecapPage() {
                   </p>
                 ) : (
                   <p className="recap-estimate-caption">
-                    Priced at the client's current rates and plans, not the rates in force each
-                    month. A rate or plan change part-way through the{' '}
-                    {recap.periodType === 'year' ? 'year' : 'quarter'} is applied to all{' '}
-                    {recap.monthsInPeriod} months, so this can differ from the invoices actually
-                    issued.
+                    Months without a sent invoice are priced at the client's current rates and
+                    plans, not the rates in force each month. A rate or plan change part-way
+                    through the {recap.periodType === 'year' ? 'year' : 'quarter'} is applied to
+                    all of them, so this can differ from the invoices that will be issued.
                   </p>
                 )
               ) : null}
@@ -859,10 +867,10 @@ export function ProfitabilityCard({
         {profit?.estimatedRevenue == null ? '' : ` (${money(profit.estimatedRevenue)})`} − estimated
         cost
         {profit?.estimatedCost == null ? '' : ` (${money(profit.estimatedCost)})`}, where estimated
-        cost is each role's estimated hours × that role's cost rate. Actual profit = invoiced
-        service revenue ({money(profit?.actualRevenue ?? null)}) − actual labor cost (
-        {money(profitability.laborCost)}) — the Billing panel's revenue, priced against the hours in
-        the table above. Reimbursements are excluded from both sides. {LABOR_COST_BASIS_NOTE}
+        cost is each role's estimated hours × that role's cost rate. Actual profit = service
+        revenue from the hours as invoicing prices them ({money(profit?.actualRevenue ?? null)}) −
+        actual labor cost ({money(profitability.laborCost)}), priced against the hours in the
+        table above (not the sent invoice's own figure). Reimbursements are excluded from both sides. {LABOR_COST_BASIS_NOTE}
       </p>
     </section>
   )
