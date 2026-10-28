@@ -190,6 +190,31 @@ describe('Client Recap page layout', () => {
     expect(await screen.findByText('Matches invoice')).toBeInTheDocument()
     expect(screen.queryByText('On estimate')).not.toBeInTheDocument()
   })
+
+  // featreq-50a059cd: the Invoice tile says where its figure came from.
+  it('prints where the Invoice figure comes from: a sent invoice or "Not invoiced yet"', async () => {
+    mockFetch.mockResolvedValue({
+      ...RECAP,
+      billing: {
+        ...RECAP.billing!,
+        invoice: { amount: 2300, sentMonths: 1, months: 1, caption: 'From invoice #12, sent September 2, 2026' },
+      },
+    })
+    const { unmount } = render(<ClientRecapPage />)
+    expect(await screen.findByText('From invoice #12, sent September 2, 2026')).toBeInTheDocument()
+    expect(screen.getByText('$2,300.00')).toBeInTheDocument()
+    unmount()
+
+    mockFetch.mockResolvedValue({
+      ...RECAP,
+      billing: {
+        ...RECAP.billing!,
+        invoice: { amount: 2202, sentMonths: 0, months: 1, caption: 'Not invoiced yet' },
+      },
+    })
+    render(<ClientRecapPage />)
+    expect(await screen.findByText('Not invoiced yet')).toBeInTheDocument()
+  })
 })
 
 /**
@@ -222,9 +247,8 @@ describe('Client Recap page — Billing says when it is a restatement', () => {
 
   it('warns on a quarterly recap that the rates are today’s', async () => {
     render(<ClientRecapPage />)
-    const caption = await screen.findByText(/Priced at the client's current rates and plans/)
+    const caption = await screen.findByText(/Months without a sent invoice are priced at the client's current rates and plans/)
     expect(caption).toHaveTextContent(/not the rates in force each month/)
-    expect(caption).toHaveTextContent(/all 3 months/)
     expect(caption).toHaveTextContent(/part-way through the quarter/)
   })
 
@@ -237,9 +261,8 @@ describe('Client Recap page — Billing says when it is a restatement', () => {
       monthsInPeriod: 12,
     })
     render(<ClientRecapPage />)
-    const caption = await screen.findByText(/Priced at the client's current rates and plans/)
+    const caption = await screen.findByText(/Months without a sent invoice are priced at the client's current rates and plans/)
     expect(caption).toHaveTextContent(/part-way through the year/)
-    expect(caption).toHaveTextContent(/all 12 months/)
   })
 
   it('says nothing of the sort on a MONTHLY recap, where the figure IS the invoice', async () => {
@@ -253,7 +276,7 @@ describe('Client Recap page — Billing says when it is a restatement', () => {
     render(<ClientRecapPage />)
     await waitFor(() => expect(screen.getByText('Invoice')).toBeInTheDocument())
     expect(
-      screen.queryByText(/Priced at the client's current rates and plans/),
+      screen.queryByText(/Months without a sent invoice are priced at the client's current rates and plans/),
     ).not.toBeInTheDocument()
   })
 })

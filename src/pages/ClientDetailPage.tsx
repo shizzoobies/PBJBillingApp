@@ -122,6 +122,7 @@ import { retainerPosition } from '../lib/retainerPosition'
 // shared with the invoice, so the block below can never quote a rate the
 // invoice would not charge.
 import { billRateAt } from '../../lib/rate-history.js'
+import { estimatedMonthlyInvoice } from '../../lib/hourly-estimate.js'
 import {
   addDays,
   clientName,
@@ -2697,46 +2698,143 @@ export function PlanChecklistsBody({ client, data }: { client: Client; data: App
   )
 }
 
-function EstimatedRoleHours({
+type EstimateHoursField = 'estimatedBookkeeperHours' | 'estimatedAccountantHours' | 'estimatedCfoHours'
+
+export function EstimatedRoleHours({
   client,
   onCommit,
 }: {
   client: Client
   onCommit: (patch: Partial<Client>) => void
 }) {
-  const bookkeeper = client.estimatedBookkeeperHours ?? 0
-  const accountant = client.estimatedAccountantHours ?? 0
-  const cfo = client.estimatedCfoHours ?? 0
+  // What is typed in a field before it saves, so the estimate under the fields
+  // moves with every keystroke instead of after the autosave. A draft counts
+  // only while the saved value it was typed against is still the saved value.
+  const [drafts, setDrafts] = useState<
+    Partial<Record<EstimateHoursField, { value: number | null; base: number | null }>>
+  >({})
+  const hoursOf = (field: EstimateHoursField): number | null => {
+    const draft = drafts[field]
+    const saved = client[field] ?? null
+    return draft && draft.base === saved ? draft.value : saved
+  }
+  const fieldProps = (field: EstimateHoursField) => ({
+    value: client[field] ?? null,
+    onDraft: (value: number | null) =>
+      setDrafts((prev) => ({ ...prev, [field]: { value, base: client[field] ?? null } })),
+    onCommit: (next: number | null) => onCommit({ [field]: next ?? undefined }),
+  })
+  const bookkeeper = hoursOf('estimatedBookkeeperHours') ?? 0
+  const accountant = hoursOf('estimatedAccountantHours') ?? 0
+  const cfo = hoursOf('estimatedCfoHours') ?? 0
   const total = bookkeeper + accountant + cfo
   return (
     <div className="field full-row estimated-role-hours">
       <span>Estimated monthly hours</span>
       <div className="form-grid two-col">
-        <SaveNumberField
-          label="Bookkeeper"
-          step="any"
-          min="0"
-          value={client.estimatedBookkeeperHours ?? null}
-          onCommit={(next) => onCommit({ estimatedBookkeeperHours: next ?? undefined })}
-        />
-        <SaveNumberField
-          label="Accountant"
-          step="any"
-          min="0"
-          value={client.estimatedAccountantHours ?? null}
-          onCommit={(next) => onCommit({ estimatedAccountantHours: next ?? undefined })}
-        />
-        <SaveNumberField
-          label="CFO"
-          step="any"
-          min="0"
-          value={client.estimatedCfoHours ?? null}
-          onCommit={(next) => onCommit({ estimatedCfoHours: next ?? undefined })}
-        />
+        <SaveNumberField label="Bookkeeper" step="any" min="0" {...fieldProps('estimatedBookkeeperHours')} />
+        <SaveNumberField label="Accountant" step="any" min="0" {...fieldProps('estimatedAccountantHours')} />
+        <SaveNumberField label="CFO" step="any" min="0" {...fieldProps('estimatedCfoHours')} />
       </div>
       <small className="field-helper">
         Total: {total} hrs/mo · For planning only — does not affect invoices.
       </small>
+      {client.billingMode === 'hourly' ? (
+        <MonthlyInvoiceEstimate
+          client={client}
+          hours={{
+            estimatedBookkeeperHours: bookkeeper,
+            estimatedAccountantHours: accountant,
+            estimatedCfoHours: cfo,
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * "Estimated monthly invoice: $X" under the estimated hours of an HOURLY client
+ * (featreq-a9de307f): the hours in the fields above priced at each role's bill
+ * rate, through the one helper the Client Recap's estimate uses
+ * (lib/hourly-estimate.js), so the two cannot disagree. Owner-only, like the
+ * Hourly rates block it reads from; renders nothing until the rate history has
+ * arrived, so a half-loaded list never flashes a wrong figure.
+ */
+function MonthlyInvoiceEstimate({
+  client,
+  hours,
+}: {
+  client: Client
+  hours: Record<EstimateHoursField, number>
+}) {
+  const { data, ownerMode } = useAppContext()
+  const [billRateVersions, setBillRateVersions] = useState<BillRateVersion[] | null>(null)
+  useEffect(() => {
+    if (!ownerMode) return
+    const controller = new AbortController()
+    void fetchRateVersions(controller.signal)
+      .then(({ billRateVersions: rows }) => setBillRateVersions(rows))
+      .catch(() => {})
+    return () => controller.abort()
+  }, [ownerMode])
+
+  if (!ownerMode || billRateVersions === null) return null
+
+  const period = localDateOnly(new Date()).slice(0, 7)
+  const estimate = estimatedMonthlyInvoice({
+    client: { ...client, ...hours },
+    employees: data.employees ?? [],
+    billRateVersions,
+    period,
+    // Same fallback the Client Recap uses: with nobody assigned in a role, whoever
+    // logged time on this client this month prices it.
+    loggedEmployeeIds: (data.timeEntries ?? [])
+      .filter((entry) => entry.clientId === client.id && entry.date.startsWith(period))
+      .map((entry) => entry.employeeId),
+  })
+  if (estimate.basis === 'none') {
+    return (
+      <p className="muted-text">
+        Estimated monthly invoice: set hourly rates on the Team page and assign this client&rsquo;s
+        team first.
+      </p>
+    )
+  }
+  // Hours but not one rate to price them: a $0.00 headline would be a lie.
+  if (estimate.unrated.length > 0 && estimate.total === 0) {
+    const roles = estimate.unrated.join(' and ')
+    const who = estimate.unrated.length === 1 ? `a ${estimate.unrated[0]}-tier person` : 'someone in those tiers'
+    return (
+      <p className="muted-text">
+        Estimated monthly invoice: no rate for the {roles} hours; assign {who} or set rates.
+      </p>
+    )
+  }
+  // Bookkeeper first, as the fields above read; a role with no hours is named
+  // with 0 h and no rate.
+  const breakdown = [...estimate.tiers]
+    .reverse()
+    .map((row) => {
+      const name = row.tier === 'CFO' ? 'CFO' : row.tier.toLowerCase()
+      if (row.hours > 0) {
+        return row.rate === null
+          ? `${name} ${row.hours} h × no rate`
+          : `${name} ${row.hours} h × ${currency.format(row.rate)}`
+      }
+      return `${name} 0 h`
+    })
+    .join(' + ')
+  return (
+    <div className="estimated-invoice">
+      <strong>Estimated monthly invoice: {currency.format(estimate.total)}</strong>
+      <small className="field-helper">{breakdown}</small>
+      {estimate.unrated.length > 0 ? (
+        <small className="field-helper">
+          (not counted: no rate for the {estimate.unrated.join(' and ')}{' '}
+          {estimate.unrated.length === 1 ? 'role' : 'roles'}; assign someone or set rates)
+        </small>
+      ) : null}
     </div>
   )
 }

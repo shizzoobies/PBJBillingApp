@@ -71,7 +71,7 @@ import {
 import { createPendingActionStore } from './lib/pending-actions.js'
 import { capacity, clientProfitability, deadlines, timeSummary } from './lib/firm-analytics.js'
 import { buildMemoryDigest, safeEqual, verifyElevenLabsSignature } from './lib/voice.js'
-import { buildClientRecap, buildMasterRecap } from './lib/client-recap.js'
+import { buildClientRecap, buildMasterRecap, recapMonths } from './lib/client-recap.js'
 import {
   isMaintenanceMode,
   isProviderWebhookPath,
@@ -5743,6 +5743,24 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      // The Billing tile's Invoice is the real invoice once it has been sent
+      // (featreq-50a059cd): owner only, this client's (and, for a sub billed on a
+      // master's combined invoice, the master's so the tile can name it).
+      const recapInvoices = includeFinancials
+        ? (
+            await Promise.all(
+              recapMonths(periodType, period).map((month) =>
+                appDataStore.listInvoices({ period: month }),
+              ),
+            )
+          )
+            .flat()
+            .filter(
+              (invoice) =>
+                invoice.clientId === clientId ||
+                (recapClient?.billToClientId && invoice.clientId === recapClient.billToClientId),
+            )
+        : []
       const recap = buildClientRecap(data, {
         clientId,
         periodType,
@@ -5752,6 +5770,7 @@ const server = createServer(async (request, response) => {
         billRateVersions,
         costRateVersions,
         salesTaxRecord,
+        invoices: recapInvoices,
       })
       if (!recap) {
         sendJson(response, 404, { error: 'Client not found' })

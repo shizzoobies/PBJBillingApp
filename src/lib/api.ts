@@ -3616,7 +3616,21 @@ export type ClientRecap = {
     monthlyRate: number | null
     monthsInPeriod: number
     planNames: string[]
+    /** The live service revenue (what Profitability measures against). */
     revenue: number
+    /**
+     * The Billing tile's Invoice: the live figure until a month's invoice has been sent,
+     * then that invoice's accounting total (featreq-50a059cd). Absent on a billing master,
+     * whose tile stays `revenue`.
+     */
+    invoice?: {
+      amount: number
+      /** Months in the period with a sent monthly invoice, out of `months`. */
+      sentMonths: number
+      months: number
+      /** "From invoice #N, sent <date>" / "Not invoiced yet" / "N of M months from sent invoices". */
+      caption: string
+    }
     reimbursements: Array<{ date: string; description: string; amount: number }>
     reimbursementTotal: number
   } | null
@@ -3738,8 +3752,9 @@ export type ClientRecapProjection = {
   /**
    * 'actual' — the month is closed, this is the invoice, not a projection.
    * 'plan' — fixed plan fee + reimbursements recorded so far.
-   * 'hourly' — extrapolated from hours logged across the business days elapsed.
-   * 'too_early' — an in-progress month with no elapsed business days to scale.
+   * 'hourly' — the larger of the estimated hours × rates and the service value so far
+   *   (never scaled by business days); `method` says which one it is.
+   * 'too_early' — an hourly month with no estimated hours and nothing billable booked yet.
    */
   basis: 'actual' | 'plan' | 'hourly' | 'too_early'
   isEstimate: boolean
