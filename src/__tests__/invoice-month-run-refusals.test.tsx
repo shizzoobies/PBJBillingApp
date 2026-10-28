@@ -401,9 +401,11 @@ describe('InvoiceMonthRun — a refusal that arrives after the editor is gone', 
     mockList.mockResolvedValue([{ ...invoice, number: null }])
     const refuse = pendingRefusal()
     render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
-    fireEvent.click(await screen.findByText('Acme'))
+    // The row's client cell: "Acme" is also in the ribbon's not-invoiced list.
+    const rowClient = { selector: '.invoice-run-client' }
+    fireEvent.click(await screen.findByText('Acme', rowClient))
     fireEvent.click(await screen.findByRole('button', { name: 'Mark reviewed' }))
-    fireEvent.click(screen.getByText('Acme'))
+    fireEvent.click(screen.getByText('Acme', rowClient))
 
     refuse()
 

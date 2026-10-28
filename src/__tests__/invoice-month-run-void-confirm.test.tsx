@@ -79,7 +79,8 @@ async function openEditor(tab: RegExp, number: string | null = 'INV-2026-08-001'
   render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
   fireEvent.click(await screen.findByRole('tab', { name: tab }))
   // An invoice with no number has no row text to click; the client name does.
-  fireEvent.click(await screen.findByText(number ?? 'Acme'))
+  // The row's own client cell: "Acme" is also in the ribbon's not-invoiced list.
+  fireEvent.click(await screen.findByText(number ?? 'Acme', { selector: number ? undefined : '.invoice-run-client' }))
 }
 
 const voidButton = () => screen.getByRole('button', { name: 'Void' })

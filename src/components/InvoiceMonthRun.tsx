@@ -77,6 +77,7 @@ import {
 } from '../../lib/payment-amount-mismatch.js'
 import { generatedCreditNote } from '../lib/accountCreditText'
 import { invoiceAddressee } from '../lib/completeness'
+import { summarizeInvoiceMonthTotals } from '../lib/invoiceMonthTotals'
 import { ListSearch } from './ListSearch'
 import {
   INVOICE_HOURS_ROLE_ROWS,
@@ -1455,15 +1456,16 @@ export function InvoiceMonthRun({
   }
 
   const live = ordered.filter((invoice) => invoice.status !== 'void')
+  // The ribbon's figures are the whole month's, like every other figure up
+  // here — the search narrows the tabs, never this. The per-status counts
+  // (To review, Reviewed, Past due...) live on the tabs below.
+  const ribbon = summarizeInvoiceMonthTotals(invoices, clients)
+  // Still needed by Regenerate (nothing unsent to rebuild) and "Remind all past due".
   const toReview = live.filter((invoice) => invoice.status === 'draft').length
   const reviewed = live.filter((invoice) => invoice.status === 'reviewed').length
-  const needALook = live.filter(needsALook).length
-  // Whole-month, like every other figure in the strip — the search narrows the
-  // tabs, never this.
   const pastDue = live.filter((invoice) => pastDueInvoice(invoice, today)).length
   // The Sent tab's whole-month count, for "Remind all sent" (not narrowed by the search).
   const sentCount = live.filter((invoice) => runTabOf(invoice, today) === 'sent').length
-  const monthTotal = live.reduce((sum, invoice) => sum + invoice.total, 0)
 
   // What a poll is waiting for: a live monthly invoice with no rating yet.
   // Retainers are never rated — one manual line, nothing to check — so a month
@@ -2069,25 +2071,37 @@ export function InvoiceMonthRun({
       </div>
 
       <div className="invoice-run-stats">
-        <div className="invoice-run-stat">
-          <span>To review</span>
-          <strong>{toReview}</strong>
-        </div>
-        <div className="invoice-run-stat">
-          <span>Reviewed</span>
-          <strong>{reviewed}</strong>
-        </div>
-        <div className={needALook > 0 ? 'invoice-run-stat is-flagged' : 'invoice-run-stat'}>
-          <span>Need a look</span>
-          <strong>{needALook}</strong>
-        </div>
-        <div className={pastDue > 0 ? 'invoice-run-stat is-flagged' : 'invoice-run-stat'}>
-          <span>Past due</span>
-          <strong>{pastDue}</strong>
-        </div>
+        {/* Once invoices have gone out (featreq-ea4a68cd): sent, processing, paid
+            or overdue monthly invoices - never drafts, reviewed or voided. */}
         <div className="invoice-run-stat">
           <span>Month total</span>
-          <strong>{currency.format(monthTotal)}</strong>
+          <strong>{currency.format(ribbon.monthTotal)}</strong>
+        </div>
+        <div className="invoice-run-stat">
+          <span>Service total</span>
+          <strong>{currency.format(ribbon.serviceTotal)}</strong>
+        </div>
+        <div className="invoice-run-stat">
+          <span>Reimburse total</span>
+          <strong>{currency.format(ribbon.reimburseTotal)}</strong>
+        </div>
+        <div className="invoice-run-stat">
+          <span>Clients invoiced</span>
+          <strong>{ribbon.clientsInvoiced}</strong>
+        </div>
+        <div className={ribbon.notInvoiced.length > 0 ? 'invoice-run-stat is-flagged' : 'invoice-run-stat'}>
+          <span>Clients not invoiced</span>
+          <strong>{ribbon.notInvoiced.length}</strong>
+          {ribbon.notInvoiced.length > 0 ? (
+            <details className="invoice-run-stat-who">
+              <summary>Who</summary>
+              <ul>
+                {ribbon.notInvoiced.map((client) => (
+                  <li key={client.id}>{client.name}</li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
         </div>
       </div>
 

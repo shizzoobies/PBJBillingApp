@@ -213,12 +213,12 @@ describe('the Past due tab', () => {
     expect(await screen.findByText(/Nothing is past its 30-day line/)).toBeInTheDocument()
   })
 
-  it('counts them in the stat strip, flagged when there are any', async () => {
-    await renderRun([invoice(), invoice({ id: 'inv-2', number: 'INV-2026-08-032' })])
-    const stat = (await screen.findByText('Past due', { selector: '.invoice-run-stat span' }))
-      .closest('div')
-    expect(stat?.textContent).toContain('2')
-    expect(stat?.className).toContain('is-flagged')
+  it('counts them on the tab only: the stat strip no longer carries Past due', async () => {
+    const run = await renderRun([invoice(), invoice({ id: 'inv-2', number: 'INV-2026-08-032' })])
+    expect(run.count(await run.tab(/^Past due/))).toBe('2')
+    expect(
+      screen.queryByText('Past due', { selector: '.invoice-run-stat span' }),
+    ).not.toBeInTheDocument()
   })
 })
 

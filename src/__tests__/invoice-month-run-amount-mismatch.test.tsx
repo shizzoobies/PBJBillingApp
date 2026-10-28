@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { InvoiceMonthRun } from '../components/InvoiceMonthRun'
 import type { Client, PersistedInvoice } from '../lib/types'
@@ -91,10 +91,13 @@ function makeInvoice(over: Partial<PersistedInvoice> = {}): PersistedInvoice {
 const NOTICE =
   "The client paid $350.00; this invoice's total is $400.00. It is recorded as paid. Bill or refund the difference, then mark this as handled."
 
-const needALookStat = () => {
-  const label = screen.getByText('Need a look')
-  return within(label.parentElement as HTMLElement).getByText(/^\d+$/)
-}
+// The "Need a look" count left the stat strip (featreq-ea4a68cd); what remains
+// is the amber marker on each tab, which says how many there need a look.
+const needALookCount = () =>
+  screen.getAllByRole('tab').reduce((total, tab) => {
+    const match = /(\d+) needs? a look/.exec(tab.textContent ?? '')
+    return total + (match ? Number(match[1]) : 0)
+  }, 0)
 
 beforeEach(() => {
   mockList.mockReset()
@@ -112,7 +115,7 @@ describe('a payment for a different amount than the invoice total', () => {
     mockList.mockResolvedValue([makeInvoice()])
     render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
 
-    await waitFor(() => expect(needALookStat()).toHaveTextContent('1'))
+    await waitFor(() => expect(needALookCount()).toBe(1))
     const paidTab = screen.getByRole('tab', { name: /Paid/ })
     expect(paidTab.querySelector('.invoice-run-tab-flag')).not.toBeNull()
     // The other tabs hold nothing flagged.
@@ -175,14 +178,14 @@ describe('a payment for a different amount than the invoice total', () => {
     ])
     render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
 
-    await waitFor(() => expect(needALookStat()).toHaveTextContent('0'))
+    await waitFor(() => expect(needALookCount()).toBe(0))
   })
 
   it('does not count an invoice whose mismatch was already handled', async () => {
     mockList.mockResolvedValue([makeInvoice({ emailLog: [marker, handled] })])
     render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
 
-    await waitFor(() => expect(needALookStat()).toHaveTextContent('0'))
+    await waitFor(() => expect(needALookCount()).toBe(0))
     expect(
       screen.getByRole('tab', { name: /Paid/ }).querySelector('.invoice-run-tab-flag'),
     ).toBeNull()
@@ -212,7 +215,7 @@ describe('a payment for a different amount than the invoice total', () => {
     await waitFor(() => expect(mockAck).toHaveBeenCalledWith('inv-1'))
     await waitFor(() => expect(screen.queryByText(NOTICE)).not.toBeInTheDocument())
     expect(screen.queryByText(/Paid \$350\.00, total \$400\.00/)).not.toBeInTheDocument()
-    expect(needALookStat()).toHaveTextContent('0')
+    expect(needALookCount()).toBe(0)
   })
 
   it('says a refusal inline instead of swallowing it, and keeps the flag', async () => {
@@ -228,7 +231,7 @@ describe('a payment for a different amount than the invoice total', () => {
       await screen.findByText('Only owners can mark a payment mismatch handled'),
     ).toBeInTheDocument()
     expect(screen.getByText(NOTICE)).toBeInTheDocument()
-    expect(needALookStat()).toHaveTextContent('1')
+    expect(needALookCount()).toBe(1)
   })
 })
 
@@ -255,7 +258,7 @@ describe('a second payment on a paid invoice, and how many are waiting', () => {
     mockList.mockResolvedValue([makeInvoice({ emailLog: [duplicate] })])
     render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
 
-    await waitFor(() => expect(needALookStat()).toHaveTextContent('1'))
+    await waitFor(() => expect(needALookCount()).toBe(1))
     fireEvent.click(await screen.findByRole('tab', { name: /Paid/ }))
     expect(await screen.findByText('Second payment $400.00')).toBeInTheDocument()
     fireEvent.click(await screen.findByText('INV-2026-08-001'))
@@ -284,7 +287,7 @@ describe('a second payment on a paid invoice, and how many are waiting', () => {
     render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
 
     // One invoice, however many payments: the stat counts invoices.
-    await waitFor(() => expect(needALookStat()).toHaveTextContent('1'))
+    await waitFor(() => expect(needALookCount()).toBe(1))
     fireEvent.click(await screen.findByRole('tab', { name: /Paid/ }))
     expect(await screen.findByText('Second payment $400.00 (2 unhandled)')).toBeInTheDocument()
     fireEvent.click(await screen.findByText('INV-2026-08-001'))
@@ -319,7 +322,7 @@ describe('a second payment on a paid invoice, and how many are waiting', () => {
     ])
     render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
 
-    await waitFor(() => expect(needALookStat()).toHaveTextContent('0'))
+    await waitFor(() => expect(needALookCount()).toBe(0))
   })
 })
 

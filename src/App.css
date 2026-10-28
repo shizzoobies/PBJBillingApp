@@ -12624,6 +12624,23 @@ tr.is-inactive-client .client-name-link {
   color: #8a5a06;
 }
 
+/* The names behind "Clients not invoiced" (featreq-ea4a68cd). */
+.invoice-run-stat-who {
+  font-size: 12px;
+}
+
+.invoice-run-stat-who summary {
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.invoice-run-stat-who ul {
+  margin: 4px 0 0;
+  max-height: 160px;
+  overflow-y: auto;
+  padding-left: 16px;
+}
+
 /* A paid invoice, stated once at the top of its editor. Deliberately calm
    rather than red: nothing has gone wrong, the record is simply closed. */
 .invoice-run-locked {

@@ -120,7 +120,7 @@ describe('the month run — sort and search', () => {
       { target: { value: 'zebra' } },
     )
     // $50 + $900 — the strip describes the month, not the search.
-    expect(screen.getByText('$950.00')).toBeInTheDocument()
+    expect(screen.getByText('Month total').closest('.invoice-run-stat')).toHaveTextContent('$950.00')
   })
 
   it('the OPEN editor row is exempt from the filter — unsaved edits cannot be unmounted by typing', async () => {

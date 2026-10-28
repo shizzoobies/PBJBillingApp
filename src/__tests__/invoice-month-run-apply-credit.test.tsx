@@ -103,10 +103,13 @@ const creditRow = (over: Partial<AccountCredit> = {}) =>
     ...over,
   }) as AccountCredit
 
-const needALookStat = () => {
-  const label = screen.getByText('Need a look')
-  return within(label.parentElement as HTMLElement).getByText(/^\d+$/)
-}
+// The "Need a look" count left the stat strip (featreq-ea4a68cd); what remains
+// is the amber marker on each tab, which says how many there need a look.
+const needALookCount = () =>
+  screen.getAllByRole('tab').reduce((total, tab) => {
+    const match = /(\d+) needs? a look/.exec(tab.textContent ?? '')
+    return total + (match ? Number(match[1]) : 0)
+  }, 0)
 
 async function openEditor(clients: Client[] = [acme]) {
   render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
@@ -156,7 +159,7 @@ describe('Apply as credit on a second payment', () => {
     fireEvent.click(within(panel).getByRole('button', { name: 'Add $412.50 to credit' }))
 
     expect(await screen.findByText('That payment is still settling - try once it clears.')).toBeInTheDocument()
-    expect(needALookStat()).toHaveTextContent('1')
+    expect(needALookCount()).toBe(1)
   })
 
   it('Mark as handled is disabled while Apply as credit is running', async () => {
@@ -292,14 +295,14 @@ describe('Apply as credit on a second payment', () => {
       replayed: false,
     })
     await openEditor()
-    expect(needALookStat()).toHaveTextContent('1')
+    expect(needALookCount()).toBe(1)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Apply as credit' }))
     const panel = await screen.findByRole('group', { name: 'Apply as credit' })
     fireEvent.click(within(panel).getByRole('button', { name: 'Add $412.50 to credit' }))
 
     expect(await screen.findByText("Added $412.50 to Acme's credit on account")).toBeInTheDocument()
-    await waitFor(() => expect(needALookStat()).toHaveTextContent('0'))
+    await waitFor(() => expect(needALookCount()).toBe(0))
     expect(screen.queryByRole('button', { name: 'Apply as credit' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Mark as handled' })).not.toBeInTheDocument()
     expect(screen.queryByText('Second payment $412.50')).not.toBeInTheDocument()
@@ -350,7 +353,7 @@ describe('Apply as credit on a second payment', () => {
     fireEvent.click(within(panel).getByRole('button', { name: 'Add $412.50 to credit' }))
 
     expect(await screen.findByText('That payment is still settling - try once it clears.')).toBeInTheDocument()
-    expect(needALookStat()).toHaveTextContent('1')
+    expect(needALookCount()).toBe(1)
     expect(screen.queryByText(/Added \$/)).not.toBeInTheDocument()
   })
 
