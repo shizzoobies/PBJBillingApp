@@ -5744,7 +5744,8 @@ const server = createServer(async (request, response) => {
       }
 
       // The Billing tile's Invoice is the real invoice once it has been sent
-      // (featreq-50a059cd): owner only, this client's, the months in range.
+      // (featreq-50a059cd): owner only, this client's (and, for a sub billed on a
+      // master's combined invoice, the master's so the tile can name it).
       const recapInvoices = includeFinancials
         ? (
             await Promise.all(
@@ -5754,7 +5755,11 @@ const server = createServer(async (request, response) => {
             )
           )
             .flat()
-            .filter((invoice) => invoice.clientId === clientId)
+            .filter(
+              (invoice) =>
+                invoice.clientId === clientId ||
+                (recapClient?.billToClientId && invoice.clientId === recapClient.billToClientId),
+            )
         : []
       const recap = buildClientRecap(data, {
         clientId,

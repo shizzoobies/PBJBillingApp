@@ -2781,11 +2781,17 @@ function MonthlyInvoiceEstimate({
 
   if (!ownerMode || billRateVersions === null) return null
 
+  const period = localDateOnly(new Date()).slice(0, 7)
   const estimate = estimatedMonthlyInvoice({
     client: { ...client, ...hours },
     employees: data.employees ?? [],
     billRateVersions,
-    period: localDateOnly(new Date()).slice(0, 7),
+    period,
+    // Same fallback the Client Recap uses: with nobody assigned in a role, whoever
+    // logged time on this client this month prices it.
+    loggedEmployeeIds: (data.timeEntries ?? [])
+      .filter((entry) => entry.clientId === client.id && entry.date.startsWith(period))
+      .map((entry) => entry.employeeId),
   })
   if (estimate.basis === 'none') {
     return (
@@ -2801,15 +2807,23 @@ function MonthlyInvoiceEstimate({
     .reverse()
     .map((row) => {
       const name = row.tier === 'CFO' ? 'CFO' : row.tier.toLowerCase()
-      return row.hours > 0
-        ? `${name} ${row.hours} h × ${currency.format(row.rate ?? 0)}`
-        : `${name} 0 h`
+      if (row.hours > 0) {
+        return row.rate === null
+          ? `${name} ${row.hours} h × no rate`
+          : `${name} ${row.hours} h × ${currency.format(row.rate)}`
+      }
+      return `${name} 0 h`
     })
     .join(' + ')
   return (
     <div className="estimated-invoice">
       <strong>Estimated monthly invoice: {currency.format(estimate.total)}</strong>
       <small className="field-helper">{breakdown}</small>
+      {estimate.unrated.length > 0 ? (
+        <small className="field-helper">
+          (not counted: assign a {estimate.unrated.join(' / ')}-tier person or set rates)
+        </small>
+      ) : null}
     </div>
   )
 }

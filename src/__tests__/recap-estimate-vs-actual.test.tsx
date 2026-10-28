@@ -279,7 +279,7 @@ describe('Profitability — estimate, actual, over/under for profit', () => {
     )
     const caption = screen.getByText(/Estimated profit = expected revenue/)
     expect(caption).toHaveTextContent(/estimated hours × that role's cost rate/)
-    expect(caption).toHaveTextContent(/Actual profit = invoiced service revenue/)
+    expect(caption).toHaveTextContent(/Actual profit = service revenue from the hours as invoicing prices them/)
     expect(caption).toHaveTextContent(/Reimbursements are excluded from both sides/)
   })
 

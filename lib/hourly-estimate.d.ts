@@ -23,6 +23,8 @@ export type EstimateTier = {
 export type MonthlyInvoiceEstimate = {
   total: number
   hasEstimate: boolean
+  /** Roles with estimated hours but no rate: their hours are NOT counted in `total`. */
+  unrated: Array<'CFO' | 'Accountant' | 'Bookkeeper'>
   basis: 'rates' | 'client_rate' | 'none'
   tiers: EstimateTier[]
 }

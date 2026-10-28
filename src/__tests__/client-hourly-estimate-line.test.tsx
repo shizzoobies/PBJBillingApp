@@ -95,6 +95,29 @@ describe('Estimated monthly invoice (Billing tab)', () => {
     expect(fetchRateVersions).not.toHaveBeenCalled()
   })
 
+  it('never prints a $0.00 rate: a role with hours and no rate is named and not counted', async () => {
+    renderHours({ ...hourly, estimatedCfoHours: 2 } as unknown as Client)
+    expect(await screen.findByText('Estimated monthly invoice: $1,250.00')).toBeInTheDocument()
+    expect(screen.getByText(/CFO 2 h × no rate/)).toBeInTheDocument()
+    expect(screen.getByText(/not counted: assign a CFO-tier person or set rates/)).toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('$0.00')
+  })
+
+  it('prices an unassigned role from whoever logged time on the client this month, as the recap does', async () => {
+    contextValue = {
+      ownerMode: true,
+      data: {
+        clients: [hourly],
+        employees,
+        timeEntries: [{ id: 't1', clientId: 'c1', employeeId: 'emp-lisa', date: '2026-09-03', minutes: 60 }],
+      } as unknown as AppData,
+    } as unknown as AppContextValue
+    const unassigned = { ...hourly, assignedBookkeeperIds: ['emp-ann'] } as unknown as Client
+    render(<EstimatedRoleHours client={unassigned} onCommit={vi.fn()} />)
+    expect(await screen.findByText('Estimated monthly invoice: $1,250.00')).toBeInTheDocument()
+    expect(screen.getByText('bookkeeper 10 h × $95.00 + accountant 2 h × $150.00 + CFO 0 h')).toBeInTheDocument()
+  })
+
   it('says to set rates first instead of showing $0.00', async () => {
     fetchRateVersions = vi.fn(async () => ({ billRateVersions: [], costRateVersions: [] }))
     renderHours(hourly)

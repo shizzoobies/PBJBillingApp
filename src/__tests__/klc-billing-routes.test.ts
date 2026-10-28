@@ -259,8 +259,10 @@ describe('a sub can see the invoice its work was billed ON', () => {
 
 describe('the Recap branches to the roll-up for a master and to nothing else', () => {
   const block = () =>
-    // 5400: the route grew by the owner's stored-invoice load (featreq-50a059cd).
-    routeBlock(/if \(normalizedPath === '\/api\/client-recap' && request\.method === 'GET'\)/, 5400)
+    routeBlockUntil(
+      /if \(normalizedPath === '\/api\/client-recap' && request\.method === 'GET'\)/,
+      '// Owner-only: record/upsert sales-tax figures',
+    )
 
   it('builds every ACTIVE sub’s recap the ordinary way, then rolls them up', () => {
     const text = block()
