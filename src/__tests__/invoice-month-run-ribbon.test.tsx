@@ -148,3 +148,62 @@ describe('the month run ribbon', () => {
     expect(screen.getByRole('tab', { name: /^To review/ })).toBeInTheDocument()
   })
 })
+
+describe('the ribbon with the owner estimate (loadEstimate)', () => {
+  const estimateFor = (clientsOut: Array<{ id: string; name: string; service: number }>) => ({
+    period: '2026-08',
+    monthTotal: 0,
+    serviceTotal: 0,
+    reimburseTotal: 0,
+    clients: clientsOut.map((entry) => ({
+      clientId: entry.id,
+      clientName: entry.name,
+      basis: entry.service > 0 ? ('projected' as const) : ('too_early' as const),
+      detail: entry.service > 0 ? 'plan' : 'too early',
+      service: entry.service > 0 ? entry.service : null,
+      reimburse: 0,
+      total: entry.service > 0 ? entry.service : null,
+    })),
+  })
+
+  it('lists only clients with something to bill, and says so', async () => {
+    mockList.mockResolvedValue([invoice('1', 'client-acme')])
+    const loadEstimate = vi.fn(async (period: string) => ({
+      ...estimateFor([
+        { id: 'client-bolt', name: 'Bolt', service: 500 },
+        { id: 'client-cedar', name: 'Cedar', service: 0 },
+      ]),
+      period,
+    }))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} loadEstimate={loadEstimate} />)
+    await waitFor(() =>
+      expect(stat('Clients not invoiced')).toHaveTextContent(/Clients with something to bill/),
+    )
+    const left = stat('Clients not invoiced')
+    expect(within(left).getByText('1')).toBeInTheDocument()
+    expect(within(left).getByText('Bolt')).toBeInTheDocument()
+    expect(within(left).queryByText('Cedar')).not.toBeInTheDocument()
+    expect(within(left).queryByText('Dune')).not.toBeInTheDocument()
+    expect(loadEstimate).toHaveBeenCalledWith(expect.stringMatching(/^\d{4}-\d{2}$/), expect.anything())
+  })
+
+  it('keeps the roster fallback (and its disclosure) while the estimate is pending or failed', async () => {
+    mockList.mockResolvedValue([invoice('1', 'client-acme')])
+    const loadEstimate = vi.fn().mockRejectedValue(new Error('nope'))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} loadEstimate={loadEstimate} />)
+    await waitFor(() => expect(within(stat('Clients invoiced')).getByText('1')).toBeInTheDocument())
+    await waitFor(() => expect(loadEstimate).toHaveBeenCalled())
+    expect(stat('Clients not invoiced')).toHaveTextContent(/including any with nothing to bill/)
+    expect(within(stat('Clients not invoiced')).getByText('Dune')).toBeInTheDocument()
+  })
+
+  it('does not ask for the estimate in preview', async () => {
+    mockList.mockResolvedValue([])
+    const loadEstimate = vi.fn()
+    render(
+      <InvoiceMonthRun clients={clients} onPrint={vi.fn()} loadEstimate={loadEstimate} previewMode />,
+    )
+    await waitFor(() => expect(mockList).toHaveBeenCalled())
+    expect(loadEstimate).not.toHaveBeenCalled()
+  })
+})

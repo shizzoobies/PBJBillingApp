@@ -1,5 +1,6 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { InvoiceEstimateRibbon } from '../components/InvoiceEstimateRibbon'
 import { invoiceRecapRequest, type InvoiceRecapRow } from '../lib/api'
 import {
   INVOICE_STATUS_LABELS,
@@ -9,6 +10,9 @@ import {
 } from '../lib/utils'
 
 /**
+ * `ownerEstimate` adds the owner's estimate ribbon above the cards; App passes it
+ * only for the owner outside preview.
+ *
  * The monthly invoice recap (featreq-0c2d4ce5) — the one invoicing surface
  * staff can see, built so they can record each month's deposits correctly:
  * per client, the total billed, the accounting-services remainder, and every
@@ -26,7 +30,7 @@ function currentMonth(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
 }
 
-export function InvoiceRecapPage() {
+export function InvoiceRecapPage({ ownerEstimate = false }: { ownerEstimate?: boolean }) {
   const [period, setPeriod] = useState(currentMonth)
   const [rows, setRows] = useState<InvoiceRecapRow[]>([])
   const [loading, setLoading] = useState(true)
@@ -89,6 +93,10 @@ export function InvoiceRecapPage() {
           </button>
         </div>
       </div>
+
+      {/* The owner's estimate (featreq-a5e14899). The route decides who gets it
+          (owner, outside preview); staff and preview never request it. */}
+      {ownerEstimate ? <InvoiceEstimateRibbon period={period} /> : null}
 
       <p className="invoice-recap-hint">
         Every invoice sent for {getBillingPeriodLabel(period)} for your clients: the total

@@ -9,7 +9,11 @@
  * total minus reimbursed, prepayment and credit-applied lines.
  */
 import { buildInvoiceRecap } from '../../lib/invoice-recap.js'
-import { lifecycleOf } from './clientLifecycle'
+import {
+  clientsLeftToInvoice,
+  isInvoiceRunClient,
+  type InvoiceEstimateRow,
+} from '../../lib/invoice-estimate.js'
 import type { Client, PersistedInvoice } from './types'
 
 export type InvoiceMonthTotals = {
@@ -21,28 +25,24 @@ export type InvoiceMonthTotals = {
   reimburseTotal: number
   /** Distinct clients holding a sent invoice (a billing master counts once). */
   clientsInvoiced: number
-  /** Clients the month run would invoice that have no sent invoice yet, A to Z. */
+  /** Clients still to invoice (no sent invoice yet), A to Z. */
   notInvoiced: Array<{ id: string; name: string }>
+  /**
+   * Where `notInvoiced` came from. 'estimate': the owner's estimate rows, so only
+   * clients with something to bill. 'roster': the fallback while that request is
+   * pending or failed - every client the run would offer, including any with
+   * nothing to bill this month.
+   */
+  notInvoicedFrom: 'estimate' | 'roster'
 }
 
 const cents = (value: number) => Math.round(value * 100) / 100
 
-/**
- * The clients the month run offers an invoice to: active, not invoiced outside
- * the app, and not billed on a master's invoice (the master stands for them).
- * Mirrors the generator's skips in `generateInvoices` (db/store.js).
- */
-function billableThisMonth(client: Client) {
-  return (
-    lifecycleOf(client) === 'active' &&
-    client.platformInvoicingOptOut !== true &&
-    !(typeof client.billToClientId === 'string' && client.billToClientId)
-  )
-}
-
 export function summarizeInvoiceMonthTotals(
   invoices: readonly PersistedInvoice[],
   clients: readonly Client[],
+  /** The owner's estimate rows for this month, once loaded (see lib/invoice-estimate.js). */
+  estimateRows?: readonly InvoiceEstimateRow[] | null,
 ): InvoiceMonthTotals {
   const rows = buildInvoiceRecap({
     invoices,
@@ -55,9 +55,14 @@ export function summarizeInvoiceMonthTotals(
     serviceTotal: cents(rows.reduce((sum, row) => sum + row.accountingTotal, 0)),
     reimburseTotal: cents(rows.reduce((sum, row) => sum + row.reimbursedTotal, 0)),
     clientsInvoiced: invoiced.size,
-    notInvoiced: clients
-      .filter((client) => billableThisMonth(client) && !invoiced.has(client.id))
-      .map((client) => ({ id: client.id, name: client.name }))
+    // The estimate is read when the month opens; a send since then moves a client
+    // into `invoiced` straight away, so that wins over the older estimate.
+    notInvoiced: (estimateRows
+      ? clientsLeftToInvoice(estimateRows)
+      : clients.filter(isInvoiceRunClient).map((client) => ({ id: client.id, name: client.name }))
+    )
+      .filter((client) => !invoiced.has(client.id))
       .sort((a, b) => a.name.localeCompare(b.name)),
+    notInvoicedFrom: estimateRows ? 'estimate' : 'roster',
   }
 }

@@ -78,6 +78,7 @@ import {
 import { generatedCreditNote } from '../lib/accountCreditText'
 import { invoiceAddressee } from '../lib/completeness'
 import { summarizeInvoiceMonthTotals } from '../lib/invoiceMonthTotals'
+import type { InvoiceEstimate } from '../lib/api'
 import { ListSearch } from './ListSearch'
 import {
   INVOICE_HOURS_ROLE_ROWS,
@@ -898,6 +899,7 @@ export function InvoiceMonthRun({
   onClientNoteKept,
   onPrint,
   refreshToken = 0,
+  loadEstimate,
   ref,
 }: {
   clients: Client[]
@@ -951,6 +953,14 @@ export function InvoiceMonthRun({
    * sections must not disagree about whether something has been sent.
    */
   refreshToken?: number
+  /**
+   * Reads the owner's estimate of the month (`GET /api/invoice-recap/estimate`).
+   * The ribbon's "Clients not invoiced" uses it to name only the clients that
+   * have something to bill; without it, or while it is pending or failed, the
+   * ribbon falls back to the whole roster and says so. Injected rather than
+   * imported so the component keeps its API-only test mocks.
+   */
+  loadEstimate?: (period: string, signal?: AbortSignal) => Promise<InvoiceEstimate>
   /** See `InvoiceMonthRunHandle` — the page's one way to move this run. */
   ref?: Ref<InvoiceMonthRunHandle>
 }) {
@@ -1240,6 +1250,27 @@ export function InvoiceMonthRun({
   // covers the effect.
   const shownPeriod = useRef(period)
 
+  // The owner's estimate of this month (who still has something to bill). Read
+  // once per month and on the page's refresh, NOT on every save: it projects
+  // every client, and the ribbon already folds in what changed since by
+  // dropping any client that has since been sent. A failure just leaves the
+  // ribbon on its roster fallback.
+  const [estimate, setEstimate] = useState<InvoiceEstimate | null>(null)
+  useEffect(() => {
+    if (!loadEstimate || previewMode) return
+    const controller = new AbortController()
+    setEstimate(null)
+    // Started from a promise so a loader that throws on the spot is just a failure.
+    Promise.resolve()
+      .then(() => loadEstimate(period, controller.signal))
+      .then((result) => {
+        if (!controller.signal.aborted) setEstimate(result)
+      })
+      .catch(() => {})
+    return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadEstimate is a stable module function
+  }, [period, refreshToken, previewMode])
+
   // Load whenever the period changes, or the page tells us an invoice moved
   // under us. `cancelled` guards against a slow response for a month she has
   // already navigated away from landing on top of the newer one — same shape
@@ -1466,8 +1497,16 @@ export function InvoiceMonthRun({
   // The ribbon's figures are the whole month's, like every other figure up
   // here — the search narrows the tabs, never this. The per-status counts
   // (To review, Reviewed, Past due...) live on the tabs below.
-  const ribbon = summarizeInvoiceMonthTotals(invoices, clients)
+  const ribbon = summarizeInvoiceMonthTotals(
+    invoices,
+    clients,
+    estimate && estimate.period === period ? estimate.clients : null,
+  )
   const ribbonReady = !loading && !loadFailed
+  const notInvoicedNote =
+    ribbon.notInvoicedFrom === 'estimate'
+      ? 'Clients with something to bill this month and no sent invoice yet.'
+      : 'Active clients with no sent invoice yet, including any with nothing to bill this month.'
   // Still needed by Regenerate (nothing unsent to rebuild) and "Remind all past due".
   const toReview = live.filter((invoice) => invoice.status === 'draft').length
   const reviewed = live.filter((invoice) => invoice.status === 'reviewed').length
@@ -2108,14 +2147,14 @@ export function InvoiceMonthRun({
               ? 'invoice-run-stat is-flagged'
               : 'invoice-run-stat'
           }
-          title="Active clients with no sent invoice yet, including any with nothing to bill this month."
+          title={notInvoicedNote}
         >
           <span>Clients not invoiced</span>
           <strong>{ribbonReady ? ribbon.notInvoiced.length : '—'}</strong>
           {ribbonReady && ribbon.notInvoiced.length > 0 ? (
             <details className="invoice-run-stat-who">
               <summary>Who</summary>
-              <p>Active clients with no sent invoice yet, including any with nothing to bill this month.</p>
+              <p>{notInvoicedNote}</p>
               <ul>
                 {ribbon.notInvoiced.map((client) => (
                   <li key={client.id}>{client.name}</li>

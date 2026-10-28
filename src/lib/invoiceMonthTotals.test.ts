@@ -114,3 +114,47 @@ describe('summarizeInvoiceMonthTotals', () => {
     expect(totals.monthTotal).toBe(0.3)
   })
 })
+
+describe('summarizeInvoiceMonthTotals with the owner estimate', () => {
+  const row = (clientId: string, over: Record<string, unknown> = {}) => ({
+    clientId,
+    clientName: clientId.toUpperCase(),
+    basis: 'projected' as const,
+    detail: 'plan',
+    service: 500,
+    reimburse: 0,
+    total: 500,
+    ...over,
+  })
+
+  it('names only the clients with something to bill, not those with nothing to bill', () => {
+    const clients = [client('todo'), client('zero'), client('done')]
+    const totals = summarizeInvoiceMonthTotals([invoice('a', 'done')], clients, [
+      row('todo'),
+      row('zero', { service: 0, total: 0 }),
+      row('done', { basis: 'sent', detail: null }),
+    ])
+    expect(totals.notInvoicedFrom).toBe('estimate')
+    expect(totals.notInvoiced).toEqual([{ id: 'todo', name: 'TODO' }])
+  })
+
+  it('counts a too-early client only when reimbursements are already recorded', () => {
+    const clients = [client('c1'), client('c2')]
+    const totals = summarizeInvoiceMonthTotals([], clients, [
+      row('c1', { basis: 'too_early', detail: 'too early', service: null, reimburse: 0, total: null }),
+      row('c2', { basis: 'too_early', detail: 'too early', service: null, reimburse: 40, total: 40 }),
+    ])
+    expect(totals.notInvoiced.map((entry) => entry.id)).toEqual(['c2'])
+  })
+
+  it('drops a client sent since the estimate was read', () => {
+    const totals = summarizeInvoiceMonthTotals([invoice('a', 'c1')], [client('c1')], [row('c1')])
+    expect(totals.notInvoiced).toEqual([])
+  })
+
+  it('falls back to the roster while the estimate is not there', () => {
+    const totals = summarizeInvoiceMonthTotals([], [client('c1')], null)
+    expect(totals.notInvoicedFrom).toBe('roster')
+    expect(totals.notInvoiced).toEqual([{ id: 'c1', name: 'C1' }])
+  })
+})

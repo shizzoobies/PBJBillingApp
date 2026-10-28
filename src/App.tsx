@@ -4726,7 +4726,10 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
             The server scopes it by the owner-picked TEAM (teamClientIdSet) —
             never the task-widened visible set — so staff receive only the
             invoices of clients an owner put them on. */}
-        <Route path="/invoice-recap" element={<InvoiceRecapPage />} />
+        <Route
+          path="/invoice-recap"
+          element={<InvoiceRecapPage ownerEstimate={ownerMode && !previewMode} />}
+        />
         <Route
           path="/plans"
           element={

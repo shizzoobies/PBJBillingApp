@@ -1147,7 +1147,7 @@ function OwnerDashboardView() {
             <span>Active clients</span>
           </div>
         </div>
-        <Link to="/reports" className="dashboard-section-more">
+        <Link to="/invoice-recap" className="dashboard-section-more">
           View full report →
         </Link>
       </DashboardPanel>
@@ -1386,8 +1386,9 @@ function EmployeeDashboardView() {
   const touchedClientIds = new Set(monthEntries.map((e) => e.clientId))
   const activeClientCount = touchedClientIds.size
 
-  // Bookkeepers can't visit /reports (owner-only); route them to /time instead.
-  const kpiHref = role === 'owner' ? '/reports' : '/time'
+  // The owner's full report is the Invoice Recap with her estimate of the month's
+  // invoices (featreq-3b162946); bookkeepers go to /time.
+  const kpiHref = role === 'owner' ? '/invoice-recap' : '/time'
 
   // Show the 2FA nudge banner to non-owners who haven't enabled it yet,
   // but not while the owner is previewing as an employee.

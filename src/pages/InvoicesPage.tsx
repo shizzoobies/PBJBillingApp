@@ -57,6 +57,7 @@ import { prepaymentHoldOf } from '../lib/prepaymentHold'
 import {
   fetchRateVersions,
   generateInvoicesRequest,
+  invoiceEstimateRequest,
   listInvoicesRequest,
   sendInvoiceRequest,
 } from '../lib/api'
@@ -1088,6 +1089,9 @@ export function InvoicesPage({
             for its preview and print until they are pointed at stored data. */}
         <InvoiceMonthRun
           clients={data.clients}
+          // Owner-only page: the ribbon's "not invoiced" names come from the
+          // owner's estimate (the run skips the request in preview).
+          loadEstimate={(period, signal) => invoiceEstimateRequest(period, signal)}
           contacts={data.contacts}
           // The hours behind each invoice, for the review panel beside it
           // (featreq-8cec48db). Handed down as props rather than read from the

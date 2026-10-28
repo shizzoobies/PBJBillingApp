@@ -104,6 +104,22 @@ const projectedBilling = () =>
   screen.getByText('Projected billing').closest('.kpi-stat')?.querySelector('strong')
     ?.textContent ?? ''
 
+describe('DashboardPage: where "View full report" goes (featreq-3b162946)', () => {
+  const linkTarget = async () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <DashboardPage />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(mockRateVersions).toHaveBeenCalled())
+    return screen.getAllByText(/View full report|Open my time/)[0].closest('a')?.getAttribute('href')
+  }
+
+  it('takes the owner to the Invoice Recap, where her estimate of the month is', async () => {
+    expect(await linkTarget()).toBe('/invoice-recap')
+  })
+})
+
 describe('DashboardPage projects a pinned client at its pin', () => {
   it('bills a June-pinned client’s September hour at $40, not the newest $60', async () => {
     render(

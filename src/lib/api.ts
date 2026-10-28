@@ -68,6 +68,7 @@
 } from './types'
 import type { GroupAllocationMode } from '../../lib/group-allocation.js'
 import type { ScopeTag } from '../../lib/invoice-scope-retag.js'
+import type { InvoiceEstimate } from '../../lib/invoice-estimate.js'
 import type { SkipReasonCategory } from '../../lib/checklist-skip.js'
 import type { DashboardLayout } from '../../lib/dashboard-layout.js'
 
@@ -4965,6 +4966,28 @@ export async function invoiceRecapRequest(period: string) {
     )
   }
   return (await response.json()) as { period: string; rows: InvoiceRecapRow[] }
+}
+
+export type { InvoiceEstimate, InvoiceEstimateRow } from '../../lib/invoice-estimate.js'
+
+/**
+ * The OWNER's estimate of a month's invoices (featreq-a5e14899): sent invoices
+ * as they stand, everyone else as the Client Recap projects them. A 403 for
+ * anyone but the owner (and in preview) - callers must not request it then.
+ */
+export async function invoiceEstimateRequest(period: string, signal?: AbortSignal) {
+  const response = await apiFetch(
+    `/api/invoice-recap/estimate?period=${encodeURIComponent(period)}`,
+    { credentials: 'same-origin', signal },
+  )
+  if (!response.ok) {
+    const { message } = await safeError(response)
+    throw new ApiError(
+      response.status,
+      message || `Failed to load the invoice estimate (${response.status})`,
+    )
+  }
+  return (await response.json()) as InvoiceEstimate
 }
 
 /**
