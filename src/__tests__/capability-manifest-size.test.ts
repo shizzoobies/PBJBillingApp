@@ -18,10 +18,13 @@ const WHY =
   'condense the manifest (state each rule once) before shipping'
 
 describe('capability manifest size', () => {
+  // Measured as the Linux CI runner and the voice knowledge base see it: LF. A
+  // Windows checkout (autocrlf) writes CRLF to the working copy, which would add one
+  // byte per line (about 770 here) to a cap that is about the uploaded content.
   const manifest = readFileSync(
     path.join(process.cwd(), 'docs', 'capability-manifest.md'),
     'utf8',
-  )
+  ).replace(/\r\n/g, '\n')
 
   it(`stays at or under ${LIMIT.toLocaleString('en-US')} bytes`, () => {
     const bytes = Buffer.byteLength(manifest, 'utf8')
