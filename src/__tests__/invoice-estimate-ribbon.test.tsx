@@ -81,6 +81,12 @@ describe('the owner estimate ribbon', () => {
     expect(rowFor('Bolt')).toHaveTextContent('Projected · estimate')
   })
 
+  it('explains why the three totals can differ on sent rows', async () => {
+    mockEstimate.mockResolvedValue(estimate)
+    render(<InvoiceRecapPage ownerEstimate />)
+    expect(await screen.findByText(/Service excludes prepayments and credits applied/)).toBeInTheDocument()
+  })
+
   it('never shows $0.00 for a client whose estimate is unusable: it says why', async () => {
     mockEstimate.mockResolvedValue(estimate)
     render(<InvoiceRecapPage ownerEstimate />)

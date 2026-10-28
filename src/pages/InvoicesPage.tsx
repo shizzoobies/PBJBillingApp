@@ -502,6 +502,11 @@ function persistedToDisplay(
   }
 }
 
+// A stable module function (the month run keeps it out of its effect deps). It reads the
+// API at call time, so a test that mocks the API without this route just sees a failed load.
+const loadMonthEstimate = (period: string, signal?: AbortSignal) =>
+  invoiceEstimateRequest(period, signal)
+
 export function InvoicesPage({
   openPeriod = null,
   onOpenPeriodHandled,
@@ -1091,7 +1096,7 @@ export function InvoicesPage({
           clients={data.clients}
           // Owner-only page: the ribbon's "not invoiced" names come from the
           // owner's estimate (the run skips the request in preview).
-          loadEstimate={(period, signal) => invoiceEstimateRequest(period, signal)}
+          loadEstimate={loadMonthEstimate}
           contacts={data.contacts}
           // The hours behind each invoice, for the review panel beside it
           // (featreq-8cec48db). Handed down as props rather than read from the

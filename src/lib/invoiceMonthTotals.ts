@@ -57,8 +57,17 @@ export function summarizeInvoiceMonthTotals(
     clientsInvoiced: invoiced.size,
     // The estimate is read when the month opens; a send since then moves a client
     // into `invoiced` straight away, so that wins over the older estimate.
+    // A sent invoice VOIDED since the estimate was read leaves `invoiced` while the
+    // estimate still calls that client sent: it is left to invoice again.
     notInvoiced: (estimateRows
-      ? clientsLeftToInvoice(estimateRows)
+      ? [
+          ...clientsLeftToInvoice(estimateRows),
+          ...estimateRows
+            .filter((entry) => entry.basis === 'sent')
+            .map((entry) => clients.find((client) => client.id === entry.clientId))
+            .filter((client): client is Client => !!client && isInvoiceRunClient(client))
+            .map((client) => ({ id: client.id, name: client.name })),
+        ]
       : clients.filter(isInvoiceRunClient).map((client) => ({ id: client.id, name: client.name }))
     )
       .filter((client) => !invoiced.has(client.id))

@@ -152,6 +152,17 @@ describe('summarizeInvoiceMonthTotals with the owner estimate', () => {
     expect(totals.notInvoiced).toEqual([])
   })
 
+  it('puts a client back when its sent invoice was voided after the estimate loaded', () => {
+    // The estimate still calls c1 sent; the live invoice list no longer has a sent one.
+    const totals = summarizeInvoiceMonthTotals(
+      [invoice('a', 'c1', { status: 'void' })],
+      [client('c1'), client('c2', { lifecycleStage: 'inactive' })],
+      [row('c1', { basis: 'sent', detail: null }), row('c2', { basis: 'sent', detail: null })],
+    )
+    // c2 is retired, so it is not a client the run would offer.
+    expect(totals.notInvoiced).toEqual([{ id: 'c1', name: 'C1' }])
+  })
+
   it('falls back to the roster while the estimate is not there', () => {
     const totals = summarizeInvoiceMonthTotals([], [client('c1')], null)
     expect(totals.notInvoicedFrom).toBe('roster')

@@ -187,7 +187,17 @@ describe('the ribbon with the owner estimate (loadEstimate)', () => {
     expect(loadEstimate).toHaveBeenCalledWith(expect.stringMatching(/^\d{4}-\d{2}$/), expect.anything())
   })
 
-  it('keeps the roster fallback (and its disclosure) while the estimate is pending or failed', async () => {
+  it('keeps the roster fallback (and its disclosure) while the estimate is still pending', async () => {
+    mockList.mockResolvedValue([invoice('1', 'client-acme')])
+    const loadEstimate = vi.fn(() => new Promise<never>(() => {}))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} loadEstimate={loadEstimate} />)
+    await waitFor(() => expect(within(stat('Clients invoiced')).getByText('1')).toBeInTheDocument())
+    await waitFor(() => expect(loadEstimate).toHaveBeenCalled())
+    expect(stat('Clients not invoiced')).toHaveTextContent(/including any with nothing to bill/)
+    expect(within(stat('Clients not invoiced')).getByText('Dune')).toBeInTheDocument()
+  })
+
+  it('keeps the roster fallback (and its disclosure) when the estimate failed', async () => {
     mockList.mockResolvedValue([invoice('1', 'client-acme')])
     const loadEstimate = vi.fn().mockRejectedValue(new Error('nope'))
     render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} loadEstimate={loadEstimate} />)

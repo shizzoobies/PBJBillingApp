@@ -627,7 +627,7 @@ Header actions: **Accept** marks the proposal Won, drafts its engagement letter 
 >
 > Navigate months with the arrows or the month picker. Retainers aren't in this recap (money held on account, not a monthly bill). Read-only; editing stays on the owner-only Invoices page.
 >
-> **Owner only: your estimate of the month's invoices** sits above the cards (never shown to staff or in preview): Month total, Service total, Reimburse total, "N clients: K sent, M projected", and a client-by-client fold-out. A client with a sent invoice is that invoice; any other is the Client Recap's projection for the month (estimate, service so far, plan; "too early" or "no rates" when unusable, never $0.00), with only the reimbursements already recorded.
+> **Owner only: your estimate of the month's invoices** sits above the cards (never shown to staff or in preview): Month total, Service total, Reimburse total, "N clients: K sent, M projected", and a client-by-client fold-out. A client with a sent invoice is that invoice; any other is the Client Recap's projection for the month (estimate, service so far, plan; "too early" or "no rates" when unusable, never $0.00), with only the reimbursements already recorded. On sent rows Service excludes prepayments and credits applied, so the totals can differ.
 
 ## Plans (owner only)
 

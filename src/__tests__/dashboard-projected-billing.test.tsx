@@ -120,6 +120,27 @@ describe('DashboardPage: where "View full report" goes (featreq-3b162946)', () =
   })
 })
 
+describe('DashboardPage: the staff link stays on their own time', () => {
+  it('sends a bookkeeper to /time, not the Invoice Recap estimate', async () => {
+    contextValue = {
+      ...contextValue,
+      role: 'employee',
+      ownerMode: false,
+      activeEmployeeId: 'emp-avery',
+      sessionUser: { id: 'emp-avery', name: 'Avery Stone', role: 'employee' },
+      effectiveUser: { id: 'emp-avery', name: 'Avery Stone', role: 'employee' },
+    } as unknown as AppContextValue
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <DashboardPage />
+      </MemoryRouter>,
+    )
+    const link = (await screen.findAllByText('Open my time →'))[0].closest('a')
+    expect(link?.getAttribute('href')).toBe('/time')
+    expect(screen.queryByText('View full report →')).not.toBeInTheDocument()
+  })
+})
+
 describe('DashboardPage projects a pinned client at its pin', () => {
   it('bills a June-pinned client’s September hour at $40, not the newest $60', async () => {
     render(
