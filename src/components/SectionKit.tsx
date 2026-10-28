@@ -349,6 +349,7 @@ export function SavingNumberInput({
   onCommit,
   className = 'input',
   ariaLabel,
+  onDraft,
 }: {
   canonical: number | null
   min?: string
@@ -357,6 +358,8 @@ export function SavingNumberInput({
   onCommit: (value: number | null) => void
   className?: string
   ariaLabel?: string
+  /** Every keystroke's parsed value (null when blank), before any save - for a live preview beside the field. */
+  onDraft?: (value: number | null) => void
 }) {
   const [draft, setDraft] = useState(canonical === null ? '' : String(canonical))
   const [prev, setPrev] = useState(canonical)
@@ -398,6 +401,11 @@ export function SavingNumberInput({
       onChange={(event) => {
         const next = event.target.value
         setDraft(next)
+        if (onDraft) {
+          const typed = next.trim()
+          const parsed = typed === '' ? null : Number(typed)
+          onDraft(parsed === null || Number.isNaN(parsed) ? null : parsed)
+        }
         if (timerRef.current) window.clearTimeout(timerRef.current)
         timerRef.current = window.setTimeout(() => fire(next), COMMIT_DEBOUNCE_MS)
       }}
@@ -508,6 +516,7 @@ export function SaveNumberField({
   step,
   value,
   onCommit,
+  onDraft,
 }: {
   label: string
   helper?: string
@@ -519,6 +528,8 @@ export function SaveNumberField({
   // Receives null when the field is cleared — callers decide whether that
   // means 0, undefined, etc. for their specific field.
   onCommit: (value: number | null) => void
+  // Each keystroke's value before it is saved (see SavingNumberInput).
+  onDraft?: (value: number | null) => void
 }) {
   const { state, flash } = useSaveFlash()
   return (
@@ -531,6 +542,7 @@ export function SaveNumberField({
         canonical={value}
         min={min}
         step={step}
+        onDraft={onDraft}
         onCommit={(next) => {
           onCommit(next)
           flash()
