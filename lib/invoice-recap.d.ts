@@ -43,6 +43,8 @@ export interface InvoiceRecapRowShape {
   prepaymentTotal: number
   creditTotal: number
   accountingTotal: number
+  reimbursedLines?: Array<{ label: string; detail: string; amount: number; company: string | null }>
+  prepaymentLines?: Array<{ label: string; detail: string; amount: number; period: string | null }>
 }
 
 export function buildInvoiceRecap(args: {

@@ -103,6 +103,38 @@ describe('the month run ribbon', () => {
     expect(within(left).getByText('Dune')).toBeInTheDocument()
   })
 
+  it('shows dashes, not $0.00 or the whole roster, while the month is loading', async () => {
+    mockList.mockReturnValue(new Promise(() => {}))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    for (const label of [
+      'Month total',
+      'Service total',
+      'Reimburse total',
+      'Clients invoiced',
+      'Clients not invoiced',
+    ]) {
+      expect(within(stat(label)).getByText('—')).toBeInTheDocument()
+    }
+    expect(screen.queryByText('Who')).not.toBeInTheDocument()
+    expect(screen.queryByText('Acme')).not.toBeInTheDocument()
+  })
+
+  it('shows dashes when the month could not be loaded', async () => {
+    mockList.mockRejectedValue(new Error('boom'))
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('boom')
+    expect(within(stat('Month total')).getByText('—')).toBeInTheDocument()
+    expect(within(stat('Clients not invoiced')).getByText('—')).toBeInTheDocument()
+    expect(screen.queryByText('Who')).not.toBeInTheDocument()
+  })
+
+  it('says what "not invoiced" includes', async () => {
+    mockList.mockResolvedValue([invoice('1', 'client-acme')])
+    render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)
+    await waitFor(() => expect(within(stat('Clients invoiced')).getByText('1')).toBeInTheDocument())
+    expect(stat('Clients not invoiced')).toHaveTextContent(/including any with nothing to bill/)
+  })
+
   it('no longer carries the status counts in the strip', async () => {
     mockList.mockResolvedValue([invoice('1', 'client-acme', { status: 'draft' })])
     render(<InvoiceMonthRun clients={clients} onPrint={vi.fn()} />)

@@ -12634,6 +12634,11 @@ tr.is-inactive-client .client-name-link {
   cursor: pointer;
 }
 
+.invoice-run-stat-who p {
+  color: var(--muted);
+  margin: 4px 0 0;
+}
+
 .invoice-run-stat-who ul {
   margin: 4px 0 0;
   max-height: 160px;

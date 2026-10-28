@@ -982,7 +982,12 @@ export function InvoiceMonthRun({
   // Set by Generate and Void & regenerate — the two things that create invoices
   // the server then rates on its own.
   const [ratingPollStartedAt, setRatingPollStartedAt] = useState<number | null>(null)
-  const [loading, setLoading] = useState(false)
+  // Starts true: the first fetch is already on its way, and the ribbon must not
+  // show $0.00 (or the whole roster as "not invoiced") for the frame before it.
+  const [loading, setLoading] = useState(true)
+  // The month's fetch failed: the ribbon has nothing true to say. (`error` is
+  // shared with every action below, so a refused Send must not blank it.)
+  const [loadFailed, setLoadFailed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
@@ -1244,12 +1249,14 @@ export function InvoiceMonthRun({
     let cancelled = false
     const load = async () => {
       setLoading(true)
+      setLoadFailed(false)
       setError(null)
       try {
         const rows = await listInvoicesRequest(period)
         if (!cancelled) setInvoices(rows)
       } catch (err) {
         if (!cancelled) {
+          setLoadFailed(true)
           setError(err instanceof Error ? err.message : 'Could not load invoices.')
         }
       } finally {
@@ -1460,6 +1467,7 @@ export function InvoiceMonthRun({
   // here — the search narrows the tabs, never this. The per-status counts
   // (To review, Reviewed, Past due...) live on the tabs below.
   const ribbon = summarizeInvoiceMonthTotals(invoices, clients)
+  const ribbonReady = !loading && !loadFailed
   // Still needed by Regenerate (nothing unsent to rebuild) and "Remind all past due".
   const toReview = live.filter((invoice) => invoice.status === 'draft').length
   const reviewed = live.filter((invoice) => invoice.status === 'reviewed').length
@@ -2073,28 +2081,41 @@ export function InvoiceMonthRun({
       <div className="invoice-run-stats">
         {/* Once invoices have gone out (featreq-ea4a68cd): sent, processing, paid
             or overdue monthly invoices - never drafts, reviewed or voided. */}
+        {/* While the month is loading (or failed to load) there is no honest
+            figure: a dash, never $0.00 or last month's money, and no Who list. */}
         <div className="invoice-run-stat">
           <span>Month total</span>
-          <strong>{currency.format(ribbon.monthTotal)}</strong>
+          <strong>{ribbonReady ? currency.format(ribbon.monthTotal) : '—'}</strong>
         </div>
-        <div className="invoice-run-stat">
+        <div
+          className="invoice-run-stat"
+          title="Excludes prepayments and credits applied; counts fees paid from credit."
+        >
           <span>Service total</span>
-          <strong>{currency.format(ribbon.serviceTotal)}</strong>
+          <strong>{ribbonReady ? currency.format(ribbon.serviceTotal) : '—'}</strong>
         </div>
         <div className="invoice-run-stat">
           <span>Reimburse total</span>
-          <strong>{currency.format(ribbon.reimburseTotal)}</strong>
+          <strong>{ribbonReady ? currency.format(ribbon.reimburseTotal) : '—'}</strong>
         </div>
         <div className="invoice-run-stat">
           <span>Clients invoiced</span>
-          <strong>{ribbon.clientsInvoiced}</strong>
+          <strong>{ribbonReady ? ribbon.clientsInvoiced : '—'}</strong>
         </div>
-        <div className={ribbon.notInvoiced.length > 0 ? 'invoice-run-stat is-flagged' : 'invoice-run-stat'}>
+        <div
+          className={
+            ribbonReady && ribbon.notInvoiced.length > 0
+              ? 'invoice-run-stat is-flagged'
+              : 'invoice-run-stat'
+          }
+          title="Active clients with no sent invoice yet, including any with nothing to bill this month."
+        >
           <span>Clients not invoiced</span>
-          <strong>{ribbon.notInvoiced.length}</strong>
-          {ribbon.notInvoiced.length > 0 ? (
+          <strong>{ribbonReady ? ribbon.notInvoiced.length : '—'}</strong>
+          {ribbonReady && ribbon.notInvoiced.length > 0 ? (
             <details className="invoice-run-stat-who">
               <summary>Who</summary>
+              <p>Active clients with no sent invoice yet, including any with nothing to bill this month.</p>
               <ul>
                 {ribbon.notInvoiced.map((client) => (
                   <li key={client.id}>{client.name}</li>
