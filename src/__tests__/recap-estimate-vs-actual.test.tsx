@@ -299,14 +299,14 @@ describe('Projected invoice card', () => {
   const hourly: ClientRecapProjection = {
     basis: 'hourly',
     isEstimate: true,
-    amount: 3024,
-    serviceAmount: 3024,
+    amount: 1200,
+    serviceAmount: 1200,
     reimbursementsToDate: 0,
     hoursToDate: 12,
     businessDaysElapsed: 10,
     businessDaysInMonth: 21,
     method:
-      'Estimate — projected from 12.00 billable hours over 10 of 21 business days. Reimbursements are only those already recorded.',
+      'Estimate — Estimated hours × rates. Reimbursements are only those already recorded.',
   }
 
   it('calls a projection an estimate and prints how it was projected', () => {
@@ -314,7 +314,7 @@ describe('Projected invoice card', () => {
     expect(screen.getByRole('heading', { name: /Projected end-of-month invoice/ })).toHaveTextContent(
       'Estimate',
     )
-    expect(screen.getByText(/12.00 billable hours over 10 of 21 business days/)).toBeInTheDocument()
+    expect(screen.getByText(/Estimated hours × rates/)).toBeInTheDocument()
   })
 
   it('drops the estimate framing once the month is closed', () => {

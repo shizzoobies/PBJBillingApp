@@ -3738,8 +3738,9 @@ export type ClientRecapProjection = {
   /**
    * 'actual' — the month is closed, this is the invoice, not a projection.
    * 'plan' — fixed plan fee + reimbursements recorded so far.
-   * 'hourly' — extrapolated from hours logged across the business days elapsed.
-   * 'too_early' — an in-progress month with no elapsed business days to scale.
+   * 'hourly' — the larger of the estimated hours × rates and the service value so far
+   *   (never scaled by business days); `method` says which one it is.
+   * 'too_early' — an hourly month with no estimated hours and nothing billable booked yet.
    */
   basis: 'actual' | 'plan' | 'hourly' | 'too_early'
   isEstimate: boolean
