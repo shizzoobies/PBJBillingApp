@@ -13,6 +13,44 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-10-28 (~22:50Z) - SIX TICKETS LIVE IN THREE SHIPS; queue EMPTY; nothing in flight; READ THIS FIRST, then the 10-27
+paragraphs.** `main` = `5a2487d4` (+ this handoff), live (`/health` 200, commit 5a2487d), **voice NOT yet re-provisioned: the
+ElevenLabs knowledge base stopped persisting new uploads (a POST answers with an id that 404s a second later) because
+30+ orphaned manifest copies from earlier runs were never deleted; `node scripts/prod/voice-kb-prune.mjs` lists them and
+`--apply` deletes the orphans (the classifier refused the bulk delete for the session; Alex runs it), then
+`node scripts/prod/voice-provision.mjs` again, and the provisioner should learn to delete the previously attached copy
+after a successful update**, only the primary worktree (+ Alex's chip worktree - leave it), manifest 204,942 bytes measured LF (the size test now normalizes
+`\r\n`; never hand-convert line endings). **Ship 1 `1f3d977b` (featreq-ea4a68cd Shipped):** the Invoices month ribbon is now
+Month total / Service total / Reimburse total / Clients invoiced / Clients not invoiced (names in a fold-out) over SENT
+invoices (sent/processing/paid; drafts and reviewed never count; a past-due one is still Sent), built on
+`buildInvoiceRecap`'s definitions (`src/lib/invoiceMonthTotals.ts`); dashes while loading; the old To review / Need a look /
+Past due counts live on the tabs. Same ship: `scripts/prod/quiet-check.mjs` ignores a bulk-save burst (one `updated_at`
+stamping >= half of all invoices) and refuses on anything else touched in 5 min or sent in 15 - ship.sh no longer trips on
+Brittany working. **Ship 2 `030c84b3` (merge 7b319787; featreq-a9de307f, 2ce41d5f, 50a059cd Shipped):** `lib/hourly-estimate.js`
+= ONE estimated-monthly-invoice helper (per-role estimated hours x mean bill rate of the assigned team in that role, else
+whoever logged time, else client.hourlyRate; returns `unrated` roles); Billing tab shows "Estimated monthly invoice" for
+hourly clients (owner only, live as hours change, never "$0.00": unrated roles are named); Client Recap projection for hourly
+= max(estimate, service value so far) + extras recorded, usable only when every role with hours has a rate (else "no rates" /
+too_early), business-day extrapolation REMOVED; the Billing Invoice tile reads the SENT invoice's fees (minus reimbursements,
+prepayments, credits and CARD FEES - decided 10-28) with a caption naming the invoice and sent date, "Not invoiced yet"
+otherwise, "Billed on <master>'s invoice #N" for subs; Profitability keeps the live figure and its caption says so. Service
+value itself was unchanged (already hours x employee rate; her ticket text confirmed it). **Ship 3 `5a2487d4` (featreq-a5e14899,
+3b162946 Shipped):** owner-only `GET /api/invoice-recap/estimate?period=` (403 for staff and any preview header; off the
+preview allowlist; `lib/invoice-estimate.js`; period via `resolveEstimatePeriod` = `isValidPeriod('month')`, firm day) returns
+per-client rows: sent invoice as it stands, else the Client Recap projection (`estimateKind` estimate / service_so_far / plan /
+no_rates / too_early, `service: null` never $0.00), masters = sum of eligible subs with honest "N of M companies (...)" detail,
+subs on their own invoice excluded; the Invoice Recap page shows the owner the Month / Service / Reimburse ribbon with the
+fold-out (staff and preview unchanged); Dashboard owner "View full report" -> `/invoice-recap` (staff -> `/time`); the Invoices
+"Clients not invoiced" now uses those rows (something to bill, no sent invoice; roster fallback with a disclosure line only
+while loading/failed). **Two review rounds per lane each found a real defect** (a period regex missing its backslash = every
+estimate request 400; a master double-counting subs; card fees as revenue; "$0.00" for unrated roles) - keep two rounds on
+money. `topbar-timer.test.tsx` now has one second of slack (flaked three times in full-suite runs). **Follow-ups (unfiled,
+small; also in memory ships-2026-10-28):** Profitability's estimated revenue silently prices an unrated role at $0; multi-month
+sub-on-master caption; "will be issued" wording for pre-app months; Billing-tab rate vs an upcoming pinned rate; averaged-rate
+rounding in the breakdown; duplicate rate-versions fetch; SPA bundle may pull `lib/client-recap.js`; projected rows ignore
+credit on account; a sent invoice whose client row is gone is missing from the estimate. **Waiting on Brittany:** 23b8a16c
+Monthly Review question. **For Alex:** TOTP encryption (ef7f4e35, parked), Saylor stage_count cosmetic.
+
 **2026-10-27 (~15:20Z) - TWO MORE SHIPS (Remove case, Dashboard Arrange); nothing in flight; READ THIS FIRST, then the
 14:30Z paragraph.** `main` = `d4982c94` (+ this handoff), live, `/health` 200, voice re-provisioned, only the primary worktree
 (+ Alex's chip worktree - leave it), manifest 204,953 of 205,000 (TRIM FIRST). **`e95c7013` Remove case** (featreq-a46c8ab3

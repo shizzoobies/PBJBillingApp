@@ -353,8 +353,28 @@ async function main() {
       },
     },
   }
+  // Remember which manifest copies the agent used before this run, so they can be deleted
+  // once the new one is attached: every run uploads a fresh copy, and by 2026-10-28 some
+  // 295 orphans had piled up and the workspace stopped persisting new uploads.
+  let previousDocIds = []
+  try {
+    const before = await call('GET', `${API}/agents/${agentId}`)
+    previousDocIds = (before?.conversation_config?.agent?.prompt?.knowledge_base || [])
+      .map((doc) => doc.id)
+      .filter((id) => id && id !== kb.id)
+  } catch (error) {
+    console.log(`     (could not read the agent's current knowledge base: ${error.message.slice(0, 120)})`)
+  }
   const updated = await call('PATCH', `${API}/agents/${agentId}`, updateBody)
   console.log(`     agent updated: ${updated.agent_id || agentId}`)
+  for (const id of previousDocIds) {
+    try {
+      await call('DELETE', `${API}/knowledge-base/${id}`)
+      console.log(`     deleted the previous manifest copy ${id}`)
+    } catch (error) {
+      console.log(`     (previous manifest copy ${id} not deleted: ${error.message.slice(0, 120)})`)
+    }
+  }
 
   console.log('\nDone. Persona + knowledge base synced' + (toolIds ? ` + ${toolIds.length} tools attached.` : '.'))
   console.log('Voice and LLM were left as configured in the dashboard.')
