@@ -87,6 +87,16 @@ describe('the owner estimate ribbon', () => {
     expect(await screen.findByText(/Service excludes prepayments and credits applied/)).toBeInTheDocument()
   })
 
+  it('leaves the sent-rows caption out when nothing is sent', async () => {
+    mockEstimate.mockResolvedValue({
+      ...estimate,
+      clients: estimate.clients.filter((entry) => entry.basis !== 'sent'),
+    })
+    render(<InvoiceRecapPage ownerEstimate />)
+    await screen.findByText('Bolt')
+    expect(screen.queryByText(/Service excludes prepayments/)).not.toBeInTheDocument()
+  })
+
   it('never shows $0.00 for a client whose estimate is unusable: it says why', async () => {
     mockEstimate.mockResolvedValue(estimate)
     render(<InvoiceRecapPage ownerEstimate />)

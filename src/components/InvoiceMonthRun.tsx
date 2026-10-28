@@ -1499,7 +1499,8 @@ export function InvoiceMonthRun({
   const ribbon = summarizeInvoiceMonthTotals(
     invoices,
     clients,
-    estimate && estimate.period === period ? estimate.clients : null,
+    // Preview turned on after a read: what was read must stop driving the ribbon.
+    !previewMode && estimate && estimate.period === period ? estimate.clients : null,
   )
   const ribbonReady = !loading && !loadFailed
   const notInvoicedNote =

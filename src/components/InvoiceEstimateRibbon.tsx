@@ -89,10 +89,12 @@ export function InvoiceEstimateRibbon({ period }: { period: string }) {
         </div>
       </div>
       <p className="invoice-recap-none">{note}</p>
-      <p className="invoice-recap-none">
-        Sent rows: Service excludes prepayments and credits applied, so the three totals can
-        differ.
-      </p>
+      {ready && sent > 0 ? (
+        <p className="invoice-recap-none">
+          Sent rows: Service excludes prepayments and credits applied, so the three totals can
+          differ.
+        </p>
+      ) : null}
       {ready && rows.length > 0 ? (
         <details className="invoice-estimate-rows">
           <summary>Client by client</summary>

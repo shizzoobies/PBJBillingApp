@@ -207,6 +207,26 @@ describe('the ribbon with the owner estimate (loadEstimate)', () => {
     expect(within(stat('Clients not invoiced')).getByText('Dune')).toBeInTheDocument()
   })
 
+  it('stops using an estimate already read when preview turns on', async () => {
+    mockList.mockResolvedValue([invoice('1', 'client-acme')])
+    const loadEstimate = vi.fn(async (period: string) => ({
+      ...estimateFor([{ id: 'client-bolt', name: 'Bolt', service: 500 }]),
+      period,
+    }))
+    const { rerender } = render(
+      <InvoiceMonthRun clients={clients} onPrint={vi.fn()} loadEstimate={loadEstimate} />,
+    )
+    await waitFor(() =>
+      expect(stat('Clients not invoiced')).toHaveTextContent(/Clients with something to bill/),
+    )
+    rerender(
+      <InvoiceMonthRun clients={clients} onPrint={vi.fn()} loadEstimate={loadEstimate} previewMode />,
+    )
+    await waitFor(() =>
+      expect(stat('Clients not invoiced')).toHaveTextContent(/including any with nothing to bill/),
+    )
+  })
+
   it('does not ask for the estimate in preview', async () => {
     mockList.mockResolvedValue([])
     const loadEstimate = vi.fn()
