@@ -31,18 +31,20 @@ export function InvoiceEstimateRibbon({ period }: { period: string }) {
 
   useEffect(() => {
     const controller = new AbortController()
-    setState({ status: 'loading' })
-    invoiceEstimateRequest(period, controller.signal)
-      .then((estimate) => {
+    const load = async () => {
+      setState({ status: 'loading' })
+      try {
+        const estimate = await invoiceEstimateRequest(period, controller.signal)
         if (!controller.signal.aborted) setState({ status: 'ready', estimate })
-      })
-      .catch((err) => {
+      } catch (err) {
         if (controller.signal.aborted) return
         setState({
           status: 'error',
           message: err instanceof Error ? err.message : 'Could not load the estimate.',
         })
-      })
+      }
+    }
+    void load()
     return () => controller.abort()
   }, [period])
 

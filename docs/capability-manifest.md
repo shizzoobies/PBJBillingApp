@@ -37,6 +37,7 @@ Sidebar pages: those grouped in the next paragraph (Engagements, Letters and Upd
 - **"Invoices past due (N)" (owner only)** - every past-due invoice across ALL months, oldest first: number, client, date sent, days past due, total, link to Invoices. Same rule as the month run's **Past due** tab; one with a failed payment is left out here (it has its own tab). Hidden when empty; never shown to staff or in preview.
 - Recent activity feed (owner).
 - Quick actions: New task, Invite bookkeeper, Add client, Notifications.
+- This month at a glance (owner): **View full report** opens the Invoice Recap and your estimate of the month.
 - **Arrange** (each person's own Dashboard): Move up/down, Hide/Show, Starts open/collapsed per panel; **Done** saves it to their account, **Reset to default** restores. Alerts stays first and shown. A panel's chevron folds it for this visit only.
 - "Viewing as" (owner): preview the app exactly as a specific bookkeeper sees it (exit anytime).
   - **Every page built for preview shows the previewed person's own data**, not the owner's: the Invoice Recap (only clients their team is on), the bell and its unread badge, "Waiting on you", the item-deletion and pending-edit approval queues, a case timeline, a client's notes, a team member's activity log and their Dashboard arrangement (read-only). Entering or leaving preview refreshes them all, no reload.
@@ -446,7 +447,7 @@ Header actions: **Accept** marks the proposal Won, drafts its engagement letter 
 >
 > **Search the month:** a box above the tabs narrows every tab to invoices matching a client name or invoice number ("N of M" count). The ribbon stays whole-month; an open invoice never disappears. History has the same box, composing with its Year / Client / Status filters; its month tables open alphabetical (click a header to re-sort).
 >
-> Above the tabs, a ribbon of what has gone out (sent, processing or paid monthly invoices; a past-due one is still Sent, so it counts): Month total, Service total (excluding prepayments and credits applied), Reimburse total, Clients invoiced, and Clients not invoiced (active clients with no sent invoice yet, including any with nothing to bill this month; amber, with a Who list). Dashes show while loading; the status counts are on the tabs. Rows flagged for a second look get an amber rule; an amber dot on a tab means some are in there. Switching tabs with unsaved edits asks first.
+> Above the tabs, a ribbon of what has gone out (sent, processing or paid monthly invoices; a past-due one is still Sent, so it counts): Month total, Service total (excluding prepayments and credits applied), Reimburse total, Clients invoiced, and Clients not invoiced (clients with something to bill and no sent invoice yet, from your estimate; amber, with a Who list; until the estimate loads, every active client without a sent invoice, including any with nothing to bill). Dashes show while loading; the status counts are on the tabs. Rows flagged for a second look get an amber rule; an amber dot on a tab means some are in there. Switching tabs with unsaved edits asks first.
 >
 > **AI confidence rating (advisory).** After Generate, an AI reviewer rates each monthly draft with a row badge: **high confidence**, **check N things**, or **low confidence**. It checks the arithmetic (printed hours x each person's bill rate, reconciled against the month's tracked time), plan-vs-hourly consistency, covered-date windows, ad hoc dispositions, month names in descriptions, and last month's comparison. The open invoice shows its summary, specific concerns and up to three questions for you. THE RATING IS ADVISORY ONLY - IT NEVER BLOCKS, CHANGES, SENDS OR TOUCHES THE NUMBERS; unrated or low-confidence invoices go as before. **Re-rate** refreshes it after edits (the card says if you edited since). Retainer invoices aren't rated (one manual line); older invoices have no badge.
 >
@@ -625,6 +626,8 @@ Header actions: **Accept** marks the proposal Won, drafts its engagement letter 
 > **Each team member sees only their assigned clients' invoices** - the ASSIGNED TEAM an owner picked on the client's page or the Team page, never a list a task assignment widened; owners see every client. A team member who sees none isn't on any client's team yet. On a combined (billing-master) invoice, each reimbursed expense names its company; the combined invoice itself appears only for people who can see the master client.
 >
 > Navigate months with the arrows or the month picker. Retainers aren't in this recap (money held on account, not a monthly bill). Read-only; editing stays on the owner-only Invoices page.
+>
+> **Owner only: your estimate of the month's invoices** sits above the cards (never shown to staff or in preview): Month total, Service total, Reimburse total, "N clients: K sent, M projected", and a client-by-client fold-out. A client with a sent invoice is that invoice; any other is the Client Recap's projection for the month (estimate, service so far, plan; "too early" or "no rates" when unusable, never $0.00), with only the reimbursements already recorded.
 
 ## Plans (owner only)
 

@@ -1259,7 +1259,6 @@ export function InvoiceMonthRun({
   useEffect(() => {
     if (!loadEstimate || previewMode) return
     const controller = new AbortController()
-    setEstimate(null)
     // Started from a promise so a loader that throws on the spot is just a failure.
     Promise.resolve()
       .then(() => loadEstimate(period, controller.signal))
