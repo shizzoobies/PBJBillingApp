@@ -1768,6 +1768,23 @@ export async function setClientHourlyRatePeriod(clientId: string, period: string
   return (await response.json()) as Client
 }
 
+export async function addClientRateAgreementRequest(clientId: string, agreement: import('../../lib/client-rate-agreement.js').ClientRateAgreement) {
+  const response = await apiFetch(`/api/clients/${encodeURIComponent(clientId)}/rate-agreements`, {
+    credentials: 'same-origin', method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(agreement),
+  })
+  if (!response.ok) throw new ApiError(response.status, await safeErrorMessage(response) || 'Could not save the rate agreement.')
+  return (await response.json()) as { agreements: import('../../lib/client-rate-agreement.js').ClientRateAgreement[] }
+}
+
+export async function advancePaymentRequest<T>(path: string, body?: object): Promise<T> {
+  const response = await apiFetch(`/api/advance-payments${path}`, {
+    credentials: 'same-origin', ...(body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
+  })
+  if (!response.ok) throw new ApiError(response.status, await safeErrorMessage(response) || 'Could not confirm the advance payment action.')
+  return await response.json() as T
+}
+
 /**
  * Keep (or clear, with null or blank) the note that starts every FUTURE invoice
  * for this client. Owner-only and TARGETED: the bulk workspace save never
@@ -5148,7 +5165,9 @@ export async function sendInvoiceRequest(
       reason,
     )
   }
-  return (await response.json()) as { invoice: PersistedInvoice }
+  const result = (await response.json()) as { invoice: PersistedInvoice; warning?: string }
+  if (result.warning) throw new ApiError(502, result.warning, 'invoice_delivery_unrecorded')
+  return result
 }
 
 /**

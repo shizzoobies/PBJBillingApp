@@ -1,4 +1,6 @@
 import { ExternalLink, FileText, Mail, Plus, Printer, RotateCcw, Sliders, Trash2 } from 'lucide-react'
+import { creditStatementText } from '../../lib/invoice-credit-statement.js'
+import { advanceOfferText } from '../../lib/invoice-advance-offer.js'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useAppContext } from '../AppContext'
@@ -206,6 +208,7 @@ function seedDraft(display: DisplayInvoice, client: Client, hasFirmLogo: boolean
     // row under no heading — or, for a kind the section layer does not name, not
     // print it at all.
     lines: display.lines.map((line) => ({
+      creditStatement: line.creditStatement,
       id: makeLineId(),
       kind: line.kind,
       roleTier: line.roleTier,
@@ -222,6 +225,7 @@ function seedDraft(display: DisplayInvoice, client: Client, hasFirmLogo: boolean
 
 function draftToDisplay(draft: InvoiceDraft, baseInvoice: Invoice): DisplayInvoice {
   const lines: DisplayLine[] = draft.lines.map((line) => ({
+    creditStatement: line.creditStatement,
     kind: line.kind,
     roleTier: line.roleTier,
     section: line.section,
@@ -468,6 +472,7 @@ function persistedToDisplay(
   const lines: DisplayLine[] = renderedInvoiceLines<
     PersistedInvoiceLine & { roleTier?: InvoiceRoleTier }
   >(stored.lineItems).map((line) => ({
+    creditStatement: line.creditStatement,
     kind: line.kind,
     roleTier: line.roleTier,
     section: line.section,
@@ -486,7 +491,7 @@ function persistedToDisplay(
       entryCount: 0,
       period: stored.period,
       periodLabel,
-      lines,
+      lines: stored.lineItems,
       total: stored.total,
     },
     kind: stored.kind,
@@ -1711,6 +1716,8 @@ function InvoicePreview({ display, custom }: { display: DisplayInvoice; custom?:
         <span>Total due</span>
         <strong>{currency.format(invoice.total)}</strong>
       </div>
+      {creditStatementText(invoice).map((text) => <p className="invoice-credit-statement" key={text}>{text}</p>)}
+      {advanceOfferText(invoice).map((text) => <p style={{ overflowWrap: 'anywhere' }} key={text}>{text}</p>)}
       {showPay ? (
         <div className="invoice-pay-row">
           <PayButton client={invoice.client} variant="screen" />
@@ -2022,6 +2029,8 @@ function InvoiceDocument({ display, custom }: { display: DisplayInvoice; custom?
         <span>Total due</span>
         <strong>{currency.format(invoice.total)}</strong>
       </footer>
+      {creditStatementText(invoice).map((text) => <p className="invoice-credit-statement" key={text}>{text}</p>)}
+      {advanceOfferText(invoice).map((text) => <p style={{ overflowWrap: 'anywhere' }} key={text}>{text}</p>)}
       {showField('payLink') ? <PayButton client={billingClient} variant="print" /> : null}
       {/* Her wording, verbatim, and NOT interpolated with the firm name — it is
           the firm's line, not a template. A per-client `footerNote` still wins. */}

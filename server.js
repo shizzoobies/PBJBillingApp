@@ -1,9 +1,11 @@
 import { createReadStream, existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
+import { handleAdvancePaymentRoute, closeAdvanceSessions } from './lib/advance-payment-routes.js'
 import {
   AccountCreditError,
   AppDataStore,
@@ -88,7 +90,7 @@ import { buildInvoiceRecap } from './lib/invoice-recap.js'
 import { buildInvoiceEstimate, resolveEstimatePeriod } from './lib/invoice-estimate.js'
 import { currentPeriod, isValidPeriod, isValidPeriodType } from './lib/periods.js'
 import { detectUsagePatterns } from './lib/usage-patterns.js'
-import { firmToday } from './lib/firm-time.js'
+import { firmToday, dateOnlyInZone } from './lib/firm-time.js'
 import {
   INTERNAL_EMAIL_KIND,
   notify,
@@ -1667,6 +1669,7 @@ function scopeAppDataForSession(session, data) {
       // reason — what PB&J charges is between the owner and the client.
       hourlyRatePeriod: null,
       hourlyRateHistory: [],
+      hourlyRateOverrides: [],
       // The note kept for future invoices is billing copy a staff member has no
       // use for; owner-only like the rates beside it.
       invoiceNote: undefined,
@@ -3075,7 +3078,7 @@ function buildInvoiceHoursSummary(data, client, period, billRateVersions = []) {
   // function exists not to do.
   const ratePeriod = ratePeriodAsOf(client, period)
   const rateFor = (employeeId) =>
-    billRateAt(billRateVersions, employeeById.get(employeeId) ?? { id: employeeId }, ratePeriod, period) ??
+    billRateAt(billRateVersions, employeeById.get(employeeId) ?? { id: employeeId }, ratePeriod, period, client) ??
     defaultHourlyRate
 
   const byEmployee = new Map()
@@ -3466,7 +3469,10 @@ const server = createServer(async (request, response) => {
       }
     }
 
-    // Legacy persistent magic-link route — replaced by /api/auth/request-link
+    if (await handleAdvancePaymentRoute({ request, response, pathname: normalizedPath, url: requestUrl,
+      store: appDataStore, requireSession, isCrossSiteOrigin, readJsonBody, sendJson, appUrl: getPublicAppUrl(request) })) return
+
+    // Legacy persistent magic-link route - replaced by /api/auth/request-link
     // and /verify/:token. Bookkeepers may have bookmarked the old URL; bounce
     // them to the staff sign-in entry page so the owner URL stays unadvertised.
     if (/^\/login(?:\/.*)?$/.test(normalizedPath) && request.method === 'GET') {
@@ -6666,6 +6672,7 @@ const server = createServer(async (request, response) => {
         // `duplicate` before this; a store failure here falls to the catch, which
         // takes the event back out of the ledger so Stripe's retry runs it again.
         if (isPaymentReversalEvent(event)) {
+          await appDataStore.recordAdvanceReversal(event)
           const reversal = await flagPaymentReversal({
             store: appDataStore,
             notify,
@@ -6677,6 +6684,17 @@ const server = createServer(async (request, response) => {
         }
 
         const object = event.data?.object ?? {}
+        if (object.metadata?.advancePaymentRequestId) {
+          if (event.type === 'payment_intent.succeeded') {
+            await appDataStore.recordAdvancePayment({ requestId: object.metadata.advancePaymentRequestId, receivedOn: dateOnlyInZone(new Date(event.created * 1000)) }, null, object)
+            paymentApplied = true
+            // The receipt is durable. Closing old links is retried by collection
+            // and cancellation routes if Stripe is temporarily unavailable.
+            await closeAdvanceSessions(appDataStore, object.metadata.advancePaymentRequestId).catch((error) => console.error('[advance payments] stale link cleanup failed:', error))
+          }
+          sendJson(response, 200, { received: true, advancePayment: true })
+          return
+        }
         const metaInvoiceId = object.metadata?.invoiceId ?? null
         const invoice = await appDataStore.findInvoiceByStripeRef({
           invoiceId: metaInvoiceId,
@@ -7899,6 +7917,10 @@ const server = createServer(async (request, response) => {
         })
         return
       }
+      try { invoice = await appDataStore.prepareInvoiceCreditStatement(invoice) } catch (error) {
+        if (error instanceof AccountCreditError) { sendJson(response, 409, { error: 'account_credit_refused', message: error.message }); return }
+        throw error
+      }
       // A covered-date window the owner has not answered for must not reach the
       // client. Review already blocks on this, but review is not the only door:
       // this route is reachable directly, and an invoice reviewed BEFORE the
@@ -8315,7 +8337,12 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const sendResult = await sendInvoiceEmail({
+      let delivery
+      const sendAttemptId = randomUUID()
+      try {
+      delivery = await appDataStore.deliverInvoiceWithCreditLock(invoice, {
+        to: sendTo, subject: email.subject, stamp: sendStamp, oneTime: sendOneTime, attemptId: sendAttemptId,
+      }, () => sendInvoiceEmail({
         to: sendTo,
         subject: email.subject,
         html: email.html,
@@ -8326,20 +8353,28 @@ const server = createServer(async (request, response) => {
         fromName: firmSettings?.name || undefined,
         invoiceId: invoice.id,
         kind: 'invoice',
-      })
+        timeoutMs: 15000,
+        idempotencyKey: `invoice-${invoice.id}-${sendAttemptId}`,
+      }))
+      } catch (error) {
+        if (error instanceof AccountCreditError) {
+          await expireInvoiceSessions(mintedSessionIds, invoice.id, 'send (credit changed before delivery)')
+          sendJson(response, 409, { error: 'account_credit_refused', message: error.message })
+          return
+        }
+        throw error
+      }
+      const sendResult = delivery.result
 
       if (!sendResult.ok) {
+        if (sendResult.uncertain) {
+          sendJson(response, 502, { error: 'invoice_delivery_uncertain', message: delivery.recordError || 'Email delivery is uncertain. Reconcile with the mail provider before sending again.' })
+          return
+        }
         // The failed attempt is still logged — it is the evidence that answers
         // "she says she sent it, the client says it never arrived" — and
         // recordInvoiceSent refuses to mark a failed send as sent.
-        await appDataStore.recordInvoiceSent(invoice.id, {
-          to: sendTo,
-          subject: email.subject,
-          ok: false,
-          error: sendResult.error,
-          providerId: sendResult.providerId ?? null,
-          oneTime: sendOneTime,
-        })
+        // Failed delivery was already recorded inside the credit lock.
         // The invoice WAS marked paid by credit above: say that, and hand back the
         // paid row so the page shows Paid instead of leaving the old row on screen.
         if (coveredByCredit) {
@@ -8355,19 +8390,8 @@ const server = createServer(async (request, response) => {
       // did not is how a client ends up billed twice.
       let sentInvoice = invoice
       try {
-        sentInvoice =
-          (await appDataStore.recordInvoiceSent(invoice.id, {
-            to: sendTo,
-            subject: email.subject,
-            ok: true,
-            error: null,
-            // Resend's own id for the message. Without it on the entry, a
-            // delivery event that carries no tag can never be placed.
-            providerId: sendResult.providerId ?? null,
-            // The moment the documents above were built from.
-            stamp: sendStamp,
-            oneTime: sendOneTime,
-          })) ?? invoice
+        sentInvoice = delivery.invoice ?? invoice
+        if (delivery.recordError) console.error('[invoice]', delivery.recordError)
         await appDataStore.recordActivity(
           session.user.id,
           'invoice_sent',
@@ -8398,7 +8422,7 @@ const server = createServer(async (request, response) => {
       } else if (autopaySend.plan) {
         await reportUnrecordedAutopaySend(request, invoice, autopaySend.plan.channel)
       }
-      sendJson(response, 200, { invoice: sentInvoice })
+      sendJson(response, 200, { invoice: sentInvoice, ...(delivery.recordError ? { warning: delivery.recordError } : {}) })
       return
     }
 
@@ -18231,7 +18255,26 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // PUT /api/clients/:id/hourly-rate-period — owner-only. "Move to current
+    const clientRateAgreementMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/rate-agreements$/)
+    if (clientRateAgreementMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') { sendJson(response, 403, { error: 'Only owners can manage rate agreements' }); return }
+      if (request.method !== 'POST') { sendJson(response, 405, { error: 'Method not allowed' }); return }
+      if (isCrossSiteOrigin(request)) { sendJson(response, 403, { error: 'Origin not allowed' }); return }
+      if (!String(request.headers['content-type'] || '').toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' }); return
+      }
+      try {
+        const agreements = await appDataStore.addClientRateAgreement(decodeURIComponent(clientRateAgreementMatch[1]), await readJsonBody(request), session.user.id)
+        sendJson(response, 200, { agreements })
+      } catch (error) {
+        sendJson(response, 400, { error: 'rate_agreement_refused', message: error.message })
+      }
+      return
+    }
+
+    // PUT /api/clients/:id/hourly-rate-period - owner-only. "Move to current
     // rates from <month>". A TARGETED endpoint rather than part of the bulk
     // save, so a stale owner tab can never clobber a pin (cardinal rule 4).
     const clientRatePeriodMatch = normalizedPath.match(

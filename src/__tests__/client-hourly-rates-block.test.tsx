@@ -182,7 +182,7 @@ describe('the Hourly rates block', () => {
         { id: 'emp-mo', name: 'Mo', role: 'Bookkeeper', billRate: 70 },
       ],
     })
-    expect(await screen.findByText('Mo')).toBeInTheDocument()
+    expect(await screen.findByText('Mo', { selector: 'span' })).toBeInTheDocument()
     expect(screen.getByText('$70.00/hr')).toBeInTheDocument()
   })
 
@@ -200,7 +200,7 @@ describe('the Hourly rates block', () => {
       today: '2026-09-22',
     })
     expect(await screen.findByText(/Rates from September 2026/i)).toBeInTheDocument()
-    expect(screen.getByText(/this month/)).toBeInTheDocument()
+    expect(screen.getByText(/this month/, { selector: 'p' })).toBeInTheDocument()
     expect(screen.queryByText(/0 months ago/)).not.toBeInTheDocument()
   })
 

@@ -17,6 +17,7 @@ export type InvoiceLineKind =
   | 'retainer_credit'
   /** Credit on account (a prepayment or an overpayment) drawn on this invoice. Always <= 0. */
   | 'account_credit'
+  | 'advance_request'
   /** The estimated fee for a LATER month of a billing period, carried on the period's first invoice. */
   | 'prepayment'
   /** Informational hours detail. ALWAYS $0.00 — see `timeBreakdownLines`. */
@@ -32,6 +33,8 @@ export type InvoiceLineKind =
 export type AdhocMode = 'billed' | 'courtesy' | 'omitted'
 
 export type InvoiceLineOut = {
+  advanceOffer?: import('./invoice-advance-offer.js').AdvanceOffer
+  creditStatement?: import('./invoice-credit-statement.js').CreditStatement
   kind: InvoiceLineKind
   label: string
   detail: string

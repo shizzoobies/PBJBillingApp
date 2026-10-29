@@ -1,0 +1,34 @@
+# Client billing — local review and test guide
+
+This describes the reviewed branch `codex/billing-deposits-rates`. Alex authorized deployment when green on October 29 at 00:08 UTC, including the necessary additive schema initialization and moving the matching build ticket to Shipped after live verification. No real rates, advances, invoices, payments or test emails may be created as part of release. Check the release report for the deployed commit; this document alone does not prove deployment.
+
+## Decisions
+
+Brittany supplied Flourish $90/hour and Lilac & Lemons $75/hour, currently for Brittany only. These are test examples; no real client values are seeded. She did not supply an effective billing month. She manually estimates an advance of roughly three months; no formula or schedule is imposed. Her preferred allocation is general credit drawn by future invoices.
+
+Optional versus already-agreed advance is an explicit per-invoice choice. The implementation combines presentation while collecting current charges and advance funds separately. No automatic rule splits a mixed payment. A check covering both must be explicitly allocated and each portion recorded once. Alex/Brittany should review this product choice before real use.
+
+## Owner walkthrough
+
+1. **Client -> Billing -> Hourly rates -> Client rate agreements:** choose person, role or client default; enter effective billing month and rate, then **Save rate agreement**. Precedence is person > role > client default > historical team rate. Inherit clears that scope; zero is valid. Existing invoices/drafts retain stored rates. Edit or regenerate a draft explicitly to change it. Agreement history retains revisions; Cancel clears unsaved entries.
+2. **Credit on account -> Advance payment requests:** enter the manually chosen amount, payment method and general or month-reserved allocation. Optional **Client billing defaults** provides effective-month suggestions and statement display preference. Copying defaults into a request is explicit. Changing defaults never creates money or changes an existing request.
+3. Open an unsent monthly invoice and choose **Pay in advance section**. Select an existing request or **Create or manage advance requests**. Choose **Optional advance** or **Already agreed advance**, then **Save advance section**. Save service edits first. The invoice returns to Draft for review. Current charges and amount due stay unchanged. The bottom section appears in email, PDF and print, including on a fully credit-paid service invoice. **Remove advance section** only detaches the presentation. Issued snapshots cannot be replaced by ordinary line edits.
+4. Pay current charges with the existing invoice option. The advance section links to a durable page displaying current received/outstanding amounts. Bank collection opens ACH checkout; outside-app collection directs the client to the firm. A processing bank payment blocks another collection. Cancellation stops new collection, but an actual later settlement still records funds that arrived.
+5. **Record money received outside the app:** choose request, actual amount and received date. Partial receipts create only that amount of credit. Interrupted receipts retain their reference and restore their entries after refresh; retry the pending receipt before entering another. Verified succeeded USD Stripe payments use actual amount received, with duplicate callbacks deduplicated.
+6. Generate future monthly invoices or **Apply credit on account** to an existing draft. Draft draws reserve credit against double spending. Removing credit or voiding the invoice releases its draws. Never also use Add credit or a retainer for the same received funds.
+
+## History and safeguards
+
+The statement shows positive opening credit, current charges, applied credit, closing credit, other draft reservations/holds and amount due. Existing monthly-plan prepayments retain their allocation; retainer credit stays separate. Display preferences never hide amount due or credit applied. Send history freezes statements and advance offers. The durable request page shows current collection status without rewriting issued documents.
+
+The separate `advance_payment_ledger` stores requests, receipts, reversals, sessions and defaults. Credit is derived from receipts rather than duplicated in account_credits. Unique source references enforce idempotency. Both PostgreSQL and JSON backends serialize credit reservations and receipt changes. A refund/dispute holds the receipt; a partial refund conservatively holds the whole credit pending reconciliation. A dispute win cannot release refunded funds. Manual reversal records a reason and does not send a refund. Already-issued invoices remain historical and require reconciliation.
+
+Advance history prevents client deletion or reassignment to another billing payer. Creation rechecks the client inside the write lock. Voiding a service invoice does not cancel its independent advance request or reverse received money. There is no implicit credit transfer or refund.
+
+Invoice delivery validates the authoritative invoice, payment status and credit state under the financial lock, including a newly credit-paid first delivery. It records the protected snapshot using the same database connection. The provider call has a 15-second abort deadline and an attempt idempotency key. Unknown delivery is logged and blocks another send; reconcile with the provider. Acceptance or uncertainty followed by recording failure is reported explicitly, not as a safe retry. The bounded external call holds the financial transaction (or file workspace queue). Recording tests exercise a single saturated connection without nested acquisition; actual PostgreSQL load testing remains outside this verification.
+
+## Validation boundary
+
+Only synthetic tests/fixtures and cleared external-service credentials were used during development. PostgreSQL tests use recording adapters, not a real PostgreSQL engine. Browser checks use real components with a synthetic fetch fixture. Final `npm run verify` exited 0: lint, TypeScript/Vite, 467 Vitest files / 10,788 tests and 40 Cloudflare script tests passed. Responsive checks at 360, 768 and 1280 pixels found no horizontal overflow; per-person rate save, defaults save/cancel, invoice attachment, interrupted save and retry passed. No console errors were captured. Live verification is a separate release gate.
+
+Independent reviews drove fixes for inherited-rate callers, local ledger isolation, held-credit application, snapshots, retry identity, bank-link cleanup, payer/deletion history, nested pool access, stale payment-state delivery, uncertain outcomes and authoritative attachment preservation. Rates/effective month, optionality and the separate-payment product choice still need owner review before real use.

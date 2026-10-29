@@ -171,7 +171,7 @@ export function ReportsPage() {
       (candidate) => candidate.id === entry.employeeId,
     ) ?? { id: entry.employeeId }
     const month = typeof entry.date === 'string' && entry.date ? entry.date.slice(0, 7) : null
-    return billRateAt(billRateVersions, employee, ratePeriodAsOf(client, month), month)
+    return billRateAt(billRateVersions, employee, ratePeriodAsOf(client, month), month, client)
   }
   /**
    * One person's Billable $ over a PERIOD: their billable rows, each at the

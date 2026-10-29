@@ -134,6 +134,7 @@ export type Client = {
    * then. Blanked for staff alongside the pin.
    */
   hourlyRateHistory?: RateHistoryEntry[]
+  hourlyRateOverrides?: import('../../lib/client-rate-agreement.js').ClientRateAgreement[]
   /**
    * Plans/services this client subscribes to. A client may select MULTIPLE
    * plans (rendered as chips in the UI). Plans are now just name + notes
@@ -604,6 +605,8 @@ export type AdhocMode = 'billed' | 'courtesy' | 'omitted'
 
 /** A line on a PERSISTED invoice. `kind` records what produced it. */
 export type PersistedInvoiceLine = {
+  advanceOffer?: import('../../lib/invoice-advance-offer.js').AdvanceOffer
+  creditStatement?: import('../../lib/invoice-credit-statement.js').CreditStatement
   /** `card-fee` is appended by the payment webhook when a client pays by card.
    *  `adhoc` is one entry of out-of-scope time, billed on its own.
    *  `retainer` is the single line of a retainer invoice; `retainer_credit` is
@@ -621,6 +624,7 @@ export type PersistedInvoiceLine = {
     | 'retainer'
     | 'retainer_credit'
     | 'account_credit'
+    | 'advance_request'
     /** The estimated fee for a LATER month of a billing period, carried on the period's
      *  first invoice (it has a `period`). It is a charge, inside the subtotal and total. */
     | 'prepayment'
@@ -2178,6 +2182,8 @@ export type TimerState = {
 }
 
 export type InvoiceLine = {
+  advanceOffer?: import('../../lib/invoice-advance-offer.js').AdvanceOffer
+  creditStatement?: import('../../lib/invoice-credit-statement.js').CreditStatement
   /**
    * What produced this line. The shared builder has always set it; it is
    * declared here so a consumer can tell an `adhoc` line from a scoped one
@@ -2513,7 +2519,7 @@ export class ApiError extends Error {
  * invoices have drawn from it and `remaining` is the amount less those draws.
  * A void credit stays in the ledger with `voidedAt` set and nothing remaining.
  */
-export type AccountCreditSourceKind = 'manual' | 'overpayment' | 'prepayment'
+export type AccountCreditSourceKind = 'manual' | 'overpayment' | 'prepayment' | 'advance_payment'
 
 export type AccountCredit = {
   id: string

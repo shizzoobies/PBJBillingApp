@@ -1,0 +1,3 @@
+export type CreditStatement = { display?: 'summary' | 'detailed'; asOf: string; openingCents: number; appliedCents: number; closingCents: number; reservedCents: number; heldCents: number; currentChargesCents: number; retainerAppliedCents: number; amountDueCents: number }
+export function creditStatementText(invoice: { total?: number; lineItems?: Array<{ kind?: string; amount: number; creditStatement?: CreditStatement }>; lines?: Array<{ kind?: string; amount: number; creditStatement?: CreditStatement }> }): string[]
+export function invoiceCreditStatement(invoice: Parameters<typeof creditStatementText>[0]): CreditStatement | null

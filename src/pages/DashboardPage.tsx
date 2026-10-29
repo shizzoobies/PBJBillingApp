@@ -839,6 +839,7 @@ function OwnerDashboardView() {
             employee ?? { id: entry.employeeId },
             ratePeriod,
             billingPeriod,
+            client,
           ) ?? defaultHourlyRate
         return sum + (entry.minutes / 60) * rate
       }, 0)

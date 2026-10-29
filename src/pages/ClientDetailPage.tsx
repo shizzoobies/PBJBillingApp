@@ -20,6 +20,7 @@ import { SectionScopeContext } from '../components/sectionScope'
 import { AssignedTeamControl } from '../components/AssignedTeamControl'
 import { LinkExistingChecklist } from '../components/LinkExistingChecklist'
 import { AccountCreditPanel } from '../components/AccountCreditPanel'
+import { ClientRateAgreementForm } from '../components/ClientRateAgreementForm'
 import { AutopayPanel } from '../components/AutopayPanel'
 import { invoiceEmailAddressee, resolveInvoiceRecipients } from '../../lib/invoice-recipients.js'
 import { BilledOnCard } from '../components/BilledOnCard'
@@ -1353,6 +1354,7 @@ export function HourlyRatesField({ client }: { client: Client }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [moveTo, setMoveTo] = useState('')
+  const [agreementEcho, setAgreementEcho] = useState<{ clientId: string; rows: NonNullable<Client['hourlyRateOverrides']>; source: string } | null>(null)
   // The client as the MOVE endpoint just returned it, stamped with the pin the
   // prop carried when the move was made. The pin has its own endpoint
   // precisely so the bulk autosave cannot carry it, so this is a
@@ -1381,7 +1383,9 @@ export function HourlyRatesField({ client }: { client: Client }) {
   // while the prop still shows the pin the move was made against.
   const echoing =
     moved && moved.clientId === client.id && moved.was === (client.hourlyRatePeriod ?? null)
-  const shown = echoing ? moved.client : client
+  const agreementSource = JSON.stringify(client.hourlyRateOverrides ?? [])
+  const shown = { ...(echoing ? moved.client : client), hourlyRateOverrides:
+    agreementEcho?.clientId === client.id && agreementEcho.source === agreementSource ? agreementEcho.rows : client.hourlyRateOverrides }
   const pin = shown.hourlyRatePeriod ?? null
   const history = shown.hourlyRateHistory ?? []
   // NEXT month, because a rate change the owner agrees with a client almost
@@ -1404,7 +1408,7 @@ export function HourlyRatesField({ client }: { client: Client }) {
       // for someone with no versions — their live `billRate`. Only someone
       // with none of those is left off; their hours fall through to the
       // client's own rate.
-      const rate = billRateAt(billRateVersions, employee, pin, currentPeriod)
+      const rate = billRateAt(billRateVersions, employee, pin, currentPeriod, shown)
       return { id: employee.id, name: employee.name, rate }
     })
     .filter((row) => row.rate !== null)
@@ -1445,6 +1449,9 @@ export function HourlyRatesField({ client }: { client: Client }) {
   return (
     <div className="field full-row">
       <span>Hourly rates</span>
+      <ClientRateAgreementForm key={client.id} clientId={client.id} employees={data.employees ?? []}
+        agreements={shown.hourlyRateOverrides ?? []}
+        onSaved={(rows) => setAgreementEcho({ clientId: client.id, rows, source: agreementSource })} />
       <small className="field-helper">
         What this client is billed for each person&rsquo;s time. Changing a person&rsquo;s rate on
         the Team page does not move this client &mdash; press Move to current rates at their

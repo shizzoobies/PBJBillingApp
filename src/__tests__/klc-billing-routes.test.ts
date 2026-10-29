@@ -169,7 +169,7 @@ describe('the send route refuses before it sends anything', () => {
     const text = block()
     const refusalAt = text.indexOf('if (sendAddressee.refusal)')
     const resolveAt = text.indexOf('resolveInvoiceRecipients({')
-    const sendAt = text.indexOf('await sendInvoiceEmail({')
+    const sendAt = text.indexOf('() => sendInvoiceEmail({')
     expect(refusalAt).toBeGreaterThan(-1)
     expect(resolveAt).toBeGreaterThan(-1)
     expect(sendAt, 'the send call moved out of this block').toBeGreaterThan(-1)

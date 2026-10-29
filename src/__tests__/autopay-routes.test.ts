@@ -323,7 +323,7 @@ describe('the send route and autopay', () => {
     expect(helper).toContain('catch (error)')
     expect(helper).toContain('attemptNo: 1,')
     expect(helper).toContain('return fallback')
-    expect(send.indexOf('chargeAfterSend(')).toBeLessThan(send.indexOf('sendJson(response, 200, { invoice: sentInvoice })'))
+    expect(send.indexOf('chargeAfterSend(')).toBeLessThan(send.indexOf('sendJson(response, 200, { invoice: sentInvoice,'))
   })
 
   // Nothing in the send route itself may touch Stripe's PaymentIntents or the

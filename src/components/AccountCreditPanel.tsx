@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { AdvancePaymentPanel } from './AdvancePaymentPanel'
 import {
   addAccountCreditRequest,
   listAccountCreditsRequest,
@@ -68,6 +69,7 @@ function AccountCreditLedger({ clientId, retiredName }: { clientId: string; reti
   const [forPeriod, setForPeriod] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [showAdvances, setShowAdvances] = useState(false)
 
   // Bumped after an add or a void so the list is read again from the server.
   const [reloadKey, setReloadKey] = useState(0)
@@ -151,6 +153,8 @@ function AccountCreditLedger({ clientId, retiredName }: { clientId: string; reti
 
   return (
     <div className="account-credit">
+      <button type="button" className="secondary-action" onClick={() => setShowAdvances((value) => !value)} aria-expanded={showAdvances}>Advance payment requests</button>
+      {showAdvances ? <AdvancePaymentPanel clientId={clientId} disabled={Boolean(retiredName)} onChanged={reload} /> : null}
       {loadFailed ? (
         <p className="invoice-run-error" role="alert">
           Could not refresh the list, so this may be out of date.{' '}
@@ -288,7 +292,7 @@ function AccountCreditLedger({ clientId, retiredName }: { clientId: string; reti
                         <span className="account-credit-void-flag">Void</span>
                       ) : credit.derived ? (
                         // Derived from a paid invoice: there is no row to void (void the invoice).
-                        <span className="account-credit-help">From a paid invoice</span>
+                        <span className="account-credit-help">{credit.sourceKind === 'advance_payment' ? 'From a received payment' : 'From a paid invoice'}</span>
                       ) : (
                         <button
                           type="button"

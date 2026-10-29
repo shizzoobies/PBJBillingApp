@@ -32,6 +32,8 @@ export type RateHistoryEntry = {
 }
 
 export type PinnedClient = {
+  billingMode?: string
+  hourlyRateOverrides?: readonly import('./client-rate-agreement.js').ClientRateAgreement[]
   hourlyRatePeriod?: string | null
   hourlyRateHistory?: readonly RateHistoryEntry[] | null
 }
@@ -45,6 +47,7 @@ export declare function billRateFor(
 /** Anything with an id and, optionally, the pre-rate-history live mirror. */
 export type RatedEmployee = {
   id: string
+  role?: string
   billRate?: number | null
 }
 
@@ -60,6 +63,7 @@ export declare function billRateAt(
   employee: RatedEmployee | null | undefined,
   ratePeriod: string | null | undefined,
   billingPeriod: string | null | undefined,
+  client?: PinnedClient | null,
 ): number | null
 
 export declare function costRateFor(

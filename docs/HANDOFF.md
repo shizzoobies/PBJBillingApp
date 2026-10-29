@@ -13,6 +13,8 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-10-29 - BILLING FEATURE RELEASE CANDIDATE GREEN.** `codex/billing-deposits-rates` adds client rate agreements, advance request/receipt ledger and editable defaults, combined service invoice plus separate advance section, credit statements and financial-history/delivery safeguards. [Review guide](plans/billing-local-review-2026-10.md) is the current workflow and decision record. Alex authorized deployment when green at 00:08 UTC. Final verify exited 0: lint/build, 467 files / 10,788 tests and 40 script tests passed. Multiple independent financial reviews cleared the final payment-source/client-lock ordering. Synthetic responsive UI checked at 360/768/1280 pixels. Release must still verify the exact CI commit, live health, startup and screens before claiming live. No client values or financial records are seeded. No matching current build ticket was found; do not reuse the historical rate or prepaid-plan tickets. The older live-state paragraphs below describe prior work.
+
 **2026-10-28 (~22:50Z) - SIX TICKETS LIVE IN THREE SHIPS; queue EMPTY; nothing in flight; READ THIS FIRST, then the 10-27
 paragraphs.** `main` = `5a2487d4` (+ this handoff), live (`/health` 200, commit 5a2487d), **voice NOT yet re-provisioned: the
 ElevenLabs knowledge base stopped persisting new uploads (a POST answers with an id that 404s a second later) because
@@ -1669,6 +1671,12 @@ stuck is a read-only look at its `signature_requests` row: `last_error` says why
 ---
 
 ## 5. Where things stand (newest first)
+
+### 2026-10-29 — Editable client billing and advance payments
+
+Reviewed release candidate: client/person/role rate agreements effective by billing month; editable advance defaults; request/receipt/reversal ledger for arbitrary hourly or plan advances; normal invoice with a separate Pay in advance amount section; dated credit statements. Existing invoices retain snapshots and existing prepaid-plan/retainer behavior remains separate. No real client values are backfilled. Received funds alone produce credit; drafts reserve it; receipt/reversal writes share source and client locks; email delivery validates under the same credit lock and records on one connection. Uncertain sends require provider reconciliation. Partial reversals conservatively hold the full receipt.
+
+Final local verify exited 0 (467 files / 10,788 tests plus 40 script tests, lint/build). The initial script-test failures were environment-only: temporary files must be outside Git and shutdown tests need loopback access; final run corrected both without weakening tests. Route-source assertions were updated for the protected delivery helper and supplemented by behavioral connection/commit-failure tests. Multiple independent reviews, including the final source-lock race fix, found no remaining code blocker. Responsive component preview verified saves, cancellation and interrupted retry at 360/768/1280 pixels. Actual PostgreSQL engine/load tests and live verification are not implied by recording-adapter tests. See the review guide and release report for the exact deployment result. The matching build ticket remains unidentified.
 
 **2026-10-14 - five ships: three leftovers tickets, the Board three-level fold, automatic invoice reminders.**
 

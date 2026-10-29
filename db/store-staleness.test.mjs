@@ -144,6 +144,8 @@ const localDataPath = path.join(projectRoot, 'tmp', 'app-data.json')
 // `splitTimeEntry` writes an activity-log row, which on the file backend lives
 // in this second file — snapshot/restore it for the same reason.
 const localAuthPath = path.join(projectRoot, 'tmp', 'auth-state.json')
+const extraLedgerPaths = ['client-rate-agreements.json', 'advance-payments.json'].map((name) => path.join(projectRoot, 'tmp', name))
+const savedExtraLedgers = new Map()
 
 let savedContents = null
 let savedAuthContents = null
@@ -185,6 +187,7 @@ async function clearInvoiceIntelligence() {
 }
 
 beforeAll(async () => {
+  for (const file of extraLedgerPaths) savedExtraLedgers.set(file, existsSync(file) ? await readFile(file, 'utf8') : null)
   // DATABASE_URL must be absent or the store would construct a Pool and take
   // the Postgres branch.
   savedDatabaseUrl = process.env.DATABASE_URL
@@ -198,6 +201,10 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  for (const [file, contents] of savedExtraLedgers) {
+    if (contents === null) await rm(file, { force: true })
+    else await writeFile(file, contents)
+  }
   if (savedDatabaseUrl !== undefined) {
     process.env.DATABASE_URL = savedDatabaseUrl
   }
@@ -216,6 +223,7 @@ afterAll(async () => {
 let store
 
 beforeEach(async () => {
+  for (const file of extraLedgerPaths) await rm(file, { force: true })
   store = new AppDataStore()
   expect(store.mode).toBe('file')
   // Boot it the way server.js does. Not optional: `initialize()` is what
@@ -231,6 +239,154 @@ beforeEach(async () => {
   await rm(localDataPath, { force: true })
   // Baseline, unguarded (server-authoritative writes pass no expectedVersion).
   await store.write(workspace())
+})
+
+describe('client billing agreements and advance receipts (file backend)', () => {
+  const requestId = 'aaaaaaaa-bbbb-cccc-dddd'
+  const sourceRef = 'manual:bbbbbbbb-cccc-dddd-eeee'
+  const record = (id, period, amount = 300) => ({ id, clientId: 'c1', period, number: `SYNTHETIC-${id}`, kind: 'monthly', status: 'draft', lineItems: [{ kind: 'plan', label: 'Services', amount }], subtotal: amount, total: amount, dueDate: '2026-12-01', scopeFlags: [], blurb: '' })
+  const setupAdvance = async (amount = 400) => {
+    await store.createAdvancePayment({ id: requestId, clientId: 'c1', amount: 1000 }, 'owner-test')
+    return store.recordAdvancePayment({ requestId, sourceRef, amount, receivedOn: '2026-06-01', method: 'manual' }, 'owner-test')
+  }
+  it('keeps append-only rate agreements through stale workspace and auth-file saves', async () => {
+    await store.write(workspace({ clients: [{ id: 'c1', name: 'Synthetic hourly client', billingMode: 'hourly' }] }))
+    const stale = await store.read()
+    const staleAuth = await readFile(localAuthPath, 'utf8')
+    const agreement = { id: requestId, userId: 'emp-1', rate: 90, effectivePeriod: '2026-11', note: 'Synthetic Flourish scenario; effective month chosen only for test' }
+    await Promise.all([store.addClientRateAgreement('c1', agreement, 'owner-test'), store.addClientRateAgreement('c1', agreement, 'owner-test')])
+    await writeFile(localAuthPath, staleAuth)
+    stale.clients[0].hourlyRateOverrides = [{ ...agreement, rate: 1 }]
+    await store.write(stale)
+    expect((await store.getClientById('c1')).hourlyRateOverrides).toHaveLength(1)
+    expect((await store.getClientById('c1')).hourlyRateOverrides[0].rate).toBe(90)
+    await expect(store.addClientRateAgreement('c1', { ...agreement, rate: 75 }, 'owner-test')).rejects.toThrow('already used')
+  })
+  it('never converts an unpaid advance into credit and deduplicates concurrent received-payment retries', async () => {
+    await store.createAdvancePayment({ id: requestId, clientId: 'c1', amount: 1000 }, 'owner-test')
+    expect(await store.listAccountCredits('c1')).toEqual([])
+    const input = { requestId, sourceRef, amount: 400, receivedOn: '2026-06-01', method: 'manual' }
+    await Promise.all([store.recordAdvancePayment(input), store.recordAdvancePayment(input)])
+    expect((await store.listAdvancePayments('c1')).receipts).toHaveLength(1)
+    expect((await store.listAccountCredits('c1'))[0].remaining).toBe(400)
+    await expect(store.recordAdvancePayment({ ...input, amount: 401 })).rejects.toThrow('different action')
+  })
+  it('reserves credit across concurrent drafts, restores it on void, and preserves receipts through cancellation', async () => {
+    await setupAdvance()
+    const drafts = await Promise.all([store._insertInvoiceDrawingAccountCredit(record('i1', '2026-11')), store._insertInvoiceDrawingAccountCredit(record('i2', '2026-12'))])
+    expect(drafts.map((row) => row.total).sort((a, b) => a - b)).toEqual([0, 200])
+    expect((await store.listAccountCredits('c1'))[0].remaining).toBe(0)
+    await store.cancelAdvancePayment(requestId, 'owner-test')
+    expect((await store.listAdvancePayments('c1')).requests[0].canceledAt).toBeTruthy()
+    expect((await store.listAccountCredits('c1'))[0].amount).toBe(400)
+    await store.updateInvoice('i1', { status: 'void' })
+    expect((await store.listAccountCredits('c1'))[0].remaining).toBe(300)
+  })
+  it('refuses held credit in manual Apply, Send preparation, and final paid-by-credit transition', async () => {
+    await setupAdvance()
+    const draft = await store._insertInvoiceDrawingAccountCredit(record('i1', '2026-11', 150))
+    await store.holdManualAdvanceReceipt(sourceRef, 'Synthetic returned check', 'owner-test', 'cccccccc-dddd-eeee-ffff')
+    expect((await store.listAccountCredits('c1'))[0].reversal.holds).toBe(true)
+    await expect(store.prepareInvoiceCreditStatement(draft)).rejects.toThrow('on hold')
+    await expect(store.markInvoicePaidByCredit(draft.id)).rejects.toThrow('on hold')
+    expect((await store.listInvoices()).find((row) => row.id === draft.id).status).toBe('draft')
+    const other = await store._insertInvoiceDrawingAccountCredit(record('i2', '2026-12', 150))
+    expect(other.total).toBe(150)
+    await expect(store.applyAccountCreditToInvoice(other.id)).rejects.toThrow()
+  })
+  it('handles reversal before receipt, then the same event after receipt without conflict', async () => {
+    await store.createAdvancePayment({ id: requestId, clientId: 'c1', amount: 1000 })
+    const event = { id: 'evt_synthetic', type: 'charge.refunded', created: 1780300800, data: { object: { payment_intent: 'pi_synthetic', amount_refunded: 10000 } } }
+    await store.recordAdvanceReversal(event)
+    const intent = { id: 'pi_synthetic', status: 'succeeded', currency: 'usd', amount_received: 40000, metadata: { advancePaymentRequestId: requestId } }
+    await store.recordAdvancePayment({ requestId }, null, intent)
+    await store.recordAdvanceReversal(event)
+    expect((await store.listAdvancePayments('c1')).reversals).toHaveLength(1)
+    expect((await store.listAccountCredits('c1'))[0].reversal.holds).toBe(true)
+  })
+  it('preserves a sent statement in its audit log when a later invoice revision changes it', async () => {
+    await setupAdvance()
+    const draft = await store._insertInvoiceDrawingAccountCredit(record('i1', '2026-11', 150))
+    await store.prepareInvoiceCreditStatement(draft)
+    await store.recordInvoiceSent(draft.id, { to: ['synthetic@example.test'], subject: 'Synthetic', ok: true })
+    const first = (await store.listInvoices()).find((row) => row.id === draft.id)
+    expect(first.emailLog.at(-1).creditStatement.closingCents).toBe(25000)
+    const changed = await store.updateInvoice(draft.id, { lineItems: [{ kind: 'plan', label: 'Services', amount: 200 }, ...first.lineItems.filter((line) => line.kind === 'account_credit')] })
+    await store.prepareInvoiceCreditStatement(changed)
+    const later = (await store.listInvoices()).find((row) => row.id === draft.id)
+    expect(later.emailLog[0].creditStatement.closingCents).toBe(25000)
+  })
+  it('preserves advance ownership and financial history even without a service invoice', async () => {
+    await setupAdvance()
+    await expect(store.write(workspace({ clients: [] }))).rejects.toThrow('advance-payment history')
+    const data = await store.read()
+    data.clients.push({ id: 'other-payer', name: 'Synthetic master', isBillingMaster: true })
+    data.clients[0].billToClientId = 'other-payer'
+    await expect(store.write(data)).rejects.toThrow('billing payer cannot be changed')
+    expect((await store.listAdvancePayments('c1')).receipts).toHaveLength(1)
+  })
+  it('attaches an explicit advance separately from charges and freezes the issued section', async () => {
+    const request = await store.createAdvancePayment({ id: requestId, clientId: 'c1', amount: 1500, collectionMethod: 'manual' })
+    expect(request.publicToken).toMatch(/^[a-f0-9]{48}$/)
+    await store._insertInvoiceDrawingAccountCredit(record('i1', '2026-11', 300))
+    await expect(store.setInvoiceAdvanceOffer('i1', requestId, undefined, 'owner-test', 'http://localhost')).rejects.toThrow('Choose whether')
+    const attached = await store.setInvoiceAdvanceOffer('i1', requestId, true, 'owner-test', 'http://localhost')
+    expect(attached.total).toBe(300)
+    expect(attached.lineItems.at(-1)).toMatchObject({ kind: 'advance_request', amount: 0, advanceOffer: { optional: true, requestedCents: 150000 }, creditStatement: { openingCents: 0, closingCents: 0 } })
+    expect(await store.listAccountCredits('c1')).toEqual([])
+    await store.recordInvoiceSent('i1', { ok: true })
+    await expect(store.setInvoiceAdvanceOffer('i1', null, null, 'owner-test', 'http://localhost')).rejects.toThrow('unsent monthly draft')
+    await store.cancelAdvancePayment(requestId, 'owner-test')
+    expect((await store.listInvoices()).find((row) => row.id === 'i1').lineItems.at(-1).advanceOffer).toEqual(attached.lineItems.at(-1).advanceOffer)
+  })
+  it('serializes simulated delivery with a reversal and records the exact delivered snapshot', async () => {
+    await setupAdvance()
+    const draft = await store._insertInvoiceDrawingAccountCredit(record('i1', '2026-11', 150))
+    let release, started
+    const entered = new Promise((resolve) => { started = resolve })
+    const gate = new Promise((resolve) => { release = resolve })
+    const delivery = store.deliverInvoiceWithCreditLock(draft, { to: ['test@example.test'] }, async () => { started(); await gate; return { ok: true, providerId: 'synthetic' } })
+    await entered
+    let reversed = false
+    const reversal = store.holdManualAdvanceReceipt(sourceRef, 'Synthetic return', 'owner-test', 'cccccccc-dddd-eeee-ffff').then(() => { reversed = true })
+    await Promise.resolve()
+    expect(reversed).toBe(false)
+    release()
+    const sent = await delivery
+    await reversal
+    expect(sent.invoice.status).toBe('sent')
+    expect(sent.invoice.emailLog.at(-1).creditStatement).toEqual(draft.lineItems.find((line) => line.kind === 'account_credit').creditStatement)
+    await expect(store.deliverInvoiceWithCreditLock(sent.invoice, {}, async () => { throw new Error('must not deliver') })).rejects.toThrow('on hold')
+  })
+  it('blocks unknown delivery retries and changed payment status without calling the provider', async () => {
+    const draft = await store._insertInvoiceDrawingAccountCredit(record('i1', '2026-11', 300))
+    const uncertain = await store.deliverInvoiceWithCreditLock(draft, {}, async () => ({ ok: false, uncertain: true, error: 'No confirmed response' }))
+    expect(uncertain.invoice.status).toBe('draft')
+    await expect(store.deliverInvoiceWithCreditLock(uncertain.invoice, {}, async () => { throw new Error('must not deliver') })).rejects.toThrow('previous delivery is uncertain')
+    const next = await store._insertInvoiceDrawingAccountCredit(record('i2', '2026-12', 300))
+    await store.markInvoicePaidManually('i2', { actorUserId: 'owner-test' })
+    await expect(store.deliverInvoiceWithCreditLock(next, {}, async () => { throw new Error('must not deliver') })).rejects.toThrow('changed before delivery')
+  })
+  it('rechecks a newly credit-paid invoice before its first delivery', async () => {
+    await setupAdvance()
+    const draft = await store._insertInvoiceDrawingAccountCredit(record('i1', '2026-11', 150))
+    await store.markInvoicePaidByCredit(draft.id)
+    const paid = (await store.listInvoices()).find((row) => row.id === draft.id)
+    await store.holdManualAdvanceReceipt(sourceRef, 'Synthetic return', 'owner-test', 'cccccccc-dddd-eeee-ffff')
+    await expect(store.deliverInvoiceWithCreditLock(paid, {}, async () => { throw new Error('must not deliver') })).rejects.toThrow('on hold')
+  })
+  it('keeps defaults and request allocation prospective without creating money', async () => {
+    await store.saveClientBillingDefaults({ id: requestId, clientId: 'c1', effectivePeriod: '2026-11', advanceAmount: 2000, allocation: 'general', balanceDisplay: 'summary' }, 'owner-test')
+    expect(await store.listAccountCredits('c1')).toEqual([])
+    await store.createAdvancePayment({ id: requestId, clientId: 'c1', amount: 400, forPeriod: '2026-12' })
+    await store.recordAdvancePayment({ requestId, sourceRef, amount: 400, receivedOn: '2026-06-01', method: 'manual' })
+    await store.saveClientBillingDefaults({ id: 'bbbbbbbb-dddd-eeee-ffff', clientId: 'c1', effectivePeriod: '2026-12', advanceAmount: 3000, allocation: 'general' }, 'owner-test')
+    expect((await store.listAccountCredits('c1'))[0].forPeriod).toBe('2026-12')
+    const november = await store._insertInvoiceDrawingAccountCredit(record('i1', '2026-11', 100))
+    const december = await store._insertInvoiceDrawingAccountCredit(record('i2', '2026-12', 100))
+    expect(november.total).toBe(100)
+    expect(december.total).toBe(0)
+  })
 })
 
 describe('bulk save staleness guard (file backend)', () => {
@@ -4272,8 +4428,12 @@ describe('recordInvoiceSent statement shape (postgres branch)', () => {
     )
     expect(updated.id).toBe('inv-1')
     expect(updated.emailLog).toHaveLength(1)
-    // The void pre-check before the write, and nothing after it.
-    expect(fake.matching(/^select\b[\s\S]*\bfrom invoices\b/i)).toHaveLength(1)
+    // The pre-check plus authoritative locked read precede the write. There
+    // is still no post-write reread that could return somebody else's change.
+    const invoiceReads = fake.matching(/^select\b[\s\S]*\bfrom invoices\b/i)
+    expect(invoiceReads).toHaveLength(2)
+    expect(invoiceReads[1].text).toMatch(/for update$/i)
+    expect(fake.statements.indexOf(invoiceReads[1])).toBeLessThan(fake.indexOf(/^update invoices/i))
   })
 
   // The provider's id is the join key every delivery event is matched on. An
@@ -35675,10 +35835,15 @@ describe('payment writes decide on the locked row (postgres branch)', () => {
 
       const all = fake.statements.map((s) => s.text)
       const beginAt = fake.indexOf(/^begin$/i)
-      expect(LOCKED.test(all[beginAt + 1])).toBe(true)
-      expect(/^update invoices/i.test(all[beginAt + 2])).toBe(true)
-      expect(/^insert into invoice_review_events/i.test(all[beginAt + 3])).toBe(true)
-      expect(all[beginAt + 4]).toBe('commit')
+      // Every payment now serializes with credit receipts/reversals before the
+      // invoice row lock, including when the earlier read had no credit line.
+      // Otherwise a concurrent edit could add credit between read and lock.
+      expect(all[beginAt + 1]).toMatch(/pg_advisory_xact_lock/)
+      expect(fake.statements[beginAt + 1].params).toEqual(['account_credit:c1'])
+      expect(LOCKED.test(all[beginAt + 2])).toBe(true)
+      expect(/^update invoices/i.test(all[beginAt + 3])).toBe(true)
+      expect(/^insert into invoice_review_events/i.test(all[beginAt + 4])).toBe(true)
+      expect(all[beginAt + 5]).toBe('commit')
       const event = fake.matching(/^insert into invoice_review_events/i)[0]
       expect(JSON.parse(event.params[6])).toEqual({ status: { before: 'reviewed', after: 'paid' } })
     })
@@ -35699,8 +35864,10 @@ describe('payment writes decide on the locked row (postgres branch)', () => {
     it('will not revive an invoice that was voided while its UPDATE waited', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const fake = fakePostgres({ invoices: [{ ...sentRow }] })
-      const inner = fake.pool.query.bind(fake.pool)
-      fake.pool.query = async (text, params) =>
+      // Sending now runs on its locked transaction connection.
+      const connection = await watchedClient(fake)
+      const inner = connection.query.bind(connection)
+      connection.query = async (text, params) =>
         /^update invoices[\s\S]*returning id, client_id/i.test(String(text).trim())
           ? (fake.statements.push({ text: String(text).trim(), params }), { rows: [], rowCount: 0 })
           : inner(text, params)
@@ -41589,6 +41756,7 @@ describe('prepayment credits are derived from paid invoices (file backend)', () 
 
     const [november] = await generate('2026-11')
     expect(accountLine(november)).toEqual({
+      creditStatement: expect.objectContaining({ openingCents: 100000, appliedCents: 50000, closingCents: 50000 }),
       kind: 'account_credit',
       label: 'Credit on account - meant for November 2026',
       detail: '',
@@ -41602,7 +41770,7 @@ describe('prepayment credits are derived from paid invoices (file backend)', () 
     const afterNovember = await store.listAccountCredits('c1')
     expect(afterNovember.map((credit) => credit.remaining)).toEqual([0, 500])
     expect(afterNovember[0].draws).toEqual([
-      { invoiceId: november.id, invoiceNumber: november.number, period: '2026-11', amount: 500 },
+      { invoiceId: november.id, invoiceNumber: november.number, period: '2026-11', status: 'draft', amount: 500 },
     ])
 
     const [december] = await generate('2026-12')
@@ -43291,7 +43459,7 @@ describe('bulk save: the write-committed line (postgres branch)', () => {
     // The first part is what the handoff and the alerting grep for.
     expect(lines[0]).toMatch(/^\[bulk-save\] write committed in \d+ms after 1 lock attempt \| /)
     expect(lines[0]).toMatch(
-      /^\[bulk-save\] write committed in \d+ms after 1 lock attempt \| lock 3ms check 2ms snapshots \d+ms deletes 14ms inserts \d+ms \(.*\) version 0ms commit 1ms$/,
+      /^\[bulk-save\] write committed in \d+ms after 1 lock attempt \| lock 3ms check 3ms snapshots \d+ms deletes 14ms inserts \d+ms \(.*\) version 0ms commit 1ms$/,
     )
     // Every row the save inserted, by table, with that table's own lap: 2 time
     // entries (one statement, so one millisecond of the controlled clock), 1
@@ -43312,7 +43480,8 @@ describe('bulk save: the write-committed line (postgres branch)', () => {
       clockedFake({ failOn: { pattern: /^lock table/i, error: busy, times: 1 } }),
     )
 
-    expect(lines[0]).toMatch(/^\[bulk-save\] write committed in \d+ms after 2 lock attempts \| lock 3ms check 2ms /)
+    // One additional authoritative advance-history check costs one fake-clock ms.
+    expect(lines[0]).toMatch(/^\[bulk-save\] write committed in \d+ms after 2 lock attempts \| lock 3ms check 3ms /)
   })
 
   it('does not touch what the transaction issues: the lock is still the first statement after begin', async () => {
@@ -44766,7 +44935,7 @@ describe('credit on account lines (file backend)', () => {
 
     const [listed] = await store.listAccountCredits('c1')
     expect(listed.draws).toEqual([
-      { invoiceId: 'inv-a', invoiceNumber: 'INV-A', period: '2026-10', amount: 200 },
+      { invoiceId: 'inv-a', invoiceNumber: 'INV-A', period: '2026-10', status: 'draft', amount: 200 },
     ])
     expect(listed.remaining).toBe(300)
     expect(await store.accountCreditBalance('c1')).toBe(300)
@@ -45415,7 +45584,7 @@ describe('credit on account lines (Postgres statements)', () => {
       `select id, number, period, status, line_items from invoices where client_id = $1 and status <> 'void' and line_items @> '[{"kind":"account_credit"}]'::jsonb`,
     )
     expect(drawReads[0].params).toEqual(['c1'])
-    expect(credit.draws).toEqual([{ invoiceId: 'inv-a', invoiceNumber: 'INV-A', period: '2026-10', amount: 120 }])
+    expect(credit.draws).toEqual([{ invoiceId: 'inv-a', invoiceNumber: 'INV-A', period: '2026-10', status: 'draft', amount: 120 }])
     expect(credit.remaining).toBe(180)
     expect(await store2.accountCreditBalance('c1')).toBe(180)
   })
@@ -45670,6 +45839,7 @@ describe('generation draws credit on account (file backend)', () => {
     expect(result.created).toHaveLength(1)
     const invoice = result.created[0]
     expect(lineOf(invoice)).toEqual({
+      creditStatement: expect.objectContaining({ openingCents: 100000, appliedCents: 60000, closingCents: 40000 }),
       kind: 'account_credit',
       label: 'Credit on account',
       detail: '',
@@ -45685,7 +45855,7 @@ describe('generation draws credit on account (file backend)', () => {
     expect((await stored())[0].lineItems).toEqual(invoice.lineItems)
     const [after] = await store.listAccountCredits('c1')
     expect(after.draws).toEqual([
-      { invoiceId: invoice.id, invoiceNumber: invoice.number, period, amount: 600 },
+      { invoiceId: invoice.id, invoiceNumber: invoice.number, period, status: 'draft', amount: 600 },
     ])
     expect(await store.accountCreditBalance('c1')).toBe(400)
   })
@@ -45825,17 +45995,16 @@ describe('generation draws credit on account (file backend)', () => {
       expect(lineOf(invoice).draws).toEqual([{ creditId: held.id, amount: 600 }])
     })
 
-    it('manual Apply still takes it', async () => {
+    it('manual Apply refuses held money too', async () => {
       await seed([flat('c1', 'Acme', 600)])
-      const held = await credit('c1', 1000, { sourceKind: 'overpayment', sourceRef: 'pi_held' })
+      await credit('c1', 1000, { sourceKind: 'overpayment', sourceRef: 'pi_held' })
       await editFile((data) => {
         data.invoices.push(carrier([note()]))
       })
       const [invoice] = (await store.generateInvoicesForPeriod(period)).created
       expect(lineOf(invoice)).toBeUndefined()
 
-      const applied = await store.applyAccountCreditToInvoice(invoice.id)
-      expect(lineOf(applied).draws).toEqual([{ creditId: held.id, amount: 600 }])
+      await expect(store.applyAccountCreditToInvoice(invoice.id)).rejects.toBeInstanceOf(AccountCreditError)
     })
   })
 
@@ -46215,7 +46384,7 @@ describe('generation draws credit on account (Postgres statements)', () => {
     const lines = JSON.parse(write.params[6])
     expect(lines).toEqual([
       expect.objectContaining({ kind: 'plan', amount: 600 }),
-      { kind: 'account_credit', label: 'Credit on account', detail: '', amount: -600, draws: [{ creditId: 'credit-1', amount: 600 }] },
+      expect.objectContaining({ kind: 'account_credit', label: 'Credit on account', detail: '', amount: -600, draws: [{ creditId: 'credit-1', amount: 600 }], creditStatement: expect.objectContaining({ openingCents: 100000, closingCents: 40000 }) }),
     ])
     expect(write.params[7]).toBe(600)
     expect(write.params[8]).toBe(0)
@@ -46483,7 +46652,8 @@ describe('markInvoicePaidByCredit (file backend)', () => {
   })
 
   it('stamps now when no moment is given, and ignores one that is not a date', async () => {
-    await seedInvoices([covered('inv-a', credit), covered('inv-b', credit)])
+    const secondCredit = await store.addAccountCredit({ clientId: 'c1', amount: 600, createdBy: 'u' })
+    await seedInvoices([covered('inv-a', credit), covered('inv-b', secondCredit)])
     const before = Date.now()
     const a = await store.markInvoicePaidByCredit('inv-a', {})
     const b = await store.markInvoicePaidByCredit('inv-b', { paidAt: 'not a date' })
@@ -46633,7 +46803,7 @@ describe('markInvoicePaidByCredit (postgres branch)', () => {
     fake.statements.map((s) => s.text).filter((t) => /^(begin|commit|rollback)$/i.test(t))
 
   it('begin, the locked select, an UPDATE that sets method credit and the send moment, the audit event, commit', async () => {
-    const fake = fakePostgres({ invoices: [{ ...coveredRow }] })
+    const fake = fakePostgres({ invoices: [{ ...coveredRow }], accountCreditRows: [{ id: 'cr-1', client_id: 'c1', amount: '100.00', source_kind: 'manual', source_ref: 'synthetic-source' }] })
 
     await postgresStore(fake).markInvoicePaidByCredit('inv-1', {
       actorUserId: 'owner-1',
@@ -46642,20 +46812,25 @@ describe('markInvoicePaidByCredit (postgres branch)', () => {
 
     const all = fake.statements.map((s) => s.text)
     const beginAt = fake.indexOf(/^begin$/i)
-    expect(LOCKED.test(all[beginAt + 1])).toBe(true)
-    expect(/^update invoices\s+set status = 'paid', payment_method = \$3, paid_at = \$2/i.test(all[beginAt + 2])).toBe(true)
-    expect(fake.statements[beginAt + 2].params).toEqual(['inv-1', '2026-10-31T23:30:00.000Z', 'credit'])
-    expect(/^insert into invoice_review_events/i.test(all[beginAt + 3])).toBe(true)
-    expect(all[beginAt + 4]).toBe('commit')
+    const lockAt = fake.indexOf(/^select pg_advisory_xact_lock/i)
+    const rowAt = all.findIndex((sql) => LOCKED.test(sql))
+    const updateAt = all.findIndex((sql) => /^update invoices\s+set status = 'paid', payment_method = \$3, paid_at = \$2/i.test(sql))
+    expect(lockAt).toBe(beginAt + 1)
+    expect(rowAt).toBeGreaterThan(lockAt)
+    expect(updateAt).toBeGreaterThan(rowAt)
+    expect(fake.statements[updateAt].params).toEqual(['inv-1', '2026-10-31T23:30:00.000Z', 'credit'])
+    expect(fake.indexOf(/^insert into invoice_review_events/i)).toBeGreaterThan(updateAt)
+    expect(all.at(-1)).not.toBe('rollback')
+    expect(control(fake)).toEqual(['begin', 'commit'])
     const event = fake.matching(/^insert into invoice_review_events/i)[0]
     expect(event.params).toContain('marked_paid_by_credit')
     expect(JSON.parse(event.params[6])).toEqual({ status: { before: 'reviewed', after: 'paid' } })
   })
 
   it('the manual mark still writes method manual through the same statement', async () => {
-    const fake = fakePostgres({ invoices: [{ ...coveredRow, status: 'sent' }] })
+    const fake = fakePostgres({ invoices: [{ ...coveredRow, status: 'sent' }], accountCreditRows: [{ id: 'cr-1', client_id: 'c1', amount: '100.00', source_kind: 'manual', source_ref: 'synthetic-source' }] })
     await postgresStore(fake).markInvoicePaidManually('inv-1', { actorUserId: 'owner-1' })
-    const [update] = fake.matching(/^update invoices/i)
+    const [update] = fake.matching(/^update invoices\s+set status/i)
     expect(update.params[2]).toBe('manual')
     expect(fake.matching(/^insert into invoice_review_events/i)[0].params).toContain('marked_paid_manually')
   })

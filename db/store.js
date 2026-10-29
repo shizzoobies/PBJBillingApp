@@ -1,5 +1,8 @@
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile as fsWriteFile } from 'node:fs/promises'
+import { buildCreditStatement } from '../lib/invoice-credit-statement.js'
+import { AdvancePaymentLedger, ADVANCE_PAYMENT_SCHEMA } from './advance-payments.js'
+import { AdvancePaymentError, advanceRequest, advanceReceipt, stripeAdvanceReceipt, billingDefaults, billingDefaultsAt } from '../lib/advance-payments.js'
+import { mkdir, readFile, rename, writeFile as fsWriteFile } from 'node:fs/promises'
 import { classifySplitTarget } from '../lib/group-allocation.js'
 import { rollUpItemDone } from '../lib/checklist-step-done.js'
 import {
@@ -41,6 +44,7 @@ import {
 import { RESTORE_CONFLICT_MESSAGE, caseKeyOf, removedCaseSet, restoreConflicts } from '../lib/case-removal.js'
 import { decryptSecretAtRest, encryptSecretAtRest } from '../lib/totp.js'
 import { latestBillRate, latestCostRate, ratePeriodAsOf } from '../lib/rate-history.js'
+import { validateClientRateAgreement } from '../lib/client-rate-agreement.js'
 import {
   cleanProposalInputs,
   cleanProposalProspect,
@@ -129,6 +133,7 @@ import {
   MAX_LINE_HOURS,
   RETAINER_LABEL,
   accountCreditCents,
+  accountCreditAvailableCents,
   accountCreditWantedCents,
   invoiceLockMessage,
   invoiceLockRefusal,
@@ -234,6 +239,7 @@ const projectRoot = path.dirname(__dirname)
 const seedDataPath = path.join(projectRoot, 'prototype-data.json')
 const localDataPath = path.join(projectRoot, 'tmp', 'app-data.json')
 const localAuthPath = path.join(projectRoot, 'tmp', 'auth-state.json')
+const localRateAgreementsPath = path.join(projectRoot, 'tmp', 'client-rate-agreements.json')
 const sessionTtlMs = 1000 * 60 * 60 * 24 * 7
 
 // Seed columns for the Active Checklists board, created once when the
@@ -2009,6 +2015,7 @@ function accountCreditView(row, draws = []) {
     // A prepayment credit is DERIVED from a paid invoice, never stored: it has no
     // row to void (void the invoice instead).
     ...(row.derived === true ? { derived: true } : {}),
+    ...(row.reversal ? { reversal: row.reversal } : {}),
   }
 }
 
@@ -2155,6 +2162,7 @@ function accountCreditsWithDraws(credits, invoices) {
           invoiceId: invoice.id,
           invoiceNumber: invoice.number ?? null,
           period: invoice.period ?? null,
+          status: invoice.status,
           amount: cents / 100,
         })
       }
@@ -2760,6 +2768,7 @@ const INVOICE_LINE_KINDS = new Set([
   // negative line into an ordinary hand-typed one and lose its draws, which are
   // the ledger.
   'account_credit',
+  'advance_request',
   // The estimated fee for a later month of a billing period, on the period's first
   // invoice (stage 2). Listed for the same reason as the credit: falling back to
   // 'custom' would lose the month the line is paid ahead for, which is what the
@@ -3494,7 +3503,8 @@ export function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly', storedLines
       .map((stored) => Number(stored.rate))
       .filter((rate) => Number.isFinite(rate)),
   )
-  return (Array.isArray(raw) ? raw : [])
+  const sanitized = (Array.isArray(raw) ? raw : [])
+    .filter((line) => line?.kind !== 'advance_request')
     .map((line) => {
       const claimed = INVOICE_LINE_KINDS.has(line?.kind) ? line.kind : 'custom'
       const kind = claimed === 'retainer' && invoiceKind !== 'retainer' ? 'custom' : claimed
@@ -3503,6 +3513,11 @@ export function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly', storedLines
         label: String(line?.label ?? '').trim().slice(0, 300),
         detail: String(line?.detail ?? '').trim().slice(0, 300),
         amount: roundMoney(line?.amount),
+      }
+      if (kind === 'advance_request') {
+        const saved = storedLines.find((row) => row.kind === 'advance_request')
+        // Only the dedicated attachment command may create/replace this data.
+        return saved ? structuredClone(saved) : { kind: 'advance_request', label: '', detail: '', amount: 0 }
       }
       // WHOSE WORK IS THIS LINE? Absent means the invoice's own client, which is
       // every line of every ordinary invoice. On a billing master's consolidated
@@ -3555,7 +3570,8 @@ export function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly', storedLines
           }))
           .filter((draw) => draw.creditId && draw.creditId.length <= 200 && draw.amount > 0)
           .slice(0, ACCOUNT_CREDIT_MAX_DRAWS)
-        return { ...base, draws }
+        const snapshot = storedLines.find((stored) => stored?.kind === 'account_credit')?.creditStatement
+        return { ...base, draws, ...(snapshot ? { creditStatement: snapshot } : {}) }
       }
 
       // A prepayment carries the month it is paid ahead for. Without it the line is
@@ -3690,6 +3706,9 @@ export function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly', storedLines
         line.amount !== 0 ||
         (line.kind === 'adhoc' && line.adhocAmount !== 0),
     )
+  const attachment = storedLines.find((line) => line.kind === 'advance_request')
+  if (attachment && !sanitized.some((line) => line.kind === 'advance_request')) sanitized.push(structuredClone(attachment))
+  return sanitized
 }
 
 /**
@@ -6193,6 +6212,17 @@ export class AppDataStore {
 
   async initialize() {
     if (this.pool) {
+      await this.pool.query(ADVANCE_PAYMENT_SCHEMA)
+      await this.pool.query('create index if not exists advance_payment_client_idx on advance_payment_ledger (client_id, kind)')
+      // Targeted append-only agreements; outside bulk-saved clients and without FKs.
+      await this.pool.query(`create table if not exists client_rate_agreements (
+        id text primary key, revision bigserial unique, client_id text not null,
+        user_id text, effective_period text not null, rate numeric(12,2), note text not null default '',
+        created_at timestamptz not null default now(), created_by text,
+        check (rate is null or rate between 0 and 100000)
+      )`)
+      await this.pool.query('create index if not exists client_rate_agreements_client_idx on client_rate_agreements (client_id, revision)')
+      await this.pool.query('alter table client_rate_agreements add column if not exists role text')
       await this.pool.query(`
         create table if not exists users (
           id text primary key,
@@ -9999,7 +10029,7 @@ export class AppDataStore {
     // No `captureVersion`: ~110 call sites read the workspace for their own
     // purposes and must not pay the fingerprint query (an md5 over every row of
     // ~15 tables) or fail if it ever fails. Only `readWithVersion()` does.
-    return (await this._readWorkspace({ captureVersion: false })).data
+    return this._withClientRateAgreements((await this._readWorkspace({ captureVersion: false })).data)
   }
 
   /**
@@ -10018,7 +10048,64 @@ export class AppDataStore {
    * @returns {Promise<{ data: object, version: string }>}
    */
   async readWithVersion() {
-    return this._readWorkspace({ captureVersion: true })
+    const result = await this._readWorkspace({ captureVersion: true })
+    return { ...result, data: await this._withClientRateAgreements(result.data) }
+  }
+
+  async listClientRateAgreements(clientId = null) {
+    if (this.pool) {
+      const { rows } = await this.pool.query(`select id, revision, client_id, user_id, role, effective_period, rate, note, created_at, created_by
+        from client_rate_agreements ${clientId ? 'where client_id = $1' : ''} order by revision`, clientId ? [clientId] : [])
+      return rows.map((row) => ({ id: row.id, revision: Number(row.revision), clientId: row.client_id,
+        userId: row.user_id ?? null, role: row.role ?? null, effectivePeriod: row.effective_period, rate: row.rate === null ? null : Number(row.rate),
+        note: row.note, createdAt: isoOrNull(row.created_at), createdBy: row.created_by ?? null }))
+    }
+    if (!existsSync(localRateAgreementsPath)) return []
+    const state = await readJson(localRateAgreementsPath)
+    return (state.clientRateAgreements ?? []).filter((row) => !clientId || row.clientId === clientId)
+      .sort((a, b) => a.revision - b.revision)
+  }
+
+  async _withClientRateAgreements(data) {
+    const rows = await this.listClientRateAgreements()
+    return { ...data, clients: (data.clients ?? []).map((client) => ({ ...client,
+      hourlyRateOverrides: rows.filter((row) => row.clientId === client.id) })) }
+  }
+
+  async addClientRateAgreement(clientId, input, actorUserId = null) {
+    const value = validateClientRateAgreement(input)
+    const data = await this.read()
+    const client = data.clients.find((row) => row.id === clientId)
+    if (!client || client.billingMode !== 'hourly') throw new Error('Choose an hourly client.')
+    if (value.userId && !(data.employees ?? []).some((row) => row.id === value.userId)) throw new Error('Team member not found.')
+    const sameRequest = (row) => row.clientId === clientId && row.userId === value.userId &&
+      (row.role ?? null) === value.role && row.effectivePeriod === value.effectivePeriod && row.rate === value.rate && row.note === value.note
+    if (this.pool) {
+      const { rows } = await this.pool.query(`insert into client_rate_agreements (id, client_id, user_id, effective_period, rate, note, created_by, role)
+        values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict (id) do nothing returning id`,
+      [value.id, clientId, value.userId, value.effectivePeriod, value.rate, value.note, actorUserId, value.role])
+      if (!rows.length) {
+        const existing = (await this.listClientRateAgreements()).find((row) => row.id === value.id)
+        if (!existing || !sameRequest(existing)) throw new Error('This request identifier was already used for a different rate. Reload and try again.')
+      }
+    } else {
+      await enqueueFileOperation(localRateAgreementsPath, async () => {
+        const state = existsSync(localRateAgreementsPath) ? JSON.parse(await readFile(localRateAgreementsPath, 'utf8')) : {}
+        const rows = state.clientRateAgreements ?? []
+        const existing = rows.find((row) => row.id === value.id)
+        if (existing) {
+          if (!sameRequest(existing)) throw new Error('This request identifier was already used for a different rate. Reload and try again.')
+          return
+        }
+        rows.push({ ...value, clientId, revision: Math.max(0, ...rows.map((row) => row.revision)) + 1,
+          createdAt: nowIso(), createdBy: actorUserId })
+        state.clientRateAgreements = rows
+        const temporary = `${localRateAgreementsPath}.${randomUUID()}.tmp`
+        await fsWriteFile(temporary, JSON.stringify(state, null, 2))
+        await rename(temporary, localRateAgreementsPath)
+      })
+    }
+    return this.listClientRateAgreements(clientId)
   }
 
   /**
@@ -10534,6 +10621,7 @@ export class AppDataStore {
           .map((c) => c?.id)
           .filter((id) => typeof id === 'string')
         await client.query(LOCK_OMITTED_CLIENTS_SQL, [keptClientIds])
+        await this._refuseAdvanceOwnershipChanges(data, { dbClient: client })
         const blocked = (await client.query(CLIENTS_WITH_HISTORY_SQL, [keptClientIds])).rows[0]
         if (blocked) {
           throw new ClientHasHistoryError(
@@ -11255,6 +11343,7 @@ export class AppDataStore {
       // payload that has stored time entries or invoices refuses the whole save.
       // `previous` unreadable or absent means there is nothing stored to protect.
       if (previous && Array.isArray(previous.clients)) {
+        await this._refuseAdvanceOwnershipChanges(data, { previous })
         const keptIds = new Set(
           (Array.isArray(data.clients) ? data.clients : []).map((c) => c?.id),
         )
@@ -18890,6 +18979,166 @@ export class AppDataStore {
    * `voidedAt`). Each carries `draws` (what non-void invoices have drawn from it)
    * and `remaining`: both backends answer the same shape (`accountCreditView`).
    */
+  async _refuseAdvanceOwnershipChanges(next, { dbClient = null, previous = null } = {}) {
+    const stored = dbClient
+      ? (await dbClient.query(`select c.bill_to_client_id, c.id, c.name from clients c
+          where exists (select 1 from advance_payment_ledger a where a.client_id = c.id)`)).rows.map((row) => ({ id: row.id, name: row.name, billToClientId: row.bill_to_client_id }))
+      : (previous?.clients ?? []) // filtered below using the separate, authoritative ledger
+    const heldIds = dbClient ? null : new Set((await this.advancePaymentLedger().rows()).map((row) => row.clientId))
+    for (const client of stored) {
+      if (heldIds && !heldIds.has(client.id)) continue
+      const replacement = (next.clients ?? []).find((row) => row.id === client.id)
+      if (!replacement) throw new ClientHasHistoryError(`${client.name} has advance-payment history. Archive the client instead of deleting its financial records.`)
+      if ((replacement.billToClientId || null) !== (client.billToClientId || null)) throw new BillingMasterError(`${client.name} has advance-payment history. Its billing payer cannot be changed; reconcile the existing requests and receipts first.`)
+    }
+  }
+
+  advancePaymentLedger() {
+    return new AdvancePaymentLedger({ pool: this.pool, transaction: (work) => this._withTransaction(work),
+      fileLock: mutateLocalData, filePath: path.join(projectRoot, 'tmp', 'advance-payments.json') })
+  }
+
+  async listAdvancePayments(clientId = null) { return this.advancePaymentLedger().list(clientId) }
+
+  async saveClientBillingDefaults(input, actorUserId) {
+    const value = billingDefaults(input, actorUserId, nowIso())
+    if (!await this.getClientById(value.clientId)) throw new AdvancePaymentError('Client not found.')
+    return this.advancePaymentLedger().append('settings', `settings:${value.id}`, value.clientId, value,
+      (a, b) => ['clientId', 'effectivePeriod', 'advanceAmount', 'collectionMethod', 'allocation', 'balanceDisplay'].every((key) => a[key] === b[key]))
+  }
+
+  async createAdvancePayment(input, actorUserId) {
+    const ledger = this.advancePaymentLedger()
+    const request = advanceRequest({ ...input, actorUserId, publicToken: randomBytes(24).toString('hex') }, nowIso())
+    const client = await this.getClientById(request.clientId)
+    assertClientTakesCredit(client)
+    if (client.platformInvoicingOptOut) throw new AdvancePaymentError('This client is invoiced outside the app.')
+    return ledger.append('request', `request:${request.id}`, request.clientId, request,
+      (a, b) => a.id === b.id && a.clientId === b.clientId && a.requestedCents === b.requestedCents && a.note === b.note && a.collectionMethod === b.collectionMethod && a.forPeriod === b.forPeriod)
+  }
+
+  async recordAdvancePayment(input, actorUserId = null, stripeIntent = null) {
+    const ledger = this.advancePaymentLedger()
+    const { requests } = await ledger.list()
+    const request = requests.find((row) => row.id === input.requestId)
+    const receipt = stripeIntent ? stripeAdvanceReceipt(stripeIntent, request, firmToday(), nowIso(), input.receivedOn)
+      : advanceReceipt({ ...input, actorUserId }, request, firmToday(), nowIso())
+    return ledger.append('receipt', `receipt:${receipt.sourceRef}`, receipt.clientId, receipt,
+      (a, b) => a.requestId === b.requestId && a.sourceRef === b.sourceRef && a.cents === b.cents &&
+        (b.method === 'stripe' || (a.receivedOn === b.receivedOn && a.method === b.method)))
+  }
+
+  async recordAdvanceReversal(event) {
+    const object = event.data?.object ?? {}
+    const intent = typeof object.payment_intent === 'string' ? object.payment_intent : object.payment_intent?.id
+    if (!intent || !['charge.refunded', 'charge.dispute.created', 'charge.dispute.closed'].includes(event.type)) return false
+    const ledger = this.advancePaymentLedger()
+    const { receipts } = await ledger.list()
+    const receipt = receipts.find((row) => row.sourceRef === `stripe:${intent}`)
+    const notice = { id: event.id, sourceRef: `stripe:${intent}`, kind: event.type === 'charge.refunded' ? 'refund' : event.type === 'charge.dispute.closed' ? 'dispute-closed' : 'dispute',
+      cents: event.type === 'charge.refunded' ? object.amount_refunded : object.amount,
+      status: object.status || '', reason: object.reason || '', at: new Date(event.created * 1000).toISOString() }
+    await ledger.append('reversal', `event:${event.id}`, null, notice, (a, b) => a.id === b.id && a.sourceRef === b.sourceRef)
+    return !!receipt
+  }
+
+  async holdManualAdvanceReceipt(sourceRef, note, actorUserId, id) {
+    if (!/^manual:[a-zA-Z0-9-]{16,80}$/.test(sourceRef) || !/^[a-zA-Z0-9-]{16,80}$/.test(id ?? '') || !String(note ?? '').trim()) throw new AdvancePaymentError('Choose a manual receipt and enter the reversal reason.')
+    const ledger = this.advancePaymentLedger()
+    const { receipts } = await ledger.list()
+    const receipt = receipts.find((row) => row.sourceRef === sourceRef)
+    if (!receipt) throw new AdvancePaymentError('Receipt not found.')
+    const event = { id, sourceRef, kind: 'refund', cents: receipt.cents, reason: String(note).trim().slice(0, 500), at: nowIso(), actorUserId }
+    return ledger.append('reversal', `event:manual:${id}`, receipt.clientId, event, (a, b) => a.sourceRef === b.sourceRef && a.reason === b.reason)
+  }
+
+  async cancelAdvancePayment(id, actorUserId) { return this.advancePaymentLedger().cancel(id, actorUserId, nowIso()) }
+
+  async setInvoiceAdvanceOffer(invoiceId, requestId, optional, actorUserId, appUrl) {
+    const initial = (await this.listInvoices()).find((row) => row.id === invoiceId)
+    if (!initial) throw new AdvancePaymentError('Invoice not found.')
+    if (requestId && typeof optional !== 'boolean') throw new AdvancePaymentError('Choose whether this advance is optional or already agreed.')
+    const update = async (invoice, runner = this.pool, data = null) => {
+      if (!invoice || !['draft', 'reviewed'].includes(invoice.status) || invoice.sentAt || (invoice.kind ?? 'monthly') !== 'monthly') throw new AdvancePaymentError('Only an unsent monthly draft can change its advance section. Issued invoices keep their snapshot.')
+      let offer = null
+      if (requestId) {
+        const request = (await this.advancePaymentLedger().list(invoice.clientId, runner)).requests.find((row) => row.id === requestId)
+        if (!request || request.clientId !== invoice.clientId || request.canceledAt || !request.publicToken || !request.collectionMethod) throw new AdvancePaymentError('Choose an active advance request for this billing client with a payment method.')
+        offer = { requestId, number: request.number, requestedCents: request.requestedCents, receivedCents: request.receivedCents, outstandingCents: request.outstandingCents, forPeriod: request.forPeriod,
+          optional, url: `${appUrl}/advance-pay/${request.publicToken}`, preparedAt: nowIso(), preparedBy: actorUserId }
+      }
+      const before = invoice.lineItems.find((line) => line.kind === 'advance_request')?.advanceOffer ?? null
+      const lineItems = invoice.lineItems.filter((line) => line.kind !== 'advance_request')
+      if (offer) lineItems.push({ kind: 'advance_request', label: 'Pay in advance amount', detail: 'Separate advance request; excluded from charges', amount: 0, advanceOffer: offer })
+      if (offer && !lineItems.some((line) => line.kind === 'account_credit')) {
+        const ledger = await this._readAccountCredits(invoice.clientId, { dbClient: runner, ...(data ? { data } : {}) })
+        const preferences = billingDefaultsAt((await this.advancePaymentLedger().list(invoice.clientId, runner)).settings, invoice.period)
+        lineItems.at(-1).creditStatement = { ...buildCreditStatement({ ...invoice, lineItems }, ledger, nowIso()), display: preferences?.balanceDisplay ?? 'detailed' }
+      }
+      return { ...invoice, lineItems, status: 'draft', updatedAt: nowIso(), emailLog: [...(invoice.emailLog ?? []), { kind: 'advance-offer-edit', at: nowIso(), actorUserId, before, after: offer }] }
+    }
+    if (this.pool) return this._withTransaction(async (dbClient) => {
+      await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [`account_credit:${initial.clientId}`])
+      const { rows } = await dbClient.query(`select ${INVOICE_SELECT_COLUMNS} from invoices where id = $1 for update`, [invoiceId])
+      const next = await update(rows.length ? mapInvoiceRow(rows[0]) : null, dbClient)
+      const saved = await dbClient.query(`update invoices set line_items = $2::jsonb, email_log = $3::jsonb, status = 'draft', updated_at = now() where id = $1 returning ${INVOICE_SELECT_COLUMNS}`, [invoiceId, JSON.stringify(next.lineItems), JSON.stringify(next.emailLog)])
+      return mapInvoiceRow(saved.rows[0])
+    })
+    return mutateLocalData(async (data) => {
+      const index = (data.invoices ?? []).findIndex((row) => row.id === invoiceId)
+      const next = await update(index >= 0 ? normalizeStoredInvoice(data.invoices[index]) : null, null, data)
+      data.invoices[index] = next
+      return { result: next, changed: true }
+    })
+  }
+
+  async _validateCreditDraws(invoice, options = {}) {
+    const line = invoice.lineItems.find((row) => row.kind === 'account_credit') ?? invoice.lineItems.find((row) => row.kind === 'advance_request')
+    if (!line) return
+    const ledger = await this._readAccountCredits(invoice.clientId, options)
+    for (const draw of line.draws ?? []) {
+      const credit = ledger.find((row) => row.id === draw.creditId)
+      if (!credit || credit.voidedAt || credit.reversal?.holds || accountCreditAvailableCents(credit, invoice.id) < accountCreditCents(draw.amount)) throw new AccountCreditError('This invoice uses credit that is on hold or unavailable. Review its credit line before sending.')
+    }
+    if (!line.creditStatement || line.creditStatement.amountDueCents !== accountCreditCents(invoice.total) || line.creditStatement.appliedCents !== -accountCreditCents(line.amount)) {
+      const settings = billingDefaultsAt((await this.advancePaymentLedger().list(invoice.clientId, options.dbClient ?? this.pool)).settings, invoice.period)
+      line.creditStatement = { ...buildCreditStatement(invoice, ledger, nowIso()), display: line.creditStatement?.display ?? settings?.balanceDisplay ?? 'detailed' }
+    }
+  }
+
+  async prepareInvoiceCreditStatement(invoice) {
+    if (!(invoice.lineItems ?? []).some((line) => ['account_credit', 'advance_request'].includes(line.kind))) return invoice
+    const prepare = async (current, ledger, runner = this.pool) => {
+      const line = current.lineItems.find((row) => row.kind === 'account_credit') ?? current.lineItems.find((row) => row.kind === 'advance_request')
+      if (!line) return current
+      if (current.status !== 'paid') for (const draw of line.draws ?? []) {
+        const credit = ledger.find((row) => row.id === draw.creditId)
+        if (!credit || credit.voidedAt || credit.reversal?.holds || accountCreditAvailableCents(credit, current.id) < accountCreditCents(draw.amount)) throw new AccountCreditError('This invoice uses credit that is on hold or unavailable. Review its credit line before sending.')
+      }
+      const snapshot = line.creditStatement
+      const cardFees = current.lineItems.filter((row) => row.kind === 'card-fee').reduce((sum, row) => sum + accountCreditCents(row.amount), 0)
+      if (current.sentAt && snapshot?.appliedCents === -accountCreditCents(line.amount) &&
+        (snapshot.amountDueCents === accountCreditCents(current.total) || snapshot.amountDueCents + cardFees === accountCreditCents(current.total))) return current
+      const settings = billingDefaultsAt((await this.advancePaymentLedger().list(current.clientId, runner)).settings, current.period)
+      line.creditStatement = { ...buildCreditStatement(current, ledger, nowIso()), display: snapshot?.display ?? settings?.balanceDisplay ?? 'detailed' }
+      return current
+    }
+    if (this.pool) return this._withTransaction(async (runner) => {
+      await runner.query('select pg_advisory_xact_lock(hashtext($1))', [`account_credit:${invoice.clientId}`])
+      const { rows } = await runner.query(`select ${INVOICE_SELECT_COLUMNS} from invoices where id = $1 for update`, [invoice.id])
+      if (!rows.length) throw new AccountCreditError('Invoice not found.')
+      const current = await prepare(mapInvoiceRow(rows[0]), await this._readAccountCredits(invoice.clientId, { dbClient: runner }), runner)
+      await runner.query('update invoices set line_items = $2::jsonb, updated_at = now() where id = $1', [invoice.id, JSON.stringify(current.lineItems)])
+      return current
+    })
+    return mutateLocalData(async (data) => {
+      const current = (data.invoices ?? []).find((row) => row.id === invoice.id)
+      if (!current) throw new AccountCreditError('Invoice not found.')
+      await prepare(current, await this._readAccountCredits(invoice.clientId, { data }))
+      return { result: normalizeStoredInvoice(current), changed: true }
+    })
+  }
+
   async listAccountCredits(clientId) {
     if (!clientId) return []
     return this._readAccountCredits(clientId)
@@ -18913,7 +19162,7 @@ export class AppDataStore {
       const prepaid = await runner.query(ACCOUNT_CREDIT_PREPAID_SQL, [clientId])
       const ledger = accountCreditsWithDraws(
         withDerivedCredits(
-          credits.rows.map(accountCreditRowOf),
+          [...credits.rows.map(accountCreditRowOf), ...await this.advancePaymentLedger().credits(clientId, runner)],
           derivedPrepaymentCredits(
             clientId,
             prepaid.rows.map((row) => ({
@@ -18944,7 +19193,7 @@ export class AppDataStore {
     const own = (workspace.invoices ?? []).filter((invoice) => invoice.clientId === clientId)
     const stored = (workspace.accountCredits ?? []).filter((row) => row.clientId === clientId)
     const ledger = accountCreditsWithDraws(
-      withDerivedCredits(stored, derivedPrepaymentCredits(clientId, own)),
+      withDerivedCredits([...stored, ...await this.advancePaymentLedger().credits(clientId)], derivedPrepaymentCredits(clientId, own)),
       own,
     )
     if (!stored.some((row) => row.sourceKind === 'overpayment')) return ledger
@@ -20373,6 +20622,7 @@ export class AppDataStore {
       try {
         await dbClient.query('begin')
         // Decided on the row as it IS: `for update` waits at a running bulk save's
+        await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [`account_credit:${current.clientId}`])
         // table lock and holds the row, so a bank payment that moved it to
         // 'processing' (or a void, or another click) is refused here instead of
         // being overwritten by an UPDATE that never looked.
@@ -20394,6 +20644,8 @@ export class AppDataStore {
         }
         refuseUnlessPayable(before)
         refuse(before)
+        await this._validateCreditDraws(before, { dbClient })
+        if (before.lineItems.some((line) => line.kind === 'account_credit')) await dbClient.query('update invoices set line_items = $2::jsonb where id = $1', [invoiceId, JSON.stringify(before.lineItems)])
         await dbClient.query(
           `update invoices
               set status = 'paid', payment_method = $3, paid_at = $2, updated_at = now()
@@ -20434,8 +20686,10 @@ export class AppDataStore {
       if (alreadyDone(before)) return { next: data.invoices[index], before, unchanged: true }
       refuseUnlessPayable(before)
       refuse(before)
+      await this._validateCreditDraws(before, { data })
       const next = {
         ...data.invoices[index],
+        lineItems: before.lineItems,
         status: 'paid',
         paymentMethod: method,
         paidAt,
@@ -20673,6 +20927,43 @@ export class AppDataStore {
    * is stored on the entry rather than derived — an id we did not write down is
    * an event we can never place.
    */
+  /** Serialize validation, external delivery and its send record with credit
+   * reversals. The callback must only deliver mail; no store calls inside it.
+   * A provider acceptance cannot be rolled back: recordError is reported as a
+   * delivered message needing reconciliation, never as a safe retry. */
+  async deliverInvoiceWithCreditLock(expected, details, deliver) {
+    let accepted = null
+    const run = async (current, context) => {
+      if (!current || current.status === 'void' || current.status !== expected.status || current.clientId !== expected.clientId ||
+          current.total !== expected.total || JSON.stringify(current.lineItems) !== JSON.stringify(expected.lineItems) ||
+          (current.blurb ?? '') !== (expected.blurb ?? '') ||
+          JSON.stringify(current.emailLog ?? []) !== JSON.stringify(expected.emailLog ?? [])) throw new AccountCreditError('This invoice changed before delivery. Reload and review before sending.')
+      if ((current.emailLog ?? []).some((entry) => entry.kind === 'send-uncertain')) throw new AccountCreditError('A previous delivery is uncertain. Reconcile it with the mail provider before another send.')
+      if (current.status !== 'paid' || !current.sentAt) await this._validateCreditDraws(current, context)
+      // Validation may initialize a missing snapshot. Documents must match it.
+      if (JSON.stringify(current.lineItems) !== JSON.stringify(expected.lineItems)) throw new AccountCreditError('The credit statement changed. Reload and review before sending.')
+      const result = await deliver()
+      if (result.ok || result.uncertain) accepted = result
+      const invoice = await this.recordInvoiceSent(current.id, { ...details, stamp: result.ok ? details.stamp : null, ok: result.ok, ...(result.uncertain ? { kind: 'send-uncertain' } : {}), error: result.error ?? null, providerId: result.providerId ?? null }, { ...context, current })
+      return { result, invoice }
+    }
+    try {
+      if (this.pool) return await this._withTransaction(async (dbClient) => {
+        await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [`account_credit:${expected.clientId}`])
+        const { rows } = await dbClient.query(`select ${INVOICE_SELECT_COLUMNS} from invoices where id = $1 for update`, [expected.id])
+        return run(rows.length ? mapInvoiceRow(rows[0]) : null, { dbClient })
+      })
+      return await enqueueFileOperation(localDataPath, async () => {
+        const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+        const current = (data.invoices ?? []).find((row) => row.id === expected.id)
+        return run(current ? normalizeStoredInvoice(current) : null, { data })
+      })
+    } catch (error) {
+      if (accepted) return { result: accepted, invoice: null, recordError: accepted.ok ? 'Email accepted by the provider, but its send record could not be confirmed. Reconcile before sending again.' : 'Email delivery and its send record are uncertain. Reconcile with the mail provider before sending again.' }
+      throw error
+    }
+  }
+
   async recordInvoiceSent(
     invoiceId,
     {
@@ -20687,9 +20978,11 @@ export class AppDataStore {
       notEmailed = false,
       clearedPaymentFailure = null,
       auto = false,
+      attemptId = null,
     } = {},
+    deliveryContext = null,
   ) {
-    const current = (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
+    const current = deliveryContext?.current ?? (await this.listInvoices()).find((invoice) => invoice.id === invoiceId)
     if (!current) return null
     // A void invoice is not a thing that can be sent. The send route already
     // refuses one up front; what this catches is the MID-FLIGHT race that "Void
@@ -20722,6 +21015,7 @@ export class AppDataStore {
     // it reads INSIDE its queue slot (see the end of this method).
     const entryFor = (invoice) => ({
       at,
+      ...(attemptId ? { attemptId } : {}),
       to: Array.isArray(to) ? to : [to].filter(Boolean),
       subject: String(subject ?? ''),
       ok: Boolean(ok),
@@ -20729,6 +21023,10 @@ export class AppDataStore {
       // edited after a send, so without this the log records that an email left
       // but not what the client was asked to pay.
       total: Number(invoice.total) || 0,
+      ...(invoice.lineItems.find((line) => line.creditStatement)?.creditStatement
+        ? { creditStatement: structuredClone(invoice.lineItems.find((line) => line.creditStatement).creditStatement) } : {}),
+      ...(invoice.lineItems.find((line) => line.kind === 'advance_request')?.advanceOffer
+        ? { advanceOffer: structuredClone(invoice.lineItems.find((line) => line.kind === 'advance_request').advanceOffer) } : {}),
       // `notEmailed` is the stamp "Mark reviewed" writes for a client whose
       // invoices are never emailed from here: it MARKS THE INVOICE SENT exactly
       // as a real send does (status, first sent date, the due-date re-stamp -
@@ -20786,7 +21084,9 @@ export class AppDataStore {
       // One row, and never a reason to fail a send that has already gone out:
       // an unreadable client just means the firm's own window.
       const sendClient = marksSent
-        ? await this.getClientById(current.clientId).catch(() => null)
+        ? deliveryContext?.dbClient
+          ? { paymentTerms: (await deliveryContext.dbClient.query('select payment_terms from clients where id = $1', [current.clientId])).rows[0]?.payment_terms }
+          : await this.getClientById(current.clientId).catch(() => null)
         : null
       const firstSendDueDate = firstSendDueDateFor(sendClient?.paymentTerms)
       // The entry is APPENDED server-side, deliberately: `current` above is a
@@ -20822,7 +21122,8 @@ export class AppDataStore {
       // to scan every invoice the firm has issued three times over — and more
       // honest: a re-list can only show what the table looks like afterwards,
       // which is not necessarily what this write did.
-      const { rows, rowCount } = await this.pool.query(
+      const writeSend = async (runner, sendEntry = entry) => {
+      const { rows, rowCount } = await runner.query(
         `update invoices
             set email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb,
                 sent_at = case when $3::boolean then coalesce(sent_at, $4::timestamptz)
@@ -20835,10 +21136,26 @@ export class AppDataStore {
           where id = $1 and status <> 'void'
             and (not $6::boolean or status = 'reviewed')
           returning ${INVOICE_SELECT_COLUMNS}`,
-        [invoiceId, JSON.stringify([entry]), marksSent, entry.at, firstSendDueDate, notEmailed],
+        [invoiceId, JSON.stringify([sendEntry]), marksSent, sendEntry.at, firstSendDueDate, notEmailed],
       )
       if (rowCount === 0) return null
       return mapInvoiceRow(rows[0])
+      }
+      if (deliveryContext?.dbClient) return writeSend(deliveryContext.dbClient)
+      if (marksSent) {
+        return this._withTransaction(async (runner) => {
+          await runner.query('select pg_advisory_xact_lock(hashtext($1))', [`account_credit:${current.clientId}`])
+          const locked = await runner.query(`select ${INVOICE_SELECT_COLUMNS} from invoices where id = $1 for update`, [invoiceId])
+          if (!locked.rows.length) return null
+          const authoritative = mapInvoiceRow(locked.rows[0])
+          if (authoritative.status === 'void' || notEmailed && authoritative.status !== 'reviewed') return null
+          const previousLines = JSON.stringify(authoritative.lineItems)
+          if (authoritative.status !== 'paid') await this._validateCreditDraws(authoritative, { dbClient: runner })
+          if (JSON.stringify(authoritative.lineItems) !== previousLines) await runner.query('update invoices set line_items = $2::jsonb where id = $1', [invoiceId, JSON.stringify(authoritative.lineItems)])
+          return writeSend(runner, entryFor(authoritative))
+        })
+      }
+      return writeSend(this.pool)
     }
 
     // Same semantics, spelled out in JS, and read, decided and written inside ONE
@@ -20847,8 +21164,8 @@ export class AppDataStore {
     // whose email is already out, lost with it). Everything below is decided on
     // the row read in the slot, not on `current` above. Raw fs calls only in
     // here: `readJson` / `writeFile` enqueue behind this very slot and deadlock.
-    return enqueueFileOperation(localDataPath, async () => {
-      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    const writeFileSend = async () => {
+      const data = deliveryContext?.data ?? JSON.parse(await readFile(localDataPath, 'utf8'))
       if (!Array.isArray(data.invoices)) data.invoices = []
       const index = data.invoices.findIndex((invoice) => invoice.id === invoiceId)
       if (index === -1) return null
@@ -20860,6 +21177,7 @@ export class AppDataStore {
       // Same guard as the Postgres statement's `status = 'reviewed'`, decided on
       // the row read inside this slot rather than the read above.
       if (notEmailed && stored.status !== 'reviewed') return null
+      if (marksSent && stored.status !== 'paid') await this._validateCreditDraws(stored, { data })
       const storedEntry = entryFor(stored)
       // The file backend's read IS the whole file, so appending here cannot drop
       // entries the way the Postgres read-modify-write did — the branch above
@@ -20886,7 +21204,8 @@ export class AppDataStore {
       data.invoices[index] = { ...stored, emailLog, sentAt, status, dueDate, updatedAt: nowIso() }
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       return data.invoices[index]
-    })
+    }
+    return deliveryContext?.data ? writeFileSend() : enqueueFileOperation(localDataPath, writeFileSend)
   }
 
   /**
@@ -21582,10 +21901,12 @@ export class AppDataStore {
       // Plus whoever has a PAID prepayment invoice: derived credit is credit, and a
       // client holding only that must still take the lock and draw it.
       const prepaid = await this.pool.query(ACCOUNT_CREDIT_PREPAID_HOLDERS_SQL)
-      return new Set([...rows, ...prepaid.rows].map((row) => row.client_id))
+      const advances = await this.pool.query("select distinct client_id from advance_payment_ledger where kind = 'receipt'")
+      return new Set([...rows, ...prepaid.rows, ...advances.rows].map((row) => row.client_id))
     }
     const data = await readJson(localDataPath)
     return new Set([
+      ...(await this.listAdvancePayments()).receipts.map((row) => row.clientId),
       ...(data.accountCredits ?? []).filter((row) => !row.voidedAt).map((row) => row.clientId),
       ...(data.invoices ?? [])
         .filter(
@@ -21624,11 +21945,23 @@ export class AppDataStore {
         `account_credit:${record.clientId}`,
       ])
       const ledger = await this._readAccountCredits(record.clientId, { dbClient })
-      return this._insertInvoice(withGeneratedAccountCredit(record, ledger), { dbClient })
+      const prepared = withGeneratedAccountCredit(record, ledger)
+      const line = prepared.lineItems.find((row) => row.kind === 'account_credit')
+      if (line) {
+        const settings = billingDefaultsAt((await this.advancePaymentLedger().list(record.clientId, dbClient)).settings, record.period)
+        line.creditStatement = { ...buildCreditStatement(prepared, ledger, nowIso()), display: settings?.balanceDisplay ?? 'detailed' }
+      }
+      return this._insertInvoice(prepared, { dbClient })
     }
     return mutateLocalData(async (data) => {
       const ledger = await this._readAccountCredits(record.clientId, { data })
-      const inserted = await this._insertInvoice(withGeneratedAccountCredit(record, ledger), { data })
+      const prepared = withGeneratedAccountCredit(record, ledger)
+      const line = prepared.lineItems.find((row) => row.kind === 'account_credit')
+      if (line) {
+        const settings = billingDefaultsAt((await this.listAdvancePayments(record.clientId)).settings, record.period)
+        line.creditStatement = { ...buildCreditStatement(prepared, ledger, nowIso()), display: settings?.balanceDisplay ?? 'detailed' }
+      }
+      const inserted = await this._insertInvoice(prepared, { data })
       return { result: inserted, changed: inserted !== null }
     })
   }
@@ -22610,7 +22943,7 @@ export class AppDataStore {
     })
     if (!updated) return null
     await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return updated
+    return { ...updated, hourlyRateOverrides: await this.listClientRateAgreements(clientId) }
   }
 
   /**
@@ -25366,7 +25699,7 @@ export class AppDataStore {
         `select ${CLIENT_SELECT_COLUMNS} from clients where id = $1`,
         [clientId],
       )
-      return rows.length > 0 ? mapClientRow(rows[0]) : null
+      return rows.length > 0 ? { ...mapClientRow(rows[0]), hourlyRateOverrides: await this.listClientRateAgreements(clientId) } : null
     }
     // `readJson`, NOT `this.read()`. The public pay route is a caller, and
     // `read()` materializes recurring checklists and can write them back — a
@@ -25376,7 +25709,7 @@ export class AppDataStore {
     // and is what keeps the promise above that this is the same shape.
     const data = await readJson(localDataPath)
     const found = (data.clients ?? []).find((client) => client.id === clientId)
-    return found ? normalizeClientProfile(found) : null
+    return found ? { ...normalizeClientProfile(found), hourlyRateOverrides: await this.listClientRateAgreements(clientId) } : null
   }
 
   /**

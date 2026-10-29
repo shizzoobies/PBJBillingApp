@@ -209,7 +209,7 @@ describe('the send route stops at a null swap, at both call sites', () => {
 
 describe('the send route looks once more immediately before the email leaves', () => {
   const lastLookAt = route.indexOf('lastLook = await readInvoiceNow(invoice)')
-  const providerAt = route.indexOf('const sendResult = await sendInvoiceEmail({')
+  const providerAt = route.indexOf('() => sendInvoiceEmail({')
 
   it('reads the invoice after the documents are built and before the provider call', () => {
     expect(lastLookAt).toBeGreaterThan(-1)
@@ -240,15 +240,19 @@ describe('the send route looks once more immediately before the email leaves', (
     expect(cardGuard).toBeGreaterThan(bankGuard)
     for (const later of [
       'buildInvoiceDocuments({',
-      'await sendInvoiceEmail({',
-      'recordInvoiceSent(',
+      '() => sendInvoiceEmail({',
+      'await appDataStore.deliverInvoiceWithCreditLock(',
     ]) {
       expect(route.indexOf(later), `${later} moved above a guard`).toBeGreaterThan(cardGuard)
     }
   })
 
   it('records nothing before the provider call, and the last look sits above every record', () => {
-    expect(route.indexOf('recordInvoiceSent(')).toBeGreaterThan(providerAt)
+    expect(route.indexOf('await appDataStore.deliverInvoiceWithCreditLock(')).toBeGreaterThan(lastLookAt)
+    const source = readFileSync('db/store.js', 'utf8')
+    const helper = source.slice(source.indexOf('async deliverInvoiceWithCreditLock('), source.indexOf('async recordInvoiceSent('))
+    expect(helper.indexOf('await deliver()')).toBeGreaterThan(helper.indexOf('await this._validateCreditDraws('))
+    expect(helper.indexOf('await this.recordInvoiceSent(')).toBeGreaterThan(helper.indexOf('await deliver()'))
   })
 })
 

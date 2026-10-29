@@ -53,6 +53,7 @@ import {
   updateInvoiceRequest,
 } from '../lib/api'
 import { InvoicePreviewModal } from './InvoicePreviewModal'
+import { InvoiceAdvanceSection } from './InvoiceAdvanceSection'
 import { RecipientChoices, RecipientPicker } from './RecipientPicker'
 import {
   PICK_ONE_ON_FILE,
@@ -4142,7 +4143,7 @@ function InvoiceEditor({
   // separation to review it. Original indices travel with the lines, because
   // everything that edits a line addresses it by its position in the saved
   // array; splitting the display must not renumber the data.
-  const numbered = lines.map((line, index) => ({ line, index }))
+  const numbered = lines.map((line, index) => ({ line, index })).filter(({ line }) => line.kind !== 'advance_request')
   const scopedRows = numbered.filter((row) => row.line.kind !== 'adhoc')
   const adhocRows = numbered.filter((row) => row.line.kind === 'adhoc')
 
@@ -4986,6 +4987,7 @@ function InvoiceEditor({
       {/* What was drawn, and the way back. Remove is the server's act (it hands
           the draws back to the credits) so it waits behind unsaved edits like Apply;
           the trash icon on the line itself still takes it off locally for Save. */}
+      <InvoiceAdvanceSection invoice={invoice} disabled={Boolean(lockMessage) || dirty || busy || savingDates} onChanged={onInvoiceChanged} />
       {accountLine ? (
         <p className="invoice-run-retainer-note" data-testid="account-credit-applied">
           Credit applied {currency.format(Math.abs(accountLine.amount))}.

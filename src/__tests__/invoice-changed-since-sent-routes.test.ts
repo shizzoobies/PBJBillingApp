@@ -184,7 +184,7 @@ describe('an edit that lands while a send is in flight stops the send', () => {
   )
   const lastLook = sendBlock.indexOf('lastLook = await readInvoiceNow(invoice)')
   const check = sendBlock.indexOf('if (invoiceContentChanged(invoice, lastLook)) {')
-  const email = sendBlock.indexOf('await sendInvoiceEmail(')
+  const email = sendBlock.indexOf('await appDataStore.deliverInvoiceWithCreditLock(')
 
   it('compares what the email was built from with the re-read, after the void check and before the email', () => {
     expect(lastLook).toBeGreaterThan(-1)

@@ -76,7 +76,7 @@ describe('the send route validates `extra` before anything leaves', () => {
       'swapInvoiceCheckoutSession(',
       'buildInvoiceDocuments(',
       'sendInvoiceEmail(',
-      'recordInvoiceSent(',
+      'deliverInvoiceWithCreditLock(',
     ]) {
       const at = sendBlock.indexOf(later)
       expect(at, `${later} is gone from the send route`).toBeGreaterThan(-1)
@@ -93,8 +93,13 @@ describe('the send route validates `extra` before anything leaves', () => {
 describe('the log says which addresses were one-time', () => {
   it('passes the one-time list on the failed attempt and on the successful send', () => {
     expect(sendBlock).toContain('const sendOneTime = sendRecipients.oneTime')
-    expect(sendBlock.match(/oneTime: sendOneTime,/g)).toHaveLength(2)
-    expect(sendBlock.match(/recordInvoiceSent\(/g)).toHaveLength(2)
+    // One protected helper handles both outcomes with the same resolved details.
+    expect(sendBlock.match(/oneTime: sendOneTime,/g)).toHaveLength(1)
+    expect(sendBlock).toMatch(/deliverInvoiceWithCreditLock\(invoice, \{[\s\S]*?oneTime: sendOneTime,[\s\S]*?\}, \(\) => sendInvoiceEmail\(/)
+    const store = readFileSync('db/store.js', 'utf8')
+    const delivery = store.slice(store.indexOf('async deliverInvoiceWithCreditLock('), store.indexOf('async recordInvoiceSent('))
+    expect(delivery).toContain('this.recordInvoiceSent(current.id, { ...details,')
+    expect(delivery).toContain('ok: result.ok')
   })
 })
 

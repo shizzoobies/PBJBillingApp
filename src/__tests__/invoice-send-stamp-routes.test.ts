@@ -23,6 +23,8 @@ const serverSource = readFileSync(
 const at = serverSource.search(/const invoiceSendMatch = normalizedPath\.match\(/)
 // To the next route's marker, not a fixed length: the route keeps growing.
 const route = serverSource.slice(at, serverSource.indexOf('// GET /api/invoices/export.csv', at))
+const storeSource = readFileSync('db/store.js', 'utf8')
+const protectedDelivery = storeSource.slice(storeSource.indexOf('async deliverInvoiceWithCreditLock('), storeSource.indexOf('async recordInvoiceSent('))
 
 describe('the send route builds both documents from one send moment', () => {
   it('decides the stamp once, before the email and the PDF', () => {
@@ -44,19 +46,19 @@ describe('the send route builds both documents from one send moment', () => {
   })
 
   it('hands the same stamp to the store on a delivered send, and never on a failed one', () => {
-    const failedAt = route.indexOf('ok: false,')
-    const deliveredAt = route.indexOf('ok: true,', failedAt)
-    expect(failedAt).toBeGreaterThan(-1)
-    expect(deliveredAt).toBeGreaterThan(failedAt)
-    expect(route.slice(failedAt, deliveredAt)).not.toContain('stamp:')
-    expect(route.slice(deliveredAt, deliveredAt + 800)).toContain('stamp: sendStamp')
+    expect(route).toMatch(/deliverInvoiceWithCreditLock\(invoice, \{[\s\S]*?stamp: sendStamp,/)
+    // The protected helper records both outcomes. Only accepted delivery gets
+    // the document stamp; failed attempts cannot move sent_at or due_date.
+    expect(protectedDelivery).toContain('stamp: result.ok ? details.stamp : null')
+    expect(protectedDelivery).toContain('ok: result.ok')
   })
 
   it('does not stamp anything before the provider answers', () => {
     const stampAt = route.indexOf('const sendStamp')
-    const providerAt = route.indexOf('await sendInvoiceEmail({')
-    const firstRecord = route.indexOf('recordInvoiceSent(')
+    const providerAt = route.indexOf('() => sendInvoiceEmail({')
     expect(providerAt).toBeGreaterThan(stampAt)
-    expect(firstRecord).toBeGreaterThan(providerAt)
+    const call = protectedDelivery.indexOf('const result = await deliver()')
+    expect(call).toBeGreaterThan(-1)
+    expect(protectedDelivery.indexOf('await this.recordInvoiceSent(')).toBeGreaterThan(call)
   })
 })
