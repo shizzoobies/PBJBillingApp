@@ -21,7 +21,7 @@ Feature commit `9afb5aa` is deployed. GitHub run `41106528871` completed success
 
 Alex chose to test an attachment manually after the browser extension blocked automated file selection. One ready attachment and one R2 object were subsequently verified on the synthetic request `featreq-bae5f652`; its contents were not inspected and the user's upload is preserved. Anonymous attachment listing and download both returned 401. An unsigned S3 request returned 400 InvalidArgument; bucket privacy is established by disabled public access, no custom domains, and scoped-credential checks, not by treating that 400 as a specific permission result.
 
-Pending: Alex's preview/download/removal checks and physical cleanup confirmation; historical Container stdout startup evidence; voice knowledge-base synchronization. Automatic approval review rejected the voice provisioner because it considered updating the agent and replacing its prior manifest outside storage/deployment approval. An explicit voice-sync question is pending; do not run it without that answer.
+Pending: Alex's preview/download/removal checks and physical cleanup confirmation; historical Container stdout startup evidence. Alex explicitly approved the separate voice sync after automatic approval review initially blocked it. The released manifest was then synchronized successfully, its previous copy replaced, and read-back confirmed the new document persists (HTTP 200), is attached to the agent, and retains all 16 tools.
 
 ## Release gates
 
@@ -37,7 +37,7 @@ Pending: Alex's preview/download/removal checks and physical cleanup confirmatio
 1. Preserve the upload on synthetic request `featreq-bae5f652` while Alex tests it. Do not create another request or delete his uploaded file. Manual preview, download, removal and physical cleanup are not yet confirmed.
 2. If Alex wants agent-driven transfer verification resumed, use only fictional files and an authorized owner session. The Chrome extension needs file-URL access for its automated chooser; Alex chose manual testing instead. Local automated create/retry/download/removal and both persistence-backend tests already passed.
 3. Capture historical Container startup stdout if available. Dashboard version 39 is Running in Chicago on image `sha256:7354e5c4ab04393b71b4db0f30ce4a7b1cd244402d69a70f7c722408b7ed8f16`; this and healthy responses are operational evidence, not stdout.
-4. Obtain the answer to the explicit voice-sync approval question. If approved, run `node scripts/prod/voice-provision.mjs` at the released commit with current credentials, then verify the manifest/tools. Do not rerun a rejected command before that answer.
+4. Voice sync is complete: `node scripts/prod/voice-provision.mjs` exited 0 at the released feature commit. Read-back returned HTTP 200 for the agent and new knowledge-base document, with 16 tools attached. No repeat sync is needed for documentation-only commits.
 5. After the remaining verification, file the feature as Shipped and update this record/HANDOFF. Brittany's acceptance remains separate. No financial records, client files, invoices, or notification emails were used for the agent's QA.
 
 ## Data and rollback
