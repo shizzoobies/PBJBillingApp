@@ -21,6 +21,7 @@
   type ClientPendingNote,
   type ClientStatementAccount,
   type FeatureRequest,
+  type FeatureRequestAttachment,
   type FeatureRequestType,
   type ItemDeletionRequest,
   type PendingTaskEdit,
@@ -86,8 +87,21 @@ import type { DashboardLayout } from '../../lib/dashboard-layout.js'
  * queues) answered with the OWNER's data while the banner named a staffer.
  */
 let previewUserId: string | null = null
+const feedbackControllers = new Set<AbortController>()
+
+export function createFeedbackAbortController() {
+  const controller = new AbortController()
+  feedbackControllers.add(controller)
+  controller.signal.addEventListener('abort', () => feedbackControllers.delete(controller), { once: true })
+  return controller
+}
+
+function cancelFeedbackOperations() {
+  for (const controller of feedbackControllers) controller.abort()
+}
 
 export function setPreviewUser(id: string | null) {
+  if (id !== previewUserId) cancelFeedbackOperations()
   previewUserId = id
 }
 
@@ -393,6 +407,7 @@ export async function changePasswordRequest(newPassword: string, currentPassword
 }
 
 export async function logoutSession() {
+  cancelFeedbackOperations()
   const response = await apiFetch('/api/logout', {
     credentials: 'same-origin',
     method: 'POST',
@@ -5904,4 +5919,34 @@ export async function draftProposalEngagementRequest(proposalId: string): Promis
     'Failed to draft the engagement',
   )
   return body.engagement
+}
+
+
+async function attachmentResponse(response: Response) {
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: string } | null
+    throw new ApiError(response.status, body?.error || 'Attachments are unavailable. Please retry.')
+  }
+  return response
+}
+const attachmentPath = (requestId: string, id?: string) =>
+  '/api/feature-requests/' + encodeURIComponent(requestId) + '/attachments' + (id ? '/' + encodeURIComponent(id) : '')
+
+export async function listFeedbackAttachments(requestId: string, signal: AbortSignal) {
+  const response = await attachmentResponse(await apiFetch(attachmentPath(requestId), { credentials: 'same-origin', signal }))
+  return (await response.json() as { attachments: FeatureRequestAttachment[] }).attachments
+}
+export async function uploadFeedbackAttachment(requestId: string, file: File, uploadId: string, signal: AbortSignal) {
+  const body = new FormData()
+  body.append('upload_id', uploadId)
+  body.append('file', file)
+  const response = await attachmentResponse(await apiFetch(attachmentPath(requestId), { method: 'POST', body, credentials: 'same-origin', signal }))
+  return (await response.json() as { attachment: FeatureRequestAttachment }).attachment
+}
+export async function downloadFeedbackAttachment(requestId: string, id: string, preview: boolean, signal: AbortSignal) {
+  const response = await attachmentResponse(await apiFetch(attachmentPath(requestId, id) + (preview ? '?preview=1' : ''), { credentials: 'same-origin', signal }))
+  return response.blob()
+}
+export async function removeFeedbackAttachment(requestId: string, id: string, signal: AbortSignal) {
+  await attachmentResponse(await apiFetch(attachmentPath(requestId, id), { method: 'DELETE', credentials: 'same-origin', signal }))
 }

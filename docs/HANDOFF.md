@@ -13,6 +13,8 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-10-30 - FEEDBACK ATTACHMENTS READY FOR LOCAL REVIEW, DEPLOYMENT HELD.** Alex approved implementation only and wants to inspect before deployment. Work is on `codex/feedback-attachments` in `D:/PBJ Accounting Work/AP-feedback-attachments`, based on `a54b26c11e0e3aa925a2086abe3a4e96aeb285bd`. [Review guide](plans/feedback-attachments-local-review-2026-10.md) records the local URL, fixtures, evidence and boundaries. Private owner-only attachments now support creation and existing Updates, retry without duplicate requests, preview/download/removal, durable upload intents and deletion cleanup, and PostgreSQL plus isolated JSON tracker storage. `npm run verify` exited 0: lint/build, 470 files / 10,825 tests, 40 Cloudflare script tests. Broader scripts: 58 passed. Real local PostgreSQL and JSON drills, Linux dependency smoke, independent review and responsive browser QA passed. No production writes, provider setup, push or deployment. Production R2 provisioning and live R2 checks remain held for Alex.
+
 **2026-10-29 - BILLING FEATURE RELEASE CANDIDATE GREEN.** `codex/billing-deposits-rates` adds client rate agreements, advance request/receipt ledger and editable defaults, combined service invoice plus separate advance section, credit statements and financial-history/delivery safeguards. [Review guide](plans/billing-local-review-2026-10.md) is the current workflow and decision record. Alex authorized deployment when green at 00:08 UTC. Final verify exited 0: lint/build, 467 files / 10,788 tests and 40 script tests passed. Multiple independent financial reviews cleared the final payment-source/client-lock ordering. Synthetic responsive UI checked at 360/768/1280 pixels. Release must still verify the exact CI commit, live health, startup and screens before claiming live. No client values or financial records are seeded. No matching current build ticket was found; do not reuse the historical rate or prepaid-plan tickets. The older live-state paragraphs below describe prior work.
 
 **2026-10-28 (~22:50Z) - SIX TICKETS LIVE IN THREE SHIPS; queue EMPTY; nothing in flight; READ THIS FIRST, then the 10-27
@@ -1671,6 +1673,8 @@ stuck is a read-only look at its `signature_requests` row: `last_error` says why
 ---
 
 ## 5. Where things stand (newest first)
+
+**2026-10-30 - FEEDBACK ATTACHMENTS READY FOR LOCAL REVIEW, DEPLOYMENT HELD.** Alex approved implementation only and wants to inspect before deployment. Work is on `codex/feedback-attachments` in `D:/PBJ Accounting Work/AP-feedback-attachments`, based on `a54b26c11e0e3aa925a2086abe3a4e96aeb285bd`. [Review guide](plans/feedback-attachments-local-review-2026-10.md) records the local URL, fixtures, evidence and boundaries. Private owner-only attachments now support creation and existing Updates, retry without duplicate requests, preview/download/removal, durable upload intents and deletion cleanup, and PostgreSQL plus isolated JSON tracker storage. `npm run verify` exited 0: lint/build, 470 files / 10,825 tests, 40 Cloudflare script tests. Broader scripts: 58 passed. Real local PostgreSQL and JSON drills, Linux dependency smoke, independent review and responsive browser QA passed. No production writes, provider setup, push or deployment. Production R2 provisioning and live R2 checks remain held for Alex.
 
 ### 2026-10-29 — Editable client billing and advance payments
 

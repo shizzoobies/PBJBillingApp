@@ -48,6 +48,12 @@ export const CONTAINER_ENV_NAMES = [
   'AUTOPAY_CHARGING',
   'TICK_TOKEN',
   'MAINTENANCE_MODE',
+  'FEEDBACK_STORAGE',
+  'FEEDBACK_R2_ENDPOINT',
+  'FEEDBACK_R2_BUCKET',
+  'FEEDBACK_R2_ACCESS_KEY_ID',
+  'FEEDBACK_R2_SECRET_ACCESS_KEY',
+  'FEEDBACK_ATTACHMENTS_PAUSED',
   // Stamped by scripts/cf/secrets-upload.mjs on every upload; /health echoes it so
   // scripts/cf/restart.mjs can prove the container started with that upload's environment.
   'ENV_REVISION',

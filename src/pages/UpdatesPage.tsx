@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type DragEvent, type FormEvent } from 'react'
+import { FeedbackAttachments } from '../components/FeedbackAttachments'
+import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react'
 import {
   Brain,
   Bug,
@@ -17,6 +18,7 @@ import {
 } from 'lucide-react'
 import { useAppContext } from '../AppContext'
 import {
+  createFeedbackAbortController,
   confirmRejectFeedbackRequest,
   spitballNewSessionRequest,
   spitballRequest,
@@ -129,6 +131,12 @@ function PriorityBadge({ priority }: { priority: FeatureRequestPriority }) {
  * Claude Code.
  */
 export function UpdatesPage() {
+  const { ownerMode, previewMode, sessionUser } = useAppContext()
+  if (!ownerMode || previewMode) return null
+  return <OwnerUpdatesPage key={sessionUser.id} />
+}
+
+function OwnerUpdatesPage() {
   const {
     ownerMode,
     data,
@@ -147,6 +155,14 @@ export function UpdatesPage() {
   }
 
   // Add-item form.
+  const creationLifecycle = useRef<AbortController | null>(null)
+  useEffect(() => {
+    const controller = createFeedbackAbortController()
+    creationLifecycle.current = controller
+    return () => controller.abort()
+  }, [])
+  const [savedRequestId, setSavedRequestId] = useState<string | null>(null)
+  const [draftNumber, setDraftNumber] = useState(0)
   const [newTitle, setNewTitle] = useState('')
   const [newDescription, setNewDescription] = useState('')
   const [newType, setNewType] = useState<FeatureRequestType>('feature')
@@ -244,6 +260,8 @@ export function UpdatesPage() {
 
   const handleAdd = async (event: FormEvent) => {
     event.preventDefault()
+    const signal = creationLifecycle.current?.signal
+    if (!signal || signal.aborted || savedRequestId || adding) return
     const title = newTitle.trim()
     const description = newDescription.trim()
     if (!title || !description) {
@@ -253,15 +271,14 @@ export function UpdatesPage() {
     setAdding(true)
     setFormError(null)
     try {
-      await addFeatureRequest({ title, description, type: newType, priority: newPriority })
-      setNewTitle('')
-      setNewDescription('')
-      setNewType('feature')
-      setNewPriority('medium')
+      const created = await addFeatureRequest({ title, description, type: newType, priority: newPriority })
+      if (signal.aborted) return
+      setSavedRequestId(created.id)
+      setActiveStatus('new')
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : 'Could not add that update.')
+      if (!signal.aborted) setFormError(error instanceof Error ? error.message : 'Could not add that update.')
     } finally {
-      setAdding(false)
+      if (!signal.aborted) setAdding(false)
     }
   }
 
@@ -679,6 +696,8 @@ export function UpdatesPage() {
                 : null}
             </div>
 
+            {item.id !== savedRequestId && item.status !== 'needs_input' ? <FeedbackAttachments requestId={item.id} /> : null}
+
             {item.reviewNote ? (
               <p className="updates-review-note">
                 Not approved{reviewedWhen ? ` — ${reviewedWhen}` : ''}: {item.reviewNote}
@@ -976,12 +995,14 @@ export function UpdatesPage() {
               type="text"
               placeholder="Title — e.g. Saving notes sometimes loses my edits"
               value={newTitle}
+              disabled={adding || Boolean(savedRequestId)}
               maxLength={120}
               onChange={(event) => setNewTitle(event.target.value)}
               aria-label="Update title"
             />
             <select
               value={newType}
+              disabled={adding || Boolean(savedRequestId)}
               onChange={(event) => setNewType(event.target.value as FeatureRequestType)}
               aria-label="Update type"
             >
@@ -994,6 +1015,7 @@ export function UpdatesPage() {
             <select
               className={`updates-priority-select updates-priority-${newPriority}`}
               value={newPriority}
+              disabled={adding || Boolean(savedRequestId)}
               onChange={(event) => setNewPriority(event.target.value as FeatureRequestPriority)}
               aria-label="Priority"
               title="Priority — set it right here so you don't have to find the item afterwards"
@@ -1008,15 +1030,25 @@ export function UpdatesPage() {
           <textarea
             placeholder="Describe what you want or what's broken — plain language is fine. Use “Refine for dev” after adding to clean it up."
             value={newDescription}
+              disabled={adding || Boolean(savedRequestId)}
             maxLength={2000}
             rows={3}
             onChange={(event) => setNewDescription(event.target.value)}
             aria-label="Update description"
           />
+          <FeedbackAttachments key={draftNumber} requestId={savedRequestId} draft />
+          {savedRequestId ? <div className="feedback-draft-saved" role="status">
+            <p>Update saved. Any files that failed can be retried here without adding the update again.</p>
+            <button type="button" className="secondary-action" onClick={() => {
+              if (!window.confirm('Start another update? Any files still waiting to upload will be cleared.')) return
+              setSavedRequestId(null); setDraftNumber((value) => value + 1)
+              setNewTitle(''); setNewDescription(''); setNewType('feature'); setNewPriority('medium')
+            }}>Start another update</button>
+          </div> : null}
           {formError ? <p className="updates-form-error">{formError}</p> : null}
           <div className="updates-add-actions">
-            <button type="submit" className="primary-action" disabled={adding}>
-              <Plus size={15} aria-hidden="true" /> {adding ? 'Adding…' : 'Add update'}
+            <button type="submit" className="primary-action" disabled={adding || Boolean(savedRequestId)}>
+              <Plus size={15} aria-hidden="true" /> {savedRequestId ? 'Update saved' : adding ? 'Adding…' : 'Add update'}
             </button>
           </div>
         </form>
@@ -1064,6 +1096,7 @@ export function UpdatesPage() {
               return (
                 <div key={item.id} className="updates-needs-input-card">
                   <p className="updates-needs-input-title">{item.title}</p>
+                  <FeedbackAttachments requestId={item.id} />
                   <p className="updates-needs-input-question">
                     {item.clarificationQuestion?.trim() ||
                       'The developer flagged this as needing your input — see its notes for details.'}

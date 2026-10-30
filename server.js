@@ -1,3 +1,5 @@
+import { handleFeedbackAttachmentRoute } from './lib/feedback-attachment-routes.js'
+import { createAttachmentStorage } from './lib/feedback-storage.js'
 import { createReadStream, existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
@@ -369,6 +371,7 @@ const indexFile = path.join(distDir, 'index.html')
 // PORT=8080 for every container host, so the image never relies on this fallback.
 const port = Number(process.env.PORT || 4173)
 const appDataStore = new AppDataStore()
+const feedbackStorage = createAttachmentStorage()
 // Pending-notes attach pass (featreq-b688e73c) runs from inside db/store.js
 // itself (read()'s guarded write-back, generateChecklistFromTemplate) as well
 // as from the bulk-save route below — this hook is the one way any of those
@@ -3329,6 +3332,8 @@ function scheduleInvoiceRatings(invoices, session) {
   })()
 }
 
+registerPeriodicJob('feedbackAttachmentCleanup', () => appDataStore.feedbackAttachments().cleanup(feedbackStorage))
+
 const server = createServer(async (request, response) => {
   try {
     const requestUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`)
@@ -3468,6 +3473,9 @@ const server = createServer(async (request, response) => {
         return result
       }
     }
+
+    if (await handleFeedbackAttachmentRoute({ request, response, pathname: normalizedPath, url: requestUrl,
+      ledger: appDataStore.feedbackAttachments(), storage: feedbackStorage, requireSession, isCrossSiteOrigin, sendJson })) return
 
     if (await handleAdvancePaymentRoute({ request, response, pathname: normalizedPath, url: requestUrl,
       store: appDataStore, requireSession, isCrossSiteOrigin, readJsonBody, sendJson, appUrl: getPublicAppUrl(request) })) return

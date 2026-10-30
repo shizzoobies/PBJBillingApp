@@ -21,6 +21,8 @@ import type { AppData, FeatureRequest } from '../lib/types'
 vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
 
 vi.mock('../lib/api', () => ({
+  listFeedbackAttachments: vi.fn().mockResolvedValue([]),
+  createFeedbackAbortController: () => new AbortController(),
   confirmRejectFeedbackRequest: vi.fn(),
   spitballNewSessionRequest: vi.fn(),
   spitballRequest: vi.fn(),
@@ -64,6 +66,8 @@ let updateFeatureRequest: ReturnType<typeof vi.fn>
 function mountUpdates(requests: FeatureRequest[]) {
   updateFeatureRequest = vi.fn()
   contextValue = {
+    sessionUser: { id: 'emp-patrice' },
+    previewMode: false,
     ownerMode: true,
     data,
     featureRequests: requests,

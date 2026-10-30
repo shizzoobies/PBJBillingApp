@@ -18,6 +18,7 @@ const HOST_ONLY = new Set([
   'RAILWAY_GIT_COMMIT_SHA', // Railway only; harmless fallback
   'WORKERS_CI_COMMIT_SHA', // Cloudflare Workers Builds only; harmless fallback
   'AUTH_DEMO_PASSWORD', // local dev seeding only
+  'FEEDBACK_LOCAL_DIRECTORY', // explicit development/test object storage only
   'NODE_PATH',
   'CI',
   'TMPDIR',

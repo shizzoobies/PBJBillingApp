@@ -356,6 +356,12 @@ describe('pickContainerEnv', () => {
       'AUTOPAY_CHARGING',
       'TICK_TOKEN',
       'MAINTENANCE_MODE',
+      'FEEDBACK_STORAGE',
+      'FEEDBACK_R2_ENDPOINT',
+      'FEEDBACK_R2_BUCKET',
+      'FEEDBACK_R2_ACCESS_KEY_ID',
+      'FEEDBACK_R2_SECRET_ACCESS_KEY',
+      'FEEDBACK_ATTACHMENTS_PAUSED',
       'ENV_REVISION',
     ])
   })

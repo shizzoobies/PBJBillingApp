@@ -3060,3 +3060,12 @@ export type EngagementSendResult = {
   /** The addresses it actually went to (featreq-34627da1). */
   to?: string[]
 }
+export interface FeatureRequestAttachment {
+  id: string
+  requestId: string
+  filename: string
+  contentType: string
+  size: number
+  createdAt: string
+  uploadedBy: string
+}

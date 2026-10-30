@@ -1,3 +1,4 @@
+import { FeedbackAttachmentLedger, FEEDBACK_ATTACHMENT_SCHEMA, withFeedbackLock } from './feedback-attachments.js'
 import { existsSync } from 'node:fs'
 import { buildCreditStatement } from '../lib/invoice-credit-statement.js'
 import { AdvancePaymentLedger, ADVANCE_PAYMENT_SCHEMA } from './advance-payments.js'
@@ -239,6 +240,8 @@ const projectRoot = path.dirname(__dirname)
 const seedDataPath = path.join(projectRoot, 'prototype-data.json')
 const localDataPath = path.join(projectRoot, 'tmp', 'app-data.json')
 const localAuthPath = path.join(projectRoot, 'tmp', 'auth-state.json')
+const localFeatureRequestsPath = path.join(projectRoot, 'tmp', 'feature-requests.json')
+const localFeedbackLedgerPath = path.join(projectRoot, 'tmp', 'feedback-attachments.json')
 const localRateAgreementsPath = path.join(projectRoot, 'tmp', 'client-rate-agreements.json')
 const sessionTtlMs = 1000 * 60 * 60 * 24 * 7
 
@@ -6212,6 +6215,7 @@ export class AppDataStore {
 
   async initialize() {
     if (this.pool) {
+      await this.pool.query(FEEDBACK_ATTACHMENT_SCHEMA)
       await this.pool.query(ADVANCE_PAYMENT_SCHEMA)
       await this.pool.query('create index if not exists advance_payment_client_idx on advance_payment_ledger (client_id, kind)')
       // Targeted append-only agreements; outside bulk-saved clients and without FKs.
@@ -26324,7 +26328,29 @@ export class AppDataStore {
    * Every feature request, ordered urgent-first, then priority_rank asc, then
    * created_at asc. Owner-only at the endpoint layer.
    */
+  async ensureFeatureRequestFile() {
+    if (this.pool || existsSync(localFeatureRequestsPath)) return
+    const authState = await readJson(localAuthPath)
+    await writeFile(localFeatureRequestsPath, JSON.stringify({ featureRequests: authState.featureRequests ?? [] }, null, 2))
+  }
+
   async listFeatureRequests() {
+    if (this.pool) return this.listFeatureRequestsLocked()
+    return withFeedbackLock(localFeedbackLedgerPath, async () => {
+      await this.ensureFeatureRequestFile()
+
+      return this.listFeatureRequestsLocked()
+    })
+  }
+
+  async listFeatureRequestsLocked() {
+    const rows = await this.listFeatureRequestsRaw()
+    if (this.pool) return rows
+    const visible = await Promise.all(rows.map((row) => this.feedbackAttachments().parentExists(row.id)))
+    return rows.filter((_, index) => visible[index])
+  }
+
+  async listFeatureRequestsRaw() {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, user_id, title, description, type, status, urgent, priority,
@@ -26339,7 +26365,7 @@ export class AppDataStore {
       )
       return result.rows.map((row) => AppDataStore.mapFeatureRequest(row))
     }
-    const authState = await readJson(localAuthPath)
+    const authState = await readJson(localFeatureRequestsPath)
     const list = Array.isArray(authState.featureRequests) ? authState.featureRequests : []
     const weight = (p) => FEATURE_REQUEST_PRIORITY_WEIGHT[p] ?? FEATURE_REQUEST_PRIORITY_WEIGHT.medium
     return list
@@ -26359,6 +26385,15 @@ export class AppDataStore {
    * order (priority_rank = current max + 1). Returns the created record.
    */
   async createFeatureRequest(userId, title, description, opts = {}) {
+    if (this.pool) return this.createFeatureRequestLocked(userId, title, description, opts)
+    return withFeedbackLock(localFeedbackLedgerPath, async () => {
+      await this.ensureFeatureRequestFile()
+
+      return this.createFeatureRequestLocked(userId, title, description, opts)
+    })
+  }
+
+  async createFeatureRequestLocked(userId, title, description, opts = {}) {
     const id = `featreq-${randomUUID().slice(0, 8)}`
     const createdAt = nowIso()
     const allowedTypes = ['feature', 'bug', 'improvement']
@@ -26415,7 +26450,7 @@ export class AppDataStore {
       return AppDataStore.mapFeatureRequest({ ...record, status: 'new' })
     }
 
-    const authState = await readJson(localAuthPath)
+    const authState = await readJson(localFeatureRequestsPath)
     if (!Array.isArray(authState.featureRequests)) authState.featureRequests = []
     const maxRank = authState.featureRequests.reduce(
       (max, r) => Math.max(max, Number(r.priorityRank ?? r.priority_rank ?? 0) || 0),
@@ -26423,7 +26458,7 @@ export class AppDataStore {
     )
     record.priorityRank = maxRank + 1
     authState.featureRequests.push(record)
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await writeFile(localFeatureRequestsPath, JSON.stringify(authState, null, 2))
     return AppDataStore.mapFeatureRequest({ ...record, status: 'new' })
   }
 
@@ -26437,6 +26472,15 @@ export class AppDataStore {
    * truthful — only currently-done items carry an approver).
    */
   async updateFeatureRequest(id, patch = {}, actingUserId = null) {
+    if (this.pool) return this.updateFeatureRequestLocked(id, patch, actingUserId)
+    return withFeedbackLock(localFeedbackLedgerPath, async () => {
+      await this.ensureFeatureRequestFile()
+      if (!await this.feedbackAttachments().parentExists(id)) return null
+      return this.updateFeatureRequestLocked(id, patch, actingUserId)
+    })
+  }
+
+  async updateFeatureRequestLocked(id, patch = {}, actingUserId = null) {
     if (!id) return null
     const allowedTypes = ['feature', 'bug', 'improvement']
     const allowedStatuses = [
@@ -26582,7 +26626,7 @@ export class AppDataStore {
       return AppDataStore.mapFeatureRequest(result.rows[0])
     }
 
-    const authState = await readJson(localAuthPath)
+    const authState = await readJson(localFeatureRequestsPath)
     if (!Array.isArray(authState.featureRequests)) authState.featureRequests = []
     const existing = authState.featureRequests.find((r) => r.id === id)
     if (!existing) return null
@@ -26622,12 +26666,21 @@ export class AppDataStore {
       existing.reviewedAt = null
     }
     existing.updatedAt = nowIso()
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await writeFile(localFeatureRequestsPath, JSON.stringify(authState, null, 2))
     return AppDataStore.mapFeatureRequest(existing)
   }
 
   /** Re-rank feature requests by array index (priority_rank = position). */
   async reorderFeatureRequests(orderedIds) {
+    if (this.pool) return this.reorderFeatureRequestsLocked(orderedIds)
+    return withFeedbackLock(localFeedbackLedgerPath, async () => {
+      await this.ensureFeatureRequestFile()
+
+      return this.reorderFeatureRequestsLocked(orderedIds)
+    })
+  }
+
+  async reorderFeatureRequestsLocked(orderedIds) {
     if (!Array.isArray(orderedIds) || orderedIds.length === 0) return
     if (this.pool) {
       const client = await this.pool.connect()
@@ -26648,7 +26701,7 @@ export class AppDataStore {
       }
       return
     }
-    const authState = await readJson(localAuthPath)
+    const authState = await readJson(localFeatureRequestsPath)
     if (!Array.isArray(authState.featureRequests)) authState.featureRequests = []
     const rankById = new Map(orderedIds.map((id, index) => [id, index]))
     for (const r of authState.featureRequests) {
@@ -26657,22 +26710,48 @@ export class AppDataStore {
         r.updatedAt = nowIso()
       }
     }
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await writeFile(localFeatureRequestsPath, JSON.stringify(authState, null, 2))
   }
 
   /** Delete a feature request. Returns true if a row was removed. */
+  feedbackAttachments() {
+    if (!this._feedbackAttachments || this._feedbackAttachments.pool !== this.pool) {
+      this._feedbackAttachments = new FeedbackAttachmentLedger({ pool: this.pool,
+        file: localFeedbackLedgerPath,
+        getParent: async (id) => { await this.ensureFeatureRequestFile(); return this.getFeatureRequestRaw(id) },
+        deleteFileParent: (id) => this.deleteFeatureRequestRaw(id),
+        paused: () => process.env.FEEDBACK_ATTACHMENTS_PAUSED === '1' || process.env.MAINTENANCE_MODE === '1',
+      })
+    }
+    return this._feedbackAttachments
+  }
+
   async deleteFeatureRequest(id) {
+    if (this.pool) return this.deleteFeatureRequestLocked(id)
+    return withFeedbackLock(localFeedbackLedgerPath, async () => {
+      await this.ensureFeatureRequestFile()
+
+      return this.deleteFeatureRequestLocked(id)
+    })
+  }
+
+  async deleteFeatureRequestLocked(id) {
+    if (!id) return false
+    return this.feedbackAttachments().removeParent(id)
+  }
+
+  async deleteFeatureRequestRaw(id) {
     if (!id) return false
     if (this.pool) {
       const result = await this.pool.query(`delete from feature_requests where id = $1`, [id])
       return (result.rowCount ?? 0) > 0
     }
-    const authState = await readJson(localAuthPath)
+    const authState = await readJson(localFeatureRequestsPath)
     if (!Array.isArray(authState.featureRequests)) authState.featureRequests = []
     const before = authState.featureRequests.length
     authState.featureRequests = authState.featureRequests.filter((r) => r.id !== id)
     const removed = authState.featureRequests.length < before
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await writeFile(localFeatureRequestsPath, JSON.stringify(authState, null, 2))
     return removed
   }
 
@@ -26683,6 +26762,21 @@ export class AppDataStore {
    * and the ship date, so a short select here silently starves it.
    */
   async getFeatureRequest(id) {
+    if (this.pool) return this.getFeatureRequestLocked(id)
+    return withFeedbackLock(localFeedbackLedgerPath, async () => {
+      await this.ensureFeatureRequestFile()
+
+      return this.getFeatureRequestLocked(id)
+    })
+  }
+
+  async getFeatureRequestLocked(id) {
+    if (!id) return null
+    if (!this.pool && !await this.feedbackAttachments().parentExists(id)) return null
+    return this.getFeatureRequestRaw(id)
+  }
+
+  async getFeatureRequestRaw(id) {
     if (!id) return null
     if (this.pool) {
       const result = await this.pool.query(
@@ -26698,7 +26792,7 @@ export class AppDataStore {
       if (!result.rowCount) return null
       return AppDataStore.mapFeatureRequest(result.rows[0])
     }
-    const authState = await readJson(localAuthPath)
+    const authState = await readJson(localFeatureRequestsPath)
     const list = Array.isArray(authState.featureRequests) ? authState.featureRequests : []
     const found = list.find((r) => r.id === id)
     return found ? AppDataStore.mapFeatureRequest(found) : null
@@ -26715,6 +26809,15 @@ export class AppDataStore {
    * same reason — generating an explanation is not an edit to the request.
    */
   async setFeatureRequestWalkthrough(id, text) {
+    if (this.pool) return this.setFeatureRequestWalkthroughLocked(id, text)
+    return withFeedbackLock(localFeedbackLedgerPath, async () => {
+      await this.ensureFeatureRequestFile()
+      if (!await this.feedbackAttachments().parentExists(id)) return null
+      return this.setFeatureRequestWalkthroughLocked(id, text)
+    })
+  }
+
+  async setFeatureRequestWalkthroughLocked(id, text) {
     if (!id) return null
     const walkthrough = typeof text === 'string' ? text.trim().slice(0, 8000) : ''
     if (!walkthrough) return null
@@ -26736,13 +26839,13 @@ export class AppDataStore {
       return AppDataStore.mapFeatureRequest(result.rows[0])
     }
 
-    const authState = await readJson(localAuthPath)
+    const authState = await readJson(localFeatureRequestsPath)
     if (!Array.isArray(authState.featureRequests)) authState.featureRequests = []
     const existing = authState.featureRequests.find((r) => r.id === id)
     if (!existing) return null
     existing.walkthrough = walkthrough
     existing.walkthroughAt = nowIso()
-    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    await writeFile(localFeatureRequestsPath, JSON.stringify(authState, null, 2))
     return AppDataStore.mapFeatureRequest(existing)
   }
 
