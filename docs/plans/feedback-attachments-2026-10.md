@@ -72,7 +72,7 @@ Rollback preserves the additive tables and objects and disables attachment opera
 
 ## Approval record
 
-Alex approved this PBJ implementation plan, including the dedicated private R2/S3 adapter, two additive tables, four justified dependencies and the stated deleted-file recovery limitation. This approval covers local implementation and testing. Provisioning and deployment remain separate until Alex authorizes the reviewed release.
+Alex approved this PBJ implementation plan, including the dedicated private R2/S3 adapter, two additive tables, four justified dependencies and the stated deleted-file recovery limitation. This approval covers local implementation and testing. Alex separately approved production storage provisioning and deployment after local review on October 30, 2026. See the production release record for the current status and completed gates.
 
 ## References
 

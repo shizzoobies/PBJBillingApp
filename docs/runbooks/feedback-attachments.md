@@ -1,12 +1,12 @@
 # Feedback attachments
 
-This feature is prepared locally. Alex must approve provisioning and deployment after reviewing the local app.
+Alex approved production provisioning and deployment on October 30, 2026 after local review. Storage is provisioned; see the [release record](../plans/feedback-attachments-production-release-2026-10.md) for deployment and verification status.
 
 ## Runtime configuration
 
 The Node API authorizes every operation against an owner session and a live Updates request. Staff and all preview sessions are denied, including downloads. Files never enter the workspace JSON or AI prompts. Only validated raster images can render inline; all other formats download. Validation is not a malware scan.
 
-Production uses a dedicated private R2 bucket, proposed name `pbj-feedback-attachments`. Disable its public r2.dev endpoint and public custom domains. Scope its S3 credentials only to this bucket. Do not reuse Finance or database-backup buckets or credentials.
+Production uses the dedicated private R2 bucket `pbj-feedback-attachments`. Disable its public r2.dev endpoint and public custom domains. Scope its S3 credentials only to this bucket. Do not reuse Finance or database-backup buckets or credentials.
 
 Configure these names through the existing Cloudflare secret uploader and Container restart procedure:
 

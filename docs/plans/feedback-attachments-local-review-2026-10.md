@@ -1,5 +1,7 @@
 # Feedback attachment local review
 
+Historical local-review evidence. The later [production release record](feedback-attachments-production-release-2026-10.md) supersedes the approval and deployment status below.
+
 October 30, 2026. Branch `codex/feedback-attachments`, based on `a54b26c11e0e3aa925a2086abe3a4e96aeb285bd`. Checkout: `D:/PBJ Accounting Work/AP-feedback-attachments`. Alex approved local implementation and wants to review before deployment.
 
 ## Try it
