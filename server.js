@@ -7,7 +7,9 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
-import { handleAdvancePaymentRoute, closeAdvanceSessions } from './lib/advance-payment-routes.js'
+import { handleAdvancePaymentRoute, closeAdvanceSessions, settleCombinedAdvance } from './lib/advance-payment-routes.js'
+import { invoiceCheckoutAdvance } from './lib/advance-payments.js'
+import { advancePaymentRows, advancePaymentSummary, linkAdvanceFor } from './lib/invoice-advance-offer.js'
 import {
   AccountCreditError,
   AppDataStore,
@@ -121,6 +123,7 @@ import { AUTO_REMINDER_EVENT, runAutoInvoiceReminders } from './lib/invoice-auto
 import { invoiceContentChanged, totalsDiffer } from './lib/invoice-sent-change.js'
 import {
   clearDuplicatePaymentOnFailure,
+  combinedAdvanceCents,
   duplicatePaymentLogged,
   duplicatePaymentWaiting,
   flagDuplicatePayment,
@@ -1931,6 +1934,53 @@ function renderPayStatusPage({ heading, body, action = null }) {
 }
 
 /**
+ * What a payment link that carries an advance will collect, shown before the
+ * Stripe page: Invoice amount, Advance payment, Processing fee (card) and
+ * Total to pay, from `advancePaymentRows` - the figures the session is built
+ * from. Amounts only; no client name and no service lines (Stripe's page
+ * repeats the same figures to the same link holder).
+ */
+function renderPaySummaryPage({ number, rows, optional, continueHref }) {
+  const table = rows
+    .map(
+      ([label, value], index) =>
+        `<tr${index === rows.length - 1 ? ' class="total"' : ''}><td>${escapeHtml(label)}</td><td class="amount">${escapeHtml(value)}</td></tr>`,
+    )
+    .join('')
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Invoice ${escapeHtml(number)} - PB&amp;J Strategic Accounting</title>
+<style>
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f6f5f1; color: #1f1d1a; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 24px; box-sizing: border-box; }
+  .card { background: #fff; padding: 32px 36px; border-radius: 14px; box-shadow: 0 12px 40px rgba(31, 29, 26, 0.08); max-width: 460px; width: 100%; }
+  h1 { margin: 0 0 12px 0; font-size: 22px; color: #7d2a4d; text-align: center; }
+  table { width: 100%; border-collapse: collapse; margin: 0 0 20px 0; }
+  td { padding: 6px 0; vertical-align: top; overflow-wrap: anywhere; }
+  td.amount { text-align: right; white-space: nowrap; padding-left: 12px; }
+  tr.total td { border-top: 1px solid #ddd; font-weight: 700; padding-top: 10px; }
+  p { line-height: 1.5; margin: 0 0 20px 0; color: #555049; }
+  .center { text-align: center; }
+  a.action { display: inline-block; font-weight: 600; color: #fff; background: #7d2a4d; border-radius: 10px; padding: 12px 24px; text-decoration: none; }
+  p.footer { margin: 0; font-size: 13px; color: #8a837a; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Invoice ${escapeHtml(number)}</h1>
+    <table>${table}</table>
+    <p>The advance is held as credit toward future invoices; it is not a charge for services.${optional ? ' It is optional: you may remove it on the next page.' : ''}</p>
+    <p class="center"><a class="action" href="${escapeHtml(continueHref)}">Continue to payment</a></p>
+    <p class="footer">Questions? billing@pbjsa.com</p>
+  </div>
+</body>
+</html>`
+}
+
+/**
  * A token that names nothing and a token that is malformed answer with EXACTLY
  * this page. Distinguishing them would tell a stranger which guesses were warm.
  */
@@ -2717,6 +2767,8 @@ async function assembleInvoicePreview(request, invoiceId) {
     firmSettings,
     payUrl,
     cardPayUrl,
+    // The advance the send's links would carry, read the same way Send reads it.
+    advance: payUrl ? await invoiceCheckoutAdvance(appDataStore, invoice) : null,
     autopay: autopaySend.plan ? autopayEmailDetails(request, invoice, autopaySend.plan) : null,
   })
 
@@ -5382,6 +5434,29 @@ const server = createServer(async (request, response) => {
           return
         }
 
+        // AN ADVANCE ON THE LINK (Brittany, 2026-11-01: one link, one payment).
+        // The payer is shown, first, what this link collects: the invoice, the
+        // advance and (card) the processing fee, adding to Total to pay - the
+        // same figures the Stripe page will list. 'Continue to payment' comes
+        // back with go=1, which mints (as does this route's own retry=1 round).
+        // Read-only until then. An invoice without an advance on its link goes
+        // straight to Stripe, as it always has.
+        const payAdvance = await invoiceCheckoutAdvance(appDataStore, payInvoice)
+        const payChannel = wantsCard ? 'card' : 'ach'
+        const payCarried = linkAdvanceFor(payAdvance, payChannel)
+        if (payCarried && requestUrl.searchParams.get('go') !== '1' && requestUrl.searchParams.get('retry') !== '1') {
+          sendPayPage(
+            response,
+            renderPaySummaryPage({
+              number: payNumber,
+              rows: advancePaymentRows(advancePaymentSummary({ total: payInvoice.total, advance: payAdvance, channel: payChannel })),
+              optional: payCarried.optional,
+              continueHref: `${payPath}?go=1`,
+            }),
+          )
+          return
+        }
+
         // Reuse the client's Stripe customer, exactly as the send route does, so
         // a repeat payer is one customer in Stripe rather than one per click.
         let payCustomerId = null
@@ -5414,6 +5489,7 @@ const server = createServer(async (request, response) => {
           // who presses "back to merchant" gets the ACH page's Pay button, so
           // the retry silently changes how they are charged.
           returnTo: `${payAppUrl}${payPath}`,
+          advance: payAdvance,
         })
         if (!payResult.ok) {
           console.error('[stripe] pay link session failed:', payResult.reason)
@@ -6636,6 +6712,11 @@ const server = createServer(async (request, response) => {
       // The invoice the event named, as first found. Read after the try by the
       // voided-invoice step, which needs its id when the apply answered null.
       let lookedUpInvoice = null
+      // The advance portion of a combined payment (invoice + advance on one
+      // link): what was recorded on `payment_intent.succeeded`, or what the
+      // session collected for it on `checkout.session.completed`. The amount
+      // check below expects the invoice total PLUS this.
+      let settledAdvanceCents = 0
       const applyPayment = async (invoiceId, patch) => {
         const settled = await appDataStore.applyInvoicePayment(invoiceId, patch)
         paymentApplied = true
@@ -6692,7 +6773,11 @@ const server = createServer(async (request, response) => {
         }
 
         const object = event.data?.object ?? {}
-        if (object.metadata?.advancePaymentRequestId) {
+        // An ADVANCE-ONLY payment (the advance's own page or link) names a request
+        // and no invoice. A payment that names BOTH paid an invoice whose link
+        // carried the advance (one link, one payment): it runs the invoice path
+        // below, which then records the advance portion.
+        if (object.metadata?.advancePaymentRequestId && !object.metadata?.invoiceId) {
           if (event.type === 'payment_intent.succeeded') {
             await appDataStore.recordAdvancePayment({ requestId: object.metadata.advancePaymentRequestId, receivedOn: dateOnlyInZone(new Date(event.created * 1000)) }, null, object)
             paymentApplied = true
@@ -6728,9 +6813,12 @@ const server = createServer(async (request, response) => {
           object,
           invoice,
         })
+        // An AGREED advance the card link carried was charged its fee too (worked
+        // on invoice + advance); the whole fee goes on the invoice of record.
+        const linkAdvanceCents = object.metadata?.advancePaymentRequestId ? Number(object.metadata.advanceCents) || 0 : 0
         // Appended by the store only if the invoice does not already carry one,
         // so the two events a single card payment fires cannot add it twice.
-        const cardFeeLines = isCardChannel ? [cardProcessingFeeLine(invoice)] : []
+        const cardFeeLines = isCardChannel ? [cardProcessingFeeLine(invoice, linkAdvanceCents)] : []
         settledByCard = isCardChannel
         settledByAutopay = object.metadata?.autopay === '1'
 
@@ -6750,6 +6838,9 @@ const server = createServer(async (request, response) => {
               typeof object.payment_intent === 'string' ? object.payment_intent : undefined,
             appendLines: cardFeeLines,
           })
+          // Nothing is recorded for an advance here (a bank payment has only
+          // been authorized); the session's total still includes it.
+          settledAdvanceCents = combinedAdvanceCents({ eventType: event.type, object, invoice, isCard: isCardChannel })
           // One of the two links has now been used. Retire the OTHER one: a
           // client holding both emails could otherwise pay the same invoice
           // twice, once per channel. Best effort — an already-expired or
@@ -6763,6 +6854,24 @@ const server = createServer(async (request, response) => {
             paymentMethod: object.payment_method_types?.[0] ?? 'us_bank_account',
             appendLines: cardFeeLines,
           })
+          // ONE payment for the invoice and the advance its link carried: the
+          // advance portion becomes a receipt (keyed on this intent, so a
+          // redelivery writes nothing new). Only when the invoice payment itself
+          // applied: a second payment on a paid invoice, or money for a voided
+          // one, is flagged whole for the owners below. A failure here takes the
+          // event back (`paymentApplied` false) so Stripe's retry records the
+          // advance; the invoice apply replays harmlessly on the same intent.
+          if (settledInvoice && !settledInvoice.duplicatePayment && object.metadata?.advancePaymentRequestId) {
+            paymentApplied = false
+            settledAdvanceCents = await settleCombinedAdvance({
+              store: appDataStore,
+              event,
+              invoice,
+              isCard: isCardChannel,
+              receivedOn: dateOnlyInZone(new Date((event.created ?? Math.floor(Date.now() / 1000)) * 1000)),
+            })
+            paymentApplied = true
+          }
           // An autopay attempt's own record: settled by Stripe's word, which
           // overrides anything the charge step guessed. Best effort, never throws.
           if (settledByAutopay) {
@@ -6944,6 +7053,8 @@ const server = createServer(async (request, response) => {
             event,
             invoice: settledInvoice,
             appPublicUrl: getPublicAppUrl(request),
+            // Invoice total (+ card fee) + the advance this payment carried.
+            advanceCents: settledAdvanceCents,
           })
         } else if (paymentApplied && lookedUpInvoice) {
           await flagPaymentOnVoidedInvoice({
@@ -7409,6 +7520,8 @@ const server = createServer(async (request, response) => {
         client: invoiceClient,
         customerId,
         appUrl: getPublicAppUrl(request),
+        // An advance attached to be collected with this invoice rides the link.
+        advance: await invoiceCheckoutAdvance(appDataStore, invoice),
       })
       if (!result.ok) {
         sendJson(response, 502, { error: 'stripe_session_failed', message: result.reason })
@@ -8108,6 +8221,8 @@ const server = createServer(async (request, response) => {
       // re-send, a changed invoice, the kill switch off - is the email it always
       // was, with its pay link.
       const autopaySend = await planAutopaySend(invoice, sendClient)
+      // The advance the links carry, LIVE from the ledger (sessions + email agree).
+      const sendAdvance = await invoiceCheckoutAdvance(appDataStore, invoice)
       let payUrl = ''
       let cardPayUrl = ''
       // The checkout sessions THIS request minted, so a void that lands before
@@ -8157,6 +8272,7 @@ const server = createServer(async (request, response) => {
           client: sendClient,
           customerId,
           appUrl: sendAppUrl,
+          advance: sendAdvance,
           ...(payReturnTo ? { returnTo: payReturnTo } : {}),
         })
         if (!linkResult.ok) {
@@ -8212,6 +8328,7 @@ const server = createServer(async (request, response) => {
             client: sendClient,
             customerId,
             appUrl: sendAppUrl,
+            advance: sendAdvance,
             // The CARD path, not the bank-transfer one. A card payer returned
             // to `/pay/<token>` who presses "back to merchant" is handed the
             // ACH page's Pay button, so their retry silently changes how they
@@ -8287,6 +8404,8 @@ const server = createServer(async (request, response) => {
         firmSettings,
         payUrl,
         cardPayUrl,
+        // What the links carry, for the Total to pay the email shows.
+        advance: payUrl ? sendAdvance : null,
         // An invoice that is about to be charged automatically: what will be
         // debited (a card's includes its fee), from what, and the way to turn it
         // off. Null for every other send, which is then the email it always was.

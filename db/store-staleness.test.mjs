@@ -96,6 +96,8 @@ import { applyScopeRetag } from '../lib/invoice-scope-retag.js'
 import { buildInvoiceLines, cardProcessingFeeLine } from '../lib/invoice-lines.js'
 import { buildCardCheckoutLineItems, buildCheckoutLineItems } from '../lib/stripe-rail.js'
 import { paymentAmountMismatch, unhandledAmountMismatch } from '../lib/payment-amount-mismatch.js'
+import { flagPaymentReversal } from '../lib/payment-amount-mismatch.js'
+import { settleCombinedAdvance } from '../lib/advance-payment-routes.js'
 import { clearedPaymentFailure, latestInvoiceSend, unresolvedPaymentFailure } from '../lib/invoice-overdue.js'
 import { buildInvoiceEmail } from '../lib/invoice-email.js'
 import { remindInvoice } from '../lib/invoice-reminder.js'
@@ -324,6 +326,53 @@ describe('client billing agreements and advance receipts (file backend)', () => 
     data.clients[0].billToClientId = 'other-payer'
     await expect(store.write(data)).rejects.toThrow('billing payer cannot be changed')
     expect((await store.listAdvancePayments('c1')).receipts).toHaveLength(1)
+  })
+  it('attaches a request with no payment method, either way to collect, and refuses an unknown one', async () => {
+    await store.createAdvancePayment({ id: requestId, clientId: 'c1', amount: 170 })
+    await store._insertInvoiceDrawingAccountCredit(record('i1', '2026-10', 153.75))
+    const onLink = await store.setInvoiceAdvanceOffer('i1', requestId, true, 'owner-test', 'http://localhost')
+    expect(onLink.total).toBe(153.75)
+    expect(onLink.lineItems.at(-1)).toMatchObject({ kind: 'advance_request', amount: 0, advanceOffer: { collection: 'invoice', optional: true, outstandingCents: 17000 } })
+    const separate = await store.setInvoiceAdvanceOffer('i1', requestId, false, 'owner-test', 'http://localhost', 'separate')
+    expect(separate.lineItems.at(-1).advanceOffer).toMatchObject({ collection: 'separate', optional: false })
+    await expect(store.setInvoiceAdvanceOffer('i1', requestId, false, 'owner-test', 'http://localhost', 'cash')).rejects.toThrow('how to collect')
+    await store.cancelAdvancePayment(requestId, 'owner-test')
+    await expect(store.setInvoiceAdvanceOffer('i1', requestId, false, 'owner-test', 'http://localhost')).rejects.toThrow('active advance request')
+  })
+  it('one payment for invoice + advance: invoice paid, advance receipt for the explicit portion, idempotent, refund holds it and notices the invoice', async () => {
+    await store.createAdvancePayment({ id: requestId, clientId: 'c1', amount: 170 })
+    await store._insertInvoiceDrawingAccountCredit(record('i1', '2026-10', 153.75))
+    const attached = await store.setInvoiceAdvanceOffer('i1', requestId, false, 'owner-test', 'http://localhost')
+    const intent = { id: 'pi_combined', status: 'succeeded', currency: 'usd', amount_received: 32375, payment_method_types: ['us_bank_account'], metadata: { invoiceId: 'i1', invoiceNumber: attached.number, advancePaymentRequestId: requestId, advanceCents: '17000' } }
+    const event = { id: 'evt_combined', type: 'payment_intent.succeeded', created: 1793534400, data: { object: intent } }
+    const settled = await store.applyInvoicePayment('i1', { status: 'paid', paidAt: '2026-11-01T12:00:00.000Z', paymentIntentId: 'pi_combined', paymentMethod: 'us_bank_account' })
+    expect(settled.status).toBe('paid')
+    const close = async () => {}
+    expect(await settleCombinedAdvance({ store, event, invoice: attached, isCard: false, receivedOn: firmToday(), close })).toBe(17000)
+    expect(await settleCombinedAdvance({ store, event, invoice: attached, isCard: false, receivedOn: firmToday(), close })).toBe(17000)
+    const ledger = await store.listAdvancePayments('c1')
+    expect(ledger.receipts).toEqual([expect.objectContaining({ sourceRef: 'stripe:pi_combined', cents: 17000, method: 'stripe' })])
+    expect(ledger.requests[0].outstandingCents).toBe(0)
+    expect(paymentAmountMismatch({ eventType: event.type, object: intent, invoice: settled, advanceCents: 17000 })).toBeNull()
+    expect((await store.listAccountCredits('c1'))[0]).toMatchObject({ amount: 170 })
+    store.getTeamMembers = async () => [{ id: 'owner-1', role: 'owner' }]
+    const notify = vi.fn(async () => {})
+    const refund = { id: 'evt_refund_combined', type: 'charge.refunded', created: 1793620800, data: { object: { id: 'ch_combined', payment_intent: 'pi_combined', amount: 32375, amount_refunded: 32375 } } }
+    await store.recordAdvanceReversal(refund)
+    expect((await store.listAccountCredits('c1'))[0].reversal.holds).toBe(true)
+    expect(await flagPaymentReversal({ store, notify, event: refund, appPublicUrl: 'http://localhost' })).toEqual({ matched: true, notified: true })
+    expect(notify.mock.calls[0][3].message).toContain(attached.number)
+  })
+  it('a payer who removed the optional advance pays the invoice only and no receipt is written', async () => {
+    await store.createAdvancePayment({ id: requestId, clientId: 'c1', amount: 170 })
+    await store._insertInvoiceDrawingAccountCredit(record('i1', '2026-10', 153.75))
+    const attached = await store.setInvoiceAdvanceOffer('i1', requestId, true, 'owner-test', 'http://localhost')
+    const intent = { id: 'pi_invoice_only', status: 'succeeded', currency: 'usd', amount_received: 15375, metadata: { invoiceId: 'i1', advancePaymentRequestId: requestId, advanceCents: '17000' } }
+    const event = { id: 'evt_invoice_only', type: 'payment_intent.succeeded', created: 1793534400, data: { object: intent } }
+    const settled = await store.applyInvoicePayment('i1', { status: 'paid', paidAt: '2026-11-01T12:00:00.000Z', paymentIntentId: 'pi_invoice_only' })
+    expect(await settleCombinedAdvance({ store, event, invoice: attached, isCard: false, receivedOn: firmToday(), close: async () => {} })).toBe(0)
+    expect((await store.listAdvancePayments('c1')).receipts).toEqual([])
+    expect(paymentAmountMismatch({ eventType: event.type, object: intent, invoice: settled, advanceCents: 0 })).toBeNull()
   })
   it('attaches an explicit advance separately from charges and freezes the issued section', async () => {
     const request = await store.createAdvancePayment({ id: requestId, clientId: 'c1', amount: 1500, collectionMethod: 'manual' })

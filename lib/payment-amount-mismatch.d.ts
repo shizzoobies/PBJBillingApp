@@ -104,6 +104,8 @@ export declare function paymentAmountMismatch(args: {
   eventType: string | undefined
   object: unknown
   invoice: { total?: number | null } | null | undefined
+  /** The advance portion a combined payment carried (cents). */
+  advanceCents?: number
 }): AmountMismatch | null
 
 export declare function paymentIntentIdOf(
@@ -225,6 +227,8 @@ export declare function flagPaymentAmountMismatch(args: {
     period?: string
   } | null
   appPublicUrl?: string
+  /** The advance portion a combined payment carried (cents): expected = total + this. */
+  advanceCents?: number
 }): Promise<void>
 
 /** Is a double payment for this PaymentIntent on the log, handled or not? */
@@ -255,6 +259,14 @@ export type OverpaymentCreditPlan =
 export declare function owedBeforeCardFee(
   invoice: { total?: number | null; lineItems?: ReadonlyArray<{ kind?: string; amount?: number }> } | null | undefined,
 ): number
+
+/** The advance portion of a payment that paid an invoice and the advance its link carried, in cents. */
+export declare function combinedAdvanceCents(args: {
+  eventType: string | undefined
+  object: unknown
+  invoice: { total?: number | null; lineItems?: ReadonlyArray<{ kind?: string; amount?: number }> } | null | undefined
+  isCard: boolean
+}): number
 
 /** What of a double payment reached the firm: the card fee comes off a card payment. */
 export declare function defaultOverpaymentCredit(args: {

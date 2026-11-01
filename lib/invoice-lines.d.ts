@@ -276,7 +276,7 @@ export const STRIPE_CARD_FIXED: number
 export const CARD_PROCESSING_FEE_LABEL: string
 export function cardProcessingFee(total: number): number
 export function cardChargedTotal(total: number): number
-export function cardProcessingFeeLine(invoice: { total?: number }): {
+export function cardProcessingFeeLine(invoice: { total?: number }, advanceCents?: number): {
   kind: 'card-fee'
   label: string
   detail: string

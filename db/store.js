@@ -19021,11 +19021,12 @@ export class AppDataStore {
       (a, b) => a.id === b.id && a.clientId === b.clientId && a.requestedCents === b.requestedCents && a.note === b.note && a.collectionMethod === b.collectionMethod && a.forPeriod === b.forPeriod)
   }
 
-  async recordAdvancePayment(input, actorUserId = null, stripeIntent = null) {
+  /** `stripeCents`: the advance PORTION of a payment that also paid an invoice. Explicit, and the receipt still keys on the intent. */
+  async recordAdvancePayment(input, actorUserId = null, stripeIntent = null, stripeCents = null) {
     const ledger = this.advancePaymentLedger()
     const { requests } = await ledger.list()
     const request = requests.find((row) => row.id === input.requestId)
-    const receipt = stripeIntent ? stripeAdvanceReceipt(stripeIntent, request, firmToday(), nowIso(), input.receivedOn)
+    const receipt = stripeIntent ? stripeAdvanceReceipt(stripeIntent, request, firmToday(), nowIso(), input.receivedOn ?? firmToday(), stripeCents)
       : advanceReceipt({ ...input, actorUserId }, request, firmToday(), nowIso())
     return ledger.append('receipt', `receipt:${receipt.sourceRef}`, receipt.clientId, receipt,
       (a, b) => a.requestId === b.requestId && a.sourceRef === b.sourceRef && a.cents === b.cents &&
@@ -19058,22 +19059,30 @@ export class AppDataStore {
 
   async cancelAdvancePayment(id, actorUserId) { return this.advancePaymentLedger().cancel(id, actorUserId, nowIso()) }
 
-  async setInvoiceAdvanceOffer(invoiceId, requestId, optional, actorUserId, appUrl) {
+  /**
+   * `collection`: 'invoice' (the default) carries the advance on this invoice's
+   * payment link, one payment for both; 'separate' keeps the advance's own page
+   * and link. Any active request of the client may be attached, whatever its
+   * payment method ("Decide when attaching to an invoice" leaves it unset).
+   */
+  async setInvoiceAdvanceOffer(invoiceId, requestId, optional, actorUserId, appUrl, collection = 'invoice') {
     const initial = (await this.listInvoices()).find((row) => row.id === invoiceId)
     if (!initial) throw new AdvancePaymentError('Invoice not found.')
     if (requestId && typeof optional !== 'boolean') throw new AdvancePaymentError('Choose whether this advance is optional or already agreed.')
+    const how = collection ?? 'invoice'
+    if (requestId && !['invoice', 'separate'].includes(how)) throw new AdvancePaymentError("Choose how to collect this advance: with this invoice's payment link, or separately.")
     const update = async (invoice, runner = this.pool, data = null) => {
       if (!invoice || !['draft', 'reviewed'].includes(invoice.status) || invoice.sentAt || (invoice.kind ?? 'monthly') !== 'monthly') throw new AdvancePaymentError('Only an unsent monthly draft can change its advance section. Issued invoices keep their snapshot.')
       let offer = null
       if (requestId) {
         const request = (await this.advancePaymentLedger().list(invoice.clientId, runner)).requests.find((row) => row.id === requestId)
-        if (!request || request.clientId !== invoice.clientId || request.canceledAt || !request.publicToken || !request.collectionMethod) throw new AdvancePaymentError('Choose an active advance request for this billing client with a payment method.')
+        if (!request || request.clientId !== invoice.clientId || request.canceledAt || !request.publicToken) throw new AdvancePaymentError('Choose an active advance request for this billing client.')
         offer = { requestId, number: request.number, requestedCents: request.requestedCents, receivedCents: request.receivedCents, outstandingCents: request.outstandingCents, forPeriod: request.forPeriod,
-          optional, url: `${appUrl}/advance-pay/${request.publicToken}`, preparedAt: nowIso(), preparedBy: actorUserId }
+          optional, collection: how, url: `${appUrl}/advance-pay/${request.publicToken}`, preparedAt: nowIso(), preparedBy: actorUserId }
       }
       const before = invoice.lineItems.find((line) => line.kind === 'advance_request')?.advanceOffer ?? null
       const lineItems = invoice.lineItems.filter((line) => line.kind !== 'advance_request')
-      if (offer) lineItems.push({ kind: 'advance_request', label: 'Pay in advance amount', detail: 'Separate advance request; excluded from charges', amount: 0, advanceOffer: offer })
+      if (offer) lineItems.push({ kind: 'advance_request', label: 'Pay in advance amount', detail: how === 'invoice' ? "Advance on this invoice's payment link; excluded from charges" : 'Separate advance request; excluded from charges', amount: 0, advanceOffer: offer })
       if (offer && !lineItems.some((line) => line.kind === 'account_credit')) {
         const ledger = await this._readAccountCredits(invoice.clientId, { dbClient: runner, ...(data ? { data } : {}) })
         const preferences = billingDefaultsAt((await this.advancePaymentLedger().list(invoice.clientId, runner)).settings, invoice.period)

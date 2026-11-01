@@ -46,7 +46,9 @@ describe('the send route refuses an unanswered covered-date window', () => {
   // 9000 for the paid-at-send stamp (credit on account, stage 1d), which sits
   // between the refusals and the mint. And from 11200 for the unpaid-prepayment
   // question (billing period, stage 2), which sits ahead of the recipients.
-  const block = () => routeBlock(/This invoice is voided, so it cannot be sent\./, 12400)
+  // Long enough to reach the first session mint (it moved down when the send
+  // started reading the advance its links carry, 2026-11-01).
+  const block = () => routeBlock(/This invoice is voided, so it cannot be sent\./, 13000)
 
   // The UI disables Send behind review, and review is gated — but this route is
   // reachable directly, and an invoice reviewed BEFORE the question existed
