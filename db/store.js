@@ -19042,6 +19042,9 @@ export class AppDataStore {
     const receipt = receipts.find((row) => row.sourceRef === `stripe:${intent}`)
     const notice = { id: event.id, sourceRef: `stripe:${intent}`, kind: event.type === 'charge.refunded' ? 'refund' : event.type === 'charge.dispute.closed' ? 'dispute-closed' : 'dispute',
       cents: event.type === 'charge.refunded' ? object.amount_refunded : object.amount,
+      // The whole charge, so a refund on a payment that also paid an invoice is
+      // judged partial against the charge, not against the advance's share.
+      chargeCents: event.type === 'charge.refunded' && Number.isSafeInteger(object.amount) ? object.amount : null,
       status: object.status || '', reason: object.reason || '', at: new Date(event.created * 1000).toISOString() }
     await ledger.append('reversal', `event:${event.id}`, null, notice, (a, b) => a.id === b.id && a.sourceRef === b.sourceRef)
     return !!receipt
@@ -19077,8 +19080,19 @@ export class AppDataStore {
       if (requestId) {
         const request = (await this.advancePaymentLedger().list(invoice.clientId, runner)).requests.find((row) => row.id === requestId)
         if (!request || request.clientId !== invoice.clientId || request.canceledAt || !request.publicToken) throw new AdvancePaymentError('Choose an active advance request for this billing client.')
+        if (how === 'invoice') {
+          if (request.collectionMethod === 'manual') throw new AdvancePaymentError('This request is set for payment outside the app; create a new request to collect it with an invoice.')
+          // ONE invoice link collects a request at a time: a second would let the
+          // client pay the same advance twice. Read under this client's credit
+          // lock (Postgres) or inside the file queue slot (file backend).
+          const others = data ? (data.invoices ?? []).map((row) => normalizeStoredInvoice(row)) : await this.listInvoices()
+          const holder = others.find((row) => row.id !== invoice.id && row.clientId === invoice.clientId && !['paid', 'void'].includes(row.status) &&
+            row.lineItems?.find((line) => line.kind === 'advance_request')?.advanceOffer?.requestId === requestId &&
+            row.lineItems.find((line) => line.kind === 'advance_request').advanceOffer.collection === 'invoice')
+          if (holder) throw new AdvancePaymentError(`This advance is already collected with invoice ${holder.number ?? holder.id}. Remove it there first, or attach it here to be collected separately.`)
+        }
         offer = { requestId, number: request.number, requestedCents: request.requestedCents, receivedCents: request.receivedCents, outstandingCents: request.outstandingCents, forPeriod: request.forPeriod,
-          optional, collection: how, url: `${appUrl}/advance-pay/${request.publicToken}`, preparedAt: nowIso(), preparedBy: actorUserId }
+          optional, collection: how, collectionMethod: request.collectionMethod ?? null, url: `${appUrl}/advance-pay/${request.publicToken}`, preparedAt: nowIso(), preparedBy: actorUserId }
       }
       const before = invoice.lineItems.find((line) => line.kind === 'advance_request')?.advanceOffer ?? null
       const lineItems = invoice.lineItems.filter((line) => line.kind !== 'advance_request')

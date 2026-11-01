@@ -7,9 +7,9 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
-import { handleAdvancePaymentRoute, closeAdvanceSessions, settleCombinedAdvance } from './lib/advance-payment-routes.js'
-import { invoiceCheckoutAdvance } from './lib/advance-payments.js'
+import { handleAdvancePaymentRoute, closeAdvanceSessions, invoiceCheckoutAdvance, settleCombinedAdvanceOrRelease } from './lib/advance-payment-routes.js'
 import { advancePaymentRows, advancePaymentSummary, linkAdvanceFor } from './lib/invoice-advance-offer.js'
+import { payLinkAdvanceStep, renderPaySummaryPage } from './lib/pay-link-advance.js'
 import {
   AccountCreditError,
   AppDataStore,
@@ -1934,53 +1934,6 @@ function renderPayStatusPage({ heading, body, action = null }) {
 }
 
 /**
- * What a payment link that carries an advance will collect, shown before the
- * Stripe page: Invoice amount, Advance payment, Processing fee (card) and
- * Total to pay, from `advancePaymentRows` - the figures the session is built
- * from. Amounts only; no client name and no service lines (Stripe's page
- * repeats the same figures to the same link holder).
- */
-function renderPaySummaryPage({ number, rows, optional, continueHref }) {
-  const table = rows
-    .map(
-      ([label, value], index) =>
-        `<tr${index === rows.length - 1 ? ' class="total"' : ''}><td>${escapeHtml(label)}</td><td class="amount">${escapeHtml(value)}</td></tr>`,
-    )
-    .join('')
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow">
-<title>Invoice ${escapeHtml(number)} - PB&amp;J Strategic Accounting</title>
-<style>
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f6f5f1; color: #1f1d1a; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 24px; box-sizing: border-box; }
-  .card { background: #fff; padding: 32px 36px; border-radius: 14px; box-shadow: 0 12px 40px rgba(31, 29, 26, 0.08); max-width: 460px; width: 100%; }
-  h1 { margin: 0 0 12px 0; font-size: 22px; color: #7d2a4d; text-align: center; }
-  table { width: 100%; border-collapse: collapse; margin: 0 0 20px 0; }
-  td { padding: 6px 0; vertical-align: top; overflow-wrap: anywhere; }
-  td.amount { text-align: right; white-space: nowrap; padding-left: 12px; }
-  tr.total td { border-top: 1px solid #ddd; font-weight: 700; padding-top: 10px; }
-  p { line-height: 1.5; margin: 0 0 20px 0; color: #555049; }
-  .center { text-align: center; }
-  a.action { display: inline-block; font-weight: 600; color: #fff; background: #7d2a4d; border-radius: 10px; padding: 12px 24px; text-decoration: none; }
-  p.footer { margin: 0; font-size: 13px; color: #8a837a; text-align: center; }
-</style>
-</head>
-<body>
-  <div class="card">
-    <h1>Invoice ${escapeHtml(number)}</h1>
-    <table>${table}</table>
-    <p>The advance is held as credit toward future invoices; it is not a charge for services.${optional ? ' It is optional: you may remove it on the next page.' : ''}</p>
-    <p class="center"><a class="action" href="${escapeHtml(continueHref)}">Continue to payment</a></p>
-    <p class="footer">Questions? billing@pbjsa.com</p>
-  </div>
-</body>
-</html>`
-}
-
-/**
  * A token that names nothing and a token that is malformed answer with EXACTLY
  * this page. Distinguishing them would tell a stranger which guesses were warm.
  */
@@ -2822,6 +2775,25 @@ async function assembleInvoicePreview(request, invoiceId) {
  * FAILS CLOSED: a read that throws answers "no plan", which sends the ordinary
  * email with its pay link and charges nobody.
  */
+/**
+ * The advance part of a second payment on an already-paid invoice, for the
+ * owners' notice: `{ cents, number }`, or null. Never throws (the notice is
+ * worth more than the detail).
+ */
+async function duplicateAdvanceNote(event, invoice, isCard) {
+  try {
+    const object = event?.data?.object ?? {}
+    const cents = combinedAdvanceCents({ eventType: event.type, object, invoice, isCard })
+    if (cents <= 0) return null
+    const requestId = object.metadata.advancePaymentRequestId
+    const found = (await appDataStore.listAdvancePayments(invoice.clientId)).requests.find((row) => row.id === requestId)
+    return { cents, number: found?.number ?? requestId }
+  } catch (error) {
+    console.error('[stripe] could not describe the advance part of a second payment:', error?.message || error)
+    return null
+  }
+}
+
 async function planAutopaySend(invoice, client) {
   try {
     const enrollment = await appDataStore.getClientAutopay(client.id)
@@ -3530,7 +3502,9 @@ const server = createServer(async (request, response) => {
       ledger: appDataStore.feedbackAttachments(), storage: feedbackStorage, requireSession, isCrossSiteOrigin, sendJson })) return
 
     if (await handleAdvancePaymentRoute({ request, response, pathname: normalizedPath, url: requestUrl,
-      store: appDataStore, requireSession, isCrossSiteOrigin, readJsonBody, sendJson, appUrl: getPublicAppUrl(request) })) return
+      store: appDataStore, requireSession, isCrossSiteOrigin, readJsonBody, sendJson, appUrl: getPublicAppUrl(request),
+      // The public advance page is limited exactly like /pay/<token>: same helper, same bucket.
+      rateLimited: (key, max) => isRateLimited(key, { max, bucket: payLinkAttempts }), clientIp: getClientIp(request) })) return
 
     // Legacy persistent magic-link route - replaced by /api/auth/request-link
     // and /verify/:token. Bookkeepers may have bookmarked the old URL; bounce
@@ -5376,11 +5350,6 @@ const server = createServer(async (request, response) => {
           return
         }
 
-        if (isRateLimited(`token:${payToken}`, { max: 10, bucket: payLinkAttempts })) {
-          sendPayPage(response, tooManyPage(), 429)
-          return
-        }
-
         // ONE ROW, not the whole workspace. This used to assemble every table
         // in the app, mapped and stitched, to find a single client on a public
         // page that anyone holding the link can reload.
@@ -5444,7 +5413,7 @@ const server = createServer(async (request, response) => {
         const payAdvance = await invoiceCheckoutAdvance(appDataStore, payInvoice)
         const payChannel = wantsCard ? 'card' : 'ach'
         const payCarried = linkAdvanceFor(payAdvance, payChannel)
-        if (payCarried && requestUrl.searchParams.get('go') !== '1' && requestUrl.searchParams.get('retry') !== '1') {
+        if (payLinkAdvanceStep({ carried: Boolean(payCarried), searchParams: requestUrl.searchParams }) === 'summary') {
           sendPayPage(
             response,
             renderPaySummaryPage({
@@ -5454,6 +5423,14 @@ const server = createServer(async (request, response) => {
               continueHref: `${payPath}?go=1`,
             }),
           )
+          return
+        }
+
+        // The per-link limit counts MINTING passes only (viewing the advance
+        // summary above mints nothing), so a single link cannot be used to mint
+        // Stripe sessions in bulk.
+        if (isRateLimited(`token:${payToken}`, { max: 10, bucket: payLinkAttempts })) {
+          sendPayPage(response, tooManyPage(), 429)
           return
         }
 
@@ -6761,11 +6738,12 @@ const server = createServer(async (request, response) => {
         // `duplicate` before this; a store failure here falls to the catch, which
         // takes the event back out of the ledger so Stripe's retry runs it again.
         if (isPaymentReversalEvent(event)) {
-          await appDataStore.recordAdvanceReversal(event)
+          const advanceHeld = await appDataStore.recordAdvanceReversal(event)
           const reversal = await flagPaymentReversal({
             store: appDataStore,
             notify,
             event,
+            advanceHeld,
             appPublicUrl: getPublicAppUrl(request),
           })
           sendJson(response, 200, { received: true, matched: reversal.matched })
@@ -6859,18 +6837,29 @@ const server = createServer(async (request, response) => {
           // redelivery writes nothing new). Only when the invoice payment itself
           // applied: a second payment on a paid invoice, or money for a voided
           // one, is flagged whole for the owners below. A failure here takes the
-          // event back (`paymentApplied` false) so Stripe's retry records the
-          // advance; the invoice apply replays harmlessly on the same intent.
+          // event back out of the ledger itself (`...OrRelease`) and tells the
+          // owners, so Stripe's retry records the advance; the invoice apply
+          // replays harmlessly on the same intent.
           if (settledInvoice && !settledInvoice.duplicatePayment && object.metadata?.advancePaymentRequestId) {
-            paymentApplied = false
-            settledAdvanceCents = await settleCombinedAdvance({
+            settledAdvanceCents = await settleCombinedAdvanceOrRelease({
               store: appDataStore,
               event,
               invoice,
               isCard: isCardChannel,
               receivedOn: dateOnlyInZone(new Date((event.created ?? Math.floor(Date.now() / 1000)) * 1000)),
+              notifyOwners: async (message) => {
+                const members = await appDataStore.getTeamMembers()
+                for (const owner of members.filter((member) => member.role === 'owner')) {
+                  await notify(appDataStore, owner.id, 'invoice_amount_mismatch', {
+                    message,
+                    subject: `Advance payment needs a look: invoice ${invoice.number ?? invoice.id}`,
+                    link: invoicePeriodLink(invoice),
+                    clientId: invoice.clientId,
+                    appPublicUrl: getPublicAppUrl(request),
+                  })
+                }
+              },
             })
-            paymentApplied = true
           }
           // An autopay attempt's own record: settled by Stripe's word, which
           // overrides anything the charge step guessed. Best effort, never throws.
@@ -7045,6 +7034,8 @@ const server = createServer(async (request, response) => {
             invoice: settledInvoice,
             isCard: settledByCard,
             appPublicUrl: getPublicAppUrl(request),
+            // A combined payment's advance part is in this amount: say so.
+            advanceNote: await duplicateAdvanceNote(event, lookedUpInvoice, settledByCard),
           })
         } else if (settledInvoice) {
           await flagPaymentAmountMismatch({
@@ -7123,6 +7114,11 @@ const server = createServer(async (request, response) => {
                     invoice: settledInvoice,
                     client: paidClient,
                     firmSettings: paidFirmSettings,
+                    // What THIS payment brought toward an attached advance (none
+                    // when the payer removed it or the link did not carry it).
+                    advanceText: {
+                      settlement: { advanceCents: settledAdvanceCents, pending: settledInvoice.status !== 'paid' },
+                    },
                   }),
                 },
               ],

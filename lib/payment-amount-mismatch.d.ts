@@ -388,6 +388,8 @@ export declare function flagPaymentReversal(args: {
   ) => Promise<unknown>
   event: { id?: string; type: string; created?: number; data?: { object?: unknown } }
   appPublicUrl?: string
+  /** The payment also carried an advance whose receipt is now held. */
+  advanceHeld?: boolean
 }): Promise<{ matched: boolean; notified: boolean }>
 
 /** A second payment on an already-paid invoice: logged as unhandled, owners told once. */

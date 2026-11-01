@@ -17,17 +17,15 @@ describe('the Stripe webhook splits a combined payment', () => {
     expect(route).toContain('if (object.metadata?.advancePaymentRequestId && !object.metadata?.invoiceId) {')
     expect(route).not.toMatch(/if \(object\.metadata\?\.advancePaymentRequestId\) \{/)
   })
-  it('records the advance after the invoice is paid, and lets a failure be redelivered', () => {
+  it('records the advance only after the invoice payment applied, through the releasing step', () => {
+    // Behavior (release + redelivery, owner notice) is tested in
+    // lib/advance-on-invoice-link.test.mjs and db/store-staleness.test.mjs.
     const succeeded = route.indexOf("} else if (event.type === 'payment_intent.succeeded') {")
     const apply = route.indexOf("status: 'paid',", succeeded)
-    const settle = route.indexOf('settledAdvanceCents = await settleCombinedAdvance({', succeeded)
+    const settle = route.indexOf('settledAdvanceCents = await settleCombinedAdvanceOrRelease({', succeeded)
     expect(apply).toBeGreaterThan(succeeded)
     expect(settle).toBeGreaterThan(apply)
-    const guard = route.slice(apply, settle)
-    expect(guard).toContain('settledInvoice && !settledInvoice.duplicatePayment && object.metadata?.advancePaymentRequestId')
-    expect(guard).toContain('paymentApplied = false')
-    expect(route.slice(settle, settle + 400)).toContain('paymentApplied = true')
-    expect(settle).toBeLessThan(route.indexOf("console.error('[stripe] webhook handling failed:', error)"))
+    expect(route.slice(apply, settle)).toContain('settledInvoice && !settledInvoice.duplicatePayment && object.metadata?.advancePaymentRequestId')
   })
   it('expects invoice total + the advance portion in the amount check, and charges the card fee on both', () => {
     const step = route.indexOf('await flagPaymentAmountMismatch(')
@@ -43,12 +41,12 @@ describe('every payment link carries the live advance', () => {
     expect(serverSource).toContain('advance: await invoiceCheckoutAdvance(appDataStore, invoice),')
     expect(serverSource.split('advance: sendAdvance,').length - 1).toBe(2)
   })
-  it('the pay page shows what the link collects before minting anything', () => {
+  it('the pay page decides summary-or-mint with the tested helper, before any mint or per-link count', () => {
     const payStart = serverSource.indexOf('const payLinkMatch = normalizedPath.match(')
-    const summary = serverSource.indexOf('renderPaySummaryPage({', payStart)
-    expect(summary).toBeGreaterThan(payStart)
-    expect(summary).toBeLessThan(serverSource.indexOf('ensureStripeCustomer({ client: payClient', payStart))
-    expect(summary).toBeLessThan(serverSource.indexOf('createInvoiceCardCheckoutSession', payStart))
-    expect(serverSource.slice(summary - 400, summary)).toContain("requestUrl.searchParams.get('go') !== '1'")
+    const step = serverSource.indexOf("payLinkAdvanceStep({ carried: Boolean(payCarried), searchParams: requestUrl.searchParams }) === 'summary'", payStart)
+    expect(step).toBeGreaterThan(payStart)
+    expect(step).toBeLessThan(serverSource.indexOf('isRateLimited(`token:${payToken}`', payStart))
+    expect(step).toBeLessThan(serverSource.indexOf('ensureStripeCustomer({ client: payClient', payStart))
   })
+
 })

@@ -10,6 +10,8 @@ export function InvoiceAdvanceSection({ invoice, disabled, onChanged }: { invoic
   const [open, setOpen] = useState(false)
   const [manage, setManage] = useState(false)
   const [requests, setRequests] = useState<Request[]>([])
+  // Which invoice already collects each request on its payment link.
+  const [carriedBy, setCarriedBy] = useState<Record<string, { invoiceId: string; number: string }>>({})
   const [selected, setSelected] = useState('')
   const [policy, setPolicy] = useState('')
   const [collection, setCollection] = useState('invoice')
@@ -20,7 +22,7 @@ export function InvoiceAdvanceSection({ invoice, disabled, onChanged }: { invoic
   useEffect(() => {
     if (!open) return
     let stale = false
-    advancePaymentRequest<{ requests: Request[] }>(`?clientId=${encodeURIComponent(invoice.clientId)}`).then((data) => { if (!stale) setRequests(data.requests) }, (error: unknown) => { if (!stale) setMessage(error instanceof Error ? error.message : 'Could not load requests.') })
+    advancePaymentRequest<{ requests: Request[]; carriedBy?: Record<string, { invoiceId: string; number: string }> }>(`?clientId=${encodeURIComponent(invoice.clientId)}`).then((data) => { if (!stale) { setRequests(data.requests); setCarriedBy(data.carriedBy ?? {}) } }, (error: unknown) => { if (!stale) setMessage(error instanceof Error ? error.message : 'Could not load requests.') })
     return () => { stale = true }
   }, [invoice.clientId, open, reload])
   const change = async (remove = false) => {
@@ -40,7 +42,7 @@ export function InvoiceAdvanceSection({ invoice, disabled, onChanged }: { invoic
         <p>Keep normal charges on this invoice and add an advance section below them. By default the advance rides this invoice's payment link, so the client pays both in one payment; the advance part becomes credit on account when it is received.</p>
         <button type="button" className="link-button" aria-expanded={manage} onClick={() => setManage(!manage)}>Create or manage advance requests</button>
         {manage ? <AdvancePaymentPanel clientId={invoice.clientId} onChanged={() => setReload((n) => n + 1)} /> : null}
-        <label className="field"><span>Advance request to include</span><select className="input" value={selected} onChange={(e) => setSelected(e.target.value)} disabled={busy}><option value="">Choose a request</option>{requests.filter((row) => !row.canceledAt).map((row) => <option key={row.id} value={row.id}>{row.number} — {currency.format(row.requestedCents / 100)}</option>)}</select></label>
+        <label className="field"><span>Advance request to include</span><select className="input" value={selected} onChange={(e) => setSelected(e.target.value)} disabled={busy}><option value="">Choose a request</option>{requests.filter((row) => !row.canceledAt).map((row) => <option key={row.id} value={row.id}>{row.number} — {currency.format(row.requestedCents / 100)}{carriedBy[row.id] && carriedBy[row.id].invoiceId !== invoice.id ? ` (already on invoice ${carriedBy[row.id].number})` : ''}</option>)}</select></label>
         <label className="field"><span>Advance agreement</span><select className="input" value={policy} onChange={(e) => setPolicy(e.target.value)} disabled={busy}><option value="">Confirm with the client</option><option value="optional">Optional advance</option><option value="agreed">Already agreed advance</option></select></label>
         <label className="field"><span>How to collect</span><select className="input" value={collection} onChange={(e) => setCollection(e.target.value)} disabled={busy}><option value="invoice">With this invoice's payment link (one payment)</option><option value="separate">Separately, from the advance's own page and link</option></select></label>
         <p className="muted-text">Neither choice adds the advance to service revenue or changes the current amount due. With this invoice's link, an optional advance can be removed on the payment page and the card link carries an agreed advance only; autopay never charges the advance. A received check covering both must be explicitly allocated and recorded once for each portion.</p>
