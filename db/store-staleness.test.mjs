@@ -97,6 +97,8 @@ import { buildInvoiceLines, cardProcessingFeeLine } from '../lib/invoice-lines.j
 import { buildCardCheckoutLineItems, buildCheckoutLineItems } from '../lib/stripe-rail.js'
 import { paymentAmountMismatch, unhandledAmountMismatch } from '../lib/payment-amount-mismatch.js'
 import { flagPaymentReversal } from '../lib/payment-amount-mismatch.js'
+import { invoiceContentChanged } from '../lib/invoice-sent-change.js'
+import { jsonbLike } from '../lib/test-support/jsonb-like.mjs'
 import { settleCombinedAdvance, settleCombinedAdvanceOrRelease } from '../lib/advance-payment-routes.js'
 import { clearedPaymentFailure, latestInvoiceSend, unresolvedPaymentFailure } from '../lib/invoice-overdue.js'
 import { buildInvoiceEmail, paymentEmailOwed, sendInvoicePaymentEmail } from '../lib/invoice-email.js'
@@ -457,6 +459,44 @@ describe('client billing agreements and advance receipts (file backend)', () => 
     expect((await store.listAdvancePayments('c1')).reversals[0]).toMatchObject({ cents: 17000, chargeCents: 32375 })
     // The credit shows its own share; the whole refund and charge ride along.
     expect((await store.listAccountCredits('c1'))[0].reversal).toMatchObject({ holds: true, partial: true, combined: true, amount: 170, refundedAmount: 170, chargeAmount: 323.75 })
+  })
+  // The send route's last look and the delivery lock compare the invoice it BUILT
+  // the email from with a re-read. On Postgres the re-read comes back from jsonb
+  // with object keys reordered; here the stored row is rewritten that way and the
+  // store's reads are wrapped to match (1969 Beach, 2026-11-01: every Send of an
+  // invoice with an attached advance answered "This invoice changed").
+  const sendThroughJsonb = async (draft) => {
+    const prepared = await store.prepareInvoiceCreditStatement(draft)
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    const index = data.invoices.findIndex((row) => row.id === prepared.id)
+    data.invoices[index] = jsonbLike(data.invoices[index])
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    const read = store.listInvoices.bind(store)
+    store.listInvoices = async (...args) => (await read(...args)).map((row) => jsonbLike(row))
+    const lastLook = (await store.listInvoices()).find((row) => row.id === prepared.id)
+    expect(JSON.stringify(lastLook.lineItems)).not.toBe(JSON.stringify(prepared.lineItems))
+    expect(invoiceContentChanged(prepared, lastLook)).toBe(false)
+    let delivered = 0
+    const sent = await store.deliverInvoiceWithCreditLock(prepared, { to: ['client@example.test'], subject: 'Synthetic', stamp: '2026-11-01T12:00:00.000Z' }, async () => { delivered += 1; return { ok: true, providerId: 'synthetic' } })
+    expect(delivered).toBe(1)
+    expect(sent.invoice.status).toBe('sent')
+    return { prepared, sent }
+  }
+  it('sends an invoice with an attached advance whose stored copy comes back in jsonb key order', async () => {
+    await store.createAdvancePayment({ id: requestId, clientId: 'c1', amount: 170 })
+    await store._insertInvoiceDrawingAccountCredit(record('i1', '2026-10', 153.75))
+    const attached = await store.setInvoiceAdvanceOffer('i1', requestId, false, 'owner-test', 'http://localhost', 'invoice')
+    const { prepared } = await sendThroughJsonb(attached)
+    expect(prepared.lineItems.at(-1).creditStatement).toBeTruthy()
+    // A real change is still caught after the jsonb round trip.
+    const changed = jsonbLike({ ...prepared, lineItems: prepared.lineItems.map((line) => line.kind === 'advance_request' ? { ...line, advanceOffer: { ...line.advanceOffer, optional: true } } : line) })
+    expect(invoiceContentChanged(prepared, changed)).toBe(true)
+  })
+  it('sends an invoice with a credit on account line whose stored copy comes back in jsonb key order', async () => {
+    await setupAdvance()
+    const draft = await store._insertInvoiceDrawingAccountCredit(record('i1', '2026-11', 450))
+    expect(draft.lineItems.some((line) => line.kind === 'account_credit')).toBe(true)
+    await sendThroughJsonb(draft)
   })
   it('attaches an explicit advance separately from charges and freezes the issued section', async () => {
     const request = await store.createAdvancePayment({ id: requestId, clientId: 'c1', amount: 1500, collectionMethod: 'manual' })

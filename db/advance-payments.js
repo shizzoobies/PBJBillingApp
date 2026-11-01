@@ -1,6 +1,7 @@
 import { readFile, writeFile, rename } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { AdvancePaymentError, advanceSummary, advanceCredits } from '../lib/advance-payments.js'
+import { stableStringify } from '../lib/stable-json.js'
 
 export const ADVANCE_PAYMENT_SCHEMA = `create table if not exists advance_payment_ledger (
   id text primary key, client_id text, kind text not null check (kind in ('request','receipt','reversal','session','settings')),
@@ -33,7 +34,8 @@ export class AdvancePaymentLedger {
     const { requests, receipts, reversals } = await this.list(clientId, runner)
     return advanceCredits(requests, receipts, reversals)
   }
-  async append(kind, id, clientId, document, same = (a, b) => JSON.stringify(a) === JSON.stringify(b)) {
+  // Key-order blind: `existing` may be a re-read of the jsonb column.
+  async append(kind, id, clientId, document, same = (a, b) => stableStringify(a) === stableStringify(b)) {
     const check = (existing) => {
       if (existing && (existing.kind !== kind || existing.clientId !== clientId || !same(existing.document, document))) throw new AdvancePaymentError('This reference already records a different action. Reload before continuing.')
       return existing?.document ?? document

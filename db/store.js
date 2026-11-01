@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { buildCreditStatement } from '../lib/invoice-credit-statement.js'
 import { AdvancePaymentLedger, ADVANCE_PAYMENT_SCHEMA } from './advance-payments.js'
 import { AdvancePaymentError, advanceRequest, advanceReceipt, stripeAdvanceReceipt, billingDefaults, billingDefaultsAt } from '../lib/advance-payments.js'
+import { stableStringify } from '../lib/stable-json.js'
 import { mkdir, readFile, rename, writeFile as fsWriteFile } from 'node:fs/promises'
 import { classifySplitTarget } from '../lib/group-allocation.js'
 import { rollUpItemDone } from '../lib/checklist-step-done.js'
@@ -3387,7 +3388,7 @@ const AI_CONFIDENCE_BANDS = new Set(['high', 'medium', 'low'])
  */
 function buildInvoiceChangeDiff(current, next) {
   const changes = {}
-  if (JSON.stringify(current.lineItems ?? []) !== JSON.stringify(next.lineItems ?? [])) {
+  if (stableStringify(current.lineItems ?? []) !== stableStringify(next.lineItems ?? [])) {
     changes.lineItems = { before: current.lineItems ?? [], after: next.lineItems ?? [] }
   }
   if ((current.blurb ?? '') !== (next.blurb ?? '')) {
@@ -17593,7 +17594,7 @@ export class AppDataStore {
     // below keeps the stored value when these parameters are null).
     const writeLines =
       Array.isArray(patch.lineItems) ||
-      JSON.stringify(next.lineItems) !== JSON.stringify(current.lineItems)
+      stableStringify(next.lineItems) !== stableStringify(current.lineItems)
 
     // Built BEFORE the write, from the two versions that only exist together
     // here. Null when the save changed nothing at all.
@@ -20973,13 +20974,13 @@ export class AppDataStore {
     let accepted = null
     const run = async (current, context) => {
       if (!current || current.status === 'void' || current.status !== expected.status || current.clientId !== expected.clientId ||
-          current.total !== expected.total || JSON.stringify(current.lineItems) !== JSON.stringify(expected.lineItems) ||
+          current.total !== expected.total || stableStringify(current.lineItems) !== stableStringify(expected.lineItems) ||
           (current.blurb ?? '') !== (expected.blurb ?? '') ||
-          JSON.stringify(current.emailLog ?? []) !== JSON.stringify(expected.emailLog ?? [])) throw new AccountCreditError('This invoice changed before delivery. Reload and review before sending.')
+          stableStringify(current.emailLog ?? []) !== stableStringify(expected.emailLog ?? [])) throw new AccountCreditError('This invoice changed before delivery. Reload and review before sending.')
       if ((current.emailLog ?? []).some((entry) => entry.kind === 'send-uncertain')) throw new AccountCreditError('A previous delivery is uncertain. Reconcile it with the mail provider before another send.')
       if (current.status !== 'paid' || !current.sentAt) await this._validateCreditDraws(current, context)
       // Validation may initialize a missing snapshot. Documents must match it.
-      if (JSON.stringify(current.lineItems) !== JSON.stringify(expected.lineItems)) throw new AccountCreditError('The credit statement changed. Reload and review before sending.')
+      if (stableStringify(current.lineItems) !== stableStringify(expected.lineItems)) throw new AccountCreditError('The credit statement changed. Reload and review before sending.')
       const result = await deliver()
       if (result.ok || result.uncertain) accepted = result
       const invoice = await this.recordInvoiceSent(current.id, { ...details, stamp: result.ok ? details.stamp : null, ok: result.ok, ...(result.uncertain ? { kind: 'send-uncertain' } : {}), error: result.error ?? null, providerId: result.providerId ?? null }, { ...context, current })
@@ -21187,9 +21188,9 @@ export class AppDataStore {
           if (!locked.rows.length) return null
           const authoritative = mapInvoiceRow(locked.rows[0])
           if (authoritative.status === 'void' || notEmailed && authoritative.status !== 'reviewed') return null
-          const previousLines = JSON.stringify(authoritative.lineItems)
+          const previousLines = stableStringify(authoritative.lineItems)
           if (authoritative.status !== 'paid') await this._validateCreditDraws(authoritative, { dbClient: runner })
-          if (JSON.stringify(authoritative.lineItems) !== previousLines) await runner.query('update invoices set line_items = $2::jsonb where id = $1', [invoiceId, JSON.stringify(authoritative.lineItems)])
+          if (stableStringify(authoritative.lineItems) !== previousLines) await runner.query('update invoices set line_items = $2::jsonb where id = $1', [invoiceId, JSON.stringify(authoritative.lineItems)])
           return writeSend(runner, entryFor(authoritative))
         })
       }
