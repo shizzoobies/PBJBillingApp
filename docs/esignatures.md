@@ -74,8 +74,10 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
      with bold as `**bold**`; a section heading (`isSectionHeading` in lib/letter-markdown.js: a Title Case line of 3-60
      characters with no comma, colon, semicolon, dollar sign, digit, quote or end punctuation, alone in its
      paragraph with text after it, or the FIRST line of a paragraph whose next line is longer or ends in
-     punctuation; never a greeting, and nothing from the first sign-off or the "By signing below" paragraph
-     on) is written bold, keeping its line break. `{{initial:...}}` tags become a mandatory checkbox line
+     punctuation; never a greeting or a dash/bullet line alone, and nothing from the first sign-off or the
+     "By signing below" paragraph on, when that is within the last 4 paragraphs) is written bold, keeping its
+     line break. Bold runs follow CommonMark's flanking rule: one that could not open or close (`fee**(x)**`,
+     `**Fees:**due`) is widened over the word it touches, so it renders bold rather than as asterisks; `{{initial:...}}` tags become a mandatory checkbox line
      "Initials: I have read and agree to the section above"; `{{text:...}}` a text input;
      `{{check:...}}` a checkbox; `{{signature:...}}` and `{{date:...}}` tags, and the letter's own
      "Signature:" / "Date:" / blank-to-fill lines, are dropped (eSignatures.io adds ONE signature
@@ -118,11 +120,22 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
   and `html` from lib/esign-preview-html.js (reads only what letterMarkdown writes, escapes every character,
   shown in a sandboxed frame), ending in a box "Signature block added by the signing service", under the
   label "This is how the signing service presents the letter. The signed copy will look like this, not like
-  the letterhead PDF." SignWell sends our own PDF, so it shows no such preview.
+  the letterhead PDF." SignWell sends our own PDF, so it shows no such preview. The answer also carries
+  `markdownHash` (SHA-256 of the Markdown); the confirm posts it with the send, which rebuilds the Markdown
+  and refuses 409 `letter_changed` ("The letter changed since the preview; open the preview again") when it
+  differs - the page then reopens the confirm, which reads the preview again. A send without it (an older tab,
+  a preview that did not load) is not checked.
 - **The logo** (lib/esign-logo.js): the Settings logo (`firm_settings.logo_url`, the uploaded data-URL; the
-  same source the letterhead draws from) is converted with sharp to a PNG 400 px wide and served publicly at
-  `/esign-logo/<hash>.png` (hash = first 32 hex of the SHA-256 of the stored logo; only the CURRENT logo's
-  hash answers, else 404; cached a year). A remote-URL logo or one that will not convert sends no logo.
+  same source the letterhead draws from) is converted with sharp to a PNG at most 400 px wide (an SVG drawn
+  about 800 px wide first, its density read from its width or viewBox; a small raster is never stretched)
+  and served publicly at `/esign-logo/<hash>.png` (hash = first 32 hex of the SHA-256 of the stored logo,
+  compared BEFORE anything is decoded; only the CURRENT logo's hash answers, else 404; cached a year; a failed
+  conversion is remembered per hash, not retried per request). A remote-URL logo or one that will not convert
+  sends no logo. `esignBranding` is the one decision (a logo that converts AND an https public URL): the
+  preview and the send both ask it. A contract eSignatures.io refuses (4xx other than 401/403/429) while it
+  carries the logo is sent ONCE more without it (logged); the send's answer carries `note` "Sent without the
+  logo: eSignatures.io did not accept it this time." and the page shows it. In local dev Vite proxies
+  `/esign-logo` to the API like `/api`.
   Custom branding also adds eSignatures.io's mandatory document-storage link to the signed PDF's footer
   (the firm name has gone as `company_name` since task 18, so that is not new).
 - **Send reminder** (once per firm day, as for SignWell): `POST

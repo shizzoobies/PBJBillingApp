@@ -175,7 +175,7 @@ export function EsignPanel({
   const latestProvider = esignProviderName(latest?.provider)
   const activeProvider = esignProviderName(active?.provider)
 
-  const send = async (chosen: EsignSignerPost) => {
+  const send = async (chosen: EsignSignerPost, markdownHash?: string) => {
     closeConfirm()
     setBusy('send')
     setError('')
@@ -185,9 +185,10 @@ export function EsignPanel({
       const result = await sendEngagementEsignRequest(engagementId, {
         templateHash,
         signer: chosen,
+        ...(markdownHash ? { markdownHash } : {}),
       })
       setNotice(
-        `Sent for signature to ${esignSignerEmail(result.request) || chosen.email}.${result.request.testMode ? ` ${ESIGN_TEST_MODE_NOTE}` : ''}`,
+        `Sent for signature to ${esignSignerEmail(result.request) || chosen.email}.${result.note ? ` ${result.note}` : ''}${result.request.testMode ? ` ${ESIGN_TEST_MODE_NOTE}` : ''}`,
       )
       reload()
       await onChanged?.()
@@ -195,6 +196,8 @@ export function EsignPanel({
       setError(esignRefusalSentence(err, 'send'))
       // The address she chose is no longer on file: ask again, on the list as it is now.
       if (err instanceof ApiError && err.code === 'recipients_changed') openConfirm(err.recipients ?? null)
+      // The letter moved since the preview: open the confirm again, which reads the preview again.
+      if (err instanceof ApiError && err.code === 'letter_changed') openConfirm()
       // Another tab got there first, or the stored letter moved: show what is stored now.
       if (err instanceof ApiError && ['signature_active', 'engagement_changed', 'engagement_refused'].includes(err.code ?? '')) {
         reload()
@@ -302,7 +305,7 @@ export function EsignPanel({
           replyTo={replyTo}
           fresh={freshSigners}
           busy={busy !== ''}
-          onSend={(chosen) => void send(chosen)}
+          onSend={(chosen, markdownHash) => void send(chosen, markdownHash)}
           onCancel={closeConfirm}
         />
       ) : (

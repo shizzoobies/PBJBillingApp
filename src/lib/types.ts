@@ -3066,6 +3066,8 @@ export type EsignStatus = { configured: boolean; provider?: EsignProvider | null
  */
 export type EsignLetterPreview = {
   markdown: string
+  /** SHA-256 of `markdown`: posted back with the send, which refuses (409 letter_changed) if the letter moved. */
+  markdownHash: string
   html: string
   logo: boolean
   missing: string[]

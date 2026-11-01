@@ -9,6 +9,8 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': 'http://127.0.0.1:4173',
+      // The firm logo eSignatures.io fetches (lib/esign-logo.js); the signing preview shows it too.
+      '/esign-logo': 'http://127.0.0.1:4173',
       '/health': 'http://127.0.0.1:4173',
     },
   },

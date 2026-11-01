@@ -93,7 +93,8 @@ describe('sending for signature', () => {
     expect(block).toContain('publicUrl: getPublicAppUrl(request)')
     expect(block).toContain('AppDataStore._engagementIsPureRecord(candidate)')
     expect(block).toContain('const { status, ...body } = sent.refused')
-    expect(block).toContain('sendJson(response, 200, { request: sent.request, engagement: sent.engagement })')
+    // A contract sent again without the logo carries the lib's note for the page.
+    expect(block).toContain('sendJson(response, 200, { request: sent.request, engagement: sent.engagement, ...(sent.note ? { note: sent.note } : {}) })')
   })
 
   it('answers the lib\'s refusals as they are, and never answers with the signing link or the document', () => {
@@ -105,7 +106,8 @@ describe('sending for signature', () => {
   // Alex 2026-10-27: Send for signature confirms (or changes) the signer first.
   it('hands the confirmed signer to the lib as posted (it decides: party, contact or one-time) and never writes the party', () => {
     const block = sendRoute()
-    expect(block).toContain('{ templateHash: payload.templateHash, userId: session.user.id, signer: payload.signer }')
+    // markdownHash: the letter the confirm's preview showed; the lib refuses (409 letter_changed) if it moved.
+    expect(block).toContain('{ templateHash: payload.templateHash, userId: session.user.id, signer: payload.signer, markdownHash: payload.markdownHash }')
     // The owner gate, the origin guard and the JSON check all come before the signer is read.
     for (const gate of ["session.user.role !== 'owner'", 'isCrossSiteOrigin(request)', 'isJsonContentType(request)']) {
       expect(block.indexOf(gate), gate).toBeLessThan(block.indexOf('payload.signer'))
@@ -343,7 +345,9 @@ describe('GET /api/engagements/:id/esign/preview', () => {
     expect(block).toContain("const templateHash = requestUrl.searchParams.get('hash')")
     expect(block.indexOf("sendJson(response, 400, { error: 'engagement_invalid'")).toBeLessThan(block.indexOf('appDataStore.getEngagement('))
     expect(block).toContain('appDataStore.getEngagement(engagementEsignPreviewMatch[1])')
-    expect(block).toContain('await esignLetterPreview(await loadEngagementContext(session), engagement, { templateHash })')
+    expect(block).toContain('await esignLetterPreview(await loadEngagementContext(session), engagement, {')
+    // The same public URL the send hands the lib: the logo decision is the same one.
+    expect(block).toMatch(/templateHash,\s*publicUrl: getPublicAppUrl\(request\),/)
     expect(block).toContain('const { status, ...body } = shown.refused')
     expect(block).toContain("sendJson(response, 200, shown, { 'Cache-Control': 'no-store' })")
     // Read-only: it never writes, records or broadcasts.
@@ -374,13 +378,13 @@ describe('GET /esign-logo/<hash>.png (public)', () => {
     expect(block).toContain('normalizedPath.match(ESIGN_LOGO_PATH)')
   })
 
-  it('answers only the CURRENT logo\'s hash, as a cache-friendly PNG; anything else is 404', () => {
+  it('answers what lib/esign-logo.js esignLogoResponse decides (hash first, 404 on a mismatch; run in lib/esign-logo.test.mjs)', () => {
     const block = logoRoute()
-    expect(block).toContain('const logo = await firmLogoPng(await appDataStore.getFirmSettings().catch(() => null))')
-    expect(block).toContain('if (!logo || logo.hash !== esignLogoMatch[1]) {')
-    expect(block).toContain("response.writeHead(404,")
-    expect(block).toContain("'Content-Type': 'image/png'")
-    expect(block).toContain("'Cache-Control': 'public, max-age=31536000, immutable'")
-    expect(block).toContain("'X-Content-Type-Options': 'nosniff'")
+    expect(block).toContain('const answer = await esignLogoResponse({')
+    expect(block).toContain('hash: esignLogoMatch[1],')
+    expect(block).toContain('method: request.method,')
+    expect(block).toContain('firmSettings: await appDataStore.getFirmSettings().catch(() => null),')
+    expect(block).toContain('response.writeHead(answer.status, answer.headers)')
+    expect(block).toContain('response.end(answer.body)')
   })
 })

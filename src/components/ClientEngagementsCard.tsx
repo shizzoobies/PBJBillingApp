@@ -198,25 +198,32 @@ export function ClientEngagementsCard({
   }
 
   // Step two: the signer she confirmed, with the hash read above.
-  const sendEsign = async (chosen: EsignSignerPost) => {
+  const sendEsign = async (chosen: EsignSignerPost, markdownHash?: string) => {
     if (!esignFor) return
     const target = esignFor
     setEsignBusy(true)
     setError('')
     setNotice('')
     try {
-      const result = await sendEngagementEsignRequest(target.engagement.id, { templateHash: target.hash, signer: chosen })
+      const result = await sendEngagementEsignRequest(target.engagement.id, {
+        templateHash: target.hash,
+        signer: chosen,
+        ...(markdownHash ? { markdownHash } : {}),
+      })
       setEsignFor(null)
       setEsign((current) => ({ ...current, [target.engagement.id]: result.request }))
       setEngagements((rows) => (rows ?? []).map((row) => (row.id === target.engagement.id ? { ...row, ...result.engagement } : row)))
       setNotice(
-        `Sent for signature to ${esignSignerEmail(result.request) || chosen.email}.${result.request.testMode ? ` ${ESIGN_TEST_MODE_NOTE}` : ''}`,
+        `Sent for signature to ${esignSignerEmail(result.request) || chosen.email}.${result.note ? ` ${result.note}` : ''}${result.request.testMode ? ` ${ESIGN_TEST_MODE_NOTE}` : ''}`,
       )
     } catch (err) {
       setError(esignRefusalSentence(err, 'send'))
       if (err instanceof ApiError && err.code === 'recipients_changed') {
         // The address she chose is no longer on file: ask again, on the list as it is now.
         setEsignFor({ ...target, fresh: err.recipients ?? null, key: target.key + 1 })
+      } else if (err instanceof ApiError && err.code === 'letter_changed') {
+        // The letter moved since the preview: the confirm opens again and reads the preview again.
+        setEsignFor({ ...target, key: target.key + 1 })
       } else {
         setEsignFor(null)
         if (err instanceof ApiError && ['signature_active', 'engagement_changed', 'engagement_refused'].includes(err.code ?? '')) {
@@ -394,7 +401,7 @@ export function ClientEngagementsCard({
             replyTo={esignFor.replyTo}
             fresh={esignFor.fresh}
             busy={esignBusy}
-            onSend={(chosen) => void sendEsign(chosen)}
+            onSend={(chosen, markdownHash) => void sendEsign(chosen, markdownHash)}
             onCancel={() => {
               if (!esignBusy) setEsignFor(null)
             }}

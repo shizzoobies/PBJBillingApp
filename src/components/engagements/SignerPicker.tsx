@@ -63,7 +63,8 @@ export function EsignSendConfirm({
   testMode: boolean
   fresh?: InvoiceRecipientDetail[] | null
   busy?: boolean
-  onSend: (signer: EsignSignerPost) => void
+  /** `markdownHash`: the letter the signing preview showed (eSignatures.io), for the send to check; absent without one. */
+  onSend: (signer: EsignSignerPost, markdownHash?: string) => void
   onCancel: () => void
 }) {
   const partyEmail = String(party.email ?? '').trim()
@@ -72,6 +73,8 @@ export function EsignSendConfirm({
     fresh ? initialSignerSelection(fresh, partyEmail ? [partyEmail] : []) : null,
   )
   const [loadError, setLoadError] = useState('')
+  // The hash of the letter the signing preview showed: the send refuses if the letter moved since.
+  const [markdownHash, setMarkdownHash] = useState<string | null>(null)
 
   useEffect(() => {
     if (fresh) return
@@ -120,14 +123,16 @@ export function EsignSendConfirm({
       ) : null}
       {provider === 'esignatures' ? <p className="muted-text">{ESIGNATURES_AUTO_REMINDER_NOTE}</p> : null}
       {testMode ? <p className="muted-text">{ESIGN_TEST_MODE_NOTE}</p> : null}
-      {provider === 'esignatures' && templateHash ? <EsignLetterPreviewFrame engagementId={engagementId} templateHash={templateHash} /> : null}
+      {provider === 'esignatures' && templateHash ? (
+        <EsignLetterPreviewFrame engagementId={engagementId} templateHash={templateHash} onLoaded={setMarkdownHash} />
+      ) : null}
       <div className="button-row">
         <button
           type="button"
           className="primary-action"
           disabled={busy || !signer}
           onClick={() => {
-            if (signer) onSend(signer.post)
+            if (signer) onSend(signer.post, provider === 'esignatures' && markdownHash ? markdownHash : undefined)
           }}
         >
           {signer ? `Send for signature to ${signer.email}` : 'Choose who signs'}
@@ -148,7 +153,16 @@ export const ESIGN_PREVIEW_LABEL =
  * The letter as eSignatures.io presents it: the server's HTML of the exact Markdown the send posts (every
  * character escaped there), in a sandboxed frame with no scripts - never injected into the page.
  */
-export function EsignLetterPreviewFrame({ engagementId, templateHash }: { engagementId: string; templateHash: string }) {
+export function EsignLetterPreviewFrame({
+  engagementId,
+  templateHash,
+  onLoaded,
+}: {
+  engagementId: string
+  templateHash: string
+  /** Told the shown letter's hash (null when it could not be built). */
+  onLoaded?: (markdownHash: string | null) => void
+}) {
   const [shown, setShown] = useState<{ key: string; preview: EsignLetterPreview | null; error: string } | null>(null)
   const key = `${engagementId}:${templateHash}`
 
@@ -156,19 +170,21 @@ export function EsignLetterPreviewFrame({ engagementId, templateHash }: { engage
     let cancelled = false
     esignLetterPreviewRequest(engagementId, templateHash).then(
       (preview) => {
-        if (!cancelled) setShown({ key, preview, error: '' })
+        if (cancelled) return
+        setShown({ key, preview, error: '' })
+        onLoaded?.(typeof preview.markdownHash === 'string' && preview.markdownHash ? preview.markdownHash : null)
       },
       (err: unknown) => {
-        if (!cancelled) {
-          const why = err instanceof ApiError ? err.message : 'Could not build the signing preview'
-          setShown({ key, preview: null, error: why })
-        }
+        if (cancelled) return
+        const why = err instanceof ApiError ? err.message : 'Could not build the signing preview'
+        setShown({ key, preview: null, error: why })
+        onLoaded?.(null)
       },
     )
     return () => {
       cancelled = true
     }
-  }, [engagementId, templateHash, key])
+  }, [engagementId, templateHash, key, onLoaded])
 
   const current = shown?.key === key ? shown : null
   return (

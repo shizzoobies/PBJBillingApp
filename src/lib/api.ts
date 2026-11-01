@@ -5832,8 +5832,8 @@ export async function listClientEsignRequests(clientId: string): Promise<Signatu
  */
 export function sendEngagementEsignRequest(
   id: string,
-  input: { templateHash: string; signer?: { email: string; name?: string; oneTime?: boolean } },
-): Promise<{ request: SignatureRequest; engagement: Engagement }> {
+  input: { templateHash: string; signer?: { email: string; name?: string; oneTime?: boolean }; markdownHash?: string },
+): Promise<{ request: SignatureRequest; engagement: Engagement; note?: string }> {
   return engagementRequest(engagementPath(id, 'esign'), proposalJson('POST', input), 'Failed to send the letter for signature')
 }
 

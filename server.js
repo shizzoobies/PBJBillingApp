@@ -208,7 +208,7 @@ import {
   withdrawOpenSignatureRequests,
   withdrawSignatureRequest,
 } from './lib/engagement-esign.js'
-import { ESIGN_LOGO_PATH, firmLogoPng } from './lib/esign-logo.js'
+import { ESIGN_LOGO_PATH, esignLogoResponse } from './lib/esign-logo.js'
 import { placeholdersFor } from './lib/letter-template.js'
 import {
   cardProcessingFeeLine,
@@ -4670,23 +4670,19 @@ const server = createServer(async (request, response) => {
     // ---- /esign-logo/<hash>.png - the firm logo as PNG for eSignatures.io (public) ----
     // lib/esign-logo.js. eSignatures.io fetches custom_branding.logo_url with no session, so this is
     // PUBLIC on purpose: the firm logo is on every invoice a client gets. The hash is the stored logo's
-    // content hash, answered only while it is the CURRENT logo (nothing to enumerate; a replaced logo's
-    // address is 404). Same bytes forever for one address, so cached a year. Above the SPA fallback.
+    // content hash, compared FIRST (a mismatch is 404 before anything is decoded or converted), answered
+    // only while it is the CURRENT logo (nothing to enumerate; a replaced logo's address is 404). Same bytes
+    // forever for one address, so cached a year. The answer is lib/esign-logo.js esignLogoResponse's.
+    // Above the SPA fallback.
     const esignLogoMatch = normalizedPath.match(ESIGN_LOGO_PATH)
     if (esignLogoMatch && (request.method === 'GET' || request.method === 'HEAD')) {
-      const logo = await firmLogoPng(await appDataStore.getFirmSettings().catch(() => null))
-      if (!logo || logo.hash !== esignLogoMatch[1]) {
-        response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
-        response.end('Not found')
-        return
-      }
-      response.writeHead(200, {
-        'Content-Type': 'image/png',
-        'Content-Length': logo.png.length,
-        'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Content-Type-Options': 'nosniff',
+      const answer = await esignLogoResponse({
+        hash: esignLogoMatch[1],
+        method: request.method,
+        firmSettings: await appDataStore.getFirmSettings().catch(() => null),
       })
-      response.end(request.method === 'HEAD' ? undefined : logo.png)
+      response.writeHead(answer.status, answer.headers)
+      response.end(answer.body)
       return
     }
 
@@ -13413,7 +13409,10 @@ const server = createServer(async (request, response) => {
         sendJson(response, 404, { error: 'Engagement not found' })
         return
       }
-      const shown = await esignLetterPreview(await loadEngagementContext(session), engagement, { templateHash })
+      const shown = await esignLetterPreview(await loadEngagementContext(session), engagement, {
+        templateHash,
+        publicUrl: getPublicAppUrl(request),
+      })
       if (shown.refused) {
         const { status, ...body } = shown.refused
         sendJson(response, status, body)
@@ -13458,7 +13457,7 @@ const server = createServer(async (request, response) => {
       const sent = await sendEngagementForSignature(
         await loadEngagementContext(session),
         engagement,
-        { templateHash: payload.templateHash, userId: session.user.id, signer: payload.signer },
+        { templateHash: payload.templateHash, userId: session.user.id, signer: payload.signer, markdownHash: payload.markdownHash },
         {
           store: appDataStore,
           signwell,
@@ -13483,7 +13482,7 @@ const server = createServer(async (request, response) => {
         console.error('[esign] could not record the send:', error)
       }
       broadcastDataChanged()
-      sendJson(response, 200, { request: sent.request, engagement: sent.engagement })
+      sendJson(response, 200, { request: sent.request, engagement: sent.engagement, ...(sent.note ? { note: sent.note } : {}) })
       return
     }
 
