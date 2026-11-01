@@ -17,6 +17,43 @@ and it has rules.**
 
 **2026-10-29 - BILLING FEATURE RELEASE CANDIDATE GREEN.** `codex/billing-deposits-rates` adds client rate agreements, advance request/receipt ledger and editable defaults, combined service invoice plus separate advance section, credit statements and financial-history/delivery safeguards. [Review guide](plans/billing-local-review-2026-10.md) is the current workflow and decision record. Alex authorized deployment when green at 00:08 UTC. Final verify exited 0: lint/build, 467 files / 10,788 tests and 40 script tests passed. Multiple independent financial reviews cleared the final payment-source/client-lock ordering. Synthetic responsive UI checked at 360/768/1280 pixels. Release must still verify the exact CI commit, live health, startup and screens before claiming live. No client values or financial records are seeded. No matching current build ticket was found; do not reuse the historical rate or prepaid-plan tickets. The older live-state paragraphs below describe prior work.
 
+**2026-11-01 - ADVANCE ON THE INVOICE PAYMENT LINK shipped (`d3d8ce82`, four commits b22a8170 / a72ee122 / cd1593ec / d3d8ce82);
+READ THIS FIRST, then the 10-28 paragraph.** Brittany (email "Invoicing", 11-01): on 1969 Beach her advance request left at "Choose
+when collecting" never showed in the invoice's attach list (the list and `setInvoiceAdvanceOffer` required a payment method), and the
+10-28 Codex design always collected the advance SEPARATELY (own page + own Checkout), so the client would pay twice; she wants one link.
+Alex: "go ship it once it's green". Ticket `featreq-780c6608` (filed from her email; Shipped note in her words). What changed: attach
+takes `collection: 'invoice' | 'separate'` (UI default = invoice link; an API call that OMITS it keeps the old separate behavior); any
+active request attaches except `manual` ("Payment outside the app") with the invoice link, never-emailed/opted-out clients, and a
+request already on another unpaid invoice's link; the invoice Checkout sessions carry one extra line "Advance payment ADV-..." at the
+request's LIVE outstanding amount (optional advance = `adjustable_quantity` 0..1 on the bank link only; agreed advance rides bank AND
+card, card fee computed on invoice + advance), metadata adds `advancePaymentRequestId` + `advanceCents` next to `invoiceId`; the
+webhook branch is now `advancePaymentRequestId && !invoiceId` = old advance-only path, BOTH = invoice path + `settleCombinedAdvance`
+on `payment_intent.succeeded` (received - invoice - fee must reach the link's advance amount, else nothing is recorded and the gap is
+flagged; receipt keyed `stripe:<pi>`, idempotent; a failed receipt write takes the event out of the dedup ledger -> 500 -> Stripe
+retries, owners told ONCE per intent with "do not record by hand until the retries stop"; the client receipt email is sent on the
+successful retry via `paymentEmailOwed`); `lib/payment-amount-mismatch.js` expects invoice (+fee) + the advance portion; ONE rule
+`invoiceServesAdvance` / `advanceCollection` (lib/advance-payment-routes.js) decides who collects the advance - used by the advance
+page GET/POST, the owner bank link, session closing and the pay link - so the client always has exactly one place to pay (Stripe
+unreachable -> link omits the advance, page stays open; a carrier in `processing` -> "being processed"); a manual receipt or cancel
+also expires open invoice sessions carrying the request; over-collection is still recorded (credit) and the owners are told; `/pay/<token>`
+shows a summary (Invoice amount / Advance / Processing fee / Total to pay + Continue `?go=1`) ONLY when a link carries an advance, otherwise
+byte-identical redirect; the per-link rate limit counts only minting passes; `/advance-pay/<token>` is rate limited like `/pay` and never
+prints the invoice number; payment ack + receipt emails list Invoice amount / Advance / fee / Amount paid (identical to before with no
+advance - proven by a comparison against the old code); `advanceOfferText(invoice, { carried, autopay, card, settlement })` is the one
+text source (neutral wording when the caller has no context, i.e. the in-app view and the print sheet); reversal notices store `chargeCents`.
+The only new SQL is `select ... from invoices where client_id = $1 and status not in ('paid','void')` inside the attach transaction
+(read-only trial on prod: 42 ms). Three review rounds (Opus) each found real defects: round 1 the silent double collection (two
+invoices / in-flight advance-only payment / stale invoice links), round 2 the receipt emails quoting the invoice total instead of the
+amount charged + a pool read inside the transaction, round 3 small items only. Manifest 203,496 of 205,000 after a trim. NOT built
+(follow-ups, low): the advance-page-POST-vs-Send race (covered by the over-collection notice), an invoice total that changes between
+mint and payment, `retry=1` skipping the summary, pay-page refusals copied rather than shared with `invoiceServesAdvance`, the refund
+share shown "of this credit" is an assumption, open Checkout sessions outliving a rule flip (up to 24 h), a settled-wording gap while an
+advance write is failing. NOTHING run against live Stripe; first real use is Brittany's 1969 Beach October send - watch Activity /
+Payment problems after she sends and after the bank payment settles. Also found while shipping: `ship.sh` exits 0 on "push failed -
+stopping" (push failed because gh's ACTIVE account was Bferguson2026 while the remote user is shizzoobies -> `gh auth switch --user
+shizzoobies`; left switched). Separately open from 10-27: the e-sign "signed copy does not look like the preview" question - cause is
+the provider (eSignatures.io renders its own Markdown layout, no PDF upload); proposal to Alex = truthful provider-style preview +
+logo via custom_branding + bold headings; waiting on his pick. **Still waiting on Brittany:** as in the 10-28 paragraph.
 **2026-10-28 (~22:50Z) - SIX TICKETS LIVE IN THREE SHIPS; queue EMPTY; nothing in flight; READ THIS FIRST, then the 10-27
 paragraphs.** `main` = `5a2487d4` (+ this handoff), live (`/health` 200, commit 5a2487d), **voice NOT yet re-provisioned: the
 ElevenLabs knowledge base stopped persisting new uploads (a POST answers with an id that 404s a second later) because
