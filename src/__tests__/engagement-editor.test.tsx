@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { AppContextValue } from '../AppContext'
@@ -1514,7 +1514,7 @@ describe('e-signature', () => {
     const frame = (await within(preview).findByTitle('Letter as the signing service presents it')) as HTMLIFrameElement
     expect(frame.getAttribute('sandbox')).toBe('')
     expect(frame.getAttribute('srcdoc')).toContain('<p><strong>Scope of services</strong></p>')
-    expect(api.esignLetterPreviewRequest).toHaveBeenCalledWith('eng-1', 'hash-1')
+    expect(api.esignLetterPreviewRequest).toHaveBeenCalledWith('eng-1', 'hash-1', { signal: expect.any(AbortSignal) })
   })
 
   it('the send posts the hash of the letter the preview showed, and says so when it went without the logo', async () => {
@@ -1594,6 +1594,36 @@ describe('e-signature', () => {
           ...(ok ? { markdownHash: 'mh-2' } : {}),
         }),
       )
+    }
+  })
+
+  it('a signing preview that never answers times out after 20 s: the confirm says so and Send goes unchecked', async () => {
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'esignatures', testMode: false }))
+    api.esignLetterPreviewRequest = vi.fn(() => new Promise(() => {}))
+    await renderEditor()
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
+      const confirm = screen.getByRole('group', { name: 'Confirm send for signature' })
+      const button = await within(confirm).findByRole('button', { name: 'Send for signature to pat@acme.test' })
+      expect(button).toBeDisabled()
+      // The request was handed an abort signal, aborted at the timeout.
+      const signal = api.esignLetterPreviewRequest.mock.calls[0][2]?.signal as AbortSignal
+      expect(signal.aborted).toBe(false)
+      await act(async () => {
+        vi.advanceTimersByTime(20_000)
+      })
+      expect(signal.aborted).toBe(true)
+      expect(button).toBeEnabled()
+      expect(within(confirm).getByRole('alert').textContent).toBe(
+        'The signing preview is taking too long, so it is not shown. You can still send; the letter is built again when it goes.',
+      )
+      fireEvent.click(button)
+      await waitFor(() =>
+        expect(api.sendEngagementEsignRequest).toHaveBeenCalledWith('eng-1', { templateHash: 'hash-1', signer: { email: 'pat@acme.test' } }),
+      )
+    } finally {
+      vi.useRealTimers()
     }
   })
 

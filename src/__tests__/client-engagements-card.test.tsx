@@ -837,7 +837,7 @@ describe('Send for signature from the card', () => {
     // Sandboxed (no scripts), the server's HTML only through srcdoc - never injected into the page.
     expect(frame.getAttribute('sandbox')).toBe('')
     expect(frame.getAttribute('srcdoc')).toContain('<h2>PB&amp;J Strategic Accounting</h2>')
-    expect(api.esignLetterPreviewRequest).toHaveBeenCalledWith('eng-amend', 'hash-eng-amend')
+    expect(api.esignLetterPreviewRequest).toHaveBeenCalledWith('eng-amend', 'hash-eng-amend', { signal: expect.any(AbortSignal) })
   })
 
   it('SignWell sends our own PDF: no signing-service preview there', async () => {

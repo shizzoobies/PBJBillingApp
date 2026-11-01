@@ -5794,10 +5794,14 @@ export function esignStatusRequest(): Promise<EsignStatus> {
  * The letter as eSignatures.io will present it to the signer (the same Markdown the send posts, as HTML).
  * `templateHash` is the page's: a stale page is refused (409 `engagement_changed`). Owner-only.
  */
-export function esignLetterPreviewRequest(id: string, templateHash: string): Promise<EsignLetterPreview> {
+export function esignLetterPreviewRequest(
+  id: string,
+  templateHash: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<EsignLetterPreview> {
   return engagementRequest<EsignLetterPreview>(
     `${engagementPath(id, 'esign/preview')}?hash=${encodeURIComponent(templateHash)}`,
-    { method: 'GET' },
+    { method: 'GET', ...(options.signal ? { signal: options.signal } : {}) },
     'Could not build the signing preview',
   )
 }

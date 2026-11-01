@@ -149,6 +149,12 @@ export function EsignSendConfirm({
   )
 }
 
+/** How long the signing preview may take before it counts as failed (Send then goes unchecked). */
+export const ESIGN_PREVIEW_TIMEOUT_MS = 20_000
+/** What the confirm says when the preview took too long. */
+export const ESIGN_PREVIEW_TIMEOUT_MESSAGE =
+  'The signing preview is taking too long, so it is not shown. You can still send; the letter is built again when it goes.'
+
 /** The label over the signing preview: what it is, and that the signed copy will look like it. */
 export const ESIGN_PREVIEW_LABEL =
   'This is how the signing service presents the letter. The signed copy will look like this, not like the letterhead PDF.'
@@ -171,22 +177,37 @@ export function EsignLetterPreviewFrame({
   const key = `${engagementId}:${templateHash}`
 
   useEffect(() => {
-    let cancelled = false
-    esignLetterPreviewRequest(engagementId, templateHash).then(
+    // Settled once: by the answer, a failure, or the timeout (a hung request must never keep Send disabled).
+    let settled = false
+    const controller = new AbortController()
+    const fail = (why: string) => {
+      settled = true
+      setShown({ key, preview: null, error: why })
+      onLoaded?.(null)
+    }
+    const timer = setTimeout(() => {
+      if (settled) return
+      controller.abort()
+      fail(ESIGN_PREVIEW_TIMEOUT_MESSAGE)
+    }, ESIGN_PREVIEW_TIMEOUT_MS)
+    esignLetterPreviewRequest(engagementId, templateHash, { signal: controller.signal }).then(
       (preview) => {
-        if (cancelled) return
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
         setShown({ key, preview, error: '' })
         onLoaded?.(typeof preview.markdownHash === 'string' && preview.markdownHash ? preview.markdownHash : null)
       },
       (err: unknown) => {
-        if (cancelled) return
-        const why = err instanceof ApiError ? err.message : 'Could not build the signing preview'
-        setShown({ key, preview: null, error: why })
-        onLoaded?.(null)
+        if (settled) return
+        clearTimeout(timer)
+        fail(err instanceof ApiError ? err.message : 'Could not build the signing preview')
       },
     )
     return () => {
-      cancelled = true
+      settled = true
+      clearTimeout(timer)
+      controller.abort()
     }
   }, [engagementId, templateHash, key, onLoaded])
 
