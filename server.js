@@ -202,11 +202,13 @@ import {
 } from './lib/esignatures-webhook.js'
 import { esignConfigured, esignProvider, esignTestMode } from './lib/esign-provider.js'
 import {
+  esignLetterPreview,
   remindEngagementSignature,
   sendEngagementForSignature,
   withdrawOpenSignatureRequests,
   withdrawSignatureRequest,
 } from './lib/engagement-esign.js'
+import { ESIGN_LOGO_PATH, firmLogoPng } from './lib/esign-logo.js'
 import { placeholdersFor } from './lib/letter-template.js'
 import {
   cardProcessingFeeLine,
@@ -4662,6 +4664,29 @@ const server = createServer(async (request, response) => {
         'Cache-Control': 'no-cache',
       })
       response.end()
+      return
+    }
+
+    // ---- /esign-logo/<hash>.png - the firm logo as PNG for eSignatures.io (public) ----
+    // lib/esign-logo.js. eSignatures.io fetches custom_branding.logo_url with no session, so this is
+    // PUBLIC on purpose: the firm logo is on every invoice a client gets. The hash is the stored logo's
+    // content hash, answered only while it is the CURRENT logo (nothing to enumerate; a replaced logo's
+    // address is 404). Same bytes forever for one address, so cached a year. Above the SPA fallback.
+    const esignLogoMatch = normalizedPath.match(ESIGN_LOGO_PATH)
+    if (esignLogoMatch && (request.method === 'GET' || request.method === 'HEAD')) {
+      const logo = await firmLogoPng(await appDataStore.getFirmSettings().catch(() => null))
+      if (!logo || logo.hash !== esignLogoMatch[1]) {
+        response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
+        response.end('Not found')
+        return
+      }
+      response.writeHead(200, {
+        'Content-Type': 'image/png',
+        'Content-Length': logo.png.length,
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'X-Content-Type-Options': 'nosniff',
+      })
+      response.end(request.method === 'HEAD' ? undefined : logo.png)
       return
     }
 
@@ -13358,6 +13383,45 @@ const server = createServer(async (request, response) => {
     // Owner-only; the writes are same-origin and JSON. Kept OUTSIDE the engagement routes
     // above on purpose: those pin "a letter goes to the client and nowhere else" by their
     // text. SignWell, not the firm, emails the signer; nothing here mails or notifies anyone.
+
+    // GET /api/engagements/:id/esign/preview?hash=<templateHash> - the honest preview at Send for
+    // signature: the Markdown an eSignatures.io send of the STORED letter would post (the same function
+    // as the send, lib/engagement-esign.js esignLetterMarkdown) and that Markdown as HTML in the
+    // provider's plain style, with the logo when one would go with the contract. Owner-only, same auth
+    // as the engagement preview (and same-origin, as every route here); a stale page (hash) is 409
+    // engagement_changed, as the send says it.
+    // Read-only, uncached.
+    const engagementEsignPreviewMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/esign\/preview$/)
+    if (engagementEsignPreviewMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can preview an engagement' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const templateHash = requestUrl.searchParams.get('hash')
+      if (!templateHash) {
+        sendJson(response, 400, { error: 'engagement_invalid', message: 'Send the page hash.' })
+        return
+      }
+      const engagement = await appDataStore.getEngagement(engagementEsignPreviewMatch[1])
+      if (!engagement) {
+        sendJson(response, 404, { error: 'Engagement not found' })
+        return
+      }
+      const shown = await esignLetterPreview(await loadEngagementContext(session), engagement, { templateHash })
+      if (shown.refused) {
+        const { status, ...body } = shown.refused
+        sendJson(response, status, body)
+        return
+      }
+      sendJson(response, 200, shown, { 'Cache-Control': 'no-store' })
+      return
+    }
 
     // POST /api/engagements/:id/esign - { templateHash, signer? }. `signer` = { email, name?,
     // oneTime? }, the one signer she confirmed (the party's address, a client contact's, or one

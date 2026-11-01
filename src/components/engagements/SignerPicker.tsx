@@ -1,7 +1,7 @@
 import { useEffect, useId, useState } from 'react'
 import { CLIENT_RECORD_SOURCE } from '../../../lib/invoice-recipients.js'
 import { esignSignerName, isReplyToSigner, isSignerEmail } from '../../../lib/esign-signer.js'
-import { engagementRecipientsRequest } from '../../lib/api'
+import { engagementRecipientsRequest, esignLetterPreviewRequest } from '../../lib/api'
 import { ESIGNATURES_AUTO_REMINDER_NOTE, ESIGN_TEST_MODE_NOTE, esignProviderName } from '../../lib/engagements'
 import {
   chosenSigner,
@@ -11,7 +11,8 @@ import {
   type SignerParty,
   type SignerSelection,
 } from '../../lib/esignSigner'
-import { ApiError, type EsignProvider } from '../../lib/types'
+import { ApiError, type EsignLetterPreview, type EsignProvider } from '../../lib/types'
+import { PREVIEW_FRAME_PREFIX } from '../InvoicePreviewModal'
 import type { InvoiceRecipientDetail } from '../../lib/utils'
 
 /**
@@ -33,6 +34,10 @@ import type { InvoiceRecipientDetail } from '../../lib/utils'
  *
  * `fresh` (a refusal's list as it is now) opens it on that list without reading again; the caller remounts it
  * (a `key`) to reopen.
+ *
+ * With eSignatures.io (it takes no PDF and draws the letter's Markdown in its own plain layout) the confirm
+ * also shows the letter THE WAY THE SIGNER WILL SEE IT (`EsignLetterPreviewFrame`, read with `templateHash`):
+ * the signed copy looks like that, not like the letterhead PDF that Preview shows for plain Send.
  */
 export function EsignSendConfirm({
   engagementId,
@@ -40,6 +45,7 @@ export function EsignSendConfirm({
   party,
   provider,
   testMode,
+  templateHash = '',
   replyTo = '',
   fresh = null,
   busy = false,
@@ -49,6 +55,8 @@ export function EsignSendConfirm({
   engagementId: string
   partyName: string
   party: SignerParty
+  /** The hash of the letter as the page loaded it: the signing preview is of exactly that letter. */
+  templateHash?: string
   /** The firm's reply-to mailbox (the engagement view's sender.replyTo): it signs only as the party's own address. */
   replyTo?: string
   provider: EsignProvider | null | undefined
@@ -112,6 +120,7 @@ export function EsignSendConfirm({
       ) : null}
       {provider === 'esignatures' ? <p className="muted-text">{ESIGNATURES_AUTO_REMINDER_NOTE}</p> : null}
       {testMode ? <p className="muted-text">{ESIGN_TEST_MODE_NOTE}</p> : null}
+      {provider === 'esignatures' && templateHash ? <EsignLetterPreviewFrame engagementId={engagementId} templateHash={templateHash} /> : null}
       <div className="button-row">
         <button
           type="button"
@@ -128,6 +137,60 @@ export function EsignSendConfirm({
         </button>
       </div>
     </div>
+  )
+}
+
+/** The label over the signing preview: what it is, and that the signed copy will look like it. */
+export const ESIGN_PREVIEW_LABEL =
+  'This is how the signing service presents the letter. The signed copy will look like this, not like the letterhead PDF.'
+
+/**
+ * The letter as eSignatures.io presents it: the server's HTML of the exact Markdown the send posts (every
+ * character escaped there), in a sandboxed frame with no scripts - never injected into the page.
+ */
+export function EsignLetterPreviewFrame({ engagementId, templateHash }: { engagementId: string; templateHash: string }) {
+  const [shown, setShown] = useState<{ key: string; preview: EsignLetterPreview | null; error: string } | null>(null)
+  const key = `${engagementId}:${templateHash}`
+
+  useEffect(() => {
+    let cancelled = false
+    esignLetterPreviewRequest(engagementId, templateHash).then(
+      (preview) => {
+        if (!cancelled) setShown({ key, preview, error: '' })
+      },
+      (err: unknown) => {
+        if (!cancelled) {
+          const why = err instanceof ApiError ? err.message : 'Could not build the signing preview'
+          setShown({ key, preview: null, error: why })
+        }
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [engagementId, templateHash, key])
+
+  const current = shown?.key === key ? shown : null
+  return (
+    <section className="esign-letter-preview" aria-label="Letter as the signer will see it">
+      <p className="esign-letter-preview-label">
+        <strong>{ESIGN_PREVIEW_LABEL}</strong>
+      </p>
+      {current === null ? <p className="muted-text">Building the signing preview...</p> : null}
+      {current?.error ? (
+        <p className="form-error" role="alert">
+          {current.error}
+        </p>
+      ) : null}
+      {current?.preview ? (
+        <iframe
+          className="invoice-preview-frame esign-letter-preview-frame"
+          title="Letter as the signing service presents it"
+          sandbox=""
+          srcDoc={PREVIEW_FRAME_PREFIX + current.preview.html}
+        />
+      ) : null}
+    </section>
   )
 }
 

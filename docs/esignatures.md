@@ -69,8 +69,11 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
   up, stale page, signed/void/superseded letter, master or retired client, a request already out, an
   unfilled placeholder, no single plain party address when no signer is chosen, a team address). Then:
   1. the FILLED letter (Send's own builder, the closing reworded "please sign electronically where
-     indicated") is written as Markdown: the firm name as a heading, the date, the addressee, the
-     paragraphs with bold as `**bold**`. `{{initial:...}}` tags become a mandatory checkbox line
+     indicated") is written as Markdown: the firm name as a heading, under it the firm's address, phone
+     and email (the letterhead's own lines, `firmDetailLines`), the date, the addressee, the paragraphs
+     with bold as `**bold**`; a section heading (`isSectionHeading` in lib/letter-markdown.js: a line
+     alone in its paragraph, at most 80 characters, not ending in a period/comma/semicolon, not "Dear ..."
+     or a sign-off, followed by more text, and never after the sign-off) is written bold. `{{initial:...}}` tags become a mandatory checkbox line
      "Initials: I have read and agree to the section above"; `{{text:...}}` a text input;
      `{{check:...}}` a checkbox; `{{signature:...}}` and `{{date:...}}` tags, and the letter's own
      "Signature:" / "Date:" / blank-to-fill lines, are dropped (eSignatures.io adds ONE signature
@@ -93,15 +96,33 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
          "final_contract_text": "Thank you for signing your engagement letter with <firm>.",
          "reply_to": "<INVOICE_REPLY_TO, the invoice emails' reply-to>"
        },
-       "custom_branding": { "company_name": "<firm>" }
+       "custom_branding": { "company_name": "<firm>", "logo_url": "https://<app>/esign-logo/<hash>.png" }
      }
      ```
 
-     (`client_id` only when the letter has a client; `reply_to` only when it is one plain address.)
+     (`client_id` only when the letter has a client; `reply_to` only when it is one plain address;
+     `logo_url` only when the Settings logo converts to PNG and the app's public URL is https.)
   4. a `signature_requests` row: provider `esignatures`, the contract id (in `signwell_document_id`,
      read neutrally as `providerDocumentId`), `provider_template_id`, `provider_signer_id`
      (`signers[0].id` of the answer), test mode, the signed-details hash; the letter moves to Sent
      with an `esign` line in its log. eSignatures.io emails the signer itself.
+- **What the signer sees** (2026-11-01; Alex: we keep eSignatures.io, do what we can). eSignatures.io
+  draws the Markdown in its own plain layout (its typography, the initials checkbox, its signature block and
+  audit trail appended, its file name), so the signed copy does NOT look like the letterhead PDF that
+  **Preview** shows for plain Send. The Send for signature confirm therefore shows the letter the way the
+  signer will see it: `GET /api/engagements/:id/esign/preview?hash=<page hash>` (owner-only, same-origin,
+  409 `engagement_changed` on a stale page) answers `{ markdown, html, logo, missing, unknown, retired }` -
+  the Markdown from `esignLetterMarkdown`, the SAME function the send posts from (a test asserts equality),
+  and `html` from lib/esign-preview-html.js (reads only what letterMarkdown writes, escapes every character,
+  shown in a sandboxed frame), ending in a box "Signature block added by the signing service", under the
+  label "This is how the signing service presents the letter. The signed copy will look like this, not like
+  the letterhead PDF." SignWell sends our own PDF, so it shows no such preview.
+- **The logo** (lib/esign-logo.js): the Settings logo (`firm_settings.logo_url`, the uploaded data-URL; the
+  same source the letterhead draws from) is converted with sharp to a PNG 400 px wide and served publicly at
+  `/esign-logo/<hash>.png` (hash = first 32 hex of the SHA-256 of the stored logo; only the CURRENT logo's
+  hash answers, else 404; cached a year). A remote-URL logo or one that will not convert sends no logo.
+  Custom branding also adds eSignatures.io's mandatory document-storage link to the signed PDF's footer
+  (the firm name has gone as `company_name` since task 18, so that is not new).
 - **Send reminder** (once per firm day, as for SignWell): `POST
   /api/contracts/<contract id>/signers/<signer id>/send_contract` (confirmed in the API docs
   2026-10-23). eSignatures.io also reminds the signer on its own (days 2, 4, 8, 16, ...); a manual

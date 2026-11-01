@@ -24,6 +24,7 @@ vi.mock('../lib/api', () => ({
   listClientEsignRequests: (...args: unknown[]) => api.listClientEsignRequests(...args),
   sendEngagementEsignRequest: (...args: unknown[]) => api.sendEngagementEsignRequest(...args),
   engagementRecipientsRequest: (...args: unknown[]) => api.engagementRecipientsRequest(...args),
+  esignLetterPreviewRequest: (...args: unknown[]) => api.esignLetterPreviewRequest(...args),
   remindEngagementEsignRequest: (...args: unknown[]) => api.remindEngagementEsignRequest(...args),
   engagementEsignPdfUrl: (id: string, requestId: string) => `/api/engagements/${id}/esign/${requestId}/pdf`,
 }))
@@ -811,6 +812,42 @@ describe('Send for signature from the card', () => {
       request: signatureRequest(),
       engagement: { ...ROWS[0], status: 'sent' },
     }))
+    api.esignLetterPreviewRequest = vi.fn(async () => ({
+      markdown: '## PB&J Strategic Accounting\n',
+      html: '<div class="esign-doc"><h2>PB&amp;J Strategic Accounting</h2></div>',
+      logo: false,
+      missing: [],
+      unknown: [],
+      retired: [],
+    }))
+  })
+
+  it('the confirm shows the letter as the signing service presents it, labeled, for the stored letter\'s hash', async () => {
+    configured()
+    renderCard()
+    fireEvent.click(await within(await rowOf('Your 2027 1099s')).findByRole('button', { name: 'Send for signature' }))
+    const confirm = within(await screen.findByRole('dialog')).getByRole('group', { name: 'Confirm send for signature' })
+    const preview = within(confirm).getByRole('region', { name: 'Letter as the signer will see it' })
+    expect(
+      within(preview).getByText(
+        'This is how the signing service presents the letter. The signed copy will look like this, not like the letterhead PDF.',
+      ),
+    ).toBeTruthy()
+    const frame = (await within(preview).findByTitle('Letter as the signing service presents it')) as HTMLIFrameElement
+    // Sandboxed (no scripts), the server's HTML only through srcdoc - never injected into the page.
+    expect(frame.getAttribute('sandbox')).toBe('')
+    expect(frame.getAttribute('srcdoc')).toContain('<h2>PB&amp;J Strategic Accounting</h2>')
+    expect(api.esignLetterPreviewRequest).toHaveBeenCalledWith('eng-amend', 'hash-eng-amend')
+  })
+
+  it('SignWell sends our own PDF: no signing-service preview there', async () => {
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'signwell', testMode: false }))
+    renderCard()
+    fireEvent.click(await within(await rowOf('Your 2027 1099s')).findByRole('button', { name: 'Send for signature' }))
+    const confirm = within(await screen.findByRole('dialog')).getByRole('group', { name: 'Confirm send for signature' })
+    await within(confirm).findByRole('radio', { name: /Pat Doe/ })
+    expect(within(confirm).queryByRole('region', { name: 'Letter as the signer will see it' })).toBeNull()
+    expect(api.esignLetterPreviewRequest).not.toHaveBeenCalled()
   })
 
   it('shows only on a draft or sent letter, once e-signature is set up, with no request out, outside preview', async () => {

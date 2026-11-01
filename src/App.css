@@ -13588,6 +13588,22 @@ tr.is-inactive-client .client-name-link {
   width: 100%;
 }
 
+/* Send for signature (eSignatures.io): the letter as the signing service presents it. */
+.esign-letter-preview {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.esign-letter-preview-label {
+  font-size: 13px;
+  margin: 0;
+}
+
+.esign-letter-preview-frame {
+  height: min(56vh, 640px);
+}
+
 /* Payment link, shown after one is created. The owner SENDS this to the client
    rather than opening it, so it presents as copyable text, not a link. */
 .invoice-run-paylink {

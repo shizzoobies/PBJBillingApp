@@ -42,6 +42,7 @@
   type EngagementSendResult,
   type SignatureRequest,
   type EsignStatus,
+  type EsignLetterPreview,
   type EngagementSignResult,
   type EngagementStatus,
   type EngagementView,
@@ -5787,6 +5788,18 @@ export function sendEngagementRequest(
  */
 export function esignStatusRequest(): Promise<EsignStatus> {
   return engagementRequest<EsignStatus>('/api/esign/status', { method: 'GET' }, 'Could not read the e-signature settings')
+}
+
+/**
+ * The letter as eSignatures.io will present it to the signer (the same Markdown the send posts, as HTML).
+ * `templateHash` is the page's: a stale page is refused (409 `engagement_changed`). Owner-only.
+ */
+export function esignLetterPreviewRequest(id: string, templateHash: string): Promise<EsignLetterPreview> {
+  return engagementRequest<EsignLetterPreview>(
+    `${engagementPath(id, 'esign/preview')}?hash=${encodeURIComponent(templateHash)}`,
+    { method: 'GET' },
+    'Could not build the signing preview',
+  )
 }
 
 /** This engagement's e-signature requests, newest first (never the signed bytes). */

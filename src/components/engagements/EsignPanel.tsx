@@ -298,6 +298,7 @@ export function EsignPanel({
           party={party}
           provider={status.provider}
           testMode={status.testMode}
+          templateHash={templateHash}
           replyTo={replyTo}
           fresh={freshSigners}
           busy={busy !== ''}

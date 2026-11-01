@@ -3059,6 +3059,20 @@ export type SignatureRequest = {
 /** Whether e-signature is set up on the server, through which provider a send goes, and whether it is in test mode. */
 export type EsignStatus = { configured: boolean; provider?: EsignProvider | null; testMode: boolean }
 
+/**
+ * The honest preview at Send for signature (GET /api/engagements/:id/esign/preview): the exact Markdown an
+ * eSignatures.io send posts, and that Markdown as HTML in the provider's plain style (escaped server-side;
+ * shown in a sandboxed frame). `logo`: the firm logo goes with the contract.
+ */
+export type EsignLetterPreview = {
+  markdown: string
+  html: string
+  logo: boolean
+  missing: string[]
+  unknown: string[]
+  retired: string[]
+}
+
 /** The answer to a Send that was not refused: whether the provider took it. */
 export type EngagementSendResult = {
   engagement: Engagement

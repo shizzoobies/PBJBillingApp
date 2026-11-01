@@ -390,6 +390,7 @@ export function ClientEngagementsCard({
             party={esignFor.engagement.party}
             provider={esignStatus.provider}
             testMode={esignStatus.testMode}
+            templateHash={esignFor.hash}
             replyTo={esignFor.replyTo}
             fresh={esignFor.fresh}
             busy={esignBusy}

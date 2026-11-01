@@ -26,6 +26,8 @@ function between(startAnchor: string, endAnchor: string, source = serverSource):
 
 const routes = () =>
   between('// ---- Engagement e-signature routes (featreq-56d39567; docs/signwell.md)', '// ---- end of the engagement e-signature routes')
+const previewRoute = () =>
+  between('// GET /api/engagements/:id/esign/preview?hash=<templateHash>', '// POST /api/engagements/:id/esign - { templateHash, signer? }')
 const sendRoute = () => between('// POST /api/engagements/:id/esign - { templateHash, signer? }', '// POST /api/engagements/:id/esign/remind')
 const remindRoute = () => between('// POST /api/engagements/:id/esign/remind', '// POST /api/engagements/:id/esign/:requestId/finish')
 const finishRoute = () => between('// POST /api/engagements/:id/esign/:requestId/finish', '// GET /api/engagements/:id/esign - this engagement')
@@ -35,6 +37,7 @@ const pdfRoute = () => between('// GET /api/engagements/:id/esign/:requestId/pdf
 
 type Route = { name: string; block: () => string; write: boolean }
 const ROUTES: Route[] = [
+  { name: 'GET /api/engagements/:id/esign/preview', block: previewRoute, write: false },
   { name: 'POST /api/engagements/:id/esign', block: sendRoute, write: true },
   { name: 'POST /api/engagements/:id/esign/remind', block: remindRoute, write: true },
   { name: 'POST /api/engagements/:id/esign/:requestId/finish', block: finishRoute, write: true },
@@ -326,5 +329,58 @@ describe('withdrawing an open request when its letter no longer stands', () => {
     expect(block).toContain('withdrawSignatureRequestsLater([')
     expect(block).not.toContain('await withdrawSignatureRequests')
     expect(block).toContain("...(result.supersededAmendmentIds ?? []).map((id) => [id, 'superseded']),")
+  })
+})
+
+/**
+ * The honest preview at Send for signature (2026-11-01) and the public logo eSignatures.io fetches. The
+ * behavior is run in lib/engagement-esign.test.mjs (the preview's Markdown equals the send's),
+ * lib/esign-preview-html.test.mjs and lib/esign-logo.test.mjs.
+ */
+describe('GET /api/engagements/:id/esign/preview', () => {
+  it('wants the page hash, reads the STORED engagement and answers what the lib builds (refusals as they are), uncached', () => {
+    const block = previewRoute()
+    expect(block).toContain("const templateHash = requestUrl.searchParams.get('hash')")
+    expect(block.indexOf("sendJson(response, 400, { error: 'engagement_invalid'")).toBeLessThan(block.indexOf('appDataStore.getEngagement('))
+    expect(block).toContain('appDataStore.getEngagement(engagementEsignPreviewMatch[1])')
+    expect(block).toContain('await esignLetterPreview(await loadEngagementContext(session), engagement, { templateHash })')
+    expect(block).toContain('const { status, ...body } = shown.refused')
+    expect(block).toContain("sendJson(response, 200, shown, { 'Cache-Control': 'no-store' })")
+    // Read-only: it never writes, records or broadcasts.
+    expect(block).not.toMatch(/recordActivity|broadcastDataChanged|appDataStore\.(create|update|mark)/)
+  })
+
+  it('is matched before the send and list routes and never collides with them (GET only, its own path)', () => {
+    expect(serverSource).toContain("normalizedPath.match(/^\\/api\\/engagements\\/([^/]+)\\/esign\\/preview$/)")
+    expect(serverSource).toContain('if (engagementEsignPreviewMatch && request.method === \'GET\') {')
+  })
+
+  it('the preview and the send share ONE Markdown function in the lib', () => {
+    expect(esignSource).toContain('export async function esignLetterMarkdown(context, engagement)')
+    expect(esignSource).toContain('const { preview, markdown } = await esignLetterMarkdown(context, engagement)')
+    expect(esignSource).toContain('const prepared = await prepareSend(context, engagement, esignMarkdownBuilder, choice)')
+    expect(esignSource).toContain('const preview = await assembleEsignLetter(context, engagement, buildPdf)')
+    expect(esignSource).toContain('markdown: esignMarkdownOf(preview)')
+  })
+})
+
+describe('GET /esign-logo/<hash>.png (public)', () => {
+  const logoRoute = () => between('// ---- /esign-logo/<hash>.png', '// ---- /signed-thank-you')
+
+  it('is public (eSignatures.io holds no session), above the SPA fallback, GET/HEAD only', () => {
+    const block = logoRoute()
+    expect(block).not.toContain('requireSession')
+    expect(block).toContain("if (esignLogoMatch && (request.method === 'GET' || request.method === 'HEAD')) {")
+    expect(block).toContain('normalizedPath.match(ESIGN_LOGO_PATH)')
+  })
+
+  it('answers only the CURRENT logo\'s hash, as a cache-friendly PNG; anything else is 404', () => {
+    const block = logoRoute()
+    expect(block).toContain('const logo = await firmLogoPng(await appDataStore.getFirmSettings().catch(() => null))')
+    expect(block).toContain('if (!logo || logo.hash !== esignLogoMatch[1]) {')
+    expect(block).toContain("response.writeHead(404,")
+    expect(block).toContain("'Content-Type': 'image/png'")
+    expect(block).toContain("'Cache-Control': 'public, max-age=31536000, immutable'")
+    expect(block).toContain("'X-Content-Type-Options': 'nosniff'")
   })
 })

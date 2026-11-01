@@ -31,6 +31,7 @@ vi.mock('../lib/api', () => ({
   sendEngagementEsignRequest: (...args: unknown[]) => api.sendEngagementEsignRequest(...args),
   remindEngagementEsignRequest: (...args: unknown[]) => api.remindEngagementEsignRequest(...args),
   finishEngagementEsignRequest: (...args: unknown[]) => api.finishEngagementEsignRequest(...args),
+  esignLetterPreviewRequest: (...args: unknown[]) => api.esignLetterPreviewRequest(...args),
   engagementEsignPdfUrl: (id: string, requestId: string) => `/api/engagements/${id}/esign/${requestId}/pdf`,
 }))
 
@@ -177,6 +178,14 @@ beforeEach(() => {
     signed: true,
     issues: [],
     engagement: engagement({ status: 'signed' }),
+  }))
+  api.esignLetterPreviewRequest = vi.fn(async () => ({
+    markdown: '## PB&J Strategic Accounting\n\n**Scope of services**\n',
+    html: '<div class="esign-doc"><h2>PB&amp;J Strategic Accounting</h2><p><strong>Scope of services</strong></p></div>',
+    logo: false,
+    missing: [],
+    unknown: [],
+    retired: [],
   }))
   api.listPackagesRequest = vi.fn(async () => [
     { id: 'pkg-1', name: 'Full service', description: '', planIds: [], templateIds: [], createdAt: '', updatedAt: null },
@@ -1489,6 +1498,35 @@ describe('e-signature', () => {
     expect(within(confirm).getByText(/One person signs; eSignatures\.io emails them a link to sign it\.$/)).toBeTruthy()
     expect(within(confirm).getByText('eSignatures.io also reminds them automatically on days 2, 4, 8 and 16.')).toBeTruthy()
     expect(within(confirm).getByText(/^Test mode - no legally binding document/)).toBeTruthy()
+  })
+
+  it('through eSignatures.io: the confirm shows the letter the way the signer will see it, labeled, for the page\'s hash', async () => {
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'esignatures', testMode: false }))
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
+    const confirm = screen.getByRole('group', { name: 'Confirm send for signature' })
+    const preview = within(confirm).getByRole('region', { name: 'Letter as the signer will see it' })
+    expect(
+      within(preview).getByText(
+        'This is how the signing service presents the letter. The signed copy will look like this, not like the letterhead PDF.',
+      ),
+    ).toBeTruthy()
+    const frame = (await within(preview).findByTitle('Letter as the signing service presents it')) as HTMLIFrameElement
+    expect(frame.getAttribute('sandbox')).toBe('')
+    expect(frame.getAttribute('srcdoc')).toContain('<p><strong>Scope of services</strong></p>')
+    expect(api.esignLetterPreviewRequest).toHaveBeenCalledWith('eng-1', 'hash-1')
+  })
+
+  it('the signing preview says so when the page is stale, and the send stays possible', async () => {
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'esignatures', testMode: false }))
+    api.esignLetterPreviewRequest = vi.fn(async () => {
+      throw new ApiError(409, 'The engagement changed since this page loaded. Reload to see the letter as it is now.', 'engagement_changed')
+    })
+    await renderEditor()
+    fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
+    const confirm = screen.getByRole('group', { name: 'Confirm send for signature' })
+    expect(await within(confirm).findByText(/^The engagement changed since this page loaded/)).toBeTruthy()
+    expect(within(confirm).queryByTitle('Letter as the signing service presents it')).toBeNull()
   })
 
   it('a SignWell send says nothing about automatic reminders', async () => {
