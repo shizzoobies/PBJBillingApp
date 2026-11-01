@@ -6,8 +6,9 @@ import type { AppData, Client } from '../lib/types'
 
 /**
  * "ESTIMATED MONTHLY INVOICE" under the estimated hours (featreq-a9de307f):
- * hourly clients only, owner only, and it moves with every keystroke - the
- * hours x each role's rate, through the same helper the Client Recap uses.
+ * Hourly and Monthly clients (Monthly since the 2026-11-01 send-back), owner
+ * only, and it moves with every keystroke - the hours x each role's rate,
+ * through the same helper the Client Recap uses.
  */
 
 vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
@@ -70,12 +71,15 @@ describe('Estimated monthly invoice (Billing tab)', () => {
     expect(screen.getByText(/For planning only/)).toBeInTheDocument()
   })
 
-  it('is absent for a monthly and an annual client, and never asks for rates', () => {
-    for (const billingMode of ['subscription', 'annual']) {
-      const { unmount } = renderHours({ ...hourly, billingMode } as unknown as Client)
-      expect(screen.queryByText(/Estimated monthly invoice/)).not.toBeInTheDocument()
-      unmount()
-    }
+  it('shows the same line for a Monthly client (send-back 2026-11-01)', async () => {
+    renderHours({ ...hourly, billingMode: 'subscription', monthlyRate: 900 } as unknown as Client)
+    expect(await screen.findByText('Estimated monthly invoice: $1,250.00')).toBeInTheDocument()
+    expect(screen.getByText('bookkeeper 10 h × $95.00 + accountant 2 h × $150.00 + CFO 0 h')).toBeInTheDocument()
+  })
+
+  it('is absent for an annual client, and never asks for rates', () => {
+    renderHours({ ...hourly, billingMode: 'annual' } as unknown as Client)
+    expect(screen.queryByText(/Estimated monthly invoice/)).not.toBeInTheDocument()
     expect(fetchRateVersions).not.toHaveBeenCalled()
   })
 

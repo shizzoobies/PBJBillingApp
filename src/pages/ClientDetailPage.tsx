@@ -2746,7 +2746,7 @@ export function EstimatedRoleHours({
       <small className="field-helper">
         Total: {total} hrs/mo · For planning only — does not affect invoices.
       </small>
-      {client.billingMode === 'hourly' ? (
+      {client.billingMode === 'hourly' || client.billingMode === 'subscription' ? (
         <MonthlyInvoiceEstimate
           client={client}
           hours={{
@@ -2761,10 +2761,13 @@ export function EstimatedRoleHours({
 }
 
 /**
- * "Estimated monthly invoice: $X" under the estimated hours of an HOURLY client
- * (featreq-a9de307f): the hours in the fields above priced at each role's bill
- * rate, through the one helper the Client Recap's estimate uses
- * (lib/hourly-estimate.js), so the two cannot disagree. Owner-only, like the
+ * "Estimated monthly invoice: $X" under the estimated hours of an HOURLY or a
+ * MONTHLY client (featreq-a9de307f; Monthly added on Brittany's send-back of
+ * 2026-11-01 - a planning figure next to the fixed Monthly rate, same line, same
+ * math; Annual stays without one): the hours in the fields above priced at each
+ * role's bill rate, through the one helper the Client Recap's estimate uses
+ * (lib/hourly-estimate.js), so the two cannot disagree for an Hourly client; a
+ * Monthly client's recap quotes the fixed monthly rate instead. Owner-only, like the
  * Hourly rates block it reads from; renders nothing until the rate history has
  * arrived, so a half-loaded list never flashes a wrong figure.
  */
