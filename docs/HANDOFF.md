@@ -13,6 +13,22 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-11-01 late - MONTHLY ESTIMATE SEND-BACK LIVE (`04fdb655`, health 04fdb65) and the SEND FIX IS CONFIRMED IN PRODUCTION:**
+Brittany sent all 22 October invoices between 22:04Z and 22:09Z, starting with INV-2026-10-043 one minute after f9c84a5e went
+live, every one carrying its advance line, zero problem rows in activity_log (`neon-sends-tonight.mjs` pattern: read-only, sent_at
++ jsonb_array_elements on line_items). The ship of 04fdb655 was held by the quiet-check while she was sending (22 sends in 15 min
+is real traffic, not a bulk save - WAIT, do not override) and went up on the retry. featreq-a9de307f ("need the same behavior when
+monthly is chosen"): Monthly = billingMode `subscription`; the estimated-hours fields already render for every billing type, so
+the change is the one condition in `EstimatedRoleHours` (ClientDetailPage.tsx, `hourly || subscription`), the test flip and the
+manifest phrase; Annual stays without the line. The reviewer caught the manifest claiming "the Client Recap's estimated revenue is
+the same figure" - true for Hourly only; a Monthly client's recap and invoice quote the fixed monthly rate, so the Billing-tab line
+is a planning figure beside it (manifest + comment now say so). Known soft spots, not changed: a client switched Hourly -> Monthly
+with a leftover `hourlyRate` and no team in a role prices that role at the old rate (same fallback the invoice uses); the no-rate
+message still says "set hourly rates on the Team page". Voice re-provisioned; manifest 204,855 of 205,000 - TRIM BEFORE ADDING
+ANYTHING. NEW INTAKE from her at 22:10Z: `featreq-40697310` "Invoicing" (sent/legacy New, low): "Way to push an invoice to a next
+month so we can send an invoice when it is worth sending?" - not triaged, not built; needs an interpretation check (defer a small
+invoice into the next billing month? threshold-based holding?) before anything is planned. Watch next: the first bank payment on a
+link that carries an advance (Payment problems / Activity), and the e-sign logo on her first real send.
 **2026-11-01 evening - TWO MORE SHIPS, BOTH LIVE (health commit f9c84a5); READ THIS, then the 11-01 advance paragraph below the two
 Codex ones.** (1) E-SIGN HONEST PREVIEW + LOGO + BOLD HEADINGS, `245bf28a` (three commits 90995b4a / d531764f / 245bf28a), ticket
 `featreq-63c5f2c6` Shipped. Alex: "we aren't changing provider so do what we can". The Send-for-signature confirm now shows a preview
