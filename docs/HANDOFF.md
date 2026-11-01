@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-10-27. Everything below is committed on
+Written 2026-07-21, last updated 2026-11-01. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -12,6 +12,39 @@ and it has rules.**
 ---
 
 ## 0. Quick start for a brand-new session
+
+**2026-11-01 evening - TWO MORE SHIPS, BOTH LIVE (health commit f9c84a5); READ THIS, then the 11-01 advance paragraph below the two
+Codex ones.** (1) E-SIGN HONEST PREVIEW + LOGO + BOLD HEADINGS, `245bf28a` (three commits 90995b4a / d531764f / 245bf28a), ticket
+`featreq-63c5f2c6` Shipped. Alex: "we aren't changing provider so do what we can". The Send-for-signature confirm now shows a preview
+rendered the way eSignatures.io lays the letter out (`lib/esign-preview-html.js` in a sandboxed srcDoc iframe; `GET
+/api/engagements/:id/esign/preview?hash=` owner-only, 409 `engagement_changed`; the response carries `markdownHash` and Send posts it
+back -> 409 `letter_changed` if the letter moved); one Markdown source `esignLetterMarkdown` feeds both preview and send
+(`lib/letter-markdown.js`: `isSectionHeading` = first line of a block or alone, 3-60 chars, Title Case with small-word exceptions, no
+terminal punctuation / comma / colon / $ / digit / quote, bullets never headings; the closing block starts at the sign-off or at "By
+signing below" only when at most one prose paragraph follows; firm block from `firmDetailLines`); the firm logo goes up as
+`custom_branding.logo_url` (`lib/esign-logo.js`: sharp converts the data-URL in firm_settings.logo_url to a 400 px PNG, SVG density
+from width/viewBox with sqrt for absolute units, fallback 300 then 72, failures memoized 10 min, served public at
+`/esign-logo/<sha256-prefix>.png`, hash checked first; a 4xx from the provider other than 401/403/429 retries once WITHOUT the logo and
+notes it); the preview fetch times out at 20 s and Send stays disabled until the preview loads or fails (eSignatures only). Vite
+proxies `/esign-logo`. Three review rounds found: SVG density pixel limit, hash check after conversion, the closing window bolding
+signature blocks, bullet first lines read as headings, absolute-unit SVGs, a hung preview leaving Send stuck. Voice agent
+re-provisioned after this ship (manifest ~203,951). NOT built (low): closing-rule edge cases (two long paragraphs after the signature
+block; "Thank you," as the first paragraph), in-flight logo conversion dedupe. FIRST REAL USE is Brittany's - a test-mode send would
+confirm the logo hotlinks and the headings bold. (2) SEND REFUSAL FIX, `f9c84a5e`, dev-note added to `featreq-780c6608` (her
+"still not working" screenshot: INV-2026-10-043 answered "This invoice changed while it was being sent. Nothing was emailed." on every
+try). ROOT CAUSE, worth remembering: Postgres jsonb REORDERS object keys (by key length, then bytes). `prepareInvoiceCreditStatement`
+writes the advance line's `creditStatement` in insertion order, the send route's last look re-reads the row, and
+`lib/invoice-sent-change.js` compared the two with JSON.stringify -> same values, different order, "changed". Proven against her stored
+row with a read-only script (true with the old lib, false with the fix). The file backend keeps key order, so CI could never see it
+(cardinal rule 1 in its purest form). Fix: `lib/stable-json.js` `stableStringify` (sorted keys, JSON semantics) now used by
+`invoice-sent-change.js`, the three checks in `deliverInvoiceWithCreditLock`, `writeLines`, `buildInvoiceChangeDiff` and
+`recordInvoiceSent`; tests re-read through `lib/test-support/jsonb-like.mjs` (`jsonbLike` reorders keys the way Postgres does) so the
+file backend now exercises the Postgres shape; two store-staleness tests prove last look + delivery lock pass on a jsonb-ordered re-read
+while a real edit is still caught. RULE: never compare an in-memory object with a re-read jsonb row by JSON.stringify - use
+`stableStringify`, and run new fixtures through `jsonbLike`. Reviewer LOWs left: `stableStringify` drops an own `__proto__` key and
+turns boxed primitives into `{}`; `jsonbLike` turns Date into `{}`. Brittany's next step: click Send again on INV-2026-10-043. Lane B
+removed; worktrees left alone: Codex pbj-billing, .claude/worktrees/ecstatic-ritchie (Alex's chip), AP-feedback-attachments. Still
+for Alex, no rush: `ship.sh` exits 0 on "push failed - stopping"; gh active account must be shizzoobies.
 
 **2026-10-30 - FEEDBACK ATTACHMENTS READY FOR LOCAL REVIEW, DEPLOYMENT HELD.** Alex approved implementation only and wants to inspect before deployment. Work is on `codex/feedback-attachments` in `D:/PBJ Accounting Work/AP-feedback-attachments`, based on `a54b26c11e0e3aa925a2086abe3a4e96aeb285bd`. [Review guide](plans/feedback-attachments-local-review-2026-10.md) records the local URL, fixtures, evidence and boundaries. Private owner-only attachments now support creation and existing Updates, retry without duplicate requests, preview/download/removal, durable upload intents and deletion cleanup, and PostgreSQL plus isolated JSON tracker storage. `npm run verify` exited 0: lint/build, 470 files / 10,825 tests, 40 Cloudflare script tests. Broader scripts: 58 passed. Real local PostgreSQL and JSON drills, Linux dependency smoke, independent review and responsive browser QA passed. No production writes, provider setup, push or deployment. Production R2 provisioning and live R2 checks remain held for Alex.
 
@@ -53,7 +86,7 @@ Payment problems after she sends and after the bank payment settles. Also found 
 stopping" (push failed because gh's ACTIVE account was Bferguson2026 while the remote user is shizzoobies -> `gh auth switch --user
 shizzoobies`; left switched). Separately open from 10-27: the e-sign "signed copy does not look like the preview" question - cause is
 the provider (eSignatures.io renders its own Markdown layout, no PDF upload); proposal to Alex = truthful provider-style preview +
-logo via custom_branding + bold headings; waiting on his pick. **Still waiting on Brittany:** as in the 10-28 paragraph.
+logo via custom_branding + bold headings; Alex picked it and it shipped the same night (245bf28a, see the 11-01 evening paragraph). **Still waiting on Brittany:** as in the 10-28 paragraph.
 **2026-10-28 (~22:50Z) - SIX TICKETS LIVE IN THREE SHIPS; queue EMPTY; nothing in flight; READ THIS FIRST, then the 10-27
 paragraphs.** `main` = `5a2487d4` (+ this handoff), live (`/health` 200, commit 5a2487d), **voice NOT yet re-provisioned: the
 ElevenLabs knowledge base stopped persisting new uploads (a POST answers with an id that 404s a second later) because
