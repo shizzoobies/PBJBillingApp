@@ -71,9 +71,11 @@ in `ESIGNATURES_SECRET_TOKEN`. One URL receives every event.
   1. the FILLED letter (Send's own builder, the closing reworded "please sign electronically where
      indicated") is written as Markdown: the firm name as a heading, under it the firm's address, phone
      and email (the letterhead's own lines, `firmDetailLines`), the date, the addressee, the paragraphs
-     with bold as `**bold**`; a section heading (`isSectionHeading` in lib/letter-markdown.js: a line
-     alone in its paragraph, at most 80 characters, not ending in a period/comma/semicolon, not "Dear ..."
-     or a sign-off, followed by more text, and never after the sign-off) is written bold. `{{initial:...}}` tags become a mandatory checkbox line
+     with bold as `**bold**`; a section heading (`isSectionHeading` in lib/letter-markdown.js: a Title Case line of 3-60
+     characters with no comma, colon, semicolon, dollar sign, digit, quote or end punctuation, alone in its
+     paragraph with text after it, or the FIRST line of a paragraph whose next line is longer or ends in
+     punctuation; never a greeting, and nothing from the first sign-off or the "By signing below" paragraph
+     on) is written bold, keeping its line break. `{{initial:...}}` tags become a mandatory checkbox line
      "Initials: I have read and agree to the section above"; `{{text:...}}` a text input;
      `{{check:...}}` a checkbox; `{{signature:...}}` and `{{date:...}}` tags, and the letter's own
      "Signature:" / "Date:" / blank-to-fill lines, are dropped (eSignatures.io adds ONE signature
