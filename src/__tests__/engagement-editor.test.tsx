@@ -1551,16 +1551,50 @@ describe('e-signature', () => {
   it('a letter that moved since the preview (409 letter_changed) says so and opens the confirm again, which reads the preview again', async () => {
     api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'esignatures', testMode: false }))
     api.sendEngagementEsignRequest = vi.fn(async () => {
-      throw new ApiError(409, 'The letter changed since the preview; open the preview again. Nothing was sent.', 'letter_changed')
+      throw new ApiError(409, "The letter changed since the preview (for example today's date or the firm or client details). The preview now shows it as it will go; check it and send again. Nothing was sent.", 'letter_changed')
     })
     await renderEditor()
     fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
     let confirm = screen.getByRole('group', { name: 'Confirm send for signature' })
     fireEvent.click(await within(confirm).findByRole('button', { name: 'Send for signature to pat@acme.test' }))
-    expect(await screen.findByText('The letter changed since the preview; open the preview again. Nothing was sent.')).toBeTruthy()
+    expect(await screen.findByText("The letter changed since the preview (for example today's date or the firm or client details). The preview now shows it as it will go; check it and send again. Nothing was sent.")).toBeTruthy()
     confirm = await screen.findByRole('group', { name: 'Confirm send for signature' })
     await waitFor(() => expect(api.esignLetterPreviewRequest).toHaveBeenCalledTimes(2))
     expect(within(confirm).getByRole('region', { name: 'Letter as the signer will see it' })).toBeTruthy()
+  })
+
+  it('eSignatures.io: Send waits for the signing preview; it is enabled once the preview loads, or fails', async () => {
+    api.esignStatusRequest = vi.fn(async () => ({ configured: true, provider: 'esignatures', testMode: false }))
+    let settle: (ok: boolean) => void = () => {}
+    api.esignLetterPreviewRequest = vi.fn(
+      () =>
+        new Promise((resolve, reject) => {
+          settle = (ok) =>
+            ok
+              ? resolve({ markdown: '## F\n', markdownHash: 'mh-2', html: '<h2>F</h2>', logo: false, missing: [], unknown: [], retired: [] })
+              : reject(new ApiError(502, 'The letter could not be built, so it cannot be sent for signature.', 'pdf_failed'))
+        }),
+    )
+    for (const ok of [true, false]) {
+      cleanup()
+      await renderEditor()
+      fireEvent.click(await screen.findByRole('button', { name: 'Send for signature' }))
+      const confirm = screen.getByRole('group', { name: 'Confirm send for signature' })
+      const button = await within(confirm).findByRole('button', { name: 'Send for signature to pat@acme.test' })
+      expect(button).toBeDisabled()
+      expect(button.getAttribute('title')).toBe('Waiting for the signing preview')
+      settle(ok)
+      await waitFor(() => expect(button).toBeEnabled())
+      fireEvent.click(button)
+      await waitFor(() =>
+        expect(api.sendEngagementEsignRequest).toHaveBeenLastCalledWith('eng-1', {
+          templateHash: 'hash-1',
+          signer: { email: 'pat@acme.test' },
+          // A failed preview sends unchecked, as before.
+          ...(ok ? { markdownHash: 'mh-2' } : {}),
+        }),
+      )
+    }
   })
 
   it('the signing preview says so when the page is stale, and the send stays possible', async () => {

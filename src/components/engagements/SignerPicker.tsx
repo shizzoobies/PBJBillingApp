@@ -73,8 +73,11 @@ export function EsignSendConfirm({
     fresh ? initialSignerSelection(fresh, partyEmail ? [partyEmail] : []) : null,
   )
   const [loadError, setLoadError] = useState('')
-  // The hash of the letter the signing preview showed: the send refuses if the letter moved since.
-  const [markdownHash, setMarkdownHash] = useState<string | null>(null)
+  // The hash of the letter the signing preview showed: the send refuses if the letter moved since. `undefined`
+  // while the preview is still loading (eSignatures.io: Send waits for it; a failed preview sends unchecked).
+  const [markdownHash, setMarkdownHash] = useState<string | null | undefined>(undefined)
+  const showsPreview = provider === 'esignatures' && Boolean(templateHash)
+  const previewPending = showsPreview && markdownHash === undefined
 
   useEffect(() => {
     if (fresh) return
@@ -123,16 +126,17 @@ export function EsignSendConfirm({
       ) : null}
       {provider === 'esignatures' ? <p className="muted-text">{ESIGNATURES_AUTO_REMINDER_NOTE}</p> : null}
       {testMode ? <p className="muted-text">{ESIGN_TEST_MODE_NOTE}</p> : null}
-      {provider === 'esignatures' && templateHash ? (
+      {showsPreview ? (
         <EsignLetterPreviewFrame engagementId={engagementId} templateHash={templateHash} onLoaded={setMarkdownHash} />
       ) : null}
       <div className="button-row">
         <button
           type="button"
           className="primary-action"
-          disabled={busy || !signer}
+          disabled={busy || !signer || previewPending}
+          title={previewPending ? 'Waiting for the signing preview' : undefined}
           onClick={() => {
-            if (signer) onSend(signer.post, provider === 'esignatures' && markdownHash ? markdownHash : undefined)
+            if (signer) onSend(signer.post, showsPreview && markdownHash ? markdownHash : undefined)
           }}
         >
           {signer ? `Send for signature to ${signer.email}` : 'Choose who signs'}
