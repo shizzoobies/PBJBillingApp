@@ -45,6 +45,12 @@ export function accountCreditReversalText(credit: AccountCredit, date: string): 
     const detail = [dollars, why ? `reason ${why}` : ''].filter(Boolean).join(', ')
     return `Disputed in Stripe on ${date}${detail ? ` (${detail})` : ''}`
   }
+  if (reversal.combined && reversal.kind === 'refund') {
+    const share = dollars ? `${dollars} of this credit` : ''
+    const whole = reversal.refundedAmount == null || reversal.chargeAmount == null ? '' : `${money(reversal.refundedAmount)} of the ${money(reversal.chargeAmount)} payment`
+    const detail = [share, whole].filter(Boolean).join('; ')
+    return `${reversal.partial ? 'Partly refunded' : 'Refunded'} in Stripe on ${date}${detail ? ` (${detail})` : ''}`
+  }
   if (reversal.partial) {
     const whole = reversal.chargeAmount == null ? '' : ` of ${money(reversal.chargeAmount)}`
     return `Partly refunded in Stripe on ${date}${dollars ? ` (${dollars}${whole})` : ''}`

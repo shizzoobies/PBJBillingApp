@@ -19063,17 +19063,25 @@ export class AppDataStore {
   async cancelAdvancePayment(id, actorUserId) { return this.advancePaymentLedger().cancel(id, actorUserId, nowIso()) }
 
   /**
-   * `collection`: 'invoice' (the default) carries the advance on this invoice's
-   * payment link, one payment for both; 'separate' keeps the advance's own page
-   * and link. Any active request of the client may be attached, whatever its
+   * `collection`: 'invoice' carries the advance on this invoice's payment link,
+   * one payment for both; 'separate' keeps the advance's own page and link. A
+   * caller that OMITS it gets 'separate', the behavior before the choice existed,
+   * so a stale tab cannot switch a client to the invoice link; the attach form
+   * always sends it (its default selection is the invoice link). Any active request of the client may be attached, whatever its
    * payment method ("Decide when attaching to an invoice" leaves it unset).
    */
-  async setInvoiceAdvanceOffer(invoiceId, requestId, optional, actorUserId, appUrl, collection = 'invoice') {
+  async setInvoiceAdvanceOffer(invoiceId, requestId, optional, actorUserId, appUrl, collection = 'separate') {
     const initial = (await this.listInvoices()).find((row) => row.id === invoiceId)
     if (!initial) throw new AdvancePaymentError('Invoice not found.')
     if (requestId && typeof optional !== 'boolean') throw new AdvancePaymentError('Choose whether this advance is optional or already agreed.')
-    const how = collection ?? 'invoice'
+    const how = collection ?? 'separate'
     if (requestId && !['invoice', 'separate'].includes(how)) throw new AdvancePaymentError("Choose how to collect this advance: with this invoice's payment link, or separately.")
+    if (requestId && how === 'invoice') {
+      // Read before the transaction: the pay link refuses these clients, so their
+      // invoice link could never collect the advance.
+      const payer = await this.getClientById(initial.clientId)
+      if (payer?.invoiceNoEmail || payer?.platformInvoicingOptOut) throw new AdvancePaymentError("This client's invoices are delivered outside the app, so there is no payment link to carry the advance. Collect it separately.")
+    }
     const update = async (invoice, runner = this.pool, data = null) => {
       if (!invoice || !['draft', 'reviewed'].includes(invoice.status) || invoice.sentAt || (invoice.kind ?? 'monthly') !== 'monthly') throw new AdvancePaymentError('Only an unsent monthly draft can change its advance section. Issued invoices keep their snapshot.')
       let offer = null
@@ -19084,8 +19092,11 @@ export class AppDataStore {
           if (request.collectionMethod === 'manual') throw new AdvancePaymentError('This request is set for payment outside the app; create a new request to collect it with an invoice.')
           // ONE invoice link collects a request at a time: a second would let the
           // client pay the same advance twice. Read under this client's credit
-          // lock (Postgres) or inside the file queue slot (file backend).
-          const others = data ? (data.invoices ?? []).map((row) => normalizeStoredInvoice(row)) : await this.listInvoices()
+          // lock ON THIS TRANSACTION'S connection (Postgres) or inside the file
+          // queue slot (file backend).
+          const others = data
+            ? (data.invoices ?? []).map((row) => normalizeStoredInvoice(row))
+            : (await runner.query(`select ${INVOICE_SELECT_COLUMNS} from invoices where client_id = $1 and status not in ('paid','void')`, [invoice.clientId])).rows.map((row) => mapInvoiceRow(row))
           const holder = others.find((row) => row.id !== invoice.id && row.clientId === invoice.clientId && !['paid', 'void'].includes(row.status) &&
             row.lineItems?.find((line) => line.kind === 'advance_request')?.advanceOffer?.requestId === requestId &&
             row.lineItems.find((line) => line.kind === 'advance_request').advanceOffer.collection === 'invoice')

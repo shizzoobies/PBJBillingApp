@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { advanceOfferText, invoiceAdvanceOffer } from '../../lib/invoice-advance-offer.js'
+import { advanceOfferCollection, advanceOfferText, invoiceAdvanceOffer } from '../../lib/invoice-advance-offer.js'
 import { advancePaymentRequest } from '../lib/api'
 import type { PersistedInvoice } from '../lib/types'
 import { currency } from '../lib/utils'
@@ -35,7 +35,10 @@ export function InvoiceAdvanceSection({ invoice, disabled, onChanged }: { invoic
   }
   const editable = !disabled && !invoice.sentAt && ['draft', 'reviewed'].includes(invoice.status) && (invoice.kind ?? 'monthly') === 'monthly'
   return <section aria-label="Invoice advance section">
-    {offer ? <div>{advanceOfferText(invoice).map((text) => <p style={{ overflowWrap: 'anywhere' }} key={text}>{text}</p>)}</div> : null}
+    {offer ? <div>
+      <p><strong>How to collect:</strong> {advanceOfferCollection(offer) === 'invoice' ? "With this invoice's payment link (one payment)" : "Separately, from the advance's own page and link"}</p>
+      {advanceOfferText(invoice).map((text) => <p style={{ overflowWrap: 'anywhere' }} key={text}>{text}</p>)}
+    </div> : null}
     {editable ? <>
       <button type="button" className="secondary-action" onClick={() => setOpen(!open)} aria-expanded={open}>Pay in advance section</button>
       {open ? <div>

@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import QRCode from 'qrcode'
-import { handleAdvancePaymentRoute, closeAdvanceSessions, invoiceCheckoutAdvance, settleCombinedAdvanceOrRelease } from './lib/advance-payment-routes.js'
+import { handleAdvancePaymentRoute, closeAdvanceSessions, invoiceAdvanceSettlement, invoiceCheckoutAdvance, settleCombinedAdvanceOrRelease } from './lib/advance-payment-routes.js'
 import { advancePaymentRows, advancePaymentSummary, linkAdvanceFor } from './lib/invoice-advance-offer.js'
 import { payLinkAdvanceStep, renderPaySummaryPage } from './lib/pay-link-advance.js'
 import {
@@ -107,6 +107,7 @@ import {
 } from './lib/notify.js'
 import {
   paymentEmailKindFor,
+  paymentEmailOwed,
   resolveInvoiceRecipients,
   sendInvoicePaymentEmail,
 } from './lib/invoice-email.js'
@@ -2722,6 +2723,7 @@ async function assembleInvoicePreview(request, invoiceId) {
     cardPayUrl,
     // The advance the send's links would carry, read the same way Send reads it.
     advance: payUrl ? await invoiceCheckoutAdvance(appDataStore, invoice) : null,
+    advanceSettlement: await invoiceAdvanceSettlement(appDataStore, invoice),
     autopay: autopaySend.plan ? autopayEmailDetails(request, invoice, autopaySend.plan) : null,
   })
 
@@ -2791,6 +2793,23 @@ async function duplicateAdvanceNote(event, invoice, isCard) {
   } catch (error) {
     console.error('[stripe] could not describe the advance part of a second payment:', error?.message || error)
     return null
+  }
+}
+
+/**
+ * `{ cents, number }` for the client's payment email when this payment carried an
+ * advance (the portion recorded, or on a bank authorization the portion the
+ * session collected), else null. Never throws: the email is worth more.
+ */
+async function paymentAdvanceForEmail(invoice, object, cents) {
+  if (!(cents > 0) || !object?.metadata?.advancePaymentRequestId) return null
+  try {
+    const requestId = object.metadata.advancePaymentRequestId
+    const found = (await appDataStore.listAdvancePayments(invoice.clientId)).requests.find((row) => row.id === requestId)
+    return { cents, number: found?.number ?? requestId }
+  } catch (error) {
+    console.error('[stripe] could not name the advance for the payment email:', error?.message || error)
+    return { cents, number: object.metadata.advancePaymentRequestId }
   }
 }
 
@@ -7057,6 +7076,7 @@ const server = createServer(async (request, response) => {
             getInvoice: async (id) =>
               (await appDataStore.listInvoices()).find((entry) => entry.id === id) ?? null,
             appPublicUrl: getPublicAppUrl(request),
+            advanceNote: await duplicateAdvanceNote(event, lookedUpInvoice, settledByCard),
           })
         }
       }
@@ -7068,9 +7088,17 @@ const server = createServer(async (request, response) => {
       // Everything here is best-effort. The payment is already recorded; a mail
       // provider having a bad afternoon is not a reason to make Stripe replay
       // the event, so this cannot fail the webhook.
+      // A real status change, or the replay of a combined payment whose advance
+      // write failed (released for redelivery): that replay changes no status but
+      // may still owe the client the receipt. The email log keeps it to one. A
+      // second payment on a paid invoice (a duplicate) is never receipted here.
+      const paymentEmailDue =
+        Boolean(settledInvoice) &&
+        !settledInvoice.duplicatePayment &&
+        paymentEmailOwed({ statusChanged: settledInvoice.statusChanged, eventType: event.type, object: event.data?.object })
       if (
         settledInvoice &&
-        settledInvoice.statusChanged &&
+        paymentEmailDue &&
         paymentEmailKindFor(settledInvoice.status, { isCard: settledByCard })
       ) {
         try {
@@ -7103,8 +7131,11 @@ const server = createServer(async (request, response) => {
               client: paidAddressee.addressee,
               contacts: paidData.contacts ?? [],
               firmName: paidFirmSettings?.name || undefined,
-              statusChanged: settledInvoice.statusChanged,
+              statusChanged: paymentEmailDue,
               isCard: settledByCard,
+              // What this payment brought toward an advance its link carried, so
+              // the email states what was actually charged.
+              advance: await paymentAdvanceForEmail(settledInvoice, event.data?.object, settledAdvanceCents),
               // Rebuilt AFTER the payment landed, so it carries the PAID stamp
               // and — for a card payment — the fee line the store just appended.
               buildPdf: async () => [
@@ -8402,6 +8433,8 @@ const server = createServer(async (request, response) => {
         cardPayUrl,
         // What the links carry, for the Total to pay the email shows.
         advance: payUrl ? sendAdvance : null,
+        // A re-send of a paid or processing invoice: what its payment brought.
+        advanceSettlement: await invoiceAdvanceSettlement(appDataStore, invoice),
         // An invoice that is about to be charged automatically: what will be
         // debited (a card's includes its fee), from what, and the way to turn it
         // off. Null for every other send, which is then the email it always was.

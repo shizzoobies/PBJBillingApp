@@ -44,6 +44,16 @@ describe('invoice advance section choices', () => {
     fireEvent.click(screen.getByText('Save advance section'))
     await waitFor(() => expect(api).toHaveBeenLastCalledWith('/r2/attach', { invoiceId: 'i1', optional: false, collection: 'separate' }))
   })
+  it('tells the owner which way the attached advance is collected, in neutral client wording', () => {
+    const offer = { requestId: 'r1', number: 'ADV-TEST', requestedCents: 17000, receivedCents: 0, outstandingCents: 17000, optional: true, collection: 'invoice', collectionMethod: null, forPeriod: null, url: 'http://localhost/advance-pay/x', preparedAt: '2026-11-01', preparedBy: 'owner' }
+    const attached = { ...invoice, lineItems: [{ kind: 'advance_request', label: 'Pay in advance amount', detail: '', amount: 0, advanceOffer: offer }] } as unknown as PersistedInvoice
+    const { rerender } = render(<InvoiceAdvanceSection invoice={attached} disabled={false} onChanged={vi.fn()} />)
+    expect(screen.getByText("With this invoice's payment link (one payment)")).toBeInTheDocument()
+    expect(screen.queryByText(/included in this invoice's payment link/)).toBeNull()
+    const separate = { ...attached, lineItems: [{ ...attached.lineItems[0], advanceOffer: { ...offer, collection: 'separate' } }] } as unknown as PersistedInvoice
+    rerender(<InvoiceAdvanceSection invoice={separate} disabled={false} onChanged={vi.fn()} />)
+    expect(screen.getByText("Separately, from the advance's own page and link")).toBeInTheDocument()
+  })
   it('does not offer mutation for issued invoices or unsaved service edits', () => {
     const { rerender } = render(<InvoiceAdvanceSection invoice={{ ...invoice, status: 'sent', sentAt: '2026-10-28' }} disabled={false} onChanged={vi.fn()} />)
     expect(screen.queryByText('Pay in advance section')).toBeNull()

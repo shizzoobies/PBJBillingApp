@@ -4,7 +4,7 @@ export type LinkAdvance = { requestId: string; number: string; cents: number; op
 export type AdvancePaymentSummary = { invoiceCents: number; advanceCents: number; feeCents: number; totalCents: number; advance: LinkAdvance | null }
 export function invoiceAdvanceOffer(invoice: Invoice): AdvanceOffer | null
 export function advanceOfferCollection(offer: AdvanceOffer | null | undefined): 'invoice' | 'separate'
-export function advanceOfferText(invoice: Invoice, options?: { carried?: boolean; autopay?: boolean; card?: boolean; settlement?: { advanceCents: number; pending?: boolean } | null }): string[]
+export function advanceOfferText(invoice: Invoice, options?: { carried?: boolean; autopay?: boolean; card?: boolean; settlement?: { advanceCents: number | null; pending?: boolean } | null }): string[]
 export function linkAdvanceFor(advance: LinkAdvance | null | undefined, channel: 'ach' | 'card'): LinkAdvance | null
 export function advancePaymentSummary(args: { total: number; advance?: LinkAdvance | null; channel?: 'ach' | 'card' }): AdvancePaymentSummary
 export function advancePaymentRows(summary: AdvancePaymentSummary): Array<[string, string]>

@@ -185,7 +185,9 @@ describe('the send route refuses before it sends anything', () => {
 })
 
 describe('the payment email follows the same addressing rule', () => {
-  const block = () => routeBlock(/Tell the CLIENT their money arrived/, 3200)
+  // Wide enough to reach the PDF build, which now also states the advance
+  // part of a combined payment (2026-11-01).
+  const block = () => routeBlock(/Tell the CLIENT their money arrived/, 4400)
 
   it('addresses the receipt through the one helper', () => {
     const text = block()

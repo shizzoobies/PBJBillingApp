@@ -2559,6 +2559,13 @@ export type AccountCreditReversal = {
   /** A refund of less than the charge; `chargeAmount` is the whole charge in dollars. */
   partial?: true
   chargeAmount?: number | null
+  /**
+   * A payment that paid an invoice AND this advance (one link, one payment):
+   * `amount` is this credit's share of the refund, `refundedAmount` the whole
+   * refund and `chargeAmount` the whole payment.
+   */
+  combined?: boolean
+  refundedAmount?: number | null
   /** A closed dispute's result from Stripe (won, lost, ...). */
   status?: string
   /**
