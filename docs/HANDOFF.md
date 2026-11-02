@@ -13,6 +13,28 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-11-01 night - THE MANIFEST IS NO LONGER CAPPED AT 205,000: the voice agent reads it by RETRIEVAL (`1764d216` + the test fix
+that follows it). READ THIS FIRST.** Alex asked whether the manifest should move into Postgres as a "mind map" so nothing gets lost;
+answer: no - the cap was never storage, it was the voice agent's whole-document prompt-mode knowledge-base upload (ElevenLabs refuses
+~216 K+), and git review + the CI tripwire is what keeps the manifest true. Alex: "let's move to RAG, she mostly uses chat not voice
+anyhow." DONE and LIVE on the agent (verified by GET: `rag.enabled true`, e5_mistral_7b_instruct, two documents): `lib/voice-manifest-split.js`
+splits the file at the first page heading (`## Dashboard`) - CORE (header, duration rule, navigation map; 4,144 chars; must stay
+under 20,000) goes up in `usage_mode: 'prompt'`, BODY (~200 KB) in `usage_mode: 'auto'`; `scripts/provision-voice-agent.mjs`
+builds the body's retrieval index (POST .../rag-index, polled every 5 s, 10-min cap, two flaky polls tolerated, 30 s fetch timeout)
+BEFORE the agent is PATCHed, deletes both uploads if the index fails, and still prunes the previous run's documents;
+`VOICE_KB_RETRIEVAL=off` restores the old single-document shape. Account tier Pro (100 MB indexable). The 294 orphaned manifest
+copies left by earlier runs (the pile that broke uploads on 10-28) were deleted with `scripts/prod/voice-kb-prune.mjs --apply`, which
+now matches both document names. `src/__tests__/capability-manifest-size.test.ts` caps the file at 400,000 (the in-app assistant
+still sends the whole manifest as a cached prompt block; ~100k tokens is the cost ceiling) and runs the split against the real file;
+the second cap hidden in `assistant.test.tsx` (216,000) is gone; AGENTS.md and the standing rules below are updated. **STOP TRIMMING
+THE MANIFEST; keep everything above `## Dashboard` small instead.** Accepted tradeoff: a voice answer sees the ~50 KB of passages
+retrieved for that turn, not the whole document (Brittany mostly uses the chat assistant, which is unchanged). The one Sonnet review
+round caught the 216,000 leftover and the prune-script gap. Also fixed on the way: `src/__tests__/project-recurring.test.ts` failed
+every evening from 7 pm Eastern because utils' `dateOffset` slices a local date through UTC (a day ahead after UTC midnight) while
+the projection uses local days - the file now uses `localDateOnly` + `addDays` (the 10-23 sweep pattern). Six other test files and
+`src/lib/seed.ts` still import `dateOffset`; they passed tonight, so they are consistent with themselves, but the helper is a trap -
+low follow-up: make `dateOffset` local-day or retire it. Noise, not a failure: ~1,000 `ECONNREFUSED ::1:3000` lines appear in every
+verify log (some test fetches localhost:3000 and ignores the error) - predates tonight; untriaged.
 **2026-11-01 late - MONTHLY ESTIMATE SEND-BACK LIVE (`04fdb655`, health 04fdb65) and the SEND FIX IS CONFIRMED IN PRODUCTION:**
 Brittany sent all 22 October invoices between 22:04Z and 22:09Z, starting with INV-2026-10-043 one minute after f9c84a5e went
 live, every one carrying its advance line, zero problem rows in activity_log (`neon-sends-tonight.mjs` pattern: read-only, sent_at

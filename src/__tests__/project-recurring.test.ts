@@ -1,16 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { projectUpcomingChecklists } from '../lib/projectRecurring'
-import { dateOffset } from '../lib/utils'
+import { addDays, localDateOnly } from '../lib/utils'
 import type { AppData, Checklist, ChecklistTemplate } from '../lib/types'
 
 /**
  * `projectUpcomingChecklists` is PURE — it takes `fromDateOnly` explicitly (it
  * never reads the clock). To stay deterministic regardless of when the suite
- * runs, dates are still expressed relative to the real today via `dateOffset`,
- * and `fromDateOnly` is passed the same "today" the app would.
+ * runs, dates are still expressed relative to the real today, in LOCAL days
+ * (`localDateOnly` + `addDays`): utils' `dateOffset` slices through UTC and is a
+ * day ahead from 7 pm Eastern, which made this file fail every evening
+ * (2026-11-01). `fromDateOnly` is passed the same "today" the app would.
  */
 
-const TODAY = dateOffset(0)
+const TODAY = localDateOnly()
+const dateOffset = (days: number) => addDays(TODAY, days)
 
 function makeTemplate(overrides: Partial<ChecklistTemplate>): ChecklistTemplate {
   return {
