@@ -24,8 +24,8 @@ manifest phrase; Annual stays without the line. The reviewer caught the manifest
 the same figure" - true for Hourly only; a Monthly client's recap and invoice quote the fixed monthly rate, so the Billing-tab line
 is a planning figure beside it (manifest + comment now say so). Known soft spots, not changed: a client switched Hourly -> Monthly
 with a leftover `hourlyRate` and no team in a role prices that role at the old rate (same fallback the invoice uses); the no-rate
-message still says "set hourly rates on the Team page". Voice re-provisioned; manifest 204,855 of 205,000 - TRIM BEFORE ADDING
-ANYTHING. NEW INTAKE from her at 22:10Z: `featreq-40697310` "Invoicing" (sent/legacy New, low): "Way to push an invoice to a next
+message still says "set hourly rates on the Team page". Voice re-provisioned; manifest 204,855 (the 205,000 cap was lifted later
+the same night - see the paragraph above). NEW INTAKE from her at 22:10Z: `featreq-40697310` "Invoicing" (sent/legacy New, low): "Way to push an invoice to a next
 month so we can send an invoice when it is worth sending?" - not triaged, not built; needs an interpretation check (defer a small
 invoice into the next billing month? threshold-based holding?) before anything is planned. Watch next: the first bank payment on a
 link that carries an advance (Payment problems / Activity), and the e-sign logo on her first real send.
@@ -1408,6 +1408,9 @@ Then the queue / watch list:
    09-28, one line per bullet/paragraph — don't hard-wrap new entries), and
    `src/__tests__/capability-manifest-size.test.ts` fails verify above
    205,000 bytes or characters** — state each rule once and cross-reference.
+   UPDATE 2026-11-01: the cap is now 400,000 (the in-app prompt's own ceiling);
+   the voice agent reads the manifest by RETRIEVAL, so the old 216 K upload
+   limit is gone - see the 11-01 night paragraph in section 0.
 1. **Brittany's team re-pick is still unfinished** (13 of 55 clients had an
    empty team on 09-21; Lisa 5, Allison 1). Until a client has a team, staff
    see none of its invoices on the Invoice Recap, and nobody but the owners
@@ -1501,8 +1504,10 @@ workaround when you have none:
   with Railway access runs `node scripts/provision-voice-agent.mjs`. The
   four values come from `npx @railway/cli@latest variables --service
   PBJBillingApp --json` (spawn the script with them in `env`; never print
-  them). The upload cap is ~216,148 characters on the agent's total knowledge
-  base; verify fails at 205,000 first (09-28 entry).
+  them). Since 2026-11-01 the manifest goes up as two documents - a small
+  always-loaded core and the body by retrieval (ElevenLabs RAG, index awaited
+  by the provisioner) - so the old ~216,148-character upload cap no longer
+  applies; verify caps the file at 400,000 for the in-app prompt instead.
 - **Prod writes** (backfills, resets) are Railway-credentialed and need
   Alex's yes at run time regardless of where you are.
 - Cloud sessions work on a branch; the merge to `main` is the deploy. Say

@@ -158,6 +158,11 @@ that one by voice yet and point her to where it lives in the app.
 - LLM: use ElevenLabs' hosted model for LOW LATENCY (Alex's call). Do NOT wire
   bring-your-own-Claude for v1. The knowledge base + this system prompt carry
   the intelligence; we can upgrade the brain later if it's not sharp enough.
+- Knowledge base (since 2026-11-01): the manifest goes up as TWO documents -
+  the core rules (header, duration rule, navigation map) always in the prompt,
+  the page sections by RETRIEVAL (ElevenLabs RAG, index built by the
+  provisioner). Retrieval lifted the ~216,000-character cap the whole-document
+  upload had; the in-app assistant still reads the whole manifest.
 - Voice: SET by Alex on the agent in the ElevenLabs dashboard (a female
   voice). Provisioning must NOT override the voice — leave it as configured.
 - First-message / greeting: short, e.g. "Hi Brittany — what can I help with?"

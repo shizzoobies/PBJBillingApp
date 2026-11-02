@@ -3,9 +3,17 @@
  *
  * Reads the persona system prompt (docs/voice-agent-persona.md) and the
  * capability manifest (docs/capability-manifest.md), then:
- *   1. uploads the manifest to the agent's knowledge base (create-from-text),
- *   2. PATCHes the agent: sets the system prompt, attaches the knowledge-base
- *      doc, and sets a greeting.
+ *   1. uploads the manifest to the agent's knowledge base as two documents
+ *      (lib/voice-manifest-split.js): the small always-loaded CORE and the
+ *      BODY, which the agent reads by RETRIEVAL (ElevenLabs RAG, since
+ *      2026-11-01 - the whole-document prompt upload capped the manifest at
+ *      ~216,000 characters; retrieval does not), and waits for the body's
+ *      index to finish building before the agent is pointed at it,
+ *   2. PATCHes the agent: sets the system prompt, turns retrieval on, attaches
+ *      the two knowledge-base docs, and sets a greeting.
+ *
+ * VOICE_KB_RETRIEVAL=off restores the old shape (one prompt-mode document,
+ * retrieval off) - only workable while the manifest fits the prompt cap.
  *
  * It deliberately does NOT touch the agent's voice or LLM — those are set in
  * the ElevenLabs dashboard (a female voice + the hosted low-latency model).
@@ -17,6 +25,7 @@
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { splitManifestForVoice } from '../lib/voice-manifest-split.js'
 
 const API = 'https://api.elevenlabs.io/v1/convai'
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -33,6 +42,21 @@ if (!apiKey || !agentId) {
 // work standalone.
 const appBaseUrl = (process.env.APP_PUBLIC_URL || '').replace(/\/$/, '')
 const toolSecret = process.env.VOICE_TOOL_SECRET || ''
+const retrieval = (process.env.VOICE_KB_RETRIEVAL || 'on').toLowerCase() !== 'off'
+
+// ElevenLabs' defaults for retrieval, written out so a dashboard change cannot
+// silently differ from what this script provisions.
+const RAG_EMBEDDING_MODEL = 'e5_mistral_7b_instruct'
+const RAG_CONFIG = {
+  enabled: true,
+  embedding_model: RAG_EMBEDDING_MODEL,
+  max_vector_distance: 0.6,
+  // How much retrieved manifest text one turn may carry (characters).
+  max_documents_length: 50_000,
+  max_retrieved_rag_chunks_count: 20,
+}
+const CORE_DOC_NAME = 'PB&J app knowledge - core rules (always loaded)'
+const BODY_DOC_NAME = 'PB&J app knowledge (capability manifest)'
 
 const headers = { 'xi-api-key': apiKey, 'Content-Type': 'application/json' }
 
@@ -40,6 +64,7 @@ async function call(method, url, body) {
   const res = await fetch(url, {
     method,
     headers,
+    signal: AbortSignal.timeout(30_000),
     ...(body ? { body: JSON.stringify(body) } : {}),
   })
   const text = await res.text()
@@ -53,6 +78,43 @@ async function call(method, url, body) {
     throw new Error(`${method} ${url} -> ${res.status}: ${text.slice(0, 600)}`)
   }
   return json
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Build the retrieval index for one knowledge-base document and wait for it.
+ * The same POST both starts the build and reports its status, so it is polled
+ * until the index is usable; a document the agent is pointed at before that
+ * would answer from nothing.
+ */
+async function indexDocument(docId, { timeoutMs = 10 * 60_000, everyMs = 5_000 } = {}) {
+  const started = Date.now()
+  let last = null
+  let misses = 0
+  while (Date.now() - started < timeoutMs) {
+    try {
+      last = await call('POST', `${API}/knowledge-base/${docId}/rag-index`, { model: RAG_EMBEDDING_MODEL })
+      misses = 0
+    } catch (error) {
+      // One flaky poll (429, 5xx, a slow answer) should not abandon an index that
+      // is still building; three in a row is a real problem.
+      misses += 1
+      if (misses >= 3) throw error
+      console.log(`     poll failed (${error.message.slice(0, 80)}); retrying`)
+      await sleep(everyMs)
+      continue
+    }
+    const status = String(last.status || '').toLowerCase()
+    if (status === 'succeeded') return last
+    if (['failed', 'rag_limit_exceeded', 'document_too_small', 'cannot_index_folder'].includes(status)) {
+      throw new Error(`retrieval index for ${docId} ended ${status}`)
+    }
+    const pct = Number(last.progress_percentage)
+    console.log(`     index ${status || 'pending'}${Number.isFinite(pct) ? ` ${Math.round(pct)}%` : ''}…`)
+    await sleep(everyMs)
+  }
+  throw new Error(`retrieval index for ${docId} did not finish in ${Math.round(timeoutMs / 60_000)} min (last status ${last?.status})`)
 }
 
 /** Pull the system prompt out of the persona doc (between the two markers). */
@@ -323,12 +385,37 @@ async function main() {
   console.log(`System prompt: ${systemPrompt.length} chars`)
   console.log(`Manifest: ${manifest.length} chars`)
 
-  console.log('\n1/3  Uploading the capability manifest to the knowledge base…')
-  const kb = await call('POST', `${API}/knowledge-base/text`, {
-    name: 'PB&J app knowledge (capability manifest)',
-    text: manifest,
-  })
-  console.log(`     knowledge-base doc id: ${kb.id}`)
+  console.log(`\n1/3  Uploading the capability manifest to the knowledge base (retrieval ${retrieval ? 'on' : 'OFF'})…`)
+  const knowledgeBase = []
+  if (retrieval) {
+    const { core, body } = splitManifestForVoice(manifest)
+    console.log(`     core ${core.length} chars (always loaded), body ${body.length} chars (retrieval)`)
+    const coreDoc = await call('POST', `${API}/knowledge-base/text`, { name: CORE_DOC_NAME, text: core })
+    console.log(`     core doc id: ${coreDoc.id}`)
+    const bodyDoc = await call('POST', `${API}/knowledge-base/text`, { name: BODY_DOC_NAME, text: body })
+    console.log(`     body doc id: ${bodyDoc.id}; building its retrieval index…`)
+    let index
+    try {
+      index = await indexDocument(bodyDoc.id)
+    } catch (error) {
+      // Nothing is attached yet, so these two uploads would otherwise sit in the
+      // workspace as orphans (295 of those broke uploads on 2026-10-28).
+      for (const id of [coreDoc.id, bodyDoc.id]) {
+        await call('DELETE', `${API}/knowledge-base/${id}`).catch(() => {})
+      }
+      throw error
+    }
+    console.log(`     index ready (${index.document_model_index_usage?.used_bytes ?? '?'} bytes)`)
+    knowledgeBase.push(
+      { type: 'text', name: CORE_DOC_NAME, id: coreDoc.id, usage_mode: 'prompt' },
+      { type: 'text', name: BODY_DOC_NAME, id: bodyDoc.id, usage_mode: 'auto' },
+    )
+  } else {
+    const kb = await call('POST', `${API}/knowledge-base/text`, { name: BODY_DOC_NAME, text: manifest })
+    console.log(`     knowledge-base doc id: ${kb.id}`)
+    knowledgeBase.push({ type: 'text', name: BODY_DOC_NAME, id: kb.id, usage_mode: 'prompt' })
+  }
+  const newDocIds = new Set(knowledgeBase.map((doc) => doc.id))
 
   let toolIds = null
   if (appBaseUrl && toolSecret) {
@@ -345,9 +432,8 @@ async function main() {
         first_message: 'Hey {{owner_name}}! What can I help with?',
         prompt: {
           prompt: systemPrompt,
-          knowledge_base: [
-            { type: 'text', name: 'PB&J app knowledge (capability manifest)', id: kb.id },
-          ],
+          knowledge_base: knowledgeBase,
+          rag: retrieval ? RAG_CONFIG : { ...RAG_CONFIG, enabled: false },
           ...(toolIds ? { tool_ids: toolIds } : {}),
         },
       },
@@ -361,7 +447,7 @@ async function main() {
     const before = await call('GET', `${API}/agents/${agentId}`)
     previousDocIds = (before?.conversation_config?.agent?.prompt?.knowledge_base || [])
       .map((doc) => doc.id)
-      .filter((id) => id && id !== kb.id)
+      .filter((id) => id && !newDocIds.has(id))
   } catch (error) {
     console.log(`     (could not read the agent's current knowledge base: ${error.message.slice(0, 120)})`)
   }
@@ -376,7 +462,10 @@ async function main() {
     }
   }
 
-  console.log('\nDone. Persona + knowledge base synced' + (toolIds ? ` + ${toolIds.length} tools attached.` : '.'))
+  console.log(
+    `\nDone. Persona + knowledge base synced (${retrieval ? 'core in prompt, body by retrieval' : 'whole manifest in prompt'})` +
+      (toolIds ? ` + ${toolIds.length} tools attached.` : '.'),
+  )
   console.log('Voice and LLM were left as configured in the dashboard.')
 }
 

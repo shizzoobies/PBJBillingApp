@@ -10,7 +10,8 @@
 //        node scripts/prod/voice-kb-prune.mjs --apply    (delete the orphans)
 import { prodEnv } from './env.mjs'
 
-const NAME = 'PB&J app knowledge (capability manifest)'
+// Both uploads of a provision run (the always-loaded core and the retrieval body).
+const NAMES = new Set(['PB&J app knowledge (capability manifest)', 'PB&J app knowledge - core rules (always loaded)'])
 const API = 'https://api.elevenlabs.io/v1/convai'
 const env = { ...process.env, ...prodEnv(['ELEVENLABS_API_KEY', 'ELEVENLABS_AGENT_ID']) }
 const apply = process.argv.includes('--apply')
@@ -33,7 +34,7 @@ for (let page = 0; page < 50; page++) {
   if (!list.has_more || !list.next_cursor) break
   cursor = list.next_cursor
 }
-const copies = documents.filter((doc) => doc.name === NAME)
+const copies = documents.filter((doc) => NAMES.has(doc.name))
 const orphans = copies.filter((doc) => !attached.has(doc.id) && !(doc.dependent_agents || []).length)
 console.log(`knowledge base: ${documents.length} documents, ${copies.length} manifest copies, ${attached.size} attached to the agent, ${orphans.length} orphaned`)
 if (!apply) {

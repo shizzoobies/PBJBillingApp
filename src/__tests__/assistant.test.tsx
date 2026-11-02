@@ -104,10 +104,8 @@ describe('capability manifest', () => {
     expect(manifest).not.toContain('**Engagements is a placeholder.**')
   })
 
-  // The voice agent's knowledge-base upload caps at ~216 KB (HANDOFF §0).
-  it('stays under the voice knowledge-base cap', () => {
-    expect(Buffer.byteLength(manifest, 'utf8')).toBeLessThan(216_000)
-  })
+  // The manifest's size cap lives in capability-manifest-size.test.ts (400,000
+  // since 2026-11-01, when the voice agent moved to retrieval).
 })
 
 describe('AssistantPanel', () => {
