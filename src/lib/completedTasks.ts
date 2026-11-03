@@ -55,6 +55,26 @@ export function checklistCompletedAt(checklist: Checklist): string | null {
 }
 
 /**
+ * Completed checklists in the order the In progress tab's "Completed" groups
+ * show them (featreq-6c7ff53b): most recently completed first, by
+ * `checklistCompletedAt`, so a task finished a minute ago is at the top. A
+ * checklist with no completion stamp (finished before the app recorded one)
+ * goes last. Ties, and the undated ones, keep the order they arrived in (the
+ * caller's due-date order) - the sort is stable. Returns a new array.
+ */
+export function sortMostRecentlyCompletedFirst<T extends Checklist>(checklists: T[]): T[] {
+  return checklists
+    .map((checklist) => ({ checklist, at: checklistCompletedAt(checklist) }))
+    .sort((a, b) => {
+      if (a.at && b.at) return a.at === b.at ? 0 : a.at < b.at ? 1 : -1
+      if (a.at) return -1
+      if (b.at) return 1
+      return 0
+    })
+    .map((entry) => entry.checklist)
+}
+
+/**
  * Whose completed tasks a viewer may see.
  *
  * Deliberately the SAME rule as the open-task badge (`openTaskAssigneeScope`):

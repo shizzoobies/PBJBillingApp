@@ -101,7 +101,7 @@ import {
   startFirstRecipeStep,
 } from '../lib/recipeFirstStep'
 import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
-import { completedTaskRows } from '../lib/completedTasks'
+import { completedTaskRows, sortMostRecentlyCompletedFirst } from '../lib/completedTasks'
 import { filterInProgressChecklists, waitingStepCount } from '../lib/inProgressFilter'
 import { overdueChecklists } from '../lib/overdueChecklists'
 import { nextStageNeverOpened as isNextStageNeverOpened, openNextStageErrorText } from '../lib/stalledCase'
@@ -1968,6 +1968,9 @@ function ChecklistInProgressSection({
       effectiveChecklistDue(a).localeCompare(effectiveChecklistDue(b)),
     )
   }
+  // Except Completed: most recently completed first (featreq-6c7ff53b), so a
+  // task finished just now is at the top; undated ones last, in due order.
+  groupedByStatus.completed = sortMostRecentlyCompletedFirst(groupedByStatus.completed)
 
   const groupConfig: Array<{ key: Group; label: string; defaultOpen: boolean }> = [
     { key: 'overdue', label: 'Overdue', defaultOpen: true },
@@ -1998,7 +2001,9 @@ function ChecklistInProgressSection({
           clientId,
           label: clientName(clients, clientId),
           open: sorted.filter((checklist) => !isDone(checklist)),
-          completed: sorted.filter(isDone),
+          // Most recently completed first (featreq-6c7ff53b), like the
+          // Due-date grouping's Completed bucket.
+          completed: sortMostRecentlyCompletedFirst(sorted.filter(isDone)),
         }
       })
       .sort((a, b) => a.label.localeCompare(b.label))

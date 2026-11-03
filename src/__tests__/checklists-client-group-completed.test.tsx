@@ -254,3 +254,43 @@ describe('In progress grouped by client: completed checklists in a nested Comple
     expect(within(completed).queryByText('Payroll filing')).toBeNull()
   })
 })
+
+/**
+ * featreq-6c7ff53b: both Completed groups on the In progress tab list the most
+ * recently completed checklist first (the latest step stamp), not by due date.
+ * The due dates here run the OPPOSITE way, so a due-date sort would fail.
+ */
+describe('Completed groups list the most recently completed first', () => {
+  const finished = (id: string, title: string, dueIn: number, completedAt?: string) =>
+    checklist({
+      id,
+      title,
+      dueDate: addDays(TODAY, dueIn),
+      items: [{ id: `${id}-step`, label: 'File', done: true, ...(completedAt ? { completedAt } : {}) }],
+    })
+  // Due order: Undated, Oldest, Middle, Newest. Completion order is the reverse
+  // (with the undated one last).
+  const UNDATED = finished('cl-undated', 'Undated filing', 0)
+  const OLDEST = finished('cl-oldest', 'Oldest filing', 1, '2026-10-01T10:00:00.000Z')
+  const MIDDLE = finished('cl-middle', 'Middle filing', 2, '2026-10-10T10:00:00.000Z')
+  const NEWEST = finished('cl-newest', 'Newest filing', 4, '2026-11-03T15:00:00.000Z')
+  const EXPECTED = ['Newest filing', 'Middle filing', 'Oldest filing', 'Undated filing']
+
+  it('grouped by client: the nested Completed sub-group', () => {
+    signIn([OPEN, UNDATED, OLDEST, MIDDLE, NEWEST])
+    renderPage()
+    const completed = completedIn(clientGroup('Shared Books LLC')) as HTMLElement
+    fireEvent.click(headerOf(completed))
+    expect(titlesIn(completed)).toEqual(EXPECTED)
+  })
+
+  it('grouped by due date: the Completed bucket (other buckets stay soonest-due first)', () => {
+    const SOON = checklist({ id: 'cl-soon', title: 'Soon open', dueDate: addDays(TODAY, 1) })
+    signIn([OPEN, SOON, UNDATED, OLDEST, MIDDLE, NEWEST])
+    renderPage('/checklists')
+    const completed = clientGroup('Completed')
+    fireEvent.click(headerOf(completed))
+    expect(titlesIn(completed)).toEqual(EXPECTED)
+    expect(titlesIn(clientGroup('Due this week'))).toEqual(['Soon open', 'Bank reconciliation'])
+  })
+})
