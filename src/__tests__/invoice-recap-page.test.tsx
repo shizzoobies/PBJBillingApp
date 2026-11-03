@@ -163,6 +163,41 @@ describe('InvoiceRecapPage', () => {
     expect(screen.getByRole('alert').textContent).toContain('No access')
   })
 
+  // featreq-ee1189fc: the lead line names the invoice date and when payment is
+  // expected. The month is set through the picker, so "today" never matters.
+  it('says October invoices are dated Oct 31 and expected by Nov 30 (the following month)', async () => {
+    mockRecap.mockResolvedValue({ period: '2026-10', rows: [] })
+    render(<InvoiceRecapPage />)
+    fireEvent.change(screen.getByLabelText('Month'), { target: { value: '2026-10' } })
+    await waitFor(() => expect(mockRecap).toHaveBeenLastCalledWith('2026-10'))
+    expect(
+      screen.getByText(
+        'Invoices dated October 31, 2026, estimated to be paid by November 30, 2026 (the following month).',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('names no single date for a month before September 2026 (dated the day each was sent)', async () => {
+    mockRecap.mockResolvedValue({ period: '2026-08', rows: [] })
+    render(<InvoiceRecapPage />)
+    fireEvent.change(screen.getByLabelText('Month'), { target: { value: '2026-08' } })
+    await waitFor(() => expect(mockRecap).toHaveBeenLastCalledWith('2026-08'))
+    expect(
+      screen.getByText('Invoices sent for August 2026, estimated to be paid within 30 days.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/Invoices dated/)).toBeNull()
+  })
+
+  it('drops "(the following month)" when the expected day is not in it (January)', async () => {
+    mockRecap.mockResolvedValue({ period: '2027-01', rows: [] })
+    render(<InvoiceRecapPage />)
+    fireEvent.change(screen.getByLabelText('Month'), { target: { value: '2027-01' } })
+    await waitFor(() => expect(mockRecap).toHaveBeenLastCalledWith('2027-01'))
+    expect(
+      screen.getByText('Invoices dated January 31, 2027, estimated to be paid by March 2, 2027.'),
+    ).toBeInTheDocument()
+  })
+
   it('asks the server for the month the arrows land on', async () => {
     mockRecap.mockResolvedValue({ period: '2026-08', rows: [] })
     render(<InvoiceRecapPage />)

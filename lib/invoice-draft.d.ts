@@ -44,6 +44,20 @@ export declare function paymentTermsLabel(
  */
 export declare const FIRM_DAY_INVOICE_DATE_FROM: string
 
+/**
+ * The firm's INTERNAL past-due day (YYYY-MM-DD) for an invoice issued on
+ * `issueDate`: `windowDays` later, or the client's own longer terms. Null for
+ * an unreadable date.
+ */
+export declare function dueDateFromTerms(
+  issueDate: string,
+  terms?: string | null,
+  windowDays?: number,
+): string | null
+
+/** Last calendar day of a "YYYY-MM" period, as YYYY-MM-DD; null when unreadable. */
+export declare function periodEndDate(period: string): string | null
+
 /** First billing month the period-end invoice date applies to. */
 export declare const PERIOD_END_INVOICE_DATE_FROM: string
 

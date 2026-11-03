@@ -8,6 +8,13 @@ import {
   getBillingPeriodLabel,
   shiftReviewPeriod,
 } from '../lib/utils'
+import { formatCoverageDate } from '../../lib/expense-coverage.js'
+import {
+  DEFAULT_PAYMENT_WINDOW_DAYS,
+  PERIOD_END_INVOICE_DATE_FROM,
+  dueDateFromTerms,
+  periodEndDate,
+} from '../../lib/invoice-draft.js'
 
 /**
  * `ownerEstimate` adds the owner's estimate ribbon above the cards; App passes it
@@ -24,6 +31,26 @@ import {
  * renders what it is handed; there is deliberately no client filter to get
  * wrong here.
  */
+
+/**
+ * The lead line (featreq-ee1189fc): when this month's invoices are dated and
+ * when payment is expected, by the same rules the invoices themselves use.
+ * From September 2026 a monthly invoice is dated the last day of its month
+ * (`invoiceDisplayDate`), so the expected day is that date plus the firm's
+ * payment window. Earlier months were dated the day each one was sent, so
+ * there is no single date to name. "(the following month)" is said only when
+ * it is true - January's 31st plus 30 days lands in March.
+ */
+function recapDatesSentence(period: string): string {
+  const end = /^\d{4}-(0[1-9]|1[0-2])$/.test(period) ? periodEndDate(period) : null
+  const paidBy = end === null ? null : dueDateFromTerms(end, null, DEFAULT_PAYMENT_WINDOW_DAYS)
+  if (period < PERIOD_END_INVOICE_DATE_FROM || end === null || paidBy === null) {
+    return `Invoices sent for ${getBillingPeriodLabel(period)}, estimated to be paid within ${DEFAULT_PAYMENT_WINDOW_DAYS} days.`
+  }
+  const nextMonth = shiftReviewPeriod('month', period, 1)
+  const following = paidBy.slice(0, 7) === nextMonth ? ' (the following month)' : ''
+  return `Invoices dated ${formatCoverageDate(end)}, estimated to be paid by ${formatCoverageDate(paidBy)}${following}.`
+}
 
 function currentMonth(): string {
   const now = new Date()
@@ -99,6 +126,7 @@ export function InvoiceRecapPage({ ownerEstimate = false }: { ownerEstimate?: bo
       {ownerEstimate ? <InvoiceEstimateRibbon period={period} /> : null}
 
       <p className="invoice-recap-hint">
+        <strong>{recapDatesSentence(period)}</strong>{' '}
         Every invoice sent for {getBillingPeriodLabel(period)} for your clients: the total
         billed, the accounting-services amount, and each client-reimbursed expense listed
         separately so you can record what each one was for.
