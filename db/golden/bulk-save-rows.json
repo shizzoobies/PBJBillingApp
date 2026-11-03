@@ -602,6 +602,7 @@
         "source_template_id": null,
         "onboarding_for_client_id": null,
         "skip_allowed": true,
+        "skip_mode": "whole",
         "period_label_enabled": true,
         "period_coverage_start": "2026-02-01",
         "period_coverage_end": "2026-02-28",
@@ -632,6 +633,7 @@
         "source_template_id": "tpl-1",
         "onboarding_for_client_id": null,
         "skip_allowed": false,
+        "skip_mode": "whole",
         "period_label_enabled": false,
         "period_coverage_start": null,
         "period_coverage_end": null,
@@ -783,6 +785,7 @@
         "pushed_from_checklist_id": "cl-origin",
         "pushed_to_checklist_id": "cl-next",
         "period_label": "February 2026",
+        "skip_notice": null,
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
         },
@@ -816,6 +819,7 @@
         "pushed_from_checklist_id": null,
         "pushed_to_checklist_id": null,
         "period_label": null,
+        "skip_notice": null,
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
         },
@@ -849,6 +853,7 @@
         "pushed_from_checklist_id": null,
         "pushed_to_checklist_id": null,
         "period_label": null,
+        "skip_notice": null,
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
         },
@@ -882,6 +887,7 @@
         "pushed_from_checklist_id": null,
         "pushed_to_checklist_id": null,
         "period_label": null,
+        "skip_notice": null,
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
         },
@@ -915,6 +921,7 @@
         "pushed_from_checklist_id": null,
         "pushed_to_checklist_id": null,
         "period_label": null,
+        "skip_notice": null,
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
         },
@@ -948,6 +955,7 @@
         "pushed_from_checklist_id": "cl-origin",
         "pushed_to_checklist_id": "cl-next",
         "period_label": null,
+        "skip_notice": null,
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
         },
@@ -1321,6 +1329,7 @@
         "source_template_id": "",
         "onboarding_for_client_id": "",
         "skip_allowed": "",
+        "skip_mode": "",
         "period_label_enabled": "",
         "period_coverage_start": "",
         "period_coverage_end": "",
@@ -1398,6 +1407,7 @@
         "pushed_from_checklist_id": "",
         "pushed_to_checklist_id": "",
         "period_label": "",
+        "skip_notice": "::jsonb",
         "created_at": "",
         "updated_at": "<now()>"
       },

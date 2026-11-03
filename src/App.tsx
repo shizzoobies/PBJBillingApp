@@ -13,6 +13,7 @@ import { settleWorkspaceSaveWaiters, type WorkspaceSaveWaiter } from './lib/work
 import { upsertChecklistById } from './lib/recipeFirstStep'
 import { AppLayout } from './components/AppLayout'
 import { NewVersionToast } from './components/NewVersionToast'
+import { StepSkipToast } from './components/StepSkipToast'
 import { StaleWorkspaceNotice } from './components/StaleWorkspaceNotice'
 import { SignInScreen } from './components/SignInScreen'
 import {
@@ -78,6 +79,7 @@ import {
   setClientLifecycleStageRequest,
   addRecurringReimbursementRequest,
   type RecurringReimbursementCoverageInput,
+  type StepSkipNextStep,
   addReimbursementRequest,
   approveWeeklySubmissionRequest,
   reopenWeeklySubmissionRequest,
@@ -331,6 +333,10 @@ function App() {
   // reads 'synced'. A server-side write started in that window (Apply a
   // package) would read without the edit and move the fingerprint under it.
   const [unsavedWorkspaceEdits, setUnsavedWorkspaceEdits] = useState(false)
+  // Skip a step (featreq-7e1827e0): what the last step skip did to the next step,
+  // said in a small notice because the skipped card has already left the list.
+  const [stepSkipOutcome, setStepSkipOutcome] = useState<StepSkipNextStep | null>(null)
+  const dismissStepSkipOutcome = useCallback(() => setStepSkipOutcome(null), [])
   // Bumped each time the live-sync ping makes this tab refetch the workspace,
   // so endpoint-managed data (pending notes) that lives OUTSIDE `data` can
   // refetch on exactly the same signal rather than on every `data` change.
@@ -1500,15 +1506,23 @@ function App() {
    */
   const skipChecklistOccurrence = useCallback(
     async (checklistId: string, input: { category: SkipReasonCategory; explanation: string }) => {
-      if (previewActiveRef.current) return
-      const { checklist } = await skipChecklistOccurrenceRequest(checklistId, input)
-      applyServerDataUpdate((current) => ({
-        ...current,
-        checklists: current.checklists.map((entry) =>
+      if (previewActiveRef.current) return null
+      const { checklist, nextStep } = await skipChecklistOccurrenceRequest(checklistId, input)
+      // Skip a step (featreq-7e1827e0): the next step the skip opened is a new row.
+      const opened = nextStep?.opened ? nextStep.checklist : null
+      applyServerDataUpdate((current) => {
+        const merged = current.checklists.map((entry) =>
           entry.id === checklist.id ? checklist : entry,
-        ),
-      }))
+        )
+        return {
+          ...current,
+          checklists:
+            opened && !merged.some((entry) => entry.id === opened.id) ? [...merged, opened] : merged,
+        }
+      })
+      if (nextStep) setStepSkipOutcome(nextStep)
       await refreshChecklistSkips()
+      return nextStep ?? null
     },
     [refreshChecklistSkips],
   )
@@ -4548,6 +4562,7 @@ function App() {
             bundle. Twice a stale tab caused real trouble (features "missing",
             and the June stale-tab bulk-save data loss) — this closes that. */}
         <NewVersionToast />
+        <StepSkipToast outcome={stepSkipOutcome} onDismiss={dismissStepSkipOutcome} />
         {/* Data-loss watchdog: the server refused this tab's save because its
             snapshot is stale. Blocking — every further save is refused too, and
             a reload is the only recovery. */}

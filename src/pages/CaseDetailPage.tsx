@@ -8,6 +8,7 @@ import { nextStageNeverOpened, stalledStageSentence } from '../lib/stalledCase'
 import { useOpenNextStage } from '../lib/useOpenNextStage'
 import { caseRemovalKey, useRemoveCase } from '../lib/useRemoveCase'
 import { caseTitleOf, rowsOfCase, stepCountLabel } from '../../lib/case-removal.js'
+import { skipNoticeLine } from '../../lib/checklist-skip.js'
 import {
   describeActivityAction,
   employeeName,
@@ -255,6 +256,13 @@ export function CaseDetailPage() {
                         ? ''
                         : ' · Awaiting previous stage'}
                   </div>
+                  {/* Skip a step (featreq-7e1827e0): this step opened because the one
+                      before it was skipped - who skipped it, and why. */}
+                  {checklist?.skipNotice ? (
+                    <div className="case-timeline-meta checklist-skip-notice">
+                      {skipNoticeLine(checklist.skipNotice)}
+                    </div>
+                  ) : null}
                   {stalledFrom ? (
                     <NeverOpenedStep
                       previous={stalledFrom}

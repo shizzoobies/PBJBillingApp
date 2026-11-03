@@ -31,6 +31,7 @@ import type {
   RecurringReimbursementCoverageInput,
   SeriesItemDeleteResponse,
   SeriesItemDeleteResult,
+  StepSkipNextStep,
 } from './lib/api'
 
 /**
@@ -529,12 +530,13 @@ export type AppContextValue = {
   /**
    * Skip this occurrence of a recurring task. Only offered when the task's
    * template has `skipAllowed` — the server refuses it otherwise. Both fields
-   * are required; an empty explanation is refused server-side.
+   * are required; an empty explanation is refused server-side. On a step skip
+   * (featreq-7e1827e0) answers what happened to the next step; otherwise null.
    */
   skipChecklistOccurrence: (
     checklistId: string,
     input: { category: SkipReasonCategory; explanation: string },
-  ) => Promise<void>
+  ) => Promise<StepSkipNextStep | null | void>
   /**
    * Push this occurrence to a new due date — the task lives on rather than
    * closing out for the cycle. Same template gate and same required reason as a

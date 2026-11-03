@@ -20,6 +20,7 @@ export declare function copiedTemplateSettings<T extends object>(
   repeatAnnually: boolean | undefined
   scheduleYear: number | undefined
   skipAllowed: boolean | undefined
+  skipMode: 'whole' | 'step'
   periodLabelEnabled: boolean | undefined
   periodCoverageStart: string | null
   periodCoverageEnd: string | null

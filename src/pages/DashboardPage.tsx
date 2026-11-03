@@ -19,7 +19,10 @@ import {
 import {
   isChecklistSkipped,
   pendingSkipReviews,
+  skipNoticeChip,
+  skipNoticeLine,
   skipReasonLabel,
+  stepSkipReviewLine,
 } from '../../lib/checklist-skip.js'
 // THE bill-rate chain the invoice is priced with, and the pin rule, so the
 // revenue estimate below says what the month run will.
@@ -460,6 +463,11 @@ function SkippedTasksReviewSection({ panel }: { panel: 'skipped' }) {
               <span className="dashboard-case-client">
                 {skip.reasonNote}
               </span>
+              {/* Skip a step (featreq-7e1827e0): which step, and who has the next one. */}
+              {(() => {
+                const line = stepSkipReviewLine({ skip, checklists: data.checklists, employees: data.employees })
+                return line ? <span className="dashboard-case-client">{line}</span> : null
+              })()}
             </div>
             <div className="dashboard-case-stage">
               {/* What actually happened, before why. A push names its date —
@@ -1065,6 +1073,12 @@ function OwnerDashboardView() {
                   </div>
                   <div className="dashboard-case-stage">
                     Step {stageIndex + 1} of {stageCount}
+                    {/* Skip a step (featreq-7e1827e0): the chip only; the note is on the card. */}
+                    {row.current.skipNotice ? (
+                      <span className="status-pill" title={skipNoticeLine(row.current.skipNotice)}>
+                        {skipNoticeChip(row.current.skipNotice)}
+                      </span>
+                    ) : null}
                   </div>
                   <div className="dashboard-case-holder">
                     {employeeName(data.employees, row.current.assigneeId)}
@@ -1575,6 +1589,12 @@ function EmployeeDashboardView() {
                   </div>
                   <div className="dashboard-case-stage">
                     Step {stageIndex + 1} of {stageCount}
+                    {/* Skip a step (featreq-7e1827e0): the chip only; the note is on the card. */}
+                    {row.current.skipNotice ? (
+                      <span className="status-pill" title={skipNoticeLine(row.current.skipNotice)}>
+                        {skipNoticeChip(row.current.skipNotice)}
+                      </span>
+                    ) : null}
                   </div>
                   <div className="dashboard-case-holder">
                     {holderIsMe

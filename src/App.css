@@ -4023,6 +4023,38 @@ td strong {
   font-size: 11px;
   font-style: italic;
 }
+/* Skip a step (featreq-7e1827e0): who skipped the step before this one, and why. */
+.checklist-skip-notice {
+  color: var(--muted);
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+.checklist-skip-notice .link-button {
+  margin-left: 6px;
+  font-style: normal;
+}
+/* The recipe's "When someone skips" choice, under "Skipping allowed". */
+.skip-mode-choice {
+  border: none;
+  margin: 0 0 8px 24px;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.skip-mode-choice-legend {
+  font-size: 0.85rem;
+  color: var(--muted);
+  padding: 0;
+}
+.skip-mode-choice-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 0.9rem;
+}
+.skip-mode-choice:disabled .skip-mode-choice-option {
+  opacity: 0.6;
+}
 /* Client name leads the card (bold + larger) for fast by-client scanning; the
    checklist title sits just beneath it. */
 .checklist-card-client {

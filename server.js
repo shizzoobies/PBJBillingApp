@@ -289,6 +289,10 @@ import {
   isChecklistSkipped,
   skipNotificationRecipients,
   skipReasonLabel,
+  buildSkipNotice,
+  isStepSkip,
+  stepNotOpenedMessage,
+  stepSkippedMessage,
   validatePushRequest,
   validateSkipRequest,
 } from './lib/checklist-skip.js'
@@ -16269,6 +16273,14 @@ const server = createServer(async (request, response) => {
         session.user.name ??
         'A team member'
 
+      // Skip a step (featreq-7e1827e0): on a recipe set to 'step', a stage with a
+      // stage after it skips only ITSELF and the next step opens for the next
+      // person. Every 'whole' recipe, and a step recipe's last stage, is the
+      // whole-cycle skip exactly as before.
+      const skipTemplate =
+        (data.checklistTemplates ?? []).find((entry) => entry.id === checklist.templateId) ?? null
+      const stepSkip = isStepSkip(skipTemplate, checklist)
+
       const skipped = await appDataStore.skipChecklistInstance(checklistId, session.user.id)
       if (!skipped) {
         sendJson(response, 409, { error: SKIP_ALREADY_SKIPPED_MESSAGE })
@@ -16294,6 +16306,111 @@ const server = createServer(async (request, response) => {
         await appDataStore.attachPendingClientNotes({ clientId: checklist.clientId })
       } catch (error) {
         console.error('[checklist-skip] pending-notes attach pass failed:', error)
+      }
+
+      // Skip a step: open the next stage NOW, carrying who skipped this one and
+      // why, and tell the next person (one notice - not also task_assigned). The
+      // skip is already saved, so a next step that cannot open is answered in words
+      // (`nextStep.opened: false`) and the OWNER is told instead of the next person.
+      let nextStep = null
+      if (stepSkip) {
+        const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
+        const stageCount = typeof checklist.stageCount === 'number' ? checklist.stageCount : 1
+        const recipeStages = Array.isArray(skipTemplate?.stages) ? skipTemplate.stages : []
+        const stageName = recipeStages[stageIndex]?.name ?? ''
+        const nextStageName = recipeStages[stageIndex + 1]?.name ?? ''
+        const skipClientName =
+          (data.clients ?? []).find((entry) => entry.id === checklist.clientId)?.name ?? ''
+        const recipeTitle = skipTemplate?.title || checklist.title
+        const caseId = checklist.caseId || checklist.id
+        let advance
+        try {
+          advance = await appDataStore.openNextStageAfterSkip(
+            checklistId,
+            buildSkipNotice({
+              checklist,
+              stageName,
+              skippedBy: session.user.id,
+              skippedByName: skipperName,
+              reasonCategory: validated.category,
+              note: validated.explanation,
+              at: skipped.skippedAt ?? new Date().toISOString(),
+              skipId: record?.id ?? null,
+            }),
+          )
+        } catch (error) {
+          console.error(
+            `[stage-advance] FAILED after skip ${checklistId} case ${caseId}: ${error?.message || error}`,
+          )
+          advance = { spawned: null, reason: 'failed' }
+        }
+        try {
+          if (advance.spawned) {
+            const spawned = advance.spawned
+            nextStep = {
+              opened: true,
+              checklist: spawned,
+              assigneeName:
+                (data.employees ?? []).find((employee) => employee.id === spawned.assigneeId)?.name ?? '',
+            }
+            await appDataStore.recordActivity(
+              session.user.id,
+              'case_advanced',
+              `${checklist.title} · case ${caseId} · stage ${stageIndex + 1} -> stage ${stageIndex + 2}`,
+            )
+            if (spawned.assigneeId && spawned.assigneeId !== session.user.id) {
+              await notify(appDataStore, spawned.assigneeId, 'checklist_step_skipped', {
+                checklistId: spawned.id,
+                caseId,
+                stageIndex: spawned.stageIndex,
+                stageCount: spawned.stageCount,
+                message: stepSkippedMessage({
+                  skipperName,
+                  stageIndex,
+                  stageCount,
+                  stageName,
+                  clientName: skipClientName,
+                  recipeTitle,
+                  reasonCategory: validated.category,
+                  note: validated.explanation,
+                }),
+                link: `/checklists?focus=${spawned.id}`,
+                appPublicUrl: getPublicAppUrl(request),
+              })
+            }
+          } else {
+            const why =
+              advance.reason === 'billing_master' && advance.message
+                ? advance.message
+                : advance.reason === 'failed'
+                  ? 'The next step could not be created (the server log has the detail).'
+                  : nextStageRefusalMessage(advance.reason, { stageIndex, nextStageName })
+            nextStep = { opened: false, reason: advance.reason, message: why }
+            // The owner, never the person who skipped (she hears it in the dialog).
+            const owners = (data.employees ?? []).filter(
+              (employee) => employee?.id && employee.role === 'Owner' && employee.id !== session.user.id,
+            )
+            for (const owner of owners) {
+              await notify(appDataStore, owner.id, 'checklist_step_skipped', {
+                checklistId,
+                caseId,
+                message: stepNotOpenedMessage({
+                  skipperName,
+                  stageIndex,
+                  stageCount,
+                  stageName,
+                  clientName: skipClientName,
+                  recipeTitle,
+                  why,
+                }),
+                link: `/cases/${caseId}`,
+                appPublicUrl: getPublicAppUrl(request),
+              })
+            }
+          }
+        } catch (err) {
+          console.error('[notify] checklist_step_skipped dispatch failed:', err?.message || err)
+        }
       }
 
       // Quiet for the person skipping; loud for the people who need to know.
@@ -16350,6 +16467,11 @@ const server = createServer(async (request, response) => {
         console.error('[checklist-skip] case_completed check failed:', err?.message || err)
       }
 
+      if (nextStep) {
+        // Skip a step: what happened to the next step, so the dialog can say it.
+        sendJson(response, 200, { checklist: skipped, skip: record, nextStep })
+        return
+      }
       sendJson(response, 200, { checklist: skipped, skip: record })
       return
     }

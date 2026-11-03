@@ -72,6 +72,92 @@ export declare function canOfferSkip(args: {
   canWrite: boolean
 }): boolean
 
+// ---- Skip a step (featreq-7e1827e0) ----
+
+export type SkipMode = 'whole' | 'step'
+
+export declare const SKIP_MODES: SkipMode[]
+
+export declare function templateSkipMode(
+  template: { skipMode?: string | null } | null | undefined,
+): SkipMode
+
+type SkipModeTemplate = { skipAllowed?: boolean; skipMode?: string | null } | null | undefined
+type StagedChecklist =
+  | { stageIndex?: number; stageCount?: number; onboardingForClientId?: string | null }
+  | null
+  | undefined
+
+export declare function isStepSkip(template: SkipModeTemplate, checklist: StagedChecklist): boolean
+export declare function isLastStepOfStepSkip(template: SkipModeTemplate, checklist: StagedChecklist): boolean
+export declare function skipButtonLabel(stepSkip: boolean): string
+export declare function stepSkipDialogLead(args: {
+  stageNumber: number
+  stageCount: number
+  stageName?: string
+  nextPersonName?: string
+}): string
+export declare const LAST_STEP_SKIP_NOTE: string
+export declare const SKIP_MODE_WHOLE_LABEL: string
+export declare const SKIP_MODE_STEP_LABEL: string
+export declare const SKIP_MODE_ONE_STEP_NOTE: string
+export declare function skipReasonThirdPerson(value: string | null | undefined): string
+
+/** What a step skip leaves on the next step (`checklists.skip_notice`). */
+export interface SkipNotice {
+  skippedBy: string | null
+  skippedByName: string | null
+  /** The SKIPPED stage's 0-based index. */
+  stageIndex: number
+  stageName: string
+  reasonCategory: string | null
+  note: string
+  at: string | null
+  /** The checklist_skips record id. */
+  skipId: string | null
+}
+
+export declare function buildSkipNotice(args: {
+  checklist: StagedChecklist
+  stageName?: string
+  skippedBy?: string | null
+  skippedByName?: string | null
+  reasonCategory?: string | null
+  note?: string
+  at?: string | null
+  skipId?: string | null
+}): SkipNotice
+export declare function skipNoticeLine(notice: Partial<SkipNotice> | null | undefined): string
+export declare function skipNoticeChip(notice: Partial<SkipNotice> | null | undefined): string
+export declare function stepSkipReviewLine(args: {
+  skip: { id?: string } | null | undefined
+  checklists?: Array<{
+    assigneeId?: string
+    stageCount?: number
+    skipNotice?: Partial<SkipNotice> | null
+  }>
+  employees?: Array<{ id?: string; name?: string }>
+}): string
+export declare function stepSkippedMessage(args: {
+  skipperName: string
+  stageIndex: number
+  stageCount: number
+  stageName?: string
+  clientName?: string
+  recipeTitle: string
+  reasonCategory: string
+  note: string
+}): string
+export declare function stepNotOpenedMessage(args: {
+  skipperName: string
+  stageIndex: number
+  stageCount: number
+  stageName?: string
+  clientName?: string
+  recipeTitle: string
+  why: string
+}): string
+
 /**
  * Every task the viewer can edit, one-offs included — NOT gated by the
  * template's `skipAllowed`. `templates` is accepted and ignored so callers that

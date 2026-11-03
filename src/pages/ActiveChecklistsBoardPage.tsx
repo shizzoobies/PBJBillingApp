@@ -14,7 +14,7 @@ import {
 import { useAppContext } from '../AppContext'
 import { inactiveClientIdSet } from '../lib/clientLifecycle'
 import { boardChecklistsFor, boardTeamMemberIds } from '../lib/checklistVisibility'
-import { isChecklistSkipped } from '../../lib/checklist-skip.js'
+import { isChecklistSkipped, skipNoticeChip, skipNoticeLine } from '../../lib/checklist-skip.js'
 import { ListSearch } from '../components/ListSearch'
 import { ReportPeriodControl } from '../components/ReportPeriodControl'
 import { reportPeriodLabel } from '../lib/reportPeriod'
@@ -901,6 +901,12 @@ function BoardClientRow({
                   <StatusChip status={statuses[index]} />
                   {teamTag ? (
                     <span className="board-chip board-chip-team">{teamTag}’s</span>
+                  ) : null}
+                  {/* Skip a step (featreq-7e1827e0): the step before this one was skipped. */}
+                  {checklist.skipNotice ? (
+                    <span className="board-chip board-chip-pending" title={skipNoticeLine(checklist.skipNotice)}>
+                      {skipNoticeChip(checklist.skipNotice)}
+                    </span>
                   ) : null}
                 </div>
                 {summary ? (

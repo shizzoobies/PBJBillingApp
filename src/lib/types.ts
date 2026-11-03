@@ -1,5 +1,6 @@
 import type { PlanCadence } from '../../lib/plan-cadence.js'
 import type { RateHistoryEntry } from '../../lib/rate-history.js'
+import type { SkipMode, SkipNotice } from '../../lib/checklist-skip.js'
 import type { QuestionnaireCustomQuestion } from '../../lib/proposal-questionnaire.js'
 import type {
   HoursByRole,
@@ -1584,6 +1585,14 @@ export type ChecklistTemplate = {
    */
   skipAllowed?: boolean
   /**
+   * Skip a step (featreq-7e1827e0): HOW a skip works when `skipAllowed` is on.
+   * 'whole' (the default, and every recipe before this) skips the whole checklist
+   * for that cycle; 'step' skips only that person's step and opens the next step
+   * for the next person, who sees who skipped and why. A one-step recipe is
+   * always a whole skip. See lib/checklist-skip.js `isStepSkip`.
+   */
+  skipMode?: SkipMode
+  /**
    * Whether instances of this template are born with a PERIOD LABEL — the
    * period the work covers, e.g. "July 2026" on a task due in August
    * (featreq-81429ad1). Off unless switched on: not every task has one.
@@ -1731,6 +1740,13 @@ export type Checklist = {
   pushedFromChecklistId?: string | null
   /** On the original: the id of the new row carrying its open work forward. */
   pushedToChecklistId?: string | null
+  /**
+   * Skip a step (featreq-7e1827e0): on a step that opened because the step before
+   * it was SKIPPED, who skipped it and why - so this card can say "Step 1 skipped by
+   * Lisa ..." without the owner-only skips list. Only POST /api/checklists/:id/skip
+   * writes it; the bulk save keeps the stored copy. Unset everywhere else.
+   */
+  skipNotice?: SkipNotice | null
 }
 
 /**

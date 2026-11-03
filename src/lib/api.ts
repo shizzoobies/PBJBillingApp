@@ -2470,8 +2470,21 @@ export async function skipChecklistOccurrence(
     const message = await safeErrorMessage(response)
     throw new ApiError(response.status, message || `Failed to skip task (${response.status})`)
   }
-  return (await response.json()) as { checklist: Checklist; skip: ChecklistSkip }
+  return (await response.json()) as {
+    checklist: Checklist
+    skip: ChecklistSkip
+    /** Skip a step (featreq-7e1827e0) only: what happened to the next step. */
+    nextStep?: StepSkipNextStep
+  }
 }
+
+/**
+ * Skip a step (featreq-7e1827e0): the next step opened (with the new checklist and
+ * the name of the person it is for), or it could not be opened and why, in words.
+ */
+export type StepSkipNextStep =
+  | { opened: true; checklist: Checklist; assigneeName: string }
+  | { opened: false; reason: string; message: string }
 
 /**
  * Push this occurrence of a recurring task to a new due date — the task stays

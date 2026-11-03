@@ -25,6 +25,7 @@ import {
 import { copiedTemplateSettings, copiedTemplateStages } from '../lib/checklist-template-copy.js'
 import { planSetUpSteps } from '../lib/checklist-link-match.js'
 import { STAGE_ADVANCE_FAILED_PHRASE } from '../lib/stage-advance-phrase.js'
+import { templateSkipMode } from '../lib/checklist-skip.js'
 import { ENGAGEMENT_LIST_LIMIT } from '../lib/engagement-list-limit.js'
 import {
   bundlingPlan,
@@ -696,6 +697,7 @@ export const BULK_INSERT_SHAPES = {
       'source_template_id',
       'onboarding_for_client_id',
       'skip_allowed',
+      'skip_mode',
       'period_label_enabled',
       'period_coverage_start',
       'period_coverage_end',
@@ -766,8 +768,12 @@ export const BULK_INSERT_SHAPES = {
       'pushed_from_checklist_id',
       'pushed_to_checklist_id',
       'period_label',
+      // Skip a step (featreq-7e1827e0): what the step before this one left when it
+      // was skipped. Endpoint-owned like the push stamps: the STORED copy is written.
+      'skip_notice',
       'created_at',
     ],
+    casts: { skip_notice: 'jsonb' },
     literals: { updated_at: 'now()' },
   },
   checklist_items: {
@@ -857,6 +863,8 @@ export function checklistTemplateBulkRows(template, preservedCreatedAt, priorSta
       : null,
     // Skipping is opt-in: anything other than an explicit true is off.
     template.skipAllowed === true,
+    // How a skip works (featreq-7e1827e0): anything but an explicit 'step' is 'whole'.
+    templateSkipMode(template),
     template.periodLabelEnabled === true,
     sanitizeCoverageDate(template.periodCoverageStart),
     sanitizeCoverageDate(template.periodCoverageEnd),
@@ -964,6 +972,9 @@ export function checklistBulkRow(checklist, priorChecklistPushStamps, preservedC
     // and a column missing here is a label that vanishes on the next autosave
     // with no error anywhere.
     sanitizePeriodLabel(checklist.periodLabel),
+    // Skip a step (featreq-7e1827e0): only the skip endpoint writes a skip notice, so
+    // the STORED one is kept and the payload's copy (present, absent or edited) is ignored.
+    storedPush?.skipNotice ? JSON.stringify(storedPush.skipNotice) : null,
     snapshotCreatedAt(preservedCreatedAt, 'checklists', checklist.id),
   ]
 }
@@ -6072,6 +6083,32 @@ const CLIENT_NOTE_MAX_CHARS = 5000
 const PENDING_NOTE_MAX_CHARS = 2000
 
 /**
+ * Skip a step (featreq-7e1827e0), added only when missing - an ALTER takes an ACCESS
+ * EXCLUSIVE lock even when it changes nothing, and both tables are bulk-saved:
+ *   - `checklist_templates.skip_mode`: 'whole' (skip the whole checklist for that
+ *     cycle, what every recipe did before) or 'step' (skip one step; the next opens).
+ *   - `checklists.skip_notice`: on the step a skip opened, who skipped the step
+ *     before it and why (lib/checklist-skip.js `buildSkipNotice`). Null everywhere else.
+ */
+export async function addSkipStepColumns(pool) {
+  const found = await pool.query(
+    `select table_name, column_name from information_schema.columns
+      where table_schema = current_schema()
+        and ((table_name = 'checklist_templates' and column_name = 'skip_mode')
+          or (table_name = 'checklists' and column_name = 'skip_notice'))`,
+  )
+  const present = new Set((found.rows ?? []).map((row) => `${row.table_name}.${row.column_name}`))
+  if (!present.has('checklist_templates.skip_mode')) {
+    await pool.query(
+      `alter table checklist_templates add column if not exists skip_mode text not null default 'whole'`,
+    )
+  }
+  if (!present.has('checklists.skip_notice')) {
+    await pool.query(`alter table checklists add column if not exists skip_notice jsonb`)
+  }
+}
+
+/**
  * `users.dashboard_layout` (lib/dashboard-layout.js), added only when missing: the
  * ALTER takes a table lock even when it changes nothing, and every request that
  * checks a session reads `users`.
@@ -7507,6 +7544,10 @@ export class AppDataStore {
       // task can never reach an overdue bucket either.
       await this.pool.query(`alter table checklists add column if not exists skipped_at timestamptz`)
       await this.pool.query(`alter table checklists add column if not exists skipped_by text`)
+
+      // Skip a step (featreq-7e1827e0): how a recipe's skip works, and what a skipped
+      // step leaves on the next one. Look-first (see `addSkipStepColumns`).
+      await addSkipStepColumns(this.pool)
 
       // The audit trail itself. Endpoint-managed (NOT part of the bulk
       // /api/app-data write) — exactly like pending_task_edits — so staff can
@@ -9789,7 +9830,7 @@ export class AppDataStore {
                    case_id, stage_id, stage_index, stage_count, category_id, deleted_at,
                    deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by,
                    skipped_at, skipped_by, cycle_due_date, pushed_at, pushed_by,
-                   pushed_from_checklist_id, pushed_to_checklist_id, period_label
+                   pushed_from_checklist_id, pushed_to_checklist_id, period_label, skip_notice
             from checklists
             order by due_date asc, id asc
           `),
@@ -9801,7 +9842,7 @@ export class AppDataStore {
           this.pool.query(`
             select id, title, client_id, assignee_id, frequency, next_due_date, active, viewer_ids, editor_ids, is_standard,
                    scheduled_months, due_day_of_month, monthly_due_days, repeat_annually, schedule_year, lead_days, category_id, source_template_id,
-                   onboarding_for_client_id, skip_allowed, period_label_enabled,
+                   onboarding_for_client_id, skip_allowed, skip_mode, period_label_enabled,
                    period_coverage_start, period_coverage_end, period_coverage_anchor_due,
                    created_at
             from checklist_templates
@@ -9962,6 +10003,9 @@ export class AppDataStore {
         // opposite rows — see `pushChecklistInstance`.
         pushedFromChecklistId: row.pushed_from_checklist_id ?? null,
         pushedToChecklistId: row.pushed_to_checklist_id ?? null,
+        // Skip a step (featreq-7e1827e0): the skip of the step before this one, on the
+        // step it opened. Absent (not null) everywhere else, like the file backend.
+        ...(row.skip_notice ? { skipNotice: row.skip_notice } : {}),
         // COSMETIC ONLY — see lib/checklist-period-label.js. Nothing may read
         // this to decide anything; it is rendered beside the title and that is
         // the whole of it.
@@ -10028,6 +10072,8 @@ export class AppDataStore {
           // Off unless an owner turned it on — a task whose template has this
           // false must not even show the skip affordance.
           skipAllowed: Boolean(row.skip_allowed),
+          // How a skip works (featreq-7e1827e0); a database from before the column reads whole.
+          skipMode: templateSkipMode({ skipMode: row.skip_mode }),
           periodLabelEnabled: Boolean(row.period_label_enabled),
           periodCoverageStart: row.period_coverage_start
             ? row.period_coverage_start.toISOString().slice(0, 10)
@@ -10860,7 +10906,7 @@ export class AppDataStore {
         const priorChecklistPushStamps = new Map(
           (
             await client.query(
-              `select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id from checklists`,
+              `select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id, skip_notice from checklists`,
             )
           ).rows.map((row) => [
             row.id,
@@ -10870,6 +10916,8 @@ export class AppDataStore {
               pushedBy: row.pushed_by ?? null,
               pushedFromChecklistId: row.pushed_from_checklist_id ?? null,
               pushedToChecklistId: row.pushed_to_checklist_id ?? null,
+              // Skip a step (featreq-7e1827e0): endpoint-owned the same way.
+              skipNotice: row.skip_notice ?? null,
             },
           ]),
         )
@@ -11576,6 +11624,8 @@ export class AppDataStore {
                 // `pushChecklistInstance` may ever set either id.
                 'pushedFromChecklistId',
                 'pushedToChecklistId',
+                // Skip a step (featreq-7e1827e0): only the skip endpoint writes it.
+                'skipNotice',
               ]) {
                 if (prior[field] == null) delete next[field]
                 else next[field] = prior[field]
@@ -23321,8 +23371,12 @@ export class AppDataStore {
    * `completedAt` (an ISO instant, store callers only - never a request body) stamps
    * every step that arrives done as completed THEN instead of now: signing records
    * the onboarding case's Proposal stage as completed at the signing instant.
+   *
+   * `skipNotice` (store callers only - the stage advance after a step skip,
+   * featreq-7e1827e0): what the skipped step before this one left. A request body's
+   * own `skipNotice` is dropped, so only the skip endpoint can ever write one.
    */
-  async createChecklist(checklist, { completedAt = null } = {}) {
+  async createChecklist(checklist, { completedAt = null, skipNotice = null } = {}) {
     await this._refuseBillingMasterWrite(checklist?.clientId, 'tasks')
     const completedStamp = completedAt ? new Date(completedAt).toISOString() : null
     const nextChecklist = {
@@ -23356,6 +23410,8 @@ export class AppDataStore {
     if (!nextChecklist.caseId) {
       nextChecklist.caseId = nextChecklist.id
     }
+    delete nextChecklist.skipNotice
+    if (skipNotice) nextChecklist.skipNotice = skipNotice
 
     if (this.pool) {
       const client = await this.pool.connect()
@@ -23364,8 +23420,8 @@ export class AppDataStore {
         await client.query('begin')
         await client.query(
           `
-            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, onboarding_for_client_id, created_by, period_label, updated_at)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())
+            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, onboarding_for_client_id, created_by, period_label, skip_notice, updated_at)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, now())
           `,
           [
             nextChecklist.id,
@@ -23385,6 +23441,7 @@ export class AppDataStore {
             nextChecklist.onboardingForClientId ?? null,
             nextChecklist.createdBy ?? null,
             sanitizePeriodLabel(nextChecklist.periodLabel),
+            nextChecklist.skipNotice ? JSON.stringify(nextChecklist.skipNotice) : null,
           ],
         )
 
@@ -23745,6 +23802,11 @@ export class AppDataStore {
    * waits (`stageOpenWorkAllWaiting`) counts as ready too. Everything after the
    * readiness check is the same path.
    *
+   * `afterSkip` (Skip a step, featreq-7e1827e0 - only `openNextStageAfterSkip`
+   * passes it): a stage that was SKIPPED counts as finished, so the next stage
+   * opens now for the next person. Every guard below still applies, and the new
+   * stage carries `skipNotice` (who skipped the step before it, and why).
+   *
    * In Postgres mode the new checklist is inserted via the existing
    * createChecklist path so activity log + persistence are consistent. Two
    * spawns racing for the same next stage (two ticks, a tick and an early open,
@@ -23754,7 +23816,7 @@ export class AppDataStore {
    * returned checklist into data and persist (since we already hold the open
    * data snapshot for that write).
    */
-  async maybeSpawnNextStage(data, checklist, { fileMode = false, allowWaiting = false } = {}) {
+  async maybeSpawnNextStage(data, checklist, { fileMode = false, allowWaiting = false, afterSkip = false, skipNotice = null } = {}) {
     // Every "did not advance" answer says why (stage advance hardening, after
     // Bright Tower 2026-10-01 and XAct 2026-10-05 stopped at stage 1 with no
     // trace). The reasons that mean "all done, yet no next stage" and are not
@@ -23768,10 +23830,12 @@ export class AppDataStore {
       }
       return heldBy ? { spawned: null, reason, heldBy } : { spawned: null, reason }
     }
-    if (!checklist || !Array.isArray(checklist.items) || checklist.items.length === 0) {
+    // A skipped stage is stepped past whatever its steps say (featreq-7e1827e0).
+    const readyAfterSkip = afterSkip && Boolean(checklist?.skippedAt)
+    if (!readyAfterSkip && (!checklist || !Array.isArray(checklist.items) || checklist.items.length === 0)) {
       return { spawned: null, reason: 'not_all_done' }
     }
-    const allDone = checklist.items.every((item) => item.done)
+    const allDone = readyAfterSkip || checklist.items.every((item) => item.done)
     // Open next step now also revives a finished stage whose next one never
     // opened (featreq-ed73d181), read through the roll-up.
     const readyEarly = allowWaiting && (stageOpenWorkAllWaiting(checklist) || stageFinished(checklist))
@@ -23821,6 +23885,14 @@ export class AppDataStore {
     const holder = nextStageInstanceHolder(data.checklists, spawn, caseId)
     if (holder) return skip('date_taken', holder.id)
 
+    const logOpenedAfterSkip = (opened) => {
+      if (readyAfterSkip) {
+        console.log(
+          `[stage-advance] opened ${opened.id} case ${caseId} stage ${stageIndex + 2}: skipped (after ${checklist.id})`,
+        )
+      }
+    }
+
     if (fileMode) {
       // Caller persists; just return the new instance. Postgres refuses a
       // checklist on a billing master inside createChecklist; the file backend
@@ -23829,14 +23901,16 @@ export class AppDataStore {
       // which is held by the caller's slot and would deadlock).
       const owner = (data.clients ?? []).find((entry) => entry?.id === spawn.clientId)
       if (owner?.isBillingMaster === true) throw billingMasterRefusal(owner.name, 'tasks')
-      return { spawned: spawn, reason: null }
+      const spawned = readyAfterSkip && skipNotice ? { ...spawn, skipNotice } : spawn
+      logOpenedAfterSkip(spawned)
+      return { spawned, reason: null }
     }
 
     // Postgres mode: insert via createChecklist so it goes through the same
     // path other instances do.
     let created
     try {
-      created = await this.createChecklist(spawn)
+      created = await this.createChecklist(spawn, readyAfterSkip && skipNotice ? { skipNotice } : {})
     } catch (error) {
       if (error?.code !== '23505') throw error
       // Another request created this next stage between our read and our insert.
@@ -23860,6 +23934,7 @@ export class AppDataStore {
         `[stage-advance] visibility grant FAILED ${created.id} client ${created.clientId}: ${error?.message || error}`,
       )
     }
+    logOpenedAfterSkip(created)
     return { spawned: created, reason: null }
   }
 
@@ -23925,6 +24000,67 @@ export class AppDataStore {
       data.checklists = sortChecklists([...data.checklists, advance.spawned])
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       return { checklist, spawned: advance.spawned }
+    })
+  }
+
+  /**
+   * Skip a step (featreq-7e1827e0): after POST /api/checklists/:id/skip stamped a
+   * stage of a 'step'-mode recipe as skipped, open the NEXT stage now for the next
+   * person, carrying `skipNotice`. Same spawn as a finished stage's tick
+   * (`maybeSpawnNextStage(..., { afterSkip: true })`), so the same assignee, due
+   * date and guards (already_spawned / later_stage_exists / date_taken / ...).
+   *
+   * Never throws for a refusal: answers `{ spawned, reason, heldBy? }`, with
+   * `spawned: null` and the reason when the next stage was not opened (the skip
+   * itself is already saved, and the route reports this in words). A billing
+   * master's refusal answers `billing_master` with its sentence as `message`.
+   */
+  async openNextStageAfterSkip(checklistId, skipNotice) {
+    const refusal = (checklist) => {
+      if (!checklist || checklist.deletedAt) return 'not_found'
+      if (!checklist.skippedAt) return 'not_skipped'
+      return null
+    }
+    const billingMaster = (error) =>
+      error instanceof BillingMasterError ? { spawned: null, reason: 'billing_master', message: error.message } : null
+    if (this.pool) {
+      const data = await this.read()
+      const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
+      const refused = refusal(checklist)
+      if (refused) return { spawned: null, reason: refused }
+      try {
+        return await this.maybeSpawnNextStage(data, checklist, { afterSkip: true, skipNotice })
+      } catch (error) {
+        const master = billingMaster(error)
+        if (master) return master
+        // A 23505 that is not this case's next stage (maybeSpawnNextStage already
+        // re-read for that): another case of the recipe holds that step on that date.
+        if (error?.code !== '23505') throw error
+        console.error(
+          `[stage-advance] after skip ${checklist.id} case ${checklist.caseId || checklist.id}: 23505 on ${error.constraint || 'unknown constraint'}`,
+        )
+        return { spawned: null, reason: 'date_taken' }
+      }
+    }
+
+    // Read, decide and write inside ONE file-queue slot, like the toggle.
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
+      const refused = refusal(checklist)
+      if (refused) return { spawned: null, reason: refused }
+      let advance
+      try {
+        advance = await this.maybeSpawnNextStage(data, checklist, { fileMode: true, afterSkip: true, skipNotice })
+      } catch (error) {
+        const master = billingMaster(error)
+        if (master) return master
+        throw error
+      }
+      if (!advance.spawned) return advance
+      data.checklists = sortChecklists([...data.checklists, advance.spawned])
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return advance
     })
   }
 

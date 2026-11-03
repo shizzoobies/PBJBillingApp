@@ -42,11 +42,19 @@ import {
   waitingToggleRefusal,
 } from '../../lib/waiting-on-state.js'
 import {
+  LAST_STEP_SKIP_NOTE,
   SKIP_REASON_CATEGORIES,
   canOfferPush,
   canOfferSkip,
+  isLastStepOfStepSkip,
+  isStepSkip,
+  skipButtonLabel,
+  stepSkipDialogLead,
+  type SkipMode,
   type SkipReasonCategory,
 } from '../../lib/checklist-skip.js'
+import { SkipModeChoice } from '../components/SkipModeChoice'
+import { SkipNoticeBanner } from '../components/SkipNoticeBanner'
 import { useAppContext, type RestoreOutcome } from '../AppContext'
 import { dismissClientPendingNoteRequest } from '../lib/api'
 import { canAddPendingClientNote } from '../../lib/checklist-write-permission.js'
@@ -2211,6 +2219,8 @@ function SkipTaskDialog({
   defaultNewDueDate,
   doneStepCount,
   openStepCount,
+  stepSkip = null,
+  lastStepOfStepSkip = false,
   onCancel,
   onConfirm,
 }: {
@@ -2227,6 +2237,13 @@ function SkipTaskDialog({
    */
   doneStepCount: number
   openStepCount: number
+  /**
+   * Skip a step (featreq-7e1827e0): set when this skip skips only this STEP of a
+   * 'step' recipe, so the dialog says the next step opens for the next person.
+   */
+  stepSkip?: { stageNumber: number; stageCount: number; stageName: string; nextPersonName: string } | null
+  /** The last step of a 'step' recipe: the skip ends the cycle, and the dialog says so. */
+  lastStepOfStepSkip?: boolean
   onCancel: () => void
   onConfirm: (input: {
     category: SkipReasonCategory
@@ -2271,7 +2288,13 @@ function SkipTaskDialog({
     <div
       className="skip-task-dialog"
       role="group"
-      aria-label={isPush ? `Push ${title} to a new date` : `Skip ${title} this cycle`}
+      aria-label={
+        isPush
+          ? `Push ${title} to a new date`
+          : stepSkip
+            ? `Skip this step of ${title}`
+            : `Skip ${title} this cycle`
+      }
     >
       <p className="skip-task-dialog-lead">
         {isPush ? (
@@ -2298,10 +2321,13 @@ function SkipTaskDialog({
               moves whole.
             </>
           )
+        ) : stepSkip ? (
+          stepSkipDialogLead(stepSkip)
         ) : (
           <>
             Skipping “{title}” for this cycle. It leaves your list now and the next occurrence still
             generates as normal.
+            {lastStepOfStepSkip ? ` ${LAST_STEP_SKIP_NOTE}` : null}
           </>
         )}
       </p>
@@ -2364,7 +2390,7 @@ function SkipTaskDialog({
               : 'Push to this date'
             : saving
               ? 'Skipping…'
-              : 'Skip this cycle'}
+              : skipButtonLabel(Boolean(stepSkip))}
         </button>
         <button type="button" className="link-button" onClick={onCancel} disabled={saving}>
           Cancel
@@ -2861,6 +2887,22 @@ export function ChecklistCard({
     contextData.checklistTemplates.find((entry) => entry.id === checklist.templateId)?.stages?.[
       stageIndex + 1
     ]?.name ?? ''
+  // Skip a step (featreq-7e1827e0): on a recipe set to 'step', skipping a stage
+  // with a stage after it skips only this step - the next one opens for the next
+  // person. The recipe's last step still ends the cycle, and the dialog says so.
+  const skipRecipe = contextData.checklistTemplates.find((entry) => entry.id === checklist.templateId)
+  const stepSkip = isStepSkip(skipRecipe, checklist)
+  const nextStageAssigneeId = skipRecipe?.stages?.[stageIndex + 1]?.assigneeId
+  const stepSkipDialog = stepSkip
+    ? {
+        stageNumber,
+        stageCount,
+        stageName: skipRecipe?.stages?.[stageIndex]?.name ?? stageName ?? '',
+        // The next stage's own person, as the spawn assigns it (a stage with none
+        // reads "the next person").
+        nextPersonName: nextStageAssigneeId ? employeeName(employees, nextStageAssigneeId) : '',
+      }
+    : null
   const caseKey = checklist.caseId || checklist.id
   const nextStageAlreadyOpen = contextData.checklists.some(
     (entry) => (entry.caseId || entry.id) === caseKey && entry.stageIndex === stageIndex + 1,
@@ -3082,6 +3124,9 @@ export function ChecklistCard({
           {metaPendingNote ? (
             <span className="checklist-meta-line pending-edit-note">{metaPendingNote}</span>
           ) : null}
+          {/* Skip a step (featreq-7e1827e0): the step before this one was skipped.
+              Who and why, so the next person never has to ask. */}
+          <SkipNoticeBanner notice={checklist.skipNotice} />
         </div>
         <div className="checklist-meta">
           {handedOff ? <span className="status-pill">Handed off</span> : null}
@@ -3124,9 +3169,13 @@ export function ChecklistCard({
               type="button"
               className="secondary-action"
               onClick={() => setSkipOpen('skip')}
-              title="Not doing this one this cycle? Skip it — the next occurrence still generates."
+              title={
+                stepSkip
+                  ? 'Skip only your step this cycle - the next step opens for the next person, who sees who skipped and why.'
+                  : 'Not doing this one this cycle? Skip it — the next occurrence still generates.'
+              }
             >
-              Skip this cycle
+              {skipButtonLabel(stepSkip)}
             </button>
           ) : null}
           {canPush ? (
@@ -3210,6 +3259,8 @@ export function ChecklistCard({
           defaultNewDueDate={pushDefaultDueDate}
           doneStepCount={doneStepCount}
           openStepCount={checklist.items.length - doneStepCount}
+          stepSkip={skipOpen === 'skip' ? stepSkipDialog : null}
+          lastStepOfStepSkip={skipOpen === 'skip' && isLastStepOfStepSkip(skipRecipe, checklist)}
           onCancel={() => setSkipOpen(null)}
           onConfirm={async ({ category, explanation, newDueDate }) => {
             if (skipOpen === 'push') {
@@ -5462,6 +5513,8 @@ export function NewTaskForm({
   // Quiet skip: OFF by default, deliberately. Skipping is an exception the owner
   // grants per recipe, not a capability every recurring task carries.
   const [skipAllowed, setSkipAllowed] = useState(false)
+  // How a skip works (featreq-7e1827e0); 'whole' unless the owner picks 'step'.
+  const [skipMode, setSkipMode] = useState<SkipMode>('whole')
   const [periodLabelEnabled, setPeriodLabelEnabled] = useState(false)
   const [periodCoverageStart, setPeriodCoverageStart] = useState('')
   const [periodCoverageEnd, setPeriodCoverageEnd] = useState('')
@@ -5583,6 +5636,8 @@ export function NewTaskForm({
         editorIds: [],
         categoryId: categoryId || null,
         skipAllowed,
+        // A one-step recipe always skips whole; the choice only means something with more.
+        skipMode: skipAllowed && extraStages.length > 0 ? skipMode : 'whole',
         periodLabelEnabled,
         // The first covered window, anchored to the occurrence that carries it —
         // this recipe's first due date, and for specific-months the first
@@ -5857,6 +5912,14 @@ export function NewTaskForm({
             Allow skipping an occurrence (with a reason) when it will be caught next cycle.
           </span>
         </label>
+      ) : null}
+      {mode === 'repeating' && skipAllowed ? (
+        <SkipModeChoice
+          name="new-recipe-skip-mode"
+          skipMode={skipMode}
+          stageCount={1 + extraStages.length}
+          onChange={setSkipMode}
+        />
       ) : null}
 
       {mode === 'repeating' ? (
@@ -6675,6 +6738,16 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
           />
           <span>Skipping allowed</span>
         </label>
+        {template.skipAllowed === true ? (
+          <SkipModeChoice
+            name={`skip-mode-${template.id}`}
+            skipMode={template.skipMode}
+            stageCount={Math.max(1, template.stages?.length ?? 0)}
+            onChange={(skipMode) =>
+              props.onUpdateTemplate(template.id, (current) => ({ ...current, skipMode }))
+            }
+          />
+        ) : null}
         {/* The period label. Set on the RECIPE like skipping is, never per
             instance: every occurrence this template makes from now on is born
             with the period it covers, and the next one springs forward on its
