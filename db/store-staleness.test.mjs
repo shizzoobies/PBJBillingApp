@@ -12,6 +12,7 @@ import {
   addDashboardLayoutColumn,
   addQuestionnaireCustomQuestionsColumn,
   addSkipStepColumns,
+  addChecklistSkipStepColumn,
   BULK_SAVE_LOCK_SQL,
   BULK_SAVE_LOCK_TABLES,
   BULK_SAVE_LOCK_TIMEOUTS,
@@ -59402,6 +59403,7 @@ describe('skip a step, round 1 (file backend)', () => {
       skippedByName: 'Lisa Mockabee',
       reasonCategory: 'client',
       reasonNote: 'No email yet.',
+      stepSkip: true,
     })
     // A push filed later against the same row is not the skip.
     await store.createChecklistSkip({
@@ -59428,8 +59430,11 @@ describe('skip a step, round 1 (file backend)', () => {
       skipId: record.id,
     })
     expect((await persisted()).checklists.filter((entry) => entry.stageIndex === 1)).toHaveLength(1)
-    // Once open, a second press is the ordinary refusal.
-    expect((await refusal(store.openNextStageEarly('cl-s0', BRITTANY))).reason).toBe('already_spawned')
+    // Once open, a second press (a stale page) opens nothing new: it answers the
+    // open step, already carrying the notice (round 2).
+    const again = await store.openNextStageEarly('cl-s0', BRITTANY)
+    expect(again).toMatchObject({ spawned: null, afterSkip: true, existing: { id: result.spawned.id } })
+    expect((await persisted()).checklists.filter((entry) => entry.stageIndex === 1)).toHaveLength(1)
   })
 
   it('a skip on a WHOLE recipe still refuses Open next step now: that cycle ended on purpose', async () => {
@@ -59439,6 +59444,7 @@ describe('skip a step, round 1 (file backend)', () => {
 
   it('the refusal on a skipped step keeps the stage-advance reason (a slot another case holds)', async () => {
     await seed([stageRow(0, SKIPPED), stageRow(1, { id: 'cl-other', caseId: 'case-other' })])
+    await store.createChecklistSkip({ checklistId: 'cl-s0', title: 'Check email', reasonCategory: 'me', reasonNote: 'Out.', stepSkip: true })
     const error = await refusal(store.openNextStageEarly('cl-s0', BRITTANY))
     expect(error).toBeInstanceOf(NextStageRefusedError)
     expect(error.reason).toBe('date_taken')
@@ -59488,11 +59494,16 @@ describe('skip a step, round 1 (postgres branch)', () => {
   }
   const nextStage = { ...skippedStage, id: 'cl-s1', assigneeId: 'emp-2', stageIndex: 1, skippedAt: null, skippedBy: null }
   const skipNotice = { skippedByName: 'Lisa', stageIndex: 0, note: 'Out', skipId: 'skip-1' }
-  const UPDATE =
-    /^update checklists set skip_notice = \$2::jsonb, updated_at = now\(\)\s+where id = \$1 and deleted_at is null\s+and \(skip_notice is null or skip_notice->>'skipId' is distinct from \$3\)$/i
 
   it('stamps an already-open next step with ONE guarded update', async () => {
     const fake = fakePostgres()
+    // The update answers the row it stamped (round 2 RETURNING; the full text is pinned there).
+    const query = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      if (!/^update checklists set skip_notice/i.test(String(text).trim())) return query(text, params)
+      fake.statements.push({ text: String(text).trim(), params })
+      return { rows: [{ id: 'cl-s1', skip_notice: skipNotice }], rowCount: 1 }
+    }
     const pg = postgresStore(fake)
     pg.read = async () => ({ checklists: [skippedStage, nextStage], checklistTemplates: [template], clients: [{ id: 'c1' }] })
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
@@ -59501,8 +59512,7 @@ describe('skip a step, round 1 (postgres branch)', () => {
       expect(result).toMatchObject({ spawned: null, reason: 'already_spawned', existing: { id: 'cl-s1', skipNotice } })
       const updates = fake.matching(/^update checklists set skip_notice/i)
       expect(updates).toHaveLength(1)
-      expect(updates[0].text.replace(/\s+/g, ' ')).toMatch(UPDATE)
-      expect(updates[0].params).toEqual(['cl-s1', JSON.stringify(skipNotice), 'skip-1'])
+      expect(updates[0].params.slice(0, 3)).toEqual(['cl-s1', JSON.stringify(skipNotice), 'skip-1'])
       expect(fake.matching(/^insert into checklists \(/i)).toHaveLength(0)
 
       // Already carrying this skip's notice: no statement at all.
@@ -59537,6 +59547,7 @@ describe('skip a step, round 1 (postgres branch)', () => {
               reason_category: 'client',
               reason_note: 'No email yet.',
               kind: 'skip',
+              step_skip: true,
             },
           ],
         }
@@ -59566,5 +59577,366 @@ describe('skip a step, round 1 (postgres branch)', () => {
     } finally {
       logSpy.mockRestore()
     }
+  })
+})
+
+/**
+ * Skip a step, review round 2 (featreq-7e1827e0):
+ *   1. the mode is recorded AT SKIP TIME (`checklist_skips.step_skip`): an old
+ *      whole-cycle skip never becomes an unopened step when the recipe is switched;
+ *   2. case ids shared across clients: the already-open stamp and the spawn guards
+ *      stay inside the skipping client's case;
+ *   3. a split push keeps the open work's skip notice.
+ *
+ * NEW / CHANGED SQL, flagged for the rolled-back production validation:
+ *   - select 1 from information_schema.columns where ... table_name = 'checklist_skips' and column_name = 'step_skip'
+ *   - alter table checklist_skips add column if not exists step_skip boolean not null default false
+ *   - insert into checklist_skips (..., kind, new_due_date, step_skip) values (..., $10, $11, $12)
+ *   - the skips selects and the review RETURNING gain step_skip
+ *   - select checklist_id from checklist_skips where step_skip = true and kind = 'skip'  (readWithVersion)
+ *   - update checklists set skip_notice = $2::jsonb, updated_at = now()
+ *       where id = $1 and deleted_at is null and client_id = $4 and case_id = $5 and stage_index = $6
+ *         and skipped_at is null and pushed_to_checklist_id is null
+ *         and (skip_notice is null or skip_notice->>'skipId' is distinct from $3)
+ *       returning id, skip_notice
+ *   - the split push's lock select gains skip_notice; its insert gains skip_notice ($22::jsonb)
+ */
+describe('skip a step, round 2 (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const LISA = 'emp-a41095f0'
+  const ALLISON = 'emp-41def8a0'
+  const recipe = (over = {}) => ({
+    id: 'tmpl-email',
+    title: 'Check email',
+    clientId: 'c1',
+    assigneeId: LISA,
+    frequency: 'monthly',
+    nextDueDate: '2099-10-31',
+    active: true,
+    skipAllowed: true,
+    skipMode: 'step',
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      { id: 'st-0', name: 'Clear', assigneeId: LISA, offsetDays: 0, items: [{ id: 'ti-0', label: 'Clear' }] },
+      { id: 'st-1', name: 'Review', assigneeId: ALLISON, offsetDays: 0, items: [{ id: 'ti-1', label: 'Review' }] },
+      { id: 'st-2', name: 'Sign off', assigneeId: LISA, offsetDays: 0, items: [{ id: 'ti-2', label: 'Sign off' }] },
+    ],
+    ...over,
+  })
+  const stageRow = (stageIndex, over = {}) => ({
+    id: `cl-s${stageIndex}`,
+    title: 'Check email',
+    clientId: 'c1',
+    assigneeId: stageIndex === 1 ? ALLISON : LISA,
+    templateId: 'tmpl-email',
+    dueDate: '2026-10-31',
+    caseId: 'case-mail',
+    stageId: `st-${stageIndex}`,
+    stageIndex,
+    stageCount: 3,
+    viewerIds: [],
+    editorIds: [],
+    items: [{ id: `item-s${stageIndex}`, label: 'Work', done: false }],
+    ...over,
+  })
+  const notice = (over = {}) => ({
+    skippedBy: LISA,
+    skippedByName: 'Lisa',
+    stageIndex: 0,
+    stageName: 'Clear',
+    reasonCategory: 'me',
+    note: 'Out sick.',
+    at: '2026-10-30T15:00:00.000Z',
+    skipId: 'skip-1',
+    ...over,
+  })
+  const SKIPPED = { skippedAt: '2026-10-30T15:00:00.000Z', skippedBy: LISA }
+  const seed = async (checklists, templates = [recipe()], clients = [{ id: 'c1', name: 'Acme' }, { id: 'c2', name: 'Other' }]) => {
+    await store.write(workspace({ clients, checklistTemplates: templates }))
+    const data = await persisted()
+    data.checklists = checklists
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const fileSkip = (over = {}) =>
+    store.createChecklistSkip({
+      checklistId: 'cl-s0',
+      templateId: 'tmpl-email',
+      clientId: 'c1',
+      title: 'Check email',
+      skippedBy: LISA,
+      skippedByName: 'Lisa',
+      reasonCategory: 'me',
+      reasonNote: 'Out sick.',
+      ...over,
+    })
+  const refusal = (promise) =>
+    promise.then(
+      () => {
+        throw new Error('expected a refusal')
+      },
+      (error) => error,
+    )
+
+  let logSpy
+  beforeEach(async () => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    authState.checklistSkips = []
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  })
+  afterEach(() => {
+    logSpy.mockRestore()
+  })
+
+  it('the skip record keeps the mode: false by default, true only for an explicit step skip, never for a push', async () => {
+    const whole = await fileSkip()
+    const step = await fileSkip({ stepSkip: true })
+    const push = await fileSkip({ kind: 'push', newDueDate: '2026-11-30', stepSkip: true })
+    expect([whole.stepSkip, step.stepSkip, push.stepSkip]).toEqual([false, true, false])
+    const listed = await store.listChecklistSkips()
+    expect(listed.find((entry) => entry.id === step.id).stepSkip).toBe(true)
+    expect(listed.find((entry) => entry.id === whole.id).stepSkip).toBe(false)
+    expect((await store.latestChecklistSkipFor('cl-s0')).kind).toBe('skip')
+  })
+
+  it('an OLD whole-cycle skip is still the end of its cycle after the recipe is switched to step', async () => {
+    await seed([stageRow(0, SKIPPED)])
+    await fileSkip()
+    expect((await refusal(store.openNextStageEarly('cl-s0', 'emp-owner'))).reason).toBe('skipped')
+    expect((await persisted()).checklists.filter((entry) => entry.stageIndex === 1)).toHaveLength(0)
+    // The workspace never marks it either.
+    const { data } = await store.readWithVersion()
+    expect(data.checklists.find((entry) => entry.id === 'cl-s0').stepSkipped).toBeUndefined()
+  })
+
+  it('a step skip opens through Open next step now even after the recipe went back to whole', async () => {
+    await seed([stageRow(0, SKIPPED)], [recipe({ skipMode: 'whole' })])
+    await fileSkip({ stepSkip: true })
+    const result = await store.openNextStageEarly('cl-s0', 'emp-owner')
+    expect(result.spawned).toMatchObject({ stageIndex: 1, assigneeId: ALLISON })
+  })
+
+  it('the workspace load marks a step-skipped row, without moving the version, and a save drops the mark', async () => {
+    await seed([stageRow(0, SKIPPED), stageRow(2, { id: 'cl-other', caseId: 'case-x', ...SKIPPED })])
+    await fileSkip({ stepSkip: true })
+    await fileSkip({ checklistId: 'cl-other' })
+    const { data, version } = await store.readWithVersion()
+    expect(data.checklists.find((entry) => entry.id === 'cl-s0').stepSkipped).toBe(true)
+    expect(data.checklists.find((entry) => entry.id === 'cl-other').stepSkipped).toBeUndefined()
+    // Derived AFTER the version is taken: with the records gone, the version is the same.
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    authState.checklistSkips = []
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    expect((await store.readWithVersion()).version).toBe(version)
+    // The owner's tab round-trips it: never stored.
+    await store.write(data)
+    expect('stepSkipped' in (await persisted()).checklists.find((entry) => entry.id === 'cl-s0')).toBe(false)
+  })
+
+  it('another client with the SAME case id is never stamped, and does not block the spawn', async () => {
+    await seed([
+      stageRow(0, SKIPPED),
+      // The 2026-08-14 import: another client's step 2 under the same case id.
+      stageRow(1, { id: 'cl-c2', clientId: 'c2', templateId: 'tmpl-c2' }),
+    ])
+    const result = await store.openNextStageAfterSkip('cl-s0', notice())
+    expect(result.spawned).toMatchObject({ clientId: 'c1', stageIndex: 1, skipNotice: notice() })
+    const other = (await persisted()).checklists.find((entry) => entry.id === 'cl-c2')
+    expect(other.skipNotice).toBeUndefined()
+  })
+
+  it('a same-client next row of ANOTHER recipe is not this case\'s next step: not stamped', async () => {
+    await seed([stageRow(0, SKIPPED), stageRow(1, { id: 'cl-other-recipe', templateId: 'tmpl-other' })])
+    const result = await store.openNextStageAfterSkip('cl-s0', notice())
+    // The guard still sees a stage 2 in this case (its own rule), but nothing is stamped.
+    expect(result).toEqual({ spawned: null, reason: 'already_spawned' })
+    expect((await persisted()).checklists.find((entry) => entry.id === 'cl-other-recipe').skipNotice).toBeUndefined()
+  })
+
+  it('Open next step now on a stale page whose next step is already open: success, with the stamped row', async () => {
+    await seed([stageRow(0, SKIPPED), stageRow(1)])
+    const record = await fileSkip({ stepSkip: true })
+    const result = await store.openNextStageEarly('cl-s0', 'emp-owner')
+    expect(result).toMatchObject({ spawned: null, afterSkip: true, existing: { id: 'cl-s1' } })
+    expect(result.existing.skipNotice.skipId).toBe(record.id)
+  })
+
+  it('a split push of the step carrying the notice keeps it on the open work', async () => {
+    await seed([
+      stageRow(1, {
+        skipNotice: notice(),
+        items: [
+          { id: 'i-done', label: 'Done', done: true },
+          { id: 'i-open', label: 'Open', done: false },
+        ],
+      }),
+    ])
+    const { checklist, completed } = await store.pushChecklistInstance('cl-s1', ALLISON, '2026-11-15')
+    expect(completed.id).toBe('cl-s1')
+    expect(checklist.id).not.toBe('cl-s1')
+    expect((await persisted()).checklists.find((entry) => entry.id === checklist.id).skipNotice).toEqual(notice())
+  })
+})
+
+describe('skip a step, round 2 (postgres branch)', () => {
+  it('adds checklist_skips.step_skip look-first, after the skips table exists', async () => {
+    const run = async (present) => {
+      const statements = []
+      await addChecklistSkipStepColumn({
+        async query(text) {
+          statements.push(String(text).trim())
+          if (/information_schema/i.test(text)) return { rows: present ? [{ '?column?': 1 }] : [] }
+          return { rows: [] }
+        },
+      })
+      return statements
+    }
+    const alter = /^alter table checklist_skips add column if not exists step_skip boolean not null default false$/i
+    expect((await run(false)).some((text) => alter.test(text))).toBe(true)
+    expect(await run(true)).toHaveLength(1)
+
+    const fake = fakePostgres()
+    await postgresStore(fake).initialize().catch(() => {})
+    expect(fake.matching(alter)).toHaveLength(1)
+    expect(fake.indexOf(/column_name = 'step_skip'/i)).toBeGreaterThan(fake.indexOf(/create table if not exists checklist_skips/i))
+  })
+
+  it('writes and reads step_skip on the skip record', async () => {
+    const fake = fakePostgres()
+    const pg = postgresStore(fake)
+    const record = await pg.createChecklistSkip({
+      checklistId: 'cl-1',
+      title: 'Check email',
+      reasonCategory: 'me',
+      reasonNote: 'Out.',
+      stepSkip: true,
+    })
+    expect(record.stepSkip).toBe(true)
+    const [insert] = fake.matching(/insert into checklist_skips/i)
+    expect(insert.text.replace(/\s+/g, ' ')).toMatch(/kind, new_due_date, step_skip\) values \(.*\$11, \$12\)/i)
+    expect(insert.params[11]).toBe(true)
+    await pg.listChecklistSkips()
+    expect(fake.matching(/from checklist_skips order by skipped_at desc/i)[0].text).toMatch(/new_due_date, step_skip,/i)
+  })
+
+  it('readWithVersion marks step-skipped rows from one small select', async () => {
+    const fake = fakePostgres()
+    const query = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      if (/^select checklist_id from checklist_skips where step_skip = true and kind = 'skip'$/i.test(String(text).trim())) {
+        fake.statements.push({ text: String(text).trim(), params })
+        return { rows: [{ checklist_id: 'cl-s0' }] }
+      }
+      return query(text, params)
+    }
+    const pg = postgresStore(fake)
+    pg._readWorkspace = async () => ({
+      data: { checklists: [{ id: 'cl-s0', skippedAt: '2026-10-30T15:00:00.000Z' }, { id: 'cl-1' }] },
+      version: 'v1',
+    })
+    pg._withClientRateAgreements = async (data) => data
+    const { data, version } = await pg.readWithVersion()
+    expect(version).toBe('v1')
+    expect(data.checklists[0].stepSkipped).toBe(true)
+    expect('stepSkipped' in data.checklists[1]).toBe(false)
+  })
+
+  it('the already-open stamp: the tightened, client-scoped update, and what landed is what is reported', async () => {
+    const template = {
+      id: 'tmpl-email',
+      title: 'Check email',
+      clientId: 'c1',
+      skipAllowed: true,
+      skipMode: 'step',
+      stages: [
+        { id: 'st-0', name: 'Clear', assigneeId: 'emp-1', offsetDays: 0, items: [{ id: 'ti-0', label: 'Clear' }] },
+        { id: 'st-1', name: 'Review', assigneeId: 'emp-2', offsetDays: 0, items: [{ id: 'ti-1', label: 'Review' }] },
+      ],
+    }
+    const skippedStage = {
+      id: 'cl-s0',
+      title: 'Check email',
+      clientId: 'c1',
+      templateId: 'tmpl-email',
+      dueDate: '2026-10-31',
+      caseId: 'case-mail',
+      stageIndex: 0,
+      stageCount: 2,
+      skippedAt: '2026-10-30T15:00:00.000Z',
+      items: [],
+    }
+    const nextStage = { ...skippedStage, id: 'cl-s1', stageIndex: 1, assigneeId: 'emp-2', skippedAt: null }
+    const skipNotice = { skippedByName: 'Lisa', stageIndex: 0, note: 'Out', skipId: 'skip-1' }
+    const stub = (rows) => {
+      const fake = fakePostgres()
+      const query = fake.pool.query.bind(fake.pool)
+      fake.pool.query = async (text, params) => {
+        if (/^update checklists set skip_notice/i.test(String(text).trim())) {
+          fake.statements.push({ text: String(text).trim(), params })
+          return { rows, rowCount: rows.length }
+        }
+        return query(text, params)
+      }
+      const pg = postgresStore(fake)
+      pg.read = async () => ({ checklists: [skippedStage, nextStage], checklistTemplates: [template], clients: [{ id: 'c1' }] })
+      return { fake, pg }
+    }
+    const landed = stub([{ id: 'cl-s1', skip_notice: skipNotice }])
+    const result = await landed.pg.openNextStageAfterSkip('cl-s0', skipNotice)
+    expect(result.existing).toMatchObject({ id: 'cl-s1', skipNotice })
+    const [update] = landed.fake.matching(/^update checklists set skip_notice/i)
+    expect(update.text.replace(/\s+/g, ' ')).toBe(
+      "update checklists set skip_notice = $2::jsonb, updated_at = now() where id = $1 and deleted_at is null and client_id = $4 and case_id = $5 and stage_index = $6 and skipped_at is null and pushed_to_checklist_id is null and (skip_notice is null or skip_notice->>'skipId' is distinct from $3) returning id, skip_notice",
+    )
+    expect(update.params).toEqual(['cl-s1', JSON.stringify(skipNotice), 'skip-1', 'c1', 'case-mail', 1])
+
+    // Nothing landed (the row moved on between the read and the update): not
+    // stamped, so nobody is told.
+    const missed = stub([])
+    expect(await missed.pg.openNextStageAfterSkip('cl-s0', skipNotice)).toEqual({
+      spawned: null,
+      reason: 'already_spawned',
+    })
+  })
+
+  it('a split push carries skip_notice from the lock select into the new row', async () => {
+    const notice = { skippedByName: 'Lisa', stageIndex: 0, note: 'Out', skipId: 'skip-1' }
+    const fake = fakePostgres({
+      pushChecklistRows: [
+        {
+          id: 'cl-mixed',
+          title: 'Check email',
+          client_id: 'c1',
+          assignee_id: 'emp-2',
+          template_id: 'tmpl-email',
+          frequency: 'monthly',
+          due_date: '2026-10-31',
+          viewer_ids: [],
+          editor_ids: [],
+          case_id: 'case-mail',
+          stage_id: 'st-1',
+          stage_index: 1,
+          stage_count: 2,
+          category_id: null,
+          cycle_due_date: null,
+          identity_date: '2026-10-31',
+          pushed_to_checklist_id: null,
+          period_label: null,
+          skip_notice: notice,
+          onboarding_for_client_id: null,
+          created_by: null,
+        },
+      ],
+      pushItemRows: [
+        { id: 'item-done', checklist_id: 'cl-mixed', label: 'Done', done: true, sort_order: 0 },
+        { id: 'item-open', checklist_id: 'cl-mixed', label: 'Open', done: false, sort_order: 1 },
+      ],
+    })
+    await postgresStore(fake).pushChecklistInstance('cl-mixed', 'emp-2', '2026-11-15')
+    const [lock] = fake.matching(/^select id, client_id, title, assignee_id[\s\S]*for update$/i)
+    expect(lock.text).toMatch(/period_label, skip_notice,/i)
+    const [inserted] = insertedRows(fake.statements, 'checklists')
+    expect(JSON.parse(inserted.skip_notice)).toEqual(notice)
   })
 })

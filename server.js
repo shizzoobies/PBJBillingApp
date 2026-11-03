@@ -16296,7 +16296,11 @@ const server = createServer(async (request, response) => {
         skippedByName: skipperName,
         reasonCategory: validated.category,
         reasonNote: validated.explanation,
+        // Skip a step: the mode AT SKIP TIME - the recipe's setting can change later.
+        stepSkip,
       })
+      // The case page reads it off the row (`_withStepSkipMarks` on the next load).
+      if (stepSkip) skipped.stepSkipped = true
 
       await appDataStore.recordActivity(session.user.id, 'checklist_skipped', checklist.title)
 
@@ -16411,6 +16415,14 @@ const server = createServer(async (request, response) => {
                 link: `/checklists?focus=${existing.id}`,
                 appPublicUrl: getPublicAppUrl(request),
               })
+            }
+          } else if (advance.reason === 'already_spawned') {
+            // The next step exists but is not a live one to tell (it was skipped
+            // too, or it moved on): nothing failed, so the owner is not told.
+            nextStep = {
+              opened: false,
+              reason: advance.reason,
+              message: `Step ${stageIndex + 2} already exists for this case, so no new step was opened.`,
             }
           } else {
             const why =
@@ -16964,6 +16976,40 @@ const server = createServer(async (request, response) => {
       // Skip a step (featreq-7e1827e0): a skipped step whose next step had not
       // opened; the store opened it with the skip's notice.
       const afterSkip = result.afterSkip === true
+      const skipClientName = (data.clients ?? []).find((entry) => entry.id === from.clientId)?.name ?? ''
+      // ...or that next step turned out to be open already (this page was out of
+      // date): it now carries the notice, so its person is told - nothing opened.
+      if (afterSkip && !spawned && result.existing) {
+        const existing = result.existing
+        const notice = existing.skipNotice ?? {}
+        if (
+          existing.assigneeId &&
+          existing.assigneeId !== session.user.id &&
+          existing.assigneeId !== notice.skippedBy
+        ) {
+          await notify(appDataStore, existing.assigneeId, 'checklist_step_skipped', {
+            checklistId: existing.id,
+            caseId,
+            stageIndex: existing.stageIndex,
+            stageCount: existing.stageCount,
+            message: stepSkippedMessage({
+              skipperName: notice.skippedByName || 'A team member',
+              stageIndex,
+              stageCount: existing.stageCount ?? from.stageCount ?? stageIndex + 2,
+              stageName: notice.stageName,
+              clientName: skipClientName,
+              recipeTitle: template?.title || from.title,
+              reasonCategory: notice.reasonCategory,
+              note: notice.note,
+              alreadyOpen: true,
+            }),
+            link: `/checklists?focus=${existing.id}`,
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        }
+        sendJson(response, 200, { checklist: from, spawned: existing, alreadyOpen: true })
+        return
+      }
       await appDataStore.recordActivity(
         session.user.id,
         'case_advanced_early',
@@ -16971,9 +17017,10 @@ const server = createServer(async (request, response) => {
       )
       const nextAssigneeId = spawned?.assigneeId
       if (afterSkip && spawned?.skipNotice) {
-        // Told as a step skip tells them: who skipped and why, one notice.
-        if (nextAssigneeId && nextAssigneeId !== session.user.id) {
-          const notice = spawned.skipNotice
+        // Told as a step skip tells them: who skipped and why, one notice - but
+        // never to the person who did the skipping, or who pressed the button.
+        const notice = spawned.skipNotice
+        if (nextAssigneeId && nextAssigneeId !== session.user.id && nextAssigneeId !== notice.skippedBy) {
           await notify(appDataStore, nextAssigneeId, 'checklist_step_skipped', {
             checklistId: spawned.id,
             caseId,
@@ -16984,7 +17031,7 @@ const server = createServer(async (request, response) => {
               stageIndex,
               stageCount: spawned.stageCount ?? from.stageCount ?? stageIndex + 2,
               stageName: notice.stageName,
-              clientName: (data.clients ?? []).find((entry) => entry.id === from.clientId)?.name ?? '',
+              clientName: skipClientName,
               recipeTitle: template?.title || from.title,
               reasonCategory: notice.reasonCategory,
               note: notice.note,

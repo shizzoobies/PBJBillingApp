@@ -1747,6 +1747,12 @@ export type Checklist = {
    * writes it; the bulk save keeps the stored copy. Unset everywhere else.
    */
   skipNotice?: SkipNotice | null
+  /**
+   * Skip a step (featreq-7e1827e0): on a SKIPPED row, true when its skip record says
+   * it was a step skip (decided at skip time). Derived by the server on each
+   * workspace load from the skips table - never stored on the row.
+   */
+  stepSkipped?: boolean
 }
 
 /**
@@ -1784,6 +1790,12 @@ export type ChecklistSkip = {
   kind: 'skip' | 'push'
   /** The date a push moved the task to. Null on a skip. */
   newDueDate?: string | null
+  /**
+   * Skip a step (featreq-7e1827e0): this skip skipped ONE step of a 'step' recipe
+   * (the next step opened, or was meant to). Decided at skip time; false on every
+   * whole-cycle skip, every push and every record from before.
+   */
+  stepSkip?: boolean
   reviewedBy: string | null
   reviewedAt: string | null
 }

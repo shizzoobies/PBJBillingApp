@@ -173,7 +173,7 @@ export function CaseDetailPage() {
     const current = live(previous)
     // Skip a step (featreq-7e1827e0): a skipped step whose next step never opened too.
     return nextStageNeverOpened(current, liveRows) ||
-      skippedStepNeverOpened(current, liveRows, data.checklistTemplates ?? [])
+      skippedStepNeverOpened(current, liveRows)
       ? current
       : null
   }

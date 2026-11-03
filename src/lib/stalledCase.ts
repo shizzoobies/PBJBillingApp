@@ -1,7 +1,6 @@
 import { stageFinished } from '../../lib/waiting-on-state.js'
 import { checklistCompletedAt } from './completedTasks'
-import { isStepSkip } from '../../lib/checklist-skip.js'
-import type { Checklist, ChecklistTemplate } from './types'
+import type { Checklist } from './types'
 import { shortDate } from './utils'
 
 /**
@@ -40,22 +39,21 @@ export function nextStageNeverOpened(checklist: Checklist, checklists: readonly 
  * did not open (the insert failed, another case held the slot, the step was
  * empty...). The owner is told to open it from the case page; Open next step now
  * accepts such a row (the server rebuilds the skip's notice). True when the row is
- * a skipped, live stage of a 'step' recipe with a stage after it, and no later
- * stage of its case is live.
+ * a skipped, live stage whose skip WAS a step skip (`stepSkipped`), with a stage
+ * after it, and no later stage of its case (same client) is live.
  */
-export function skippedStepNeverOpened(
-  checklist: Checklist,
-  checklists: readonly Checklist[],
-  templates: readonly ChecklistTemplate[],
-): boolean {
+export function skippedStepNeverOpened(checklist: Checklist, checklists: readonly Checklist[]): boolean {
   if (!checklist.skippedAt || checklist.deletedAt || checklist.projected || checklist.pushedToChecklistId) return false
-  const template = templates.find((entry) => entry.id === checklist.templateId)
-  if (!isStepSkip(template, checklist)) return false
+  // The skip RECORD's mode at skip time (the server marks the row), never the
+  // recipe's mode today: an old whole-cycle skip is the end of its cycle.
+  if (checklist.stepSkipped !== true || checklist.onboardingForClientId || !checklist.templateId) return false
   const stageIndex = checklist.stageIndex ?? 0
+  if (stageIndex + 1 >= (checklist.stageCount ?? 1)) return false
   const caseKey = checklist.caseId || checklist.id
   return !checklists.some(
     (entry) =>
       (entry.caseId || entry.id) === caseKey &&
+      (entry.clientId ?? null) === (checklist.clientId ?? null) &&
       !entry.deletedAt &&
       typeof entry.stageIndex === 'number' &&
       entry.stageIndex > stageIndex,

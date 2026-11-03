@@ -23,7 +23,7 @@ import {
 import { copiedTemplateSettings } from '../../lib/checklist-template-copy.js'
 import { skippedStepNeverOpened, skippedStepSentence } from '../lib/stalledCase'
 import { stepSkipOutcomeChecklist, stepSkipOutcomeText } from '../lib/stepSkipOutcome'
-import type { Checklist, ChecklistTemplate } from '../lib/types'
+import type { Checklist } from '../lib/types'
 
 /**
  * Skip a step (featreq-7e1827e0), Brittany: "skip whole checklist" or "skip a
@@ -155,6 +155,10 @@ describe('the words', () => {
         note: 'Out sick',
       }),
     ).toBe('Lisa skipped step 2 of 3 on Check email (they could not get to it): Out sick. Step 3 is now yours.')
+    // A notice rebuilt from a record with no reason or note: no "(): .".
+    expect(
+      stepSkippedMessage({ skipperName: 'Lisa', stageIndex: 0, stageCount: 3, recipeTitle: 'Check email', reasonCategory: '', note: '' }),
+    ).toBe('Lisa skipped step 1 of 3 on Check email. Step 2 is now yours.')
     // nextStageRefusalMessage('date_taken') - pinned in lib/checklist-step-skip.test.mjs.
     const why = 'Step 2 could not be created: another case of this recipe already has that step on that date.'
     expect(
@@ -168,7 +172,7 @@ describe('the words', () => {
         why,
       }),
     ).toBe(
-      'Lisa Mockabee skipped step 1 of 3 ("Clear") on Acme\'s Check email, but step 2 was not opened: Step 2 could not be created: another case of this recipe already has that step on that date. Open the case and press Open next step now on step 1 to open it once that is sorted out.',
+      'Lisa Mockabee skipped step 1 of 3 ("Clear") on Acme\'s Check email, but step 2 was not opened: Step 2 could not be created: another case of this recipe already has that step on that date. Once that is sorted out, open the case page and press Open next step now under step 2.',
     )
     // Its own subject, not the next person's "A step before yours was skipped".
     expect(STEP_NOT_OPENED_SUBJECT).toBe("A skipped step's next step did not open")
@@ -206,26 +210,29 @@ describe('the words', () => {
   })
 
   it('a skipped step whose next step never opened is a stall the case page offers to open', () => {
-    const step = { skipAllowed: true, skipMode: 'step', id: 'tmpl' } as unknown as ChecklistTemplate
-    const whole = { ...step, skipMode: 'whole' } as ChecklistTemplate
     const skipped = {
       id: 'cl-0',
       templateId: 'tmpl',
+      clientId: 'c1',
       caseId: 'case-1',
       stageIndex: 0,
       stageCount: 3,
       skippedAt: '2026-08-30T15:00:00.000Z',
+      stepSkipped: true,
       items: [],
     } as unknown as Checklist
-    expect(skippedStepNeverOpened(skipped, [skipped], [step])).toBe(true)
+    expect(skippedStepNeverOpened(skipped, [skipped])).toBe(true)
     // A later step of the case is live: nothing stalled.
-    const later = { id: 'cl-1', caseId: 'case-1', stageIndex: 1 } as unknown as Checklist
-    expect(skippedStepNeverOpened(skipped, [skipped, later], [step])).toBe(false)
-    // A whole recipe's skip ended its cycle on purpose; an unskipped row is not this rule.
-    expect(skippedStepNeverOpened(skipped, [skipped], [whole])).toBe(false)
-    expect(skippedStepNeverOpened({ ...skipped, skippedAt: null }, [skipped], [step])).toBe(false)
+    const later = { id: 'cl-1', clientId: 'c1', caseId: 'case-1', stageIndex: 1 } as unknown as Checklist
+    expect(skippedStepNeverOpened(skipped, [skipped, later])).toBe(false)
+    // ...but the same case id on ANOTHER client is not this case.
+    expect(skippedStepNeverOpened(skipped, [skipped, { ...later, clientId: 'c2' } as Checklist])).toBe(true)
+    // Decided by the record at skip time, not the recipe today: an old whole-cycle
+    // skip (no stepSkipped mark) is the end of its cycle, whatever the recipe says now.
+    expect(skippedStepNeverOpened({ ...skipped, stepSkipped: undefined }, [skipped])).toBe(false)
+    expect(skippedStepNeverOpened({ ...skipped, skippedAt: null }, [skipped])).toBe(false)
     // The last step has nothing after it.
-    expect(skippedStepNeverOpened({ ...skipped, stageIndex: 2 }, [skipped], [step])).toBe(false)
+    expect(skippedStepNeverOpened({ ...skipped, stageIndex: 2 }, [skipped])).toBe(false)
     expect(skippedStepSentence(skipped, true)).toBe(
       'Step 1 was skipped, but step 2 was never opened. Press Open next step now to open it.',
     )
@@ -239,9 +246,11 @@ describe('the words', () => {
       skipNotice: { skipId: 'skip-1', stageIndex: 0 },
     }
     const employees = [{ id: 'emp-allison', name: 'Allison Reed' }]
-    expect(stepSkipReviewLine({ skip: { id: 'skip-1' }, checklists: [opened], employees })).toBe(
+    expect(stepSkipReviewLine({ skip: { id: 'skip-1', stepSkip: true }, checklists: [opened], employees })).toBe(
       'Step 1 of 3 - next step opened for Allison Reed',
     )
+    // The record says it was NOT a step skip: no line, whatever row carries its id.
+    expect(stepSkipReviewLine({ skip: { id: 'skip-1', stepSkip: false }, checklists: [opened], employees })).toBe('')
     // A whole-cycle skip opened nothing: no line.
     expect(stepSkipReviewLine({ skip: { id: 'skip-2' }, checklists: [opened], employees })).toBe('')
   })
@@ -383,5 +392,51 @@ describe('the skip route after review round 1', () => {
     expect(branch.indexOf('sendJson(response, 200, { checklist: from, spawned })')).toBeLessThan(
       branch.indexOf("'task_assigned'"),
     )
+  })
+})
+
+/** Review round 2 (featreq-7e1827e0): the route glue. */
+describe('the routes after review round 2', () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
+  const serverSource = readFileSync(path.join(root, 'server.js'), 'utf8').replaceAll('\r\n', '\n')
+  const slice = (from: string, to: string) => {
+    const start = serverSource.indexOf(from)
+    const end = serverSource.indexOf(to, start)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    return serverSource.slice(start, end)
+  }
+  const skipRoute = () =>
+    slice('const checklistSkipMatch = normalizedPath.match(', 'const checklistPushMatch = normalizedPath.match(')
+  const openRoute = () =>
+    slice('const checklistOpenNextStageMatch = normalizedPath.match(', 'const checklistToggleMatch = normalizedPath.match(')
+
+  it('the skip record carries the mode at skip time, and the answered row is marked', () => {
+    const route = skipRoute()
+    const record = route.slice(route.indexOf('await appDataStore.createChecklistSkip({'))
+    expect(record.slice(0, 600)).toContain('stepSkip,\n      })')
+    expect(route).toContain('if (stepSkip) skipped.stepSkipped = true')
+  })
+
+  it('already_spawned with no live next step to tell: a sentence, and no owner notice', () => {
+    const route = skipRoute()
+    const branch = route.slice(
+      route.indexOf("} else if (advance.reason === 'already_spawned') {"),
+      route.indexOf('} else {', route.indexOf("} else if (advance.reason === 'already_spawned') {")),
+    )
+    expect(branch).toContain('already exists for this case, so no new step was opened.')
+    expect(branch).not.toContain('notify(')
+  })
+
+  it('Open next step now on a stale page: the already-open step is told, never the skipper', () => {
+    const route = openRoute()
+    const branch = route.slice(
+      route.indexOf('if (afterSkip && !spawned && result.existing) {'),
+      route.indexOf('await appDataStore.recordActivity('),
+    )
+    expect(branch).toContain('existing.assigneeId !== notice.skippedBy')
+    expect(branch).toContain('alreadyOpen: true,')
+    expect(branch).toContain('sendJson(response, 200, { checklist: from, spawned: existing, alreadyOpen: true })')
+    expect(route).toContain('nextAssigneeId !== session.user.id && nextAssigneeId !== notice.skippedBy')
   })
 })

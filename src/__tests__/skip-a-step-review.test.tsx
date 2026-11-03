@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DashboardPage } from '../pages/DashboardPage'
 import type { AppContextValue } from '../AppContext'
 import type { AppData, ChecklistSkip } from '../lib/types'
@@ -23,7 +23,15 @@ vi.mock('../lib/api', () => ({
 const OWNER = 'emp-patrice'
 const LISA = 'emp-lisa'
 const ALLISON = 'emp-allison'
-const THIS_YEAR = new Date().getFullYear()
+// The clock is pinned (below) so these August dates are always in the past.
+const THIS_YEAR = 2026
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-11-03T15:00:00.000Z'))
+})
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 const skip = (over: Partial<ChecklistSkip>): ChecklistSkip => ({
   id: 'skip-1',
@@ -38,6 +46,8 @@ const skip = (over: Partial<ChecklistSkip>): ChecklistSkip => ({
   reasonNote: 'Out sick today.',
   kind: 'skip',
   newDueDate: null,
+  // The record says it was a step skip (decided at skip time).
+  stepSkip: true,
   reviewedBy: null,
   reviewedAt: null,
   ...over,
@@ -124,6 +134,16 @@ function signInAsOwner(skips: ChecklistSkip[]) {
 const section = () => screen.getByRole('region', { name: 'Skipped and pushed tasks to review' })
 
 describe('the review panel', () => {
+  it('a record that was NOT a step skip never says next step opened, even if a row carries its id', () => {
+    signInAsOwner([skip({ stepSkip: false })])
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <DashboardPage />
+      </MemoryRouter>,
+    )
+    expect(section().textContent).not.toContain('next step opened for')
+  })
+
   it('a step skip names the step and who the next step opened for', () => {
     signInAsOwner([skip({})])
     render(
@@ -135,7 +155,7 @@ describe('the review panel', () => {
   })
 
   it('a whole-cycle skip says nothing more than before', () => {
-    signInAsOwner([skip({ id: 'skip-whole', checklistId: 'cl-other' })])
+    signInAsOwner([skip({ id: 'skip-whole', checklistId: 'cl-other', stepSkip: false })])
     render(
       <MemoryRouter initialEntries={['/']}>
         <DashboardPage />

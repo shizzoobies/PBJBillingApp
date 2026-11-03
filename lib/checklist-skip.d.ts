@@ -133,7 +133,7 @@ export declare function buildSkipNotice(args: {
 export declare function skipNoticeLine(notice: Partial<SkipNotice> | null | undefined): string
 export declare function skipNoticeChip(notice: Partial<SkipNotice> | null | undefined): string
 export declare function stepSkipReviewLine(args: {
-  skip: { id?: string } | null | undefined
+  skip: { id?: string; stepSkip?: boolean } | null | undefined
   checklists?: Array<{
     assigneeId?: string
     stageCount?: number

@@ -5004,6 +5004,15 @@ export class StepIsWaitingError extends Error {
  * words, sent as it is). The route turns the rest into a sentence. Nothing was
  * written.
  */
+export class NextStageRefusedError extends Error {
+  constructor(reason, sentence = null) {
+    super(`The next step cannot be opened: ${reason}`)
+    this.name = 'NextStageRefusedError'
+    this.reason = reason
+    this.sentence = sentence
+  }
+}
+
 /**
  * A restore that would put back a step whose cycle exists again as a live step
  * (Postgres: the partial unique instance index's 23505; the file backend checks
@@ -5016,42 +5025,45 @@ export class RestoreConflictError extends Error {
   }
 }
 
-export class NextStageRefusedError extends Error {
-  constructor(reason, sentence = null) {
-    super(`The next step cannot be opened: ${reason}`)
-    this.name = 'NextStageRefusedError'
-    this.reason = reason
-    this.sentence = sentence
-  }
-}
-
 /**
- * Why `openNextStageEarly` may not open the next stage from `checklist`, or null.
- * Decided on the data as read: the spawn itself re-checks `already_spawned`.
- * Ready means every open step is waiting, OR every step is done and the next
- * stage never opened (featreq-ed73d181: a stall from before the 10-12 hardening
- * left a finished stage with no next one, and nothing else could advance it).
+ * Skip a step (featreq-7e1827e0): could this skipped row be a STEP skip whose next
+ * step never opened? A live, skipped, templated, non-onboarding stage with a stage
+ * after it. Only the SHAPE is decided here: whether the skip really was a step
+ * skip is the skip RECORD's `stepSkip` (set at skip time), never the recipe's
+ * current mode - a recipe switched to 'step' later must not turn its old
+ * whole-cycle skips into stalls. `_openNextStageForSkippedStep` reads the record.
  */
-/**
- * Skip a step (featreq-7e1827e0): a live, SKIPPED stage of a 'step' recipe with a
- * stage after it. Open next step now opens its next step through
- * `openNextStageAfterSkip` instead of refusing 'skipped' - otherwise a step skip
- * whose next step failed to open could never be moved on.
- */
-function isSkippedStepStage(data, checklist) {
+function isSkippedStepStage(checklist) {
   if (!checklist?.skippedAt || checklist.deletedAt || checklist.pushedToChecklistId) return false
-  const template = (data?.checklistTemplates ?? []).find((entry) => entry.id === checklist.templateId)
-  return isStepSkip(template, checklist)
+  if (checklist.onboardingForClientId || !checklist.templateId) return false
+  const stageCount = typeof checklist.stageCount === 'number' ? checklist.stageCount : 1
+  const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
+  return stageIndex + 1 < stageCount
 }
 
-/** The live (not recycled, not skipped) row of the stage after `checklist` in its case. */
+/**
+ * Two rows of the same case. Case ids are NOT unique across clients (the
+ * 2026-08-14 import left 11 shared by two clients - see Remove case), so the
+ * client is part of the match.
+ */
+function sameCase(entry, checklist) {
+  return (
+    (entry.caseId || entry.id) === (checklist.caseId || checklist.id) &&
+    (entry.clientId ?? null) === (checklist.clientId ?? null)
+  )
+}
+
+/**
+ * The live (not recycled, not skipped, not pushed away) row of the stage after
+ * `checklist` in its OWN case: same case, client and recipe.
+ */
 function liveNextStageRow(checklists, checklist) {
-  const caseId = checklist.caseId || checklist.id
   const nextIndex = (typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0) + 1
   return (
     (checklists ?? []).find(
       (entry) =>
-        (entry.caseId || entry.id) === caseId &&
+        sameCase(entry, checklist) &&
+        (entry.templateId ?? null) === (checklist.templateId ?? null) &&
         entry.stageIndex === nextIndex &&
         !entry.deletedAt &&
         !entry.skippedAt &&
@@ -5066,6 +5078,13 @@ function skipNoticeNeedsStamp(row, skipNotice) {
   return !row.skipNotice || (row.skipNotice.skipId ?? null) !== (skipNotice.skipId ?? null)
 }
 
+/**
+ * Why `openNextStageEarly` may not open the next stage from `checklist`, or null.
+ * Decided on the data as read: the spawn itself re-checks `already_spawned`.
+ * Ready means every open step is waiting, OR every step is done and the next
+ * stage never opened (featreq-ed73d181: a stall from before the 10-12 hardening
+ * left a finished stage with no next one, and nothing else could advance it).
+ */
 function openNextStageEarlyRefusal(data, checklist) {
   if (!checklist) return 'not_found'
   if (checklist.skippedAt) return 'skipped'
@@ -5075,7 +5094,15 @@ function openNextStageEarlyRefusal(data, checklist) {
   const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
   if (!checklist.templateId || stageIndex + 1 >= stageCount) return 'last_stage'
   const caseId = checklist.caseId || checklist.id
-  if ((data.checklists ?? []).some((entry) => entry.caseId === caseId && entry.stageIndex === stageIndex + 1)) {
+  // The client too: case ids are shared across clients by the August import.
+  if (
+    (data.checklists ?? []).some(
+      (entry) =>
+        entry.caseId === caseId &&
+        entry.stageIndex === stageIndex + 1 &&
+        (entry.clientId ?? null) === (checklist.clientId ?? null),
+    )
+  ) {
     return 'already_spawned'
   }
   if (!stageOpenWorkAllWaiting(checklist) && !stageFinished(checklist)) return 'not_ready'
@@ -6107,6 +6134,8 @@ function mapChecklistSkipRow(row) {
     kind: row.kind === 'push' ? 'push' : 'skip',
     // Same shape every other `date` column is mapped with in this file.
     newDueDate: row.new_due_date ? row.new_due_date.toISOString().slice(0, 10) : null,
+    // Skip a step (featreq-7e1827e0): the mode at skip time; rows from before read false.
+    stepSkip: row.step_skip === true,
     reviewedBy: row.reviewed_by ?? null,
     reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
   }
@@ -6139,6 +6168,25 @@ export async function addSkipStepColumns(pool) {
   }
   if (!present.has('checklists.skip_notice')) {
     await pool.query(`alter table checklists add column if not exists skip_notice jsonb`)
+  }
+}
+
+/**
+ * `checklist_skips.step_skip` (featreq-7e1827e0), added only when missing: true
+ * only on a skip that skipped ONE step of a 'step' recipe (the next step opened,
+ * or was meant to). Every row from before reads false - a whole-cycle skip - so a
+ * recipe switched to 'step' later never turns its old skips into stalls.
+ */
+export async function addChecklistSkipStepColumn(pool) {
+  const found = await pool.query(
+    `select 1 from information_schema.columns
+      where table_schema = current_schema() and table_name = 'checklist_skips'
+        and column_name = 'step_skip'`,
+  )
+  if ((found.rows?.length ?? 0) === 0) {
+    await pool.query(
+      `alter table checklist_skips add column if not exists step_skip boolean not null default false`,
+    )
   }
 }
 
@@ -6278,6 +6326,7 @@ function normalizeChecklistSkip(record) {
     reasonNote: record.reasonNote ?? '',
     kind: record.kind === 'push' ? 'push' : 'skip',
     newDueDate: record.newDueDate ?? null,
+    stepSkip: record.stepSkip === true,
     reviewedBy: record.reviewedBy ?? null,
     reviewedAt: record.reviewedAt ?? null,
   }
@@ -7621,6 +7670,9 @@ export class AppDataStore {
       await this.pool.query(
         `alter table checklist_skips add column if not exists new_due_date date`,
       )
+      // Skip a step (featreq-7e1827e0): whether THIS skip was a step skip, decided
+      // at skip time (the recipe's mode can change later). Look-first.
+      await addChecklistSkipStepColumn(this.pool)
 
       // Time approval workflow. Detect whether the column already exists BEFORE
       // adding it: if this is the first deploy of the feature, every existing
@@ -10224,7 +10276,40 @@ export class AppDataStore {
    */
   async readWithVersion() {
     const result = await this._readWorkspace({ captureVersion: true })
-    return { ...result, data: await this._withClientRateAgreements(result.data) }
+    return { ...result, data: await this._withStepSkipMarks(await this._withClientRateAgreements(result.data)) }
+  }
+
+  /**
+   * Skip a step (featreq-7e1827e0): mark each skipped row whose skip RECORD was a
+   * step skip with `stepSkipped: true`, so the case page can offer Open next step
+   * now under a step skip whose next step never opened - and never under an old
+   * whole-cycle skip, whatever the recipe's mode is today. Derived from the skips
+   * table (pg) / auth state (file) AFTER the version was captured, so it never
+   * moves the staleness fingerprint; the file bulk save drops it again.
+   */
+  async _withStepSkipMarks(data) {
+    if (!Array.isArray(data?.checklists) || !data.checklists.some((entry) => entry?.skippedAt)) return data
+    let ids
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select checklist_id from checklist_skips where step_skip = true and kind = 'skip'`,
+      )
+      ids = new Set((result.rows ?? []).map((row) => row.checklist_id))
+    } else {
+      const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+      ids = new Set(
+        (Array.isArray(authState.checklistSkips) ? authState.checklistSkips : [])
+          .filter((record) => record?.stepSkip === true && record.kind !== 'push')
+          .map((record) => record.checklistId),
+      )
+    }
+    if (ids.size === 0) return data
+    return {
+      ...data,
+      checklists: data.checklists.map((entry) =>
+        entry?.skippedAt && ids.has(entry.id) ? { ...entry, stepSkipped: true } : entry,
+      ),
+    }
   }
 
   async listClientRateAgreements(clientId = null) {
@@ -11669,6 +11754,8 @@ export class AppDataStore {
               // may not mint one - the Postgres branch writes null for it.
               delete next.skipNotice
             }
+            // Derived on read from the skip records (`_withStepSkipMarks`), never stored.
+            delete next.stepSkipped
             if (Array.isArray(checklist.items)) {
               next.items = checklist.items.map((payloadItem) => {
                 if (!payloadItem || typeof payloadItem.id !== 'string') return payloadItem
@@ -23897,8 +23984,11 @@ export class AppDataStore {
     if (!stages || stageIndex + 1 >= stages.length) return skip('no_stages')
 
     const caseId = checklist.caseId || checklist.id
+    // Same case AND client: case ids are shared across clients by the August
+    // import (featreq-7e1827e0 review), so another client's row is not this one.
+    const ownCase = (entry) => entry.caseId === caseId && (entry.clientId ?? null) === (checklist.clientId ?? null)
     const alreadySpawned = (data.checklists ?? []).some(
-      (entry) => entry.caseId === caseId && entry.stageIndex === stageIndex + 1,
+      (entry) => ownCase(entry) && entry.stageIndex === stageIndex + 1,
     )
     if (alreadySpawned) return skip('already_spawned')
     // A LATER stage of this case is already live (Saylor Grace 2026-10-16: step 3
@@ -23906,7 +23996,7 @@ export class AppDataStore {
     // would reopen work the case has moved past; say so instead.
     const laterStageLive = (data.checklists ?? []).some(
       (entry) =>
-        entry.caseId === caseId &&
+        ownCase(entry) &&
         !entry.deletedAt &&
         typeof entry.stageIndex === 'number' &&
         entry.stageIndex > stageIndex + 1,
@@ -23954,7 +24044,7 @@ export class AppDataStore {
       // Another request created this next stage between our read and our insert.
       const fresh = await this.read()
       const landed = (fresh.checklists ?? []).some(
-        (entry) => entry.caseId === caseId && entry.stageIndex === stageIndex + 1,
+        (entry) => ownCase(entry) && entry.stageIndex === stageIndex + 1,
       )
       if (landed) return skip('already_spawned')
       // ...or another case took that step's slot on that date in the meantime.
@@ -23995,7 +24085,7 @@ export class AppDataStore {
       const data = await this.read()
       const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
       // A skipped STEP of a 'step' recipe whose next step did not open (featreq-7e1827e0).
-      if (isSkippedStepStage(data, checklist)) return this._openNextStageForSkippedStep(data, checklist)
+      if (isSkippedStepStage(checklist)) return this._openNextStageForSkippedStep(data, checklist)
       const refused = openNextStageEarlyRefusal(data, checklist)
       if (refused) throw new NextStageRefusedError(refused)
       let advance
@@ -24022,7 +24112,7 @@ export class AppDataStore {
     // takes its own file-queue slot - so it is decided before entering this one.
     const peek = await readJson(localDataPath)
     const peeked = (peek.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
-    if (isSkippedStepStage(peek, peeked)) return this._openNextStageForSkippedStep(peek, peeked)
+    if (isSkippedStepStage(peeked)) return this._openNextStageForSkippedStep(peek, peeked)
 
     // Read, decide and write inside ONE file-queue slot, like the toggle: two
     // opens at the same instant must not both see "no next stage yet".
@@ -24098,14 +24188,27 @@ export class AppDataStore {
       const next = liveNextStageRow((await this.read()).checklists, checklist)
       if (!next) return advance
       if (!skipNoticeNeedsStamp(next, skipNotice)) return { ...advance, existing: next }
-      // Endpoint-owned, one row, and only while it carries no notice or another skip's.
-      await this.pool.query(
+      // Endpoint-owned, one row, re-checked in the WHERE: still that case's live next
+      // step (client too - case ids are shared across clients), and carrying no notice
+      // or another skip's. What landed is what is reported; nothing landed, nothing told.
+      const stamped = await this.pool.query(
         `update checklists set skip_notice = $2::jsonb, updated_at = now()
-         where id = $1 and deleted_at is null
-           and (skip_notice is null or skip_notice->>'skipId' is distinct from $3)`,
-        [next.id, JSON.stringify(skipNotice), skipNotice?.skipId ?? null],
+         where id = $1 and deleted_at is null and client_id = $4 and case_id = $5 and stage_index = $6
+           and skipped_at is null and pushed_to_checklist_id is null
+           and (skip_notice is null or skip_notice->>'skipId' is distinct from $3)
+         returning id, skip_notice`,
+        [
+          next.id,
+          JSON.stringify(skipNotice),
+          skipNotice?.skipId ?? null,
+          next.clientId ?? null,
+          next.caseId || next.id,
+          next.stageIndex,
+        ],
       )
-      return { ...advance, existing: { ...next, skipNotice } }
+      const row = stamped.rows?.[0]
+      if (!row) return advance
+      return { ...advance, existing: { ...next, skipNotice: row.skip_notice ?? skipNotice } }
     }
 
     // Read, decide and write inside ONE file-queue slot, like the toggle.
@@ -24151,6 +24254,9 @@ export class AppDataStore {
     const template = (data.checklistTemplates ?? []).find((entry) => entry.id === checklist.templateId) ?? null
     const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
     const record = await this.latestChecklistSkipFor(checklist.id)
+    // Decided by the RECORD (the mode at skip time), not the recipe's mode today:
+    // an old whole-cycle skip stays the end of its cycle.
+    if (!record?.stepSkip) throw new NextStageRefusedError('skipped')
     const notice = buildSkipNotice({
       checklist,
       stageName: template?.stages?.[stageIndex]?.name ?? '',
@@ -24162,6 +24268,9 @@ export class AppDataStore {
       skipId: record?.id ?? null,
     })
     const advance = await this.openNextStageAfterSkip(checklist.id, notice)
+    // The next step was already open (a stale page): it now carries the notice, and
+    // the route tells its person - a success, not a refusal.
+    if (!advance.spawned && advance.existing) return { checklist, spawned: null, existing: advance.existing, afterSkip: true }
     if (!advance.spawned) throw new NextStageRefusedError(advance.reason, advance.message ?? null)
     return { checklist, spawned: advance.spawned, afterSkip: true }
   }
@@ -24175,7 +24284,7 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, checklist_id, template_id, client_id, title, skipped_by, skipped_by_name,
-                skipped_at, reason_category, reason_note, kind, new_due_date, reviewed_by, reviewed_at
+                skipped_at, reason_category, reason_note, kind, new_due_date, step_skip, reviewed_by, reviewed_at
            from checklist_skips
           where checklist_id = $1 and kind = 'skip'
           order by skipped_at desc
@@ -33886,7 +33995,7 @@ export class AppDataStore {
           await client.query(
             `select id, client_id, title, assignee_id, template_id, frequency, due_date,
                     viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count,
-                    category_id, cycle_due_date, period_label,
+                    category_id, cycle_due_date, period_label, skip_notice,
                     onboarding_for_client_id, created_by, pushed_to_checklist_id,
                     to_char(coalesce(cycle_due_date, due_date), 'YYYY-MM-DD') as identity_date
                from checklists
@@ -33980,9 +34089,9 @@ export class AppDataStore {
                 id, title, client_id, assignee_id, template_id, frequency, due_date,
                 viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count,
                 category_id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id,
-                period_label, onboarding_for_client_id, created_by, created_at, updated_at
+                period_label, onboarding_for_client_id, created_by, skip_notice, created_at, updated_at
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::jsonb, $23, $24)
             `,
             [
               newChecklistId,
@@ -34009,6 +34118,9 @@ export class AppDataStore {
               checklistRow.period_label,
               checklistRow.onboarding_for_client_id ?? null,
               checklistRow.created_by ?? null,
+              // Skip a step (featreq-7e1827e0): the open work keeps who skipped the step
+              // before it, and why.
+              checklistRow.skip_notice ? JSON.stringify(checklistRow.skip_notice) : null,
               splitNowIso,
               splitNowIso,
             ],
@@ -34174,6 +34286,8 @@ export class AppDataStore {
         pushedAt: now,
         pushedBy: userId ?? null,
         pushedFromChecklistId: target.id,
+        // Skip a step (featreq-7e1827e0): the open work keeps the skip notice, as on pg.
+        ...(target.skipNotice ? { skipNotice: target.skipNotice } : {}),
         items: openItems,
       }
       target.items = doneItems
@@ -34244,7 +34358,7 @@ export class AppDataStore {
     if (this.pool) {
       const result = await this.pool.query(
         `select id, checklist_id, template_id, client_id, title, skipped_by, skipped_by_name,
-                skipped_at, reason_category, reason_note, kind, new_due_date, reviewed_by, reviewed_at
+                skipped_at, reason_category, reason_note, kind, new_due_date, step_skip, reviewed_by, reviewed_at
            from checklist_skips order by skipped_at desc`,
       )
       return result.rows.map(mapChecklistSkipRow)
@@ -34271,6 +34385,7 @@ export class AppDataStore {
     reasonNote,
     kind,
     newDueDate,
+    stepSkip,
   } = {}) {
     if (!checklistId || !reasonCategory || !reasonNote) return null
     const record = {
@@ -34289,6 +34404,8 @@ export class AppDataStore {
       // existing caller, and every existing row, correct without a backfill.
       kind: kind === 'push' ? 'push' : 'skip',
       newDueDate: kind === 'push' ? (newDueDate ?? null) : null,
+      // Skip a step (featreq-7e1827e0): only an explicit step skip; never a push.
+      stepSkip: kind !== 'push' && stepSkip === true,
       reviewedBy: null,
       reviewedAt: null,
     }
@@ -34296,8 +34413,8 @@ export class AppDataStore {
       await this.pool.query(
         `insert into checklist_skips
            (id, checklist_id, template_id, client_id, title, skipped_by, skipped_by_name,
-            skipped_at, reason_category, reason_note, kind, new_due_date)
-         values ($1, $2, $3, $4, $5, $6, $7, now(), $8, $9, $10, $11)`,
+            skipped_at, reason_category, reason_note, kind, new_due_date, step_skip)
+         values ($1, $2, $3, $4, $5, $6, $7, now(), $8, $9, $10, $11, $12)`,
         [
           record.id,
           record.checklistId,
@@ -34310,6 +34427,7 @@ export class AppDataStore {
           record.reasonNote,
           record.kind,
           record.newDueDate,
+          record.stepSkip,
         ],
       )
       return record
@@ -34334,7 +34452,7 @@ export class AppDataStore {
         `update checklist_skips set reviewed_by = $2, reviewed_at = now()
          where id = $1 and reviewed_at is null
          returning id, checklist_id, template_id, client_id, title, skipped_by, skipped_by_name,
-                   skipped_at, reason_category, reason_note, kind, new_due_date,
+                   skipped_at, reason_category, reason_note, kind, new_due_date, step_skip,
                    reviewed_by, reviewed_at`,
         [skipId, reviewerId ?? null],
       )
