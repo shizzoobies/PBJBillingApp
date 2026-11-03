@@ -111,3 +111,12 @@ describe('the single-client skip sentence', () => {
     )
   })
 })
+
+describe('hasWaitingPushedWork', () => {
+  it('is true only for a skip that carries a pushed month and a client', async () => {
+    const { hasWaitingPushedWork } = await import('./invoiceRollForwardText')
+    expect(hasWaitingPushedWork({ skipped: [{ clientId: 'c1', reason: 'client-inactive', carriedFromPeriod: '2026-10' }] })).toBe(true)
+    expect(hasWaitingPushedWork({ skipped: [{ clientId: 'c1', reason: 'opted-out' }] })).toBe(false)
+    expect(hasWaitingPushedWork({})).toBe(false)
+  })
+})

@@ -27,7 +27,7 @@ export type InvoiceMonthTotals = {
   /** Distinct clients holding a sent invoice (a billing master counts once). */
   clientsInvoiced: number
   /** Clients still to invoice (no sent invoice yet), A to Z. */
-  notInvoiced: Array<{ id: string; name: string }>
+  notInvoiced: Array<{ id: string; name: string; label?: string }>
   /**
    * Where `notInvoiced` came from. 'estimate': the owner's estimate rows, so only
    * clients with something to bill. 'roster': the fallback while that request is
@@ -116,7 +116,7 @@ export function summarizeInvoiceMonthTotals(
     notInvoicedFrom: estimateRows ? 'estimate' : 'roster',
     rolled,
     waiting: (estimateRows ?? [])
-      .filter((entry) => entry.basis === 'pushed_waiting' && !invoiced.has(entry.clientId))
+      .filter((entry) => entry.basis === 'pushed_waiting' && entry.notBillable === true && !invoiced.has(entry.clientId))
       .map((entry) => ({
         id: entry.clientId,
         name: entry.clientName,

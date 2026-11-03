@@ -94,6 +94,13 @@ export function generateRollForwardNote(
   return text
 }
 
+/** Did this run leave pushed work on no invoice (a skip that carries the pushed month)? */
+export function hasWaitingPushedWork(result: {
+  skipped?: Array<{ clientId?: string; reason?: string; carriedFromPeriod?: string | null }>
+}) {
+  return (result.skipped ?? []).some((row) => isPeriod(row.carriedFromPeriod) && Boolean(row.clientId))
+}
+
 /** Why a client with pushed work waiting got no invoice, finishing "this client …". */
 const WAITING_REASON: Record<string, string> = {
   'client-inactive': 'is inactive',

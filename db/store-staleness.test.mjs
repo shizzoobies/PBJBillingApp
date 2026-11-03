@@ -58729,3 +58729,51 @@ describe('listInvoiceEvidence: narrow rows, both backends (featreq-8dffdff7)', (
     expect(calls[0].text).toMatch(/carried->>'sourceClientId' = any\(\$1::text\[\]\)/)
   })
 })
+
+describe('push to next month, final round (file backend)', () => {
+  async function seed() {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100 }],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [
+          { id: 't-oct', clientId: 'c1', employeeId: 'emp-1', date: '2026-10-06', minutes: 60, billable: true },
+          { id: 't-nov', clientId: 'c1', employeeId: 'emp-1', date: '2026-11-04', minutes: 120, billable: true },
+        ],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+
+  it('a refused rebuild insert leaves NOTHING changed: marker, next month and ledger all as they were', async () => {
+    await seed()
+    const october = (await store.generateInvoicesForPeriod('2026-10')).created[0]
+    await store.rollInvoiceForward(october.id)
+    await store.generateInvoicesForPeriod('2026-11')
+    const realInsert = store._insertInvoice.bind(store)
+    // The unique index refuses the rebuilt draft (another live October appeared).
+    store._insertInvoice = async (record, opts) => (record.period === '2026-10' ? null : realInsert(record, opts))
+    const before = await readFile(localDataPath, 'utf8')
+    await expect(store.undoInvoiceRollForward(october.id)).rejects.toMatchObject({ code: 'period_has_invoice' })
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('the month list marks Undo not allowed when there is nothing to rebuild', async () => {
+    await seed()
+    const october = (await store.generateInvoicesForPeriod('2026-10')).created[0]
+    await store.rollInvoiceForward(october.id)
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices.find((row) => row.id === october.id).lineItems = [
+      { kind: 'advance_request', label: 'Pay in advance amount', detail: '', amount: 0 },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    const [marked] = await store.withRollForwardState(await store.listInvoices({ period: '2026-10' }))
+    expect(marked.rollUndo).toEqual({
+      allowed: false,
+      reason: 'This invoice has no lines to rebuild, so the push cannot be undone.',
+    })
+    await expect(store.undoInvoiceRollForward(october.id)).rejects.toMatchObject({ code: 'nothing_to_rebuild' })
+  })
+})

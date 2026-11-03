@@ -2907,6 +2907,9 @@ export class InvoiceRollForwardError extends Error {
   }
 }
 
+/** Undo's refusal, and the month list's reason, when the pushed invoice has no lines to rebuild. */
+const UNDO_NOTHING_TO_REBUILD = 'This invoice has no lines to rebuild, so the push cannot be undone.'
+
 /** Generation's answer for a client whose month turned out to have nothing to bill under the lock. */
 const NOTHING_TO_BILL = Symbol('nothing to bill')
 
@@ -17228,10 +17231,7 @@ export class AppDataStore {
     })
     if (early) throw new InvoiceRollForwardError(early.message, early.code)
     if (rebuiltLinesFromRolledInvoice(current).length === 0) {
-      throw new InvoiceRollForwardError(
-        'This invoice has no lines to rebuild, so the push cannot be undone.',
-        'nothing_to_rebuild',
-      )
+      throw new InvoiceRollForwardError(UNDO_NOTHING_TO_REBUILD, 'nothing_to_rebuild')
     }
 
     const offer = rolledAdvanceOffer(current)
@@ -17305,7 +17305,9 @@ export class AppDataStore {
         : []
 
     let outcome
-    let generateError = null
+    // Kept in the answer's shape; both backends now insert the rebuilt draft
+    // atomically with the undo, so there is no half-done case to report.
+    const generateError = null
     if (this.pool) {
       outcome = await this._withTransaction(async (dbClient) => {
         await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [
@@ -17409,19 +17411,36 @@ export class AppDataStore {
           target.emailLog = [...(Array.isArray(target.emailLog) ? target.emailLog : []), plan.entry]
           target.updatedAt = stamp
         }
-        return { result: plan, changed: true }
+        // The rebuilt draft, in this SAME queue slot - the file backend's version
+        // of the one transaction above. A refused insert throws before the slot
+        // writes, so nothing at all is changed.
+        const prepared = creditHolders.has(current.clientId)
+          ? await this._withGeneratedCreditInSlot(plan.rebuilt, data)
+          : plan.rebuilt
+        const inserted = await this._insertInvoice(prepared, { data })
+        if (!inserted) {
+          throw new InvoiceRollForwardError(
+            `${getBillingPeriodLabel(current.period)} already has a live invoice for this client.`,
+            'period_has_invoice',
+          )
+        }
+        for (const line of inserted.lineItems ?? []) {
+          if (line?.kind !== 'recurring' || !line.recurringId) continue
+          if (!isIsoDate(line.coverageStart) || !isIsoDate(line.coverageEnd)) continue
+          applyCoverageLedgerEntry(data, line.recurringId, current.period, {
+            start: line.coverageStart,
+            end: line.coverageEnd,
+            needsConfirmation: Boolean(line.needsCoverageConfirmation),
+            reason: line.coverageReason ?? null,
+          })
+        }
+        return { result: { plan, rebuiltId: inserted.id }, changed: true }
       })
-      // The rebuilt draft, right after (the credit draw takes its own queue slot).
-      const inserted = creditHolders.has(current.clientId)
-        ? await this._insertInvoiceDrawingAccountCredit(planned.rebuilt)
-        : await this._insertInvoice(planned.rebuilt)
-      if (inserted) await this._commitCoverageForInvoice(current.period, inserted.lineItems)
-      else generateError = 'The push was undone, but the invoice could not be rebuilt. Press Generate to build the month.'
       outcome = {
-        carrierId: planned.carrier?.id ?? null,
-        carrierVoided: Boolean(planned.carrier && planned.voidIt),
-        sessions: planned.carrier ? sessionsOf(planned) : [],
-        rebuiltId: inserted?.id ?? null,
+        carrierId: planned.plan.carrier?.id ?? null,
+        carrierVoided: Boolean(planned.plan.carrier && planned.plan.voidIt),
+        sessions: planned.plan.carrier ? sessionsOf(planned.plan) : [],
+        rebuiltId: planned.rebuiltId,
       }
     }
 
@@ -17508,12 +17527,16 @@ export class AppDataStore {
     const marks = new Map()
     for (const invoice of asks) {
       if (invoice.status === 'void') {
-        const refusal = rollUndoRefusal({
-          invoice,
-          nextInvoices: monthlyOf(invoice.clientId, invoice.rolledIntoPeriod),
-          periodInvoices: monthlyOf(invoice.clientId, invoice.period),
-          client: allClients.get(invoice.clientId) ?? null,
-        })
+        const refusal =
+          rollUndoRefusal({
+            invoice,
+            nextInvoices: monthlyOf(invoice.clientId, invoice.rolledIntoPeriod),
+            periodInvoices: monthlyOf(invoice.clientId, invoice.period),
+            client: allClients.get(invoice.clientId) ?? null,
+          }) ??
+          (rebuiltLinesFromRolledInvoice(invoice).length === 0
+            ? { code: 'nothing_to_rebuild', message: UNDO_NOTHING_TO_REBUILD }
+            : null)
         marks.set(invoice.id, { rollUndo: { allowed: !refusal, reason: refusal?.message ?? null } })
       } else {
         const refusal = rollForwardRefusal({
@@ -22945,6 +22968,23 @@ export class AppDataStore {
       const inserted = await this._insertInvoice(prepared, { data })
       return { result: inserted, changed: inserted !== null }
     })
+  }
+
+  /**
+   * The file backend's credit draw for a NEW monthly draft, on a workspace the
+   * caller already holds inside a queue slot (`mutateLocalData`): the same
+   * `withGeneratedAccountCredit` plan and statement `_insertInvoiceDrawingAccountCredit`
+   * writes, without taking a second slot. The caller inserts the result.
+   */
+  async _withGeneratedCreditInSlot(record, data) {
+    const ledger = await this._readAccountCredits(record.clientId, { data })
+    const prepared = withGeneratedAccountCredit(record, ledger)
+    const line = prepared.lineItems.find((row) => row.kind === 'account_credit')
+    if (line) {
+      const settings = billingDefaultsAt((await this.listAdvancePayments(record.clientId)).settings, record.period)
+      line.creditStatement = { ...buildCreditStatement(prepared, ledger, nowIso()), display: settings?.balanceDisplay ?? 'detailed' }
+    }
+    return prepared
   }
 
   /**

@@ -23,6 +23,8 @@ export interface InvoiceEstimateRow {
    * no invoice yet. On a 'pushed_waiting' row the client can no longer be billed.
    */
   pushedInWaiting?: string
+  /** 'pushed_waiting' rows only: true when the client can no longer be billed (no figure is quoted). */
+  notBillable?: boolean
 }
 
 export interface InvoiceEstimate {
@@ -53,4 +55,4 @@ export function buildInvoiceEstimate(args: {
 
 export function clientsLeftToInvoice(
   rows: readonly InvoiceEstimateRow[],
-): Array<{ id: string; name: string }>
+): Array<{ id: string; name: string; label?: string }>

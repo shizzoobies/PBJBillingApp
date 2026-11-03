@@ -216,7 +216,7 @@ describe('a pushed invoice', () => {
     fireEvent.click(editor().getByRole('button', { name: /Undo push/ }))
     const sheet = screen.getByRole('group', { name: 'Undo push' })
     expect(sheet).toHaveTextContent(
-      "Undo the push of INV-2026-08-001? Its lines come off September 2026's invoice, and this takes the lines back and rebuilds August 2026's invoice as you left it, as a new draft with a new number. This invoice stays voided as the record.",
+      "Undo the push of INV-2026-08-001: take its lines back off September 2026's invoice and rebuild August 2026's invoice as you left it, with a new number?",
     )
     expect(confirm).not.toHaveBeenCalled()
     expect(mockUndo).not.toHaveBeenCalled()

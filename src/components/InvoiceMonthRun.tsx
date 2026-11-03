@@ -121,6 +121,7 @@ import {
 } from '../../lib/invoice-rollforward.js'
 import {
   generateRollForwardNote,
+  hasWaitingPushedWork,
   rollForwardNotice,
   undoRollForwardNotice,
 } from '../lib/invoiceRollForwardText'
@@ -1617,13 +1618,18 @@ export function InvoiceMonthRun({
           : ''
       // Say what happened, including the nothing-case: running this and seeing
       // the list unchanged otherwise looks like a broken button.
+      // Pushed work waiting on a client who got no invoice leads the sentence: the
+      // "every client already has one" line would contradict it.
+      const pushNote = generateRollForwardNote(result, clientName)
       setNote(
         (result.created.length > 0
           ? `Built ${result.created.length} invoice${result.created.length === 1 ? '' : 's'}.` +
             generatedCreditNote(result.created)
-          : 'Nothing new to build — every client already has one for this month.') +
+          : hasWaitingPushedWork(result)
+            ? 'Nothing new was built.'
+            : 'Nothing new to build — every client already has one for this month.') +
           optedOutNote +
-          generateRollForwardNote(result, clientName),
+          pushNote,
       )
     } catch (err) {
       if (shownPeriod.current !== target) return
@@ -2177,7 +2183,10 @@ export function InvoiceMonthRun({
               {ribbon.notInvoiced.length > 0 ? <p>{notInvoicedNote}</p> : null}
               <ul>
                 {ribbon.notInvoiced.map((client) => (
-                  <li key={client.id}>{client.name}</li>
+                  <li key={client.id}>
+                    {client.name}
+                    {client.label ? ` · ${client.label}` : ''}
+                  </li>
                 ))}
                 {/* Pushed to next month (featreq-40697310): not "not invoiced" -
                     the work is on the later month's invoice. Not counted above. */}
@@ -4754,7 +4763,7 @@ function InvoiceEditor({
     }
   }
   const undoInto = invoice.rolledIntoPeriod ? getBillingPeriodLabel(invoice.rolledIntoPeriod) : 'next month'
-  const undoSentence = `Undo the push of ${invoice.number ?? 'this invoice'}? Its lines come off ${undoInto}'s invoice, and this takes the lines back and rebuilds ${getBillingPeriodLabel(invoice.period)}'s invoice as you left it, as a new draft with a new number. This invoice stays voided as the record.`
+  const undoSentence = `Undo the push of ${invoice.number ?? 'this invoice'}: take its lines back off ${undoInto}'s invoice and rebuild ${getBillingPeriodLabel(invoice.period)}'s invoice as you left it, with a new number?`
   const undoPush = async () => {
     setRetainerError(null)
     setRollBusy(true)
