@@ -1,6 +1,6 @@
 # Handoff — PBJBillingApp
 
-Written 2026-07-21, last updated 2026-11-01. Everything below is committed on
+Written 2026-07-21, last updated 2026-11-02. Everything below is committed on
 local `main` AND pushed — the eleven commits of 2026-09-15 went up at ~16:20
 UTC, with the Railway deploy still in flight as this was written (§0 says what
 to do first). The working tree was clean at handoff. Read this top to bottom before your first
@@ -13,6 +13,48 @@ and it has rules.**
 
 ## 0. Quick start for a brand-new session
 
+**2026-11-02 night - TWO SHIPS LIVE (health commit 5737b31), queue EMPTY except ef7f4e35 (parked for Alex); READ THIS FIRST, then the
+11-01 paragraphs.** `main` = `5737b318` (+ this handoff), only the primary worktree (+ Alex's chip worktree, the Codex pbj-billing tree
+and AP-feedback-attachments - all left alone; feedback attachments is still HELD for Alex's local review), voice re-provisioned after
+each ship, manifest ~214,557 (cap 400,000). **Ship 1 `33a3d9ed` (featreq-8dffdff7 Shipped, her words on the ticket):** Client Recap
+quarter/year views count only the months the client was ACTIVE: `clientActiveMonths` (lib/client-recap.js) = earliest evidence (first
+time entry, first non-void MONTHLY invoice incl. a master's line naming the sub, a recorded reimbursement, clients.createdAt) through
+the current firm-day month counted in full; inactive clients stop at their last evidence; estimates, cost, expected revenue, plan
+revenue and the Invoice tile scale by that count; captions name the months and why any were left out (`uncountedMonths`:
+beforeStart / notYetBegun / afterLastActivity); "Not active in this period" / "This period hasn't started yet"; projection null when
+not active; CSV rows Calendar months / Active months / Client since; masters take the max over subs. STORE: `created_at` is NOW
+selected and mapped on clients (it never was - the round-1 reviewer caught that the rule's creation term existed only in fixtures);
+new `listInvoiceEvidence({clientIds})` on both backends (client_id, period, kind, status, sourceClientIds), used by the recap route
+after the 403 and by the estimate route (lib/invoice-estimate.js `activityInvoices`, so a client created after a month it was
+billed/reimbursed in keeps its row). Prod probe (read-only, scratchpad neon-active-months-trial.mjs): Bright Tower / Chemtrex / XAct /
+KLC / K&A = 4 of 12 months for 2026, long-standing clients 11 of 12 (December not begun), Skyline (inactive) stops at August; every
+imported client has created_at 2026-08-14 and only RETAINER invoices before 2026-06, so evidence beats created_at. Said on her
+ticket: the current year counts Jan-Nov until December begins - she may send that back. **Ship 2 `5737b318` (merge 21d33bd9 + four
+commits; featreq-40697310 Shipped, her answer "1"):** PUSH TO NEXT MONTH. `invoices.rolled_into_period text` (look-first, Alex ok,
+confirmed on prod after deploy); push = status void + marker + email_log 'rolled-forward' + activity `invoice_rolled_forward`,
+hand-written in one transaction (advisory lock `account_credit:<client>`, row lock, autopay check, retainer release; the covered-date
+ledger is NOT released - the carried recurring lines still bill that window); carried lines (`lib/invoice-rollforward.js`
+`carriedLinesFromRolledInvoice`: plan/hourly/reimbursement/recurring/adhoc/adjustment/custom/time_detail; advance/prepayment/
+account_credit/retainer/card-fee dropped; `carriedFromPeriod` + `carriedFromInvoiceId` stamps; recurringId/coverage/employeeId/
+entryId/roleTier dropped so November's run never touches October's window or hours) append to an unsent next-month draft now
+(originalLineItems too) or are carried at Generate, which now takes the per-client advisory lock FIRST and re-reads the rolled marker
+under it (`_rolledIntoForUnderLock`; six "no lock without credit" pins updated); Generate skips the pushed month 'rolled-forward';
+every skip of a client with pushed work waiting is tagged and named in the Generate note, the estimate (`pushed_waiting` row, "client
+not billable" only when `isInvoiceRunClient` is false; a billable client's November row includes the pushed money "incl. October
+2026 pushed work") and the ribbon `waiting` list; the advance on the invoice link is re-attached (separately collected stays);
+refusals: not monthly/unsent, prepaid billing-period client, processing/autopay, unconfirmed covered dates, next invoice sent or
+emailed once (`sentAt`), next invoice itself pushed; Undo (in-page sheet) clears the marker, strips the carrier by carriedFromInvoiceId
+(voids it when nothing billable is left), and REBUILDS the month from the void row's own lines as a NEW number inside the same
+transaction (file backend: same mutateLocalData slot), refused once the carrier is sent, holds credit/retainer credit, the client is
+unbillable, or nothing to rebuild. Routes POST /api/invoices/:id/roll-forward and /undo-roll-forward (owner, preview refused,
+broadcast). Rolled-back prod trial of the SQL passed (column 36 ms; push/undo updates on a void row). Two review rounds each found
+real defects (unbillable-client lines vanishing; the generate-vs-push race; undo throwing away her edits). **Follow-ups (unfiled,
+LOW):** push still allowed for an already-unbillable client; a separately collected advance stays; undo refused while the carrier holds
+credit (remove credit first); the Client Recap counts carried work in the receiving month; undo picks its number before the lock (a
+race gives 500 not 409); combined master copy prints a $0 head line for a carried-only month; AI-accuracy sees the rebuilt draft's
+edited lines as generated; `dateOffset` still in six tests. **Watch:** her first real push (Activity `invoice_rolled_forward`, then
+November's Generate note). **Waiting on Brittany:** as in the 10-28 paragraph plus the 8dffdff7 current-year choice. **For Alex:**
+ef7f4e35 TOTP encryption (parked), feedback-attachments review, the stale machine ELEVENLABS_API_KEY.
 **2026-11-01 night - THE MANIFEST IS NO LONGER CAPPED AT 205,000: the voice agent reads it by RETRIEVAL (`1764d216` + the test fix
 that follows it). READ THIS FIRST.** Alex asked whether the manifest should move into Postgres as a "mind map" so nothing gets lost;
 answer: no - the cap was never storage, it was the voice agent's whole-document prompt-mode knowledge-base upload (ElevenLabs refuses
