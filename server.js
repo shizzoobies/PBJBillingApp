@@ -16395,7 +16395,8 @@ const server = createServer(async (request, response) => {
               assigneeName:
                 (data.employees ?? []).find((employee) => employee.id === existing.assigneeId)?.name ?? '',
             }
-            if (existing.assigneeId && existing.assigneeId !== session.user.id) {
+            // Told only when this skip's notice was actually written onto it.
+            if (advance.stamped === true && existing.assigneeId && existing.assigneeId !== session.user.id) {
               await notify(appDataStore, existing.assigneeId, 'checklist_step_skipped', {
                 checklistId: existing.id,
                 caseId,
@@ -16983,6 +16984,8 @@ const server = createServer(async (request, response) => {
         const existing = result.existing
         const notice = existing.skipNotice ?? {}
         if (
+          // Only when this press actually stamped it: a second press tells nobody again.
+          result.stamped === true &&
           existing.assigneeId &&
           existing.assigneeId !== session.user.id &&
           existing.assigneeId !== notice.skippedBy

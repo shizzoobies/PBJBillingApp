@@ -5055,7 +5055,8 @@ function sameCase(entry, checklist) {
 
 /**
  * The live (not recycled, not skipped, not pushed away) row of the stage after
- * `checklist` in its OWN case: same case, client and recipe.
+ * `checklist` in its OWN case: same case and client - the same rule the spawn
+ * guard (`maybeSpawnNextStage`) uses, so "already open" always finds the row.
  */
 function liveNextStageRow(checklists, checklist) {
   const nextIndex = (typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0) + 1
@@ -5063,7 +5064,6 @@ function liveNextStageRow(checklists, checklist) {
     (checklists ?? []).find(
       (entry) =>
         sameCase(entry, checklist) &&
-        (entry.templateId ?? null) === (checklist.templateId ?? null) &&
         entry.stageIndex === nextIndex &&
         !entry.deletedAt &&
         !entry.skippedAt &&
@@ -23986,7 +23986,9 @@ export class AppDataStore {
     const caseId = checklist.caseId || checklist.id
     // Same case AND client: case ids are shared across clients by the August
     // import (featreq-7e1827e0 review), so another client's row is not this one.
-    const ownCase = (entry) => entry.caseId === caseId && (entry.clientId ?? null) === (checklist.clientId ?? null)
+    // ONE rule with `liveNextStageRow` (`sameCase`: case key + client), so a guard
+    // that says already_spawned always has a row the lookup can find.
+    const ownCase = (entry) => sameCase(entry, checklist)
     const alreadySpawned = (data.checklists ?? []).some(
       (entry) => ownCase(entry) && entry.stageIndex === stageIndex + 1,
     )
@@ -24187,13 +24189,14 @@ export class AppDataStore {
       // Re-read: the row may have landed after `data` (the spawn's 23505 race).
       const next = liveNextStageRow((await this.read()).checklists, checklist)
       if (!next) return advance
-      if (!skipNoticeNeedsStamp(next, skipNotice)) return { ...advance, existing: next }
+      // Already carrying THIS skip's notice: nothing written, so nobody is told again.
+      if (!skipNoticeNeedsStamp(next, skipNotice)) return { ...advance, existing: next, stamped: false }
       // Endpoint-owned, one row, re-checked in the WHERE: still that case's live next
       // step (client too - case ids are shared across clients), and carrying no notice
       // or another skip's. What landed is what is reported; nothing landed, nothing told.
       const stamped = await this.pool.query(
         `update checklists set skip_notice = $2::jsonb, updated_at = now()
-         where id = $1 and deleted_at is null and client_id = $4 and case_id = $5 and stage_index = $6
+         where id = $1 and deleted_at is null and client_id = $4 and coalesce(nullif(case_id, ''), id) = $5 and stage_index = $6
            and skipped_at is null and pushed_to_checklist_id is null
            and (skip_notice is null or skip_notice->>'skipId' is distinct from $3)
          returning id, skip_notice`,
@@ -24208,7 +24211,7 @@ export class AppDataStore {
       )
       const row = stamped.rows?.[0]
       if (!row) return advance
-      return { ...advance, existing: { ...next, skipNotice: row.skip_notice ?? skipNotice } }
+      return { ...advance, existing: { ...next, skipNotice: row.skip_notice ?? skipNotice }, stamped: true }
     }
 
     // Read, decide and write inside ONE file-queue slot, like the toggle.
@@ -24229,11 +24232,13 @@ export class AppDataStore {
         // The same stamp as the Postgres branch, in the same slot as the decision.
         const next = liveNextStageRow(data.checklists, checklist)
         if (!next) return advance
-        if (skipNoticeNeedsStamp(next, skipNotice)) {
+        // `stamped` only when this slot actually wrote: a second press is told nothing.
+        const stamp = skipNoticeNeedsStamp(next, skipNotice)
+        if (stamp) {
           next.skipNotice = skipNotice
           await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
         }
-        return { ...advance, existing: next }
+        return { ...advance, existing: next, stamped: stamp }
       }
       if (!advance.spawned) return advance
       data.checklists = sortChecklists([...data.checklists, advance.spawned])
@@ -24270,7 +24275,9 @@ export class AppDataStore {
     const advance = await this.openNextStageAfterSkip(checklist.id, notice)
     // The next step was already open (a stale page): it now carries the notice, and
     // the route tells its person - a success, not a refusal.
-    if (!advance.spawned && advance.existing) return { checklist, spawned: null, existing: advance.existing, afterSkip: true }
+    if (!advance.spawned && advance.existing) {
+      return { checklist, spawned: null, existing: advance.existing, stamped: advance.stamped === true, afterSkip: true }
+    }
     if (!advance.spawned) throw new NextStageRefusedError(advance.reason, advance.message ?? null)
     return { checklist, spawned: advance.spawned, afterSkip: true }
   }

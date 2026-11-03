@@ -59369,6 +59369,7 @@ describe('skip a step, round 1 (file backend)', () => {
     const result = await store.openNextStageAfterSkip('cl-s0', notice())
     expect(result.spawned).toBeNull()
     expect(result.reason).toBe('already_spawned')
+    expect(result.stamped).toBe(true)
     expect(result.existing).toMatchObject({ id: 'cl-s1', assigneeId: ALLISON, skipNotice: notice() })
     expect((await persisted()).checklists.find((entry) => entry.id === 'cl-s1').skipNotice).toEqual(notice())
   })
@@ -59378,6 +59379,8 @@ describe('skip a step, round 1 (file backend)', () => {
     const before = await readFile(localDataPath, 'utf8')
     const again = await store.openNextStageAfterSkip('cl-s0', notice())
     expect(again.existing.skipNotice).toEqual(notice())
+    // Nothing written, so nobody is told again.
+    expect(again.stamped).toBe(false)
     expect(await readFile(localDataPath, 'utf8')).toBe(before)
 
     await store.openNextStageAfterSkip('cl-s0', notice({ skipId: 'skip-2', note: 'Second try.' }))
@@ -59595,7 +59598,7 @@ describe('skip a step, round 1 (postgres branch)', () => {
  *   - the skips selects and the review RETURNING gain step_skip
  *   - select checklist_id from checklist_skips where step_skip = true and kind = 'skip'  (readWithVersion)
  *   - update checklists set skip_notice = $2::jsonb, updated_at = now()
- *       where id = $1 and deleted_at is null and client_id = $4 and case_id = $5 and stage_index = $6
+ *       where id = $1 and deleted_at is null and client_id = $4 and coalesce(nullif(case_id, ''), id) = $5 and stage_index = $6
  *         and skipped_at is null and pushed_to_checklist_id is null
  *         and (skip_notice is null or skip_notice->>'skipId' is distinct from $3)
  *       returning id, skip_notice
@@ -59746,20 +59749,22 @@ describe('skip a step, round 2 (file backend)', () => {
     expect(other.skipNotice).toBeUndefined()
   })
 
-  it('a same-client next row of ANOTHER recipe is not this case\'s next step: not stamped', async () => {
+  it('the guard and the lookup agree: a same-client step 2 under the case is the one told, whatever its recipe', async () => {
     await seed([stageRow(0, SKIPPED), stageRow(1, { id: 'cl-other-recipe', templateId: 'tmpl-other' })])
     const result = await store.openNextStageAfterSkip('cl-s0', notice())
-    // The guard still sees a stage 2 in this case (its own rule), but nothing is stamped.
-    expect(result).toEqual({ spawned: null, reason: 'already_spawned' })
-    expect((await persisted()).checklists.find((entry) => entry.id === 'cl-other-recipe').skipNotice).toBeUndefined()
+    // The guard says already_spawned (case + client), and the lookup finds THAT row.
+    expect(result).toMatchObject({ spawned: null, reason: 'already_spawned', stamped: true, existing: { id: 'cl-other-recipe' } })
+    expect((await persisted()).checklists.find((entry) => entry.id === 'cl-other-recipe').skipNotice).toEqual(notice())
   })
 
   it('Open next step now on a stale page whose next step is already open: success, with the stamped row', async () => {
     await seed([stageRow(0, SKIPPED), stageRow(1)])
     const record = await fileSkip({ stepSkip: true })
     const result = await store.openNextStageEarly('cl-s0', 'emp-owner')
-    expect(result).toMatchObject({ spawned: null, afterSkip: true, existing: { id: 'cl-s1' } })
+    expect(result).toMatchObject({ spawned: null, afterSkip: true, stamped: true, existing: { id: 'cl-s1' } })
     expect(result.existing.skipNotice.skipId).toBe(record.id)
+    // A second press on the same stale page: already stamped, so not stamped again (no second notice).
+    expect(await store.openNextStageEarly('cl-s0', 'emp-owner')).toMatchObject({ existing: { id: 'cl-s1' }, stamped: false })
   })
 
   it('a split push of the step carrying the notice keeps it on the open work', async () => {
@@ -59885,9 +59890,10 @@ describe('skip a step, round 2 (postgres branch)', () => {
     const landed = stub([{ id: 'cl-s1', skip_notice: skipNotice }])
     const result = await landed.pg.openNextStageAfterSkip('cl-s0', skipNotice)
     expect(result.existing).toMatchObject({ id: 'cl-s1', skipNotice })
+    expect(result.stamped).toBe(true)
     const [update] = landed.fake.matching(/^update checklists set skip_notice/i)
     expect(update.text.replace(/\s+/g, ' ')).toBe(
-      "update checklists set skip_notice = $2::jsonb, updated_at = now() where id = $1 and deleted_at is null and client_id = $4 and case_id = $5 and stage_index = $6 and skipped_at is null and pushed_to_checklist_id is null and (skip_notice is null or skip_notice->>'skipId' is distinct from $3) returning id, skip_notice",
+      "update checklists set skip_notice = $2::jsonb, updated_at = now() where id = $1 and deleted_at is null and client_id = $4 and coalesce(nullif(case_id, ''), id) = $5 and stage_index = $6 and skipped_at is null and pushed_to_checklist_id is null and (skip_notice is null or skip_notice->>'skipId' is distinct from $3) returning id, skip_notice",
     )
     expect(update.params).toEqual(['cl-s1', JSON.stringify(skipNotice), 'skip-1', 'c1', 'case-mail', 1])
 
@@ -59898,6 +59904,23 @@ describe('skip a step, round 2 (postgres branch)', () => {
       spawned: null,
       reason: 'already_spawned',
     })
+
+    // Already carrying this skip's notice: no statement, existing answered, stamped false.
+    const same = stub([])
+    same.pg.read = async () => ({ checklists: [skippedStage, { ...nextStage, skipNotice }], checklistTemplates: [template], clients: [{ id: 'c1' }] })
+    expect(await same.pg.openNextStageAfterSkip('cl-s0', skipNotice)).toMatchObject({ existing: { id: 'cl-s1' }, stamped: false })
+    expect(same.fake.matching(/^update checklists set skip_notice/i)).toHaveLength(0)
+
+    // A legacy next row with an EMPTY case_id is keyed by its own id, as everywhere else.
+    const legacyNext = { ...nextStage, id: 'cl-legacy', caseId: '' }
+    const legacy = stub([{ id: 'cl-legacy', skip_notice: skipNotice }])
+    legacy.pg.read = async () => ({
+      checklists: [{ ...skippedStage, caseId: 'cl-legacy' }, legacyNext],
+      checklistTemplates: [template],
+      clients: [{ id: 'c1' }],
+    })
+    expect(await legacy.pg.openNextStageAfterSkip('cl-s0', skipNotice)).toMatchObject({ stamped: true, existing: { id: 'cl-legacy' } })
+    expect(legacy.fake.matching(/^update checklists set skip_notice/i)[0].params[4]).toBe('cl-legacy')
   })
 
   it('a split push carries skip_notice from the lock select into the new row', async () => {

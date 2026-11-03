@@ -362,7 +362,7 @@ describe('the skip route after review round 1', () => {
     expect(branch).toContain('checklist: existing,')
     expect(branch).toContain("await notify(appDataStore, existing.assigneeId, 'checklist_step_skipped', {")
     expect(branch).toContain('alreadyOpen: true,\n                }),')
-    expect(branch).toContain('if (existing.assigneeId && existing.assigneeId !== session.user.id) {')
+    expect(branch).toContain('existing.assigneeId && existing.assigneeId !== session.user.id) {')
     expect(branch).not.toContain('owner.id')
   })
 
@@ -438,5 +438,27 @@ describe('the routes after review round 2', () => {
     expect(branch).toContain('alreadyOpen: true,')
     expect(branch).toContain('sendJson(response, 200, { checklist: from, spawned: existing, alreadyOpen: true })')
     expect(route).toContain('nextAssigneeId !== session.user.id && nextAssigneeId !== notice.skippedBy')
+  })
+})
+
+/** Final round (featreq-7e1827e0): an already-open step is told only when this skip wrote its notice. */
+describe('the routes tell an already-open step once', () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
+  const serverSource = readFileSync(path.join(root, 'server.js'), 'utf8').replaceAll('\r\n', '\n')
+
+  it('the skip route notifies only when the store stamped it', () => {
+    const start = serverSource.indexOf("} else if (advance.reason === 'already_spawned' && advance.existing) {")
+    const branch = serverSource.slice(start, serverSource.indexOf('} else if (', start + 10))
+    expect(branch).toContain('if (advance.stamped === true && existing.assigneeId && existing.assigneeId !== session.user.id) {')
+    // Answered as already open either way.
+    expect(branch).toContain('alreadyOpen: true,')
+  })
+
+  it('Open next step now on a stale page notifies only when this press stamped it, and answers alreadyOpen either way', () => {
+    const start = serverSource.indexOf('if (afterSkip && !spawned && result.existing) {')
+    const branch = serverSource.slice(start, serverSource.indexOf('await appDataStore.recordActivity(', start))
+    expect(branch).toContain('result.stamped === true &&')
+    expect(branch.indexOf('result.stamped === true &&')).toBeLessThan(branch.indexOf("'checklist_step_skipped'"))
+    expect(branch).toContain('sendJson(response, 200, { checklist: from, spawned: existing, alreadyOpen: true })')
   })
 })
