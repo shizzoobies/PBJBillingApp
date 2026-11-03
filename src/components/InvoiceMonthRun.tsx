@@ -12,6 +12,7 @@ import {
   RefreshCw,
   RotateCcw,
   ShieldCheck,
+  CalendarClock,
   Trash2,
   Undo2,
 } from 'lucide-react'
@@ -42,6 +43,8 @@ import {
   listUnappliedRetainersRequest,
   markInvoicePaidRequest,
   removeAccountCreditRequest,
+  rollInvoiceForwardRequest,
+  undoInvoiceRollForwardRequest,
   unmarkInvoicePaidRequest,
   verifyAllInvoicePaymentsRequest,
   verifyInvoicePaymentRequest,
@@ -109,6 +112,18 @@ import {
   type ScopeTagEdits,
 } from '../../lib/invoice-scope-retag.js'
 import { InvoiceScopePanel } from './InvoiceScopePanel'
+import {
+  carriedForwardTitle,
+  isCarriedLine,
+  nextPeriod as rollNextPeriod,
+  rollForwardConfirmText,
+  rolledIntoLabel,
+} from '../../lib/invoice-rollforward.js'
+import {
+  generateRollForwardNote,
+  rollForwardNotice,
+  undoRollForwardNotice,
+} from '../lib/invoiceRollForwardText'
 import {
   ApiError,
   type AdhocMode,
@@ -1606,7 +1621,9 @@ export function InvoiceMonthRun({
         (result.created.length > 0
           ? `Built ${result.created.length} invoice${result.created.length === 1 ? '' : 's'}.` +
             generatedCreditNote(result.created)
-          : 'Nothing new to build — every client already has one for this month.') + optedOutNote,
+          : 'Nothing new to build — every client already has one for this month.') +
+          optedOutNote +
+          generateRollForwardNote(result),
       )
     } catch (err) {
       if (shownPeriod.current !== target) return
@@ -1705,7 +1722,8 @@ export function InvoiceMonthRun({
             : '') +
           (optedOutCount > 0
             ? ` ${optedOutCount} client${optedOutCount === 1 ? '' : 's'} opted out of platform invoicing.`
-            : ''),
+            : '') +
+          generateRollForwardNote(result),
       )
     } catch (err) {
       // Includes the half-done case: the server says the voids landed and that
@@ -2152,13 +2170,20 @@ export function InvoiceMonthRun({
         >
           <span>Clients not invoiced</span>
           <strong>{ribbonReady ? ribbon.notInvoiced.length : '—'}</strong>
-          {ribbonReady && ribbon.notInvoiced.length > 0 ? (
+          {ribbonReady && (ribbon.notInvoiced.length > 0 || ribbon.rolled.length > 0) ? (
             <details className="invoice-run-stat-who">
               <summary>Who</summary>
-              <p>{notInvoicedNote}</p>
+              {ribbon.notInvoiced.length > 0 ? <p>{notInvoicedNote}</p> : null}
               <ul>
                 {ribbon.notInvoiced.map((client) => (
                   <li key={client.id}>{client.name}</li>
+                ))}
+                {/* Pushed to next month (featreq-40697310): not "not invoiced" -
+                    the work is on the later month's invoice. Not counted above. */}
+                {ribbon.rolled.map((client) => (
+                  <li key={`rolled-${client.id}`} className="invoice-run-stat-rolled">
+                    {client.name} · {client.label}
+                  </li>
                 ))}
               </ul>
             </details>
@@ -2434,6 +2459,7 @@ export function InvoiceMonthRun({
                     onRefusal={(message) =>
                       setError(`${invoice.number ?? clientName(invoice.clientId)}: ${message}`)
                     }
+                    onNotice={setNote}
                     onPrint={() => onPrint(invoice)}
                     onDirtyChange={setOpenDirty}
                     reminderUnrecorded={unrecordedReminders.has(invoice.id)}
@@ -2487,6 +2513,7 @@ function InvoiceRow({
   onInvoiceChanged,
   onInvoiceMoved,
   onRefusal,
+  onNotice,
   onDirtyChange,
   reminderUnrecorded,
   onReminderUnrecorded,
@@ -2553,6 +2580,8 @@ function InvoiceRow({
   onInvoiceMoved: () => Promise<void>
   /** A refusal whose editor was gone when it arrived: the run's banner says it. */
   onRefusal: (message: string) => void
+  /** Say what a push to next month (or its undo) did, in the run's note line. */
+  onNotice?: (message: string) => void
   /** Tell the run whether this row's open editor has unsaved edits. */
   onDirtyChange: (dirty: boolean) => void
 }) {
@@ -2833,7 +2862,11 @@ function InvoiceRow({
         <span className="invoice-run-amount">
           <strong>{currency.format(invoice.total)}</strong>
           <span className={`invoice-status is-${invoice.status}`}>
-            {INVOICE_STATUS_LABELS[invoice.status] ?? invoice.status}
+            {/* A pushed invoice (featreq-40697310) is a void that says where its
+                lines went, so it does not read as thrown away. */}
+            {isVoid && invoice.rolledIntoPeriod
+              ? rolledIntoLabel(invoice.rolledIntoPeriod)
+              : (INVOICE_STATUS_LABELS[invoice.status] ?? invoice.status)}
           </span>
           {/* A bank payment is on its way (about 4 business days). Since when, so
               a payment that has sat here a week stands out. */}
@@ -2991,6 +3024,7 @@ function InvoiceRow({
           onInvoiceChanged={onInvoiceChanged}
           onInvoiceMoved={onInvoiceMoved}
           onRefusal={onRefusal}
+          onNotice={onNotice}
           onDirtyChange={onDirtyChange}
           reminderUnrecorded={reminderUnrecorded}
           onReminderUnrecorded={onReminderUnrecorded}
@@ -3455,12 +3489,15 @@ function InvoiceEditor({
   onInvoiceChanged,
   onInvoiceMoved,
   onRefusal,
+  onNotice,
   onDirtyChange,
   reminderUnrecorded,
   onReminderUnrecorded,
 }: {
   invoice: PersistedInvoice
   clientName: string
+  /** Say what a push to next month (or its undo) did, in the run's note line. */
+  onNotice?: (message: string) => void
   /** A reminder left this session but is not on the log: Send reminder stays off. */
   reminderUnrecorded: boolean
   /** Tell the run a reminder left without its log entry (`logged: false`). */
@@ -3554,6 +3591,19 @@ function InvoiceEditor({
   // the run, because it is about the lines on this screen and it arrives with
   // the credit line being removed from them.
   const [retainerError, setRetainerError] = useState<string | null>(null)
+  // Push to next month (featreq-40697310): the confirm sheet, and a push or undo
+  // in the air.
+  const [rollConfirm, setRollConfirm] = useState(false)
+  const [rollBusy, setRollBusy] = useState(false)
+  const rollTarget = rollNextPeriod(invoice.period)
+  const rollTargetLabel = rollTarget ? getBillingPeriodLabel(rollTarget) : 'next month'
+  // The month list's own answer (derived by the server from the rules it
+  // enforces). Absent on an invoice handed back by a save: then the button is
+  // offered and the server decides.
+  const rollBlocked =
+    invoice.rollForward && !invoice.rollForward.allowed
+      ? (invoice.rollForward.reason ?? 'This invoice cannot be pushed to next month.')
+      : null
 
   // Whether this editor is still on screen. A refusal that arrives after she
   // collapsed the row, opened another invoice or switched tab has no slot to
@@ -4144,8 +4194,14 @@ function InvoiceEditor({
   // everything that edits a line addresses it by its position in the saved
   // array; splitting the display must not renumber the data.
   const numbered = lines.map((line, index) => ({ line, index })).filter(({ line }) => line.kind !== 'advance_request')
-  const scopedRows = numbered.filter((row) => row.line.kind !== 'adhoc')
-  const adhocRows = numbered.filter((row) => row.line.kind === 'adhoc')
+  // Lines pushed from an earlier month (featreq-40697310) are shown apart, under
+  // "Carried forward from <month>", one block per month: they are that month's
+  // work, editable like any line, but not this month's hours or ad hoc review.
+  const carriedRows = numbered.filter(({ line }) => isCarriedLine(line))
+  const ownRows = numbered.filter(({ line }) => !isCarriedLine(line))
+  const carriedMonths = [...new Set(carriedRows.map(({ line }) => line.carriedFromPeriod as string))].sort()
+  const scopedRows = ownRows.filter((row) => row.line.kind !== 'adhoc')
+  const adhocRows = ownRows.filter((row) => row.line.kind === 'adhoc')
 
   /**
    * A BILLING MASTER's lines, grouped by the company whose work they are.
@@ -4174,7 +4230,7 @@ function InvoiceEditor({
   const sourceGroups: SourceGroup[] = []
   if (isBillingMaster) {
     const byKey = new Map<string, SourceGroup>()
-    for (const row of numbered) {
+    for (const row of ownRows) {
       const key = row.line.sourceClientId ?? ''
       let group = byKey.get(key)
       if (!group) {
@@ -4668,6 +4724,51 @@ function InvoiceEditor({
   }
 
   /**
+   * PUSH TO NEXT MONTH (featreq-40697310). The confirm sheet says, in her words,
+   * what moves, what closes and what happens to an attached advance; the server
+   * owns every rule and answers a refusal with the sentence. Success reloads the
+   * month (this invoice moves to Voided, as "Rolled into <month>") and the run's
+   * note line says where the lines went.
+   */
+  const pushToNextMonth = async () => {
+    setRetainerError(null)
+    setRollBusy(true)
+    try {
+      const result = await rollInvoiceForwardRequest(invoice.id)
+      onNotice?.(rollForwardNotice(result, { number: invoice.number, period: invoice.period }))
+      if (mountedRef.current) setRollConfirm(false)
+      await onInvoiceMoved()
+    } catch (err) {
+      if (err instanceof ApiError && INVOICE_MOVED_CODES.has(err.code)) await onInvoiceMoved()
+      sayRefusal(err instanceof Error ? err.message : 'Could not push this invoice.')
+    } finally {
+      if (mountedRef.current) setRollBusy(false)
+    }
+  }
+  const undoPush = async () => {
+    const into = invoice.rolledIntoPeriod ? getBillingPeriodLabel(invoice.rolledIntoPeriod) : 'next month'
+    const here = getBillingPeriodLabel(invoice.period)
+    const confirmed = window.confirm(
+      `Undo the push of ${invoice.number ?? 'this invoice'}? Its lines come off ${into}'s invoice, and ${here}'s invoice is built again from the time records. This invoice stays voided with your edits on it; they are not copied to the new one.`,
+    )
+    if (!confirmed) return
+    setRetainerError(null)
+    setRollBusy(true)
+    try {
+      const result = await undoInvoiceRollForwardRequest(invoice.id)
+      onNotice?.(
+        undoRollForwardNotice(result, { number: invoice.number, period: invoice.period, clientName }),
+      )
+      await onInvoiceMoved()
+    } catch (err) {
+      if (err instanceof ApiError && INVOICE_MOVED_CODES.has(err.code)) await onInvoiceMoved()
+      sayRefusal(err instanceof Error ? err.message : 'Could not undo the push.')
+    } finally {
+      if (mountedRef.current) setRollBusy(false)
+    }
+  }
+
+  /**
    * She has billed or refunded the difference. No confirm: it writes one log
    * entry, changes nothing about the money, and the flag is derived from the log
    * so it simply goes. A refusal is a sentence in the editor's own error slot.
@@ -4884,6 +4985,29 @@ function InvoiceEditor({
               ))}
             </tbody>
           ) : null}
+          {carriedMonths.map((month) => (
+            <tbody className="invoice-run-carried" key={`carried-${month}`}>
+              <tr className="invoice-run-carried-heading">
+                <th colSpan={3} scope="colgroup">
+                  {carriedForwardTitle(month)}
+                </th>
+              </tr>
+              {carriedRows
+                .filter(({ line }) => line.carriedFromPeriod === month)
+                .map(({ line, index }) => (
+                  <InvoiceLineRow
+                    key={`${line.kind}-${index}`}
+                    line={line}
+                    index={index}
+                    onChange={setLine}
+                    onRemove={removeLine}
+                    locked={Boolean(lockMessage)}
+                    busy={savingDates}
+                    onModeChange={line.kind === 'adhoc' ? setAdhocMode : undefined}
+                  />
+                ))}
+            </tbody>
+          ))}
         </table>
         </div>
         <InvoiceScopePanel
@@ -5586,6 +5710,32 @@ function InvoiceEditor({
           onClose={() => setPreviewOpen(false)}
         />
       ) : null}
+      {/* Push to next month's confirm sheet (featreq-40697310): what moves, what
+          closes, what happens to an attached advance. Nothing is sent until she
+          presses the button in it. */}
+      {rollConfirm ? (
+        <div className="invoice-run-remind-confirm invoice-run-roll-confirm" role="group" aria-label="Push to next month">
+          <p className="invoice-run-remind-prompt">{rollForwardConfirmText(invoice)}</p>
+          <div className="invoice-run-remind-actions">
+            <button
+              type="button"
+              className="primary-action"
+              disabled={rollBusy || busy}
+              onClick={() => void pushToNextMonth()}
+            >
+              {rollBusy ? 'Pushing…' : `Push to ${rollTargetLabel}`}
+            </button>
+            <button
+              type="button"
+              className="ghost-action"
+              disabled={rollBusy}
+              onClick={() => setRollConfirm(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
       <div className="invoice-run-editor-footer">
         <span className="invoice-run-running-total">
           Total {currency.format(localTotal)}
@@ -5876,8 +6026,62 @@ function InvoiceEditor({
               Void
             </button>
           ) : null}
+          {/* Push to next month (featreq-40697310), beside Void: an unsent monthly
+              invoice too small to send closes and its lines move onto next
+              month's. Off, with the reason, wherever the server would refuse. */}
+          {invoice.kind === 'monthly' && (invoice.status === 'draft' || invoice.status === 'reviewed') ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={busy || savingDates || dirty || rollBusy || scope.previewMode || rollBlocked !== null}
+              title={
+                scope.previewMode
+                  ? 'Disabled in preview mode'
+                  : dirty
+                    ? 'Save your changes first'
+                    : (rollBlocked ??
+                      `Close this invoice and move everything on it onto ${rollTargetLabel}'s invoice`)
+              }
+              onClick={() => {
+                setRetainerError(null)
+                setRollConfirm(true)
+              }}
+            >
+              <CalendarClock size={15} />
+              Push to next month
+            </button>
+          ) : null}
+          {/* The undo, on a pushed invoice, while the month it went into has not
+              gone out. */}
+          {invoice.status === 'void' && invoice.rolledIntoPeriod ? (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={
+                busy || rollBusy || scope.previewMode || invoice.rollUndo?.allowed === false
+              }
+              title={
+                scope.previewMode
+                  ? 'Disabled in preview mode'
+                  : invoice.rollUndo?.allowed === false
+                    ? (invoice.rollUndo.reason ?? 'This push cannot be undone.')
+                    : `Take these lines back off ${getBillingPeriodLabel(invoice.rolledIntoPeriod)}'s invoice and build this month's invoice again`
+              }
+              onClick={() => void undoPush()}
+            >
+              <Undo2 size={15} />
+              {rollBusy ? 'Undoing…' : 'Undo push'}
+            </button>
+          ) : null}
         </div>
       </div>
+      {/* Why Push (or Undo) is off, said where she can read it: a title is hover-only. */}
+      {rollBlocked && invoice.kind === 'monthly' && (invoice.status === 'draft' || invoice.status === 'reviewed') ? (
+        <p className="invoice-run-roll-blocked">Push to next month: {rollBlocked}</p>
+      ) : null}
+      {invoice.status === 'void' && invoice.rolledIntoPeriod && invoice.rollUndo?.allowed === false ? (
+        <p className="invoice-run-roll-blocked">Undo push: {invoice.rollUndo.reason}</p>
+      ) : null}
     </div>
   )
 }

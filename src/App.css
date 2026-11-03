@@ -13174,6 +13174,36 @@ tr.is-inactive-client .client-name-link {
   text-transform: uppercase;
 }
 
+/* Lines pushed from an earlier month (featreq-40697310): their own block under
+   "Carried forward from <month>", so October's work does not read as November's. */
+.invoice-run-carried td,
+.invoice-run-carried th {
+  background: color-mix(in srgb, var(--muted) 6%, transparent);
+}
+
+.invoice-run-carried-heading th {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  padding: 10px 6px 4px 0;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+/* Why Push to next month (or its undo) is off, under the footer buttons. */
+.invoice-run-roll-blocked {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 6px 0 0;
+  text-align: right;
+}
+
+.invoice-run-stat-rolled {
+  color: var(--muted);
+}
+
 .invoice-run-adhoc-choice {
   align-items: center;
   display: flex;

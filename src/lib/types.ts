@@ -738,6 +738,14 @@ export type PersistedInvoiceLine = {
   sourceClientId?: string | null
   /** `prepayment` lines only: the "YYYY-MM" month this line is paid ahead for. */
   period?: string
+  /**
+   * Pushed from an earlier month (featreq-40697310): the "YYYY-MM" the work was
+   * done in. The line prints under "Carried forward from <month>" and keeps it
+   * through a chain of pushes.
+   */
+  carriedFromPeriod?: string
+  /** The pushed invoice that brought this line here; Undo removes by it. */
+  carriedFromInvoiceId?: string
 }
 
 /** Something on the draft worth a decision before sending — never a charge. */
@@ -846,6 +854,16 @@ export type PersistedInvoice = {
    * off. Never stored.
    */
   accountCreditNotice?: string
+  /**
+   * Push to next month (featreq-40697310): on a VOID monthly invoice, the
+   * "YYYY-MM" its lines were carried into ("Rolled into November 2026"). Null or
+   * absent on every other invoice.
+   */
+  rolledIntoPeriod?: string | null
+  /** Derived on the month list for an unsent monthly invoice: can it be pushed, and if not why. */
+  rollForward?: { allowed: boolean; reason: string | null }
+  /** Derived on the month list for a pushed invoice: can the push be undone, and if not why. */
+  rollUndo?: { allowed: boolean; reason: string | null }
   createdAt: string | null
   updatedAt: string | null
 }

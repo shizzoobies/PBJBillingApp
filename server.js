@@ -23,6 +23,7 @@ import {
   InvoiceChangedError,
   InvoiceLockedError,
   InvoicePaymentProcessingError,
+  InvoiceRollForwardError,
   ManualPaymentError,
   NextStageRefusedError,
   RestoreConflictError,
@@ -6024,6 +6025,13 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         console.error('[invoices] unpaid-prepayment mark failed on the list, answering unmarked:', error)
       }
+      // And Push to next month (featreq-40697310): whether each unsent invoice can
+      // be pushed, and whether each pushed one can still be undone, with the reason.
+      try {
+        marked = await appDataStore.withRollForwardState(marked)
+      } catch (error) {
+        console.error('[invoices] push-to-next-month mark failed on the list, answering unmarked:', error)
+      }
       sendJson(response, 200, { invoices: marked })
       return
     }
@@ -9163,6 +9171,93 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/invoices/:id/roll-forward and /undo-roll-forward — "Push to next
+    // month" (featreq-40697310) and its undo (owner only; preview headers are
+    // refused for every write above). Push closes an unsent monthly invoice as
+    // "rolled into <next month>" and moves its lines onto that month's invoice;
+    // Undo takes them back off while that month has not gone out and builds the
+    // pushed month's invoice again. Every rule is the store's
+    // (lib/invoice-rollforward.js); a refusal is a sentence, 409, nothing written.
+    const rollForwardMatch = normalizedPath.match(
+      /^\/api\/invoices\/([^/]+)\/(roll-forward|undo-roll-forward)$/,
+    )
+    if (rollForwardMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can push invoices' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      const rollContentType = String(request.headers['content-type'] || '')
+      if (!rollContentType.toLowerCase().includes('application/json')) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const rollInvoiceId = decodeURIComponent(rollForwardMatch[1])
+      const undoing = rollForwardMatch[2] === 'undo-roll-forward'
+      let rollResult
+      try {
+        // The actor comes from the SESSION, never from the body.
+        const rollOptions = { actorId: session.user.id, appUrl: getPublicAppUrl(request) }
+        rollResult = undoing
+          ? await appDataStore.undoInvoiceRollForward(rollInvoiceId, rollOptions)
+          : await appDataStore.rollInvoiceForward(rollInvoiceId, rollOptions)
+      } catch (error) {
+        if (error instanceof InvoiceRollForwardError) {
+          sendJson(response, 409, { error: error.code, message: error.message })
+          return
+        }
+        if (error instanceof InvoiceChangedError) {
+          sendJson(response, 409, { error: 'invoice_changed', message: error.message })
+          return
+        }
+        console.error('[invoices] push to next month failed:', error)
+        sendJson(response, 500, {
+          error: undoing ? 'invoice_undo_roll_forward_failed' : 'invoice_roll_forward_failed',
+          message: undoing
+            ? 'Could not undo the push - nothing was changed. Please try again.'
+            : 'Could not push this invoice - nothing was changed. Please try again.',
+        })
+        return
+      }
+      if (!rollResult) {
+        sendJson(response, 404, { error: 'Invoice not found' })
+        return
+      }
+      // The write is COMMITTED by now: the pushed invoice (or the next month's
+      // invoice an undo voided) may still hold open payment pages, closed the
+      // same way a void closes them. Best-effort, never throws.
+      if (!undoing && rollResult.rolled) {
+        await expireInvoiceSessions(
+          [rollResult.rolled.stripeCheckoutSessionId, rollResult.rolled.stripeCardSessionId],
+          rollInvoiceId,
+          'void (pushed to next month)',
+        )
+      }
+      if (undoing && rollResult.carrierVoided && rollResult.carrier) {
+        await expireInvoiceSessions(rollResult.carrierSessions ?? [], rollResult.carrier.id, 'void (push undone)')
+      }
+      try {
+        const rolledName = rollResult.rolled?.number ?? rollInvoiceId
+        await appDataStore.recordActivity(
+          session.user.id,
+          undoing ? 'invoice_roll_forward_undone' : 'invoice_rolled_forward',
+          undoing
+            ? `${rolledName}${rollResult.regenerated ? ` -> ${rollResult.regenerated.number ?? rollResult.regenerated.id}` : ''}`
+            : `${rolledName} -> ${rollResult.rolled?.rolledIntoPeriod ?? ''}${rollResult.carrier ? ` (${rollResult.carrier.number ?? rollResult.carrier.id})` : ''}`,
+        )
+      } catch (error) {
+        console.error('[invoices] push saved but its activity entry failed:', error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 200, rollResult)
+      return
+    }
+
     // POST /api/invoices/:id/apply-account-credit and /remove-account-credit —
     // draw a client's credit on account onto one invoice by hand, or take that
     // line off again (owner only; stage 1b of docs/plans/credit-on-account-and-
@@ -9512,6 +9607,9 @@ const server = createServer(async (request, response) => {
       try {
         result = await appDataStore.generateInvoicesForPeriod(period, {
           ...(onlyClientId ? { clientId: onlyClientId } : {}),
+          // Only for a pushed invoice's advance re-attached to the new draft.
+          actorUserId: session.user.id,
+          appUrl: getPublicAppUrl(request),
         })
       } catch (error) {
         console.error('[invoices] generate failed:', error)
@@ -9588,7 +9686,10 @@ const server = createServer(async (request, response) => {
 
       let rebuilt
       try {
-        rebuilt = await appDataStore.generateInvoicesForPeriod(regenPeriod)
+        rebuilt = await appDataStore.generateInvoicesForPeriod(regenPeriod, {
+          actorUserId: session.user.id,
+          appUrl: getPublicAppUrl(request),
+        })
       } catch (error) {
         // The voids have already landed. There is no transaction spanning both
         // halves and inventing one here would mean restructuring generation, so
@@ -9615,6 +9716,8 @@ const server = createServer(async (request, response) => {
         clearing: voided.clearing ?? 0,
         created: rebuilt.created,
         skipped: rebuilt.skipped,
+        carried: rebuilt.carried ?? [],
+        advances: rebuilt.advances ?? [],
       })
       return
     }

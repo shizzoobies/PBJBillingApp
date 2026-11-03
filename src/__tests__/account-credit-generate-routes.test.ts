@@ -39,7 +39,9 @@ describe('the routes that generate monthly drafts', () => {
   it('Void & regenerate voids first (which returns the draws), then rebuilds through the same generator', () => {
     const text = squash(regenerate)
     const voided = text.indexOf('appDataStore.voidUnsentInvoicesForPeriod(regenPeriod)')
-    const rebuilt = text.indexOf('appDataStore.generateInvoicesForPeriod(regenPeriod)')
+    // Since Push to next month (featreq-40697310) the rebuild also passes the
+    // actor and the public address, so the anchor stops at the period.
+    const rebuilt = text.indexOf('appDataStore.generateInvoicesForPeriod(regenPeriod')
     expect(voided).toBeGreaterThan(-1)
     expect(rebuilt).toBeGreaterThan(voided)
     expect(text).toContain('created: rebuilt.created')

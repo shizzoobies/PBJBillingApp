@@ -315,6 +315,7 @@
         "created_at": {
           "$date": "2026-08-01T12:00:00.000Z"
         },
+        "rolled_into_period": null,
         "updated_at": "now()"
       },
       {
@@ -344,6 +345,7 @@
         "pay_token": null,
         "recorded_outside_app": true,
         "created_at": "2026-09-01T00:00:00.000Z",
+        "rolled_into_period": null,
         "updated_at": "now()"
       }
     ],
@@ -1192,6 +1194,7 @@
         "pay_token": "",
         "recorded_outside_app": "",
         "created_at": "",
+        "rolled_into_period": "",
         "updated_at": "<now()>"
       },
       "tails": [

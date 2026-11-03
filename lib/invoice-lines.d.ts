@@ -77,6 +77,11 @@ export type InvoiceLineOut = {
   needsCoverageConfirmation?: boolean
   /** Why she is being asked: a skipped cycle, or a resumed pause. */
   coverageReason?: 'gap' | 'resumed'
+  /* -- pushed from an earlier month (featreq-40697310) ---------------------- */
+  /** "YYYY-MM" the work was done in, kept through a chain of pushes. */
+  carriedFromPeriod?: string
+  /** The pushed invoice that brought this line onto this one. */
+  carriedFromInvoiceId?: string
 }
 
 export type BuildInvoiceLinesResult = {
@@ -395,7 +400,8 @@ export type InvoiceSectionGroup = {
  * are null for the untitled charges block and in combined mode.
  */
 export type InvoiceSection = {
-  key: 'plan' | 'work' | 'expenses' | 'software' | 'prepayment' | 'charges' | 'combined'
+  /** `carried-YYYY-MM`: lines pushed from that month's invoice (featreq-40697310). */
+  key: 'plan' | 'work' | 'expenses' | 'software' | 'prepayment' | 'charges' | 'combined' | `carried-${string}`
   title: string | null
   totalLabel: string | null
   rows: InvoiceLineOut[]

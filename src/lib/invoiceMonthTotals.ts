@@ -15,6 +15,7 @@ import {
   type InvoiceEstimateRow,
 } from '../../lib/invoice-estimate.js'
 import type { Client, PersistedInvoice } from './types'
+import { getBillingPeriodLabel } from './utils'
 
 export type InvoiceMonthTotals = {
   /** Sum of `total` over the month's sent monthly invoices. */
@@ -34,6 +35,12 @@ export type InvoiceMonthTotals = {
    * nothing to bill this month.
    */
   notInvoicedFrom: 'estimate' | 'roster'
+  /**
+   * Push to next month (featreq-40697310): clients whose invoice for this month was
+   * closed into a later month's, A to Z. Never in `notInvoiced`: the work is billed
+   * on that later invoice. `label` is what the fold-out says ("Rolled into November 2026").
+   */
+  rolled: Array<{ id: string; name: string; intoPeriod: string; label: string }>
 }
 
 const cents = (value: number) => Math.round(value * 100) / 100
@@ -50,6 +57,33 @@ export function summarizeInvoiceMonthTotals(
     visibleClientIds: new Set(invoices.map((invoice) => invoice.clientId)),
   })
   const invoiced = new Set(rows.map((row) => row.clientId))
+  // A pushed month: a void monthly invoice carrying the month it went into, for a
+  // client with no live monthly invoice of its own this month.
+  const live = new Set(
+    invoices
+      .filter((invoice) => invoice.kind === 'monthly' && invoice.status !== 'void')
+      .map((invoice) => invoice.clientId),
+  )
+  const rolledInto = new Map<string, string>()
+  for (const invoice of invoices) {
+    if (
+      invoice.kind === 'monthly' &&
+      invoice.status === 'void' &&
+      typeof invoice.rolledIntoPeriod === 'string' &&
+      /^[0-9]{4}-[0-9]{2}$/.test(invoice.rolledIntoPeriod) &&
+      !live.has(invoice.clientId)
+    ) {
+      rolledInto.set(invoice.clientId, invoice.rolledIntoPeriod)
+    }
+  }
+  const rolled = [...rolledInto.entries()]
+    .map(([id, intoPeriod]) => ({
+      id,
+      name: clients.find((client) => client.id === id)?.name ?? 'Unknown client',
+      intoPeriod,
+      label: `Rolled into ${getBillingPeriodLabel(intoPeriod)}`,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name))
   return {
     monthTotal: cents(rows.reduce((sum, row) => sum + row.total, 0)),
     serviceTotal: cents(rows.reduce((sum, row) => sum + row.accountingTotal, 0)),
@@ -70,8 +104,9 @@ export function summarizeInvoiceMonthTotals(
         ]
       : clients.filter(isInvoiceRunClient).map((client) => ({ id: client.id, name: client.name }))
     )
-      .filter((client) => !invoiced.has(client.id))
+      .filter((client) => !invoiced.has(client.id) && !rolledInto.has(client.id))
       .sort((a, b) => a.name.localeCompare(b.name)),
     notInvoicedFrom: estimateRows ? 'estimate' : 'roster',
+    rolled,
   }
 }

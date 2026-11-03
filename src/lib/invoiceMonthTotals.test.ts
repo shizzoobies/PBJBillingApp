@@ -168,4 +168,17 @@ describe('summarizeInvoiceMonthTotals with the owner estimate', () => {
     expect(totals.notInvoicedFrom).toBe('roster')
     expect(totals.notInvoiced).toEqual([{ id: 'c1', name: 'C1' }])
   })
+
+  it('lists a pushed month as rolled, never as not invoiced (featreq-40697310)', () => {
+    const pushed = invoice('a', 'c1', { status: 'void', rolledIntoPeriod: '2026-11' })
+    const clients = [client('c1'), client('c2')]
+    const roster = summarizeInvoiceMonthTotals([pushed], clients, null)
+    expect(roster.notInvoiced.map((entry) => entry.id)).toEqual(['c2'])
+    expect(roster.rolled).toEqual([{ id: 'c1', name: 'C1', intoPeriod: '2026-11', label: 'Rolled into November 2026' }])
+    const fromEstimate = summarizeInvoiceMonthTotals([pushed], clients, [row('c1', { basis: 'sent', detail: null })])
+    expect(fromEstimate.notInvoiced).toEqual([])
+    expect(fromEstimate.rolled.map((entry) => entry.id)).toEqual(['c1'])
+    // A plain void is not a push.
+    expect(summarizeInvoiceMonthTotals([invoice('a', 'c1', { status: 'void' })], clients, null).rolled).toEqual([])
+  })
 })

@@ -4685,7 +4685,85 @@ export async function generateInvoicesRequest(period: string, clientId?: string)
      * invoice. Absent on every other reason.
      */
     skipped: Array<{ clientId: string; reason: string; billedToClientId?: string | null }>
+    /** Push to next month (featreq-40697310): drafts that took a pushed invoice's lines. */
+    carried?: InvoiceCarriedReport[]
+    /** And the advance requests that rode along, or could not. */
+    advances?: InvoiceAdvanceCarriedReport[]
   }
+}
+
+/** One draft that took a pushed invoice's lines (featreq-40697310). */
+export type InvoiceCarriedReport = {
+  clientId: string
+  invoiceId: string
+  fromInvoiceId: string
+  fromPeriod: string
+  lines: number
+}
+
+/** One pushed invoice's advance request: moved onto the new invoice, or why not. */
+export type InvoiceAdvanceCarriedReport = {
+  clientId?: string
+  invoiceId: string | null
+  requestId: string
+  number: string | null
+  attached: boolean
+  message: string | null
+}
+
+/** What Push to next month answers (featreq-40697310). */
+export type InvoiceRollForwardResult = {
+  /** The pushed invoice, now void and "Rolled into <next month>". */
+  rolled: PersistedInvoice | null
+  /** Next month's invoice that now holds the lines; null until next month is generated. */
+  carrier: PersistedInvoice | null
+  advance: InvoiceAdvanceCarriedReport | null
+}
+
+/** What Undo push answers (featreq-40697310). */
+export type InvoiceUndoRollForwardResult = {
+  rolled: PersistedInvoice | null
+  carrier: PersistedInvoice | null
+  /** Next month's invoice held nothing but the pushed lines, so it was voided. */
+  carrierVoided: boolean
+  /** The pushed month's invoice built again; null when nothing was built (see `skipped`). */
+  regenerated: PersistedInvoice | null
+  skipped: Array<{ clientId: string; reason: string }>
+  advance: InvoiceAdvanceCarriedReport | null
+  /** The undo landed but rebuilding failed: Generate builds the month. */
+  generateError: string | null
+}
+
+async function rollRequest<T>(invoiceId: string, action: 'roll-forward' | 'undo-roll-forward'): Promise<T> {
+  const response = await apiFetch(`/api/invoices/${encodeURIComponent(invoiceId)}/${action}`, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  if (!response.ok) {
+    const { message, code } = await safeError(response)
+    throw new ApiError(
+      response.status,
+      message || (action === 'roll-forward' ? 'Could not push this invoice.' : 'Could not undo the push.'),
+      code,
+    )
+  }
+  return (await response.json()) as T
+}
+
+/**
+ * Push to next month (featreq-40697310): close this unsent monthly invoice as
+ * "rolled into <next month>" and move its lines onto that month's invoice. A
+ * refusal is a 409 with her sentence (`ApiError.message`).
+ */
+export function rollInvoiceForwardRequest(invoiceId: string) {
+  return rollRequest<InvoiceRollForwardResult>(invoiceId, 'roll-forward')
+}
+
+/** Undo a push while the next month's invoice has not gone out (featreq-40697310). */
+export function undoInvoiceRollForwardRequest(invoiceId: string) {
+  return rollRequest<InvoiceUndoRollForwardResult>(invoiceId, 'undo-roll-forward')
 }
 
 /**
@@ -4719,6 +4797,8 @@ export async function regenerateInvoicesRequest(period: string) {
      * invoice. Absent on every other reason.
      */
     skipped: Array<{ clientId: string; reason: string; billedToClientId?: string | null }>
+    carried?: InvoiceCarriedReport[]
+    advances?: InvoiceAdvanceCarriedReport[]
   }
 }
 

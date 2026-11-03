@@ -1,3 +1,5 @@
+import { getBillingPeriodLabel } from './utils'
+
 /**
  * Why a single-client generate produced nothing.
  *
@@ -16,6 +18,8 @@ export type InvoiceGenerateSkip = {
   reason?: string
   /** Only on `billed-to-other`: the billing master the work went onto. */
   billedToClientId?: string | null
+  /** Only on `rolled-forward`: the month this month's invoice was pushed into. */
+  rolledIntoPeriod?: string | null
 }
 
 export function generateSkipMessage(
@@ -56,6 +60,12 @@ export function generateSkipMessage(
     // fix, when the absence IS the setting.
     case 'opted-out':
       return `${clientName} is invoiced outside the app, so no invoice was created.`
+    // Pushed to next month (featreq-40697310): billing this month again would bill
+    // the same work twice. Undo the push to bill it in this month instead.
+    case 'rolled-forward':
+      return skipped.rolledIntoPeriod && /^\d{4}-\d{2}$/.test(skipped.rolledIntoPeriod)
+        ? `${clientName}'s ${periodLabel} invoice was pushed into ${getBillingPeriodLabel(skipped.rolledIntoPeriod)}, so no invoice was created. Undo the push to bill it in ${periodLabel}.`
+        : `${clientName}'s ${periodLabel} invoice was pushed to next month, so no invoice was created.`
     default:
       return `No invoice was created for ${clientName} for ${periodLabel}.`
   }

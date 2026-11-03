@@ -110,6 +110,18 @@ import {
   withPrepaymentLines,
 } from '../lib/invoice-draft.js'
 import {
+  carriedLinesFromRolledInvoice,
+  hasBillableContent,
+  insertCarriedLines,
+  moneyOfLines,
+  nextPeriod as rollNextPeriod,
+  rollForwardRefusal,
+  rollUndoRefusal,
+  rolledAdvanceOffer,
+  withCarriedLines,
+  withoutCarriedLinesFrom,
+} from '../lib/invoice-rollforward.js'
+import {
   hasBillingPeriod,
   normalizeBillingPeriodMonths,
   normalizePeriodAnchorMonth,
@@ -615,6 +627,7 @@ export const BULK_INSERT_SHAPES = {
       'pay_token',
       'recorded_outside_app',
       'created_at',
+      'rolled_into_period',
     ],
     casts: { line_items: 'jsonb', scope_flags: 'jsonb', email_log: 'jsonb', original_line_items: 'jsonb' },
     literals: { updated_at: 'now()' },
@@ -1216,6 +1229,10 @@ export function invoiceRestoreRow(invoice) {
     // would start exporting to QuickBooks.
     invoice.recorded_outside_app === true,
     invoice.created_at,
+    // "Rolled into November" (featreq-40697310) rides the restore too: dropped
+    // from either half, the next owner autosave would turn a pushed invoice back
+    // into a plain void, and November's generation would stop carrying its lines.
+    invoice.rolled_into_period ?? null,
   ]
 }
 
@@ -2875,6 +2892,20 @@ export class InvoiceChangedError extends Error {
   }
 }
 
+/**
+ * "Push to next month" (or its undo) refused - see lib/invoice-rollforward.js
+ * `rollForwardRefusal` / `rollUndoRefusal`. Carries the refusal's `code` for the
+ * route; the message is the sentence she reads. Thrown BEFORE any write (or
+ * inside the transaction, which then writes nothing).
+ */
+export class InvoiceRollForwardError extends Error {
+  constructor(message, code = 'roll_forward_refused') {
+    super(message)
+    this.name = 'InvoiceRollForwardError'
+    this.code = code
+  }
+}
+
 /** What the locked read of `applyInvoicePayment` answers when it finds no row. */
 const INVOICE_ROW_NOT_FOUND = Symbol('invoice row not found')
 
@@ -3544,6 +3575,22 @@ export function sanitizeInvoiceLines(raw, { invoiceKind = 'monthly', storedLines
       if (INVOICE_LINE_ROLE_TIERS.has(line?.roleTier)) {
         base.roleTier = line.roleTier
       }
+      // PUSHED FROM AN EARLIER MONTH (featreq-40697310). The month the work was
+      // done in and the pushed invoice that brought the line here: the first
+      // prints the "Carried forward from October 2026" heading, the second is
+      // what Undo removes by. Named here for the same reason as the two above -
+      // without it one Save in the editor would turn October's work into
+      // November's. A malformed value is dropped, not stored.
+      if (typeof line?.carriedFromPeriod === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(line.carriedFromPeriod)) {
+        base.carriedFromPeriod = line.carriedFromPeriod
+        if (
+          typeof line?.carriedFromInvoiceId === 'string' &&
+          line.carriedFromInvoiceId &&
+          line.carriedFromInvoiceId.length <= 200
+        ) {
+          base.carriedFromInvoiceId = line.carriedFromInvoiceId
+        }
+      }
       // The Software section's mark (featreq-a69a3cc0), kept for the same
       // reason: only a recurring line can carry it, and an unknown value is
       // dropped rather than stored.
@@ -3873,7 +3920,8 @@ export const INVOICE_SELECT_COLUMNS = `id, client_id, period, number, kind, stat
           due_date, blurb, scope_flags, sent_at, paid_at, payment_method,
           stripe_checkout_session_id, stripe_card_session_id,
           stripe_payment_intent_id, email_log, applied_to_invoice_id,
-          original_line_items, pay_token, recorded_outside_app, created_at, updated_at`
+          original_line_items, pay_token, recorded_outside_app, created_at, updated_at,
+          rolled_into_period`
 
 /**
  * One invoices row -> the camelCase shape the app and the API speak. jsonb
@@ -3925,6 +3973,9 @@ export function mapInvoiceRow(row) {
     recordedOutsideApp: row.recorded_outside_app === true,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+    // "Push to next month" (featreq-40697310): on a VOID monthly invoice, the
+    // "YYYY-MM" its lines were carried into. Null on every other row.
+    rolledIntoPeriod: row.rolled_into_period ?? null,
   }
 }
 
@@ -3950,6 +4001,8 @@ function normalizeStoredInvoice(invoice) {
     payToken: invoice.payToken ?? null,
     // Same as `mapInvoiceRow`: a boolean, false on a row minted before it existed.
     recordedOutsideApp: invoice.recordedOutsideApp === true,
+    // Same as `mapInvoiceRow`: null, never undefined.
+    rolledIntoPeriod: invoice.rolledIntoPeriod ?? null,
   }
 }
 
@@ -8191,6 +8244,12 @@ export class AppDataStore {
       await this.pool.query(
         `alter table invoices add column if not exists recorded_outside_app boolean not null default false`,
       )
+      // "Push to next month" (featreq-40697310): on a VOIDED monthly invoice, the
+      // "YYYY-MM" its lines were carried into ("Rolled into November 2026").
+      // NULLABLE with no default: every existing row was never pushed, and null
+      // is exactly that. Only `rollInvoiceForward` sets it and only
+      // `undoInvoiceRollForward` clears it.
+      await this.pool.query(`alter table invoices add column if not exists rolled_into_period text`)
       // PARTIAL unique — one live invoice per client per month, but a VOIDED
       // one must not block re-generating. Same lesson as the checklist
       // materializer's instance index, applied from day one rather than after
@@ -10656,7 +10715,7 @@ export class AppDataStore {
                     stripe_checkout_session_id, stripe_card_session_id,
                     stripe_payment_intent_id, payment_method,
                     email_log, applied_to_invoice_id, original_line_items, pay_token,
-                    recorded_outside_app, created_at
+                    recorded_outside_app, created_at, rolled_into_period
                from invoices`,
           )
         ).rows
@@ -16292,6 +16351,10 @@ export class AppDataStore {
       windowDays = DEFAULT_PAYMENT_WINDOW_DAYS,
       issueDate = firmToday(),
       clientId = null,
+      // Who pressed Generate, and the app's public address: used only to re-attach
+      // a pushed invoice's advance (featreq-40697310), written into its log.
+      actorUserId = null,
+      appUrl = null,
     } = {},
   ) {
     const data = await this.read()
@@ -16313,11 +16376,35 @@ export class AppDataStore {
     // Monthly only, for the same reason as `liveClientIds` plus one of its own:
     // this is a Map keyed by client, so a retainer sharing last month with a
     // real invoice would overwrite it and quietly drop that client's true-up.
+    const priorInvoices = await this.listInvoices({ period: previousPeriod(period) })
     const priorByClient = new Map(
-      (await this.listInvoices({ period: previousPeriod(period) }))
+      priorInvoices
         .filter((invoice) => invoice.kind === 'monthly' && invoice.status !== 'void')
         .map((invoice) => [invoice.clientId, invoice]),
     )
+    // PUSH TO NEXT MONTH (featreq-40697310). Last month's invoices that were
+    // pushed INTO this month: their lines are carried onto this month's draft
+    // (time entries carry no "invoiced" flag, so nothing else would ever bill
+    // them). The latest push per client wins; Undo clears the marker, so there is
+    // normally only one.
+    const rolledIntoByClient = new Map()
+    for (const invoice of priorInvoices) {
+      if (invoice.kind !== 'monthly' || invoice.status !== 'void' || invoice.rolledIntoPeriod !== period) continue
+      const held = rolledIntoByClient.get(invoice.clientId)
+      if (!held || String(invoice.updatedAt ?? '') > String(held.updatedAt ?? '')) {
+        rolledIntoByClient.set(invoice.clientId, invoice)
+      }
+    }
+    // And this month's invoices that were pushed OUT to next month: that client
+    // is never billed for this month again ('rolled-forward'), however many
+    // times Generate or Void & regenerate runs. Undo is the way back.
+    const rolledOutClientIds = new Map(
+      existing
+        .filter((invoice) => invoice.kind === 'monthly' && invoice.status === 'void' && invoice.rolledIntoPeriod)
+        .map((invoice) => [invoice.clientId, invoice.rolledIntoPeriod]),
+    )
+    const carried = []
+    const advances = []
 
     // Who bills to whom, resolved once for the whole run. Each master's subs
     // are held in CLIENT-NAME order so the merged document reads the same way
@@ -16358,6 +16445,21 @@ export class AppDataStore {
         skipped.push({ clientId: client.id, reason: 'already-generated' })
         continue
       }
+      // PUSHED TO NEXT MONTH (featreq-40697310): this month's invoice was closed
+      // and its lines moved onto the next month's. Billing the month again would
+      // bill that work twice. Said out loud on every run, like 'opted-out'.
+      if (rolledOutClientIds.has(client.id)) {
+        skipped.push({
+          clientId: client.id,
+          reason: 'rolled-forward',
+          rolledIntoPeriod: rolledOutClientIds.get(client.id),
+        })
+        continue
+      }
+      // Lines pushed into this month that a lifecycle skip below would leave on
+      // no invoice at all: said out loud even on a month-wide run, because that
+      // is money that would otherwise go quiet.
+      const pushedIn = rolledIntoByClient.get(client.id) ?? null
       // BILLED OUTSIDE THE APP (featreq-006f12f6). Nothing is generated for this
       // client, ever, and it is said OUT LOUD on a month-wide run as well as a
       // single one — exactly like 'billed-to-other', and for the same reason:
@@ -16380,12 +16482,24 @@ export class AppDataStore {
       // has finished. Their existing invoices are untouched and stay in
       // History — the `liveClientIds` check above already protects those.
       if (isInactiveClientStage(client.lifecycleStage)) {
-        if (clientId) skipped.push({ clientId: client.id, reason: 'client-inactive' })
+        if (clientId || pushedIn) {
+          skipped.push({
+            clientId: client.id,
+            reason: 'client-inactive',
+            ...(pushedIn ? { carriedFromInvoiceId: pushedIn.id } : {}),
+          })
+        }
         continue
       }
       // Prospects and onboarding clients are not billed yet.
       if ((client.lifecycleStage ?? 'active') !== 'active') {
-        if (clientId) skipped.push({ clientId: client.id, reason: 'not-billable-yet' })
+        if (clientId || pushedIn) {
+          skipped.push({
+            clientId: client.id,
+            reason: 'not-billable-yet',
+            ...(pushedIn ? { carriedFromInvoiceId: pushedIn.id } : {}),
+          })
+        }
         continue
       }
 
@@ -16511,11 +16625,20 @@ export class AppDataStore {
           issueDate,
           windowDays,
           subDrafts,
-          priorInvoice: priorByClient.get(client.id) ?? null,
+          // A pushed last month still supplies its true-up (featreq-40697310):
+          // it is the invoice of record for that month, just closed into this one.
+          priorInvoice: priorByClient.get(client.id) ?? pushedIn,
         })
       } else {
-        draft = draftFor(client, priorByClient.get(client.id) ?? null)
+        draft = draftFor(client, priorByClient.get(client.id) ?? pushedIn)
       }
+      // PUSHED IN (featreq-40697310): last month's lines, after this month's own
+      // lines and true-up and BEFORE the prepayment and credit on account below,
+      // so those (and a later card fee) are worked out on the carried money too.
+      // A month with nothing of its own but carried lines is no longer
+      // 'nothing-to-bill'.
+      const carriedLines = pushedIn ? carriedLinesFromRolledInvoice(pushedIn) : []
+      draft = withCarriedLines(draft, carriedLines)
       if (draft.lineItems.length === 0) {
         skipped.push({ clientId: client.id, reason: 'nothing-to-bill' })
         continue
@@ -16578,11 +16701,584 @@ export class AppDataStore {
         }
         return inserted
       })
-      if (saved) created.push(saved)
-      else skipped.push({ clientId: client.id, reason: 'already-generated' })
+      if (!saved) {
+        skipped.push({ clientId: client.id, reason: 'already-generated' })
+        continue
+      }
+      let result = saved
+      if (pushedIn && carriedLines.length > 0) {
+        carried.push({
+          clientId: client.id,
+          invoiceId: saved.id,
+          fromInvoiceId: pushedIn.id,
+          fromPeriod: pushedIn.period,
+          lines: carriedLines.length,
+        })
+        // THE ADVANCE RIDES ALONG. A pushed invoice whose advance was to be
+        // collected on its payment link hands that request to this one, the same
+        // way the owner would attach it. Never fatal: the invoice stands, and a
+        // request that can no longer be attached is reported, not retried.
+        const attached = await this._reattachRolledAdvance(pushedIn, saved.id, actorUserId, appUrl)
+        if (attached) {
+          advances.push({ clientId: client.id, ...attached.report })
+          if (attached.invoice) result = attached.invoice
+        }
+      }
+      created.push(result)
     }
 
-    return { period, created, skipped }
+    return { period, created, skipped, carried, advances }
+  }
+
+  /**
+   * Re-attach a pushed invoice's advance section to the invoice that now carries
+   * its lines (featreq-40697310). Only an advance collected WITH the invoice's
+   * payment link moves (Brittany's ask: one link to pay); one collected
+   * separately keeps its own page and is reported as left there.
+   *
+   * Answers null when the pushed invoice had no advance, else
+   * `{ report: { invoiceId, requestId, number, attached, message }, invoice }`
+   * where `invoice` is the re-read invoice when the attach landed. Never throws.
+   */
+  async _reattachRolledAdvance(rolled, targetInvoiceId, actorUserId = null, appUrl = null) {
+    const offer = rolledAdvanceOffer(rolled)
+    if (!offer) return null
+    const base = { invoiceId: targetInvoiceId, requestId: offer.requestId, number: offer.number ?? null }
+    if (offer.collection !== 'invoice') {
+      return {
+        report: {
+          ...base,
+          attached: false,
+          message: 'Collected separately, so it stays on its own payment page.',
+        },
+        invoice: null,
+      }
+    }
+    // setInvoiceAdvanceOffer rebuilds `<base>/advance-pay/<token>`. The caller's
+    // public address when it has one, else the base the original offer was made
+    // with.
+    const linkBase = appUrl || String(offer.url ?? '').replace(/\/advance-pay\/[^/]*$/, '')
+    try {
+      const invoice = await this.setInvoiceAdvanceOffer(
+        targetInvoiceId,
+        offer.requestId,
+        offer.optional === true,
+        actorUserId,
+        linkBase,
+        'invoice',
+      )
+      return { report: { ...base, attached: true, message: null }, invoice }
+    } catch (error) {
+      return {
+        report: {
+          ...base,
+          attached: false,
+          message: error instanceof Error ? error.message : 'The advance could not be attached.',
+        },
+        invoice: null,
+      }
+    }
+  }
+
+  /**
+   * PUSH TO NEXT MONTH (featreq-40697310): close an unsent monthly invoice as
+   * "rolled into <next month>" and move everything on it onto the next month's
+   * invoice as its own lines.
+   *
+   * The pushed invoice becomes `status 'void'` + `rolledIntoPeriod`. Keeping it a
+   * VOID is the point: the live-monthly unique index, generation, the recaps, the
+   * ribbon and payments already treat a void as not live, and the marker is what
+   * tells the editor and the generator it was pushed rather than thrown away.
+   *
+   * What the void path does that this does too: a retainer credited on it goes
+   * back on account, and its credit-on-account draws are released (the ledger
+   * ignores void rows). What it does DIFFERENTLY: the covered-date ledger is NOT
+   * released - the carried recurring lines still bill that window, on the next
+   * invoice. No review event is written: a push is not a judgment on the draft's
+   * lines (the AI's trust record), and the email log + activity log say it.
+   *
+   * When the next month already has an UNSENT draft (or reviewed) invoice, the
+   * carried lines are appended to it in the SAME transaction and it goes back to
+   * draft (it changed); otherwise nothing more - generating the next month carries
+   * them. Either way an advance collected with the pushed invoice's link is
+   * re-attached afterwards (its own transaction; reported, never fatal).
+   *
+   * Refusals: lib/invoice-rollforward.js `rollForwardRefusal`, decided early for a
+   * cheap answer and AGAIN under the locks, on the rows about to be written.
+   *
+   * Returns null when there is no such invoice, else
+   * `{ rolled, carrier, advance }` - the re-read pushed invoice, the next month's
+   * invoice that now holds the lines (null until next month is generated) and the
+   * advance report (null when there was none).
+   */
+  async rollInvoiceForward(invoiceId, { actorId = null, now = nowIso(), appUrl = null } = {}) {
+    const all = await this.listInvoices()
+    const current = all.find((invoice) => invoice.id === invoiceId)
+    if (!current) return null
+    const toPeriod = rollNextPeriod(current.period)
+    const client = await this.getClientById(current.clientId)
+    const monthlyOf = (list, period) =>
+      list.filter(
+        (row) =>
+          row.clientId === current.clientId &&
+          row.period === period &&
+          (row.kind ?? 'monthly') === 'monthly',
+      )
+    const early = rollForwardRefusal({
+      invoice: current,
+      client,
+      nextInvoices: monthlyOf(all, toPeriod),
+      autopayActive: (await this.listAutopayAttempts({ invoiceId })).some((attempt) =>
+        AUTOPAY_ACTIVE_ATTEMPT_STATUSES.has(attempt.status),
+      ),
+    })
+    if (early) throw new InvoiceRollForwardError(early.message, early.code)
+
+    // The decision, made again on the rows about to be written.
+    const decide = (row, nextRows, autopayActive) => {
+      const refusal = rollForwardRefusal({ invoice: row, client, nextInvoices: nextRows, autopayActive })
+      if (refusal) throw new InvoiceRollForwardError(refusal.message, refusal.code)
+      const carrier = nextRows.find((next) => next.status === 'draft' || next.status === 'reviewed') ?? null
+      if (!carrier) return { carrier: null }
+      const lineItems = insertCarriedLines(carrier.lineItems, carriedLinesFromRolledInvoice(row))
+      return {
+        carrier,
+        lineItems,
+        ...recomputeInvoiceMoney(lineItems),
+        entry: {
+          kind: 'carried-in',
+          fromPeriod: row.period,
+          fromInvoiceId: row.id,
+          fromNumber: row.number ?? null,
+          by: actorId,
+          at: now,
+        },
+      }
+    }
+    const rolledEntry = { kind: 'rolled-forward', toPeriod, by: actorId, at: now }
+
+    let carrierId = null
+    if (this.pool) {
+      carrierId = await this._withTransaction(async (dbClient) => {
+        // The client's credit lock FIRST, as every credit-moving write takes it
+        // (the void hands this invoice's draws back; the advance attach takes it
+        // too), then the rows: the pushed invoice, then next month's.
+        await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [
+          `account_credit:${current.clientId}`,
+        ])
+        const locked = await dbClient.query(
+          `select ${INVOICE_SELECT_COLUMNS} from invoices where id = $1 for update`,
+          [invoiceId],
+        )
+        if (!locked.rows?.length) throw new InvoiceChangedError()
+        const row = mapInvoiceRow(locked.rows[0])
+        const nextRows = (
+          await dbClient.query(
+            `select ${INVOICE_SELECT_COLUMNS} from invoices
+              where client_id = $1 and period = $2 and kind = 'monthly'
+              for update`,
+            [current.clientId, toPeriod],
+          )
+        ).rows.map(mapInvoiceRow)
+        const active = await dbClient.query(
+          `select 1 from autopay_attempts
+            where invoice_id = $1 and status = any($2::text[]) limit 1`,
+          [invoiceId, [...AUTOPAY_ACTIVE_ATTEMPT_STATUSES]],
+        )
+        const plan = decide(row, nextRows, active.rows.length > 0)
+        const closed = await dbClient.query(
+          `update invoices
+              set status = 'void', rolled_into_period = $2,
+                  email_log = coalesce(email_log, '[]'::jsonb) || $3::jsonb, updated_at = now()
+            where id = $1 and status = $4`,
+          [invoiceId, toPeriod, JSON.stringify([rolledEntry]), row.status],
+        )
+        if (closed.rowCount === 0) throw new InvoiceChangedError()
+        // A voided invoice holds no retainer (same release as the void path).
+        await dbClient.query(
+          `update invoices
+              set applied_to_invoice_id = null, updated_at = now()
+            where kind = 'retainer' and applied_to_invoice_id = $1`,
+          [invoiceId],
+        )
+        if (!plan.carrier) return null
+        const moved = await dbClient.query(
+          `update invoices
+              set line_items = $2::jsonb, subtotal = $3, total = $4, status = 'draft',
+                  email_log = coalesce(email_log, '[]'::jsonb) || $5::jsonb, updated_at = now()
+            where id = $1 and status = $6`,
+          [
+            plan.carrier.id,
+            JSON.stringify(plan.lineItems),
+            plan.subtotal,
+            plan.total,
+            JSON.stringify([plan.entry]),
+            plan.carrier.status,
+          ],
+        )
+        if (moved.rowCount === 0) throw new InvoiceChangedError()
+        return plan.carrier.id
+      })
+    } else {
+      carrierId = await mutateLocalData(async (data) => {
+        if (!Array.isArray(data.invoices)) data.invoices = []
+        const stored = data.invoices.find((invoice) => invoice.id === invoiceId)
+        if (!stored) throw new InvoiceChangedError()
+        const row = normalizeStoredInvoice(stored)
+        const nextStored = data.invoices.filter(
+          (invoice) =>
+            invoice.clientId === current.clientId &&
+            invoice.period === toPeriod &&
+            (invoice.kind ?? 'monthly') === 'monthly',
+        )
+        const autopayActive = (data.autopayAttempts ?? []).some(
+          (attempt) => attempt.invoiceId === invoiceId && AUTOPAY_ACTIVE_ATTEMPT_STATUSES.has(attempt.status),
+        )
+        const plan = decide(row, nextStored.map(normalizeStoredInvoice), autopayActive)
+        const stamp = nowIso()
+        stored.status = 'void'
+        stored.rolledIntoPeriod = toPeriod
+        stored.emailLog = [...(Array.isArray(stored.emailLog) ? stored.emailLog : []), rolledEntry]
+        stored.updatedAt = stamp
+        for (const invoice of data.invoices) {
+          if (invoice.kind === 'retainer' && invoice.appliedToInvoiceId === invoiceId) {
+            invoice.appliedToInvoiceId = null
+            invoice.updatedAt = stamp
+          }
+        }
+        if (!plan.carrier) return { result: null, changed: true }
+        const target = data.invoices.find((invoice) => invoice.id === plan.carrier.id)
+        target.lineItems = plan.lineItems
+        target.subtotal = plan.subtotal
+        target.total = plan.total
+        target.status = 'draft'
+        target.emailLog = [...(Array.isArray(target.emailLog) ? target.emailLog : []), plan.entry]
+        target.updatedAt = stamp
+        return { result: target.id, changed: true }
+      })
+    }
+
+    const after = await this.listInvoices({ period: current.period })
+    const rolled = after.find((invoice) => invoice.id === invoiceId) ?? null
+    let carrier = carrierId
+      ? ((await this.listInvoices({ period: toPeriod })).find((invoice) => invoice.id === carrierId) ?? null)
+      : null
+    let advance = null
+    if (carrier && rolledAdvanceOffer(current)) {
+      // Only when the next invoice has no advance section of its own: replacing
+      // one she attached there on purpose is not this button's decision.
+      if (rolledAdvanceOffer(carrier)) {
+        advance = {
+          invoiceId: carrier.id,
+          requestId: rolledAdvanceOffer(current).requestId,
+          number: rolledAdvanceOffer(current).number ?? null,
+          attached: false,
+          message: `${carrier.number ?? 'The next invoice'} already has an advance section, so this one was not moved.`,
+        }
+      } else {
+        const attached = await this._reattachRolledAdvance(current, carrier.id, actorId, appUrl)
+        advance = attached?.report ?? null
+        if (attached?.invoice) carrier = attached.invoice
+      }
+    } else if (rolledAdvanceOffer(current)) {
+      const offer = rolledAdvanceOffer(current)
+      advance = {
+        invoiceId: null,
+        requestId: offer.requestId,
+        number: offer.number ?? null,
+        attached: false,
+        message:
+          offer.collection === 'invoice'
+            ? 'It moves onto next month’s invoice when that invoice is generated.'
+            : 'Collected separately, so it stays on its own payment page.',
+      }
+    }
+    return { rolled, carrier, advance }
+  }
+
+  /**
+   * UNDO A PUSH (featreq-40697310), while the month it went into has not gone out.
+   *
+   *   - the pushed invoice loses its marker and STAYS VOID (a void never revives;
+   *     its lines and her edits stay on it as the record);
+   *   - the lines it carried are taken off the next month's unsent invoice. If
+   *     they were all that invoice billed (what is left is credits, an advance
+   *     section or nothing), that invoice is VOIDED rather than left empty;
+   *   - an advance re-attached there from the pushed invoice is taken off too;
+   *   - then the pushed month is generated again for this client - the same path
+   *     as Generate for one client - so it gets a fresh draft, and the advance is
+   *     re-attached to that draft.
+   *
+   * Refusals: `rollUndoRefusal` (next month sent, pushed on again, a credit on
+   * next month's invoice, a live invoice already in the pushed month).
+   *
+   * Returns null when there is no such invoice, else
+   * `{ rolled, carrier, carrierVoided, regenerated, skipped, advance }`.
+   */
+  async undoInvoiceRollForward(invoiceId, { actorId = null, now = nowIso(), appUrl = null } = {}) {
+    const all = await this.listInvoices()
+    const current = all.find((invoice) => invoice.id === invoiceId)
+    if (!current) return null
+    const toPeriod = current.rolledIntoPeriod
+    const monthlyOf = (list, period) =>
+      list.filter(
+        (row) =>
+          row.clientId === current.clientId &&
+          row.period === period &&
+          (row.kind ?? 'monthly') === 'monthly',
+      )
+    const early = rollUndoRefusal({
+      invoice: current,
+      nextInvoices: toPeriod ? monthlyOf(all, toPeriod) : [],
+      periodInvoices: monthlyOf(all, current.period),
+    })
+    if (early) throw new InvoiceRollForwardError(early.message, early.code)
+
+    const offer = rolledAdvanceOffer(current)
+    const decide = (row, nextRows, periodRows) => {
+      const refusal = rollUndoRefusal({ invoice: row, nextInvoices: nextRows, periodInvoices: periodRows })
+      if (refusal) throw new InvoiceRollForwardError(refusal.message, refusal.code)
+      const carrier = nextRows.find((next) => next.status === 'draft' || next.status === 'reviewed') ?? null
+      if (!carrier) return { carrier: null }
+      let lineItems = withoutCarriedLinesFrom(carrier.lineItems, row.id)
+      // The advance that rode along comes off with the lines it rode with.
+      const riding = rolledAdvanceOffer(carrier)
+      if (offer && riding && riding.requestId === offer.requestId) {
+        lineItems = lineItems.filter((line) => line?.kind !== 'advance_request')
+      }
+      const voidIt = !hasBillableContent(lineItems)
+      return {
+        carrier,
+        voidIt,
+        lineItems: voidIt ? carrier.lineItems : lineItems,
+        ...recomputeInvoiceMoney(voidIt ? carrier.lineItems : lineItems),
+        entry: {
+          kind: voidIt ? 'carried-out-voided' : 'carried-out',
+          fromPeriod: row.period,
+          fromInvoiceId: row.id,
+          fromNumber: row.number ?? null,
+          by: actorId,
+          at: now,
+        },
+      }
+    }
+    const undoEntry = { kind: 'roll-forward-undone', fromPeriod: toPeriod, by: actorId, at: now }
+
+    let outcome
+    if (this.pool) {
+      outcome = await this._withTransaction(async (dbClient) => {
+        await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [
+          `account_credit:${current.clientId}`,
+        ])
+        const locked = await dbClient.query(
+          `select ${INVOICE_SELECT_COLUMNS} from invoices where id = $1 for update`,
+          [invoiceId],
+        )
+        if (!locked.rows?.length) throw new InvoiceChangedError()
+        const row = mapInvoiceRow(locked.rows[0])
+        const nextRows = (
+          await dbClient.query(
+            `select ${INVOICE_SELECT_COLUMNS} from invoices
+              where client_id = $1 and period = $2 and kind = 'monthly'
+              for update`,
+            [current.clientId, toPeriod],
+          )
+        ).rows.map(mapInvoiceRow)
+        const periodRows = (
+          await dbClient.query(
+            `select ${INVOICE_SELECT_COLUMNS} from invoices
+              where client_id = $1 and period = $2 and kind = 'monthly'`,
+            [current.clientId, current.period],
+          )
+        ).rows.map(mapInvoiceRow)
+        const plan = decide(row, nextRows, periodRows)
+        const cleared = await dbClient.query(
+          `update invoices
+              set rolled_into_period = null,
+                  email_log = coalesce(email_log, '[]'::jsonb) || $2::jsonb, updated_at = now()
+            where id = $1 and status = 'void' and rolled_into_period = $3`,
+          [invoiceId, JSON.stringify([undoEntry]), toPeriod],
+        )
+        if (cleared.rowCount === 0) throw new InvoiceChangedError()
+        if (!plan.carrier) return { carrierId: null, carrierVoided: false, sessions: [] }
+        const moved = await dbClient.query(
+          `update invoices
+              set line_items = $2::jsonb, subtotal = $3, total = $4,
+                  status = case when $7::boolean then 'void' else 'draft' end,
+                  email_log = coalesce(email_log, '[]'::jsonb) || $5::jsonb, updated_at = now()
+            where id = $1 and status = $6`,
+          [
+            plan.carrier.id,
+            JSON.stringify(plan.lineItems),
+            plan.subtotal,
+            plan.total,
+            JSON.stringify([plan.entry]),
+            plan.carrier.status,
+            plan.voidIt,
+          ],
+        )
+        if (moved.rowCount === 0) throw new InvoiceChangedError()
+        return {
+          carrierId: plan.carrier.id,
+          carrierVoided: plan.voidIt,
+          sessions: plan.voidIt
+            ? [plan.carrier.stripeCheckoutSessionId, plan.carrier.stripeCardSessionId].filter(Boolean)
+            : [],
+        }
+      })
+    } else {
+      outcome = await mutateLocalData(async (data) => {
+        if (!Array.isArray(data.invoices)) data.invoices = []
+        const stored = data.invoices.find((invoice) => invoice.id === invoiceId)
+        if (!stored) throw new InvoiceChangedError()
+        const ofPeriod = (period) =>
+          data.invoices
+            .filter(
+              (invoice) =>
+                invoice.clientId === current.clientId &&
+                invoice.period === period &&
+                (invoice.kind ?? 'monthly') === 'monthly',
+            )
+            .map(normalizeStoredInvoice)
+        const plan = decide(normalizeStoredInvoice(stored), ofPeriod(toPeriod), ofPeriod(current.period))
+        const stamp = nowIso()
+        stored.rolledIntoPeriod = null
+        stored.emailLog = [...(Array.isArray(stored.emailLog) ? stored.emailLog : []), undoEntry]
+        stored.updatedAt = stamp
+        if (!plan.carrier) {
+          return { result: { carrierId: null, carrierVoided: false, sessions: [] }, changed: true }
+        }
+        const target = data.invoices.find((invoice) => invoice.id === plan.carrier.id)
+        target.lineItems = plan.lineItems
+        target.subtotal = plan.subtotal
+        target.total = plan.total
+        target.status = plan.voidIt ? 'void' : 'draft'
+        target.emailLog = [...(Array.isArray(target.emailLog) ? target.emailLog : []), plan.entry]
+        target.updatedAt = stamp
+        return {
+          result: {
+            carrierId: plan.carrier.id,
+            carrierVoided: plan.voidIt,
+            sessions: plan.voidIt
+              ? [plan.carrier.stripeCheckoutSessionId, plan.carrier.stripeCardSessionId].filter(Boolean)
+              : [],
+          },
+          changed: true,
+        }
+      })
+    }
+
+    // The pushed month, built again for this one client - the same path as
+    // Generate for one client. Not in the transaction above (generation runs its
+    // own); if it fails the undo stands and Generate builds the month.
+    let regenerated = null
+    let skipped = []
+    let generateError = null
+    try {
+      const built = await this.generateInvoicesForPeriod(current.period, {
+        clientId: current.clientId,
+        actorUserId: actorId,
+        appUrl,
+      })
+      regenerated = built.created[0] ?? null
+      skipped = built.skipped
+    } catch (error) {
+      console.error('[invoices] undo push: regenerating the month failed:', error)
+      generateError = 'The push was undone, but rebuilding the invoice failed. Press Generate to build the month.'
+    }
+    let advance = null
+    if (offer && regenerated) {
+      const attached = await this._reattachRolledAdvance(current, regenerated.id, actorId, appUrl)
+      advance = attached?.report ?? null
+      if (attached?.invoice) regenerated = attached.invoice
+    }
+    const rolled = (await this.listInvoices({ period: current.period })).find((invoice) => invoice.id === invoiceId) ?? null
+    const carrier = outcome.carrierId
+      ? ((await this.listInvoices({ period: toPeriod })).find((invoice) => invoice.id === outcome.carrierId) ?? null)
+      : null
+    return {
+      rolled,
+      carrier,
+      carrierVoided: outcome.carrierVoided,
+      carrierSessions: outcome.sessions,
+      regenerated,
+      skipped,
+      advance,
+      generateError,
+    }
+  }
+
+  /**
+   * The month run's marks for Push to next month (featreq-40697310): each unsent
+   * monthly invoice carries `rollForward: { allowed, reason }` and each pushed
+   * invoice `rollUndo: { allowed, reason }`, from the same rules the store
+   * enforces (autopay is left to the store: the row knows its own attempt). One
+   * read of the next month per distinct month in the list, one client read. A
+   * derived mark like `changedSinceSent`, never stored.
+   */
+  async withRollForwardState(invoices) {
+    const list = Array.isArray(invoices) ? invoices : []
+    const asks = list.filter(
+      (invoice) =>
+        (invoice?.kind ?? 'monthly') === 'monthly' &&
+        (invoice.status === 'draft' ||
+          invoice.status === 'reviewed' ||
+          (invoice.status === 'void' && invoice.rolledIntoPeriod)),
+    )
+    if (asks.length === 0) return list
+    const periods = new Set()
+    for (const invoice of asks) {
+      periods.add(invoice.status === 'void' ? invoice.rolledIntoPeriod : rollNextPeriod(invoice.period))
+      periods.add(invoice.period)
+    }
+    // A month list needs two months; a list across many months (History) is read
+    // once and grouped, rather than one read per month.
+    const byPeriod = new Map()
+    const wanted = [...periods].filter(Boolean)
+    if (wanted.length > 4) {
+      for (const invoice of await this.listInvoices()) {
+        if (!byPeriod.has(invoice.period)) byPeriod.set(invoice.period, [])
+        byPeriod.get(invoice.period).push(invoice)
+      }
+    } else {
+      for (const period of wanted) byPeriod.set(period, await this.listInvoices({ period }))
+    }
+    const monthlyOf = (clientId, period) =>
+      (byPeriod.get(period) ?? []).filter(
+        (row) => row.clientId === clientId && (row.kind ?? 'monthly') === 'monthly',
+      )
+    // Only the multi-month (billing period) clients matter to the rule; never a
+    // whole-workspace read() here (it can trigger the materializer write-back).
+    let periodClients
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select ${CLIENT_SELECT_COLUMNS} from clients where billing_period_months > 1`,
+      )
+      periodClients = rows.map(mapClientRow)
+    } else {
+      const data = await readJson(localDataPath)
+      periodClients = (Array.isArray(data.clients) ? data.clients : []).map(normalizeClientProfile)
+    }
+    const clients = new Map(periodClients.map((client) => [client.id, client]))
+    const marks = new Map()
+    for (const invoice of asks) {
+      if (invoice.status === 'void') {
+        const refusal = rollUndoRefusal({
+          invoice,
+          nextInvoices: monthlyOf(invoice.clientId, invoice.rolledIntoPeriod),
+          periodInvoices: monthlyOf(invoice.clientId, invoice.period),
+        })
+        marks.set(invoice.id, { rollUndo: { allowed: !refusal, reason: refusal?.message ?? null } })
+      } else {
+        const refusal = rollForwardRefusal({
+          invoice,
+          client: clients.get(invoice.clientId) ?? null,
+          nextInvoices: monthlyOf(invoice.clientId, rollNextPeriod(invoice.period)),
+        })
+        marks.set(invoice.id, { rollForward: { allowed: !refusal, reason: refusal?.message ?? null } })
+      }
+    }
+    return list.map((invoice) => (marks.has(invoice?.id) ? { ...invoice, ...marks.get(invoice.id) } : invoice))
   }
 
   /**
