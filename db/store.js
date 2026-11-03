@@ -16223,8 +16223,17 @@ export class AppDataStore {
    * `{ clientId, period, kind, status, sourceClientIds }`, where
    * `sourceClientIds` is the distinct sub ids a billing master's lines carry.
    * No line items, email log or pay token leave the store through here.
+   *
+   * `clientIds` (optional) narrows it to invoices that are one of those
+   * clients' own OR carry one of them on a line (a billing master's invoice
+   * for a sub) - the Client Recap passes the client, or the master's subs.
+   * Without it, every invoice (the owner's invoice estimate, which asks about
+   * every client at once).
    */
-  async listInvoiceEvidence() {
+  async listInvoiceEvidence({ clientIds = null } = {}) {
+    const filter = Array.isArray(clientIds)
+      ? clientIds.filter((id) => typeof id === 'string' && id)
+      : null
     if (this.pool) {
       const { rows } = await this.pool.query(
         `select client_id, period, kind, status,
@@ -16236,12 +16245,30 @@ export class AppDataStore {
                     where coalesce(line->>'sourceClientId', '') <> ''),
                   '{}'
                 ) as source_client_ids
-           from invoices`,
+           from invoices
+          ${
+            filter
+              ? `where client_id = any($1::text[])
+                    or exists (
+                      select 1
+                        from jsonb_array_elements(
+                               case when jsonb_typeof(line_items) = 'array' then line_items else '[]'::jsonb end
+                             ) as carried
+                       where carried->>'sourceClientId' = any($1::text[]))`
+              : ''
+          }`,
+        filter ? [filter] : [],
       )
       return rows.map(mapInvoiceEvidenceRow)
     }
     const data = await readJson(localDataPath)
-    return (Array.isArray(data.invoices) ? data.invoices : []).map((invoice) =>
+    const wanted = filter ? new Set(filter) : null
+    const matches = (invoice) =>
+      !wanted ||
+      wanted.has(invoice?.clientId) ||
+      (Array.isArray(invoice?.lineItems) &&
+        invoice.lineItems.some((line) => wanted.has(line?.sourceClientId)))
+    return (Array.isArray(data.invoices) ? data.invoices : []).filter(matches).map((invoice) =>
       mapInvoiceEvidenceRow({
         client_id: invoice?.clientId,
         period: invoice?.period,

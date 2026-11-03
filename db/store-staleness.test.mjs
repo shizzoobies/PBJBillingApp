@@ -57812,8 +57812,12 @@ describe('listInvoiceEvidence: narrow rows, both backends (featreq-8dffdff7)', (
     expect(statements).toHaveLength(1)
     expect(statements[0]).toMatch(/from invoices/)
     for (const column of ['email_log', 'pay_token', 'original_line_items', 'total']) {
-      expect(statements[0]).not.toMatch(new RegExp(`\b${column}\b`))
+      expect(statements[0]).not.toMatch(new RegExp(`\\b${column}\\b`))
     }
+    // The pattern is live: it does match the column it names.
+    expect('select email_log from invoices').toMatch(new RegExp(`\\b${'email_log'}\\b`))
+    // Unfiltered (the owner's invoice estimate): no client filter.
+    expect(statements[0]).not.toMatch(/any\(\$1/)
     expect(rows).toEqual([
       { clientId: 'm1', period: '2026-08', kind: 'monthly', status: 'sent', sourceClientIds: ['s1', 's2'] },
       { clientId: 'c1', period: '2026-07', kind: 'monthly', status: 'draft', sourceClientIds: [] },
@@ -57843,5 +57847,37 @@ describe('listInvoiceEvidence: narrow rows, both backends (featreq-8dffdff7)', (
       status: null,
       sourceClientIds: [],
     })
+  })
+
+  it('clientIds narrows the file backend to own invoices and invoices carrying them', async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      { id: 'own', clientId: 'c1', period: '2026-07', status: 'draft', lineItems: [] },
+      { id: 'carried', clientId: 'm1', period: '2026-06', status: 'sent', lineItems: [{ sourceClientId: 'c1' }] },
+      { id: 'other', clientId: 'c9', period: '2026-05', status: 'sent', lineItems: [{ sourceClientId: 'c8' }] },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    expect((await store.listInvoiceEvidence({ clientIds: ['c1'] })).map((row) => row.period)).toEqual([
+      '2026-07',
+      '2026-06',
+    ])
+    expect(await store.listInvoiceEvidence()).toHaveLength(3)
+  })
+
+  it('clientIds narrows the Postgres query the same way, as one array parameter', async () => {
+    const calls = []
+    const pgStore = new AppDataStore()
+    pgStore.pool = {
+      query: async (text, params) => {
+        calls.push({ text, params })
+        return { rows: [] }
+      },
+    }
+    pgStore.mode = 'postgres'
+    await pgStore.listInvoiceEvidence({ clientIds: ['sa', 'sb'] })
+    expect(calls).toHaveLength(1)
+    expect(calls[0].params).toEqual([['sa', 'sb']])
+    expect(calls[0].text).toMatch(/where client_id = any\(\$1::text\[\]\)/)
+    expect(calls[0].text).toMatch(/carried->>'sourceClientId' = any\(\$1::text\[\]\)/)
   })
 })

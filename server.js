@@ -5808,7 +5808,9 @@ const server = createServer(async (request, response) => {
       // (lib/client-recap.js clientActiveMonths; nothing is priced from them).
       // Loaded for staff too, so both payloads agree on which months counted,
       // and only once access has been decided (below, after the master check).
-      const loadActivityInvoices = () => appDataStore.listInvoiceEvidence()
+      // Narrowed to the client(s) asked about: their own invoices and any master's
+      // invoice carrying them on a line.
+      const loadActivityInvoices = (clientIds) => appDataStore.listInvoiceEvidence({ clientIds })
       if (recapClient?.isBillingMaster === true) {
         // ACCESS IS PER COMPANY, not per group. Being assigned to the master is
         // not access to Bright Tower's hours, its staff roster or its task
@@ -5828,7 +5830,7 @@ const server = createServer(async (request, response) => {
           })
           return
         }
-        const activityInvoices = await loadActivityInvoices()
+        const activityInvoices = await loadActivityInvoices(masterSubs.map((sub) => sub.id))
         const subRecaps = []
         for (const sub of masterSubs) {
           const subRecap = buildClientRecap(data, {
@@ -5862,7 +5864,7 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const activityInvoices = await loadActivityInvoices()
+      const activityInvoices = await loadActivityInvoices([clientId])
       // The Billing tile's Invoice is the real invoice once it has been sent
       // (featreq-50a059cd): owner only, this client's (and, for a sub billed on a
       // master's combined invoice, the master's so the tile can name it).
@@ -6116,10 +6118,21 @@ const server = createServer(async (request, response) => {
       const data = await appDataStore.read()
       const { billRateVersions } = await loadRateVersions(session)
       const invoices = await appDataStore.listInvoices({ period })
+      // Every invoice's narrow evidence row, once (featreq-8dffdff7): each
+      // client's projection asks when it started being billed, so a client
+      // created after this month but billed in it keeps its row.
+      const activityInvoices = await appDataStore.listInvoiceEvidence()
       sendJson(
         response,
         200,
-        buildInvoiceEstimate({ period, data, invoices, billRateVersions, today: todayIso() }),
+        buildInvoiceEstimate({
+          period,
+          data,
+          invoices,
+          billRateVersions,
+          activityInvoices,
+          today: todayIso(),
+        }),
       )
       return
     }
