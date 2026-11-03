@@ -201,7 +201,7 @@ describe('a pushed invoice', () => {
     expect(within(row).queryByText('Voided')).toBeNull()
   })
 
-  it('offers Undo push, asks first, and reloads with the outcome', async () => {
+  it('offers Undo push, asks first in the page, and reloads with the outcome', async () => {
     mockList.mockResolvedValue([rolled()])
     mockUndo.mockResolvedValue({
       rolled: makeInvoice({ status: 'void', rolledIntoPeriod: null }),
@@ -214,23 +214,28 @@ describe('a pushed invoice', () => {
     })
     await openEditor(/Voided/)
     fireEvent.click(editor().getByRole('button', { name: /Undo push/ }))
-    expect(confirm).toHaveBeenCalledWith(
-      "Undo the push of INV-2026-08-001? Its lines come off September 2026's invoice, and August 2026's invoice is built again from the time records. This invoice stays voided with your edits on it; they are not copied to the new one.",
+    const sheet = screen.getByRole('group', { name: 'Undo push' })
+    expect(sheet).toHaveTextContent(
+      "Undo the push of INV-2026-08-001? Its lines come off September 2026's invoice, and this takes the lines back and rebuilds August 2026's invoice as you left it, as a new draft with a new number. This invoice stays voided as the record.",
     )
+    expect(confirm).not.toHaveBeenCalled()
+    expect(mockUndo).not.toHaveBeenCalled()
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Undo the push' }))
     await waitFor(() => expect(mockUndo).toHaveBeenCalledWith('inv-1'))
     expect(
       await screen.findByText(
-        'The push of INV-2026-08-001 was undone. Its lines were taken off INV-2026-09-001. August 2026 was built again as INV-2026-08-002.',
+        "The push of INV-2026-08-001 was undone. Its lines were taken off INV-2026-09-001. August 2026's invoice was rebuilt as you left it, as INV-2026-08-002.",
         { exact: false },
       ),
     ).toBeInTheDocument()
   })
 
-  it('declining the confirm sends nothing', async () => {
-    confirm.mockReturnValue(false)
+  it('Cancel on the undo sheet sends nothing', async () => {
     mockList.mockResolvedValue([rolled()])
     await openEditor(/Voided/)
     fireEvent.click(editor().getByRole('button', { name: /Undo push/ }))
+    fireEvent.click(within(screen.getByRole('group', { name: 'Undo push' })).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('group', { name: 'Undo push' })).toBeNull()
     expect(mockUndo).not.toHaveBeenCalled()
   })
 

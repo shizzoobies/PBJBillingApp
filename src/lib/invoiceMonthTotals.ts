@@ -41,6 +41,13 @@ export type InvoiceMonthTotals = {
    * on that later invoice. `label` is what the fold-out says ("Rolled into November 2026").
    */
   rolled: Array<{ id: string; name: string; intoPeriod: string; label: string }>
+  /**
+   * Clients with work pushed into this month (featreq-40697310) that can no longer
+   * be billed (inactive, a prospect, opted out, billed on another client's
+   * invoice): never dropped from every surface. Counted in "Clients not invoiced".
+   * From the estimate only.
+   */
+  waiting: Array<{ id: string; name: string; label: string }>
 }
 
 const cents = (value: number) => Math.round(value * 100) / 100
@@ -108,5 +115,13 @@ export function summarizeInvoiceMonthTotals(
       .sort((a, b) => a.name.localeCompare(b.name)),
     notInvoicedFrom: estimateRows ? 'estimate' : 'roster',
     rolled,
+    waiting: (estimateRows ?? [])
+      .filter((entry) => entry.basis === 'pushed_waiting' && !invoiced.has(entry.clientId))
+      .map((entry) => ({
+        id: entry.clientId,
+        name: entry.clientName,
+        label: 'pushed work waiting - client not billable',
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
   }
 }

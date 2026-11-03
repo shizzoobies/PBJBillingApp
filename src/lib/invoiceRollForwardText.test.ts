@@ -47,7 +47,9 @@ describe('undoRollForwardNotice', () => {
         { ...base, carrier: inv({ number: 'INV-2026-09-001' }), carrierVoided: true, regenerated: inv({ number: 'INV-2026-08-002' }) },
         fallback,
       ),
-    ).toBe('The push of INV-2026-08-001 was undone. INV-2026-09-001 held nothing else, so it was voided. August 2026 was built again as INV-2026-08-002.')
+    ).toBe(
+      "The push of INV-2026-08-001 was undone. INV-2026-09-001 held nothing else, so it was voided. August 2026's invoice was rebuilt as you left it, as INV-2026-08-002.",
+    )
   })
 
   it('says why nothing was built, or that rebuilding failed', () => {
@@ -78,6 +80,27 @@ describe('generateRollForwardNote', () => {
       ' 1 invoice carried lines pushed from last month. 1 client pushed to next month, so not billed here. The advance request ADV-1 was not moved: Choose an active advance request for this billing client.',
     )
     expect(generateRollForwardNote({ skipped: [], carried: [], advances: [] })).toBe('')
+  })
+
+  it('names, in words, every client whose pushed work no invoice could take', () => {
+    const names: Record<string, string> = { c1: 'Bright Tower', c2: 'Rivercity', c3: 'KLC Sub' }
+    expect(
+      generateRollForwardNote(
+        {
+          skipped: [
+            { clientId: 'c1', reason: 'client-inactive', carriedFromPeriod: '2026-10' },
+            { clientId: 'c2', reason: 'opted-out', carriedFromPeriod: '2026-10' },
+            { clientId: 'c3', reason: 'billed-to-other', carriedFromPeriod: '2026-10' },
+            { clientId: 'c4', reason: 'opted-out' },
+          ],
+        },
+        (id) => names[id] ?? id,
+      ),
+    ).toBe(
+      " Bright Tower: October's pushed work is waiting but this client is inactive, so no invoice was made." +
+        " Rivercity: October's pushed work is waiting but this client is invoiced outside the app, so no invoice was made." +
+        " KLC Sub: October's pushed work is waiting but this client is billed on another client's invoice, so no invoice was made.",
+    )
   })
 })
 

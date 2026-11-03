@@ -46,5 +46,15 @@ export declare function rollUndoRefusal(args: {
   invoice: InvoiceLike | null
   nextInvoices?: readonly InvoiceLike[]
   periodInvoices?: readonly InvoiceLike[]
+  /** Omit to skip the "can the client be billed again" check; null = not on file. */
+  client?: ClientLike | null
 }): RollRefusal | null
+type ClientLike = {
+  name?: string
+  lifecycleStage?: string | null
+  platformInvoicingOptOut?: boolean
+  billToClientId?: string | null
+}
+export declare function clientUnbillableReason(client: ClientLike | null): string | null
+export declare function rebuiltLinesFromRolledInvoice(invoice: InvoiceLike): LineLike[]
 export declare function rollForwardConfirmText(invoice: InvoiceLike, advance?: AdvanceOfferLike | null): string

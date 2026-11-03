@@ -19,6 +19,7 @@ const BASIS_LABEL: Record<InvoiceEstimateRow['basis'], string> = {
   projected: 'Projected',
   too_early: 'Too early',
   rolled: 'Pushed',
+  pushed_waiting: 'Pushed work waiting',
 }
 
 const money = (value: number | null) => (value === null ? '—' : currency.format(value))
@@ -117,19 +118,24 @@ export function InvoiceEstimateRibbon({ period }: { period: string }) {
                   <td>
                     {/* A pushed month (featreq-40697310) says where it went, and
                         nothing else: its work is quoted on the later month. */}
-                    {row.basis === 'rolled' ? (row.detail ?? BASIS_LABEL.rolled) : BASIS_LABEL[row.basis]}
+                    {row.basis === 'rolled' || row.basis === 'pushed_waiting'
+                      ? (row.detail ?? BASIS_LABEL[row.basis])
+                      : BASIS_LABEL[row.basis]}
                     {row.basis === 'sent' && row.invoiceNumber ? ` · ${row.invoiceNumber}` : ''}
-                    {row.detail && row.basis !== 'too_early' && row.basis !== 'rolled' ? ` · ${row.detail}` : ''}
+                    {row.detail && row.basis !== 'too_early' && row.basis !== 'rolled' && row.basis !== 'pushed_waiting'
+                      ? ` · ${row.detail}`
+                      : ''}
                   </td>
                   <td>
-                    {row.basis === 'rolled'
+                    {row.basis === 'rolled' || row.basis === 'pushed_waiting'
                       ? '—'
                       : row.service === null
                         ? (row.detail ?? 'too early')
                         : money(row.service)}
                   </td>
                   <td>
-                    {(row.basis === 'too_early' || row.basis === 'rolled') && row.reimburse === 0
+                    {(row.basis === 'too_early' || row.basis === 'rolled' || row.basis === 'pushed_waiting') &&
+                    row.reimburse === 0
                       ? '—'
                       : currency.format(row.reimburse)}
                   </td>

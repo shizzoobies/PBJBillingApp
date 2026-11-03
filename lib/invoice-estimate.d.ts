@@ -7,7 +7,7 @@ export interface InvoiceEstimateRow {
    * 'sent': the invoice as stored. 'projected': the Client Recap projection. 'too_early': nothing usable yet.
    * 'rolled': this month's invoice was pushed into a later month (featreq-40697310); no figure is quoted.
    */
-  basis: 'sent' | 'projected' | 'too_early' | 'rolled'
+  basis: 'sent' | 'projected' | 'too_early' | 'rolled' | 'pushed_waiting'
   /** A word for the basis ("estimate", "service so far", "plan", "no rates", "too early"...); null on a sent row. */
   detail: string | null
   /** Null when the estimate is unusable (never a made-up $0.00). */
@@ -18,6 +18,11 @@ export interface InvoiceEstimateRow {
   invoiceNumber?: string | null
   /** 'rolled' rows only: the "YYYY-MM" the invoice was pushed into. */
   rolledIntoPeriod?: string
+  /**
+   * The "YYYY-MM" of last month's invoice that was pushed into this month and is on
+   * no invoice yet. On a 'pushed_waiting' row the client can no longer be billed.
+   */
+  pushedInWaiting?: string
 }
 
 export interface InvoiceEstimate {
@@ -41,6 +46,7 @@ export function buildInvoiceEstimate(args: {
   period: string
   data: Record<string, unknown>
   invoices?: readonly unknown[]
+  priorInvoices?: readonly unknown[]
   billRateVersions?: readonly unknown[]
   today: string
 }): InvoiceEstimate

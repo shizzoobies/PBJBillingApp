@@ -6111,10 +6111,12 @@ const server = createServer(async (request, response) => {
       const data = await appDataStore.read()
       const { billRateVersions } = await loadRateVersions(session)
       const invoices = await appDataStore.listInvoices({ period })
+      // Last month's, for work pushed into this month (featreq-40697310).
+      const priorInvoices = await appDataStore.listInvoices({ period: previousPeriod(period) })
       sendJson(
         response,
         200,
-        buildInvoiceEstimate({ period, data, invoices, billRateVersions, today: todayIso() }),
+        buildInvoiceEstimate({ period, data, invoices, priorInvoices, billRateVersions, today: todayIso() }),
       )
       return
     }

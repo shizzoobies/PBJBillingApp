@@ -401,7 +401,7 @@ export type InvoiceSectionGroup = {
  */
 export type InvoiceSection = {
   /** `carried-YYYY-MM`: lines pushed from that month's invoice (featreq-40697310). */
-  key: 'plan' | 'work' | 'expenses' | 'software' | 'prepayment' | 'charges' | 'combined' | `carried-${string}`
+  key: 'plan' | 'work' | 'expenses' | 'software' | 'prepayment' | 'charges' | 'combined' | 'combined-tail' | `carried-${string}`
   title: string | null
   totalLabel: string | null
   rows: InvoiceLineOut[]

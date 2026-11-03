@@ -42477,7 +42477,10 @@ describe('prepayment credits and the send guard (Postgres statements)', () => {
 
     expect(created).toHaveLength(1)
     const locks = fake.matching(/pg_advisory_xact_lock/i)
-    expect(locks.map((lock) => lock.params[0])).toEqual(['account_credit:c1'])
+    // Since Push to next month (featreq-40697310) EVERY client's insert transaction
+    // takes its credit lock once first (the lock a push takes), to re-read a push
+    // into this month under it; a credit holder's draw takes it again (re-entrant).
+    expect(locks.map((lock) => lock.params[0])).toEqual(['account_credit:c1', 'account_credit:c1'])
     const [write] = inserts(fake)
     const lines = JSON.parse(write.params[6])
     expect(lines.map((line) => line.kind)).toEqual(['plan', 'account_credit'])
@@ -42505,11 +42508,14 @@ describe('prepayment credits and the send guard (Postgres statements)', () => {
     )
   })
 
-  it('a client without such an invoice takes no lock', async () => {
+  it('a client without such an invoice takes only the push lock and draws nothing', async () => {
     const fake = fakePostgres()
     await answerPrepaid(fake, [paidOctober({ client_id: 'someone-else' })])
     await storeFor(fake, [clientRow()]).generateInvoicesForPeriod('2026-11')
-    expect(fake.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+    // Since Push to next month (featreq-40697310) EVERY client's insert transaction
+    // takes its credit lock once first (the lock a push takes), to re-read a push
+    // into this month under it; a credit holder's draw takes it again (re-entrant).
+    expect(fake.matching(/pg_advisory_xact_lock/i)).toHaveLength(1)
     expect(JSON.parse(inserts(fake)[0].params[6]).map((line) => line.kind)).toEqual(['plan'])
   })
 
@@ -46567,10 +46573,13 @@ describe('generation draws credit on account (Postgres statements)', () => {
     expect(JSON.parse(write.params[12])).toEqual(lines)
   })
 
-  it('does not lock, nor read any ledger, for a client with no credit - the statements are the ones it always issued', async () => {
+  it('takes only the push lock, and reads no ledger, for a client with no credit', async () => {
     const withNone = fakePostgres({ accountCreditRows: [] })
     await storeFor(withNone, clientsFor('c1')).generateInvoicesForPeriod(period)
-    expect(withNone.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+    // Since Push to next month (featreq-40697310) EVERY client's insert transaction
+    // takes its credit lock once first (the lock a push takes), to re-read a push
+    // into this month under it; a credit holder's draw takes it again (re-entrant).
+    expect(withNone.matching(/pg_advisory_xact_lock/i)).toHaveLength(1)
     expect(withNone.matching(/from account_credits\s+where client_id = \$1/i)).toHaveLength(0)
     expect(withNone.matching(/line_items @>/i)).toHaveLength(0)
     const [write] = inserts(withNone)
@@ -46580,18 +46589,21 @@ describe('generation draws credit on account (Postgres statements)', () => {
     // A client whose only credit is void is a client with no credit.
     const voided = fakePostgres({ accountCreditRows: [creditRow({ voided_at: new Date('2026-10-02T00:00:00Z') })] })
     await storeFor(voided, clientsFor('c1')).generateInvoicesForPeriod(period)
-    expect(voided.matching(/pg_advisory_xact_lock/i)).toHaveLength(0)
+    expect(voided.matching(/pg_advisory_xact_lock/i)).toHaveLength(1)
+    expect(voided.matching(/from account_credits\s+where client_id = \$1/i)).toHaveLength(0)
   })
 
-  it('locks only the clients that have credit: another client in the same run issues no lock', async () => {
+  it('only the clients that have credit draw: another client in the same run takes just its own push lock', async () => {
     const fake = fakePostgres({ accountCreditRows: [creditRow()] })
 
     const { created } = await storeFor(fake, clientsFor('c1', 'c2')).generateInvoicesForPeriod(period)
 
     expect(created).toHaveLength(2)
     const locks = fake.matching(/pg_advisory_xact_lock/i)
-    expect(locks).toHaveLength(1)
-    expect(locks[0].params).toEqual(['account_credit:c1'])
+    // Since Push to next month (featreq-40697310) EVERY client's insert transaction
+    // takes its credit lock once first (the lock a push takes), to re-read a push
+    // into this month under it; a credit holder's draw takes it again (re-entrant).
+    expect(locks.map((lock) => lock.params[0])).toEqual(['account_credit:c1', 'account_credit:c1', 'account_credit:c2'])
     const writes = inserts(fake)
     expect(JSON.parse(writes.find((w) => w.params[1] === 'c2').params[6])).toHaveLength(1)
   })
@@ -46639,7 +46651,10 @@ describe('generation draws credit on account (Postgres statements)', () => {
 
     expect(created.map((invoice) => invoice.clientId)).toEqual(['c1'])
     const locks = fake.matching(/pg_advisory_xact_lock/i)
-    expect(locks.map((lock) => lock.params[0])).toEqual(['account_credit:c1'])
+    // Since Push to next month (featreq-40697310) EVERY client's insert transaction
+    // takes its credit lock once first (the lock a push takes), to re-read a push
+    // into this month under it; a credit holder's draw takes it again (re-entrant).
+    expect(locks.map((lock) => lock.params[0])).toEqual(['account_credit:c1', 'account_credit:c1'])
     const lines = JSON.parse(inserts(fake)[0].params[6])
     expect(lines.find((line) => line.kind === 'account_credit').draws).toEqual([{ creditId: 'credit-m', amount: 150 }])
   })
@@ -46722,7 +46737,10 @@ describe('generation draws credit on account (Postgres statements)', () => {
     const { created } = await storeFor(fake, clientsFor('c1')).generateInvoicesForPeriod(period)
 
     expect(created).toHaveLength(1)
-    expect(fake.matching(/pg_advisory_xact_lock/i)).toHaveLength(1)
+    // Since Push to next month (featreq-40697310) EVERY client's insert transaction
+    // takes its credit lock once first (the lock a push takes), to re-read a push
+    // into this month under it; a credit holder's draw takes it again (re-entrant).
+    expect(fake.matching(/pg_advisory_xact_lock/i)).toHaveLength(2)
     const [write] = inserts(fake)
     expect(JSON.parse(write.params[6])).toHaveLength(1)
     expect(write.params[8]).toBe(600)
@@ -58177,8 +58195,28 @@ describe('push to next month (postgres branch, recording fake)', () => {
           total: String(params[3]),
           status: 'draft',
           email_log: [...row.email_log, ...JSON.parse(params[4])],
+          original_line_items: params[6] === null ? null : jsonbLike(JSON.parse(params[6])),
         })
         return { rowCount: 1, rows: [] }
+      }
+      if (/^insert into invoices \(/i.test(t)) {
+        const [id, client_id, period, number, kind, status, lines, subtotal, total, due_date, blurb, flags, original] = params
+        if (kind === 'monthly' && invoices.some((row) => row.client_id === client_id && row.period === period && row.kind === 'monthly' && row.status !== 'void')) {
+          return { rows: [] }
+        }
+        invoices.push(jsonbLike({
+          id, client_id, period, number, kind, status,
+          line_items: JSON.parse(lines), subtotal: String(subtotal), total: String(total), due_date, blurb,
+          scope_flags: JSON.parse(flags), sent_at: null, paid_at: null, payment_method: null, email_log: [],
+          applied_to_invoice_id: null, original_line_items: original === null ? null : JSON.parse(original),
+          pay_token: null, recorded_outside_app: false, rolled_into_period: null,
+          created_at: '2026-11-02T00:00:00.000Z', updated_at: '2026-11-02T00:00:00.000Z',
+        }))
+        return { rows: [{ id }] }
+      }
+      if (/^update recurring_reimbursements/i.test(t)) return { rowCount: 1, rows: [] }
+      if (/ from invoices where client_id = \$1 and period = \$2 and kind = 'monthly' and status = 'void' and rolled_into_period = \$3$/i.test(t)) {
+        return { rows: invoices.filter((row) => row.client_id === params[0] && row.period === params[1] && row.status === 'void' && row.rolled_into_period === params[2]) }
       }
       if (/^update invoices set rolled_into_period = null,/i.test(t)) {
         const row = invoices.find((entry) => entry.id === params[0] && entry.status === 'void' && entry.rolled_into_period === params[2])
@@ -58195,6 +58233,7 @@ describe('push to next month (postgres branch, recording fake)', () => {
           total: String(params[3]),
           status: params[6] ? 'void' : 'draft',
           email_log: [...row.email_log, ...JSON.parse(params[4])],
+          original_line_items: params[7] === null ? null : jsonbLike(JSON.parse(params[7])),
         })
         return { rowCount: 1, rows: [] }
       }
@@ -58208,6 +58247,7 @@ describe('push to next month (postgres branch, recording fake)', () => {
     s.mode = 'postgres'
     s.getClientById = async () => client
     s.listAutopayAttempts = async () => []
+    s._clientIdsHoldingAccountCredit = async () => new Set()
     return s
   }
   const writes = (fake) => fake.statements.filter((s) => /^(update|insert|delete)/i.test(s.text))
@@ -58238,6 +58278,7 @@ describe('push to next month (postgres branch, recording fake)', () => {
     expect(fake.statements[begin + 5].params[3]).toBe('draft')
     expect(texts[begin + 6]).toMatch(/^update invoices set applied_to_invoice_id = null, updated_at = now\(\) where kind = 'retainer'/)
     expect(texts[begin + 7]).toMatch(/^update invoices set line_items = \$2::jsonb/)
+    expect(texts[begin + 7]).toMatch(/original_line_items = \$7::jsonb/)
     expect(texts[begin + 8]).toBe('COMMIT')
     // Never the covered-date ledger.
     expect(texts.some((text) => /recurring_reimbursements/i.test(text))).toBe(false)
@@ -58305,25 +58346,84 @@ describe('push to next month (postgres branch, recording fake)', () => {
       }),
     ])
     const s = pgStore(fake)
-    const generated = { id: 'inv-oct-2', period: '2026-10', number: 'INV-2026-10-002', status: 'draft', lineItems: [] }
-    s.generateInvoicesForPeriod = vi.fn(async () => ({ created: [generated], skipped: [], carried: [], advances: [] }))
+    s.generateInvoicesForPeriod = vi.fn()
 
     const result = await s.undoInvoiceRollForward('inv-oct', { actorId: 'owner-1' })
 
     const texts = fake.statements.map((st) => st.text)
     const begin = texts.indexOf('BEGIN')
+    const commit = texts.indexOf('COMMIT', begin)
     expect(texts[begin + 1]).toMatch(/^select pg_advisory_xact_lock/)
     expect(texts[begin + 2]).toMatch(/where id = \$1 for update$/)
     expect(texts[begin + 3]).toMatch(/kind = 'monthly' for update$/)
     expect(texts[begin + 5]).toMatch(/^update invoices set rolled_into_period = null,/)
     expect(texts[begin + 6]).toMatch(/status = case when \$7::boolean then 'void' else 'draft' end/)
-    expect(texts[begin + 7]).toBe('COMMIT')
-    expect(s.generateInvoicesForPeriod).toHaveBeenCalledWith('2026-10', expect.objectContaining({ clientId: 'c1', actorUserId: 'owner-1' }))
+    expect(texts[begin + 6]).toMatch(/original_line_items = \$8::jsonb/)
+    // The rebuilt draft is inserted, and its covered window written, INSIDE the same transaction.
+    const insertAt = texts.findIndex((text, index) => index > begin && /^insert into invoices \(/i.test(text))
+    expect(insertAt).toBeGreaterThan(begin + 6)
+    expect(insertAt).toBeLessThan(commit)
+    expect(texts.slice(insertAt, commit).some((text) => /^update recurring_reimbursements/i.test(text))).toBe(true)
+    // Rebuilt from the pushed invoice's own lines, never from the time records.
+    expect(s.generateInvoicesForPeriod).not.toHaveBeenCalled()
     expect(result.rolled).toMatchObject({ status: 'void', rolledIntoPeriod: null })
     expect(result.carrier).toMatchObject({ status: 'draft', total: 50 })
     expect(result.carrier.lineItems.some((line) => line.carriedFromInvoiceId)).toBe(false)
     expect(result.carrierVoided).toBe(false)
-    expect(result.regenerated).toBe(generated)
+    expect(result.regenerated).toMatchObject({ period: '2026-10', number: 'INV-2026-10-002', status: 'draft', total: 190 })
+    expect(result.regenerated.lineItems.map((line) => line.label)).toEqual([
+      'Bookkeeping Services',
+      'QuickBooks Online — October 1 – 31, 2026',
+    ])
+    expect(result.regenerated.originalLineItems).toEqual(result.regenerated.lineItems)
+  })
+
+  it('undo is refused when the client can no longer be billed', async () => {
+    const fake = rollFake([asRow({ status: 'void', rolled_into_period: '2026-11' })])
+    const s = pgStore(fake, { id: 'c1', name: 'Bright Tower', lifecycleStage: 'inactive' })
+    await expect(s.undoInvoiceRollForward('inv-oct')).rejects.toMatchObject({
+      code: 'client_not_billable',
+      message: 'Bright Tower is inactive. Its invoice could not be rebuilt, so the push cannot be undone.',
+    })
+    expect(writes(fake)).toEqual([])
+  })
+
+  it('generation takes the push lock and re-reads the pushed marker BEFORE it inserts, and carries what it finds then', async () => {
+    // The early read at the top of the run saw no push; one committed before the lock.
+    const fake = rollFake([asRow({ status: 'void', rolled_into_period: '2026-11' })])
+    const s = pgStore(fake)
+    s.read = async () => ({
+      // November has work of its own, so the run reaches the insert transaction.
+      clients: [{ id: 'c1', name: 'Acme', billingMode: 'hourly', hourlyRate: 100, lifecycleStage: 'active' }],
+      timeEntries: [{ id: 't-nov', clientId: 'c1', employeeId: 'emp-1', date: '2026-11-04', minutes: 60, billable: true }],
+      plans: [],
+      reimbursements: [],
+      recurringReimbursements: [],
+      employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+    })
+    s.listBillRateVersions = async () => []
+    const listed = s.listInvoices.bind(s)
+    s.listInvoices = async ({ period = null } = {}) => (period === '2026-10' ? [] : listed({ period }))
+
+    const result = await s.generateInvoicesForPeriod('2026-11')
+
+    const texts = fake.statements.map((st) => st.text)
+    const lock = texts.findIndex((text) => /^select pg_advisory_xact_lock/i.test(text))
+    const reread = texts.findIndex((text) => /status = 'void' and rolled_into_period = \$3$/i.test(text))
+    const insert = texts.findIndex((text) => /^insert into invoices \(/i.test(text))
+    expect(fake.statements[lock].params).toEqual(['account_credit:c1'])
+    expect(lock).toBeGreaterThan(texts.indexOf('BEGIN'))
+    expect(reread).toBeGreaterThan(lock)
+    expect(insert).toBeGreaterThan(reread)
+    expect(result.created).toHaveLength(1)
+    expect(result.created[0].lineItems.filter((line) => line.carriedFromInvoiceId === 'inv-oct')).toHaveLength(2)
+    expect(result.carried).toEqual([expect.objectContaining({ fromInvoiceId: 'inv-oct', lines: 2 })])
+  })
+
+  it('a push onto a next-month draft that was emailed once is refused', async () => {
+    const fake = rollFake([asRow(), asRow({ id: 'inv-nov', period: '2026-11', status: 'draft', sent_at: '2026-11-01T12:00:00.000Z', line_items: [] })])
+    await expect(pgStore(fake).rollInvoiceForward('inv-oct')).rejects.toMatchObject({ code: 'next_invoice_sent_once' })
+    expect(writes(fake)).toEqual([])
   })
 
   it('undo is refused, with nothing written, when next month went out', async () => {
@@ -58375,5 +58475,114 @@ describe('rolled_into_period: migration, reads and the bulk save (postgres branc
     expect(kept).toMatchObject({ carriedFromPeriod: '2026-10', carriedFromInvoiceId: 'inv-oct' })
     expect(dropped.carriedFromPeriod).toBeUndefined()
     expect(dropped.carriedFromInvoiceId).toBeUndefined()
+  })
+})
+
+describe('push to next month, fix round 1 (file backend)', () => {
+  async function seed({ client = {} } = {}) {
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Bright Tower', billingMode: 'hourly', hourlyRate: 100, ...client }],
+        employees: [{ id: 'emp-1', name: 'Lisa', role: 'bookkeeper', billRate: 100 }],
+        timeEntries: [
+          { id: 't-sep', clientId: 'c1', employeeId: 'emp-1', date: '2026-09-08', minutes: 30, billable: true },
+          { id: 't-oct', clientId: 'c1', employeeId: 'emp-1', date: '2026-10-06', minutes: 60, billable: true },
+          { id: 't-nov', clientId: 'c1', employeeId: 'emp-1', date: '2026-11-04', minutes: 120, billable: true },
+        ],
+      }),
+    )
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = []
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const setClient = async (patch) => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    Object.assign(data.clients[0], patch)
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const generate = async (period, opts = {}) => store.generateInvoicesForPeriod(period, opts)
+
+  it.each([
+    ['client-inactive', { lifecycleStage: 'inactive' }],
+    ['not-billable-yet', { lifecycleStage: 'prospect' }],
+    ['opted-out', { platformInvoicingOptOut: true }],
+  ])('a month-wide Generate tags the %s skip of a client with pushed work waiting', async (reason, patch) => {
+    await seed()
+    const october = (await generate('2026-10')).created[0]
+    await store.rollInvoiceForward(october.id)
+    await setClient(patch)
+    const result = await generate('2026-11')
+    expect(result.created).toEqual([])
+    expect(result.skipped).toContainEqual(
+      expect.objectContaining({ clientId: 'c1', reason, carriedFromInvoiceId: october.id, carriedFromPeriod: '2026-10' }),
+    )
+  })
+
+  it('undo is refused when the client can no longer be billed, with nothing written', async () => {
+    await seed()
+    const october = (await generate('2026-10')).created[0]
+    await store.rollInvoiceForward(october.id)
+    await setClient({ lifecycleStage: 'inactive' })
+    const before = await readFile(localDataPath, 'utf8')
+    await expect(store.undoInvoiceRollForward(october.id)).rejects.toMatchObject({ code: 'client_not_billable' })
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('undo rebuilds the month AS SHE LEFT IT, with a new number, including lines carried in from an earlier push', async () => {
+    await seed()
+    // September pushed into October; October generated (with September's lines) and edited.
+    const september = (await generate('2026-09')).created[0]
+    await store.rollInvoiceForward(september.id)
+    const october = (await generate('2026-10')).created[0]
+    const own = october.lineItems.find((line) => line.kind === 'hourly' && !line.carriedFromPeriod)
+    const edited = await store.updateInvoice(october.id, {
+      lineItems: [
+        ...october.lineItems.map((line) => (line === own ? { ...line, label: 'Monthly close (edited)' } : line)),
+        { kind: 'custom', label: 'Rush fee she added', detail: '', amount: 40 },
+      ],
+      blurb: 'Thanks for October!',
+    })
+    await store.rollInvoiceForward(october.id)
+    await generate('2026-11')
+
+    const result = await store.undoInvoiceRollForward(october.id, { actorId: 'owner-1' })
+
+    const rebuilt = result.regenerated
+    expect(rebuilt.id).not.toBe(october.id)
+    expect(rebuilt.number).toBe('INV-2026-10-002')
+    expect(rebuilt.status).toBe('draft')
+    expect(rebuilt.blurb).toBe('Thanks for October!')
+    expect(rebuilt.lineItems).toEqual(edited.lineItems)
+    expect(rebuilt.lineItems.some((line) => line.label === 'Monthly close (edited)')).toBe(true)
+    // September's lines keep their stamps (still September's, still from the September push).
+    expect(rebuilt.lineItems.filter((line) => line.carriedFromPeriod === '2026-09')).toEqual(
+      edited.lineItems.filter((line) => line.carriedFromPeriod === '2026-09'),
+    )
+    expect(rebuilt.lineItems.find((line) => line.carriedFromPeriod === '2026-09').carriedFromInvoiceId).toBe(september.id)
+    expect(rebuilt.originalLineItems).toEqual(rebuilt.lineItems)
+    expect(rebuilt.total).toBe(edited.total)
+    // A later Generate for October leaves the rebuilt draft alone.
+    expect((await generate('2026-10')).skipped[0].reason).toBe('already-generated')
+  })
+
+  it('the append path adds the carried lines to the next invoice’s as-generated snapshot, and undo takes them back out', async () => {
+    await seed()
+    const october = (await generate('2026-10')).created[0]
+    const november = (await generate('2026-11')).created[0]
+    const pushed = await store.rollInvoiceForward(october.id)
+    expect(pushed.carrier.originalLineItems).toEqual(pushed.carrier.lineItems)
+    const undone = await store.undoInvoiceRollForward(october.id)
+    expect(undone.carrier.originalLineItems).toEqual(november.originalLineItems)
+    expect(undone.carrier.lineItems).toEqual(november.lineItems)
+  })
+
+  it('refuses to push onto, or undo from, a next-month draft that was emailed once', async () => {
+    await seed()
+    const october = (await generate('2026-10')).created[0]
+    const november = (await generate('2026-11')).created[0]
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices.find((row) => row.id === november.id).sentAt = '2026-11-01T12:00:00.000Z'
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await expect(store.rollInvoiceForward(october.id)).rejects.toMatchObject({ code: 'next_invoice_sent_once' })
   })
 })

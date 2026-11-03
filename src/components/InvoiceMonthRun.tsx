@@ -1623,7 +1623,7 @@ export function InvoiceMonthRun({
             generatedCreditNote(result.created)
           : 'Nothing new to build — every client already has one for this month.') +
           optedOutNote +
-          generateRollForwardNote(result),
+          generateRollForwardNote(result, clientName),
       )
     } catch (err) {
       if (shownPeriod.current !== target) return
@@ -1723,7 +1723,7 @@ export function InvoiceMonthRun({
           (optedOutCount > 0
             ? ` ${optedOutCount} client${optedOutCount === 1 ? '' : 's'} opted out of platform invoicing.`
             : '') +
-          generateRollForwardNote(result),
+          generateRollForwardNote(result, clientName),
       )
     } catch (err) {
       // Includes the half-done case: the server says the voids landed and that
@@ -2162,15 +2162,16 @@ export function InvoiceMonthRun({
         </div>
         <div
           className={
-            ribbonReady && ribbon.notInvoiced.length > 0
+            ribbonReady && ribbon.notInvoiced.length + ribbon.waiting.length > 0
               ? 'invoice-run-stat is-flagged'
               : 'invoice-run-stat'
           }
           title={notInvoicedNote}
         >
           <span>Clients not invoiced</span>
-          <strong>{ribbonReady ? ribbon.notInvoiced.length : '—'}</strong>
-          {ribbonReady && (ribbon.notInvoiced.length > 0 || ribbon.rolled.length > 0) ? (
+          <strong>{ribbonReady ? ribbon.notInvoiced.length + ribbon.waiting.length : '—'}</strong>
+          {ribbonReady &&
+          (ribbon.notInvoiced.length > 0 || ribbon.rolled.length > 0 || ribbon.waiting.length > 0) ? (
             <details className="invoice-run-stat-who">
               <summary>Who</summary>
               {ribbon.notInvoiced.length > 0 ? <p>{notInvoicedNote}</p> : null}
@@ -2180,6 +2181,12 @@ export function InvoiceMonthRun({
                 ))}
                 {/* Pushed to next month (featreq-40697310): not "not invoiced" -
                     the work is on the later month's invoice. Not counted above. */}
+                {/* Pushed-in work for a client who can no longer be billed. */}
+                {ribbon.waiting.map((client) => (
+                  <li key={`waiting-${client.id}`} className="invoice-run-stat-waiting">
+                    {client.name} · {client.label}
+                  </li>
+                ))}
                 {ribbon.rolled.map((client) => (
                   <li key={`rolled-${client.id}`} className="invoice-run-stat-rolled">
                     {client.name} · {client.label}
@@ -3594,6 +3601,7 @@ function InvoiceEditor({
   // Push to next month (featreq-40697310): the confirm sheet, and a push or undo
   // in the air.
   const [rollConfirm, setRollConfirm] = useState(false)
+  const [undoConfirm, setUndoConfirm] = useState(false)
   const [rollBusy, setRollBusy] = useState(false)
   const rollTarget = rollNextPeriod(invoice.period)
   const rollTargetLabel = rollTarget ? getBillingPeriodLabel(rollTarget) : 'next month'
@@ -4745,13 +4753,9 @@ function InvoiceEditor({
       if (mountedRef.current) setRollBusy(false)
     }
   }
+  const undoInto = invoice.rolledIntoPeriod ? getBillingPeriodLabel(invoice.rolledIntoPeriod) : 'next month'
+  const undoSentence = `Undo the push of ${invoice.number ?? 'this invoice'}? Its lines come off ${undoInto}'s invoice, and this takes the lines back and rebuilds ${getBillingPeriodLabel(invoice.period)}'s invoice as you left it, as a new draft with a new number. This invoice stays voided as the record.`
   const undoPush = async () => {
-    const into = invoice.rolledIntoPeriod ? getBillingPeriodLabel(invoice.rolledIntoPeriod) : 'next month'
-    const here = getBillingPeriodLabel(invoice.period)
-    const confirmed = window.confirm(
-      `Undo the push of ${invoice.number ?? 'this invoice'}? Its lines come off ${into}'s invoice, and ${here}'s invoice is built again from the time records. This invoice stays voided with your edits on it; they are not copied to the new one.`,
-    )
-    if (!confirmed) return
     setRetainerError(null)
     setRollBusy(true)
     try {
@@ -4759,6 +4763,7 @@ function InvoiceEditor({
       onNotice?.(
         undoRollForwardNotice(result, { number: invoice.number, period: invoice.period, clientName }),
       )
+      if (mountedRef.current) setUndoConfirm(false)
       await onInvoiceMoved()
     } catch (err) {
       if (err instanceof ApiError && INVOICE_MOVED_CODES.has(err.code)) await onInvoiceMoved()
@@ -5736,6 +5741,29 @@ function InvoiceEditor({
           </div>
         </div>
       ) : null}
+      {undoConfirm ? (
+        <div className="invoice-run-remind-confirm invoice-run-roll-confirm" role="group" aria-label="Undo push">
+          <p className="invoice-run-remind-prompt">{undoSentence}</p>
+          <div className="invoice-run-remind-actions">
+            <button
+              type="button"
+              className="primary-action"
+              disabled={rollBusy || busy}
+              onClick={() => void undoPush()}
+            >
+              {rollBusy ? 'Undoing…' : 'Undo the push'}
+            </button>
+            <button
+              type="button"
+              className="ghost-action"
+              disabled={rollBusy}
+              onClick={() => setUndoConfirm(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
       <div className="invoice-run-editor-footer">
         <span className="invoice-run-running-total">
           Total {currency.format(localTotal)}
@@ -6067,10 +6095,13 @@ function InvoiceEditor({
                     ? (invoice.rollUndo.reason ?? 'This push cannot be undone.')
                     : `Take these lines back off ${getBillingPeriodLabel(invoice.rolledIntoPeriod)}'s invoice and build this month's invoice again`
               }
-              onClick={() => void undoPush()}
+              onClick={() => {
+                setRetainerError(null)
+                setUndoConfirm(true)
+              }}
             >
               <Undo2 size={15} />
-              {rollBusy ? 'Undoing…' : 'Undo push'}
+              Undo push
             </button>
           ) : null}
         </div>

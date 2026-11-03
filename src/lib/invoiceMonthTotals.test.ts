@@ -178,6 +178,12 @@ describe('summarizeInvoiceMonthTotals with the owner estimate', () => {
     const fromEstimate = summarizeInvoiceMonthTotals([pushed], clients, [row('c1', { basis: 'sent', detail: null })])
     expect(fromEstimate.notInvoiced).toEqual([])
     expect(fromEstimate.rolled.map((entry) => entry.id)).toEqual(['c1'])
+    // Pushed work for a client who can no longer be billed is counted and named, never dropped.
+    const waiting = summarizeInvoiceMonthTotals([], clients, [
+      row('c2', { basis: 'pushed_waiting', detail: "October 2026's pushed work waiting - client not billable", service: null, reimburse: 0, total: null, pushedInWaiting: '2026-10' }),
+    ])
+    expect(waiting.notInvoiced).toEqual([])
+    expect(waiting.waiting).toEqual([{ id: 'c2', name: 'C2', label: 'pushed work waiting - client not billable' }])
     // A plain void is not a push.
     expect(summarizeInvoiceMonthTotals([invoice('a', 'c1', { status: 'void' })], clients, null).rolled).toEqual([])
   })

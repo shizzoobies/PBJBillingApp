@@ -53,7 +53,7 @@ export function undoRollForwardNotice(
   if (result.generateError) {
     text += ` ${result.generateError}`
   } else if (result.regenerated) {
-    text += ` ${periodLabel} was built again as ${result.regenerated.number ?? 'a new draft'}.`
+    text += ` ${periodLabel}'s invoice was rebuilt as you left it, as ${result.regenerated.number ?? 'a new draft'}.`
   } else {
     text += ` ${generateSkipMessage(result.skipped?.[0], fallback.clientName, periodLabel)}`
   }
@@ -65,11 +65,14 @@ export function undoRollForwardNotice(
  * invoices were involved: clients skipped because their month was pushed, drafts
  * that took pushed lines, and any advance that could not move. '' when none.
  */
-export function generateRollForwardNote(result: {
-  skipped?: Array<{ reason?: string }>
-  carried?: InvoiceCarriedReport[]
-  advances?: InvoiceAdvanceCarriedReport[]
-}) {
+export function generateRollForwardNote(
+  result: {
+    skipped?: Array<{ clientId?: string; reason?: string; carriedFromPeriod?: string | null }>
+    carried?: InvoiceCarriedReport[]
+    advances?: InvoiceAdvanceCarriedReport[]
+  },
+  clientName: (clientId: string) => string = () => 'A client',
+) {
   const pushedOut = (result.skipped ?? []).filter((row) => row.reason === 'rolled-forward').length
   const carried = (result.carried ?? []).length
   const stuck = (result.advances ?? []).filter((row) => !row.attached)
@@ -81,5 +84,21 @@ export function generateRollForwardNote(result: {
     text += ` ${pushedOut} client${pushedOut === 1 ? '' : 's'} pushed to next month, so not billed here.`
   }
   for (const row of stuck) text += advanceSentence(row)
+  // Pushed work that this run could not put on any invoice: named, client by client.
+  for (const row of result.skipped ?? []) {
+    if (!isPeriod(row.carriedFromPeriod) || !row.clientId) continue
+    const month = getBillingPeriodLabel(row.carriedFromPeriod).split(' ')[0]
+    const why = WAITING_REASON[row.reason ?? ''] ?? 'cannot be billed this month'
+    text += ` ${clientName(row.clientId)}: ${month}'s pushed work is waiting but this client ${why}, so no invoice was made.`
+  }
   return text
+}
+
+/** Why a client with pushed work waiting got no invoice, finishing "this client …". */
+const WAITING_REASON: Record<string, string> = {
+  'client-inactive': 'is inactive',
+  'not-billable-yet': 'is not an active client yet',
+  'opted-out': 'is invoiced outside the app',
+  'billed-to-other': "is billed on another client's invoice",
+  'master-without-subs': 'is a billing master with no companies',
 }
