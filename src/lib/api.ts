@@ -3611,6 +3611,14 @@ export type ClientRecap = {
   clientSince?: string | null
   /** Masters only: false when the companies counted different months. */
   activeMonthsUniform?: boolean
+  /** The whole period lies after the current month: "hasn't started yet", not inactive. */
+  periodNotStarted?: boolean
+  /** The range's left-out months, by reason. Absent on a master and on an older payload. */
+  uncountedMonths?: {
+    beforeStart: string[]
+    notYetBegun: string[]
+    afterLastActivity: string[]
+  }
   includeFinancials: boolean
   time: {
     totalHours: number

@@ -4,8 +4,9 @@
  * A quarter or a year counts only the months the client was ACTIVE - from its
  * first time entry, invoice or set-up through the current month (an inactive
  * client stops at its last activity). The server decides which months those
- * are (lib/client-recap.js `clientActiveMonths`); this file only says it, so the
- * page and the CSV export use the same words.
+ * are (lib/client-recap.js `clientActiveMonths`) and why each other month was
+ * left out; this file only says it, so the page and the CSV export use the
+ * same words.
  */
 import type { ClientRecap } from './api'
 
@@ -20,6 +21,8 @@ export type RecapActivity = Partial<
     | 'clientSince'
     | 'isBillingMaster'
     | 'activeMonthsUniform'
+    | 'periodNotStarted'
+    | 'uncountedMonths'
     | 'subs'
     | 'range'
   >
@@ -47,11 +50,15 @@ export function activeSpanLabel(months: string[] | null | undefined): string {
   return `${monthShort(first)}–${monthShort(last)}`
 }
 
+/** True when a billing master's companies counted different months. */
+const isMixedMaster = (activity: RecapActivity) =>
+  activity.isBillingMaster === true && activity.activeMonthsUniform === false
+
 /** True when the server counted fewer months than the calendar holds. */
 export function isTrimmed(activity: RecapActivity | null | undefined): boolean {
   if (!activity || !Array.isArray(activity.activeMonths)) return false
+  if (isMixedMaster(activity)) return true
   const calendar = activity.calendarMonthsInPeriod ?? activity.monthsInPeriod ?? 0
-  if (activity.isBillingMaster && activity.activeMonthsUniform === false) return true
   return activity.activeMonths.length < calendar
 }
 
@@ -69,11 +76,11 @@ export function scaledEstimateNote(
   if (!activity || !isTrimmed(activity)) {
     return monthsInPeriod > 1 ? ` (monthly estimates × ${monthsInPeriod} months)` : ''
   }
-  if (activity.isBillingMaster && activity.activeMonthsUniform === false) {
-    return ' (monthly estimates × each company’s own active months)'
-  }
+  if (isMixedMaster(activity)) return ' (monthly estimates × each company’s own active months)'
   const months = activity.activeMonths ?? []
-  if (months.length === 0) return ' (not active in this period)'
+  if (months.length === 0) {
+    return activity.periodNotStarted ? ' (period not started yet)' : ' (not active in this period)'
+  }
   const rangeStart = String(activity.range?.start ?? '').slice(0, 7)
   const since =
     activity.clientSince && rangeStart && activity.clientSince >= rangeStart
@@ -83,15 +90,21 @@ export function scaledEstimateNote(
   return ` (monthly estimates × ${months.length} ${unit}: ${activeSpanLabel(months)}${since})`
 }
 
+/** What to print in an Estimate cell when the period has none to show. */
+export function noEstimateWord(activity: RecapActivity | null | undefined): string | null {
+  if (!activity || activity.activeInPeriod !== false) return null
+  return activity.periodNotStarted ? 'Not started yet' : 'Not active'
+}
+
 /**
  * One sentence for the Billing and Profitability captions saying which months
- * were counted - null when every month of the period counted, so the page
- * reads exactly as it always did for a client active all along.
+ * were counted and why the others were not - null when every month of the
+ * period counted, so the page reads exactly as it always did.
  */
 export function activeMonthsSentence(activity: RecapActivity | null | undefined): string | null {
   if (!activity || !isTrimmed(activity)) return null
   const calendar = activity.calendarMonthsInPeriod ?? activity.monthsInPeriod ?? 0
-  if (activity.isBillingMaster && activity.activeMonthsUniform === false) {
+  if (isMixedMaster(activity)) {
     const parts = (activity.subs ?? [])
       .filter((sub) => typeof sub.monthsInPeriod === 'number')
       .map((sub) => `${sub.name} ${sub.monthsInPeriod} of ${calendar}`)
@@ -103,11 +116,44 @@ export function activeMonthsSentence(activity: RecapActivity | null | undefined)
   }
   const months = activity.activeMonths ?? []
   if (months.length === 0) {
+    if (activity.periodNotStarted) {
+      return 'This period hasn’t started yet, so nothing is planned or priced for it.'
+    }
     const rangeEnd = String(activity.range?.end ?? '').slice(0, 7)
     if (activity.clientSince && rangeEnd && activity.clientSince > rangeEnd) {
       return `Not active in this period — this client’s first activity on record is ${monthShort(activity.clientSince)}, so nothing is planned or priced for it.`
     }
-    return 'Not active in this period — none of its months count (not yet begun, or after the client’s last activity), so nothing is planned or priced for it.'
+    return 'Not active in this period — none of its months count, so nothing is planned or priced for it.'
   }
-  return `Counted ${months.length} of ${calendar} months (${activeSpanLabel(months)}) — only the months this client was active. Months before its first time entry, invoice or set-up, months not yet begun, and months after an inactive client’s last activity are left out.`
+  const counted = `Counted ${months.length} of ${calendar} months (${activeSpanLabel(months)}).`
+  const uncounted = activity.uncountedMonths
+  if (!uncounted) {
+    return `${counted} Months before the client’s first time entry, invoice or set-up, months not yet begun, and months after an inactive client’s last activity are left out.`
+  }
+  const reasons = [
+    uncounted.beforeStart.length > 0
+      ? `${activeSpanLabel(uncounted.beforeStart)} is before the client’s first activity on record`
+      : null,
+    uncounted.notYetBegun.length > 0
+      ? `${activeSpanLabel(uncounted.notYetBegun)} ${uncounted.notYetBegun.length === 1 ? 'has' : 'have'} not started yet`
+      : null,
+    uncounted.afterLastActivity.length > 0
+      ? `${activeSpanLabel(uncounted.afterLastActivity)} is after this inactive client’s last activity`
+      : null,
+  ].filter((reason): reason is string => reason !== null)
+  return reasons.length > 0 ? `${counted} Left out: ${reasons.join('; ')}.` : counted
+}
+
+/**
+ * The CSV's "Active months" cell: the span, "None", or - on a billing master
+ * whose companies counted different months - each company's own span.
+ */
+export function activeMonthsCell(activity: RecapActivity): string {
+  if (isMixedMaster(activity)) {
+    return (activity.subs ?? [])
+      .map((sub) => `${sub.name}: ${sub.activeMonths?.length ? activeSpanLabel(sub.activeMonths) : 'None'}`)
+      .join('; ')
+  }
+  const months = activity.activeMonths ?? []
+  return months.length === 0 ? 'None' : activeSpanLabel(months)
 }

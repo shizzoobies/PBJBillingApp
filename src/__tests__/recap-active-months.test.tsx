@@ -180,3 +180,75 @@ describe('month spans', () => {
     expect(activeSpanLabel([])).toBe('')
   })
 })
+
+describe('why months were left out', () => {
+  it('a client active all along, current year: December has simply not started', () => {
+    const sentence = activeMonthsSentence({
+      monthsInPeriod: 11,
+      calendarMonthsInPeriod: 12,
+      activeMonths: Array.from({ length: 11 }, (_, i) => `2026-${String(i + 1).padStart(2, '0')}`),
+      activeInPeriod: true,
+      clientSince: '2025-05',
+      uncountedMonths: { beforeStart: [], notYetBegun: ['2026-12'], afterLastActivity: [] },
+      range: { start: '2026-01-01', end: '2026-12-31' },
+    })
+    expect(sentence).toBe('Counted 11 of 12 months (Jan–Nov 2026). Left out: Dec 2026 has not started yet.')
+    expect(sentence).not.toMatch(/inactive|before the client/)
+  })
+
+  it('an August starter names both reasons', () => {
+    expect(
+      activeMonthsSentence({
+        ...AUGUST_STARTER,
+        uncountedMonths: {
+          beforeStart: ['2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07'],
+          notYetBegun: ['2026-12'],
+          afterLastActivity: [],
+        },
+      }),
+    ).toBe(
+      'Counted 4 of 12 months (Aug–Nov 2026). Left out: Jan–Jul 2026 is before the client’s first activity on record; Dec 2026 has not started yet.',
+    )
+  })
+})
+
+describe('a period that has not started yet', () => {
+  const NEXT_QUARTER = {
+    monthsInPeriod: 0,
+    calendarMonthsInPeriod: 3,
+    activeMonths: [] as string[],
+    activeInPeriod: false,
+    periodNotStarted: true,
+    clientSince: '2025-05',
+    range: { start: '2027-01-01', end: '2027-03-31' },
+  }
+
+  it('says the period has not started, and never calls the client inactive', () => {
+    render(
+      <TimeAndHoursCard time={{ ...TIME, byRole: [], hasEstimate: false }} monthsInPeriod={0} activity={NEXT_QUARTER} />,
+    )
+    expect(screen.getByText(/This period hasn.t started yet/)).toBeInTheDocument()
+    expect(screen.queryByText(/Not active/)).not.toBeInTheDocument()
+    expect(activeMonthsSentence(NEXT_QUARTER)).toBe(
+      'This period hasn’t started yet, so nothing is planned or priced for it.',
+    )
+  })
+
+  it('the Profitability estimate reads "Not started yet", not "No estimate set"', () => {
+    render(
+      <ProfitabilityCard
+        profitability={{ realizedRate: null, laborCost: 0, margin: 0 }}
+        estimates={{
+          ...ESTIMATES,
+          hasEstimate: false,
+          monthsInPeriod: 0,
+          profit: { ...ESTIMATES.profit, estimatedRevenue: null, estimatedCost: null, estimatedProfit: null, delta: null, direction: null },
+        }}
+        monthsInPeriod={0}
+        activity={NEXT_QUARTER}
+      />,
+    )
+    expect(screen.getByText('Not started yet')).toBeInTheDocument()
+    expect(screen.queryByText('No estimate set')).not.toBeInTheDocument()
+  })
+})

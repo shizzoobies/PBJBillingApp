@@ -55,6 +55,7 @@ import {
   sanitizeClientPackageRefs,
   mapChecklistItemRow,
   mapClientRow,
+  mapInvoiceEvidenceRow,
   mapInvoiceRow,
   mapRecurringReimbursementRow,
   materializeRecurringChecklists,
@@ -57736,5 +57737,111 @@ describe('dashboard layout on the user row (postgres branch)', () => {
     expect(fake.statements.filter((s) => /^update users set dashboard_layout/i.test(s.text))[1].params[1]).toBeNull()
 
     expect(await postgresStore(pool({ updateRowCount: 0 })).setDashboardLayout('emp-gone', layout)).toBeUndefined()
+  })
+})
+
+/**
+ * featreq-8dffdff7: the Client Recap's "client since" reads `createdAt`, so
+ * it must exist on BOTH backends and survive a whole-workspace save. Postgres:
+ * selected and mapped here, restored by the bulk save's created_at snapshot
+ * (the CREATED_AT_PRESERVED_TABLES suite above covers `clients`). File: stamped
+ * on create, stored wins through a save, a payload's copy is ignored.
+ */
+describe('a client carries createdAt on both backends (featreq-8dffdff7)', () => {
+  it('the Postgres read selects created_at and maps it to an ISO createdAt', () => {
+    expect(CLIENT_SELECT_COLUMNS).toMatch(/\bcreated_at\b/)
+    expect(
+      mapClientRow({ id: 'c1', name: 'Acme', created_at: new Date('2026-08-14T16:00:00.000Z') }).createdAt,
+    ).toBe('2026-08-14T16:00:00.000Z')
+    expect(mapClientRow({ id: 'c1', name: 'Acme' }).createdAt).toBeNull()
+  })
+
+  it('createClient stamps createdAt and the file backend reads it back', async () => {
+    const before = Date.now()
+    const created = await store.createClient({ name: 'New Co', createdAt: '1999-01-01T00:00:00.000Z' })
+    expect(created).toBeTruthy()
+    // Never the payload's: a create stamps its own moment.
+    expect(Date.parse(created.createdAt)).toBeGreaterThanOrEqual(before)
+    const stored = (await store.read()).clients.find((client) => client.id === created.id)
+    expect(stored.createdAt).toBe(created.createdAt)
+  })
+
+  it('a bulk save keeps the stored createdAt and ignores the payload copy', async () => {
+    const stamped = (await store.read()).clients.find((client) => client.id === 'c1')
+    expect(typeof stamped.createdAt).toBe('string')
+    await store.write(
+      workspace({ clients: [{ id: 'c1', name: 'Acme renamed', createdAt: '1999-01-01T00:00:00.000Z' }] }),
+    )
+    const afterRename = (await store.read()).clients.find((client) => client.id === 'c1')
+    expect(afterRename.name).toBe('Acme renamed')
+    expect(afterRename.createdAt).toBe(stamped.createdAt)
+    // A tab that never had the field (an older bundle) does not erase it either.
+    await store.write(workspace({ clients: [{ id: 'c1', name: 'Acme' }] }))
+    expect((await store.read()).clients.find((client) => client.id === 'c1').createdAt).toBe(
+      stamped.createdAt,
+    )
+  })
+
+  it('a client id the file has never seen is stamped by the save', async () => {
+    const before = Date.now()
+    await store.write(
+      workspace({ clients: [{ id: 'c1', name: 'Acme' }, { id: 'c2', name: 'Brand New', createdAt: 'junk' }] }),
+    )
+    const fresh = (await store.read()).clients.find((client) => client.id === 'c2')
+    expect(Date.parse(fresh.createdAt)).toBeGreaterThanOrEqual(before)
+  })
+})
+
+describe('listInvoiceEvidence: narrow rows, both backends (featreq-8dffdff7)', () => {
+  it('Postgres selects only client, period, kind, status and the sub ids', async () => {
+    const statements = []
+    const pgStore = new AppDataStore()
+    pgStore.pool = {
+      query: async (text) => {
+        statements.push(text)
+        return {
+          rows: [
+            { client_id: 'm1', period: '2026-08', kind: 'monthly', status: 'sent', source_client_ids: ['s1', 's2'] },
+            { client_id: 'c1', period: '2026-07', kind: null, status: 'draft', source_client_ids: null },
+          ],
+        }
+      },
+    }
+    pgStore.mode = 'postgres'
+    const rows = await pgStore.listInvoiceEvidence()
+    expect(statements).toHaveLength(1)
+    expect(statements[0]).toMatch(/from invoices/)
+    for (const column of ['email_log', 'pay_token', 'original_line_items', 'total']) {
+      expect(statements[0]).not.toMatch(new RegExp(`\b${column}\b`))
+    }
+    expect(rows).toEqual([
+      { clientId: 'm1', period: '2026-08', kind: 'monthly', status: 'sent', sourceClientIds: ['s1', 's2'] },
+      { clientId: 'c1', period: '2026-07', kind: 'monthly', status: 'draft', sourceClientIds: [] },
+    ])
+  })
+
+  it('the file backend answers the same shape', async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.invoices = [
+      {
+        id: 'inv-1',
+        clientId: 'm1',
+        period: '2026-08',
+        status: 'sent',
+        lineItems: [{ sourceClientId: 's1' }, { sourceClientId: 's1' }, { sourceClientId: 's2' }, { kind: 'plan' }],
+        emailLog: [{ to: 'x' }],
+      },
+    ]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    expect(await store.listInvoiceEvidence()).toEqual([
+      { clientId: 'm1', period: '2026-08', kind: 'monthly', status: 'sent', sourceClientIds: ['s1', 's2'] },
+    ])
+    expect(mapInvoiceEvidenceRow({})).toEqual({
+      clientId: null,
+      period: null,
+      kind: 'monthly',
+      status: null,
+      sourceClientIds: [],
+    })
   })
 })

@@ -1,5 +1,5 @@
 import type { ClientRecap, ClientRecapDirection } from './api'
-import { activeSpanLabel, monthShort } from './recapActiveMonths'
+import { activeMonthsCell, monthShort } from './recapActiveMonths'
 
 /**
  * The Client Recap as a spreadsheet (featreq-0f761138, Alex).
@@ -100,7 +100,8 @@ export function buildClientRecapCsv(recap: ClientRecap): {
     add('Period', '', 'Calendar months', recap.calendarMonthsInPeriod)
   }
   if (recap.activeMonths) {
-    add('Period', '', 'Active months', recap.activeMonths.length === 0 ? 'None' : activeSpanLabel(recap.activeMonths))
+    // A master whose companies counted different months lists each company's.
+    add('Period', '', 'Active months', activeMonthsCell(recap))
   }
   if (recap.clientSince !== undefined) {
     add('Period', '', 'Client since', recap.clientSince ? monthShort(recap.clientSince) : '')

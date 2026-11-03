@@ -4000,7 +4000,26 @@ export const CLIENT_SELECT_COLUMNS = `id, name, contact, billing_mode, hourly_ra
           annual_rate, annual_billing_month, lifecycle_stage,
           bill_to_client_id, is_billing_master, invoice_recipient_client_id,
           hourly_rate_period, hourly_rate_history, invoice_note,
-          invoice_no_email, billing_period_months, period_anchor_month, package_ids`
+          invoice_no_email, billing_period_months, period_anchor_month, package_ids,
+          created_at`
+
+/**
+ * One `listInvoiceEvidence` row -> `{ clientId, period, kind, status,
+ * sourceClientIds }`. Both backends go through here (cardinal rule 1): `kind`
+ * answers 'monthly' for a row written before the column existed, as
+ * `normalizeStoredInvoice` does, and `sourceClientIds` is always an array.
+ */
+export function mapInvoiceEvidenceRow(row) {
+  return {
+    clientId: row?.client_id ?? null,
+    period: row?.period ?? null,
+    kind: row?.kind ?? 'monthly',
+    status: row?.status ?? null,
+    sourceClientIds: Array.isArray(row?.source_client_ids)
+      ? row.source_client_ids.filter((id) => typeof id === 'string' && id)
+      : [],
+  }
+}
 
 /** One `clients` row -> the camelCase shape the app and the API speak. */
 export function mapClientRow(row) {
@@ -4112,6 +4131,11 @@ export function mapClientRow(row) {
     invoiceNote: row.invoice_note ?? null,
     hourlyRatePeriod: row.hourly_rate_period ?? null,
     hourlyRateHistory: Array.isArray(row.hourly_rate_history) ? row.hourly_rate_history : [],
+    // When the row was first written (featreq-8dffdff7: one term of the Client
+    // Recap's "client since"). The bulk save snapshots and restores it
+    // (`snapshotCreatedAt`), so an autosave never moves it. The file backend
+    // stamps it on create and keeps the stored value through a save.
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
   }
 }
 
@@ -11411,6 +11435,7 @@ export class AppDataStore {
             hourlyRateHistory: Array.isArray(entry.hourlyRateHistory)
               ? entry.hourlyRateHistory
               : [],
+            createdAt: typeof entry.createdAt === 'string' && entry.createdAt ? entry.createdAt : null,
           })
         }
       } catch {
@@ -11659,13 +11684,23 @@ export class AppDataStore {
       // actually got to look at what is stored. It never runs off an empty map
       // it could not fill.
       const currentRatePeriod = firmToday().slice(0, 7)
+      const savedAt = nowIso()
       if (ratePinSnapshotOk && Array.isArray(data.clients)) {
         data.clients = data.clients.map((clientRecord) => {
           if (!clientRecord || typeof clientRecord !== 'object') return clientRecord
           const prior =
             typeof clientRecord.id === 'string' ? priorPinById.get(clientRecord.id) : undefined
+          // `createdAt`, Cardinal rule 1 mirror of `snapshotCreatedAt` in the
+          // Postgres branch (featreq-8dffdff7, the Client Recap's "client
+          // since"): what is stored wins and the payload's copy is ignored; a
+          // client id this file has never seen is stamped now, as the Postgres
+          // insert stamps it. A stored client that predates the field (written
+          // before it existed) is left without one rather than given today's.
+          const { createdAt: _payloadCreatedAt, ...withoutCreatedAt } = clientRecord
+          const createdAt = prior ? prior.createdAt : savedAt
           return {
-            ...clientRecord,
+            ...withoutCreatedAt,
+            ...(createdAt ? { createdAt } : {}),
             // The kept invoice note is endpoint-owned like the pin: stored wins,
             // the payload's copy is discarded (null when nothing is stored).
             invoiceNote: prior?.invoiceNote ?? null,
@@ -16181,6 +16216,48 @@ export class AppDataStore {
    * the client as its `sourceClientId` (a sub billed only on its billing
    * master's invoice).
    */
+  /**
+   * Every invoice reduced to what says WHEN a client was billed
+   * (featreq-8dffdff7): the Client Recap reads these to find a client's first
+   * and last invoiced month, and nothing else. One narrow row per invoice:
+   * `{ clientId, period, kind, status, sourceClientIds }`, where
+   * `sourceClientIds` is the distinct sub ids a billing master's lines carry.
+   * No line items, email log or pay token leave the store through here.
+   */
+  async listInvoiceEvidence() {
+    if (this.pool) {
+      const { rows } = await this.pool.query(
+        `select client_id, period, kind, status,
+                coalesce(
+                  (select array_agg(distinct line->>'sourceClientId')
+                     from jsonb_array_elements(
+                            case when jsonb_typeof(line_items) = 'array' then line_items else '[]'::jsonb end
+                          ) as line
+                    where coalesce(line->>'sourceClientId', '') <> ''),
+                  '{}'
+                ) as source_client_ids
+           from invoices`,
+      )
+      return rows.map(mapInvoiceEvidenceRow)
+    }
+    const data = await readJson(localDataPath)
+    return (Array.isArray(data.invoices) ? data.invoices : []).map((invoice) =>
+      mapInvoiceEvidenceRow({
+        client_id: invoice?.clientId,
+        period: invoice?.period,
+        kind: invoice?.kind,
+        status: invoice?.status,
+        source_client_ids: [
+          ...new Set(
+            (Array.isArray(invoice?.lineItems) ? invoice.lineItems : [])
+              .map((line) => line?.sourceClientId)
+              .filter((id) => typeof id === 'string' && id),
+          ),
+        ],
+      }),
+    )
+  }
+
   async countClientInvoices(clientId) {
     if (this.pool) {
       const { rows } = await this.pool.query(
@@ -22139,6 +22216,10 @@ export class AppDataStore {
       hourlyRatePeriod:
         (client.billingMode ?? 'hourly') === 'hourly' ? firmToday().slice(0, 7) : null,
       hourlyRateHistory: [],
+      // Stamped HERE, never taken from the payload (featreq-8dffdff7: the Client
+      // Recap's "client since" reads it). Postgres writes the same moment
+      // through the column's `default now()`; the file backend stores this.
+      createdAt: nowIso(),
     })
 
     // Chosen packages that still exist (FK-free column, the plan_ids idiom).

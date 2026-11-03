@@ -15,6 +15,7 @@ import { isInactiveClient } from '../lib/clientLifecycle'
 import {
   activeMonthsSentence,
   monthShort,
+  noEstimateWord,
   scaledEstimateNote,
   type RecapActivity,
 } from '../lib/recapActiveMonths'
@@ -698,11 +699,19 @@ export function TimeAndHoursCard({
           nothing was planned for it, which is a different thing from "no
           estimate set" (featreq-8dffdff7). */}
       {activity?.activeInPeriod === false ? (
-        <p className="recap-estimate-banner">
-          Not active in this period
-          {activity.clientSince ? ` — client since ${monthShort(activity.clientSince)}` : ''}. Nothing
-          was planned for it; any actual hours below are reported on their own.
-        </p>
+        activity.periodNotStarted ? (
+          // A future period (the next arrow past this month): the client is
+          // not inactive, the period simply has not begun.
+          <p className="recap-estimate-banner">
+            This period hasn&apos;t started yet, so nothing is planned for it yet.
+          </p>
+        ) : (
+          <p className="recap-estimate-banner">
+            Not active in this period
+            {activity.clientSince ? ` — client since ${monthShort(activity.clientSince)}` : ''}.
+            Nothing was planned for it; any actual hours below are reported on their own.
+          </p>
+        )
       ) : null}
       {time.estimatesVisible && !time.hasEstimate && activity?.activeInPeriod !== false ? (
         <p className="recap-estimate-banner">
@@ -884,7 +893,7 @@ export function ProfitabilityCard({
             <td>Profit this period</td>
             <td>
               {profit?.estimatedProfit == null ? (
-                <span className="muted-text">No estimate set</span>
+                <span className="muted-text">{noEstimateWord(activity) ?? 'No estimate set'}</span>
               ) : (
                 money(profit.estimatedProfit)
               )}

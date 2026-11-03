@@ -182,6 +182,23 @@ describe('buildClientRecapCsv', () => {
     expect(find(none, 'Period', '', 'Active months')).toBe('None')
   })
 
+  it('lists each company’s months on a master whose companies counted different ones', () => {
+    const { rows: r } = buildClientRecapCsv({
+      ...RECAP,
+      isBillingMaster: true,
+      monthsInPeriod: 3,
+      calendarMonthsInPeriod: 3,
+      activeMonths: ['2026-01', '2026-02', '2026-03'],
+      activeMonthsUniform: false,
+      clientSince: '2025-05',
+      subs: [
+        { id: 'a', name: 'KLC Floors', monthsInPeriod: 3, activeMonths: ['2026-01', '2026-02', '2026-03'] },
+        { id: 'b', name: 'KLC & More', monthsInPeriod: 1, activeMonths: ['2026-03'] },
+      ],
+    })
+    expect(find(r, 'Period', '', 'Active months')).toBe('KLC Floors: Jan–Mar 2026; KLC & More: Mar 2026')
+  })
+
   it('carries the Billing tiles as the page shows them', () => {
     expect(find(rows, 'Billing', '', 'Service value')).toBe(2400)
     expect(find(rows, 'Billing', '', 'Invoice')).toBe(2202)
