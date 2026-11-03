@@ -1,4 +1,5 @@
 import type { ClientRecap, ClientRecapDirection } from './api'
+import { activeSpanLabel, monthShort } from './recapActiveMonths'
 
 /**
  * The Client Recap as a spreadsheet (featreq-0f761138, Alex).
@@ -93,6 +94,17 @@ export function buildClientRecapCsv(recap: ClientRecap): {
   add('Period', '', 'Start', recap.range.start)
   add('Period', '', 'End', recap.range.end)
   add('Period', '', 'Months in period', recap.monthsInPeriod)
+  // Which months were counted (featreq-8dffdff7): a quarter or a year counts only
+  // the months the client was active. Blank on an older payload without them.
+  if (recap.calendarMonthsInPeriod != null) {
+    add('Period', '', 'Calendar months', recap.calendarMonthsInPeriod)
+  }
+  if (recap.activeMonths) {
+    add('Period', '', 'Active months', recap.activeMonths.length === 0 ? 'None' : activeSpanLabel(recap.activeMonths))
+  }
+  if (recap.clientSince !== undefined) {
+    add('Period', '', 'Client since', recap.clientSince ? monthShort(recap.clientSince) : '')
+  }
 
   // ---- Billing (owner only) ----
   if (recap.billing) {

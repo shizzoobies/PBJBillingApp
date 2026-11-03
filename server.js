@@ -5800,6 +5800,13 @@ const server = createServer(async (request, response) => {
       // untouched — the roll-up SUMS those results, it never re-derives them.
       // A non-master answers exactly as it did before this branch existed.
       const recapClient = (data.clients ?? []).find((entry) => entry.id === clientId)
+      // EVIDENCE OF WHEN A CLIENT STARTED (featreq-8dffdff7): a quarter or a
+      // year counts only the months the client was active, from its first time
+      // entry / invoice / creation. Invoices live outside read(), so every one
+      // is loaded here and handed over as evidence only (lib/client-recap.js
+      // clientActiveMonths reads their periods; nothing is priced from them).
+      // Loaded for staff too, so both payloads agree on which months counted.
+      const activityInvoices = await appDataStore.listInvoices()
       if (recapClient?.isBillingMaster === true) {
         // ACCESS IS PER COMPANY, not per group. Being assigned to the master is
         // not access to Bright Tower's hours, its staff roster or its task
@@ -5832,6 +5839,7 @@ const server = createServer(async (request, response) => {
             salesTaxRecord: includeFinancials
               ? await appDataStore.getSalesTaxRecord(sub.id, period)
               : null,
+            activityInvoices,
           })
           if (subRecap) subRecaps.push(subRecap)
         }
@@ -5879,6 +5887,7 @@ const server = createServer(async (request, response) => {
         costRateVersions,
         salesTaxRecord,
         invoices: recapInvoices,
+        activityInvoices,
       })
       if (!recap) {
         sendJson(response, 404, { error: 'Client not found' })
