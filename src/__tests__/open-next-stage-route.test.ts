@@ -81,7 +81,8 @@ describe('POST /api/checklists/:id/open-next-stage', () => {
     const activity = route.indexOf("'case_advanced_early'")
     expect(activity).toBeGreaterThan(route.indexOf('appDataStore.openNextStageEarly('))
     expect(route).toContain(
-      '`${from.title} · case ${caseId} · stage ${fromIdx} -> stage ${fromIdx + 1} (${revived ? \'opened after the step was finished\' : \'opened while waiting\'})`',
+      // Skip a step (featreq-7e1827e0) added the third kind: a skipped step's next step.
+      '`${from.title} · case ${caseId} · stage ${fromIdx} -> stage ${fromIdx + 1} (${afterSkip ? \'opened after the step was skipped\' : revived ? \'opened after the step was finished\' : \'opened while waiting\'})`',
     )
     // Read from the stage as the route found it, before the store call.
     expect(route).toContain('const revived = stageFinished(checklist)')

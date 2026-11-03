@@ -291,6 +291,7 @@ import {
   skipReasonLabel,
   buildSkipNotice,
   isStepSkip,
+  STEP_NOT_OPENED_SUBJECT,
   stepNotOpenedMessage,
   stepSkippedMessage,
   validatePushRequest,
@@ -16378,6 +16379,39 @@ const server = createServer(async (request, response) => {
                 appPublicUrl: getPublicAppUrl(request),
               })
             }
+          } else if (advance.reason === 'already_spawned' && advance.existing) {
+            // The next step was ALREADY open (Open next step now, or a finishing tick
+            // won the race): the store stamped the notice onto it, so its person is
+            // told like any step skip. Not a failure - the owner hears nothing extra.
+            const existing = advance.existing
+            nextStep = {
+              opened: false,
+              alreadyOpen: true,
+              checklist: existing,
+              assigneeName:
+                (data.employees ?? []).find((employee) => employee.id === existing.assigneeId)?.name ?? '',
+            }
+            if (existing.assigneeId && existing.assigneeId !== session.user.id) {
+              await notify(appDataStore, existing.assigneeId, 'checklist_step_skipped', {
+                checklistId: existing.id,
+                caseId,
+                stageIndex: existing.stageIndex,
+                stageCount: existing.stageCount,
+                message: stepSkippedMessage({
+                  skipperName,
+                  stageIndex,
+                  stageCount,
+                  stageName,
+                  clientName: skipClientName,
+                  recipeTitle,
+                  reasonCategory: validated.category,
+                  note: validated.explanation,
+                  alreadyOpen: true,
+                }),
+                link: `/checklists?focus=${existing.id}`,
+                appPublicUrl: getPublicAppUrl(request),
+              })
+            }
           } else {
             const why =
               advance.reason === 'billing_master' && advance.message
@@ -16392,6 +16426,8 @@ const server = createServer(async (request, response) => {
             )
             for (const owner of owners) {
               await notify(appDataStore, owner.id, 'checklist_step_skipped', {
+                // Not the next person's subject: this one says the opening failed.
+                subject: STEP_NOT_OPENED_SUBJECT,
                 checklistId,
                 caseId,
                 message: stepNotOpenedMessage({
@@ -16424,7 +16460,12 @@ const server = createServer(async (request, response) => {
           employees: data.employees ?? [],
           skipperId: session.user.id,
         })
+        // Skip a step: whoever holds the next step already got the step notice,
+        // which says the same and more - one notice, not two.
+        const nextHolderId =
+          nextStep && (nextStep.opened || nextStep.alreadyOpen) ? nextStep.checklist?.assigneeId ?? null : null
         for (const userId of recipients) {
+          if (nextHolderId && userId === nextHolderId) continue
           await notify(appDataStore, userId, 'checklist_skipped', {
             checklistId,
             clientId: checklist.clientId,
@@ -16920,13 +16961,42 @@ const server = createServer(async (request, response) => {
       const { checklist: from, spawned } = result
       const fromIdx = stageIndex + 1
       const caseId = from.caseId || from.id
+      // Skip a step (featreq-7e1827e0): a skipped step whose next step had not
+      // opened; the store opened it with the skip's notice.
+      const afterSkip = result.afterSkip === true
       await appDataStore.recordActivity(
         session.user.id,
         'case_advanced_early',
-        `${from.title} · case ${caseId} · stage ${fromIdx} -> stage ${fromIdx + 1} (${revived ? 'opened after the step was finished' : 'opened while waiting'})`,
+        `${from.title} · case ${caseId} · stage ${fromIdx} -> stage ${fromIdx + 1} (${afterSkip ? 'opened after the step was skipped' : revived ? 'opened after the step was finished' : 'opened while waiting'})`,
       )
-      // The next stage's assignee is told exactly as a finished stage tells them.
       const nextAssigneeId = spawned?.assigneeId
+      if (afterSkip && spawned?.skipNotice) {
+        // Told as a step skip tells them: who skipped and why, one notice.
+        if (nextAssigneeId && nextAssigneeId !== session.user.id) {
+          const notice = spawned.skipNotice
+          await notify(appDataStore, nextAssigneeId, 'checklist_step_skipped', {
+            checklistId: spawned.id,
+            caseId,
+            stageIndex: spawned.stageIndex,
+            stageCount: spawned.stageCount,
+            message: stepSkippedMessage({
+              skipperName: notice.skippedByName || 'A team member',
+              stageIndex,
+              stageCount: spawned.stageCount ?? from.stageCount ?? stageIndex + 2,
+              stageName: notice.stageName,
+              clientName: (data.clients ?? []).find((entry) => entry.id === from.clientId)?.name ?? '',
+              recipeTitle: template?.title || from.title,
+              reasonCategory: notice.reasonCategory,
+              note: notice.note,
+            }),
+            link: `/checklists?focus=${spawned.id}`,
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        }
+        sendJson(response, 200, { checklist: from, spawned })
+        return
+      }
+      // The next stage's assignee is told exactly as a finished stage tells them.
       if (nextAssigneeId && nextAssigneeId !== session.user.id) {
         await notify(appDataStore, nextAssigneeId, 'task_assigned', {
           checklistId: spawned.id,

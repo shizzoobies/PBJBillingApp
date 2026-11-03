@@ -93,6 +93,10 @@ const LONG_NOTE = card({
   skipNotice: { ...OPENED.skipNotice!, note: `Start ${'x'.repeat(300)} END-OF-NOTE` },
 })
 
+/** Case f: step 2 was opened already (Open next step now) while step 1 is still Lisa's. */
+const ALREADY_FIRST = card({ id: 'cl-af', title: 'Already open first close', templateId: 'tmpl-step', caseId: 'case-f', stageIndex: 0, stageId: 'st-0' })
+const ALREADY_NEXT = card({ id: 'cl-an', title: 'Already open next close', templateId: 'tmpl-step', caseId: 'case-f', stageIndex: 1, stageId: 'st-1', assigneeId: ALLISON })
+
 const data = {
   clients: [CLIENT],
   employees: [
@@ -100,7 +104,7 @@ const data = {
     { id: ALLISON, name: 'Allison Reed', role: 'Bookkeeper' },
     { id: BRITTANY, name: 'Brittany Owner', role: 'Owner' },
   ],
-  checklists: [FIRST_STEP, LAST_STEP, WHOLE_FIRST, OPENED, LONG_NOTE],
+  checklists: [FIRST_STEP, LAST_STEP, WHOLE_FIRST, OPENED, LONG_NOTE, ALREADY_FIRST, ALREADY_NEXT],
   checklistTemplates: [recipe('tmpl-step'), recipe('tmpl-whole', { skipMode: 'whole' })],
   recycledChecklists: [],
   timeEntries: [],
@@ -194,6 +198,18 @@ describe('the card on a step recipe', () => {
     expect(dialog.textContent).toContain('It leaves your list now and the next occurrence still')
     expect(dialog.textContent).not.toContain(LAST_STEP_SKIP_NOTE)
     expect(dialog.textContent).not.toContain('the next step opens')
+  })
+})
+
+describe('when the next step is already open', () => {
+  it('the dialog says it is already open for its person, who will see who skipped and why', () => {
+    renderPage()
+    fireEvent.click(within(cardFor('Already open first close')).getByText('Skip this step'))
+    const dialog = screen.getByRole('group', { name: 'Skip this step of Already open first close' })
+    expect(dialog.textContent).toContain(
+      'Skipping step 1 of 3 (“Clear Client provided email”) for this cycle. Step 2 is already open for Allison Reed; they will see who skipped and why.',
+    )
+    expect(dialog.textContent).not.toContain('right away')
   })
 })
 

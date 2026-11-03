@@ -4,7 +4,12 @@ import { ApiError, type ActivityEntry, type Checklist } from '../lib/types'
 import type { CaseDetail } from '../lib/api'
 import { fetchCase } from '../lib/api'
 import { useAppContext } from '../AppContext'
-import { nextStageNeverOpened, stalledStageSentence } from '../lib/stalledCase'
+import {
+  nextStageNeverOpened,
+  skippedStepNeverOpened,
+  skippedStepSentence,
+  stalledStageSentence,
+} from '../lib/stalledCase'
 import { useOpenNextStage } from '../lib/useOpenNextStage'
 import { caseRemovalKey, useRemoveCase } from '../lib/useRemoveCase'
 import { caseTitleOf, rowsOfCase, stepCountLabel } from '../../lib/case-removal.js'
@@ -46,7 +51,9 @@ function NeverOpenedStep({
   const { opening, error, open } = useOpenNextStage(previous.id, onOpened)
   return (
     <>
-      <div className="case-timeline-meta">{stalledStageSentence(previous, canOpen)}</div>
+      <div className="case-timeline-meta">
+        {previous.skippedAt ? skippedStepSentence(previous, canOpen) : stalledStageSentence(previous, canOpen)}
+      </div>
       {canOpen ? (
         <button type="button" className="secondary-action" disabled={opening} onClick={() => void open()}>
           {opening ? 'Opening…' : 'Open next step now'}
@@ -164,7 +171,11 @@ export function CaseDetailPage() {
     const previous = idx > 0 ? stages[idx - 1]?.checklist : null
     if (stages[idx]?.checklist || !previous) return null
     const current = live(previous)
-    return nextStageNeverOpened(current, liveRows) ? current : null
+    // Skip a step (featreq-7e1827e0): a skipped step whose next step never opened too.
+    return nextStageNeverOpened(current, liveRows) ||
+      skippedStepNeverOpened(current, liveRows, data.checklistTemplates ?? [])
+      ? current
+      : null
   }
   const markOpened = (stageId: string, spawned: Checklist) => {
     setCaseRecord((record) =>

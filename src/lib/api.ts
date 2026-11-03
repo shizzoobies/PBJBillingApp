@@ -2484,7 +2484,9 @@ export async function skipChecklistOccurrence(
  */
 export type StepSkipNextStep =
   | { opened: true; checklist: Checklist; assigneeName: string }
-  | { opened: false; reason: string; message: string }
+  /** The next step was already open: it now carries the notice, and its person was told. */
+  | { opened: false; alreadyOpen: true; checklist: Checklist; assigneeName: string }
+  | { opened: false; alreadyOpen?: false; reason: string; message: string }
 
 /**
  * Push this occurrence of a recurring task to a new due date — the task stays

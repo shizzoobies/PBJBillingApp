@@ -2241,7 +2241,14 @@ function SkipTaskDialog({
    * Skip a step (featreq-7e1827e0): set when this skip skips only this STEP of a
    * 'step' recipe, so the dialog says the next step opens for the next person.
    */
-  stepSkip?: { stageNumber: number; stageCount: number; stageName: string; nextPersonName: string } | null
+  stepSkip?: {
+    stageNumber: number
+    stageCount: number
+    stageName: string
+    nextPersonName: string
+    /** The next step is already open: its person is told rather than a step opened. */
+    nextAlreadyOpen?: boolean
+  } | null
   /** The last step of a 'step' recipe: the skip ends the cycle, and the dialog says so. */
   lastStepOfStepSkip?: boolean
   onCancel: () => void
@@ -2892,21 +2899,33 @@ export function ChecklistCard({
   // person. The recipe's last step still ends the cycle, and the dialog says so.
   const skipRecipe = contextData.checklistTemplates.find((entry) => entry.id === checklist.templateId)
   const stepSkip = isStepSkip(skipRecipe, checklist)
-  const nextStageAssigneeId = skipRecipe?.stages?.[stageIndex + 1]?.assigneeId
+  const caseKey = checklist.caseId || checklist.id
+  const nextStageAlreadyOpen = contextData.checklists.some(
+    (entry) => (entry.caseId || entry.id) === caseKey && entry.stageIndex === stageIndex + 1,
+  )
+  // The live next step, when someone already opened it (Open next step now): the
+  // skip then tells ITS person rather than opening one (the server stamps it).
+  const openNextStageRow = nextStageAlreadyOpen
+    ? contextData.checklists.find(
+        (entry) =>
+          (entry.caseId || entry.id) === caseKey &&
+          entry.stageIndex === stageIndex + 1 &&
+          !entry.deletedAt &&
+          !entry.skippedAt,
+      )
+    : undefined
+  // The next stage's own person, as the spawn assigns it (a stage with none reads
+  // "the next person"), or whoever holds the already-open next step.
+  const nextStageAssigneeId = openNextStageRow?.assigneeId || skipRecipe?.stages?.[stageIndex + 1]?.assigneeId
   const stepSkipDialog = stepSkip
     ? {
         stageNumber,
         stageCount,
         stageName: skipRecipe?.stages?.[stageIndex]?.name ?? stageName ?? '',
-        // The next stage's own person, as the spawn assigns it (a stage with none
-        // reads "the next person").
         nextPersonName: nextStageAssigneeId ? employeeName(employees, nextStageAssigneeId) : '',
+        nextAlreadyOpen: Boolean(openNextStageRow),
       }
     : null
-  const caseKey = checklist.caseId || checklist.id
-  const nextStageAlreadyOpen = contextData.checklists.some(
-    (entry) => (entry.caseId || entry.id) === caseKey && entry.stageIndex === stageIndex + 1,
-  )
   // featreq-ed73d181: every step here is done, yet the next step never opened
   // (a stall from before the 10-12 hardening). The same button revives it. The
   // rule (src/lib/stalledCase.ts) is the Dashboard's too.

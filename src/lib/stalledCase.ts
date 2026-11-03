@@ -1,6 +1,7 @@
 import { stageFinished } from '../../lib/waiting-on-state.js'
 import { checklistCompletedAt } from './completedTasks'
-import type { Checklist } from './types'
+import { isStepSkip } from '../../lib/checklist-skip.js'
+import type { Checklist, ChecklistTemplate } from './types'
 import { shortDate } from './utils'
 
 /**
@@ -32,6 +33,42 @@ export function nextStageNeverOpened(checklist: Checklist, checklists: readonly 
       typeof entry.stageIndex === 'number' &&
       entry.stageIndex > stageIndex,
   )
+}
+
+/**
+ * Skip a step (featreq-7e1827e0): a step SKIPPED on a 'step' recipe whose next step
+ * did not open (the insert failed, another case held the slot, the step was
+ * empty...). The owner is told to open it from the case page; Open next step now
+ * accepts such a row (the server rebuilds the skip's notice). True when the row is
+ * a skipped, live stage of a 'step' recipe with a stage after it, and no later
+ * stage of its case is live.
+ */
+export function skippedStepNeverOpened(
+  checklist: Checklist,
+  checklists: readonly Checklist[],
+  templates: readonly ChecklistTemplate[],
+): boolean {
+  if (!checklist.skippedAt || checklist.deletedAt || checklist.projected || checklist.pushedToChecklistId) return false
+  const template = templates.find((entry) => entry.id === checklist.templateId)
+  if (!isStepSkip(template, checklist)) return false
+  const stageIndex = checklist.stageIndex ?? 0
+  const caseKey = checklist.caseId || checklist.id
+  return !checklists.some(
+    (entry) =>
+      (entry.caseId || entry.id) === caseKey &&
+      !entry.deletedAt &&
+      typeof entry.stageIndex === 'number' &&
+      entry.stageIndex > stageIndex,
+  )
+}
+
+/** The sentence under a skipped step whose next step never opened (case page). */
+export function skippedStepSentence(stage: Checklist, canOpen: boolean): string {
+  const step = (stage.stageIndex ?? 0) + 1
+  const what = `Step ${step} was skipped, but step ${step + 1} was never opened.`
+  return canOpen
+    ? `${what} Press Open next step now to open it.`
+    : `${what} The owner or the person this step is assigned to can open it with Open next step now.`
 }
 
 /**

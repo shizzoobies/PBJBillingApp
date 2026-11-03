@@ -96,7 +96,10 @@ export declare function stepSkipDialogLead(args: {
   stageCount: number
   stageName?: string
   nextPersonName?: string
+  /** The next step is already open (Open next step now, or a finishing tick). */
+  nextAlreadyOpen?: boolean
 }): string
+export declare const STEP_NOT_OPENED_SUBJECT: string
 export declare const LAST_STEP_SKIP_NOTE: string
 export declare const SKIP_MODE_WHOLE_LABEL: string
 export declare const SKIP_MODE_STEP_LABEL: string
@@ -147,6 +150,8 @@ export declare function stepSkippedMessage(args: {
   recipeTitle: string
   reasonCategory: string
   note: string
+  /** The next step was already open: "Your step N was already open." */
+  alreadyOpen?: boolean
 }): string
 export declare function stepNotOpenedMessage(args: {
   skipperName: string

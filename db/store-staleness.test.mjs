@@ -58931,9 +58931,12 @@ describe('skip a step (file backend)', () => {
   it('the guards still apply: already_spawned, later_stage_exists and date_taken open nothing and write nothing', async () => {
     await seed([stageRow(0), stageRow(1)])
     await store.skipChecklistInstance('cl-s0', LISA)
-    let before = await readFile(localDataPath, 'utf8')
-    expect(await store.openNextStageAfterSkip('cl-s0', notice())).toEqual({ spawned: null, reason: 'already_spawned' })
-    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+    // Round 1: an already-open next step opens nothing new; it carries the notice
+    // instead (pinned in "skip a step, round 1").
+    const already = await store.openNextStageAfterSkip('cl-s0', notice())
+    expect(already).toMatchObject({ spawned: null, reason: 'already_spawned', existing: { id: 'cl-s1' } })
+    expect(await caseRows(1)).toHaveLength(1)
+    let before
 
     await seed([stageRow(0, { skippedAt: '2026-10-30T15:00:00.000Z', skippedBy: LISA }), stageRow(2)])
     before = await readFile(localDataPath, 'utf8')
@@ -59259,6 +59262,307 @@ describe('skip a step (postgres branch)', () => {
       const created = fake.matching(/^insert into checklists \(/i)
       expect(created).toHaveLength(before + 1)
       expect(created.at(-1).params[17]).toBeNull()
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+})
+
+/**
+ * Skip a step, review round 1 (featreq-7e1827e0):
+ *   1. a skipped step whose next step did not open is no longer a dead end: Open
+ *      next step now opens it, with the notice rebuilt from the skip's record;
+ *   2. a next step that is ALREADY open gets the notice stamped onto it;
+ *   5. a brand-new row in a bulk save may not carry a skip notice (file backend).
+ *
+ * NEW SQL SHAPES, flagged for the rolled-back production validation:
+ *   - update checklists set skip_notice = $2::jsonb, updated_at = now()
+ *       where id = $1 and deleted_at is null
+ *         and (skip_notice is null or skip_notice->>'skipId' is distinct from $3)
+ *   - select id, checklist_id, ... from checklist_skips
+ *       where checklist_id = $1 and kind = 'skip' order by skipped_at desc limit 1
+ */
+describe('skip a step, round 1 (file backend)', () => {
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const LISA = 'emp-a41095f0'
+  const ALLISON = 'emp-41def8a0'
+  const BRITTANY = 'emp-patrice'
+
+  const recipe = (over = {}) => ({
+    id: 'tmpl-email',
+    title: 'Check email',
+    clientId: 'c1',
+    assigneeId: LISA,
+    frequency: 'monthly',
+    nextDueDate: '2099-10-31',
+    active: true,
+    skipAllowed: true,
+    skipMode: 'step',
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      { id: 'st-0', name: 'Clear Client provided email', assigneeId: LISA, offsetDays: 0, items: [{ id: 'ti-0', label: 'Clear' }] },
+      { id: 'st-1', name: 'Review', assigneeId: ALLISON, offsetDays: 0, items: [{ id: 'ti-1', label: 'Review' }] },
+      { id: 'st-2', name: 'Sign off', assigneeId: BRITTANY, offsetDays: 0, items: [{ id: 'ti-2', label: 'Sign off' }] },
+    ],
+    ...over,
+  })
+  const stageRow = (stageIndex, over = {}) => ({
+    id: `cl-s${stageIndex}`,
+    title: 'Check email',
+    clientId: 'c1',
+    assigneeId: [LISA, ALLISON, BRITTANY][stageIndex],
+    templateId: 'tmpl-email',
+    dueDate: '2026-10-31',
+    caseId: 'case-mail',
+    stageId: `st-${stageIndex}`,
+    stageIndex,
+    stageCount: 3,
+    viewerIds: [],
+    editorIds: [],
+    items: [{ id: `item-s${stageIndex}`, label: 'Work', done: false }],
+    ...over,
+  })
+  const notice = (over = {}) => ({
+    skippedBy: LISA,
+    skippedByName: 'Lisa Mockabee',
+    stageIndex: 0,
+    stageName: 'Clear Client provided email',
+    reasonCategory: 'me',
+    note: 'Out sick today.',
+    at: '2026-10-30T15:00:00.000Z',
+    skipId: 'skip-1',
+    ...over,
+  })
+  const SKIPPED = { skippedAt: '2026-10-30T15:00:00.000Z', skippedBy: LISA }
+  const seed = async (checklists, templates = [recipe()]) => {
+    await store.write(workspace({ checklistTemplates: templates }))
+    const data = await persisted()
+    data.checklists = checklists
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+  }
+  const clearSkips = async () => {
+    const authState = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+    authState.checklistSkips = []
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+  }
+  const refusal = (promise) =>
+    promise.then(
+      () => {
+        throw new Error('expected a refusal')
+      },
+      (error) => error,
+    )
+
+  let logSpy
+  beforeEach(async () => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await clearSkips()
+  })
+  afterEach(() => {
+    logSpy.mockRestore()
+  })
+
+  it('next step already open: the notice is stamped onto it and the answer carries it', async () => {
+    await seed([stageRow(0, SKIPPED), stageRow(1)])
+    const result = await store.openNextStageAfterSkip('cl-s0', notice())
+    expect(result.spawned).toBeNull()
+    expect(result.reason).toBe('already_spawned')
+    expect(result.existing).toMatchObject({ id: 'cl-s1', assigneeId: ALLISON, skipNotice: notice() })
+    expect((await persisted()).checklists.find((entry) => entry.id === 'cl-s1').skipNotice).toEqual(notice())
+  })
+
+  it('the same skip twice writes nothing the second time; another skip replaces the notice', async () => {
+    await seed([stageRow(0, SKIPPED), stageRow(1, { skipNotice: notice() })])
+    const before = await readFile(localDataPath, 'utf8')
+    const again = await store.openNextStageAfterSkip('cl-s0', notice())
+    expect(again.existing.skipNotice).toEqual(notice())
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+
+    await store.openNextStageAfterSkip('cl-s0', notice({ skipId: 'skip-2', note: 'Second try.' }))
+    expect((await persisted()).checklists.find((entry) => entry.id === 'cl-s1').skipNotice.note).toBe('Second try.')
+  })
+
+  it('a next step that is itself skipped is not stamped', async () => {
+    await seed([stageRow(0, SKIPPED), stageRow(1, { skippedAt: '2026-10-30T16:00:00.000Z', skippedBy: ALLISON })])
+    const before = await readFile(localDataPath, 'utf8')
+    const result = await store.openNextStageAfterSkip('cl-s0', notice())
+    expect(result).toEqual({ spawned: null, reason: 'already_spawned' })
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('Open next step now opens the next step of a skipped STEP, with the notice rebuilt from its record', async () => {
+    await seed([stageRow(0, SKIPPED)])
+    const record = await store.createChecklistSkip({
+      checklistId: 'cl-s0',
+      templateId: 'tmpl-email',
+      clientId: 'c1',
+      title: 'Check email',
+      skippedBy: LISA,
+      skippedByName: 'Lisa Mockabee',
+      reasonCategory: 'client',
+      reasonNote: 'No email yet.',
+    })
+    // A push filed later against the same row is not the skip.
+    await store.createChecklistSkip({
+      checklistId: 'cl-s0',
+      title: 'Check email',
+      skippedBy: LISA,
+      reasonCategory: 'me',
+      reasonNote: 'pushed',
+      kind: 'push',
+      newDueDate: '2026-11-30',
+    })
+    expect((await store.latestChecklistSkipFor('cl-s0')).id).toBe(record.id)
+    const result = await store.openNextStageEarly('cl-s0', BRITTANY)
+    expect(result.afterSkip).toBe(true)
+    expect(result.checklist.id).toBe('cl-s0')
+    expect(result.spawned).toMatchObject({ stageIndex: 1, assigneeId: ALLISON })
+    expect(result.spawned.skipNotice).toMatchObject({
+      skippedBy: LISA,
+      skippedByName: 'Lisa Mockabee',
+      stageIndex: 0,
+      stageName: 'Clear Client provided email',
+      reasonCategory: 'client',
+      note: 'No email yet.',
+      skipId: record.id,
+    })
+    expect((await persisted()).checklists.filter((entry) => entry.stageIndex === 1)).toHaveLength(1)
+    // Once open, a second press is the ordinary refusal.
+    expect((await refusal(store.openNextStageEarly('cl-s0', BRITTANY))).reason).toBe('already_spawned')
+  })
+
+  it('a skip on a WHOLE recipe still refuses Open next step now: that cycle ended on purpose', async () => {
+    await seed([stageRow(0, SKIPPED)], [recipe({ skipMode: 'whole' })])
+    expect((await refusal(store.openNextStageEarly('cl-s0', BRITTANY))).reason).toBe('skipped')
+  })
+
+  it('the refusal on a skipped step keeps the stage-advance reason (a slot another case holds)', async () => {
+    await seed([stageRow(0, SKIPPED), stageRow(1, { id: 'cl-other', caseId: 'case-other' })])
+    const error = await refusal(store.openNextStageEarly('cl-s0', BRITTANY))
+    expect(error).toBeInstanceOf(NextStageRefusedError)
+    expect(error.reason).toBe('date_taken')
+  })
+
+  it('a brand-new row in a bulk save cannot bring its own skip notice', async () => {
+    await store.write(
+      workspace({
+        checklists: [
+          { id: 'cl-new', title: 'New', clientId: 'c1', assigneeId: LISA, dueDate: '2026-10-31', items: [], skipNotice: notice() },
+        ],
+      }),
+    )
+    const row = (await persisted()).checklists.find((entry) => entry.id === 'cl-new')
+    expect(row).toBeTruthy()
+    expect('skipNotice' in row).toBe(false)
+  })
+})
+
+describe('skip a step, round 1 (postgres branch)', () => {
+  const template = {
+    id: 'tmpl-email',
+    title: 'Check email',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'monthly',
+    skipAllowed: true,
+    skipMode: 'step',
+    stages: [
+      { id: 'st-0', name: 'Clear', assigneeId: 'emp-1', offsetDays: 0, items: [{ id: 'ti-0', label: 'Clear' }] },
+      { id: 'st-1', name: 'Review', assigneeId: 'emp-2', offsetDays: 0, items: [{ id: 'ti-1', label: 'Review' }] },
+    ],
+  }
+  const skippedStage = {
+    id: 'cl-s0',
+    title: 'Check email',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    templateId: 'tmpl-email',
+    dueDate: '2026-10-31',
+    caseId: 'case-mail',
+    stageIndex: 0,
+    stageCount: 2,
+    skippedAt: '2026-10-30T15:00:00.000Z',
+    skippedBy: 'emp-1',
+    items: [{ id: 'item-0', label: 'Clear', done: false }],
+  }
+  const nextStage = { ...skippedStage, id: 'cl-s1', assigneeId: 'emp-2', stageIndex: 1, skippedAt: null, skippedBy: null }
+  const skipNotice = { skippedByName: 'Lisa', stageIndex: 0, note: 'Out', skipId: 'skip-1' }
+  const UPDATE =
+    /^update checklists set skip_notice = \$2::jsonb, updated_at = now\(\)\s+where id = \$1 and deleted_at is null\s+and \(skip_notice is null or skip_notice->>'skipId' is distinct from \$3\)$/i
+
+  it('stamps an already-open next step with ONE guarded update', async () => {
+    const fake = fakePostgres()
+    const pg = postgresStore(fake)
+    pg.read = async () => ({ checklists: [skippedStage, nextStage], checklistTemplates: [template], clients: [{ id: 'c1' }] })
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const result = await pg.openNextStageAfterSkip('cl-s0', skipNotice)
+      expect(result).toMatchObject({ spawned: null, reason: 'already_spawned', existing: { id: 'cl-s1', skipNotice } })
+      const updates = fake.matching(/^update checklists set skip_notice/i)
+      expect(updates).toHaveLength(1)
+      expect(updates[0].text.replace(/\s+/g, ' ')).toMatch(UPDATE)
+      expect(updates[0].params).toEqual(['cl-s1', JSON.stringify(skipNotice), 'skip-1'])
+      expect(fake.matching(/^insert into checklists \(/i)).toHaveLength(0)
+
+      // Already carrying this skip's notice: no statement at all.
+      const again = fakePostgres()
+      const pg2 = postgresStore(again)
+      pg2.read = async () => ({
+        checklists: [skippedStage, { ...nextStage, skipNotice }],
+        checklistTemplates: [template],
+        clients: [{ id: 'c1' }],
+      })
+      await pg2.openNextStageAfterSkip('cl-s0', skipNotice)
+      expect(again.matching(/^update checklists set skip_notice/i)).toHaveLength(0)
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
+  it('reads the newest skip record of one checklist (not a push), and Open next step now uses it', async () => {
+    const fake = fakePostgres({ clientRows: [{ id: 'c1', name: 'Acme', is_billing_master: false }] })
+    const query = fake.pool.query.bind(fake.pool)
+    fake.pool.query = async (text, params) => {
+      if (/from checklist_skips\s+where checklist_id = \$1 and kind = 'skip'/i.test(String(text))) {
+        fake.statements.push({ text: String(text).trim(), params })
+        return {
+          rows: [
+            {
+              id: 'skip-9',
+              checklist_id: 'cl-s0',
+              skipped_by: 'emp-1',
+              skipped_by_name: 'Lisa',
+              skipped_at: new Date('2026-10-30T15:00:00.000Z'),
+              reason_category: 'client',
+              reason_note: 'No email yet.',
+              kind: 'skip',
+            },
+          ],
+        }
+      }
+      return query(text, params)
+    }
+    const pg = postgresStore(fake)
+    pg.read = async () => ({ checklists: [skippedStage], checklistTemplates: [template], clients: [{ id: 'c1' }] })
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const result = await pg.openNextStageEarly('cl-s0', 'emp-owner')
+      const [select] = fake.matching(/from checklist_skips/i)
+      expect(select.text.replace(/\s+/g, ' ')).toMatch(
+        /where checklist_id = \$1 and kind = 'skip' order by skipped_at desc limit 1$/i,
+      )
+      expect(select.params).toEqual(['cl-s0'])
+      expect(result.afterSkip).toBe(true)
+      const [insert] = fake.matching(/^insert into checklists \(/i)
+      expect(JSON.parse(insert.params[17])).toMatchObject({
+        skipId: 'skip-9',
+        skippedByName: 'Lisa',
+        reasonCategory: 'client',
+        note: 'No email yet.',
+        stageName: 'Clear',
+        at: '2026-10-30T15:00:00.000Z',
+      })
     } finally {
       logSpy.mockRestore()
     }

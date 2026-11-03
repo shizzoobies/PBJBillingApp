@@ -25,7 +25,7 @@ import {
 import { copiedTemplateSettings, copiedTemplateStages } from '../lib/checklist-template-copy.js'
 import { planSetUpSteps } from '../lib/checklist-link-match.js'
 import { STAGE_ADVANCE_FAILED_PHRASE } from '../lib/stage-advance-phrase.js'
-import { templateSkipMode } from '../lib/checklist-skip.js'
+import { buildSkipNotice, isStepSkip, templateSkipMode } from '../lib/checklist-skip.js'
 import { ENGAGEMENT_LIST_LIMIT } from '../lib/engagement-list-limit.js'
 import {
   bundlingPlan,
@@ -5032,6 +5032,40 @@ export class NextStageRefusedError extends Error {
  * stage never opened (featreq-ed73d181: a stall from before the 10-12 hardening
  * left a finished stage with no next one, and nothing else could advance it).
  */
+/**
+ * Skip a step (featreq-7e1827e0): a live, SKIPPED stage of a 'step' recipe with a
+ * stage after it. Open next step now opens its next step through
+ * `openNextStageAfterSkip` instead of refusing 'skipped' - otherwise a step skip
+ * whose next step failed to open could never be moved on.
+ */
+function isSkippedStepStage(data, checklist) {
+  if (!checklist?.skippedAt || checklist.deletedAt || checklist.pushedToChecklistId) return false
+  const template = (data?.checklistTemplates ?? []).find((entry) => entry.id === checklist.templateId)
+  return isStepSkip(template, checklist)
+}
+
+/** The live (not recycled, not skipped) row of the stage after `checklist` in its case. */
+function liveNextStageRow(checklists, checklist) {
+  const caseId = checklist.caseId || checklist.id
+  const nextIndex = (typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0) + 1
+  return (
+    (checklists ?? []).find(
+      (entry) =>
+        (entry.caseId || entry.id) === caseId &&
+        entry.stageIndex === nextIndex &&
+        !entry.deletedAt &&
+        !entry.skippedAt &&
+        !entry.pushedToChecklistId,
+    ) ?? null
+  )
+}
+
+/** Stamp `skipNotice` on an already-open next step only when it has none, or another skip's. */
+function skipNoticeNeedsStamp(row, skipNotice) {
+  if (!skipNotice) return false
+  return !row.skipNotice || (row.skipNotice.skipId ?? null) !== (skipNotice.skipId ?? null)
+}
+
 function openNextStageEarlyRefusal(data, checklist) {
   if (!checklist) return 'not_found'
   if (checklist.skippedAt) return 'skipped'
@@ -11630,6 +11664,10 @@ export class AppDataStore {
                 if (prior[field] == null) delete next[field]
                 else next[field] = prior[field]
               }
+            } else {
+              // A row this save is creating has no stored skip notice, and a payload
+              // may not mint one - the Postgres branch writes null for it.
+              delete next.skipNotice
             }
             if (Array.isArray(checklist.items)) {
               next.items = checklist.items.map((payloadItem) => {
@@ -23956,6 +23994,8 @@ export class AppDataStore {
     if (this.pool) {
       const data = await this.read()
       const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
+      // A skipped STEP of a 'step' recipe whose next step did not open (featreq-7e1827e0).
+      if (isSkippedStepStage(data, checklist)) return this._openNextStageForSkippedStep(data, checklist)
       const refused = openNextStageEarlyRefusal(data, checklist)
       if (refused) throw new NextStageRefusedError(refused)
       let advance
@@ -23977,6 +24017,12 @@ export class AppDataStore {
       if (!advance.spawned) throw new NextStageRefusedError(advance.reason)
       return { checklist, spawned: advance.spawned }
     }
+
+    // A skipped STEP (featreq-7e1827e0) goes through `openNextStageAfterSkip`, which
+    // takes its own file-queue slot - so it is decided before entering this one.
+    const peek = await readJson(localDataPath)
+    const peeked = (peek.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
+    if (isSkippedStepStage(peek, peeked)) return this._openNextStageForSkippedStep(peek, peeked)
 
     // Read, decide and write inside ONE file-queue slot, like the toggle: two
     // opens at the same instant must not both see "no next stage yet".
@@ -24014,6 +24060,11 @@ export class AppDataStore {
    * `spawned: null` and the reason when the next stage was not opened (the skip
    * itself is already saved, and the route reports this in words). A billing
    * master's refusal answers `billing_master` with its sentence as `message`.
+   *
+   * NEXT STEP ALREADY OPEN (`already_spawned`: someone used Open next step now, or
+   * a finishing tick won the race): the notice is stamped onto THAT live row instead
+   * (only when it carries none, or another skip's), and the answer carries it as
+   * `existing`, so its person can be told and the card shows who skipped and why.
    */
   async openNextStageAfterSkip(checklistId, skipNotice) {
     const refusal = (checklist) => {
@@ -24028,8 +24079,9 @@ export class AppDataStore {
       const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
       const refused = refusal(checklist)
       if (refused) return { spawned: null, reason: refused }
+      let advance
       try {
-        return await this.maybeSpawnNextStage(data, checklist, { afterSkip: true, skipNotice })
+        advance = await this.maybeSpawnNextStage(data, checklist, { afterSkip: true, skipNotice })
       } catch (error) {
         const master = billingMaster(error)
         if (master) return master
@@ -24041,6 +24093,19 @@ export class AppDataStore {
         )
         return { spawned: null, reason: 'date_taken' }
       }
+      if (advance.reason !== 'already_spawned') return advance
+      // Re-read: the row may have landed after `data` (the spawn's 23505 race).
+      const next = liveNextStageRow((await this.read()).checklists, checklist)
+      if (!next) return advance
+      if (!skipNoticeNeedsStamp(next, skipNotice)) return { ...advance, existing: next }
+      // Endpoint-owned, one row, and only while it carries no notice or another skip's.
+      await this.pool.query(
+        `update checklists set skip_notice = $2::jsonb, updated_at = now()
+         where id = $1 and deleted_at is null
+           and (skip_notice is null or skip_notice->>'skipId' is distinct from $3)`,
+        [next.id, JSON.stringify(skipNotice), skipNotice?.skipId ?? null],
+      )
+      return { ...advance, existing: { ...next, skipNotice } }
     }
 
     // Read, decide and write inside ONE file-queue slot, like the toggle.
@@ -24057,11 +24122,76 @@ export class AppDataStore {
         if (master) return master
         throw error
       }
+      if (advance.reason === 'already_spawned') {
+        // The same stamp as the Postgres branch, in the same slot as the decision.
+        const next = liveNextStageRow(data.checklists, checklist)
+        if (!next) return advance
+        if (skipNoticeNeedsStamp(next, skipNotice)) {
+          next.skipNotice = skipNotice
+          await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+        }
+        return { ...advance, existing: next }
+      }
       if (!advance.spawned) return advance
       data.checklists = sortChecklists([...data.checklists, advance.spawned])
       await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
       return advance
     })
+  }
+
+  /**
+   * Open next step now on a skipped STEP (featreq-7e1827e0): a step skip whose
+   * next step could not open (a failed insert, the slot taken, a step with nothing
+   * on it) is otherwise a dead end - the skipped row cannot be skipped again and
+   * was refused here as 'skipped'. The notice is rebuilt from the skip's own
+   * record. Refuses like any early open (`NextStageRefusedError`); answers
+   * `{ checklist, spawned, afterSkip: true }`.
+   */
+  async _openNextStageForSkippedStep(data, checklist) {
+    const template = (data.checklistTemplates ?? []).find((entry) => entry.id === checklist.templateId) ?? null
+    const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
+    const record = await this.latestChecklistSkipFor(checklist.id)
+    const notice = buildSkipNotice({
+      checklist,
+      stageName: template?.stages?.[stageIndex]?.name ?? '',
+      skippedBy: record?.skippedBy ?? checklist.skippedBy ?? null,
+      skippedByName: record?.skippedByName ?? null,
+      reasonCategory: record?.reasonCategory ?? null,
+      note: record?.reasonNote ?? '',
+      at: record?.skippedAt ?? checklist.skippedAt ?? null,
+      skipId: record?.id ?? null,
+    })
+    const advance = await this.openNextStageAfterSkip(checklist.id, notice)
+    if (!advance.spawned) throw new NextStageRefusedError(advance.reason, advance.message ?? null)
+    return { checklist, spawned: advance.spawned, afterSkip: true }
+  }
+
+  /**
+   * The newest SKIP record (not a push) filed against one checklist, or null.
+   * Used to rebuild a skipped step's notice (featreq-7e1827e0).
+   */
+  async latestChecklistSkipFor(checklistId) {
+    if (!checklistId) return null
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select id, checklist_id, template_id, client_id, title, skipped_by, skipped_by_name,
+                skipped_at, reason_category, reason_note, kind, new_due_date, reviewed_by, reviewed_at
+           from checklist_skips
+          where checklist_id = $1 and kind = 'skip'
+          order by skipped_at desc
+          limit 1`,
+        [checklistId],
+      )
+      return result.rows?.[0] ? mapChecklistSkipRow(result.rows[0]) : null
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const list = Array.isArray(authState.checklistSkips) ? authState.checklistSkips : []
+    return (
+      list
+        .map(normalizeChecklistSkip)
+        .filter((record) => record.checklistId === checklistId && record.kind !== 'push')
+        .sort((a, b) => String(b.skippedAt).localeCompare(String(a.skippedAt)))[0] ?? null
+    )
   }
 
   /**

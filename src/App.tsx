@@ -14,6 +14,7 @@ import { upsertChecklistById } from './lib/recipeFirstStep'
 import { AppLayout } from './components/AppLayout'
 import { NewVersionToast } from './components/NewVersionToast'
 import { StepSkipToast } from './components/StepSkipToast'
+import { stepSkipOutcomeChecklist } from './lib/stepSkipOutcome'
 import { StaleWorkspaceNotice } from './components/StaleWorkspaceNotice'
 import { SignInScreen } from './components/SignInScreen'
 import {
@@ -1508,11 +1509,11 @@ function App() {
     async (checklistId: string, input: { category: SkipReasonCategory; explanation: string }) => {
       if (previewActiveRef.current) return null
       const { checklist, nextStep } = await skipChecklistOccurrenceRequest(checklistId, input)
-      // Skip a step (featreq-7e1827e0): the next step the skip opened is a new row.
-      const opened = nextStep?.opened ? nextStep.checklist : null
+      // Skip a step (featreq-7e1827e0): the next step the skip opened (a new row) or stamped (already open).
+      const opened = stepSkipOutcomeChecklist(nextStep)
       applyServerDataUpdate((current) => {
         const merged = current.checklists.map((entry) =>
-          entry.id === checklist.id ? checklist : entry,
+          entry.id === checklist.id ? checklist : opened && entry.id === opened.id ? opened : entry,
         )
         return {
           ...current,
