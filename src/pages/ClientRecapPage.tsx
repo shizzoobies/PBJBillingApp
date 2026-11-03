@@ -12,6 +12,13 @@ import {
   type ClientRecapProjection,
 } from '../lib/api'
 import { isInactiveClient } from '../lib/clientLifecycle'
+import {
+  activeMonthsSentence,
+  monthShort,
+  noEstimateWord,
+  scaledEstimateNote,
+  type RecapActivity,
+} from '../lib/recapActiveMonths'
 import { ApiError } from '../lib/types'
 import { currentReviewPeriod, formatDecimalHours, shiftReviewPeriod } from '../lib/utils'
 
@@ -86,9 +93,9 @@ const varianceText = (
   return `${signed(delta, format)} ${direction}`
 }
 
-/** "(monthly estimates × 3 months)" — empty for a monthly recap. */
-const scaledEstimateNote = (monthsInPeriod: number) =>
-  monthsInPeriod > 1 ? ` (monthly estimates × ${monthsInPeriod} months)` : ''
+// "(monthly estimates × 3 months)" — empty for a monthly recap, and naming the
+// months when the client was active for fewer than the period holds
+// (featreq-8dffdff7): `scaledEstimateNote` lives in src/lib/recapActiveMonths.ts.
 
 /**
  * What a billing master's roll-up will NOT add up, and why — one line each.
@@ -365,6 +372,7 @@ export function ClientRecapPage() {
             time={recap.time}
             monthsInPeriod={recap.monthsInPeriod}
             estimates={recap.estimates}
+            activity={recap}
           />
 
           {/* Billing (owner only) */}
@@ -425,6 +433,11 @@ export function ClientRecapPage() {
                 hourly client&apos;s service value). Over/Under = service value − invoice: a positive
                 figure means the work was worth more than what was billed.
               </p>
+              {/* Which months were priced, when fewer than the period holds
+                  (featreq-8dffdff7). Absent for a client active all along. */}
+              {activeMonthsSentence(recap) ? (
+                <p className="recap-estimate-caption">{activeMonthsSentence(recap)}</p>
+              ) : null}
               {recap.billing.planNames.length > 0 ? (
                 <p className="muted-text">Plans: {recap.billing.planNames.join(', ')}</p>
               ) : null}
@@ -453,7 +466,7 @@ export function ClientRecapPage() {
                   issued. A MONTHLY or ANNUAL client still has no history —
                   its fee and its plans are single live values — so the old
                   warning stands for them, unchanged. */}
-              {recap.monthsInPeriod > 1 ? (
+              {(recap.calendarMonthsInPeriod ?? recap.monthsInPeriod) > 1 ? (
                 recap.billing.billingMode === 'hourly' ? (
                   <p className="recap-estimate-caption">
                     Priced at the rates in force each month — the rate month this client was on
@@ -479,11 +492,16 @@ export function ClientRecapPage() {
               profitability={recap.profitability}
               estimates={recap.estimates}
               monthsInPeriod={recap.monthsInPeriod}
+              activity={recap}
             />
           ) : null}
 
-          {/* Projected invoice (owner only, monthly only) */}
-          {recap.projection ? <ProjectionCard projection={recap.projection} /> : null}
+          {/* Projected invoice (owner only, monthly only). Not for a month
+              before the client's first activity (featreq-8dffdff7): there is no
+              plan figure to project for a month the client did not have. */}
+          {recap.projection && recap.activeInPeriod !== false ? (
+            <ProjectionCard projection={recap.projection} />
+          ) : null}
 
           {/* What the roll-up declines to add, said out loud. Only on a master:
               on an ordinary client these figures are simply present. */}
@@ -645,9 +663,15 @@ export function TimeAndHoursCard({
   time,
   monthsInPeriod,
   estimates = null,
+  activity = null,
 }: {
   time: ClientRecap['time']
   monthsInPeriod: number
+  /**
+   * Which months the estimates were scaled by (featreq-8dffdff7) — the recap
+   * itself. Absent: the header reads as it always did.
+   */
+  activity?: RecapActivity | null
   /**
    * Owner payloads only — adds the Cost estimate | Actual | Over/Under columns
    * from her sent-back markup. Null (a staff payload) renders the hours-only
@@ -671,7 +695,25 @@ export function TimeAndHoursCard({
           columns because estimates are owner-side planning data, which is a
           different thing from "nobody has set any", and telling a staff member
           to go edit the Client page would be a dead end. */}
-      {time.estimatesVisible && !time.hasEstimate ? (
+      {/* A period the client had not started yet (or had stopped before):
+          nothing was planned for it, which is a different thing from "no
+          estimate set" (featreq-8dffdff7). */}
+      {activity?.activeInPeriod === false ? (
+        activity.periodNotStarted ? (
+          // A future period (the next arrow past this month): the client is
+          // not inactive, the period simply has not begun.
+          <p className="recap-estimate-banner">
+            This period hasn&apos;t started yet, so nothing is planned for it yet.
+          </p>
+        ) : (
+          <p className="recap-estimate-banner">
+            Not active in this period
+            {activity.clientSince ? ` — client since ${monthShort(activity.clientSince)}` : ''}.
+            Nothing was planned for it; any actual hours below are reported on their own.
+          </p>
+        )
+      ) : null}
+      {time.estimatesVisible && !time.hasEstimate && activity?.activeInPeriod !== false ? (
         <p className="recap-estimate-banner">
           No estimate set for this client — the actual hours below are reported on their own. Set
           them on the {time.whereToSetEstimates} to compare plan against reality here.
@@ -683,7 +725,7 @@ export function TimeAndHoursCard({
           <thead>
             <tr>
               <th>Team member</th>
-              <th>Estimate{scaledEstimateNote(monthsInPeriod)}</th>
+              <th>Estimate{scaledEstimateNote(monthsInPeriod, activity)}</th>
               <th>Actual</th>
               <th>Over/Under</th>
               {showCost ? (
@@ -824,11 +866,15 @@ export function ProfitabilityCard({
   profitability,
   estimates,
   monthsInPeriod,
+  activity = null,
 }: {
   profitability: NonNullable<ClientRecap['profitability']>
   estimates: ClientRecapEstimates | null
   monthsInPeriod: number
+  /** Which months the estimate counted (featreq-8dffdff7) — the recap itself. */
+  activity?: RecapActivity | null
 }) {
+  const monthsSentence = activeMonthsSentence(activity)
   const profit = estimates?.profit ?? null
   return (
     <section className="panel recap-card">
@@ -837,7 +883,7 @@ export function ProfitabilityCard({
         <thead>
           <tr>
             <th>Profit</th>
-            <th>Estimate{scaledEstimateNote(monthsInPeriod)}</th>
+            <th>Estimate{scaledEstimateNote(monthsInPeriod, activity)}</th>
             <th>Actual</th>
             <th>Over/Under</th>
           </tr>
@@ -847,7 +893,7 @@ export function ProfitabilityCard({
             <td>Profit this period</td>
             <td>
               {profit?.estimatedProfit == null ? (
-                <span className="muted-text">No estimate set</span>
+                <span className="muted-text">{noEstimateWord(activity) ?? 'No estimate set'}</span>
               ) : (
                 money(profit.estimatedProfit)
               )}
@@ -872,6 +918,7 @@ export function ProfitabilityCard({
         actual labor cost ({money(profitability.laborCost)}), priced against the hours in the
         table above (not the sent invoice's own figure). Reimbursements are excluded from both sides. {LABOR_COST_BASIS_NOTE}
       </p>
+      {monthsSentence ? <p className="recap-estimate-caption">{monthsSentence}</p> : null}
     </section>
   )
 }

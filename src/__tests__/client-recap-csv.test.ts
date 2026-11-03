@@ -156,6 +156,49 @@ describe('buildClientRecapCsv', () => {
     expect(find(rows, 'Period', '', 'End')).toBe('2026-03-31')
   })
 
+  // featreq-8dffdff7: a quarter or a year counts only the months the client was
+  // active, and the export says which.
+  it('says which months were counted and since when the client is on record', () => {
+    const { rows: r } = buildClientRecapCsv({
+      ...RECAP,
+      monthsInPeriod: 2,
+      calendarMonthsInPeriod: 3,
+      activeMonths: ['2026-02', '2026-03'],
+      activeInPeriod: true,
+      clientSince: '2026-02',
+    })
+    expect(find(r, 'Period', '', 'Months in period')).toBe(2)
+    expect(find(r, 'Period', '', 'Calendar months')).toBe(3)
+    expect(find(r, 'Period', '', 'Active months')).toBe('Feb–Mar 2026')
+    expect(find(r, 'Period', '', 'Client since')).toBe('Feb 2026')
+    const { rows: none } = buildClientRecapCsv({
+      ...RECAP,
+      monthsInPeriod: 0,
+      calendarMonthsInPeriod: 3,
+      activeMonths: [],
+      activeInPeriod: false,
+      clientSince: '2026-08',
+    })
+    expect(find(none, 'Period', '', 'Active months')).toBe('None')
+  })
+
+  it('lists each company’s months on a master whose companies counted different ones', () => {
+    const { rows: r } = buildClientRecapCsv({
+      ...RECAP,
+      isBillingMaster: true,
+      monthsInPeriod: 3,
+      calendarMonthsInPeriod: 3,
+      activeMonths: ['2026-01', '2026-02', '2026-03'],
+      activeMonthsUniform: false,
+      clientSince: '2025-05',
+      subs: [
+        { id: 'a', name: 'KLC Floors', monthsInPeriod: 3, activeMonths: ['2026-01', '2026-02', '2026-03'] },
+        { id: 'b', name: 'KLC & More', monthsInPeriod: 1, activeMonths: ['2026-03'] },
+      ],
+    })
+    expect(find(r, 'Period', '', 'Active months')).toBe('KLC Floors: Jan–Mar 2026; KLC & More: Mar 2026')
+  })
+
   it('carries the Billing tiles as the page shows them', () => {
     expect(find(rows, 'Billing', '', 'Service value')).toBe(2400)
     expect(find(rows, 'Billing', '', 'Invoice')).toBe(2202)

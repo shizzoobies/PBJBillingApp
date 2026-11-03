@@ -3583,13 +3583,42 @@ export type ClientRecap = {
    */
   isBillingMaster?: boolean
   /** Masters only: the companies behind every figure, in reading order. */
-  subs?: Array<{ id: string | null; name: string }>
+  subs?: Array<{
+    id: string | null
+    name: string
+    /** That company's own active-month count (featreq-8dffdff7). */
+    monthsInPeriod?: number | null
+    activeMonths?: string[]
+    clientSince?: string | null
+  }>
   periodType: ClientRecapPeriodType
   period: string
   periodLabel: string
   range: { start: string; end: string }
-  /** 1 / 3 / 12 — what a per-month estimate is multiplied by for this period. */
+  /**
+   * What a per-month estimate is multiplied by for this period: the months the
+   * client was ACTIVE in it (featreq-8dffdff7), at most 1 / 3 / 12. On a
+   * billing master, the widest of its companies' counts.
+   */
   monthsInPeriod: number
+  /** 1 / 3 / 12 — the period's calendar months. Absent on an older payload. */
+  calendarMonthsInPeriod?: number
+  /** The YYYY-MM months counted (from the client's first activity through the current month). */
+  activeMonths?: string[]
+  /** False when no month of the period counts for this client. */
+  activeInPeriod?: boolean
+  /** The client's first month on record (YYYY-MM), or null with no evidence. */
+  clientSince?: string | null
+  /** Masters only: false when the companies counted different months. */
+  activeMonthsUniform?: boolean
+  /** The whole period lies after the current month: "hasn't started yet", not inactive. */
+  periodNotStarted?: boolean
+  /** The range's left-out months, by reason. Absent on a master and on an older payload. */
+  uncountedMonths?: {
+    beforeStart: string[]
+    notYetBegun: string[]
+    afterLastActivity: string[]
+  }
   includeFinancials: boolean
   time: {
     totalHours: number

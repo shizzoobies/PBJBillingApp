@@ -5801,6 +5801,17 @@ const server = createServer(async (request, response) => {
       // untouched — the roll-up SUMS those results, it never re-derives them.
       // A non-master answers exactly as it did before this branch existed.
       const recapClient = (data.clients ?? []).find((entry) => entry.id === clientId)
+      // EVIDENCE OF WHEN A CLIENT STARTED (featreq-8dffdff7): a quarter or a
+      // year counts only the months the client was active, from its first time
+      // entry / invoice / creation. Invoices live outside read(), so the store's
+      // NARROW evidence rows (client, period, kind, status, sub ids - no lines,
+      // no email log, no pay token) are loaded and handed over as evidence only
+      // (lib/client-recap.js clientActiveMonths; nothing is priced from them).
+      // Loaded for staff too, so both payloads agree on which months counted,
+      // and only once access has been decided (below, after the master check).
+      // Narrowed to the client(s) asked about: their own invoices and any master's
+      // invoice carrying them on a line.
+      const loadActivityInvoices = (clientIds) => appDataStore.listInvoiceEvidence({ clientIds })
       if (recapClient?.isBillingMaster === true) {
         // ACCESS IS PER COMPANY, not per group. Being assigned to the master is
         // not access to Bright Tower's hours, its staff roster or its task
@@ -5820,6 +5831,7 @@ const server = createServer(async (request, response) => {
           })
           return
         }
+        const activityInvoices = await loadActivityInvoices(masterSubs.map((sub) => sub.id))
         const subRecaps = []
         for (const sub of masterSubs) {
           const subRecap = buildClientRecap(data, {
@@ -5833,6 +5845,7 @@ const server = createServer(async (request, response) => {
             salesTaxRecord: includeFinancials
               ? await appDataStore.getSalesTaxRecord(sub.id, period)
               : null,
+            activityInvoices,
           })
           if (subRecap) subRecaps.push(subRecap)
         }
@@ -5852,6 +5865,7 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      const activityInvoices = await loadActivityInvoices([clientId])
       // The Billing tile's Invoice is the real invoice once it has been sent
       // (featreq-50a059cd): owner only, this client's (and, for a sub billed on a
       // master's combined invoice, the master's so the tile can name it).
@@ -5880,6 +5894,7 @@ const server = createServer(async (request, response) => {
         costRateVersions,
         salesTaxRecord,
         invoices: recapInvoices,
+        activityInvoices,
       })
       if (!recap) {
         sendJson(response, 404, { error: 'Client not found' })
@@ -6113,10 +6128,22 @@ const server = createServer(async (request, response) => {
       const invoices = await appDataStore.listInvoices({ period })
       // Last month's, for work pushed into this month (featreq-40697310).
       const priorInvoices = await appDataStore.listInvoices({ period: previousPeriod(period) })
+      // Every invoice's narrow evidence row, once (featreq-8dffdff7): each
+      // client's projection asks when it started being billed, so a client
+      // created after this month but billed in it keeps its row.
+      const activityInvoices = await appDataStore.listInvoiceEvidence()
       sendJson(
         response,
         200,
-        buildInvoiceEstimate({ period, data, invoices, priorInvoices, billRateVersions, today: todayIso() }),
+        buildInvoiceEstimate({
+          period,
+          data,
+          invoices,
+          priorInvoices,
+          billRateVersions,
+          activityInvoices,
+          today: todayIso(),
+        }),
       )
       return
     }
