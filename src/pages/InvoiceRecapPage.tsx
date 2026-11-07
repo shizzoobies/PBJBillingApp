@@ -156,7 +156,9 @@ export function InvoiceRecapPage({ ownerEstimate = false }: { ownerEstimate?: bo
                 </p>
               </div>
               <div className="invoice-recap-totals">
-                <div className="invoice-recap-total">
+                {/* The headline figure (featreq-f75d6625): Brittany asked for the
+                    Invoice total and its amount to read apart from the other two. */}
+                <div className="invoice-recap-total invoice-recap-total--headline">
                   <span>Invoice total</span>
                   <strong>{currency.format(row.total)}</strong>
                 </div>

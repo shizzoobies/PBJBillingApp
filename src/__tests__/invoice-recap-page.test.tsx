@@ -71,6 +71,22 @@ describe('InvoiceRecapPage', () => {
     expect(screen.getByText(/— Bright Tower/)).toBeInTheDocument()
   })
 
+  it('sets the Invoice total apart from the other two figures (featreq-f75d6625)', async () => {
+    mockRecap.mockResolvedValue({ period: '2026-08', rows: [row()] })
+    render(<InvoiceRecapPage />)
+
+    await screen.findByText('Acme')
+    const headline = screen.getByText('Invoice total').closest('.invoice-recap-total')
+    expect(headline).toHaveClass('invoice-recap-total--headline')
+    expect(headline?.querySelector('strong')).toHaveTextContent('$500.00')
+    // Only the Invoice total is the headline; the other two keep the plain style.
+    for (const label of ['Accounting services', 'Reimbursed expenses']) {
+      expect(screen.getByText(label).closest('.invoice-recap-total')).not.toHaveClass(
+        'invoice-recap-total--headline',
+      )
+    }
+  })
+
   it('shows an anchor invoice\'s prepayments on their own line, apart from the fees (M-9)', async () => {
     mockRecap.mockResolvedValue({
       period: '2026-10',

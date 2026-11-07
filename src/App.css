@@ -1025,6 +1025,18 @@ h2 {
   font-variant-numeric: tabular-nums;
 }
 
+/* The Invoice total is the headline figure on each card: its label and amount
+   are set heavier and larger than Accounting services and Reimbursed expenses. */
+.invoice-recap-total--headline span {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.invoice-recap-total--headline strong {
+  font-size: 17px;
+  font-weight: 800;
+}
+
 .invoice-recap-lines {
   border-top: 1px solid var(--line);
   list-style: none;
