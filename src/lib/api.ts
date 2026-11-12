@@ -1062,6 +1062,21 @@ export function copyProposalRequest(id: string): Promise<Proposal> {
   )
 }
 
+/**
+ * Owner-only: "Split" (featreq-23b26bb1). The named lines move to a new draft
+ * for the same prospect; the answer is the proposal as it now stands and the new part.
+ */
+export function splitProposalRequest(
+  id: string,
+  serviceIds: string[],
+): Promise<{ proposal: Proposal; part: Proposal }> {
+  return proposalRequest<{ proposal: Proposal; part: Proposal }>(
+    proposalPath(id, 'split'),
+    proposalJson('POST', { serviceIds }),
+    'The proposal could not be split',
+  )
+}
+
 /** Owner-only: "Reprice at today's catalog". */
 export function repriceProposalRequest(id: string): Promise<Proposal> {
   return proposalRequest<Proposal>(

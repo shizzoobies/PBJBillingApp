@@ -21,6 +21,7 @@ import {
   type QuestionnaireLinkResult,
 } from '../lib/api'
 import { PROPOSAL_STATUS_LABELS, proposalDate, proposalPriceLabel, proposalTitle } from '../lib/proposals'
+import { splitPartIds, splitPartWords } from '../../lib/proposal-split.js'
 import {
   ApiError,
   type Proposal,
@@ -131,6 +132,10 @@ export function ProposalsPage() {
           ),
       )
   }, [proposals, status, query])
+
+  // Parts of a split (featreq-23b26bb1) share a company name: each row says it is
+  // a part and what it holds, so two rows for one prospect are told apart.
+  const partIds = useMemo(() => splitPartIds(proposals), [proposals])
 
   const startNew = async () => {
     setCreating(true)
@@ -445,6 +450,9 @@ export function ProposalsPage() {
                   <tr key={proposal.id}>
                     <td>
                       <Link to={`/proposals/${proposal.id}`}>{proposalTitle(proposal)}</Link>
+                      {partIds.has(proposal.id) ? (
+                        <div className="muted-text proposal-part-note">{`Part of a split · ${splitPartWords(proposal)}`}</div>
+                      ) : null}
                     </td>
                     <td>{proposal.prospect.contactName}</td>
                     <td>

@@ -950,6 +950,8 @@ describe('Mark as signed', () => {
     expect(within(summary).getByText('Plans added: Monthly Bookkeeping, Payroll.')).toBeTruthy()
     expect(within(summary).getByText('2 recurring checklists copied from the plans and package.')).toBeTruthy()
     expect(within(summary).getByText('Software added as monthly expenses: QBO Plus.')).toBeTruthy()
+    // No other part of a split was linked: no line about one.
+    expect(within(summary).queryByText(/part of this proposal/)).toBeNull()
     expect(
       within(summary).getByText('Retainer invoice of $630.00 drafted - it is in To review in the month run.'),
     ).toBeTruthy()
@@ -958,6 +960,35 @@ describe('Mark as signed', () => {
     expect(within(summary).getByRole('link', { name: 'Open the retainer' }).getAttribute('href')).toBe(
       '/invoices?period=2026-10',
     )
+  })
+
+  // featreq-23b26bb1: signing the first part of a split proposal ties the other open parts to the new client.
+  it('says the other open parts of a split proposal now belong to the new client', async () => {
+    mockConfirm(true)
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z' }))
+    api.signEngagementRequest = vi.fn(async () => signResult({ linkedPartIds: ['prop-2'] }))
+    await renderEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    const summary = await screen.findByRole('status', { name: 'What signing did' })
+    expect(
+      within(summary).getByText(
+        'The other open part of this proposal now belongs to this client, so accepting one adds to this client instead of creating another.',
+      ),
+    ).toBeTruthy()
+  })
+
+  it('counts them when there are several', async () => {
+    mockConfirm(true)
+    api.getEngagementRequest = vi.fn(async () => view({ status: 'sent', sentAt: '2026-10-11T16:00:00.000Z' }))
+    api.signEngagementRequest = vi.fn(async () => signResult({ linkedPartIds: ['prop-2', 'prop-3'] }))
+    await renderEditor()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as signed' }))
+    const summary = await screen.findByRole('status', { name: 'What signing did' })
+    expect(
+      within(summary).getByText(
+        'The 2 other open parts of this proposal now belong to this client, so accepting one adds to this client instead of creating another.',
+      ),
+    ).toBeTruthy()
   })
 
   // featreq-b2142264: a prospect's signing opens the new client's onboarding checklist.

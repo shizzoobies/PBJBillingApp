@@ -269,8 +269,16 @@ export function proposalActivity(
   const entries: Array<{ at: string; text: string; href?: string }> = [
     {
       at: proposal.createdAt,
-      text: proposal.copiedFromId ? `Created as a copy of ${proposal.copiedFromId}` : 'Created',
-      href: proposal.copiedFromId ? `/proposals/${proposal.copiedFromId}` : undefined,
+      text: proposal.copiedFromId
+        ? `Created as a copy of ${proposal.copiedFromId}`
+        : proposal.splitFromId
+          ? `Split off from ${proposal.splitFromId}`
+          : 'Created',
+      href: proposal.copiedFromId
+        ? `/proposals/${proposal.copiedFromId}`
+        : proposal.splitFromId
+          ? `/proposals/${proposal.splitFromId}`
+          : undefined,
     },
   ]
   if (proposal.letterAt) entries.push({ at: proposal.letterAt, text: 'Letter drafted' })

@@ -5,6 +5,7 @@ import { ActivityTab } from '../components/proposals/ActivityTab'
 import { ChatPanel } from '../components/proposals/ChatPanel'
 import { EstimateTab } from '../components/proposals/EstimateTab'
 import { LetterTab } from '../components/proposals/LetterTab'
+import { SplitProposalDialog } from '../components/proposals/SplitProposalDialog'
 import { workableClients } from '../lib/clientLifecycle'
 import { partyRecipientDetails } from '../../lib/invoice-recipients.js'
 import { engagementInstantLabel, refusedEngagementId } from '../lib/engagements'
@@ -14,6 +15,7 @@ import {
   formatProposalMoney,
   unpricedProposalLines,
 } from '../../lib/proposal-pricing.js'
+import { canSplitProposal, splitFamily, splitPartWords } from '../../lib/proposal-split.js'
 import {
   acceptProposalRequest,
   copyProposalRequest,
@@ -25,10 +27,12 @@ import {
   getProposalRequest,
   listEngagementsRequest,
   listPackagesRequest,
+  listProposalsRequest,
   listQuestionnairesRequest,
   proposalChatRequest,
   repriceProposalRequest,
   sendProposalRequest,
+  splitProposalRequest,
   updateProposalRequest,
   type ProposalChatResult,
 } from '../lib/api'
@@ -93,6 +97,12 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
   const [notice, setNotice] = useState('')
   // The engagement Accept drafted, linked from the notice when there is one to read first.
   const [noticeEngagementId, setNoticeEngagementId] = useState<string | null>(null)
+  // Split (featreq-23b26bb1): the dialog, the part a split just made (linked from the
+  // notice), and every part of the split this proposal belongs to, itself included.
+  const [splitOpen, setSplitOpen] = useState(false)
+  const [noticePartId, setNoticePartId] = useState<string | null>(null)
+  const [parts, setParts] = useState<Proposal[]>([])
+  const [partsTick, setPartsTick] = useState(0)
   const [busy, setBusy] = useState(false)
   const [packages, setPackages] = useState<Package[]>([])
   const [packageId, setPackageId] = useState('')
@@ -152,6 +162,23 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
       cancelled = true
     }
   }, [proposalId])
+
+  // The other parts of a split. Read from the list (small, no chat transcripts); a
+  // failed read just means no parts line. Read again after a split here and whenever
+  // another tab or session changes data.
+  useEffect(() => {
+    let cancelled = false
+    void listProposalsRequest()
+      .then((rows) => {
+        if (!cancelled) setParts(splitFamily(rows, proposalId))
+      })
+      .catch(() => {
+        if (!cancelled) setParts([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [proposalId, partsTick, dataRefreshCount])
 
   // A Won proposal's engagement letter (docs/plans/engagements-2026-10.md): the
   // newest one that is not void, or null when it has none (then the page offers
@@ -391,7 +418,10 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
       queueMicrotask(() =>
         enqueue(async () => {
           const repriced = await repriceProposalRequest(proposalId)
-          if (repriced.id === proposalId) setNotice('Repriced at today’s rates')
+          if (repriced.id === proposalId) {
+            setNotice('Repriced at today’s rates')
+            setNoticePartId(null)
+          }
           return repriced
         }),
       )
@@ -404,13 +434,37 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
     // Her own edit ends the "what the chat just changed" marking.
     setHighlight(new Set())
     setNotice('')
+    setNoticePartId(null)
     enqueue((latest) => updateProposalRequest(proposalId, build(latest)))
+  }
+
+  /**
+   * Split (featreq-23b26bb1): through the SAME queue as a save, so an edit still in
+   * flight lands first and the server splits what is really there. The answer's
+   * `proposal` (this one, with the lines that stayed) goes on screen; the new part is
+   * linked from the notice.
+   */
+  const split = (serviceIds: string[]) => {
+    setSplitOpen(false)
+    setHighlight(new Set())
+    enqueue(async () => {
+      const result = await splitProposalRequest(proposalId, serviceIds)
+      const moved = result.part.selections.length
+      setNotice(
+        `Split. ${moved} ${moved === 1 ? 'line' : 'lines'} moved to a new draft proposal (${splitPartWords(result.part)}). This proposal keeps the rest.`,
+      )
+      setNoticeEngagementId(null)
+      setNoticePartId(result.part.id)
+      setPartsTick((tick) => tick + 1)
+      return result.proposal
+    })
   }
   const reprice = () => {
     // A reprice is her own action ending the "what the chat just changed"
     // marking, same as a manual save.
     setHighlight(new Set())
     setNotice('')
+    setNoticePartId(null)
     enqueue(() => repriceProposalRequest(proposalId))
   }
 
@@ -537,6 +591,7 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
       `Accepted - the engagement could not be drafted: ${reason}. Use Draft the engagement at the top of the page. The package and plans you picked are kept. ${signingNotice}`,
     )
     setNoticeEngagementId(null)
+    setNoticePartId(null)
   }
 
   // Accept says what it will do before it does it (spec §5.5). Since engagements
@@ -787,6 +842,12 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
               Draft the engagement
             </button>
           ) : null}
+          {/* The dialog lists the PRICED lines, so there must be two of those to divide. */}
+          {canSplitProposal(proposal) && (proposal.pricingSnapshot?.lines.length ?? 0) >= 2 ? (
+            <button type="button" className="secondary-action" disabled={busy} onClick={() => setSplitOpen(true)}>
+              Split
+            </button>
+          ) : null}
           <button type="button" className="secondary-action" disabled={busy} onClick={() => void copy()}>
             Copy to new proposal
           </button>
@@ -812,7 +873,32 @@ function ProposalEditor({ proposalId }: { proposalId: string }) {
               <Link to={`/engagements/${noticeEngagementId}`}>Open the engagement</Link>
             </>
           ) : null}
+          {noticePartId ? (
+            <>
+              {' '}
+              <Link to={`/proposals/${noticePartId}`}>Open the new part</Link>
+            </>
+          ) : null}
         </p>
+      ) : null}
+      {parts.length > 1 ? (
+        <p className="muted-text proposal-parts" data-testid="proposal-parts">
+          {`One of ${parts.length} parts of a split proposal. Other ${parts.length === 2 ? 'part' : 'parts'}: `}
+          {parts
+            .filter((part) => part.id !== proposalId)
+            .map((part, index) => (
+              <span key={part.id}>
+                {index > 0 ? '; ' : ''}
+                <Link to={`/proposals/${part.id}`}>
+                  {`${PROPOSAL_STATUS_LABELS[part.status]} · ${splitPartWords(part)}`}
+                </Link>
+              </span>
+            ))}
+          . Once one part's engagement letter is signed, the other open parts are added to that client.
+        </p>
+      ) : null}
+      {splitOpen ? (
+        <SplitProposalDialog proposal={proposal} busy={busy} onCancel={() => setSplitOpen(false)} onSplit={split} />
       ) : null}
 
       <div className="task-area-tabs" role="tablist" aria-label="Proposal sections">

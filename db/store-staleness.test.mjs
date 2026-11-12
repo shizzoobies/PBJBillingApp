@@ -96,6 +96,16 @@ import {
 } from '../lib/waiting-on-state.js'
 import { buildQuestionnaire } from '../lib/proposal-questionnaire.js'
 import { defaultProposalPricing } from '../lib/proposal-pricing.js'
+import {
+  SPLIT_DRAFT_FIRST,
+  SPLIT_LEAVE_ONE,
+  SPLIT_LINE_GONE,
+  SPLIT_PICK_ONE,
+  SPLIT_SIGN_FIRST,
+  splitClientRefusal,
+  splitFamily,
+  splitSignRefusal,
+} from '../lib/proposal-split.js'
 import { invoiceAsSent, invoiceDisplayDate } from '../lib/invoice-draft.js'
 import { applyScopeRetag } from '../lib/invoice-scope-retag.js'
 import { buildInvoiceLines, cardProcessingFeeLine } from '../lib/invoice-lines.js'
@@ -60179,5 +60189,753 @@ describe('skip a step, round 2 (postgres branch)', () => {
     expect(lock.text).toMatch(/period_label, skip_notice,/i)
     const [inserted] = insertedRows(fake.statements, 'checklists')
     expect(JSON.parse(inserted.skip_notice)).toEqual(notice)
+  })
+})
+
+// ---- Splitting a proposal into parts (featreq-23b26bb1) ----------------------
+
+describe('splitting a proposal (file backend)', () => {
+  beforeEach(async () => {
+    await clearProposals()
+    await clearEngagements()
+    await setProposalRates(store)
+    // No time on the baseline client, so a test may retire or replace it.
+    await store.write(workspace({ timeEntries: [] }))
+  })
+
+  const INPUTS = { transactions: 30, balanceSheetAccounts: 2, totalAccounts: 25, cleanupMonths: 3 }
+  const MONTHLY = ['monthly-monthly-transactions-basic', 'reconciliations', 'reports-monthly-basic']
+  const CLEANUP = ['cleanup-transactions-basic', 'cleanup-reconciliations']
+  const wholeProposal = (extra = {}) =>
+    store.createProposal({
+      prospect: { company: 'Lantern Foundation', contactName: 'Brandon Doe', email: 'brandon@lantern.test' },
+      inputs: INPUTS,
+      selections: [
+        { serviceId: 'monthly-monthly-transactions-basic' },
+        { serviceId: 'reconciliations', override: 50 },
+        { serviceId: 'reports-monthly-basic' },
+        { serviceId: 'cleanup-transactions-basic' },
+        { serviceId: 'cleanup-reconciliations', quantity: 3 },
+      ],
+      createdBy: 'emp-patrice',
+      ...extra,
+    })
+  const cents = (value) => Math.round(Number(value) * 100)
+  const TOTAL_KEYS = ['monthly', 'annual', 'oneTime', 'cleanup', 'software']
+
+  it('moves the picked lines to a new draft and leaves the rest; the two parts come to what the whole came to', async () => {
+    const whole = await wholeProposal()
+    const before = whole.pricingSnapshot.totals
+    expect(before.monthly).toBeGreaterThan(0)
+    expect(before.cleanup).toBeGreaterThan(0)
+
+    const { proposal, part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP, createdBy: 'emp-alex' })
+
+    // The proposal keeps its id, status and the monthly lines, in order, with the override.
+    expect(proposal.id).toBe(whole.id)
+    expect(proposal.status).toBe('draft')
+    expect(proposal.selections).toEqual([
+      { serviceId: 'monthly-monthly-transactions-basic' },
+      { serviceId: 'reconciliations', override: 50 },
+      { serviceId: 'reports-monthly-basic' },
+    ])
+    expect(proposal.pricingSnapshot.lines.map((line) => line.serviceId).sort()).toEqual([...MONTHLY].sort())
+    expect(proposal.pricingSnapshot.totals.cleanup).toBe(0)
+    expect(proposal.pricingSnapshot.totals.monthly).toBe(before.monthly)
+
+    // The new part: a draft for the same prospect, the same counts, the moved lines as stored.
+    expect(part.id).toMatch(/^prop-/)
+    expect(part.id).not.toBe(whole.id)
+    expect(part).toMatchObject({
+      status: 'draft',
+      splitFromId: whole.id,
+      copiedFromId: null,
+      clientId: null,
+      createdBy: 'emp-alex',
+      letter: null,
+      messages: [],
+      emailLog: [],
+      sentAt: null,
+    })
+    expect(part.prospect).toEqual(whole.prospect)
+    expect(part.inputs).toEqual(whole.inputs)
+    expect(part.selections).toEqual([
+      { serviceId: 'cleanup-transactions-basic' },
+      { serviceId: 'cleanup-reconciliations', quantity: 3 },
+    ])
+    expect(part.pricingSnapshot.totals.monthly).toBe(0)
+    expect(part.pricingSnapshot.totals.cleanup).toBe(before.cleanup)
+    for (const key of TOTAL_KEYS) {
+      expect(cents(proposal.pricingSnapshot.totals[key]) + cents(part.pricingSnapshot.totals[key])).toBe(cents(before[key]))
+    }
+
+    // Both are stored: a fresh read agrees, and no line is on both or on neither.
+    const storedWhole = await store.getProposal(whole.id)
+    const storedPart = await store.getProposal(part.id)
+    expect(storedWhole.selections).toEqual(proposal.selections)
+    expect(storedPart.selections).toEqual(part.selections)
+    expect(storedWhole.splitFromId).toBeNull()
+    const ids = [...storedWhole.selections, ...storedPart.selections].map((entry) => entry.serviceId)
+    expect(ids.sort()).toEqual([...MONTHLY, ...CLEANUP].sort())
+    expect(await store.listProposals()).toHaveLength(2)
+  })
+
+  it('an override travels with its line', async () => {
+    const whole = await wholeProposal()
+    const { proposal, part } = await store.splitProposal(whole.id, { serviceIds: ['reconciliations'] })
+    expect(part.selections).toEqual([{ serviceId: 'reconciliations', override: 50 }])
+    expect(part.pricingSnapshot.lines[0].amount).toBe(50)
+    expect(proposal.selections.some((entry) => entry.serviceId === 'reconciliations')).toBe(false)
+  })
+
+  it('a SENT proposal stays sent with its letter and log; both parts keep the rates it was sent with', async () => {
+    const whole = await wholeProposal()
+    await store.setProposalLetter(whole.id, { subject: 'Your proposal', sections: [], text: 'Dear Brandon' })
+    await store.setProposalStatus(whole.id, 'sent')
+    const sent = await store.getProposal(whole.id)
+    const before = sent.pricingSnapshot.totals
+    // The firm raises its rates after the proposal went out.
+    const pricing = (await store.getFirmSettings()).proposalPricing
+    await store.updateFirmSettings({
+      proposalPricing: { ...pricing, rates: { bookkeeper: 90, accountant: 130, controller: 150 } },
+    })
+
+    const { proposal, part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+    expect(proposal.status).toBe('sent')
+    expect(proposal.sentAt).toBe(sent.sentAt)
+    expect(proposal.letter?.text).toBe('Dear Brandon')
+    expect(part.status).toBe('draft')
+    expect(part.sentAt).toBeNull()
+    expect(part.letter).toBeNull()
+    const sentRates = { bookkeeper: 75, accountant: 115, controller: 125 }
+    expect(proposal.pricingSnapshot.rates).toEqual(sentRates)
+    expect(part.pricingSnapshot.rates).toEqual(sentRates)
+    for (const key of TOTAL_KEYS) {
+      expect(cents(proposal.pricingSnapshot.totals[key]) + cents(part.pricingSnapshot.totals[key])).toBe(cents(before[key]))
+    }
+  })
+
+  // Review round 1 (M1): a split divides the priced lines; it never reprices them.
+  it('changes no figure even after the catalog changed: a new factor, a retired service, new rates', async () => {
+    for (const status of ['draft', 'sent']) {
+      await clearProposals()
+      await setProposalRates(store)
+      const whole = await wholeProposal()
+      if (status === 'sent') await store.setProposalStatus(whole.id, 'sent')
+      const before = (await store.getProposal(whole.id)).pricingSnapshot
+      const amountsBefore = Object.fromEntries(before.lines.map((line) => [line.serviceId, line.amount]))
+
+      const pricing = (await store.getFirmSettings()).proposalPricing
+      await store.updateFirmSettings({
+        proposalPricing: {
+          ...pricing,
+          rates: { bookkeeper: 90, accountant: 130, controller: 150 },
+          services: pricing.services.map((service) =>
+            service.id === 'monthly-monthly-transactions-basic'
+              ? { ...service, factor: 0.5 }
+              : service.id === 'cleanup-reconciliations'
+                ? { ...service, active: false }
+                : service,
+          ),
+        },
+      })
+      try {
+        const { proposal, part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+        const amountsAfter = Object.fromEntries(
+          [...proposal.pricingSnapshot.lines, ...part.pricingSnapshot.lines].map((line) => [line.serviceId, line.amount]),
+        )
+        expect(amountsAfter, status).toEqual(amountsBefore)
+        expect([...proposal.pricingSnapshot.lines, ...part.pricingSnapshot.lines].some((line) => line.flag === 'retired')).toBe(false)
+        for (const key of TOTAL_KEYS) {
+          expect(cents(proposal.pricingSnapshot.totals[key]) + cents(part.pricingSnapshot.totals[key]), `${status} ${key}`).toBe(
+            cents(before.totals[key]),
+          )
+        }
+        for (const role of ['bookkeeper', 'accountant', 'controller']) {
+          expect(
+            cents(proposal.pricingSnapshot.hoursByRole[role]) + cents(part.pricingSnapshot.hoursByRole[role]),
+            `${status} ${role} hours`,
+          ).toBe(cents(before.hoursByRole[role]))
+        }
+        expect(proposal.pricingSnapshot.rates).toEqual(before.rates)
+        expect(part.pricingSnapshot.rates).toEqual(before.rates)
+        expect(part.pricingSnapshot.catalogAt).toBe(before.catalogAt)
+      } finally {
+        await store.updateFirmSettings({ proposalPricing: pricing })
+      }
+    }
+  })
+
+  it('a proposal whose snapshot does not line up with its lines is priced fresh, both parts by one rule', async () => {
+    const whole = await wholeProposal()
+    const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+    authState.proposals.find((row) => row.id === whole.id).pricingSnapshot = null
+    await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+    const { proposal, part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+    expect(proposal.pricingSnapshot.lines.map((line) => line.serviceId).sort()).toEqual([...MONTHLY].sort())
+    expect(part.pricingSnapshot.lines.map((line) => line.serviceId).sort()).toEqual([...CLEANUP].sort())
+    for (const key of TOTAL_KEYS) {
+      expect(cents(proposal.pricingSnapshot.totals[key]) + cents(part.pricingSnapshot.totals[key])).toBe(
+        cents(whole.pricingSnapshot.totals[key]),
+      )
+    }
+  })
+
+  // Review round 1 (H2): deleting a part that was itself split keeps its parts in the family.
+  it('deleting a middle part re-homes the parts split off from it; deleting the first proposal leaves its parts together', async () => {
+    const whole = await wholeProposal()
+    const first = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+    const second = await store.splitProposal(first.part.id, { serviceIds: ['cleanup-reconciliations'] })
+    expect(await store.deleteProposal(first.part.id)).toBe(true)
+    expect((await store.getProposal(second.part.id)).splitFromId).toBe(whole.id)
+    let all = await store.listProposals()
+    expect(
+      splitFamily(all, whole.id)
+        .map((entry) => entry.id)
+        .sort(),
+    ).toEqual([whole.id, second.part.id].sort())
+
+    const third = await store.splitProposal(whole.id, { serviceIds: ['reports-monthly-basic'] })
+    expect(await store.deleteProposal(whole.id)).toBe(true)
+    all = await store.listProposals()
+    expect(
+      splitFamily(all, third.part.id)
+        .map((entry) => entry.id)
+        .sort(),
+    ).toEqual([second.part.id, third.part.id].sort())
+  })
+
+  it('carries the client link of an upsell proposal onto the new part', async () => {
+    const whole = await wholeProposal({ clientId: 'c1' })
+    const { part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+    expect(part.clientId).toBe('c1')
+  })
+
+  it('refuses nothing picked, everything picked, a line that is gone and a decided proposal - and writes nothing', async () => {
+    const whole = await wholeProposal()
+    const refused = async (serviceIds) => {
+      const error = await store.splitProposal(whole.id, { serviceIds }).catch((caught) => caught)
+      expect(error).toBeInstanceOf(ProposalStateError)
+      return error.message
+    }
+    expect(await refused([])).toBe(SPLIT_PICK_ONE)
+    expect(await refused([...MONTHLY, ...CLEANUP])).toBe(SPLIT_LEAVE_ONE)
+    expect(await refused(['reconciliations', 'payroll'])).toBe(SPLIT_LINE_GONE)
+    expect(await store.listProposals()).toHaveLength(1)
+    expect((await store.getProposal(whole.id)).selections).toHaveLength(5)
+
+    expect(await store.splitProposal('prop-missing', { serviceIds: CLEANUP })).toBeNull()
+
+    await store.setProposalStatus(whole.id, 'declined')
+    expect(await refused(CLEANUP)).toBe('This proposal is closed as lost - only a Draft or Sent proposal can be split.')
+    const won = await wholeProposal()
+    await store.acceptProposal(won.id, {})
+    const wonError = await store.splitProposal(won.id, { serviceIds: CLEANUP }).catch((caught) => caught)
+    expect(wonError).toBeInstanceOf(ProposalStateError)
+    expect(wonError.message).toBe('This proposal is Won - only a Draft or Sent proposal can be split.')
+  })
+
+  it('a part can be split again: three parts that all know each other', async () => {
+    const whole = await wholeProposal()
+    const first = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+    const second = await store.splitProposal(first.part.id, { serviceIds: ['cleanup-reconciliations'] })
+    expect(second.part.splitFromId).toBe(first.part.id)
+    const all = await store.listProposals()
+    for (const id of [whole.id, first.part.id, second.part.id]) {
+      expect(
+        splitFamily(all, id)
+          .map((entry) => entry.id)
+          .sort(),
+      ).toEqual([whole.id, first.part.id, second.part.id].sort())
+    }
+  })
+
+  it('two splits at once never lose or double a line', async () => {
+    const whole = await wholeProposal()
+    const results = await Promise.all([
+      store.splitProposal(whole.id, { serviceIds: ['cleanup-transactions-basic'] }).catch((caught) => caught),
+      store.splitProposal(whole.id, { serviceIds: ['cleanup-transactions-basic', 'cleanup-reconciliations'] }).catch((caught) => caught),
+    ])
+    // The second one to run finds a line already gone and is refused whole.
+    expect(results.filter((entry) => entry instanceof ProposalStateError)).toHaveLength(1)
+    const all = await store.listProposals()
+    const ids = all.flatMap((row) => row.selections.map((entry) => entry.serviceId))
+    expect(ids.sort()).toEqual([...MONTHLY, ...CLEANUP].sort())
+  })
+
+  describe('the parts end up on ONE client', () => {
+    const sign = (engagementId) => store.signEngagement(engagementId, { signedOn: firmToday(), allowUnsent: true })
+
+    it('signing the first part links the other open part to the new client, and accepting that part amends it', async () => {
+      const whole = await wholeProposal()
+      const { part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+      // The prospect said yes to the clean-up only.
+      const accepted = await store.acceptProposal(part.id, { actorUserId: 'emp-patrice' })
+      const signed = await sign(accepted.engagementId)
+      expect(signed.createdClient).toBe(true)
+      expect(signed.linkedPartIds).toEqual([whole.id])
+      const clientsAfterFirst = (await store.read()).clients.length
+
+      const other = await store.getProposal(whole.id)
+      expect(other.status).toBe('draft')
+      expect(other.clientId).toBe(signed.clientId)
+
+      // Later they say yes to the monthly work: it is an amendment for the SAME client.
+      const second = await store.acceptProposal(whole.id, { actorUserId: 'emp-patrice' })
+      expect(second.clientId).toBe(signed.clientId)
+      const letter = await store.getEngagement(second.engagementId)
+      expect(letter).toMatchObject({ kind: 'amendment', clientId: signed.clientId, proposalId: whole.id })
+      expect((await store.read()).clients).toHaveLength(clientsAfterFirst)
+    })
+
+    it('a part closed as lost is left as the record it is', async () => {
+      const whole = await wholeProposal()
+      const first = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+      const second = await store.splitProposal(whole.id, { serviceIds: ['reports-monthly-basic'] })
+      await store.setProposalStatus(second.part.id, 'declined')
+      const accepted = await store.acceptProposal(first.part.id, {})
+      const signed = await sign(accepted.engagementId)
+      expect(signed.linkedPartIds).toEqual([whole.id])
+      expect((await store.getProposal(second.part.id)).clientId).toBeNull()
+    })
+
+    // Review round 1 (H1): void a Won part's letter, win and sign another part, then redraft.
+    it('a Won part whose letter was voided is tied to the client too, so its redraft is an amendment', async () => {
+      const whole = await wholeProposal()
+      const { part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+      const first = await store.acceptProposal(part.id, {})
+      await store.voidEngagement(first.engagementId, { userId: 'emp-patrice' })
+      const second = await store.acceptProposal(whole.id, {})
+      const signed = await sign(second.engagementId)
+      expect(signed.createdClient).toBe(true)
+      // The summary names only OPEN parts; the Won one is linked quietly.
+      expect(signed.linkedPartIds).toEqual([])
+      expect((await store.getProposal(part.id)).clientId).toBe(signed.clientId)
+
+      const redraft = await store.draftEngagementForProposal(part.id, { createdBy: 'emp-patrice' })
+      expect(redraft).toMatchObject({ kind: 'amendment', clientId: signed.clientId })
+      const clients = (await store.read()).clients.length
+      const resigned = await sign(redraft.id)
+      expect(resigned.createdClient).toBe(false)
+      expect(resigned.clientId).toBe(signed.clientId)
+      expect((await store.read()).clients).toHaveLength(clients)
+    })
+
+    // Review round 2: the redraft never puts a second client-making letter beside a live one.
+    it('Draft the engagement is refused on a Won part while another part\'s letter is still waiting to be signed', async () => {
+      const whole = await wholeProposal()
+      const { part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+      const first = await store.acceptProposal(part.id, {})
+      await store.voidEngagement(first.engagementId, { userId: 'emp-patrice' })
+      await store.acceptProposal(whole.id, {})
+      const refusal = await store.draftEngagementForProposal(part.id, { createdBy: 'emp-patrice' }).catch((caught) => caught)
+      expect(refusal).toBeInstanceOf(EngagementStateError)
+      expect(refusal.reason).toBe('split_sign_first')
+      expect(refusal.message).toBe(SPLIT_SIGN_FIRST)
+      expect((await store.listEngagements({ proposalId: part.id })).filter((row) => row.status !== 'void')).toHaveLength(0)
+    })
+
+    it('two Won parts that both lost their letters can each still be redrafted (no deadlock)', async () => {
+      const whole = await wholeProposal()
+      const { part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+      const first = await store.acceptProposal(part.id, {})
+      await store.voidEngagement(first.engagementId, { userId: 'emp-patrice' })
+      const second = await store.acceptProposal(whole.id, {})
+      await store.voidEngagement(second.engagementId, { userId: 'emp-patrice' })
+      const redraft = await store.draftEngagementForProposal(part.id, { createdBy: 'emp-patrice' })
+      expect(redraft.kind).toBe('original')
+      // And now the other one waits for it.
+      const refusal = await store.draftEngagementForProposal(whole.id, {}).catch((caught) => caught)
+      expect(refusal.message).toBe(SPLIT_SIGN_FIRST)
+    })
+
+    it('Accept names the missing letter when the Won part has none at all', async () => {
+      const whole = await wholeProposal()
+      const { part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+      // Accept wins the part but its letter fails to draft.
+      const draft = vi.spyOn(store, 'createEngagementFromProposal').mockRejectedValueOnce(new Error('disk full'))
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const first = await store.acceptProposal(part.id, {})
+        expect(first.engagementId).toBeNull()
+      } finally {
+        draft.mockRestore()
+        quiet.mockRestore()
+      }
+      const refusal = await store.acceptProposal(whole.id, {}).catch((caught) => caught)
+      expect(refusal).toBeInstanceOf(ProposalStateError)
+      expect(refusal.message).toBe(SPLIT_DRAFT_FIRST)
+    })
+
+    it('two live letters that would each make a client: the second signing is refused and no second client is made', async () => {
+      const whole = await wholeProposal()
+      const { part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+      // Two Accepts at the same moment both pass Accept's guard: each drafts an ORIGINAL letter.
+      const first = await store.acceptProposal(part.id, {})
+      const guard = vi.spyOn(store, '_refuseSecondSplitClient').mockResolvedValue(undefined)
+      let second
+      try {
+        second = await store.acceptProposal(whole.id, {})
+      } finally {
+        guard.mockRestore()
+      }
+      const leftover = await store.getEngagement(first.engagementId)
+      expect(leftover.kind).toBe('original')
+      expect(leftover.clientId).toBeNull()
+
+      const signed = await sign(second.engagementId)
+      const clients = (await store.read()).clients.length
+      const refusal = await sign(leftover.id).catch((caught) => caught)
+      expect(refusal).toBeInstanceOf(EngagementStateError)
+      expect(refusal.reason).toBe('split_client')
+      expect(refusal.message).toBe(splitSignRefusal('Lantern Foundation'))
+      expect((await store.read()).clients).toHaveLength(clients)
+      expect((await store.getEngagement(leftover.id)).status).not.toBe('signed')
+      // Its proposal is tied to the client, so the redraft the message asks for is an amendment.
+      expect((await store.getProposal(part.id)).clientId).toBe(signed.clientId)
+      await store.voidEngagement(leftover.id, { userId: 'emp-patrice' })
+      const redraft = await store.draftEngagementForProposal(part.id, { createdBy: 'emp-patrice' })
+      expect(redraft).toMatchObject({ kind: 'amendment', clientId: signed.clientId })
+    })
+
+    it('signing a proposal that was never split is not slowed into a refusal by the family check', async () => {
+      const whole = await wholeProposal()
+      const accepted = await store.acceptProposal(whole.id, {})
+      const signed = await sign(accepted.engagementId)
+      expect(signed.createdClient).toBe(true)
+      expect(signed.linkedPartIds).toEqual([])
+    })
+
+    // Review round 1 (M5): the first try made the client and stopped; the retry links the parts.
+    it('a retried signing of an original links the other parts too', async () => {
+      const whole = await wholeProposal()
+      const { part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+      const accepted = await store.acceptProposal(part.id, {})
+      const made = await store.createClient({ name: 'Lantern Foundation', billingMode: 'subscription', monthlyRate: 0 })
+      // What a signing that claimed the letter and linked the proposal, then failed, leaves behind.
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      authState.engagements.find((row) => row.id === accepted.engagementId).clientId = made.id
+      authState.proposals.find((row) => row.id === part.id).clientId = made.id
+      await writeFile(localAuthPath, JSON.stringify(authState, null, 2))
+
+      const signed = await sign(accepted.engagementId)
+      expect(signed.createdClient).toBe(false)
+      expect(signed.clientId).toBe(made.id)
+      expect(signed.linkedPartIds).toEqual([whole.id])
+      expect((await store.getProposal(whole.id)).clientId).toBe(made.id)
+    })
+
+    // Review round 1 (M3): the letter is drafted from the row the flip returned.
+    it('Accept drafts the letter from the proposal as it stood at the flip, not as first read', async () => {
+      const whole = await wholeProposal()
+      const flipped = { marker: 'the row the flip returned' }
+      const flip = vi.spyOn(store, '_markProposalAccepted').mockResolvedValue(flipped)
+      const draft = vi.spyOn(store, 'createEngagementFromProposal').mockResolvedValue({ id: 'eng-x', party: {} })
+      try {
+        await store.acceptProposal(whole.id, {})
+        expect(draft.mock.calls[0][0]).toBe(flipped)
+      } finally {
+        flip.mockRestore()
+        draft.mockRestore()
+      }
+    })
+
+    it('Accept refuses a second part while the first is Won and its letter is not signed; a voided letter holds nothing back', async () => {
+      const whole = await wholeProposal()
+      const { part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+      const first = await store.acceptProposal(part.id, {})
+      const refusal = await store.acceptProposal(whole.id, {}).catch((caught) => caught)
+      expect(refusal).toBeInstanceOf(ProposalStateError)
+      expect(refusal.message).toBe(SPLIT_SIGN_FIRST)
+      // Refused BEFORE the write: the proposal is still a draft with no letter.
+      expect((await store.getProposal(whole.id)).status).toBe('draft')
+      expect(await store.listEngagements({ proposalId: whole.id })).toHaveLength(0)
+
+      await store.voidEngagement(first.engagementId, { userId: 'emp-patrice' })
+      const second = await store.acceptProposal(whole.id, {})
+      expect(second.proposal.status).toBe('accepted')
+      expect((await store.getEngagement(second.engagementId)).kind).toBe('original')
+    })
+
+    it('Accept refuses a part with no client while another part belongs to a live client, and names that client', async () => {
+      const whole = await wholeProposal({ clientId: 'c1' })
+      const { part } = await store.splitProposal(whole.id, { serviceIds: CLEANUP })
+      await store.updateProposal(part.id, { clientId: null })
+      const refusal = await store.acceptProposal(part.id, {}).catch((caught) => caught)
+      expect(refusal).toBeInstanceOf(ProposalStateError)
+      expect(refusal.message).toBe(splitClientRefusal('Acme'))
+      expect((await store.getProposal(part.id)).status).toBe('draft')
+
+      // A retired client ties nothing: the part may make its own client.
+      await store.setClientLifecycleStage('c1', 'inactive')
+      const accepted = await store.acceptProposal(part.id, {})
+      expect(accepted.proposal.status).toBe('accepted')
+    })
+
+    it('a proposal that was never split, and a copy, are not held back by anything', async () => {
+      const whole = await wholeProposal()
+      const copy = await store.copyProposal(whole.id, {})
+      await store.acceptProposal(whole.id, {})
+      const accepted = await store.acceptProposal(copy.id, {})
+      expect(accepted.proposal.status).toBe('accepted')
+    })
+  })
+})
+
+describe('splitting a proposal (Postgres statements)', () => {
+  /** A pool whose `connect()` hands out one recording client, as `_withTransaction` uses it. */
+  function splitFake(row, { failUpdate = false } = {}) {
+    const statements = []
+    let released = 0
+    const answer = (text, params) => {
+      const trimmed = String(text).trim()
+      statements.push({ text: trimmed, params })
+      if (/from firm_settings where id = 'singleton'/i.test(trimmed)) {
+        return { rows: [{ name: 'PB&J', proposal_pricing: null }] }
+      }
+      if (/^select [\s\S]* from proposals where id = \$1 for update$/i.test(trimmed)) {
+        return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }
+      }
+      if (/^insert into proposals/i.test(trimmed)) {
+        return {
+          rows: [
+            {
+              id: params[0],
+              status: 'draft',
+              prospect: params[1],
+              client_id: params[2],
+              inputs: params[3],
+              selections: params[4],
+              pricing_snapshot: params[5],
+              split_from_id: params[6],
+              created_by: params[7],
+              created_at: params[8],
+              updated_at: params[8],
+            },
+          ],
+          rowCount: 1,
+        }
+      }
+      if (/^update proposals/i.test(trimmed)) {
+        if (failUpdate) return { rows: [], rowCount: 0 }
+        return {
+          rows: [{ ...row, selections: params[1], pricing_snapshot: params[2] }],
+          rowCount: 1,
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+    const pool = {
+      query: async (text, params) => answer(text, params),
+      connect: async () => ({
+        query: async (text, params) => answer(text, params),
+        release: () => {
+          released += 1
+        },
+      }),
+    }
+    return { pool, statements, released: () => released, matching: (pattern) => statements.filter((s) => pattern.test(s.text)) }
+  }
+
+  const sourceRow = (overrides = {}) => ({
+    id: 'prop-1',
+    status: 'draft',
+    prospect: { company: 'Lantern Foundation', contactName: 'Brandon Doe' },
+    client_id: 'c9',
+    inputs: { transactions: 30, balanceSheetAccounts: 2, cleanupMonths: 3 },
+    selections: [
+      { serviceId: 'monthly-monthly-transactions-basic' },
+      { serviceId: 'reconciliations', override: 50 },
+      { serviceId: 'cleanup-transactions-basic' },
+    ],
+    pricing_snapshot: null,
+    created_at: '2026-11-10T16:00:00.000Z',
+    updated_at: '2026-11-10T16:00:00.000Z',
+    ...overrides,
+  })
+
+  it('locks the row, inserts the part and rewrites the proposal inside one transaction', async () => {
+    const fake = splitFake(sourceRow())
+    const result = await postgresStore(fake).splitProposal('prop-1', {
+      serviceIds: ['cleanup-transactions-basic'],
+      createdBy: 'emp-alex',
+    })
+    const texts = fake.statements.map((entry) => entry.text)
+    const at = (pattern) => texts.findIndex((text) => pattern.test(text))
+    const begin = at(/^BEGIN$/)
+    const lock = at(/for update$/i)
+    const insert = at(/^insert into proposals/i)
+    const update = at(/^update proposals/i)
+    const commit = at(/^COMMIT$/)
+    expect(begin).toBeGreaterThan(-1)
+    expect(begin).toBeLessThan(lock)
+    expect(lock).toBeLessThan(insert)
+    expect(insert).toBeLessThan(update)
+    expect(update).toBeLessThan(commit)
+    expect(texts.some((text) => /^ROLLBACK$/.test(text))).toBe(false)
+    expect(fake.released()).toBe(1)
+
+    const [inserted] = fake.matching(/^insert into proposals/i)
+    expect(inserted.text).toMatch(/pricing_snapshot, split_from_id, created_by, created_at, updated_at\)/)
+    expect(inserted.text).toMatch(/values \(\$1, 'draft'/)
+    expect(inserted.params[2]).toBe('c9')
+    expect(JSON.parse(inserted.params[3])).toEqual({ transactions: 30, balanceSheetAccounts: 2, cleanupMonths: 3 })
+    expect(JSON.parse(inserted.params[4])).toEqual([{ serviceId: 'cleanup-transactions-basic' }])
+    expect(inserted.params[6]).toBe('prop-1')
+    expect(inserted.params[7]).toBe('emp-alex')
+
+    const [updated] = fake.matching(/^update proposals/i)
+    expect(updated.text).toMatch(/where id = \$1 and status in \('draft', 'sent'\)/)
+    // Only the lines and their prices are rewritten: never the prospect, letter, client or status.
+    const setClause = updated.text.slice(updated.text.indexOf('set '), updated.text.indexOf('where '))
+    expect(setClause.replace(/\s+/g, ' ').trim()).toBe(
+      'set selections = $2::jsonb, pricing_snapshot = $3::jsonb, updated_at = now()',
+    )
+    expect(JSON.parse(updated.params[1])).toEqual([
+      { serviceId: 'monthly-monthly-transactions-basic' },
+      { serviceId: 'reconciliations', override: 50 },
+    ])
+    // Each part's snapshot holds only its own lines.
+    expect(JSON.parse(updated.params[2]).lines.map((line) => line.serviceId).sort()).toEqual([
+      'monthly-monthly-transactions-basic',
+      'reconciliations',
+    ])
+    expect(JSON.parse(inserted.params[5]).lines.map((line) => line.serviceId)).toEqual(['cleanup-transactions-basic'])
+
+    expect(result.proposal.id).toBe('prop-1')
+    expect(result.part).toMatchObject({ status: 'draft', splitFromId: 'prop-1', clientId: 'c9' })
+  })
+
+  it('a refusal rolls back and inserts nothing; a missing proposal answers null', async () => {
+    const won = splitFake(sourceRow({ status: 'accepted' }))
+    await expect(
+      postgresStore(won).splitProposal('prop-1', { serviceIds: ['cleanup-transactions-basic'] }),
+    ).rejects.toBeInstanceOf(ProposalStateError)
+    expect(won.matching(/^insert into proposals/i)).toHaveLength(0)
+    expect(won.matching(/^ROLLBACK$/)).toHaveLength(1)
+    expect(won.released()).toBe(1)
+
+    const missing = splitFake(null)
+    expect(await postgresStore(missing).splitProposal('prop-1', { serviceIds: ['x'] })).toBeNull()
+    expect(missing.matching(/^insert into proposals/i)).toHaveLength(0)
+  })
+
+  it('an update that matches no row rolls the new part back', async () => {
+    const fake = splitFake(sourceRow(), { failUpdate: true })
+    await expect(
+      postgresStore(fake).splitProposal('prop-1', { serviceIds: ['cleanup-transactions-basic'] }),
+    ).rejects.toBeInstanceOf(ProposalStateError)
+    expect(fake.matching(/^ROLLBACK$/)).toHaveLength(1)
+    expect(fake.matching(/^COMMIT$/)).toHaveLength(0)
+  })
+
+  it('deleting a part that was split off deletes it and re-homes its own parts in ONE statement; any other proposal is a plain delete', async () => {
+    const deleteFake = (row, removed) => {
+      const statements = []
+      const pool = {
+        async query(text, params) {
+          const trimmed = String(text).trim()
+          statements.push({ text: trimmed, params })
+          if (/^with gone as/i.test(trimmed)) return { rows: [{ removed, rehomed: 2 }], rowCount: 1 }
+          if (/^delete from proposals/i.test(trimmed)) return { rows: [{ id: row.id }], rowCount: 1 }
+          if (/^select [\s\S]* from proposals where id = \$1$/i.test(trimmed)) return { rows: [row], rowCount: 1 }
+          return { rows: [], rowCount: 0 }
+        },
+      }
+      return { pool, statements, matching: (pattern) => statements.filter((entry) => pattern.test(entry.text)) }
+    }
+
+    const part = deleteFake(proposalRow({ split_from_id: 'prop-0' }), 1)
+    expect(await postgresStore(part).deleteProposal('prop-1')).toBe(true)
+    const [both] = part.matching(/^with gone as/i)
+    expect(both.params).toEqual(['prop-1', 'prop-0'])
+    expect(both.text).toMatch(/delete from proposals where id = \$1 and status = 'draft' returning id/)
+    expect(both.text).toMatch(/update proposals set split_from_id = \$2\s+where split_from_id = \$1 and exists \(select 1 from gone\)/)
+    expect(part.matching(/^delete from proposals/i)).toHaveLength(0)
+    // The questionnaire link is cleared after it, as for any deleted draft.
+    expect(part.matching(/^update proposal_questionnaires set proposal_id = null/i)).toHaveLength(1)
+
+    // Not a draft any more (sent meanwhile): nothing was removed, so nothing else is touched.
+    const raced = deleteFake(proposalRow({ split_from_id: 'prop-0' }), 0)
+    expect(await postgresStore(raced).deleteProposal('prop-1')).toBe(false)
+    expect(raced.matching(/^update proposal_questionnaires/i)).toHaveLength(0)
+
+    const plain = deleteFake(proposalRow(), 1)
+    expect(await postgresStore(plain).deleteProposal('prop-1')).toBe(true)
+    expect(plain.matching(/^with gone as/i)).toHaveLength(0)
+    expect(plain.matching(/^delete from proposals where id = \$1 and status = 'draft' returning id$/i)).toHaveLength(1)
+  })
+
+  /** A pool that answers `listProposals` with a family and records the link statements. */
+  function familyFake(rows) {
+    const statements = []
+    const pool = {
+      async query(text, params) {
+        const trimmed = String(text).trim()
+        statements.push({ text: trimmed, params })
+        if (/^select [\s\S]* from proposals order by updated_at desc$/i.test(trimmed)) return { rows, rowCount: rows.length }
+        if (/^update proposals set client_id = \$2, updated_at = now\(\)/i.test(trimmed)) {
+          const row = rows.find((entry) => entry.id === params[0])
+          const won = /status = 'accepted'/.test(trimmed)
+          const takes = row && !row.client_id && (won ? row.status === 'accepted' : ['draft', 'sent'].includes(row.status))
+          return takes ? { rows: [{ ...row, client_id: params[1] }], rowCount: 1 } : { rows: [], rowCount: 0 }
+        }
+        return { rows: [], rowCount: 0 }
+      },
+    }
+    return { pool, statements, matching: (pattern) => statements.filter((entry) => pattern.test(entry.text)) }
+  }
+  const familyRows = () => [
+    proposalRow({ id: 'prop-a', status: 'accepted', client_id: 'c-new' }),
+    proposalRow({ id: 'prop-b', status: 'draft', split_from_id: 'prop-a' }),
+    proposalRow({ id: 'prop-c', status: 'accepted', split_from_id: 'prop-a' }),
+    proposalRow({ id: 'prop-d', status: 'declined', split_from_id: 'prop-b' }),
+    proposalRow({ id: 'prop-e', status: 'sent', split_from_id: 'prop-a', client_id: 'c-other' }),
+    proposalRow({ id: 'prop-z', status: 'draft' }),
+  ]
+
+  it('linkSplitPartsToClient links the open and the Won parts with no client, each by its own compare-and-set', async () => {
+    const fake = familyFake(familyRows())
+    const linked = await postgresStore(fake).linkSplitPartsToClient('prop-a', 'c-new')
+    expect(linked).toEqual(['prop-b'])
+    const updates = fake.matching(/^update proposals set client_id/i)
+    expect(updates.map((entry) => entry.params)).toEqual([
+      ['prop-b', 'c-new'],
+      ['prop-c', 'c-new'],
+    ])
+    expect(updates[0].text).toMatch(/client_id is null and status in \('draft', 'sent'\)/)
+    expect(updates[1].text).toMatch(/status = 'accepted' and \(client_id is null or client_id = \$2\)/)
+  })
+
+  it('the family checks read siblings from the list: a live client is found, a retired or missing one is not', async () => {
+    const pgStore = postgresStore(familyFake(familyRows()))
+    const clients = { 'c-new': { id: 'c-new', name: 'Lantern Foundation', lifecycleStage: 'onboarding' } }
+    pgStore.getClientById = async (id) => clients[id] ?? null
+    expect((await pgStore._splitFamilyClient('prop-b'))?.id).toBe('c-new')
+    // The proposal itself counts once it is one part of a split.
+    expect((await pgStore._splitFamilyClient('prop-a'))?.id).toBe('c-new')
+    expect(await pgStore._splitFamilyClient('prop-z')).toBeNull()
+    await expect(pgStore._refuseSecondSplitClient({ id: 'prop-b' })).rejects.toThrow(splitClientRefusal('Lantern Foundation'))
+
+    clients['c-new'].lifecycleStage = 'inactive'
+    expect(await pgStore._splitFamilyClient('prop-b')).toBeNull()
+    // No live client now, but prop-c is Won with no client: no letter yet, then a live one.
+    pgStore.listEngagements = async () => []
+    await expect(pgStore._refuseSecondSplitClient({ id: 'prop-b' })).rejects.toThrow(SPLIT_DRAFT_FIRST)
+    expect(await pgStore._splitPartAwaitingSignature('prop-b')).toBe(false)
+    pgStore.listEngagements = async () => [{ id: 'eng-0', status: 'void' }, { id: 'eng-1', status: 'sent' }]
+    await expect(pgStore._refuseSecondSplitClient({ id: 'prop-b' })).rejects.toThrow(SPLIT_SIGN_FIRST)
+    expect(await pgStore._splitPartAwaitingSignature('prop-b')).toBe(true)
+    pgStore.listEngagements = async () => [{ id: 'eng-1', status: 'void' }]
+    await expect(pgStore._refuseSecondSplitClient({ id: 'prop-b' })).resolves.toBeUndefined()
+  })
+
+  it('reads split_from_id with every proposal', async () => {
+    const fake = fakeProposalPostgres(proposalRow({ split_from_id: 'prop-0' }))
+    const read = await postgresStore(fake).getProposal('prop-1')
+    expect(read.splitFromId).toBe('prop-0')
+    expect(fake.statements[0].text).toMatch(/accept_picks, split_from_id from proposals/)
+    const listed = await postgresStore(fake).listProposals()
+    expect(listed[0].splitFromId).toBe('prop-0')
   })
 })

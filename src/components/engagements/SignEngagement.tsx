@@ -320,6 +320,11 @@ export function SigningSummary({
         {onboardingOpened ? (
           <li>Onboarding checklist opened at the Onboarding stage - the Proposal stage is marked done.</li>
         ) : null}
+        {(result.linkedPartIds ?? []).length > 0 ? (
+          <li>
+            {`${(result.linkedPartIds ?? []).length === 1 ? 'The other open part of this proposal now belongs' : `The ${(result.linkedPartIds ?? []).length} other open parts of this proposal now belong`} to this client, so accepting one adds to this client instead of creating another.`}
+          </li>
+        ) : null}
         {result.softwareAdded.length > 0 ? (
           <li>{`Software added as monthly expenses: ${result.softwareAdded.join(', ')}.`}</li>
         ) : null}

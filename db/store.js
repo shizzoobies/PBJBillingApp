@@ -53,12 +53,26 @@ import {
   cleanProposalProspect,
   cleanProposalSelections,
   formatProposalMoney,
+  hoursByRoleOf,
   priceProposal,
   sanitizeProposalPricing,
   snapshotHoursByRole,
   softwareLocksOf,
 } from '../lib/proposal-pricing.js'
 import { proposalOutcomeAction, proposalOutcomeWords } from '../lib/proposal-outcomes.js'
+import {
+  SPLIT_CHANGED,
+  SPLIT_DRAFT_FIRST,
+  SPLIT_SIGN_FIRST,
+  SPLIT_STATUSES,
+  splitClientRefusal,
+  splitFamily,
+  splitLineTotals,
+  splitRefusal,
+  splitSelections,
+  splitSiblings,
+  splitSignRefusal,
+} from '../lib/proposal-split.js'
 import { DEFAULT_ENGAGEMENT_SECTIONS, EMAIL_SECTION_KEY, sanitizeEngagementSections } from '../lib/engagement-sections.js'
 import { assembleEngagement } from '../lib/engagement-assemble.js'
 import { engagementChangedSinceSent, engagementHash } from '../lib/engagement-hash.js'
@@ -3317,7 +3331,7 @@ const RECURRING_CATEGORIES = ['expense', 'software']
 /** Every `proposals` column, in the order `mapProposal` reads them. */
 const PROPOSAL_COLUMNS = `id, status, prospect, client_id, inputs, selections, pricing_snapshot,
   letter, letter_at, messages, email_log, sent_at, accepted_at, declined_at, decline_note,
-  copied_from_id, created_by, created_at, updated_at, accept_picks`
+  copied_from_id, created_by, created_at, updated_at, accept_picks, split_from_id`
 
 /**
  * `PROPOSAL_COLUMNS` without `messages` — what `listProposals` selects. The
@@ -7196,6 +7210,17 @@ export class AppDataStore {
       )
       if ((acceptPicksColumn.rows?.length ?? 0) === 0) {
         await this.pool.query(`alter table proposals add column if not exists accept_picks jsonb`)
+      }
+      // Splitting a proposal into parts (featreq-23b26bb1): the proposal a part was
+      // split off from. No foreign key (the `copied_from_id` idiom): a part outlives
+      // a deleted draft it came from. Look-first, so a boot with the column in place
+      // takes no lock.
+      const splitFromColumn = await this.pool.query(
+        `select 1 from information_schema.columns
+          where table_schema = current_schema() and table_name = 'proposals' and column_name = 'split_from_id'`,
+      )
+      if ((splitFromColumn.rows?.length ?? 0) === 0) {
+        await this.pool.query(`alter table proposals add column if not exists split_from_id text`)
       }
 
       // PROPOSAL QUESTIONNAIRES (featreq-8f139178): the intake that comes before
@@ -13806,6 +13831,8 @@ export class AppDataStore {
       declinedAt: iso(row.declined_at ?? row.declinedAt),
       declineNote: row.decline_note ?? row.declineNote ?? null,
       copiedFromId: row.copied_from_id ?? row.copiedFromId ?? null,
+      // The proposal this part was split off from (featreq-23b26bb1), or null.
+      splitFromId: row.split_from_id ?? row.splitFromId ?? null,
       createdBy: row.created_by ?? row.createdBy ?? null,
       createdAt: iso(row.created_at ?? row.createdAt),
       updatedAt: iso(row.updated_at ?? row.updatedAt),
@@ -13923,6 +13950,7 @@ export class AppDataStore {
       declinedAt: null,
       declineNote: null,
       copiedFromId: cleanProposalId(copiedFromId),
+      splitFromId: null,
       createdBy: cleanProposalId(createdBy),
       createdAt: now,
       updatedAt: now,
@@ -14152,11 +14180,30 @@ export class AppDataStore {
       throw new ProposalStateError('Only a draft can be deleted — close a sent proposal as lost instead.')
     }
     if (this.pool) {
-      const result = await this.pool.query(
-        `delete from proposals where id = $1 and status = 'draft' returning id`,
-        [id],
-      )
-      if ((result.rowCount ?? 0) === 0) return false
+      if (current.splitFromId) {
+        // A part that was itself split off (featreq-23b26bb1): the parts split from IT
+        // now point at what it pointed at, so they stay one family with the rest - in
+        // the SAME statement as the delete, so the two can never come apart. (A deleted
+        // first proposal needs nothing: its parts still share its id.)
+        const { rows } = await this.pool.query(
+          `with gone as (
+             delete from proposals where id = $1 and status = 'draft' returning id
+           ), rehomed as (
+             update proposals set split_from_id = $2
+              where split_from_id = $1 and exists (select 1 from gone)
+              returning id
+           )
+           select (select count(*) from gone)::int as removed, (select count(*) from rehomed)::int as rehomed`,
+          [id, current.splitFromId],
+        )
+        if (!(Number(rows?.[0]?.removed) > 0)) return false
+      } else {
+        const result = await this.pool.query(
+          `delete from proposals where id = $1 and status = 'draft' returning id`,
+          [id],
+        )
+        if ((result.rowCount ?? 0) === 0) return false
+      }
       // A questionnaire's draft that is gone is a draft it no longer has: clear
       // the link (there is no FK to do it) so the inbox offers Start draft again
       // instead of an "Open the draft" that goes nowhere.
@@ -14174,6 +14221,11 @@ export class AppDataStore {
       const list = Array.isArray(authState.proposals) ? authState.proposals : []
       const next = list.filter((row) => !row || row.id !== id || row.status !== 'draft')
       if (next.length === list.length) return false
+      // Parts split off from the deleted part stay in its family (see the Postgres branch).
+      const gone = list.find((row) => row && row.id === id)
+      if (gone?.splitFromId) {
+        for (const row of next) if (row && row.splitFromId === id) row.splitFromId = gone.splitFromId
+      }
       authState.proposals = next
       for (const questionnaire of Array.isArray(authState.proposalQuestionnaires)
         ? authState.proposalQuestionnaires
@@ -14208,6 +14260,265 @@ export class AppDataStore {
       // copy where the source never had it (featreq-311473e2 pt 2).
       applyDefaults: false,
     })
+  }
+
+  /**
+   * What a split writes, worked out from the proposal AS READ UNDER THE LOCK (or
+   * inside the file's queue slot): the lines that stay, the new part's whole
+   * record, and both snapshots. Throws ProposalStateError when it cannot happen.
+   *
+   * A split changes NO figure: each part's snapshot is the proposal's own priced
+   * lines divided between them, with the totals and hours summed again from those
+   * lines and the rates and catalog time carried over. So what stays plus what
+   * moves always comes to what the whole came to, a SENT proposal keeps exactly
+   * what the prospect saw, and a catalog change since (a factor, a retired
+   * service) never slips in through a split. (The new part is a DRAFT: like any
+   * draft, the editor reprices it once on opening if the firm's rates differ from
+   * the ones it carries, and says so.) Only a proposal whose snapshot does
+   * not line up with its selections (an old or missing snapshot) is priced fresh,
+   * by the rule `updateProposal` keeps: a DRAFT at today's rates, a SENT one at
+   * the rates and software figures it was sent with.
+   */
+  static _planProposalSplit(source, { serviceIds, createdBy, pricing, now }) {
+    const refusal = splitRefusal({
+      status: source.status,
+      selections: source.selections,
+      moveIds: serviceIds,
+      statusWords: proposalOutcomeWords(source.status),
+    })
+    if (refusal) throw new ProposalStateError(refusal)
+    const { move, stay } = splitSelections(source.selections, serviceIds)
+    const sentRates =
+      source.pricingSnapshot?.rates && Object.keys(source.pricingSnapshot.rates).length > 0
+        ? source.pricingSnapshot.rates
+        : pricing.rates
+    const snapshot = source.pricingSnapshot
+    const snapshotLines = Array.isArray(snapshot?.lines) ? snapshot.lines : []
+    const lineIds = snapshotLines.map((line) => line?.serviceId)
+    const selectionIds = source.selections.map((entry) => entry.serviceId)
+    // The snapshot prices exactly these selections: one line each, nothing else.
+    const linedUp =
+      lineIds.length === selectionIds.length &&
+      new Set(lineIds).size === lineIds.length &&
+      selectionIds.every((serviceId) => lineIds.includes(serviceId))
+    const price = (selections) => {
+      if (linedUp) {
+        const wanted = new Set(selections.map((entry) => entry.serviceId))
+        const lines = snapshotLines.filter((line) => wanted.has(line.serviceId))
+        return {
+          rates: { ...(snapshot.rates ?? {}) },
+          lines,
+          totals: splitLineTotals(lines),
+          hoursByRole: hoursByRoleOf(lines),
+          catalogAt: snapshot.catalogAt ?? now,
+        }
+      }
+      return source.status === 'sent'
+        ? proposalSnapshot(
+            pricing,
+            source.inputs,
+            selections,
+            snapshot?.catalogAt ?? now,
+            sentRates,
+            softwareLocksOf(snapshot?.lines),
+          )
+        : proposalSnapshot(pricing, source.inputs, selections, now)
+    }
+    return {
+      stay,
+      staySnapshot: price(stay),
+      part: {
+        id: `prop-${randomUUID().slice(0, 8)}`,
+        status: 'draft',
+        prospect: source.prospect,
+        clientId: source.clientId ?? null,
+        inputs: source.inputs,
+        selections: move,
+        pricingSnapshot: price(move),
+        letter: null,
+        letterAt: null,
+        messages: [],
+        emailLog: [],
+        sentAt: null,
+        acceptedAt: null,
+        declinedAt: null,
+        declineNote: null,
+        copiedFromId: null,
+        splitFromId: source.id,
+        createdBy: cleanProposalId(createdBy),
+        createdAt: now,
+        updatedAt: now,
+      },
+    }
+  }
+
+  /**
+   * "Split" (featreq-23b26bb1): move the lines named in `serviceIds` off a Draft
+   * or Sent proposal into a NEW draft for the same prospect - same client link,
+   * same counts, each line exactly as it was (an override or a typed amount goes
+   * with it). The proposal keeps the rest, and its status, letter, chat and email
+   * log; the new part starts with none and points back through `splitFromId`.
+   *
+   * One write: Postgres locks the row, re-reads it and does the insert and the
+   * update in one transaction; the file backend does both in one queue slot. So
+   * a line is never on both parts and never on neither.
+   *
+   * @returns {{ proposal, part } | null} null when there is no such proposal.
+   */
+  async splitProposal(id, { serviceIds = [], createdBy = null } = {}) {
+    if (!id) return null
+    const pricing = (await this.getFirmSettings()).proposalPricing
+    if (this.pool) {
+      return this._withTransaction(async (dbClient) => {
+        const locked = await dbClient.query(
+          `select ${PROPOSAL_COLUMNS} from proposals where id = $1 for update`,
+          [id],
+        )
+        if (!locked.rows?.[0]) return null
+        const source = AppDataStore.mapProposal(locked.rows[0])
+        const plan = AppDataStore._planProposalSplit(source, { serviceIds, createdBy, pricing, now: nowIso() })
+        const inserted = await dbClient.query(
+          `insert into proposals (id, status, prospect, client_id, inputs, selections,
+              pricing_snapshot, split_from_id, created_by, created_at, updated_at)
+           values ($1, 'draft', $2::jsonb, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9, $9)
+           returning ${PROPOSAL_COLUMNS}`,
+          [
+            plan.part.id,
+            JSON.stringify(plan.part.prospect),
+            plan.part.clientId,
+            JSON.stringify(plan.part.inputs),
+            JSON.stringify(plan.part.selections),
+            JSON.stringify(plan.part.pricingSnapshot),
+            plan.part.splitFromId,
+            plan.part.createdBy,
+            plan.part.createdAt,
+          ],
+        )
+        const updated = await dbClient.query(
+          `update proposals
+              set selections = $2::jsonb, pricing_snapshot = $3::jsonb, updated_at = now()
+            where id = $1 and status in ('draft', 'sent')
+            returning ${PROPOSAL_COLUMNS}`,
+          [id, JSON.stringify(plan.stay), JSON.stringify(plan.staySnapshot)],
+        )
+        // Zero rows under our own row lock should not happen; if it ever does, the
+        // throw rolls the new part back so no line is on both.
+        if (!updated.rows?.[0]) throw new ProposalStateError(SPLIT_CHANGED)
+        return {
+          proposal: AppDataStore.mapProposal(updated.rows[0]),
+          part: AppDataStore.mapProposal(inserted.rows?.[0] ?? plan.part),
+        }
+      })
+    }
+    // The read, the decision and both writes in ONE queue slot of the proposals
+    // file. Raw fs calls only in here.
+    return enqueueFileOperation(localAuthPath, async () => {
+      if (!existsSync(localAuthPath)) return null
+      const authState = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      const target = (Array.isArray(authState.proposals) ? authState.proposals : []).find(
+        (row) => row && row.id === id,
+      )
+      if (!target) return null
+      const now = nowIso()
+      const plan = AppDataStore._planProposalSplit(AppDataStore.mapProposal(target), {
+        serviceIds,
+        createdBy,
+        pricing,
+        now,
+      })
+      target.selections = plan.stay
+      target.pricingSnapshot = plan.staySnapshot
+      target.updatedAt = now
+      authState.proposals.push(plan.part)
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return { proposal: AppDataStore.mapProposal(target), part: AppDataStore.mapProposal(plan.part) }
+    })
+  }
+
+  /**
+   * Accept's guard for a part of a split that has no client yet (featreq-23b26bb1):
+   * the parts of one proposal are for ONE prospect, so a second part must never
+   * make a second client. Refused when another part already belongs to a live
+   * client (pick that client first - the letter is then an amendment), or when
+   * another part is Won and its letter is still waiting to be signed (sign it
+   * first - signing links this part to the client it makes). A part whose every
+   * letter was voided, or whose client is gone or retired, holds nothing back.
+   */
+  async _refuseSecondSplitClient(proposal) {
+    const siblings = splitSiblings(await this.listProposals(), proposal.id)
+    for (const sibling of siblings) {
+      if (!sibling.clientId) continue
+      const client = await this.getClientById(sibling.clientId)
+      if (!client || (client.lifecycleStage ?? 'active') === 'inactive') continue
+      throw new ProposalStateError(splitClientRefusal(client.name))
+    }
+    for (const sibling of siblings) {
+      if (sibling.status !== 'accepted' || sibling.clientId) continue
+      const letters = await this.listEngagements({ proposalId: sibling.id })
+      if (letters.length > 0 && letters.every((letter) => letter.status === 'void')) continue
+      // No letter at all (its draft failed at Accept): there is nothing to sign or void yet.
+      throw new ProposalStateError(letters.length === 0 ? SPLIT_DRAFT_FIRST : SPLIT_SIGN_FIRST)
+    }
+  }
+
+  /**
+   * True when another part of this proposal's split is Won, has no client yet and
+   * has a LIVE (not voided) engagement letter: a letter that will make the client
+   * when it is signed. What "Draft the engagement" checks, so a Won part whose
+   * letter was voided is never given a second client-making letter beside it.
+   */
+  async _splitPartAwaitingSignature(proposalId) {
+    for (const sibling of splitSiblings(await this.listProposals(), proposalId)) {
+      if (sibling.status !== 'accepted' || sibling.clientId) continue
+      const letters = await this.listEngagements({ proposalId: sibling.id })
+      if (letters.some((letter) => letter.status !== 'void')) return true
+    }
+    return false
+  }
+
+  /**
+   * Signing just made a client from one part of a split: every OTHER part with
+   * no client of its own is linked to that client. An OPEN part (Draft or Sent)
+   * then accepts as an amendment to this client instead of making a second one;
+   * a WON part (its letter was voided, or it is still to be signed) is linked too,
+   * so "Draft the engagement" on it drafts an amendment and a leftover original
+   * letter is refused at signing (`_splitFamilyClient`). A Closed/Lost part is
+   * left as the record it is. The link is `linkProposalClient`'s compare-and-set,
+   * so a part someone linked meanwhile is left alone.
+   *
+   * @returns {string[]} the ids of the OPEN parts it linked (what the signing summary names).
+   */
+  async linkSplitPartsToClient(proposalId, clientId) {
+    if (!proposalId || !clientId) return []
+    const linked = []
+    for (const sibling of splitSiblings(await this.listProposals(), proposalId)) {
+      if (sibling.clientId) continue
+      if (SPLIT_STATUSES.includes(sibling.status)) {
+        if (await this.linkProposalClient(sibling.id, clientId)) linked.push(sibling.id)
+      } else if (sibling.status === 'accepted') {
+        await this.linkProposalClient(sibling.id, clientId, { won: true })
+      }
+    }
+    return linked
+  }
+
+  /**
+   * The live client another part of this proposal's split already belongs to, or
+   * null: what signing checks before it would MAKE a client (the one place a
+   * client is created). The proposal itself counts when it is one part of a
+   * split; a proposal that was never split answers null, and so does a client
+   * that is gone or retired.
+   */
+  async _splitFamilyClient(proposalId) {
+    if (!proposalId) return null
+    const family = splitFamily(await this.listProposals(), proposalId)
+    if (family.length < 2) return null
+    for (const part of family) {
+      if (!part.clientId) continue
+      const client = await this.getClientById(part.clientId)
+      if (client && (client.lifecycleStage ?? 'active') !== 'inactive') return client
+    }
+    return null
   }
 
   /**
@@ -14583,6 +14894,8 @@ export class AppDataStore {
     if (!linkedClientId && !(proposal.prospect?.company || proposal.prospect?.contactName)) {
       throw new ProposalStateError('Give the prospect a company or contact name before accepting.')
     }
+    // A part of a split never makes a second client (featreq-23b26bb1).
+    if (!linkedClientId) await this._refuseSecondSplitClient(proposal)
     // Superseding replaces the client's CURRENT signed engagement, so there must be one.
     let superseded = null
     if (mode === 'supersede') {
@@ -14640,7 +14953,10 @@ export class AppDataStore {
     // database or system text).
     let engagementError = null
     try {
-      engagement = await this.createEngagementFromProposal(proposal, {
+      // From the row the flip returned, not the read at the top: a split (or an edit)
+      // that landed in between must not put lines on this letter that are no longer
+      // on this proposal.
+      engagement = await this.createEngagementFromProposal(accepted ?? proposal, {
         kind,
         createdBy: actorUserId,
         packageId: pkg ? pkg.id : null,
@@ -30129,6 +30445,24 @@ export class AppDataStore {
       error.engagementId = existing.id
       throw error
     }
+    // One part of a split with no client yet (featreq-23b26bb1): if another part
+    // already belongs to a live client, this proposal is tied to it now, so the
+    // letter drafted below is an amendment; and while another part's letter is
+    // still waiting to make the client, a second client-making letter is refused.
+    let draftFor = proposal
+    if (!proposal.clientId) {
+      const partClient = await this._splitFamilyClient(proposal.id)
+      if (partClient) {
+        draftFor = (await this.linkProposalClient(proposal.id, partClient.id, { won: true })) ?? proposal
+      } else if (await this._splitPartAwaitingSignature(proposal.id)) {
+        throw new EngagementStateError(SPLIT_SIGN_FIRST, 'split_sign_first')
+      }
+    }
+    return this._draftEngagementForWonProposal(draftFor, { createdBy })
+  }
+
+  /** The drafting half of `draftEngagementForProposal`, for a Won proposal that has no live letter. */
+  async _draftEngagementForWonProposal(proposal, { createdBy = null } = {}) {
     // The package and plans picked at Accept (kept on the proposal, stage 3), as
     // far as they still exist: a package or plan deleted since is left out.
     const picks = proposal.acceptPicks
@@ -31441,6 +31775,23 @@ export class AppDataStore {
         )
       }
     }
+    // A split proposal's parts end up on ONE client (featreq-23b26bb1): a letter that
+    // would MAKE a client is refused when another part already belongs to a live one.
+    // Its proposal is tied to that client first, so the redraft it asks for is an
+    // amendment.
+    if (!current.clientId && current.proposalId) {
+      const partClient = await this._splitFamilyClient(current.proposalId)
+      if (partClient) {
+        let tied = false
+        try {
+          await this.linkProposalClient(current.proposalId, partClient.id, { won: true })
+          tied = (await this.getProposal(current.proposalId))?.clientId === partClient.id
+        } catch (error) {
+          console.error('[proposals] could not tie', current.proposalId, 'to its split client', error)
+        }
+        throw refuse(splitSignRefusal(partClient.name, { tied }), 'split_client')
+      }
+    }
     const firm = current.clientId ? null : await this.getFirmSettings()
 
     // ---- 1. the client and its contact (a prospect only) ----
@@ -31877,10 +32228,25 @@ export class AppDataStore {
         }
       }
 
+      // Splitting (featreq-23b26bb1): the other parts of this letter's proposal now
+      // belong to the client it made (a retried signing of an original links them
+      // too: the first try made the client, and the link is a compare-and-set). After
+      // the signing is final, and a failure is logged only - Accept or signing on
+      // such a part refuses and says how to fix it.
+      let linkedPartIds = []
+      if (current.proposalId && (createdClient || current.kind === 'original')) {
+        try {
+          linkedPartIds = await this.linkSplitPartsToClient(current.proposalId, clientId)
+        } catch (error) {
+          console.error('[proposals] signing could not link the other parts of', current.proposalId, error)
+        }
+      }
+
       return {
         engagement,
         clientId,
         createdClient,
+        linkedPartIds,
         clonedTemplateIds,
         linkedTemplateIds,
         ambiguousTemplateIds,

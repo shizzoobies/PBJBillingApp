@@ -465,6 +465,8 @@ export type Proposal = {
   declinedAt: string | null
   declineNote: string | null
   copiedFromId: string | null
+  /** The proposal this part was split off from (featreq-23b26bb1), or null. */
+  splitFromId?: string | null
   createdBy: string | null
   createdAt: string
   updatedAt: string | null
@@ -2971,6 +2973,8 @@ export type EngagementSignResult = {
   engagement: Engagement
   clientId: string
   createdClient: boolean
+  /** Other open parts of a split proposal that signing tied to the client it made (featreq-23b26bb1). */
+  linkedPartIds?: string[]
   clonedTemplateIds: string[]
   /** Checklists the client already had that signing tied to the package / plans instead of copying. */
   linkedTemplateIds?: string[]

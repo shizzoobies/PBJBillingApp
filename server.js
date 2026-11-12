@@ -14982,6 +14982,61 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // POST /api/proposals/:id/split - { serviceIds } (featreq-23b26bb1): the named
+    // lines move off a Draft or Sent proposal into a new draft for the same
+    // prospect; the proposal keeps the rest. Answers both: { proposal, part }.
+    const proposalSplitMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/split$/)
+    if (proposalSplitMatch && request.method === 'POST') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can split proposals' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      if (!isJsonContentType(request)) {
+        sendJson(response, 415, { error: 'application/json required' })
+        return
+      }
+      const payload = (await readJsonBody(request)) ?? {}
+      const serviceIds = Array.isArray(payload.serviceIds)
+        ? payload.serviceIds.filter((entry) => typeof entry === 'string' && entry).slice(0, 200)
+        : []
+      let split
+      try {
+        split = await appDataStore.splitProposal(proposalSplitMatch[1], {
+          serviceIds,
+          createdBy: session.user.id,
+        })
+      } catch (error) {
+        if (error instanceof ProposalStateError) {
+          sendJson(response, 409, { error: 'proposal_refused', message: error.message })
+          return
+        }
+        throw error
+      }
+      if (!split) {
+        sendJson(response, 404, { error: 'Proposal not found' })
+        return
+      }
+      // The split is saved by now: a failed activity line must not answer as a failed split.
+      try {
+        await appDataStore.recordActivity(
+          session.user.id,
+          'proposal_split',
+          `${split.proposal.prospect.company || split.proposal.id}: ${split.part.selections.length} of ${split.part.selections.length + split.proposal.selections.length} lines moved to ${split.part.id}`,
+        )
+      } catch (error) {
+        console.error('[proposals] could not record the split of', proposalSplitMatch[1], error)
+      }
+      broadcastDataChanged()
+      sendJson(response, 201, split)
+      return
+    }
+
     // POST /api/proposals/:id/reprice — "Reprice at today's catalog": an edit
     // that changes nothing but the snapshot.
     const proposalRepriceMatch = normalizedPath.match(/^\/api\/proposals\/([^/]+)\/reprice$/)

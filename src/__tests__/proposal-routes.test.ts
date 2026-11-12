@@ -79,6 +79,7 @@ describe('the proposal CRUD routes are owner-only and same-origin', () => {
     { name: 'PATCH /api/proposals/:id', pattern: /proposalIdMatch && request\.method === 'PATCH'/, write: true },
     { name: 'DELETE /api/proposals/:id', pattern: /proposalIdMatch && request\.method === 'DELETE'/, write: true },
     { name: 'POST /api/proposals/:id/copy', pattern: /proposalCopyMatch && request\.method === 'POST'/, write: true },
+    { name: 'POST /api/proposals/:id/split', pattern: /proposalSplitMatch && request\.method === 'POST'/, write: true },
     {
       name: 'POST /api/proposals/:id/reprice',
       pattern: /proposalRepriceMatch && request\.method === 'POST'/,
@@ -106,6 +107,31 @@ describe('the proposal CRUD routes are owner-only and same-origin', () => {
       expect(block).toContain('error instanceof ProposalStateError')
       expect(block).toContain("sendJson(response, 409, { error: 'proposal_refused', message: error.message })")
     }
+  })
+
+  // featreq-23b26bb1: splitting a proposal into parts.
+  it('the split route takes JSON, hands the store only the line ids and the actor, and answers a refusal as a 409', () => {
+    const block = routeBlock(/proposalSplitMatch && request\.method === 'POST'/, 3000)
+    expect(serverSource).toContain("const proposalSplitMatch = normalizedPath.match(/^\\/api\\/proposals\\/([^/]+)\\/split$/)")
+    expect(block).toContain('isJsonContentType(request)')
+    expect(block).toContain("payload.serviceIds.filter((entry) => typeof entry === 'string' && entry).slice(0, 200)")
+    expect(block).toContain('appDataStore.splitProposal(proposalSplitMatch[1], {')
+    expect(block).toContain('createdBy: session.user.id,')
+    expect(block).not.toContain('splitProposal(proposalSplitMatch[1], payload')
+    expect(block).toContain('error instanceof ProposalStateError')
+    expect(block).toContain("sendJson(response, 409, { error: 'proposal_refused', message: error.message })")
+    expect(block).toContain("sendJson(response, 404, { error: 'Proposal not found' })")
+    expect(block).toContain('sendJson(response, 201, split)')
+  })
+
+  it('a split that saved is never answered as a failure because its activity line could not be written', () => {
+    const block = routeBlock(/proposalSplitMatch && request\.method === 'POST'/, 3000)
+    const record = block.indexOf("'proposal_split'")
+    expect(record).toBeGreaterThan(-1)
+    const before = block.slice(0, record)
+    const after = block.slice(record)
+    expect(before.lastIndexOf('try {')).toBeGreaterThan(before.lastIndexOf('splitProposal('))
+    expect(after).toContain("console.error('[proposals] could not record the split of'")
   })
 
   it('nothing here goes near the bulk save', () => {
