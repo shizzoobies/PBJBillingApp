@@ -23932,6 +23932,13 @@ export class AppDataStore {
    * opens now for the next person. Every guard below still applies, and the new
    * stage carries `skipNotice` (who skipped the step before it, and why).
    *
+   * `afterPush` (Push a step, featreq-78f09571 - only `openNextStageAfterPush`
+   * passes it): a stage that was PUSHED to a new date counts as ready too, so the
+   * next stage opens now while the pushed one stays open. The next stage is dated
+   * from the pushed stage's ORIGINAL due date (`cycleDueDate`), the date a finished
+   * stage would have handed it - a push delays one person's step, not the next
+   * person's. The new stage carries the push's notice in `skipNotice`.
+   *
    * In Postgres mode the new checklist is inserted via the existing
    * createChecklist path so activity log + persistence are consistent. Two
    * spawns racing for the same next stage (two ticks, a tick and an early open,
@@ -23941,7 +23948,7 @@ export class AppDataStore {
    * returned checklist into data and persist (since we already hold the open
    * data snapshot for that write).
    */
-  async maybeSpawnNextStage(data, checklist, { fileMode = false, allowWaiting = false, afterSkip = false, skipNotice = null } = {}) {
+  async maybeSpawnNextStage(data, checklist, { fileMode = false, allowWaiting = false, afterSkip = false, afterPush = false, skipNotice = null } = {}) {
     // Every "did not advance" answer says why (stage advance hardening, after
     // Bright Tower 2026-10-01 and XAct 2026-10-05 stopped at stage 1 with no
     // trace). The reasons that mean "all done, yet no next stage" and are not
@@ -23957,10 +23964,14 @@ export class AppDataStore {
     }
     // A skipped stage is stepped past whatever its steps say (featreq-7e1827e0).
     const readyAfterSkip = afterSkip && Boolean(checklist?.skippedAt)
-    if (!readyAfterSkip && (!checklist || !Array.isArray(checklist.items) || checklist.items.length === 0)) {
+    // A pushed stage is still open; its next stage opens beside it (featreq-78f09571).
+    const readyAfterPush = afterPush && Boolean(checklist?.pushedAt) && !checklist?.skippedAt
+    // Either one carries its notice onto the stage it opens.
+    const carriesNotice = (readyAfterSkip || readyAfterPush) && Boolean(skipNotice)
+    if (!readyAfterSkip && !readyAfterPush && (!checklist || !Array.isArray(checklist.items) || checklist.items.length === 0)) {
       return { spawned: null, reason: 'not_all_done' }
     }
-    const allDone = readyAfterSkip || checklist.items.every((item) => item.done)
+    const allDone = readyAfterSkip || readyAfterPush || checklist.items.every((item) => item.done)
     // Open next step now also revives a finished stage whose next one never
     // opened (featreq-ed73d181), read through the roll-up.
     const readyEarly = allowWaiting && (stageOpenWorkAllWaiting(checklist) || stageFinished(checklist))
@@ -24007,7 +24018,11 @@ export class AppDataStore {
 
     const spawn = buildSpawnedNextStageChecklist({
       template: { ...template, stages },
-      justCompletedChecklist: checklist,
+      // After a push the next stage is dated from the date this stage was
+      // ORIGINALLY due, not the date it was pushed to.
+      justCompletedChecklist: readyAfterPush
+        ? { ...checklist, dueDate: checklist.cycleDueDate || checklist.dueDate }
+        : checklist,
     })
     if (!spawn) return skip('next_stage_empty')
     // Another case of this recipe already holds this step on this date: the v3
@@ -24016,9 +24031,9 @@ export class AppDataStore {
     if (holder) return skip('date_taken', holder.id)
 
     const logOpenedAfterSkip = (opened) => {
-      if (readyAfterSkip) {
+      if (readyAfterSkip || readyAfterPush) {
         console.log(
-          `[stage-advance] opened ${opened.id} case ${caseId} stage ${stageIndex + 2}: skipped (after ${checklist.id})`,
+          `[stage-advance] opened ${opened.id} case ${caseId} stage ${stageIndex + 2}: ${readyAfterSkip ? 'skipped' : 'pushed'} (after ${checklist.id})`,
         )
       }
     }
@@ -24031,7 +24046,7 @@ export class AppDataStore {
       // which is held by the caller's slot and would deadlock).
       const owner = (data.clients ?? []).find((entry) => entry?.id === spawn.clientId)
       if (owner?.isBillingMaster === true) throw billingMasterRefusal(owner.name, 'tasks')
-      const spawned = readyAfterSkip && skipNotice ? { ...spawn, skipNotice } : spawn
+      const spawned = carriesNotice ? { ...spawn, skipNotice } : spawn
       logOpenedAfterSkip(spawned)
       return { spawned, reason: null }
     }
@@ -24040,7 +24055,7 @@ export class AppDataStore {
     // path other instances do.
     let created
     try {
-      created = await this.createChecklist(spawn, readyAfterSkip && skipNotice ? { skipNotice } : {})
+      created = await this.createChecklist(spawn, carriesNotice ? { skipNotice } : {})
     } catch (error) {
       if (error?.code !== '23505') throw error
       // Another request created this next stage between our read and our insert.
@@ -24159,8 +24174,40 @@ export class AppDataStore {
    * `existing`, so its person can be told and the card shows who skipped and why.
    */
   async openNextStageAfterSkip(checklistId, skipNotice) {
+    return this._openNextStageCarrying(checklistId, skipNotice, 'skip')
+  }
+
+  /**
+   * Push a step (featreq-78f09571): after POST /api/checklists/:id/push moved a
+   * stage of a 'step'-mode recipe to a new date, open the NEXT stage now for the
+   * next person, carrying the push's notice. `checklistId` is the row that holds
+   * the open work (the new copy, after a split push). The pushed stage stays
+   * open; the tick that later finishes it finds the next stage already there.
+   *
+   * Everything else is `openNextStageAfterSkip`: the same guards, the same
+   * answers, the same stamp onto a next step that is already open - except a next
+   * step whose work is already FINISHED, which is answered `finished: true` and
+   * left untouched (a second push after the next person is done). Refuses
+   * `not_pushed` (no push stamp), `skipped`, `pushed` (the done-only record a
+   * split left behind) and `onboarding`.
+   */
+  async openNextStageAfterPush(checklistId, pushNotice) {
+    return this._openNextStageCarrying(checklistId, pushNotice, 'push')
+  }
+
+  /** The shared body of `openNextStageAfterSkip` and `openNextStageAfterPush`. */
+  async _openNextStageCarrying(checklistId, skipNotice, mode) {
+    const afterPush = mode === 'push'
+    const spawnOptions = afterPush ? { afterPush: true, skipNotice } : { afterSkip: true, skipNotice }
     const refusal = (checklist) => {
       if (!checklist || checklist.deletedAt) return 'not_found'
+      if (afterPush) {
+        if (checklist.skippedAt) return 'skipped'
+        if (checklist.pushedToChecklistId) return 'pushed'
+        if (checklist.onboardingForClientId) return 'onboarding'
+        if (!checklist.pushedAt) return 'not_pushed'
+        return null
+      }
       if (!checklist.skippedAt) return 'not_skipped'
       return null
     }
@@ -24173,7 +24220,7 @@ export class AppDataStore {
       if (refused) return { spawned: null, reason: refused }
       let advance
       try {
-        advance = await this.maybeSpawnNextStage(data, checklist, { afterSkip: true, skipNotice })
+        advance = await this.maybeSpawnNextStage(data, checklist, spawnOptions)
       } catch (error) {
         const master = billingMaster(error)
         if (master) return master
@@ -24181,7 +24228,7 @@ export class AppDataStore {
         // re-read for that): another case of the recipe holds that step on that date.
         if (error?.code !== '23505') throw error
         console.error(
-          `[stage-advance] after skip ${checklist.id} case ${checklist.caseId || checklist.id}: 23505 on ${error.constraint || 'unknown constraint'}`,
+          `[stage-advance] after ${mode} ${checklist.id} case ${checklist.caseId || checklist.id}: 23505 on ${error.constraint || 'unknown constraint'}`,
         )
         return { spawned: null, reason: 'date_taken' }
       }
@@ -24189,6 +24236,9 @@ export class AppDataStore {
       // Re-read: the row may have landed after `data` (the spawn's 23505 race).
       const next = liveNextStageRow((await this.read()).checklists, checklist)
       if (!next) return advance
+      // Push a step: a next step whose work is already finished has nothing to be
+      // told about and nothing to show - it is answered as finished, never stamped.
+      if (afterPush && stageFinished(next)) return { ...advance, existing: next, stamped: false, finished: true }
       // Already carrying THIS skip's notice: nothing written, so nobody is told again.
       if (!skipNoticeNeedsStamp(next, skipNotice)) return { ...advance, existing: next, stamped: false }
       // Endpoint-owned, one row, re-checked in the WHERE: still that case's live next
@@ -24222,7 +24272,7 @@ export class AppDataStore {
       if (refused) return { spawned: null, reason: refused }
       let advance
       try {
-        advance = await this.maybeSpawnNextStage(data, checklist, { fileMode: true, afterSkip: true, skipNotice })
+        advance = await this.maybeSpawnNextStage(data, checklist, { fileMode: true, ...spawnOptions })
       } catch (error) {
         const master = billingMaster(error)
         if (master) return master
@@ -24232,6 +24282,8 @@ export class AppDataStore {
         // The same stamp as the Postgres branch, in the same slot as the decision.
         const next = liveNextStageRow(data.checklists, checklist)
         if (!next) return advance
+        // Push a step: a finished next step is never stamped (as the Postgres branch).
+        if (afterPush && stageFinished(next)) return { ...advance, existing: next, stamped: false, finished: true }
         // `stamped` only when this slot actually wrote: a second press is told nothing.
         const stamp = skipNoticeNeedsStamp(next, skipNotice)
         if (stamp) {

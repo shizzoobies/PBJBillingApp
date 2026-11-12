@@ -2482,11 +2482,22 @@ export async function skipChecklistOccurrence(
  * Skip a step (featreq-7e1827e0): the next step opened (with the new checklist and
  * the name of the person it is for), or it could not be opened and why, in words.
  */
-export type StepSkipNextStep =
+export type StepSkipNextStep = (
   | { opened: true; checklist: Checklist; assigneeName: string }
   /** The next step was already open: it now carries the notice, and its person was told. */
-  | { opened: false; alreadyOpen: true; checklist: Checklist; assigneeName: string }
+  | {
+      opened: false
+      alreadyOpen: true
+      checklist: Checklist
+      assigneeName: string
+      /** Push a step: the next step's work was already finished, so nobody was told. */
+      finished?: boolean
+    }
   | { opened: false; alreadyOpen?: false; reason: string; message: string }
+) & {
+  /** Push a step (featreq-78f09571): set when a PUSH did this, absent for a skip. */
+  after?: 'push'
+}
 
 /**
  * Push this occurrence of a recurring task to a new due date — the task stays
@@ -2512,7 +2523,12 @@ export async function pushChecklistOccurrence(
     const message = await safeErrorMessage(response)
     throw new ApiError(response.status, message || `Failed to push task (${response.status})`)
   }
-  return (await response.json()) as { checklist: Checklist; completed: Checklist | null }
+  return (await response.json()) as {
+    checklist: Checklist
+    completed: Checklist | null
+    /** Push a step (featreq-78f09571) only: what happened to the next step. */
+    nextStep?: StepSkipNextStep
+  }
 }
 
 /**

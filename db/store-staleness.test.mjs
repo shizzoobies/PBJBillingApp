@@ -58921,6 +58921,142 @@ describe('skip a step (file backend)', () => {
     expect(result.spawned).toMatchObject({ stageIndex: 2, assigneeId: BRITTANY, dueDate: '2026-10-31' })
   })
 
+  // ---- Push a step (featreq-78f09571): a pushed step opens the next one too ----
+  const pushNotice = (over = {}) => ({
+    ...notice({ note: 'Waiting on the client.', skipId: 'push-1' }),
+    kind: 'push',
+    newDueDate: '2026-11-05',
+    ...over,
+  })
+
+  it('push a step: opens the next stage beside the pushed one, dated from the ORIGINAL due date, with the notice', async () => {
+    await seed([stageRow(0)])
+    const pushed = await store.pushChecklistInstance('cl-s0', LISA, '2026-11-05')
+    expect(pushed.checklist.id).toBe('cl-s0')
+    const result = await store.openNextStageAfterPush('cl-s0', pushNotice())
+    expect(result.reason).toBeNull()
+    expect(result.spawned).toMatchObject({
+      caseId: 'case-mail',
+      stageIndex: 1,
+      stageId: 'st-1',
+      assigneeId: ALLISON,
+      // 3 days before the cycle's own due date (10-31), NOT before the pushed date (11-05).
+      dueDate: '2026-10-28',
+      skipNotice: pushNotice(),
+    })
+    // The pushed stage is still open, on its new date, keeping its place in the cycle.
+    const [still] = await caseRows(0)
+    expect(still).toMatchObject({ dueDate: '2026-11-05', cycleDueDate: '2026-10-31' })
+    expect(still.skippedAt ?? null).toBeNull()
+    expect(still.items.map((item) => item.done)).toEqual([false])
+    const [opened] = await caseRows(1)
+    expect(opened.skipNotice).toEqual(pushNotice())
+    expect(
+      logSpy.mock.calls.some((call) =>
+        /\[stage-advance\] opened .* case case-mail stage 2: pushed \(after cl-s0\)/.test(call[0]),
+      ),
+    ).toBe(true)
+  })
+
+  it('push a step: finishing the pushed stage later finds the next stage already there and makes no second one', async () => {
+    await seed([stageRow(0)])
+    await store.pushChecklistInstance('cl-s0', LISA, '2026-11-05')
+    await store.openNextStageAfterPush('cl-s0', pushNotice())
+    await store.toggleChecklistItem('cl-s0', 'item-s0')
+    expect(await caseRows(1)).toHaveLength(1)
+    const [done] = await caseRows(0)
+    expect(done.items.map((item) => item.done)).toEqual([true])
+  })
+
+  it('push a step: a split push opens the next stage from the copy that holds the open work, never the done-only record', async () => {
+    await seed([
+      stageRow(0, {
+        items: [
+          { id: 'item-a', label: 'Done part', done: true },
+          { id: 'item-b', label: 'Open part', done: false },
+        ],
+      }),
+    ])
+    const pushed = await store.pushChecklistInstance('cl-s0', LISA, '2026-11-05')
+    expect(pushed.completed.id).toBe('cl-s0')
+    expect(pushed.checklist.id).not.toBe('cl-s0')
+    // The record left behind is refused in words...
+    expect(await store.openNextStageAfterPush('cl-s0', pushNotice())).toEqual({ spawned: null, reason: 'pushed' })
+    // ...and the live copy opens the next stage, once.
+    const result = await store.openNextStageAfterPush(pushed.checklist.id, pushNotice())
+    expect(result.spawned).toMatchObject({ stageIndex: 1, assigneeId: ALLISON, dueDate: '2026-10-28' })
+    expect(await caseRows(1)).toHaveLength(1)
+  })
+
+  it('push a step: refuses a stage that was not pushed, a skipped one, an onboarding case and a missing one, writing nothing', async () => {
+    await seed([
+      stageRow(0),
+      stageRow(0, { id: 'cl-skipped', caseId: 'case-b', pushedAt: '2026-10-30T15:00:00.000Z', skippedAt: '2026-10-30T16:00:00.000Z' }),
+      stageRow(0, { id: 'cl-onb', caseId: 'case-c', pushedAt: '2026-10-30T15:00:00.000Z', onboardingForClientId: 'c1' }),
+    ])
+    const before = await readFile(localDataPath, 'utf8')
+    expect(await store.openNextStageAfterPush('cl-s0', pushNotice())).toEqual({ spawned: null, reason: 'not_pushed' })
+    expect(await store.openNextStageAfterPush('cl-skipped', pushNotice())).toEqual({ spawned: null, reason: 'skipped' })
+    expect(await store.openNextStageAfterPush('cl-onb', pushNotice())).toEqual({ spawned: null, reason: 'onboarding' })
+    expect(await store.openNextStageAfterPush('cl-none', pushNotice())).toEqual({ spawned: null, reason: 'not_found' })
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('push a step: a next stage that is already open carries the notice instead, once per push', async () => {
+    await seed([stageRow(0), stageRow(1)])
+    await store.pushChecklistInstance('cl-s0', LISA, '2026-11-05')
+    const first = await store.openNextStageAfterPush('cl-s0', pushNotice())
+    expect(first).toMatchObject({ spawned: null, reason: 'already_spawned', stamped: true, existing: { id: 'cl-s1' } })
+    expect((await caseRows(1))[0].skipNotice).toEqual(pushNotice())
+    // The same push again writes nothing; a later push (its own record) restamps.
+    expect((await store.openNextStageAfterPush('cl-s0', pushNotice())).stamped).toBe(false)
+    const again = await store.openNextStageAfterPush('cl-s0', pushNotice({ skipId: 'push-2', newDueDate: '2026-11-09' }))
+    expect(again.stamped).toBe(true)
+    expect((await caseRows(1))[0].skipNotice.newDueDate).toBe('2026-11-09')
+    expect(await caseRows(1)).toHaveLength(1)
+  })
+
+  it('push a step: a next stage that is already FINISHED is left untouched and answered as finished', async () => {
+    await seed([
+      stageRow(0),
+      stageRow(1, {
+        items: [{ id: 'item-s1', label: 'Work', done: false, subItems: [{ id: 'sub-1', label: 'Part', done: true }] }],
+      }),
+    ])
+    await store.pushChecklistInstance('cl-s0', LISA, '2026-11-05')
+    const before = await readFile(localDataPath, 'utf8')
+    // Finished by the roll-up (its only sub-step is ticked), though its own flag lags.
+    const result = await store.openNextStageAfterPush('cl-s0', pushNotice())
+    expect(result).toMatchObject({
+      spawned: null,
+      reason: 'already_spawned',
+      stamped: false,
+      finished: true,
+      existing: { id: 'cl-s1' },
+    })
+    expect((await caseRows(1))[0].skipNotice).toBeUndefined()
+    expect(await readFile(localDataPath, 'utf8')).toBe(before)
+  })
+
+  it('push a step: a push in the middle opens the last step, and the last step has nothing to open', async () => {
+    await seed([stageRow(0, { items: [{ id: 'item-s0', label: 'Work', done: true }] }), stageRow(1)])
+    await store.pushChecklistInstance('cl-s1', ALLISON, '2026-11-05')
+    const result = await store.openNextStageAfterPush('cl-s1', pushNotice({ stageIndex: 1, skippedBy: ALLISON }))
+    expect(result.spawned).toMatchObject({ stageIndex: 2, assigneeId: BRITTANY, dueDate: '2026-10-31' })
+    await store.pushChecklistInstance(result.spawned.id, BRITTANY, '2026-11-06')
+    expect(await store.openNextStageAfterPush(result.spawned.id, pushNotice({ stageIndex: 2 }))).toEqual({
+      spawned: null,
+      reason: 'last_stage',
+    })
+  })
+
+  it('a skip still needs a skip: a pushed stage is refused by the skip path, and a skipped one by the push path', async () => {
+    await seed([stageRow(0)])
+    await store.pushChecklistInstance('cl-s0', LISA, '2026-11-05')
+    expect(await store.openNextStageAfterSkip('cl-s0', notice())).toEqual({ spawned: null, reason: 'not_skipped' })
+    expect(await caseRows(1)).toHaveLength(0)
+  })
+
   it('refuses an occurrence that was not skipped, and a missing one, writing nothing', async () => {
     await seed([stageRow(0)])
     const before = await readFile(localDataPath, 'utf8')
@@ -59528,6 +59664,88 @@ describe('skip a step, round 1 (postgres branch)', () => {
       })
       await pg2.openNextStageAfterSkip('cl-s0', skipNotice)
       expect(again.matching(/^update checklists set skip_notice/i)).toHaveLength(0)
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
+  it('push a step: the spawn is created with the notice and dated from the cycle date; an open next step gets the same guarded update', async () => {
+    const pushedStage = {
+      ...skippedStage,
+      skippedAt: null,
+      skippedBy: null,
+      dueDate: '2026-11-05',
+      cycleDueDate: '2026-10-31',
+      pushedAt: '2026-10-30T15:00:00.000Z',
+      pushedBy: 'emp-1',
+    }
+    const pushNotice = { ...skipNotice, kind: 'push', newDueDate: '2026-11-05', skipId: 'push-1' }
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const fake = fakePostgres()
+      const pg = postgresStore(fake)
+      pg.read = async () => ({ checklists: [pushedStage], checklistTemplates: [template], clients: [{ id: 'c1' }] })
+      const created = []
+      pg.createChecklist = async (checklist, options) => {
+        created.push({ checklist, options })
+        return { ...checklist, id: 'cl-new', ...(options?.skipNotice ? { skipNotice: options.skipNotice } : {}) }
+      }
+      pg.grantClientVisibility = async () => {}
+      const result = await pg.openNextStageAfterPush('cl-s0', pushNotice)
+      expect(result.reason).toBeNull()
+      expect(created).toHaveLength(1)
+      expect(created[0].options).toEqual({ skipNotice: pushNotice })
+      expect(created[0].checklist).toMatchObject({ stageIndex: 1, assigneeId: 'emp-2', dueDate: '2026-10-31' })
+      expect(result.spawned.skipNotice).toEqual(pushNotice)
+
+      // Next step already open: ONE guarded update, the same statement a skip uses.
+      const open = fakePostgres()
+      const query = open.pool.query.bind(open.pool)
+      open.pool.query = async (text, params) => {
+        if (!/^update checklists set skip_notice/i.test(String(text).trim())) return query(text, params)
+        open.statements.push({ text: String(text).trim(), params })
+        return { rows: [{ id: 'cl-s1', skip_notice: pushNotice }], rowCount: 1 }
+      }
+      const pg2 = postgresStore(open)
+      pg2.read = async () => ({ checklists: [pushedStage, nextStage], checklistTemplates: [template], clients: [{ id: 'c1' }] })
+      const stamped = await pg2.openNextStageAfterPush('cl-s0', pushNotice)
+      expect(stamped).toMatchObject({ spawned: null, reason: 'already_spawned', stamped: true, existing: { id: 'cl-s1' } })
+      const updates = open.matching(/^update checklists set skip_notice/i)
+      expect(updates).toHaveLength(1)
+      expect(updates[0].params.slice(0, 3)).toEqual(['cl-s1', JSON.stringify(pushNotice), 'push-1'])
+
+      // Next step already finished: answered as finished, with no statement at all.
+      const done = fakePostgres()
+      const pg4 = postgresStore(done)
+      pg4.read = async () => ({
+        // Finished by the roll-up (its only sub-step is ticked) though its own flag lags.
+        checklists: [
+          pushedStage,
+          {
+            ...nextStage,
+            items: [{ id: 'item-1', label: 'Review', done: false, subItems: [{ id: 'sub-1', label: 'Part', done: true }] }],
+          },
+        ],
+        checklistTemplates: [template],
+        clients: [{ id: 'c1' }],
+      })
+      expect(await pg4.openNextStageAfterPush('cl-s0', pushNotice)).toMatchObject({
+        reason: 'already_spawned',
+        stamped: false,
+        finished: true,
+        existing: { id: 'cl-s1' },
+      })
+      expect(done.matching(/^update checklists set skip_notice/i)).toHaveLength(0)
+
+      // Not pushed: refused before any statement.
+      const none = fakePostgres()
+      const pg3 = postgresStore(none)
+      pg3.read = async () => ({
+        checklists: [{ ...pushedStage, pushedAt: null }],
+        checklistTemplates: [template],
+        clients: [{ id: 'c1' }],
+      })
+      expect(await pg3.openNextStageAfterPush('cl-s0', pushNotice)).toEqual({ spawned: null, reason: 'not_pushed' })
     } finally {
       logSpy.mockRestore()
     }

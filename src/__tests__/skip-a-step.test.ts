@@ -277,6 +277,15 @@ describe('POST /api/checklists/:id/skip - the step path', () => {
     expect(end).toBeGreaterThan(start)
     return serverSource.slice(start, end)
   }
+  // Since Push a step (featreq-78f09571) the opening and the telling live in ONE
+  // routine both routes call, so a skip and a push cannot report differently.
+  const sharedRoutine = () => {
+    const start = serverSource.indexOf('async function openNextStepAndTell({')
+    const end = serverSource.indexOf('async function notifyOwnersOfUpdateActivity(', start)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    return serverSource.slice(start, end)
+  }
 
   it('decides step-or-whole from the recipe BEFORE the skip is saved', () => {
     const route = skipRoute()
@@ -287,8 +296,11 @@ describe('POST /api/checklists/:id/skip - the step path', () => {
 
   it('opens the next step only on a step skip, after the skip, its record, its activity and the notes pass', () => {
     const route = skipRoute()
-    const opened = route.indexOf('await appDataStore.openNextStageAfterSkip(')
+    const opened = route.indexOf('appDataStore.openNextStageAfterSkip(')
     expect(opened).toBeGreaterThan(route.indexOf('if (stepSkip) {'))
+    // ...through the shared routine, in skip mode.
+    expect(route.indexOf(';({ nextStep } = await openNextStepAndTell({')).toBeGreaterThan(route.indexOf('if (stepSkip) {'))
+    expect(route).toContain("mode: 'skip',")
     expect(opened).toBeGreaterThan(route.indexOf('await appDataStore.createChecklistSkip('))
     expect(opened).toBeGreaterThan(route.indexOf("'checklist_skipped', checklist.title"))
     expect(opened).toBeGreaterThan(route.indexOf('attachPendingClientNotes({ clientId: checklist.clientId })'))
@@ -298,18 +310,20 @@ describe('POST /api/checklists/:id/skip - the step path', () => {
 
   it('tells the next person once, with the new event, and never task_assigned for the same spawn', () => {
     const route = skipRoute()
-    const notice = route.indexOf("await notify(appDataStore, spawned.assigneeId, 'checklist_step_skipped', {")
+    const shared = sharedRoutine()
+    const notice = shared.indexOf("await notify(appDataStore, spawned.assigneeId, 'checklist_step_skipped', {")
     expect(notice).toBeGreaterThan(-1)
-    expect(route).toContain('if (spawned.assigneeId && spawned.assigneeId !== session.user.id) {')
-    expect(route.slice(notice, notice + 900)).toContain('link: `/checklists?focus=${spawned.id}`')
+    expect(shared).toContain('if (spawned.assigneeId && spawned.assigneeId !== session.user.id) {')
+    expect(shared.slice(notice, notice + 900)).toContain('link: `/checklists?focus=${spawned.id}`')
     expect(route).not.toContain("'task_assigned'")
+    expect(shared).not.toContain("'task_assigned'")
     // The case moved on: the same activity a finishing tick writes.
-    expect(route).toContain("'case_advanced',")
+    expect(shared).toContain("'case_advanced',")
   })
 
   it('when the next step cannot open: answers it in words and tells the owners, never the skipper', () => {
-    const route = skipRoute()
-    expect(route).toContain('nextStep = { opened: false, reason: advance.reason, message: why }')
+    const route = sharedRoutine()
+    expect(route).toContain('nextStep = { opened: false, reason: advance.reason, message: why, ...after }')
     expect(route).toContain('nextStageRefusalMessage(advance.reason, { stageIndex, nextStageName })')
     expect(route).toContain("employee.role === 'Owner' && employee.id !== session.user.id")
     expect(route).toContain("await notify(appDataStore, owner.id, 'checklist_step_skipped', {")
@@ -317,8 +331,9 @@ describe('POST /api/checklists/:id/skip - the step path', () => {
   })
 
   it('a spawn that throws is logged and answered, never a 500 for a saved skip', () => {
-    const route = skipRoute()
-    expect(route).toContain('`[stage-advance] FAILED after skip ${checklistId} case ${caseId}: ${error?.message || error}`')
+    const route = sharedRoutine()
+    expect(route).toContain('`[stage-advance] FAILED after ${mode} ${checklist.id} case ${caseId}: ${error?.message || error}`')
+    expect(route).toContain("advance = { spawned: null, reason: 'failed' }")
     expect(route).toContain("console.error('[notify] checklist_step_skipped dispatch failed:'")
   })
 
@@ -351,9 +366,12 @@ describe('the skip route after review round 1', () => {
     slice('const checklistSkipMatch = normalizedPath.match(', 'const checklistPushMatch = normalizedPath.match(')
   const openRoute = () =>
     slice('const checklistOpenNextStageMatch = normalizedPath.match(', 'const checklistToggleMatch = normalizedPath.match(')
+  // The opening and the telling: one routine for a skip and a push (featreq-78f09571).
+  const sharedRoutine = () =>
+    slice('async function openNextStepAndTell({', 'async function notifyOwnersOfUpdateActivity(')
 
   it('next step already open: tells THAT step person, answers alreadyOpen, and is not an owner failure', () => {
-    const route = skipRoute()
+    const route = sharedRoutine()
     const branch = route.slice(
       route.indexOf("} else if (advance.reason === 'already_spawned' && advance.existing) {"),
       route.indexOf('const why =', route.indexOf("advance.reason === 'already_spawned' && advance.existing")),
@@ -361,15 +379,17 @@ describe('the skip route after review round 1', () => {
     expect(branch).toContain('alreadyOpen: true,')
     expect(branch).toContain('checklist: existing,')
     expect(branch).toContain("await notify(appDataStore, existing.assigneeId, 'checklist_step_skipped', {")
-    expect(branch).toContain('alreadyOpen: true,\n                }),')
-    expect(branch).toContain('existing.assigneeId && existing.assigneeId !== session.user.id) {')
+    expect(branch).toContain('message: toldMessage(true),')
+    expect(branch).toContain('existing.assigneeId !== session.user.id')
     expect(branch).not.toContain('owner.id')
   })
 
   it("the owner's could-not-open notice has its own subject", () => {
-    const route = skipRoute()
+    const route = sharedRoutine()
     const ownerNotice = route.slice(route.indexOf("await notify(appDataStore, owner.id, 'checklist_step_skipped', {"))
-    expect(ownerNotice.slice(0, 300)).toContain('subject: STEP_NOT_OPENED_SUBJECT,')
+    expect(ownerNotice.slice(0, 300)).toContain('subject: push ? STEP_PUSH_NOT_OPENED_SUBJECT : STEP_NOT_OPENED_SUBJECT,')
+    // The next person's skip notice keeps the event's own subject.
+    expect(route).toContain('const toldSubject = push ? { subject: STEP_PUSHED_SUBJECT } : {}')
   })
 
   it('whoever holds the next step gets the step notice only, not also the skip notice', () => {
@@ -419,7 +439,7 @@ describe('the routes after review round 2', () => {
   })
 
   it('already_spawned with no live next step to tell: a sentence, and no owner notice', () => {
-    const route = skipRoute()
+    const route = slice('async function openNextStepAndTell({', 'async function notifyOwnersOfUpdateActivity(')
     const branch = route.slice(
       route.indexOf("} else if (advance.reason === 'already_spawned') {"),
       route.indexOf('} else {', route.indexOf("} else if (advance.reason === 'already_spawned') {")),
@@ -449,7 +469,8 @@ describe('the routes tell an already-open step once', () => {
   it('the skip route notifies only when the store stamped it', () => {
     const start = serverSource.indexOf("} else if (advance.reason === 'already_spawned' && advance.existing) {")
     const branch = serverSource.slice(start, serverSource.indexOf('} else if (', start + 10))
-    expect(branch).toContain('if (advance.stamped === true && existing.assigneeId && existing.assigneeId !== session.user.id) {')
+    expect(branch).toContain('advance.stamped === true &&')
+    expect(branch.indexOf('advance.stamped === true &&')).toBeLessThan(branch.indexOf("'checklist_step_skipped'"))
     // Answered as already open either way.
     expect(branch).toContain('alreadyOpen: true,')
   })

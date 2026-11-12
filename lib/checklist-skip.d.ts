@@ -90,6 +90,19 @@ type StagedChecklist =
 
 export declare function isStepSkip(template: SkipModeTemplate, checklist: StagedChecklist): boolean
 export declare function isLastStepOfStepSkip(template: SkipModeTemplate, checklist: StagedChecklist): boolean
+/** Push a step (featreq-78f09571): pushing this checklist opens the next step. Same rule as `isStepSkip`. */
+export declare function isStepPush(template: SkipModeTemplate, checklist: StagedChecklist): boolean
+export declare function stepPushDialogNote(args: {
+  stageNumber: number
+  nextPersonName?: string
+  nextAlreadyOpen?: boolean
+  /** The next step's work is already finished: nothing opens and nobody is told. */
+  nextFinished?: boolean
+}): string
+export declare const SKIP_MODE_STEP_PUSH_NOTE: string
+export declare const STEP_PUSHED_SUBJECT: string
+export declare const STEP_PUSH_NOT_OPENED_SUBJECT: string
+export declare function pushDateWords(value: string | null | undefined): string
 export declare function skipButtonLabel(stepSkip: boolean): string
 export declare function stepSkipDialogLead(args: {
   stageNumber: number
@@ -118,6 +131,10 @@ export interface SkipNotice {
   at: string | null
   /** The checklist_skips record id. */
   skipId: string | null
+  /** Push a step (featreq-78f09571): set on a PUSHED step's notice; absent on a skip's. */
+  kind?: 'push'
+  /** The date the step was pushed to (`yyyy-mm-dd`), on a push's notice. */
+  newDueDate?: string | null
 }
 
 export declare function buildSkipNotice(args: {
@@ -132,8 +149,20 @@ export declare function buildSkipNotice(args: {
 }): SkipNotice
 export declare function skipNoticeLine(notice: Partial<SkipNotice> | null | undefined): string
 export declare function skipNoticeChip(notice: Partial<SkipNotice> | null | undefined): string
+export declare function buildPushNotice(args: {
+  checklist: StagedChecklist
+  stageName?: string
+  pushedBy?: string | null
+  pushedByName?: string | null
+  reasonCategory?: string | null
+  note?: string
+  at?: string | null
+  skipId?: string | null
+  newDueDate?: string | null
+}): SkipNotice
+export declare function isPushNotice(notice: Partial<SkipNotice> | null | undefined): boolean
 export declare function stepSkipReviewLine(args: {
-  skip: { id?: string; stepSkip?: boolean } | null | undefined
+  skip: { id?: string; stepSkip?: boolean; kind?: string } | null | undefined
   checklists?: Array<{
     assigneeId?: string
     stageCount?: number
@@ -152,6 +181,28 @@ export declare function stepSkippedMessage(args: {
   note: string
   /** The next step was already open: "Your step N was already open." */
   alreadyOpen?: boolean
+}): string
+export declare function stepPushedMessage(args: {
+  pusherName: string
+  stageIndex: number
+  stageCount: number
+  stageName?: string
+  clientName?: string
+  recipeTitle: string
+  reasonCategory: string
+  note: string
+  newDueDate?: string | null
+  alreadyOpen?: boolean
+}): string
+export declare function stepPushNotOpenedMessage(args: {
+  pusherName: string
+  stageIndex: number
+  stageCount: number
+  stageName?: string
+  clientName?: string
+  recipeTitle: string
+  newDueDate?: string | null
+  why: string
 }): string
 export declare function stepNotOpenedMessage(args: {
   skipperName: string

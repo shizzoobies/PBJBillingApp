@@ -35,6 +35,7 @@ import {
   removalWouldCompleteWaitingStep,
   removalWouldDropOpenWait,
   STEP_HAS_OPEN_WAIT_MESSAGE,
+  stageFinished,
   stageOpenWorkAllWaiting,
   stepWouldDropOpenWait,
   WAITING_BLOCK_TITLES,
@@ -49,6 +50,7 @@ import {
   isLastStepOfStepSkip,
   isStepSkip,
   skipButtonLabel,
+  stepPushDialogNote,
   stepSkipDialogLead,
   type SkipMode,
   type SkipReasonCategory,
@@ -2221,6 +2223,7 @@ function SkipTaskDialog({
   openStepCount,
   stepSkip = null,
   lastStepOfStepSkip = false,
+  stepPush = null,
   onCancel,
   onConfirm,
 }: {
@@ -2251,6 +2254,17 @@ function SkipTaskDialog({
   } | null
   /** The last step of a 'step' recipe: the skip ends the cycle, and the dialog says so. */
   lastStepOfStepSkip?: boolean
+  /**
+   * Push a step (featreq-78f09571): set when pushing this step of a 'step' recipe
+   * also opens the next step, so the form says so before anyone confirms.
+   */
+  stepPush?: {
+    stageNumber: number
+    nextPersonName: string
+    nextAlreadyOpen?: boolean
+    /** The already-open next step is finished: a push opens nothing and tells nobody. */
+    nextFinished?: boolean
+  } | null
   onCancel: () => void
   onConfirm: (input: {
     category: SkipReasonCategory
@@ -2338,6 +2352,11 @@ function SkipTaskDialog({
           </>
         )}
       </p>
+      {isPush && stepPush ? (
+        <p className="skip-task-dialog-lead" data-testid="step-push-note">
+          {stepPushDialogNote(stepPush)}
+        </p>
+      ) : null}
       <label className="field">
         <span>Who could not complete it?</span>
         <select
@@ -3279,6 +3298,12 @@ export function ChecklistCard({
           doneStepCount={doneStepCount}
           openStepCount={checklist.items.length - doneStepCount}
           stepSkip={skipOpen === 'skip' ? stepSkipDialog : null}
+          // The same recipes and steps a step skip applies to (`isStepPush`).
+          stepPush={
+            skipOpen === 'push' && stepSkipDialog
+              ? { ...stepSkipDialog, nextFinished: Boolean(openNextStageRow && stageFinished(openNextStageRow)) }
+              : null
+          }
           lastStepOfStepSkip={skipOpen === 'skip' && isLastStepOfStepSkip(skipRecipe, checklist)}
           onCancel={() => setSkipOpen(null)}
           onConfirm={async ({ category, explanation, newDueDate }) => {

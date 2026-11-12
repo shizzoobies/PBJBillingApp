@@ -259,10 +259,16 @@ describe('the push endpoint answers a split the way the spec promises', () => {
     path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../server.js'),
     'utf8',
   )
-  const routeBlock = (startPattern: RegExp, length = 9000): string => {
+  // The whole route: from its matcher to the next route's. (A fixed length cut
+  // the answer off once the route grew - Push a step, featreq-78f09571.)
+  const routeBlock = (startPattern: RegExp, length?: number): string => {
     const at = serverSource.search(startPattern)
     expect(at, `route not found: ${startPattern}`).toBeGreaterThan(-1)
-    return serverSource.slice(at, at + length)
+    if (typeof length === 'number') return serverSource.slice(at, at + length)
+    // No length: up to the next route's matcher.
+    const end = serverSource.indexOf('= normalizedPath.match(', at + 80)
+    expect(end, 'the next route was not found').toBeGreaterThan(at)
+    return serverSource.slice(at, end)
   }
 
   it('maps a NothingToPushError to 409 NOTHING_TO_PUSH with its message', () => {

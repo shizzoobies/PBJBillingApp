@@ -113,10 +113,12 @@ const data = {
 
 let contextValue: AppContextValue
 let skipChecklistOccurrence: ReturnType<typeof vi.fn>
+let pushChecklistOccurrence: ReturnType<typeof vi.fn>
 let updateChecklistTemplate: ReturnType<typeof vi.fn>
 
 function signInAs(viewerId: string, isOwner: boolean, workspace: AppData = data) {
   skipChecklistOccurrence = vi.fn().mockResolvedValue(null)
+  pushChecklistOccurrence = vi.fn().mockResolvedValue(undefined)
   updateChecklistTemplate = vi.fn()
   const active = workspace.checklists.filter((entry) => !isChecklistSkipped(entry))
   contextValue = {
@@ -131,7 +133,7 @@ function signInAs(viewerId: string, isOwner: boolean, workspace: AppData = data)
     serviceCategories: [],
     checklistSkips: [],
     skipChecklistOccurrence,
-    pushChecklistOccurrence: vi.fn(),
+    pushChecklistOccurrence,
     updateChecklistTemplate,
     patchTemplateStage: vi.fn(),
     reviewChecklistSkip: vi.fn(),
@@ -280,5 +282,119 @@ describe('the recipe editor', () => {
     expect(whole.checked).toBe(true)
     expect(whole).toBeDisabled()
     expect(screen.getByText('This recipe has one step, so a skip is the whole cycle.')).toBeInTheDocument()
+  })
+})
+
+/**
+ * Push a step (featreq-78f09571) on screen: on the same recipes and steps a step
+ * skip applies to, the Push form says the next step opens too, and the step it
+ * opened says who pushed and to when.
+ */
+describe('pushing a step of a step recipe', () => {
+  const STEP_OPENS =
+    'Step 2 opens for Allison Reed right away, and they will see who pushed this step and why. This step stays open on its new date.'
+
+  it('the Push form says the next step opens for the next person, and pushes as before', async () => {
+    renderPage()
+    fireEvent.click(within(cardFor('First step close')).getByText('Push to a new date'))
+    const dialog = screen.getByRole('group', { name: 'Push First step close to a new date' })
+    expect(dialog.textContent).toContain(STEP_OPENS)
+    // The push's own sentence is still there.
+    expect(dialog.textContent).toContain('Nothing is completed.')
+    fireEvent.change(within(dialog).getByRole('combobox'), { target: { value: 'client' } })
+    fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'Waiting on the bank statement' } })
+    fireEvent.change(within(dialog).getByLabelText('New due date'), { target: { value: '2026-09-10' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Push to this date' }))
+    await waitFor(() =>
+      expect(pushChecklistOccurrence).toHaveBeenCalledWith('cl-first', {
+        category: 'client',
+        explanation: 'Waiting on the bank statement',
+        newDueDate: '2026-09-10',
+      }),
+    )
+  })
+
+  it('the last step and a whole recipe push exactly as before: nothing about a next step', () => {
+    renderPage()
+    fireEvent.click(within(cardFor('Last step close')).getByText('Push to a new date'))
+    expect(screen.getByRole('group', { name: 'Push Last step close to a new date' }).textContent).not.toContain('opens for')
+    fireEvent.click(within(cardFor('Whole first close')).getByText('Push to a new date'))
+    const whole = screen.getByRole('group', { name: 'Push Whole first close to a new date' })
+    expect(whole.textContent).not.toContain('opens for')
+    expect(whole.textContent).not.toContain('who pushed this step')
+  })
+
+  it('when the next step is already open, the form says its person will see who pushed and why', () => {
+    renderPage()
+    fireEvent.click(within(cardFor('Already open first close')).getByText('Push to a new date'))
+    const dialog = screen.getByRole('group', { name: 'Push Already open first close to a new date' })
+    expect(dialog.textContent).toContain(
+      'Step 2 is already open for Allison Reed; they will see who pushed this step and why.',
+    )
+    expect(dialog.textContent).not.toContain('right away')
+  })
+
+  it('when the next step is already finished, the form says nothing else opens and promises nobody is told', () => {
+    const finishedNext = { ...ALREADY_NEXT, items: [{ id: 'cl-an-step', label: 'Work', done: true }] } as Checklist
+    signInAs(BRITTANY, true, {
+      ...data,
+      checklists: [ALREADY_FIRST, finishedNext],
+    } as unknown as AppData)
+    renderPage()
+    fireEvent.click(within(cardFor('Already open first close')).getByText('Push to a new date'))
+    const dialog = screen.getByRole('group', { name: 'Push Already open first close to a new date' })
+    expect(dialog.textContent).toContain(
+      'Step 2 is already finished, so nothing else opens. This step stays open on its new date.',
+    )
+    expect(dialog.textContent).not.toContain('they will see who pushed')
+  })
+
+  it('the step a push opened says who pushed the step before, to when, and why', () => {
+    const pushedOpen = card({
+      id: 'cl-pushed-open',
+      title: 'Pushed open close',
+      templateId: 'tmpl-step',
+      caseId: 'case-p',
+      assigneeId: ALLISON,
+      stageIndex: 1,
+      stageId: 'st-1',
+      skipNotice: { ...OPENED.skipNotice!, kind: 'push', newDueDate: '2026-09-10', reasonCategory: 'client', note: 'Waiting on the bank statement' },
+    })
+    signInAs(BRITTANY, true, { ...data, checklists: [pushedOpen] } as unknown as AppData)
+    renderPage()
+    expect(
+      within(cardFor('Pushed open close')).getByText(
+        'Step 1 pushed to September 10, 2026 by Lisa Mockabee (the client did not get us what we needed): Waiting on the bank statement',
+      ),
+    ).toBeInTheDocument()
+  })
+})
+
+describe('the recipe editor says the choice covers a push too', () => {
+  const NOTE = 'Pushing a step to a new date opens the next step the same way; the pushed step stays open.'
+  function openEditor(template: ChecklistTemplate) {
+    signInAs(BRITTANY, true, { ...data, checklists: [], checklistTemplates: [template] } as unknown as AppData)
+    renderPage('/checklists?area=repeating')
+    fireEvent.click(screen.getByRole('button', { name: new RegExp(CLIENT.name) }))
+    const row = screen
+      .getAllByRole('button')
+      .find((button) => button.querySelector('.repeating-task-title')?.textContent === template.title)
+    if (!row) throw new Error('No repeating-task row')
+    fireEvent.click(row)
+  }
+
+  it('under "Skip a step", and not under the whole-checklist choice or on a one-step recipe', () => {
+    openEditor(recipe('tmpl-step'))
+    expect(screen.getByText(NOTE)).toBeInTheDocument()
+  })
+
+  it('not under the whole-checklist choice', () => {
+    openEditor(recipe('tmpl-step', { skipMode: 'whole' }))
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
+  })
+
+  it('not on a one-step recipe', () => {
+    openEditor(recipe('tmpl-step', { stages: [stages[0]] as ChecklistTemplate['stages'] }))
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
   })
 })

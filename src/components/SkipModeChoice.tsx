@@ -1,6 +1,7 @@
 import {
   SKIP_MODE_ONE_STEP_NOTE,
   SKIP_MODE_STEP_LABEL,
+  SKIP_MODE_STEP_PUSH_NOTE,
   SKIP_MODE_WHOLE_LABEL,
   type SkipMode,
 } from '../../lib/checklist-skip.js'
@@ -50,6 +51,10 @@ export function SkipModeChoice({
         <span>{SKIP_MODE_STEP_LABEL}</span>
       </label>
       {oneStep ? <small className="new-task-hint">{SKIP_MODE_ONE_STEP_NOTE}</small> : null}
+      {/* Push a step (featreq-78f09571): the same choice decides what a push does. */}
+      {!oneStep && current === 'step' ? (
+        <small className="new-task-hint">{SKIP_MODE_STEP_PUSH_NOTE}</small>
+      ) : null}
     </fieldset>
   )
 }

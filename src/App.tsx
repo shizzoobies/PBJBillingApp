@@ -1542,17 +1542,27 @@ function App() {
       input: { category: SkipReasonCategory; explanation: string; newDueDate: string },
     ) => {
       if (previewActiveRef.current) return
-      const { checklist, completed } = await pushChecklistOccurrenceRequest(checklistId, input)
+      const { checklist, completed, nextStep } = await pushChecklistOccurrenceRequest(checklistId, input)
+      // Push a step (featreq-78f09571): the next step the push opened (a new row) or stamped (already open).
+      const opened = stepSkipOutcomeChecklist(nextStep)
       applyServerDataUpdate((current) => {
         const merged = current.checklists.map((entry) =>
-          entry.id === checklist.id ? checklist : entry.id === completed?.id ? completed : entry,
+          entry.id === checklist.id
+            ? checklist
+            : entry.id === completed?.id
+              ? completed
+              : opened && entry.id === opened.id
+                ? opened
+                : entry,
         )
-        const checklistIsNew = !current.checklists.some((entry) => entry.id === checklist.id)
+        const withPushed = merged.some((entry) => entry.id === checklist.id) ? merged : [...merged, checklist]
         return {
           ...current,
-          checklists: checklistIsNew ? [...merged, checklist] : merged,
+          checklists:
+            opened && !withPushed.some((entry) => entry.id === opened.id) ? [...withPushed, opened] : withPushed,
         }
       })
+      if (nextStep) setStepSkipOutcome(nextStep)
       await refreshChecklistSkips()
     },
     [refreshChecklistSkips],

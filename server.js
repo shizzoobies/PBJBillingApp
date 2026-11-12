@@ -290,9 +290,15 @@ import {
   skipNotificationRecipients,
   skipReasonLabel,
   buildSkipNotice,
+  buildPushNotice,
   isStepSkip,
+  isStepPush,
   STEP_NOT_OPENED_SUBJECT,
+  STEP_PUSHED_SUBJECT,
+  STEP_PUSH_NOT_OPENED_SUBJECT,
   stepNotOpenedMessage,
+  stepPushNotOpenedMessage,
+  stepPushedMessage,
   stepSkippedMessage,
   validatePushRequest,
   validateSkipRequest,
@@ -1596,6 +1602,208 @@ function serializeSpitballSession(session) {
     id: session.id,
     messages: session.messages.map((message) => ({ role: message.role, text: message.text })),
   }
+}
+
+/**
+ * Skip a step (featreq-7e1827e0) and Push a step (featreq-78f09571): open the
+ * stage after `checklist` NOW and tell the people who need to know. ONE routine
+ * for both, so a pushed step and a skipped step can never report differently:
+ *
+ *   - opened: the next person gets one notice (who skipped or pushed, and why -
+ *     not also task_assigned), and the Activity log gets `case_advanced`;
+ *   - already open: its person is told, only when this notice was actually
+ *     written onto that step. A PUSH never writes onto a next step whose work is
+ *     already finished: that is answered `finished: true` and nobody is told;
+ *   - could not open: the answer says why in words, and the OWNER is told
+ *     instead of the next person.
+ *
+ * `open({ stageName })` is the store call (`openNextStageAfterSkip` /
+ * `openNextStageAfterPush`). The skip or push itself is already saved, so the
+ * opening and the telling never throw. Answers `{ nextStep, toldUserId }`:
+ * `nextStep` for the route to send back, and the one person who actually got
+ * the step notice (null when nobody did), so the route's ordinary notice skips
+ * exactly that person and nobody else.
+ */
+async function openNextStepAndTell({
+  request,
+  session,
+  data,
+  mode,
+  checklist,
+  template,
+  actorName,
+  category,
+  note,
+  newDueDate = null,
+  open,
+}) {
+  const push = mode === 'push'
+  const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
+  const stageCount = typeof checklist.stageCount === 'number' ? checklist.stageCount : 1
+  const recipeStages = Array.isArray(template?.stages) ? template.stages : []
+  const stageName = recipeStages[stageIndex]?.name ?? ''
+  const nextStageName = recipeStages[stageIndex + 1]?.name ?? ''
+  const clientName = (data.clients ?? []).find((entry) => entry.id === checklist.clientId)?.name ?? ''
+  const recipeTitle = template?.title || checklist.title
+  const caseId = checklist.caseId || checklist.id
+  const employeeNameOf = (id) => (data.employees ?? []).find((employee) => employee.id === id)?.name ?? ''
+  // The next person's sentence, in the skip's words or the push's.
+  const toldMessage = (alreadyOpen) =>
+    push
+      ? stepPushedMessage({
+          pusherName: actorName,
+          stageIndex,
+          stageCount,
+          stageName,
+          clientName,
+          recipeTitle,
+          reasonCategory: category,
+          note,
+          newDueDate,
+          ...(alreadyOpen ? { alreadyOpen: true } : {}),
+        })
+      : stepSkippedMessage({
+          skipperName: actorName,
+          stageIndex,
+          stageCount,
+          stageName,
+          clientName,
+          recipeTitle,
+          reasonCategory: category,
+          note,
+          ...(alreadyOpen ? { alreadyOpen: true } : {}),
+        })
+  // A push's notice goes out under its own subject; a skip's keeps the event's.
+  const toldSubject = push ? { subject: STEP_PUSHED_SUBJECT } : {}
+  // Lets the page word its notice ("Step pushed." rather than "Step skipped.").
+  const after = push ? { after: 'push' } : {}
+
+  let advance
+  try {
+    advance = await open({ stageName })
+  } catch (error) {
+    console.error(
+      `[stage-advance] FAILED after ${mode} ${checklist.id} case ${caseId}: ${error?.message || error}`,
+    )
+    advance = { spawned: null, reason: 'failed' }
+  }
+
+  let nextStep = null
+  let toldUserId = null
+  try {
+    if (advance.spawned) {
+      const spawned = advance.spawned
+      nextStep = { opened: true, checklist: spawned, assigneeName: employeeNameOf(spawned.assigneeId), ...after }
+      await appDataStore.recordActivity(
+        session.user.id,
+        'case_advanced',
+        `${checklist.title} · case ${caseId} · stage ${stageIndex + 1} -> stage ${stageIndex + 2}`,
+      )
+      if (spawned.assigneeId && spawned.assigneeId !== session.user.id) {
+        await notify(appDataStore, spawned.assigneeId, 'checklist_step_skipped', {
+          ...toldSubject,
+          checklistId: spawned.id,
+          caseId,
+          stageIndex: spawned.stageIndex,
+          stageCount: spawned.stageCount,
+          message: toldMessage(false),
+          link: `/checklists?focus=${spawned.id}`,
+          appPublicUrl: getPublicAppUrl(request),
+        })
+        toldUserId = spawned.assigneeId
+      }
+    } else if (advance.reason === 'already_spawned' && advance.existing) {
+      // The next step was ALREADY open (Open next step now, an earlier push, or a
+      // finishing tick won the race): the store stamped the notice onto it, so its
+      // person is told like any step skip. Not a failure - the owner hears nothing extra.
+      const existing = advance.existing
+      // A push onto a next step whose work is already finished (a second push after
+      // the next person is done): the store wrote nothing, so nobody is told, and
+      // the page says "already finished" rather than "already open".
+      const existingFinished = push && (advance.finished === true || stageFinished(existing))
+      nextStep = {
+        opened: false,
+        alreadyOpen: true,
+        checklist: existing,
+        assigneeName: employeeNameOf(existing.assigneeId),
+        ...(existingFinished ? { finished: true } : {}),
+        ...after,
+      }
+      // Told only when this notice was actually written onto it.
+      if (
+        advance.stamped === true &&
+        !existingFinished &&
+        existing.assigneeId &&
+        existing.assigneeId !== session.user.id
+      ) {
+        await notify(appDataStore, existing.assigneeId, 'checklist_step_skipped', {
+          ...toldSubject,
+          checklistId: existing.id,
+          caseId,
+          stageIndex: existing.stageIndex,
+          stageCount: existing.stageCount,
+          message: toldMessage(true),
+          link: `/checklists?focus=${existing.id}`,
+          appPublicUrl: getPublicAppUrl(request),
+        })
+        toldUserId = existing.assigneeId
+      }
+    } else if (advance.reason === 'already_spawned') {
+      // The next step exists but is not a live one to tell (it was skipped
+      // too, or it moved on): nothing failed, so the owner is not told.
+      nextStep = {
+        opened: false,
+        reason: advance.reason,
+        message: `Step ${stageIndex + 2} already exists for this case, so no new step was opened.`,
+        ...after,
+      }
+    } else {
+      const why =
+        advance.reason === 'billing_master' && advance.message
+          ? advance.message
+          : advance.reason === 'failed'
+            ? 'The next step could not be created (the server log has the detail).'
+            : nextStageRefusalMessage(advance.reason, { stageIndex, nextStageName })
+      nextStep = { opened: false, reason: advance.reason, message: why, ...after }
+      // The owner, never the person who skipped or pushed (they hear it on the page).
+      const owners = (data.employees ?? []).filter(
+        (employee) => employee?.id && employee.role === 'Owner' && employee.id !== session.user.id,
+      )
+      for (const owner of owners) {
+        await notify(appDataStore, owner.id, 'checklist_step_skipped', {
+          // Not the next person's subject: this one says the opening failed.
+          subject: push ? STEP_PUSH_NOT_OPENED_SUBJECT : STEP_NOT_OPENED_SUBJECT,
+          checklistId: checklist.id,
+          caseId,
+          message: push
+            ? stepPushNotOpenedMessage({
+                pusherName: actorName,
+                stageIndex,
+                stageCount,
+                stageName,
+                clientName,
+                recipeTitle,
+                newDueDate,
+                why,
+              })
+            : stepNotOpenedMessage({
+                skipperName: actorName,
+                stageIndex,
+                stageCount,
+                stageName,
+                clientName,
+                recipeTitle,
+                why,
+              }),
+          link: `/cases/${caseId}`,
+          appPublicUrl: getPublicAppUrl(request),
+        })
+      }
+    }
+  } catch (err) {
+    console.error('[notify] checklist_step_skipped dispatch failed:', err?.message || err)
+  }
+  return { nextStep, toldUserId }
 }
 
 /**
@@ -16319,147 +16527,31 @@ const server = createServer(async (request, response) => {
       // (`nextStep.opened: false`) and the OWNER is told instead of the next person.
       let nextStep = null
       if (stepSkip) {
-        const stageIndex = typeof checklist.stageIndex === 'number' ? checklist.stageIndex : 0
-        const stageCount = typeof checklist.stageCount === 'number' ? checklist.stageCount : 1
-        const recipeStages = Array.isArray(skipTemplate?.stages) ? skipTemplate.stages : []
-        const stageName = recipeStages[stageIndex]?.name ?? ''
-        const nextStageName = recipeStages[stageIndex + 1]?.name ?? ''
-        const skipClientName =
-          (data.clients ?? []).find((entry) => entry.id === checklist.clientId)?.name ?? ''
-        const recipeTitle = skipTemplate?.title || checklist.title
-        const caseId = checklist.caseId || checklist.id
-        let advance
-        try {
-          advance = await appDataStore.openNextStageAfterSkip(
-            checklistId,
-            buildSkipNotice({
-              checklist,
-              stageName,
-              skippedBy: session.user.id,
-              skippedByName: skipperName,
-              reasonCategory: validated.category,
-              note: validated.explanation,
-              at: skipped.skippedAt ?? new Date().toISOString(),
-              skipId: record?.id ?? null,
-            }),
-          )
-        } catch (error) {
-          console.error(
-            `[stage-advance] FAILED after skip ${checklistId} case ${caseId}: ${error?.message || error}`,
-          )
-          advance = { spawned: null, reason: 'failed' }
-        }
-        try {
-          if (advance.spawned) {
-            const spawned = advance.spawned
-            nextStep = {
-              opened: true,
-              checklist: spawned,
-              assigneeName:
-                (data.employees ?? []).find((employee) => employee.id === spawned.assigneeId)?.name ?? '',
-            }
-            await appDataStore.recordActivity(
-              session.user.id,
-              'case_advanced',
-              `${checklist.title} · case ${caseId} · stage ${stageIndex + 1} -> stage ${stageIndex + 2}`,
-            )
-            if (spawned.assigneeId && spawned.assigneeId !== session.user.id) {
-              await notify(appDataStore, spawned.assigneeId, 'checklist_step_skipped', {
-                checklistId: spawned.id,
-                caseId,
-                stageIndex: spawned.stageIndex,
-                stageCount: spawned.stageCount,
-                message: stepSkippedMessage({
-                  skipperName,
-                  stageIndex,
-                  stageCount,
-                  stageName,
-                  clientName: skipClientName,
-                  recipeTitle,
-                  reasonCategory: validated.category,
-                  note: validated.explanation,
-                }),
-                link: `/checklists?focus=${spawned.id}`,
-                appPublicUrl: getPublicAppUrl(request),
-              })
-            }
-          } else if (advance.reason === 'already_spawned' && advance.existing) {
-            // The next step was ALREADY open (Open next step now, or a finishing tick
-            // won the race): the store stamped the notice onto it, so its person is
-            // told like any step skip. Not a failure - the owner hears nothing extra.
-            const existing = advance.existing
-            nextStep = {
-              opened: false,
-              alreadyOpen: true,
-              checklist: existing,
-              assigneeName:
-                (data.employees ?? []).find((employee) => employee.id === existing.assigneeId)?.name ?? '',
-            }
-            // Told only when this skip's notice was actually written onto it.
-            if (advance.stamped === true && existing.assigneeId && existing.assigneeId !== session.user.id) {
-              await notify(appDataStore, existing.assigneeId, 'checklist_step_skipped', {
-                checklistId: existing.id,
-                caseId,
-                stageIndex: existing.stageIndex,
-                stageCount: existing.stageCount,
-                message: stepSkippedMessage({
-                  skipperName,
-                  stageIndex,
-                  stageCount,
-                  stageName,
-                  clientName: skipClientName,
-                  recipeTitle,
-                  reasonCategory: validated.category,
-                  note: validated.explanation,
-                  alreadyOpen: true,
-                }),
-                link: `/checklists?focus=${existing.id}`,
-                appPublicUrl: getPublicAppUrl(request),
-              })
-            }
-          } else if (advance.reason === 'already_spawned') {
-            // The next step exists but is not a live one to tell (it was skipped
-            // too, or it moved on): nothing failed, so the owner is not told.
-            nextStep = {
-              opened: false,
-              reason: advance.reason,
-              message: `Step ${stageIndex + 2} already exists for this case, so no new step was opened.`,
-            }
-          } else {
-            const why =
-              advance.reason === 'billing_master' && advance.message
-                ? advance.message
-                : advance.reason === 'failed'
-                  ? 'The next step could not be created (the server log has the detail).'
-                  : nextStageRefusalMessage(advance.reason, { stageIndex, nextStageName })
-            nextStep = { opened: false, reason: advance.reason, message: why }
-            // The owner, never the person who skipped (she hears it in the dialog).
-            const owners = (data.employees ?? []).filter(
-              (employee) => employee?.id && employee.role === 'Owner' && employee.id !== session.user.id,
-            )
-            for (const owner of owners) {
-              await notify(appDataStore, owner.id, 'checklist_step_skipped', {
-                // Not the next person's subject: this one says the opening failed.
-                subject: STEP_NOT_OPENED_SUBJECT,
-                checklistId,
-                caseId,
-                message: stepNotOpenedMessage({
-                  skipperName,
-                  stageIndex,
-                  stageCount,
-                  stageName,
-                  clientName: skipClientName,
-                  recipeTitle,
-                  why,
-                }),
-                link: `/cases/${caseId}`,
-                appPublicUrl: getPublicAppUrl(request),
-              })
-            }
-          }
-        } catch (err) {
-          console.error('[notify] checklist_step_skipped dispatch failed:', err?.message || err)
-        }
+        ;({ nextStep } = await openNextStepAndTell({
+          request,
+          session,
+          data,
+          mode: 'skip',
+          checklist,
+          template: skipTemplate,
+          actorName: skipperName,
+          category: validated.category,
+          note: validated.explanation,
+          open: ({ stageName }) =>
+            appDataStore.openNextStageAfterSkip(
+              checklistId,
+              buildSkipNotice({
+                checklist,
+                stageName,
+                skippedBy: session.user.id,
+                skippedByName: skipperName,
+                reasonCategory: validated.category,
+                note: validated.explanation,
+                at: skipped.skippedAt ?? new Date().toISOString(),
+                skipId: record?.id ?? null,
+              }),
+            ),
+        }))
       }
 
       // Quiet for the person skipping; loud for the people who need to know.
@@ -16539,7 +16631,12 @@ const server = createServer(async (request, response) => {
     // permission), the same refusal once an occurrence has been skipped, the
     // same required reason, the same audit record and the same recipients. The
     // ONLY difference is the outcome — the task stays alive, due later. It
-    // completes nothing and unblocks nothing.
+    // completes nothing.
+    //
+    // Push a step (featreq-78f09571): on a recipe set to 'step' (the Skip a step
+    // setting), pushing a stage that has a stage after it ALSO opens the next
+    // stage for the next person, exactly as skipping it would - the pushed stage
+    // stays open on its new date. Everywhere else a push still unblocks nothing.
     const checklistPushMatch = normalizedPath.match(/^\/api\/checklists\/([^/]+)\/push$/)
     if (checklistPushMatch) {
       const session = await requireSession(request, response)
@@ -16657,7 +16754,7 @@ const server = createServer(async (request, response) => {
       // open work forward — the same row for a plain push, the NEW row for a
       // split — so next-occurrence rules keep reading identity off the row
       // that actually owns the cycle now (see checklist-push-next-occurrence).
-      await appDataStore.createChecklistSkip({
+      const pushRecord = await appDataStore.createChecklistSkip({
         checklistId: pushed.id,
         templateId: checklist.templateId ?? null,
         clientId: checklist.clientId ?? null,
@@ -16672,6 +16769,55 @@ const server = createServer(async (request, response) => {
 
       await appDataStore.recordActivity(session.user.id, 'checklist_pushed', checklist.title)
 
+      // Push a step (featreq-78f09571): on a 'step' recipe the next stage opens
+      // now for the next person, carrying who pushed this one and why. Read off
+      // the row that holds the open work (the new copy, after a split). The push
+      // is already saved, so a next step that cannot open is answered in words.
+      const pushTemplate =
+        (data.checklistTemplates ?? []).find((entry) => entry.id === checklist.templateId) ?? null
+      let nextStep = null
+      // Who actually got the step notice (null when nobody did).
+      let stepNoticeToldId = null
+      if (isStepPush(pushTemplate, pushed)) {
+        try {
+          ;({ nextStep, toldUserId: stepNoticeToldId } = await openNextStepAndTell({
+            request,
+            session,
+            data,
+            mode: 'push',
+            checklist: pushed,
+            template: pushTemplate,
+            actorName: pusherName,
+            category: validatedPush.category,
+            note: validatedPush.explanation,
+            newDueDate: validatedPush.newDueDate,
+            open: ({ stageName }) =>
+              appDataStore.openNextStageAfterPush(
+                pushed.id,
+                buildPushNotice({
+                  checklist: pushed,
+                  stageName,
+                  pushedBy: session.user.id,
+                  pushedByName: pusherName,
+                  reasonCategory: validatedPush.category,
+                  note: validatedPush.explanation,
+                  at: pushed.pushedAt ?? new Date().toISOString(),
+                  skipId: pushRecord?.id ?? null,
+                  newDueDate: validatedPush.newDueDate,
+                }),
+              ),
+          }))
+        } catch (error) {
+          // The push is saved: whatever went wrong opening the next step is logged,
+          // and the push still answers as a push.
+          console.error(
+            `[stage-advance] FAILED after push ${pushed.id}: ${error?.message || error}`,
+          )
+          nextStep = null
+          stepNoticeToldId = null
+        }
+      }
+
       try {
         const client = (data.clients ?? []).find((entry) => entry.id === checklist.clientId) ?? null
         const recipients = skipNotificationRecipients({
@@ -16679,7 +16825,12 @@ const server = createServer(async (request, response) => {
           employees: data.employees ?? [],
           skipperId: session.user.id,
         })
+        // Push a step: whoever was TOLD about their step already has a notice that
+        // says the same and more - one notice, not two. Only that person is left
+        // out: a next person who was not told (their step was already finished)
+        // still hears about the push the ordinary way.
         for (const userId of recipients) {
+          if (stepNoticeToldId && userId === stepNoticeToldId) continue
           await notify(appDataStore, userId, 'checklist_pushed', {
             // The checklist that now holds the open work (the new row on a
             // split, the same row otherwise) - not the done-only original.
@@ -16696,6 +16847,11 @@ const server = createServer(async (request, response) => {
         console.error('[notify] checklist_pushed dispatch failed:', err?.message || err)
       }
 
+      if (nextStep) {
+        // Push a step: what happened to the next step, so the page can say it.
+        sendJson(response, 200, { checklist: pushed, completed, nextStep })
+        return
+      }
       sendJson(response, 200, { checklist: pushed, completed })
       return
     }
