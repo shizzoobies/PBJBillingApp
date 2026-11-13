@@ -4,6 +4,29 @@ Plan and decisions: `docs/plans/cloudflare-migration-2026-10.md`. This page is h
 wired and what to do on the first deploy. Railway keeps working unchanged; the same `Dockerfile` and
 the same `server.js` run on both.
 
+## Since 2026-11-12: deploys hand over (read this first)
+
+The wiring below describes ONE container owned by the Durable Object `AppContainer`. That
+arrangement is still in the code as the instance named `legacy` (the way back), but it is no longer
+what serves. Since the cutover the app runs in an `AppHost` instance on Cloudflare's
+`durable_object` container scheduling policy, and `AppRouter` decides which instance is live:
+
+- **A deploy stops nothing by itself.** The router brings a new instance up beside the live one,
+  HELD (`lib/container-hold.js`: container up, app not started, database reachable), moves the
+  pointer to it, stops the old app, and only then lets the new app start. Requests wait a few seconds
+  while that happens; the old and the new app never run at once. If the new app does not start, the
+  old instance is started again and the deploy run goes red.
+- **A restart after a secret upload** (`node scripts/cf/restart.mjs`) is the same hand-over to a
+  fresh instance with the Worker's current environment. The script waits for it (it can take several
+  minutes while Cloudflare brings the image up; the app keeps answering meanwhile).
+- **`GET /internal/rollout`** (header `x-tick-token`) shows where things stand.
+- **The way back to the old container:** `"ROLLOUT_TARGET": "legacy"` in the `wrangler.jsonc` vars,
+  then deploy.
+
+The rules, the rehearsal results and what is left to clean up are in
+`docs/plans/zero-downtime-deploy-2026-11.md`, section 12. Everything below about the Worker's guards,
+the tick, secrets and the environment still applies unchanged.
+
 ## How it is wired
 
 ```
