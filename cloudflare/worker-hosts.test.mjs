@@ -17,7 +17,7 @@ vi.mock('@cloudflare/containers', () => ({
   getContainer: () => ({ fetch: legacyFetch, retire: legacyRetire, revive: legacyRevive, restartWith: legacyRestartWith }),
 }))
 
-const { default: worker, AppHost, AppRouter } = await import('./worker.js')
+const { default: worker, AppHost, AppRouter, targetOf } = await import('./worker.js')
 
 function fakeStorage() {
   const map = new Map()
@@ -293,6 +293,33 @@ describe('AppRouter', () => {
     vi.setSystemTime(Date.now() + RETIRE_GRACE_MS)
     await router.tick()
     expect(HOST.hosts.get('app-1').container.signals).toEqual([15])
+  })
+
+  it('takes the target from the newest Worker version that pokes it, not from its own (possibly older) env', async () => {
+    const { router, HOST } = makeRouter({ legacy: true })
+    await router.tick()
+    await router.tick()
+    await expect(router.liveName()).resolves.toBe('app-1')
+    // A new version says legacy; this object's own env still says hosts.
+    legacyFetch.mockImplementation(async () => Response.json({ ok: true, commit: 'old1234' }))
+    await router.poke({ target: LEGACY, stamp: 2_000 })
+    await router.tick()
+    await router.tick()
+    await expect(router.liveName()).resolves.toBe(LEGACY)
+    // A straggling isolate of the older version cannot turn it back.
+    await router.poke({ target: 'hosts', stamp: 1_000 })
+    expect((await router.status()).target).toBe(LEGACY)
+    await router.poke({ target: 'hosts', stamp: 3_000 })
+    expect((await router.status()).target).toBe('hosts')
+    expect(HOST.hosts.get('app-1').container.signals.length).toBeLessThanOrEqual(1)
+  })
+
+  it('targetOf reads the var and the version time, and defaults to hosts', () => {
+    expect(targetOf({})).toEqual({ target: 'hosts', stamp: 0 })
+    expect(targetOf({ ROLLOUT_TARGET: LEGACY, CF_VERSION: { timestamp: '2026-11-13T00:00:00.000Z' } })).toEqual({
+      target: LEGACY,
+      stamp: Date.parse('2026-11-13T00:00:00.000Z'),
+    })
   })
 
   it('swap() restarts onto a fresh host with the environment handed in, once', async () => {

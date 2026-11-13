@@ -440,7 +440,15 @@ export class AppRouter extends DurableObject {
     if (!this.ticking && (await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(now)
   }
 
+  /**
+   * Where traffic should be: 'hosts' or the old application. The Worker hands this in with
+   * every poke (see targetOf), because this object can keep running an OLDER version of the
+   * code and its vars for minutes after a deploy (measured: 5 minutes on staging), while the
+   * stateless Worker is always the newest. Its own env is only the fallback before any poke.
+   */
   target() {
+    const stored = this.state?.target
+    if (stored === LEGACY || stored === 'hosts') return stored
     return this.env.ROLLOUT_TARGET === LEGACY ? LEGACY : 'hosts'
   }
 
@@ -553,9 +561,18 @@ export class AppRouter extends DurableObject {
     return state.live?.name ?? null
   }
 
-  /** Look now instead of at the next heartbeat (a new Worker version just started serving). */
-  async poke() {
-    await this.load()
+  /**
+   * Look now instead of at the next heartbeat (a new Worker version just started serving).
+   * `target` and `stamp` come from the Worker version that is poking; the newest stamp wins,
+   * so a straggling isolate of an older version cannot turn the target back.
+   */
+  async poke({ target = null, stamp = 0 } = {}) {
+    const state = await this.load()
+    const wanted = target === LEGACY ? LEGACY : target === 'hosts' ? 'hosts' : null
+    if (wanted && Number.isFinite(stamp) && stamp >= (state.targetStamp ?? 0) && (state.target !== wanted || stamp > (state.targetStamp ?? 0))) {
+      if (state.target !== wanted) console.log('[router] target is now ' + wanted)
+      await this.save({ ...this.state, target: wanted, targetStamp: stamp })
+    }
     this.armed = Date.now()
     await this.ctx.storage.setAlarm(Date.now())
   }
@@ -624,6 +641,12 @@ async function tokensMatch(presented, expected) {
 }
 
 const routerOf = (env) => (env.ROUTER ? env.ROUTER.get(env.ROUTER.idFromName('router')) : null)
+
+/** What this Worker version says the target is, and when the version was made (newest wins). */
+export function targetOf(env) {
+  const made = Date.parse(env?.CF_VERSION?.timestamp ?? '')
+  return { target: env?.ROLLOUT_TARGET === LEGACY ? LEGACY : 'hosts', stamp: Number.isFinite(made) ? made : 0 }
+}
 
 // One poke per Worker isolate: new isolates appear when a new version starts serving, which
 // is exactly when the router should look for a new image.
@@ -694,7 +717,7 @@ export default {
     const router = routerOf(env)
     if (router && !poked) {
       poked = true
-      ctx?.waitUntil?.(router.poke().catch((error) => console.error('[worker] poke failed', error?.message)))
+      ctx?.waitUntil?.(router.poke(targetOf(env)).catch((error) => console.error('[worker] poke failed', error?.message)))
     }
 
     // /internal/* is for the Worker and its cron, never for the public internet. The cron
@@ -752,7 +775,7 @@ export default {
     const tick = { method: 'POST', headers: { 'x-tick-token': env.TICK_TOKEN ?? '' } }
     // The cron is also the heartbeat's safety net: it sets the router's alarm again.
     routerOf(env)
-      ?.poke()
+      ?.poke(targetOf(env))
       .catch((error) => console.error('[cron] poke failed', error?.message))
     const sent = routerOf(env)
       ? sendToLive(env, () => new Request('http://app/internal/tick', tick), true)

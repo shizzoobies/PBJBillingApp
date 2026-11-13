@@ -1,6 +1,6 @@
 # Zero-downtime deploys: findings and options (2026-11-12)
 
-Status: **investigated, nothing built.** Alex asked for this after Brittany reported the app down during two deploys on 2026-11-12. Waiting on his choice between the options in section 4.
+Status: **option A built and rehearsed on a staging Worker (2026-11-12 evening); production is untouched.** Alex chose option A and approved the staging copy. Sections 9 to 11 are the rehearsal, what two reviews found, and the production cutover. Open with Alex: the choice in section 10.3 and when to cut production over. Everything is on the branch `staging/zero-downtime` (never merged to `main`, so no production deploy has run).
 
 ## 1. What happens today
 
@@ -85,3 +85,69 @@ The rehearsal has to show, with timestamps: a deploy that leaves `/health` answe
 - https://developers.cloudflare.com/changelog/post/2026-09-30-durable-object-scheduling-policy/
 - https://developers.cloudflare.com/workers/wrangler/configuration/ (Containers section)
 - Local: `node_modules/wrangler/config-schema.json`, `node_modules/@cloudflare/containers/dist/lib/container.js`, the `cf-deploy` run logs for the three deploys above.
+
+## 9. Rehearsal on staging (2026-11-12, evening; times UTC, 2026-11-13)
+
+Staging is the Worker `pbjbillingapp-staging` (`cloudflare/staging/wrangler.jsonc`, workflow `cf-staging`, runs only for branches named `staging/**`). File backend, seeded demo data, no secrets; nobody can sign in (production mode has no demo passwords). Each test ran one `/health` request per second from a laptop, and the later ones also ran overlapping 8-second requests (a slow POST to the sign-in route), so some request was always in flight.
+
+### 9.1 Baseline on the old arrangement, and a correction to section 2
+
+| Deploy | Old stopped | New answered | Failed of total |
+|---|---|---|---|
+| `49ca994` | 00:08:55 | 00:09:00 | 1 of 197 (about 5 s) |
+| `5729df4` | 00:16:34 | 00:16:46 | 5 of 259 (about 12 s) |
+
+Staging stalls for **seconds**, where production stalls for **minutes**, with the same Dockerfile, the same Worker code and the same deploy. So "stop first, start second" is only part of it. What differs is how long Cloudflare takes to get the new image running on the machine: on production's last deploy the new instance record (location `ord10`) was created at 21:05:28 and its process started at 21:09:59, 4.5 minutes later; on staging the same step took 1 to 7 seconds, and before the second staging deploy Cloudflare held the application in "provisioning" for 86 seconds BEFORE stopping the old container. Why production's machine is slow is not known (it cannot be seen from outside). It does not need to be: the swap below keeps the old instance serving for however long the new one takes, and 9.3 proves that with a new instance made slow on purpose.
+
+A side finding: every deploy pushes 15 of the image's 20 layers as new (a fresh build machine has no cache, so even an unchanged `npm ci` layer gets a new identity). Caching those layers would make every new image smaller to fetch. Not done; listed in section 11.
+
+### 9.2 What was built (branch `staging/zero-downtime`)
+
+- `cloudflare/rollout.js`: the swap rules, pure and unit-tested. One instance is live. A new image starts a second instance; the pointer moves only when that instance answers `/health`; the old one serves 5 more seconds, then gets SIGTERM. A new instance that is not healthy within 20 minutes is given up on and the live one keeps serving. A newer deploy arriving mid-swap replaces the half-started instance. A stop that fails is retried until it works.
+- `cloudflare/worker.js`: `AppRouter` (one Durable Object: which instance is live, a heartbeat alarm that carries out the rules), `AppHost` (one instance on the `durable_object` policy: its own code picks the image, so a deploy never restarts it), and the old `AppContainer` kept as the instance named `legacy` (what serves until the first swap, and the way back through the `ROLLOUT_TARGET` var).
+- The old container's image is PINNED in the Wrangler config to the digest it is running. Left as `./Dockerfile`, the cutover deploy itself would roll the old container and stall once more.
+- A restart after a secret upload (`POST /internal/restart`) becomes a swap to a fresh instance started with the Worker's current environment, so it no longer interrupts anyone. `GET /internal/rollout` (token) shows where things stand.
+
+### 9.3 Results on the new arrangement
+
+| Test | What happened | Failed of total |
+|---|---|---|
+| Cutover from the old container (`387436f`) | Old container served until the first new instance answered, 18 s after it was started; then it was stopped | 0 of 213 |
+| An ordinary deploy, instance to instance (`6999f07`) | Swap 45 s after the deploy finished; new instance answered 16 s after it was started | 0 of 292 |
+| A new instance made to take 4 minutes to come up (`e31b682`) | Old instance served for the whole 253 s; swap at 00:40:01; old instance exited on SIGTERM at 00:40:08 | 0 of 491 health checks, 0 of 653 eight-second requests |
+| The way back to the old container (`668b224`, `ROLLOUT_TARGET` = `legacy`) | Old container started on its pinned image and took over when it answered, 6 s after it was asked; the instance was then stopped | 0 of 500 |
+
+No request took longer than one second during any swap. In the slow-start test, requests that were in flight at the moment of the swap and at the moment the old instance got SIGTERM all finished normally.
+
+### 9.4 The way back
+
+The way back worked, but slowly at first: the swap to the old container began about 5 minutes after the deploy finished. The router is a long-lived Durable Object, and it went on running the PREVIOUS Worker version (code and vars) for those 5 minutes, so it had not seen the new `ROLLOUT_TARGET` yet. A new image is not affected (the router asks a brand-new object, which always runs the newest version, what image is wanted; those swaps began within 30 to 45 seconds). Fixed after this run: the stateless Worker, which is always the newest version, hands the target to the router with its version time, and the newest wins. Rule of thumb that stays true: anything the router or a long-lived instance reads from its own `env` can be minutes stale after a deploy.
+
+## 10. What the two reviews found (2026-11-12)
+
+### 10.1 The Worker code (fixed)
+
+An independent review of `worker.js` and `rollout.js` found one real defect and several gaps, all fixed with tests before the last staging runs: a restart requested while the router was mid-look was overwritten and lost; the old container, once stopped, could be woken by a late request and would then run for ever (it now stores a "retired" mark and answers "gone"); an instance whose stop failed five times was forgotten while possibly still running (now retried until it stops); the heartbeat had no safety net (the cron and ordinary requests now re-arm it); the old instance was stopped even if the new one had just crashed (now kept until the new one answers). Known and left: a request with a body that lands on an instance in the second it stops serving gets a 503 with retry-after (it is never sent twice); a restart requested while the target is `legacy` waits until the target is `hosts` again.
+
+### 10.2 The app under two processes (NOT fixed; the reason for 10.3)
+
+A second review read `server.js`, `db/store.js` and `lib/` for what goes wrong when the old and the new process run against the same Postgres for 15 to 60 seconds. Its two serious findings, both checked against the code:
+
+1. **A save on the old process can erase a column the new process just added.** The bulk save deletes and re-inserts whole tables (`clients`, `invoices`, `time_entries` and others) with the OLD code's column list. If a deploy adds a column and fills it at boot, and someone saves in the seconds before the swap, those rows go back to empty and the boot-time fill does not run again. Today this cannot happen because the old process is dead before the new one boots.
+2. **Boot's schema statements can freeze the old process for the length of a save.** Boot runs about 200 `alter table ... if not exists` statements with no lock timeout. Each one asks for an exclusive lock even when it changes nothing. Behind a bulk save (10 to 13 seconds) it waits, and every other query on that table, reads included, waits behind it.
+
+Smaller: shutdown does not wait for a periodic job or a webhook's after-work that is mid-run (true today as well); the weekly digest reads its "sent" mark, sends, then writes the mark, so two processes could both send it in a narrow window on digest day; a few double-click guards are in-process only. Found safe: Stripe, SignWell and eSignatures webhooks (event ledger first), past-due notices (one claiming update), automatic reminders (provider idempotency key per invoice and day), autopay (claim row plus Stripe idempotency key), money operations (database advisory locks), and the bulk save's staleness guard (checked in the database under the table locks).
+
+### 10.3 The choice this leaves (Alex)
+
+- **Overlap (what was rehearsed).** Zero downtime. Needs a standing rule: a deploy that adds or fills a column ships the schema first and the code that depends on it in a later deploy, or is marked to use the other style. Also worth doing first: a lock timeout and retry around boot's schema statements.
+- **Hand-over (not built).** The new instance is brought up and HELD before the app starts (so Cloudflare's slow step is already done), the pointer moves, the old process is stopped, and only then is the new app started. Requests wait about 15 seconds instead of failing, and the two processes never overlap, so neither finding above applies and no deploy rule is needed. About a day of work plus its own rehearsal; it relies on running a command inside the container (`ctx.container.exec`), which is part of the same beta API.
+- Either way production's stall goes from minutes to nothing or to seconds. Recommended: hand-over as the default, with overlap available for deploys known not to touch the schema, because the bulk save's delete-and-re-insert makes "the old code can live with it" a promise that has to be re-checked on every schema change.
+
+## 11. Production cutover (after the choice above; outside working hours)
+
+1. Merge the branch into `main` as ONE commit with the production config changes: the old container's image pinned to the digest it is running at that moment (`wrangler containers info` shows it; it was `sha256:2a4f3e2f...85b9` on 2026-11-12), a second `containers` entry (`AppHost`, `scheduling_policy: durable_object`, `images.app` built from `./Dockerfile`), the `HOST` and `ROUTER` bindings, migration `v2`, the version-metadata binding, and a longer health wait in `cf-deploy.yml` (the new commit answers only after the swap). Remove the rehearsal-only slow-start switch from `worker.js` first.
+2. That deploy is itself a swap: the old container serves until the first new instance answers. Watch `/health` and `GET /internal/rollout`.
+3. The way back for the first days: set `ROLLOUT_TARGET` to `legacy` and deploy. The old container starts on its pinned (old) image and takes over when it answers.
+4. After a week: delete the old application and class, the `@cloudflare/containers` package, the legacy code paths, the staging Worker and its workflow; update `docs/cloudflare.md` and `scripts/cf/restart.mjs` (its 90-second wait assumes a stop-and-start); drop the "ask about timing" rule.
+5. Separate, optional: cache the image layers in the deploy workflow (9.1).

@@ -59,8 +59,6 @@
     "NODE_ENV": "production",
     "FIRM_TIME_ZONE": "America/New_York",
     // Staging has no secrets, so its rollout status is readable without a token.
-    "ROLLOUT_STATUS_PUBLIC": "1",
-    // Rehearsal of the way back: serve from the old container again.
-    "ROLLOUT_TARGET": "legacy"
+    "ROLLOUT_STATUS_PUBLIC": "1"
   }
 }
