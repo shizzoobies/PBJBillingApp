@@ -46,3 +46,30 @@ jobs:
           echo "deploy start $(date -u +%H:%M:%S)"
           npx wrangler deploy --config cloudflare/staging/wrangler.jsonc
           echo "deploy end $(date -u +%H:%M:%S)"
+
+  # Read-only: how Cloudflare has placed the staging container and the production one
+  # (location, state, image), to compare them. Prints platform metadata only; changes nothing.
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: deploy
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Container applications
+        run: npx wrangler containers list || true
+      - name: Staging application
+        run: |
+          npx wrangler containers info a03de0c5-22eb-445c-a579-036e18dbf970 || true
+          npx wrangler containers instances a03de0c5-22eb-445c-a579-036e18dbf970 || true
+      - name: Production application (read-only)
+        run: |
+          npx wrangler containers info a030a23a-e6db-41aa-8413-3a58499ea33f || true
+          npx wrangler containers instances a030a23a-e6db-41aa-8413-3a58499ea33f || true
