@@ -51,6 +51,17 @@ const COLD_POLL_MS = 300
 /** Marks an answer from a host that no longer serves, so the Worker can ask the router again. */
 const GONE_HEADER = 'x-pbj-host-gone'
 
+/**
+ * REHEARSAL ONLY (the staging Worker sets REHEARSAL_START_DELAY_SECONDS; production never
+ * does): make a new instance slow to come up, the way production's are while Cloudflare
+ * brings the image to the machine, to prove the old instance serves through the wait.
+ */
+function rehearsalStartDelay(env) {
+  const seconds = Number(env?.REHEARSAL_START_DELAY_SECONDS)
+  if (!Number.isInteger(seconds) || seconds <= 0 || seconds > 3600) return {}
+  return { entrypoint: ['sh', '-c', 'sleep ' + seconds + '; exec node server.js'] }
+}
+
 const NAME_SET = new Set(CONTAINER_ENV_NAMES)
 
 /** Throws (message without values) unless `value` is a plain object of listed names with string values. */
@@ -205,6 +216,7 @@ export class AppHost extends DurableObject {
         // The app talks straight to Postgres, Stripe, Resend and the rest, as it did before.
         enableInternet: true,
         env: this.envOverride ?? pickContainerEnv(this.env),
+        ...rehearsalStartDelay(this.env),
       })
     } catch (error) {
       // "Throws Error if already running": a second caller got here first.
@@ -374,14 +386,19 @@ export class AppRouter extends DurableObject {
 
   async load() {
     if (this.state === undefined) {
-      this.state = (await this.ctx.storage.get('state')) ?? initialState({ hasLegacy: Boolean(this.env.APP) })
+      const stored = await this.ctx.storage.get('state')
+      this.state = stored ?? initialState({ hasLegacy: Boolean(this.env.APP) })
+      // A first-ever state is written at once, so "unchanged" in save() never hides it.
+      if (!stored) await this.ctx.storage.put('state', this.state)
     }
     return this.state
   }
 
+  /** Store the state, unless nothing changed (most looks change nothing). */
   async save(state) {
+    const unchanged = this.state !== undefined && JSON.stringify(this.state) === JSON.stringify(state)
     this.state = state
-    await this.ctx.storage.put('state', state)
+    if (!unchanged) await this.ctx.storage.put('state', state)
   }
 
   /** The heartbeat must never stop: it is what notices a new image and a crashed instance. */
@@ -437,7 +454,7 @@ export class AppRouter extends DurableObject {
     // What the newest code wants is asked of the host that WOULD be next: a new object always
     // runs the newest version, where a long-lived one may briefly lag behind a deploy.
     let wanted = null
-    if (!state.next && target !== LEGACY) wanted = (await this.describe(hostName(state.seq + 1)))?.wanted ?? live?.wanted ?? null
+    if (target !== LEGACY) wanted = (await this.describe(hostName(state.seq + 1)))?.wanted ?? live?.wanted ?? null
     return { live, next, wanted, target }
   }
 
@@ -467,7 +484,7 @@ export class AppRouter extends DurableObject {
         } else if (action.type === 'retire') {
           const { graceful } = await this.instance(action.name).retire()
           console.log('[router] retired ' + action.name + ' graceful=' + graceful)
-          await this.save(retired(this.state, action.name))
+          await this.save(retired(this.state, action.name, { graceful, now: Date.now() }))
         }
       } catch (error) {
         console.error('[router] ' + action.type + ' ' + action.name + ' failed:', error?.message)

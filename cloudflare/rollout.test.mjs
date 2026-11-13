@@ -65,6 +65,31 @@ describe('a new image', () => {
     expect(out.delay).toBe(TICK_FAST_MS)
   })
 
+  it('drops a host that is still coming up when a newer deploy arrives, then starts the newest image', () => {
+    const state = liveOn('app-1', { seq: 2, next: { name: 'app-2', startedAt: T - 30_000, reason: 'image', image: 'img-2' } })
+    const out = plan(state, { live: host('img-1'), next: host('img-2', { ready: false }), wanted: 'img-3', target: 'hosts' }, T)
+    expect(out.state.live.name).toBe('app-1')
+    expect(out.state.next).toBeNull()
+    expect(out.state.failed).toBeNull()
+    expect(out.actions).toEqual([{ type: 'retire', name: 'app-2' }])
+    expect(out.state.history.at(-1)).toMatchObject({ to: 'app-2', superseded: true })
+    const after = plan(retired(out.state, 'app-2'), { live: host('img-1'), next: null, wanted: 'img-3', target: 'hosts' }, T + 2_000)
+    expect(after.actions).toEqual([{ type: 'begin', name: 'app-3', reason: 'image', forced: false }])
+  })
+
+  it('still swaps to a host that is already healthy when a newer deploy arrives (the newest follows)', () => {
+    const state = liveOn('app-1', { seq: 2, next: { name: 'app-2', startedAt: T - 30_000, reason: 'image', image: 'img-2' } })
+    const out = plan(state, { live: host('img-1'), next: host('img-2'), wanted: 'img-3', target: 'hosts' }, T)
+    expect(out.state.live.name).toBe('app-2')
+  })
+
+  it('a restart onto the same image is not mistaken for a newer deploy', () => {
+    const state = liveOn('app-1', { seq: 2, next: { name: 'app-2', startedAt: T - 3_000, reason: 'restart', image: 'img-1' } })
+    const out = plan(state, { live: host('img-1'), next: host('img-1', { ready: false }), wanted: 'img-1', target: 'hosts' }, T)
+    expect(out.state.next.name).toBe('app-2')
+    expect(out.actions).toEqual([])
+  })
+
   it('asks a host whose start did not take to begin again', () => {
     const state = liveOn('app-1', { seq: 2, next: { name: 'app-2', startedAt: T - 4_000, reason: 'image' } })
     const out = plan(state, { live: host('img-1'), next: { begun: false, image: null, running: false, ready: false }, wanted: null, target: 'hosts' }, T)
@@ -90,7 +115,9 @@ describe('a new image', () => {
     expect(due.actions).toEqual([{ type: 'retire', name: 'app-1' }])
     // It stays listed until the router reports the stop worked.
     expect(due.state.retiring).toHaveLength(1)
-    expect(retired(due.state, 'app-1').retiring).toEqual([])
+    const after = retired(due.state, 'app-1', { graceful: true, now: T + 9_000 })
+    expect(after.retiring).toEqual([])
+    expect(after.history.at(-1)).toEqual({ at: T + 9_000, stopped: 'app-1', graceful: true })
   })
 })
 

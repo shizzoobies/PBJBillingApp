@@ -59,6 +59,9 @@
     "NODE_ENV": "production",
     "FIRM_TIME_ZONE": "America/New_York",
     // Staging has no secrets, so its rollout status is readable without a token.
-    "ROLLOUT_STATUS_PUBLIC": "1"
+    "ROLLOUT_STATUS_PUBLIC": "1",
+    // Rehearsal: every new instance takes 4 minutes to come up (as production's do while
+    // Cloudflare brings the image to the machine), to prove the old one serves through it.
+    "REHEARSAL_START_DELAY_SECONDS": "240"
   }
 }

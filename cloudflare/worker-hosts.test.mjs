@@ -246,7 +246,8 @@ describe('AppRouter', () => {
     const status = await router.status()
     expect(status.live).toMatchObject({ name: 'app-2', image: 'bbbbbbbbbbbb', ready: true, commit: 'def5678' })
     expect(status.retiring).toEqual([])
-    expect(status.history.at(-1)).toMatchObject({ from: 'app-1', to: 'app-2', reason: 'image' })
+    expect(status.history.at(-2)).toMatchObject({ from: 'app-1', to: 'app-2', reason: 'image' })
+    expect(status.history.at(-1)).toMatchObject({ stopped: 'app-1', graceful: true })
     await expect(router.tick()).resolves.toBe(TICK_SLOW_MS)
   })
 

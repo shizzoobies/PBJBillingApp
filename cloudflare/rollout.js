@@ -57,7 +57,7 @@ function liveImageOf(state, facts) {
  * facts: { live, next, wanted, target }
  *   live / next: what each instance reports ({ begun, image, running, ready, commit }), or null
  *     when it could not be asked.
- *   wanted: the image this version of the code wants to run (null when unknown).
+ *   wanted: the image the newest version of the code wants to run (null when unknown).
  *   target: 'hosts' (normal) or 'legacy' (the rollback lever: go back to the old application).
  * Returns { state, actions, delay } where actions are, in order:
  *   { type: 'begin', name, reason, forced }   start an instance
@@ -80,6 +80,17 @@ export function plan(state, facts, now) {
       next.history = [
         ...next.history,
         { at: now, from, to: candidate.name, reason: candidate.reason, tookMs: now - candidate.startedAt, commit: facts.next.commit ?? null },
+      ].slice(-HISTORY_KEPT)
+    } else if (
+      target !== LEGACY && candidate.name !== LEGACY && facts.wanted && facts.next?.begun && facts.next.image && facts.next.image !== facts.wanted
+    ) {
+      // A newer deploy arrived while this one was still coming up: drop it and go straight
+      // to the newest image (the next look starts it) instead of waiting out the older one.
+      next.retiring.push({ name: candidate.name, at: now - RETIRE_GRACE_MS, tries: 0 })
+      next.next = null
+      next.history = [
+        ...next.history,
+        { at: now, from: next.live?.name ?? null, to: candidate.name, reason: candidate.reason, superseded: true, tookMs: now - candidate.startedAt },
       ].slice(-HISTORY_KEPT)
     } else if (now - candidate.startedAt > ROLLOUT_TIMEOUT_MS) {
       // Given up on. It goes on the old-instances list, already due, so a failed stop is retried.
@@ -140,9 +151,10 @@ export function plan(state, facts, now) {
   return { state: next, actions, delay: busy ? TICK_FAST_MS : TICK_SLOW_MS }
 }
 
-/** The instance was stopped for good: forget it. */
-export function retired(state, name) {
-  return { ...state, retiring: state.retiring.filter((old) => old.name !== name) }
+/** The instance was stopped for good: forget it, and note how the stop went. */
+export function retired(state, name, { graceful = null, now = null } = {}) {
+  const history = now === null ? state.history : [...state.history, { at: now, stopped: name, graceful }].slice(-HISTORY_KEPT)
+  return { ...state, retiring: state.retiring.filter((old) => old.name !== name), history }
 }
 
 /** Stopping it failed: try again next time, up to MAX_RETIRE_TRIES. `dropped` says it was given up on. */
