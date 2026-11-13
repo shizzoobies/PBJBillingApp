@@ -1,0 +1,66 @@
+{
+  // THROWAWAY staging copy for the zero-downtime deploy rehearsal
+  // (docs/plans/zero-downtime-deploy-2026-11.md). A second Worker with its own container
+  // applications. It has NO secrets and NO DATABASE_URL, so the app runs on its file backend
+  // with the seeded demo workspace (prototype-data.json). Deployed only by
+  // .github/workflows/cf-staging.yml, from branches named staging/**. Delete the Worker and
+  // its container applications when the rehearsal ends.
+  //
+  // It lives under cloudflare/ so it stays out of the Docker build context (.dockerignore).
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "pbjbillingapp-staging",
+  "main": "../worker.js",
+  "compatibility_date": "2026-10-21",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+
+  "containers": [
+    // The OLD arrangement, as production has it today (one container, default scheduling
+    // policy). Step 1 of the rehearsal measured it; it stays so the rehearsal can practice
+    // the cutover away from it and the way back.
+    {
+      "name": "pbjbillingapp-staging-app",
+      "class_name": "AppContainer",
+      // Pinned to the image it is running (no account id needed: wrangler adds it). A deploy
+      // that left "../../Dockerfile" here would roll this container too, which is the very
+      // stall the cutover is meant to avoid.
+      "image": "registry.cloudflare.com/pbjbillingapp-staging-app@sha256:df22a80cec6fe3e303ed32b307247adfe5f9038e57b449b82f2d14fbe2f8422d",
+      "max_instances": 1,
+      "instance_type": "standard-1"
+    },
+    // The NEW arrangement: the Durable Object's own code picks the image, so a deploy never
+    // restarts a running instance (cloudflare/worker.js AppHost).
+    {
+      "name": "pbjbillingapp-staging-hosts",
+      "class_name": "AppHost",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "app": { "dockerfile": "../../Dockerfile" }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "APP", "class_name": "AppContainer" },
+      { "name": "HOST", "class_name": "AppHost" },
+      { "name": "ROUTER", "class_name": "AppRouter" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["AppContainer"] },
+    { "tag": "v2", "new_sqlite_classes": ["AppHost", "AppRouter"] }
+  ],
+  // Which Worker version each Durable Object runs, shown by GET /internal/rollout.
+  "version_metadata": { "binding": "CF_VERSION" },
+
+  // No cron: nothing here has periodic work worth running, and there is no TICK_TOKEN.
+  "vars": {
+    "NODE_ENV": "production",
+    "FIRM_TIME_ZONE": "America/New_York",
+    // Staging has no secrets, so its rollout status is readable without a token.
+    "ROLLOUT_STATUS_PUBLIC": "1",
+    // Staging has no database at all; everywhere else a new instance must reach one before it takes over.
+    "ALLOW_NO_DATABASE": "1"
+  }
+}

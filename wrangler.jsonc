@@ -1,7 +1,9 @@
 {
-  // PBJBillingApp on Cloudflare: a Worker in front of ONE container running the
-  // Dockerfile image. See docs/cloudflare.md. Non-secret settings only; every secret
-  // is a Worker secret (scripts/cf/secrets-upload.mjs) read in cloudflare/worker.js.
+  // PBJBillingApp on Cloudflare: a Worker in front of ONE live instance of the Dockerfile
+  // image. A deploy brings a second instance up beside it and hands over to it
+  // (cloudflare/worker.js, docs/plans/zero-downtime-deploy-2026-11.md). See docs/cloudflare.md.
+  // Non-secret settings only; every secret is a Worker secret
+  // (scripts/cf/secrets-upload.mjs) read in cloudflare/worker.js.
   // No account id here: wrangler reads CLOUDFLARE_ACCOUNT_ID.
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "pbjbillingapp",
@@ -12,17 +14,45 @@
 
   // https://developers.cloudflare.com/containers/configuration/wrangler/
   "containers": [
+    // The OLD arrangement (one container, Cloudflare's default scheduling policy, where a
+    // deploy stops the container before the new one is up). Kept as the way back
+    // (ROLLOUT_TARGET=legacy) until the new arrangement has run for a while. Its image is
+    // PINNED to the last one it ran (commit 7620cbc, 2026-11-12): with "./Dockerfile" here
+    // every deploy would roll this container too, which is the stall this file now avoids.
+    // No account id in the reference: wrangler adds it.
     {
       "class_name": "AppContainer",
-      "image": "./Dockerfile",
+      "image": "registry.cloudflare.com/pbjbillingapp-appcontainer@sha256:2a4f3e2f1bce6b8296f2c27a53e708c76e067646ffd5fa28103e6cc29f2685b9",
       "max_instances": 1,
       "instance_type": "standard-1"
+    },
+    // The app's instances. On the durable_object policy the Durable Object's own code picks
+    // the image and starts the container, so a deploy never restarts a running instance:
+    // cloudflare/worker.js (AppHost, AppRouter) starts a new one beside it and hands over.
+    // The instance size is set in code (HOST_INSTANCE in cloudflare/worker.js).
+    {
+      "name": "pbjbillingapp-hosts",
+      "class_name": "AppHost",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "app": { "dockerfile": "./Dockerfile" }
+      }
     }
   ],
   "durable_objects": {
-    "bindings": [{ "name": "APP", "class_name": "AppContainer" }]
+    "bindings": [
+      { "name": "APP", "class_name": "AppContainer" },
+      { "name": "HOST", "class_name": "AppHost" },
+      { "name": "ROUTER", "class_name": "AppRouter" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AppContainer"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["AppContainer"] },
+    { "tag": "v2", "new_sqlite_classes": ["AppHost", "AppRouter"] }
+  ],
+  // Which Worker version each Durable Object runs (GET /internal/rollout), and how the
+  // router tells the newest version's ROLLOUT_TARGET from an older one's.
+  "version_metadata": { "binding": "CF_VERSION" },
 
   // The Worker POSTs /internal/tick to the container every 15 minutes (UTC).
   // https://developers.cloudflare.com/workers/configuration/cron-triggers/

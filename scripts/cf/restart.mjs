@@ -15,6 +15,12 @@
 // revision when it reports one. After /health answers, its envRevision must equal the value;
 // if not, restart again (up to MAX_EXTRA_RESTARTS more times, RESTART_GAP_MS apart) and fail
 // with the last status if it never does.
+//
+// Since the hand-over arrangement (docs/plans/zero-downtime-deploy-2026-11.md) the restart is
+// a hand-over to a fresh instance, like a deploy: the route answers "swapping" at once, the
+// old process keeps answering until the new instance is up (minutes, while Cloudflare brings
+// the image to the machine), and requests wait a few seconds while the app starts. So this
+// script then waits much longer for the new process to show up.
 import { pathToFileURL } from 'node:url'
 import { readEnvFile } from '../prod/env.mjs'
 import { DEFAULT_ROTATION_FILE } from './secrets-upload.mjs'
@@ -22,6 +28,9 @@ import { DEFAULT_ROTATION_FILE } from './secrets-upload.mjs'
 export const DEFAULT_APP_URL = 'https://app.pbjsatime.com'
 const HEALTH_TIMEOUT_MS = 90_000
 const HEALTH_INTERVAL_MS = 3_000
+// A hand-over waits for a fresh instance to come up beside the old one before anything changes.
+export const SWAP_TIMEOUT_MS = 25 * 60_000
+const SWAP_INTERVAL_MS = 5_000
 // With no uptime from before the restart to compare with, a restarted container is younger than this.
 export const FRESH_UPTIME_SECONDS = 120
 // The restart route itself waits up to 20 s for a graceful stop before it destroys the
@@ -146,12 +155,15 @@ export async function restartContainer(argv = [], {
       throw new Error(
         restart.status === 404 ? 'Restart refused (404): TICK_TOKEN is not uploaded to the Worker yet' :
         restart.status === 401 ? 'Restart refused (401): TICK_TOKEN does not match the Worker\'s' :
+        restart.status === 409 ? 'Restart refused (409): the newest deploy did not start, so a fresh instance cannot be started; deploy a fix first (GET /internal/rollout says why)' :
         'Restart failed with HTTP ' + restart.status,
       )
     }
 
+    const swapping = restartBody?.swapping === true
+    if (swapping) print('the restart is a hand-over to a fresh instance; the app keeps answering meanwhile (this can take several minutes)')
     // The first request after the restart starts the container, which takes a while.
-    const deadline = now() + HEALTH_TIMEOUT_MS
+    const deadline = now() + (swapping ? SWAP_TIMEOUT_MS : HEALTH_TIMEOUT_MS)
     let answered = null
     let last = { status: null, body: null }
     while (!answered) {
@@ -167,10 +179,11 @@ export async function restartContainer(argv = [], {
       if (now() >= deadline) {
         const seen = describeHealth(last.status, last.body)
         throw new Error(last.status === 200
-          ? 'the container did not restart: /health keeps reporting an uptime that did not drop (last: ' + seen + ')'
-          : '/health did not answer 200 within 90 seconds (last: ' + seen + ')')
+          ? 'the container did not restart: /health keeps reporting an uptime that did not drop (last: ' + seen + ')' +
+            (swapping ? '; GET /internal/rollout says why the hand-over did not happen' : '')
+          : '/health did not answer 200 within ' + (swapping ? '25 minutes' : '90 seconds') + ' (last: ' + seen + ')')
       }
-      await sleep(HEALTH_INTERVAL_MS)
+      await sleep(swapping ? SWAP_INTERVAL_MS : HEALTH_INTERVAL_MS)
     }
 
     const uptime = reportedUptime(answered)
