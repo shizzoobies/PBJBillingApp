@@ -62,7 +62,7 @@
     "ROLLOUT_STATUS_PUBLIC": "1",
     // Staging has no database at all; everywhere else a new instance must reach one before it takes over.
     "ALLOW_NO_DATABASE": "1",
-    // REHEARSAL: the new app fails to start (cloudflare/worker.js rehearsalOf).
-    "REHEARSAL_BOOT_FAIL": "1"
+    // REHEARSAL: the way back to the old container.
+    "ROLLOUT_TARGET": "legacy"
   }
 }
