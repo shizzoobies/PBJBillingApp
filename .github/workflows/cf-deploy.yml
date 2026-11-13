@@ -1,10 +1,12 @@
 name: cf-deploy
 
-# Deploys the Cloudflare runtime (docs/cloudflare.md): a Worker in front of one
-# container built from the repo Dockerfile. `wrangler deploy` builds that image with
+# Deploys the Cloudflare runtime (docs/cloudflare.md): a Worker in front of one live
+# instance of the repo Dockerfile image. `wrangler deploy` builds that image with
 # Docker, which this laptop does not have and ubuntu-latest does, so the deploy lives
-# here. Rollback = re-run this workflow on the previous commit (Actions > cf-deploy >
-# Run workflow > pick the older commit's branch/tag, or push a revert).
+# here. The deploy itself stops nothing: the Worker brings a new instance up beside the
+# live one and hands over to it (cloudflare/worker.js). Rollback = re-run this workflow on
+# the previous commit (Actions > cf-deploy > Run workflow > pick the older commit's
+# branch/tag, or push a revert).
 #
 # Secrets: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (repo secrets, already set).
 # The APP's secrets are Worker secrets uploaded once with scripts/cf/secrets-upload.mjs;
@@ -27,7 +29,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -57,23 +59,25 @@ jobs:
         run: npx wrangler deploy
 
       # Confirms the NEW code is the code answering: /health carries the 7-character
-      # commit. 40 tries, 15 seconds apart (10 minutes): a container rollout takes a few
-      # minutes. The custom domain may not be attached on the first deploy, so this step
-      # does not fail the job yet.
-      # Once app.pbjsatime.com is attached to the Worker, delete the
-      # `continue-on-error` line below so a deploy that never shows up fails the run.
+      # commit. The old instance keeps answering (with the old commit) until the new one
+      # is up and has taken over, which on production's machine takes several minutes.
+      # 100 tries, 15 seconds apart (25 minutes): the Worker gives up on a new instance
+      # after 20. A request may wait up to a minute while the hand-over happens, hence
+      # the long --max-time.
+      # A red run here means the new code is NOT serving: the hand-over never began, or the
+      # new app did not start and the old instance was started again. GET /internal/rollout
+      # (x-tick-token) says which.
       - name: Wait for the new commit on /health
-        continue-on-error: true
         run: |
           want="${GITHUB_SHA::7}"
-          for i in $(seq 1 40); do
-            body="$(curl -fsS --max-time 10 https://app.pbjsatime.com/health 2>/dev/null || true)"
+          for i in $(seq 1 100); do
+            body="$(curl -fsS --max-time 60 https://app.pbjsatime.com/health 2>/dev/null || true)"
             if echo "$body" | grep -q "\"commit\":\"$want\""; then
               echo "app.pbjsatime.com/health reports $want (try $i)"
               exit 0
             fi
-            echo "try $i/40: /health does not report $want yet"
+            echo "try $i/100: /health does not report $want yet"
             sleep 15
           done
-          echo "::warning::app.pbjsatime.com/health never reported $want. If the custom domain is not attached to the Worker yet, that is expected on the first deploy (docs/cloudflare.md). Otherwise check 'wrangler tail' and the Cloudflare dashboard."
+          echo "::error::app.pbjsatime.com/health never reported $want. The previous version is still serving. GET /internal/rollout (x-tick-token) says why the hand-over did not happen."
           exit 1
