@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { LEGACY, RETIRE_GRACE_MS, TICK_FAST_MS, TICK_SLOW_MS } from './rollout.js'
+import { HANDOVER, HANDOVER_BOOT_TIMEOUT_MS, LEGACY, RETIRE_GRACE_MS, TICK_FAST_MS, TICK_SLOW_MS } from './rollout.js'
 
-// The zero-downtime arrangement: AppHost (one instance of the app), AppRouter (which one is
-// live, and the swaps), and the Worker's routing. worker.test.mjs covers the old arrangement.
+// The arrangement that keeps the app up through a deploy: AppHost (one instance of the app),
+// AppRouter (which one is live, and the swaps), and the Worker's routing. worker.test.mjs
+// covers the old arrangement.
 const legacyFetch = vi.fn()
 const legacyRetire = vi.fn(async () => ({ graceful: true }))
 const legacyRevive = vi.fn(async () => ({}))
 const legacyRestartWith = vi.fn(async () => ({ graceful: true, lastStatus: 'stopped' }))
+const legacyProtocol = vi.fn(async () => 2)
 vi.mock('@cloudflare/containers', () => ({
   Container: class {
     constructor(ctx, env) {
@@ -14,10 +16,12 @@ vi.mock('@cloudflare/containers', () => ({
       this.env = env
     }
   },
-  getContainer: () => ({ fetch: legacyFetch, retire: legacyRetire, revive: legacyRevive, restartWith: legacyRestartWith }),
+  getContainer: () => ({ fetch: legacyFetch, retire: legacyRetire, revive: legacyRevive, restartWith: legacyRestartWith, protocol: legacyProtocol }),
 }))
 
 const { default: worker, AppHost, AppRouter, targetOf } = await import('./worker.js')
+
+const HOLD = ['node', '/app/lib/container-hold.js']
 
 function fakeStorage() {
   const map = new Map()
@@ -32,18 +36,38 @@ function fakeStorage() {
   }
 }
 
-/** A container whose app answers /health with `health` once it is running. */
+/**
+ * A container. Started with the hold command it is in 'hold' mode: only port 8079 answers
+ * (/held, and POST /go, which turns it into the app). In 'app' mode port 8080 answers
+ * /health with `health`.
+ */
 function fakeContainer({ image = 'reg/app@sha256:aaaaaaaaaaaa', health = { ok: true, commit: 'abc1234', uptimeSeconds: 3 } } = {}) {
   const container = {
     running: false,
     images: { app: image },
     health,
+    mode: 'app',
+    holdChecks: { database: 'ok', net: 'skipped' },
     started: [],
     signals: [],
     exitsOnSigterm: true,
-    portFetch: vi.fn(async (url) => {
+    exitNow: () => {},
+    portFetch: vi.fn(async (url, init, port = 8080) => {
       if (!container.running) throw new Error('the container is not listening')
-      if (String(url).endsWith('/health') && String(url).startsWith('http://app/')) {
+      const path = new URL(String(url)).pathname
+      if (port === 8079) {
+        if (container.mode !== 'hold') throw new Error('the container is not listening')
+        if (path === '/held') {
+          return Response.json({ held: true, ok: container.holdChecks.database !== 'failed', checks: container.holdChecks, commit: 'new5678' })
+        }
+        if (path === '/go' && init?.method === 'POST') {
+          container.mode = 'app'
+          return Response.json({ released: true })
+        }
+        return Response.json({ error: 'Not found' }, { status: 404 })
+      }
+      if (container.mode !== 'app') throw new Error('the container is not listening')
+      if (path === '/health' && String(url).startsWith('http://app/')) {
         return Response.json(container.health, { status: container.health.ok ? 200 : 503 })
       }
       return new Response('from the app')
@@ -51,6 +75,7 @@ function fakeContainer({ image = 'reg/app@sha256:aaaaaaaaaaaa', health = { ok: t
     start: vi.fn((options) => {
       if (container.running) throw new Error('already running')
       container.started.push(options)
+      container.mode = options.entrypoint?.some((part) => String(part).includes('container-hold')) ? 'hold' : 'app'
       container.running = true
     }),
     signal: vi.fn((n) => {
@@ -58,9 +83,17 @@ function fakeContainer({ image = 'reg/app@sha256:aaaaaaaaaaaa', health = { ok: t
       if (container.exitsOnSigterm) container.running = false
     }),
     destroy: vi.fn(async () => void (container.running = false)),
-    monitor: vi.fn(() => new Promise(() => {})),
+    monitor: vi.fn(
+      () =>
+        new Promise((resolve) => {
+          container.exitNow = () => {
+            container.running = false
+            resolve()
+          }
+        }),
+    ),
     setInactivityTimeout: vi.fn(async () => {}),
-    getTcpPort: vi.fn(() => ({ fetch: container.portFetch })),
+    getTcpPort: vi.fn((port) => ({ fetch: (url, init) => container.portFetch(url, init, port) })),
   }
   return container
 }
@@ -76,6 +109,8 @@ beforeEach(() => {
   legacyRetire.mockClear()
   legacyRevive.mockClear()
   legacyRestartWith.mockClear()
+  legacyProtocol.mockReset()
+  legacyProtocol.mockImplementation(async () => 2)
 })
 afterEach(() => {
   vi.useRealTimers()
@@ -179,6 +214,177 @@ describe('AppHost', () => {
   })
 })
 
+describe('AppHost, held', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+
+  it('begin({ held }) starts the hold, not the app: it is parked when its checks pass, and never ready', async () => {
+    const { host, container, storage } = makeHost()
+    await host.begin({ held: true })
+    expect(container.started).toEqual([
+      { image: 'reg/app@sha256:aaaaaaaaaaaa', instance: 'standard-1', enableInternet: true, env: { NODE_ENV: 'production', DATABASE_URL: 'db-url' }, entrypoint: HOLD },
+    ])
+    expect(storage.map.get('cfg')).toMatchObject({ held: true, released: false })
+    await expect(host.describe()).resolves.toMatchObject({
+      begun: true,
+      held: true,
+      parked: true,
+      ready: false,
+      checks: { database: 'ok', net: 'skipped' },
+      commit: 'new5678',
+    })
+    container.holdChecks = { database: 'failed', net: 'skipped' }
+    await expect(host.describe()).resolves.toMatchObject({ parked: false, ready: false, checks: { database: 'failed' } })
+  })
+
+  it('is not parked on the look that starts it, or while the hold is not answering yet', async () => {
+    const { host, container } = makeHost()
+    await host.begin({ held: true })
+    container.running = false
+    await expect(host.describe()).resolves.toMatchObject({ held: true, parked: false, running: true })
+    container.portFetch.mockRejectedValueOnce(new Error('the container is not listening'))
+    await expect(host.describe()).resolves.toMatchObject({ parked: false })
+    await expect(host.describe()).resolves.toMatchObject({ parked: true })
+  })
+
+  it('release() stores the release first, then tells the hold to become the app; again is harmless', async () => {
+    const { host, container, storage } = makeHost()
+    await host.begin({ held: true })
+    await expect(host.release()).resolves.toEqual({ released: true })
+    expect(storage.map.get('cfg')).toMatchObject({ held: true, released: true })
+    expect(container.mode).toBe('app')
+    expect(container.started).toHaveLength(1)
+    await expect(host.release()).resolves.toEqual({ released: true })
+    await expect(host.describe()).resolves.toMatchObject({ held: false, ready: true, commit: 'abc1234' })
+  })
+
+  it('after release every start runs the app: a crash restarts the app, never the hold', async () => {
+    const { host, container } = makeHost()
+    await host.begin({ held: true })
+    await host.release()
+    container.exitNow()
+    await Promise.resolve()
+    await expect(host.describe()).resolves.toMatchObject({ running: true, ready: false })
+    expect(container.started).toHaveLength(2)
+    expect(container.started[1].entrypoint).toBeUndefined()
+    expect(container.mode).toBe('app')
+  })
+
+  it('a release whose call to the hold is lost throws, and the next look lets it go', async () => {
+    const { host, container } = makeHost()
+    await host.begin({ held: true })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    container.portFetch.mockRejectedValueOnce(new Error('Network connection lost'))
+    await expect(host.release()).rejects.toThrow('Network connection lost')
+    expect(container.mode).toBe('hold')
+    // The record already says released, so the look finds the app not answering, the hold
+    // still there, and lets it go.
+    await expect(host.describe()).resolves.toMatchObject({ held: false, ready: false })
+    expect(container.mode).toBe('app')
+    await expect(host.describe()).resolves.toMatchObject({ ready: true })
+  })
+
+  it('a release that finds the container gone starts the app directly', async () => {
+    const { host, container } = makeHost()
+    await host.begin({ held: true })
+    container.running = false
+    await expect(host.release()).resolves.toEqual({ released: true, started: true })
+    expect(container.started[1].entrypoint).toBeUndefined()
+  })
+
+  it('requests wait on a parked host and go through once it is let go and the app answers', async () => {
+    vi.useFakeTimers()
+    const { host, container } = makeHost()
+    await host.begin({ held: true })
+    let answered = null
+    const waiting = host.fetch(new Request('https://app.example/api/x', { method: 'POST', body: 'b' })).then((response) => void (answered = response))
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(answered).toBeNull()
+    await host.release()
+    await vi.advanceTimersByTimeAsync(400)
+    await waiting
+    expect(answered.status).toBe(200)
+    await expect(answered.text()).resolves.toBe('from the app')
+    // The hold was started once; nothing started it again while the request waited.
+    expect(container.started).toHaveLength(1)
+  })
+
+  it('a request that began waiting while parked starts the APP if the container dies after release', async () => {
+    vi.useFakeTimers()
+    const { host, container } = makeHost()
+    await host.begin({ held: true })
+    const waiting = host.fetch(new Request('https://app.example/api/x'))
+    await vi.advanceTimersByTimeAsync(1_000)
+    await host.release()
+    container.exitNow()
+    await vi.advanceTimersByTimeAsync(1_000)
+    const response = await waiting
+    expect(response.status).toBe(200)
+    expect(container.started).toHaveLength(2)
+    expect(container.started[1].entrypoint).toBeUndefined()
+  })
+
+  it('counts exits since it was let go', async () => {
+    const { host, container } = makeHost()
+    await host.begin({ held: true })
+    await host.release()
+    for (let i = 1; i <= 2; i++) {
+      container.exitNow()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await expect(host.describe()).resolves.toMatchObject({ exits: i })
+    }
+  })
+
+  it('stop() keeps the record: it stays stopped, says it is gone, and resume() starts the same image again', async () => {
+    const { host, container, storage } = makeHost()
+    await host.begin()
+    await expect(host.stop()).resolves.toEqual({ graceful: true })
+    expect(container.signals).toEqual([15])
+    expect(storage.map.get('cfg')).toMatchObject({ image: 'reg/app@sha256:aaaaaaaaaaaa', stopped: true })
+    // Neither the router's look nor a late request starts it again.
+    await expect(host.describe()).resolves.toMatchObject({ begun: true, stopped: true, running: false, ready: false })
+    const response = await host.fetch(new Request('https://app.example/api/x'))
+    expect(response.headers.get('x-pbj-host-gone')).toBe('1')
+    expect(container.started).toHaveLength(1)
+    // Stopping again is harmless.
+    await expect(host.stop()).resolves.toEqual({ graceful: true })
+
+    container.images.app = 'reg/app@sha256:bbbbbbbbbbbb'
+    await expect(host.resume()).resolves.toEqual({ resumed: true })
+    expect(container.started).toHaveLength(2)
+    expect(container.started[1].image).toBe('reg/app@sha256:aaaaaaaaaaaa')
+    expect(container.started[1].entrypoint).toBeUndefined()
+    await expect(host.describe()).resolves.toMatchObject({ ready: true })
+    expect(storage.map.get('cfg').stopped).toBe(false)
+  })
+
+  it('stop() throws when the app will not leave and cannot be destroyed, and stays marked stopped', async () => {
+    vi.useFakeTimers()
+    const { host, container, storage } = makeHost()
+    await host.begin()
+    container.exitsOnSigterm = false
+    container.destroy.mockRejectedValueOnce(new Error('destroy exploded'))
+    const pending = host.stop()
+    const failed = expect(pending).rejects.toThrow('destroy exploded')
+    await vi.advanceTimersByTimeAsync(21_000)
+    await failed
+    expect(storage.map.get('cfg').stopped).toBe(true)
+    const again = host.stop()
+    await vi.advanceTimersByTimeAsync(21_000)
+    await expect(again).resolves.toEqual({ graceful: false })
+    expect(container.running).toBe(false)
+  })
+
+  it('a parked host that is retired just leaves', async () => {
+    const { host, container, storage } = makeHost()
+    await host.begin({ held: true })
+    await expect(host.retire()).resolves.toEqual({ graceful: true })
+    expect(container.running).toBe(false)
+    expect(storage.map.size).toBe(0)
+  })
+})
+
 /** A HOST namespace of real AppHost objects on fake containers, all wanting `images.app`. */
 function fakeHosts(images) {
   const hosts = new Map()
@@ -205,6 +411,20 @@ function makeRouter({ legacy = false, target } = {}) {
   return { router, storage, HOST, images, env }
 }
 
+/** One look, with the clock moved far enough for the pause before a stop (and a slow stop). */
+async function look(router, ms = 1_100) {
+  const looking = router.tick()
+  await vi.advanceTimersByTimeAsync(ms)
+  return looking
+}
+
+/** From the old application to the first host: begun held, handed over, done. */
+async function cutOver(router) {
+  await look(router)
+  await look(router)
+  await look(router)
+}
+
 describe('AppRouter', () => {
   beforeEach(() => {
     vi.useFakeTimers()
@@ -212,59 +432,175 @@ describe('AppRouter', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {})
   })
 
-  it('with nothing serving, starts the first host and names it live', async () => {
+  it('with nothing serving, starts the first host (the app, not the hold) and names it live', async () => {
     const { router, HOST, storage } = makeRouter()
     await expect(router.liveName()).resolves.toBe('app-1')
     expect(HOST.hosts.get('app-1').container.started).toHaveLength(1)
+    expect(HOST.hosts.get('app-1').container.started[0].entrypoint).toBeUndefined()
     // The heartbeat is armed from the first request on.
     expect(storage.setAlarm).toHaveBeenCalled()
   })
 
-  it('a deploy: the old host serves until the new one answers, then is stopped after the grace period', async () => {
+  it('a deploy: the old app serves until the new instance is parked, is stopped, and only then is the new app let go', async () => {
     const { router, HOST, images } = makeRouter()
     await router.liveName()
     await expect(router.tick()).resolves.toBe(TICK_SLOW_MS)
 
-    // The deploy: the code now wants another image. The new host's app is not up yet.
+    // The deploy: the code now wants another image. The new host is started HELD.
     images.app = 'reg/app@sha256:bbbbbbbbbbbb'
     await expect(router.tick()).resolves.toBe(TICK_FAST_MS)
+    const old = HOST.hosts.get('app-1')
     const next = HOST.hosts.get('app-2')
-    expect(next.container.started[0].image).toBe('reg/app@sha256:bbbbbbbbbbbb')
-    next.container.health = { ok: false }
-    await router.tick()
+    expect(next.container.started[0]).toMatchObject({ image: 'reg/app@sha256:bbbbbbbbbbbb', entrypoint: HOLD })
+    expect((await router.status()).next).toMatchObject({ name: 'app-2', held: true })
+
+    // While its checks do not pass, nothing moves and the old app is untouched.
+    next.container.holdChecks = { database: 'failed', net: 'skipped' }
+    await look(router)
     await expect(router.liveName()).resolves.toBe('app-1')
-    expect(HOST.hosts.get('app-1').container.running).toBe(true)
+    expect(old.container.signals).toEqual([])
+    expect(next.container.mode).toBe('hold')
 
-    // It answers: the pointer moves, and the old host is still running.
-    next.container.health = { ok: true, commit: 'def5678', uptimeSeconds: 4 }
-    await router.tick()
+    // Parked. The pointer moves, the old app gets SIGTERM while the new one is still held,
+    // and only after it has left is the new one let go.
+    next.container.holdChecks = { database: 'ok', net: 'skipped' }
+    let modeWhenOldStopped = null
+    old.container.signal.mockImplementation((n) => {
+      modeWhenOldStopped = next.container.mode
+      old.container.signals.push(n)
+      old.container.running = false
+    })
+    next.container.health = { ok: false }
+    const looking = router.tick()
+    await vi.advanceTimersByTimeAsync(500)
+    // The pointer has moved already; the old app is not stopped until the pause is over.
     await expect(router.liveName()).resolves.toBe('app-2')
-    expect(HOST.hosts.get('app-1').container.signals).toEqual([])
+    expect(old.container.signals).toEqual([])
+    await vi.advanceTimersByTimeAsync(600)
+    await looking
+    expect(old.container.signals).toEqual([15])
+    expect(modeWhenOldStopped).toBe('hold')
+    expect(next.container.mode).toBe('app')
+    expect((await router.status()).handover).toMatchObject({ from: 'app-1', to: 'app-2', phase: 'boot' })
+    // The old host keeps its record until the new app answers (it is the way back).
+    expect(old.storage.map.get('cfg')).toMatchObject({ stopped: true })
 
-    // After the grace period it is asked to stop, and forgotten.
-    vi.setSystemTime(Date.now() + RETIRE_GRACE_MS)
-    await router.tick()
-    expect(HOST.hosts.get('app-1').container.signals).toEqual([15])
+    // Still booting: nothing changes.
+    await look(router)
+    expect((await router.status()).handover).toMatchObject({ phase: 'boot' })
+
+    // The new app answers: done, and the old host is forgotten.
+    next.container.health = { ok: true, commit: 'def5678', uptimeSeconds: 4 }
+    await look(router)
     const status = await router.status()
+    expect(status.handover).toBeNull()
     expect(status.live).toMatchObject({ name: 'app-2', image: 'bbbbbbbbbbbb', ready: true, commit: 'def5678' })
     expect(status.retiring).toEqual([])
-    expect(status.history.at(-2)).toMatchObject({ from: 'app-1', to: 'app-2', reason: 'image' })
+    expect(status.history.at(-2)).toMatchObject({ from: 'app-1', to: 'app-2', reason: 'image', style: HANDOVER })
     expect(status.history.at(-1)).toMatchObject({ stopped: 'app-1', graceful: true })
+    expect(old.storage.map.size).toBe(0)
+    expect(old.container.started).toHaveLength(1)
     await expect(router.tick()).resolves.toBe(TICK_SLOW_MS)
   })
 
-  it('cuts over from the old application without poking it, and stops it only after the host answers', async () => {
+  it('never lets the new app go while the old one could not be stopped', async () => {
+    const { router, HOST, images } = makeRouter()
+    await router.liveName()
+    images.app = 'reg/app@sha256:bbbbbbbbbbbb'
+    await router.tick()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const old = HOST.hosts.get('app-1')
+    const next = HOST.hosts.get('app-2')
+    old.container.exitsOnSigterm = false
+    old.container.destroy.mockRejectedValueOnce(new Error('destroy exploded'))
+    await look(router, 22_000)
+    expect(next.container.mode).toBe('hold')
+    expect((await router.status()).handover).toMatchObject({ phase: 'stop' })
+    // The next look stops it, and then lets the new app go.
+    await look(router, 22_000)
+    expect(old.container.running).toBe(false)
+    expect(next.container.mode).toBe('app')
+    expect((await router.status()).handover).toMatchObject({ phase: 'boot' })
+  })
+
+  it('a new app that does not come up is stopped and the old instance is started again on its own image', async () => {
+    const { router, HOST, images } = makeRouter()
+    await router.liveName()
+    images.app = 'reg/app@sha256:bbbbbbbbbbbb'
+    await router.tick()
+    const old = HOST.hosts.get('app-1')
+    const next = HOST.hosts.get('app-2')
+    next.container.health = { ok: false }
+    await look(router)
+    expect((await router.status()).handover).toMatchObject({ phase: 'boot' })
+    vi.setSystemTime(Date.now() + HANDOVER_BOOT_TIMEOUT_MS + 1_000)
+    await look(router)
+    await expect(router.liveName()).resolves.toBe('app-1')
+    expect(next.container.running).toBe(false)
+    expect(next.storage.map.size).toBe(0)
+    expect(old.container.started).toHaveLength(2)
+    expect(old.container.started[1]).toMatchObject({ image: 'reg/app@sha256:aaaaaaaaaaaa' })
+    expect(old.container.started[1].entrypoint).toBeUndefined()
+    const status = await router.status()
+    expect(status.handover).toBeNull()
+    expect(status.failed).toMatchObject({ name: 'app-2', final: true, why: 'the new app did not come up' })
+    // The image that failed is not tried again by itself.
+    await look(router)
+    await look(router)
+    expect((await router.status()).next).toBeNull()
+    expect(HOST.hosts.get('app-3')?.container.started ?? []).toEqual([])
+    // A new deploy is.
+    images.app = 'reg/app@sha256:cccccccccccc'
+    await look(router)
+    expect(HOST.hosts.get('app-3').container.started[0]).toMatchObject({ image: 'reg/app@sha256:cccccccccccc', entrypoint: HOLD })
+  })
+
+  it('hands over from the old application: it serves until the host is parked, and is stopped once', async () => {
     const { router, HOST } = makeRouter({ legacy: true })
     await expect(router.liveName()).resolves.toBe(LEGACY)
     await router.tick()
-    expect(HOST.hosts.get('app-1').container.started).toHaveLength(1)
+    expect(HOST.hosts.get('app-1').container.started[0].entrypoint).toEqual(HOLD)
     expect(legacyFetch).not.toHaveBeenCalled()
-    await router.tick()
-    await expect(router.liveName()).resolves.toBe('app-1')
     expect(legacyRetire).not.toHaveBeenCalled()
-    vi.setSystemTime(Date.now() + RETIRE_GRACE_MS)
-    await router.tick()
+    await look(router)
+    await expect(router.liveName()).resolves.toBe('app-1')
     expect(legacyRetire).toHaveBeenCalledTimes(1)
+    expect(HOST.hosts.get('app-1').container.mode).toBe('app')
+    await look(router)
+    await look(router)
+    expect((await router.status()).handover).toBeNull()
+    expect(legacyRetire).toHaveBeenCalledTimes(1)
+    expect(legacyRevive).not.toHaveBeenCalled()
+  })
+
+  it('waits to hand over from the old application until its object runs code that can be stopped and started again', async () => {
+    const { router, HOST } = makeRouter({ legacy: true })
+    // For minutes after the first deploy the old object may still run the previous code.
+    legacyProtocol.mockRejectedValue(new TypeError('The RPC receiver does not implement the method "protocol".'))
+    await router.tick()
+    await look(router)
+    await look(router)
+    await expect(router.liveName()).resolves.toBe(LEGACY)
+    expect(legacyRetire).not.toHaveBeenCalled()
+    expect(HOST.hosts.get('app-1').container.mode).toBe('hold')
+    expect((await router.status()).next).toMatchObject({ name: 'app-1', parked: true })
+    legacyProtocol.mockImplementation(async () => 2)
+    await look(router)
+    await expect(router.liveName()).resolves.toBe('app-1')
+    expect(legacyRetire).toHaveBeenCalledTimes(1)
+  })
+
+  it('starts the old application again when the first host does not come up', async () => {
+    const { router, HOST } = makeRouter({ legacy: true })
+    await router.tick()
+    HOST.hosts.get('app-1').container.health = { ok: false }
+    await look(router)
+    await expect(router.liveName()).resolves.toBe('app-1')
+    vi.setSystemTime(Date.now() + HANDOVER_BOOT_TIMEOUT_MS + 1_000)
+    await look(router)
+    await expect(router.liveName()).resolves.toBe(LEGACY)
+    expect(legacyRevive).toHaveBeenCalledTimes(1)
+    expect(HOST.hosts.get('app-1').container.running).toBe(false)
   })
 
   it('stays on the old application while ROLLOUT_TARGET says legacy', async () => {
@@ -275,10 +611,9 @@ describe('AppRouter', () => {
     expect(HOST.hosts.size).toBe(0)
   })
 
-  it('goes back to the old application: it must answer /health before the host is stopped', async () => {
+  it('goes back to the old application by overlap: it must answer /health before the host is stopped', async () => {
     const { router, HOST, env } = makeRouter({ legacy: true })
-    await router.tick()
-    await router.tick()
+    await cutOver(router)
     await expect(router.liveName()).resolves.toBe('app-1')
     env.ROLLOUT_TARGET = LEGACY
     legacyFetch.mockResolvedValue(Response.json({ ok: false }, { status: 503 }))
@@ -290,6 +625,7 @@ describe('AppRouter', () => {
     legacyFetch.mockImplementation(async () => Response.json({ ok: true, commit: 'old1234' }))
     await router.tick()
     await expect(router.liveName()).resolves.toBe(LEGACY)
+    expect(HOST.hosts.get('app-1').container.signals).toEqual([])
     vi.setSystemTime(Date.now() + RETIRE_GRACE_MS)
     await router.tick()
     expect(HOST.hosts.get('app-1').container.signals).toEqual([15])
@@ -297,8 +633,7 @@ describe('AppRouter', () => {
 
   it('takes the target from the newest Worker version that pokes it, not from its own (possibly older) env', async () => {
     const { router, HOST } = makeRouter({ legacy: true })
-    await router.tick()
-    await router.tick()
+    await cutOver(router)
     await expect(router.liveName()).resolves.toBe('app-1')
     // A new version says legacy; this object's own env still says hosts.
     legacyFetch.mockImplementation(async () => Response.json({ ok: true, commit: 'old1234' }))
@@ -322,16 +657,18 @@ describe('AppRouter', () => {
     })
   })
 
-  it('swap() restarts onto a fresh host with the environment handed in, once', async () => {
+  it('swap() hands over to a fresh host started with the environment handed in, once', async () => {
     const { router, HOST } = makeRouter()
     await router.liveName()
     await router.tick()
     await expect(router.swap({ envVars: { DATABASE_URL: 'fresh' } })).resolves.toEqual({ swapping: true })
     await router.tick()
-    expect(HOST.hosts.get('app-2').container.started[0].env).toEqual({ DATABASE_URL: 'fresh' })
-    await router.tick()
+    expect(HOST.hosts.get('app-2').container.started[0]).toMatchObject({ env: { DATABASE_URL: 'fresh' }, entrypoint: HOLD })
+    await look(router)
     await expect(router.liveName()).resolves.toBe('app-2')
-    await router.tick()
+    await look(router)
+    await look(router)
+    expect((await router.status()).handover).toBeNull()
     // app-3 exists only as the object the router asks "which image does the code want"; it runs nothing.
     expect(HOST.hosts.get('app-3')?.container.started ?? []).toEqual([])
     await expect(router.swap({ envVars: { NOT_LISTED: 'x' } })).rejects.toThrow('not in CONTAINER_ENV_NAMES')
@@ -359,28 +696,27 @@ describe('AppRouter', () => {
     expect((await router.status()).next).toMatchObject({ name: 'app-2', reason: 'restart' })
   })
 
-  it('a failed stop is tried again, and the alarm is always set again even when a look throws', async () => {
-    const { router, HOST, images, storage } = makeRouter()
-    await router.liveName()
-    images.app = 'reg/app@sha256:bbbbbbbbbbbb'
+  it('a failed stop for good is tried again, and the alarm is always set again even when a look throws', async () => {
+    const { router, HOST, env, storage } = makeRouter({ legacy: true })
+    await cutOver(router)
+    // Back to the old application (overlap): the host is stopped for good after the grace period.
+    env.ROLLOUT_TARGET = LEGACY
+    legacyFetch.mockImplementation(async () => Response.json({ ok: true, commit: 'old1234' }))
     await router.tick()
     await router.tick()
+    await expect(router.liveName()).resolves.toBe(LEGACY)
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const old = HOST.hosts.get('app-1')
     old.container.signal.mockImplementation(() => {})
     old.container.destroy.mockRejectedValueOnce(new Error('destroy exploded'))
     vi.setSystemTime(Date.now() + RETIRE_GRACE_MS)
-    const first = router.tick()
-    await vi.advanceTimersByTimeAsync(21_000)
-    await first
+    await look(router, 21_000)
     expect((await router.status()).retiring).toMatchObject([{ name: 'app-1', tries: 1 }])
     // Not yet: the next try waits its turn.
     await router.tick()
     expect((await router.status()).retiring).toMatchObject([{ name: 'app-1', tries: 1 }])
     vi.setSystemTime(Date.now() + 30_000)
-    const second = router.tick()
-    await vi.advanceTimersByTimeAsync(21_000)
-    await second
+    await look(router, 21_000)
     expect((await router.status()).retiring).toEqual([])
 
     storage.setAlarm.mockClear()
