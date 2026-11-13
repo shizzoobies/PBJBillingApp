@@ -1,0 +1,39 @@
+{
+  // THROWAWAY staging copy for the zero-downtime deploy rehearsal
+  // (docs/plans/zero-downtime-deploy-2026-11.md). A second Worker with its own container
+  // application. It has NO secrets and NO DATABASE_URL, so the app runs on its file backend
+  // with the seeded demo workspace (prototype-data.json). Deployed only by
+  // .github/workflows/cf-staging.yml, from branches named staging/**. Delete the Worker and
+  // its container application when the rehearsal ends.
+  //
+  // It lives under cloudflare/ so it stays out of the Docker build context (.dockerignore).
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "pbjbillingapp-staging",
+  "main": "../worker.js",
+  "compatibility_date": "2026-10-21",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+
+  // Step 1 of the rehearsal: the SAME arrangement as production today (one container on the
+  // default scheduling policy), to measure the stall a deploy causes before changing anything.
+  "containers": [
+    {
+      "name": "pbjbillingapp-staging-app",
+      "class_name": "AppContainer",
+      "image": "../../Dockerfile",
+      "max_instances": 1,
+      "instance_type": "standard-1"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "APP", "class_name": "AppContainer" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AppContainer"] }],
+
+  // No cron: nothing here has periodic work worth running, and there is no TICK_TOKEN.
+  "vars": {
+    "NODE_ENV": "production",
+    "FIRM_TIME_ZONE": "America/New_York"
+  }
+}

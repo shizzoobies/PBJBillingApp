@@ -1,0 +1,48 @@
+name: cf-staging
+
+# THROWAWAY: deploys the staging copy used to rehearse zero-downtime deploys
+# (docs/plans/zero-downtime-deploy-2026-11.md, cloudflare/staging/wrangler.jsonc).
+# Runs only for branches named staging/**, so a push to main never starts it and it
+# never touches the production Worker (a different Worker name and container application).
+# No app secrets: the staging app runs on its file backend with seeded demo data.
+# Delete this file with the staging Worker when the rehearsal ends.
+on:
+  push:
+    branches: ['staging/**']
+
+permissions:
+  contents: read
+
+# One staging deploy at a time, in order: the rehearsal measures each one.
+concurrency:
+  group: cf-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # Same stamp as cf-deploy: /health reports this commit, which is how the rehearsal
+      # tells the old instance from the new one.
+      - name: Stamp the commit into the image
+        run: echo "${GITHUB_SHA::7}" > .app-commit
+
+      - name: Deploy the staging Worker
+        run: |
+          echo "deploy start $(date -u +%H:%M:%S)"
+          npx wrangler deploy --config cloudflare/staging/wrangler.jsonc
+          echo "deploy end $(date -u +%H:%M:%S)"
