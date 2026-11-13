@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   FAILED_RETRY_MS,
   LEGACY,
-  MAX_RETIRE_TRIES,
+  RETIRE_RETRY_CAP_MS,
+  RETIRE_RETRY_MS,
   RETIRE_GRACE_MS,
   ROLLOUT_TIMEOUT_MS,
   TICK_FAST_MS,
@@ -101,7 +102,7 @@ describe('a new image', () => {
     const out = plan(state, { live: host('img-1'), next: host('img-2', { commit: 'def5678' }), wanted: null, target: 'hosts' }, T)
     expect(out.state.live).toMatchObject({ name: 'app-2', since: T, image: 'img-2', commit: 'def5678' })
     expect(out.state.next).toBeNull()
-    expect(out.state.retiring).toEqual([{ name: 'app-1', at: T, tries: 0 }])
+    expect(out.state.retiring).toEqual([{ name: 'app-1', at: T, tries: 0, wasLive: true }])
     expect(out.actions).toEqual([])
     expect(out.delay).toBe(TICK_FAST_MS)
     expect(out.state.history.at(-1)).toMatchObject({ from: 'app-1', to: 'app-2', reason: 'image', tookMs: 90_000 })
@@ -140,17 +141,35 @@ describe('a swap that fails', () => {
     expect(plan(state, facts('img-3'), T + 1).actions).toEqual([{ type: 'begin', name: 'app-3', reason: 'image', forced: false }])
   })
 
-  it('counts failed stops and drops the instance after the last try', () => {
-    let state = liveOn('app-2', { retiring: [{ name: 'app-1', at: T, tries: 0 }] })
-    for (let i = 1; i < MAX_RETIRE_TRIES; i++) {
-      const out = retireFailed(state, 'app-1')
-      expect(out.dropped).toBe(false)
-      expect(out.state.retiring[0].tries).toBe(i)
-      state = out.state
-    }
-    const last = retireFailed(state, 'app-1')
-    expect(last.dropped).toBe(true)
-    expect(last.state.retiring).toEqual([])
+  it('never forgets an instance whose stop fails: it is tried again, later each time, on the slow heartbeat', () => {
+    const facts = { live: host('img-2'), next: null, wanted: 'img-2', target: 'hosts' }
+    let state = liveOn('app-2', { seq: 2, retiring: [{ name: 'app-1', at: T, tries: 0 }] })
+    state = retireFailed(state, 'app-1', T + 6_000)
+    expect(state.retiring).toEqual([{ name: 'app-1', at: T, tries: 1, retryAt: T + 6_000 + RETIRE_RETRY_MS }])
+    const early = plan(state, facts, T + 6_000 + RETIRE_RETRY_MS - 1)
+    expect(early.actions).toEqual([])
+    expect(early.delay).toBe(TICK_SLOW_MS)
+    expect(plan(state, facts, T + 6_000 + RETIRE_RETRY_MS).actions).toEqual([{ type: 'retire', name: 'app-1' }])
+    for (let i = 0; i < 100; i++) state = retireFailed(state, 'app-1', T)
+    expect(state.retiring).toHaveLength(1)
+    expect(state.retiring[0].retryAt).toBe(T + RETIRE_RETRY_CAP_MS)
+  })
+
+  it('keeps the instance that was just serving while the new live one is not answering', () => {
+    const state = liveOn('app-2', { seq: 2, retiring: [{ name: 'app-1', at: T, tries: 0, wasLive: true }] })
+    const facts = (ready) => ({ live: host('img-2', { ready }), next: null, wanted: 'img-2', target: 'hosts' })
+    expect(plan(state, facts(false), T + RETIRE_GRACE_MS + 1).actions).toEqual([])
+    expect(plan(state, facts(true), T + RETIRE_GRACE_MS + 1).actions).toEqual([{ type: 'retire', name: 'app-1' }])
+    // Not for ever: an instance nothing points at is stopped in the end.
+    expect(plan(state, facts(false), T + ROLLOUT_TIMEOUT_MS).actions).toEqual([{ type: 'retire', name: 'app-1' }])
+  })
+
+  it('drops a host that is coming up as soon as the target becomes the old application', () => {
+    const state = { ...initialState({ hasLegacy: true }), seq: 1, next: { name: 'app-1', startedAt: T - 5_000, reason: 'cutover', image: 'img-1' } }
+    const out = plan(state, { live: { begun: true, image: LEGACY, ready: true }, next: host('img-1', { ready: false }), wanted: null, target: LEGACY }, T)
+    expect(out.state.next).toBeNull()
+    expect(out.state.live.name).toBe(LEGACY)
+    expect(out.actions).toEqual([{ type: 'retire', name: 'app-1' }])
   })
 
   it('sets a live host up again when it has lost its own record', () => {
@@ -185,7 +204,7 @@ describe('the old application', () => {
     expect(first.actions).toEqual([{ type: 'begin', name: 'app-1', reason: 'cutover', forced: false }])
     const second = plan(first.state, { live: { begun: true, image: LEGACY, ready: true }, next: host('img-1'), wanted: null, target: 'hosts' }, T + 30_000)
     expect(second.state.live.name).toBe('app-1')
-    expect(second.state.retiring).toEqual([{ name: LEGACY, at: T + 30_000, tries: 0 }])
+    expect(second.state.retiring).toEqual([{ name: LEGACY, at: T + 30_000, tries: 0, wasLive: true }])
     const third = plan(second.state, { live: host('img-1'), next: null, wanted: 'img-1', target: 'hosts' }, T + 30_000 + RETIRE_GRACE_MS)
     expect(third.actions).toEqual([{ type: 'retire', name: LEGACY }])
   })
@@ -205,7 +224,7 @@ describe('the old application', () => {
     expect(waiting.state.live.name).toBe('app-3')
     const done = plan(first.state, { live: host('img-3'), next: { begun: true, image: LEGACY, ready: true }, wanted: null, target: LEGACY }, T + 9_000)
     expect(done.state.live.name).toBe(LEGACY)
-    expect(done.state.retiring).toEqual([{ name: 'app-3', at: T + 9_000, tries: 0 }])
+    expect(done.state.retiring).toEqual([{ name: 'app-3', at: T + 9_000, tries: 0, wasLive: true }])
   })
 
   it('is not stopped if it became live again before its grace period ran out', () => {

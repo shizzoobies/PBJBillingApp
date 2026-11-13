@@ -17,6 +17,9 @@ import { Container, getContainer } from '@cloudflare/containers'
 import { CONTAINER_ENV_NAMES } from './env-names.js'
 import { LEGACY, TICK_SLOW_MS, force, hostName, initialState, plan, retireFailed, retired } from './rollout.js'
 
+/** How often a request re-checks that the router's heartbeat alarm is still set. */
+const ARM_CHECK_MS = 60_000
+
 export { CONTAINER_ENV_NAMES }
 
 /** Copy exactly the listed names that are defined on `env`; never invent one. */
@@ -101,7 +104,7 @@ export class AppContainer extends Container {
   async onActivityExpired() {
     // Once the router has moved traffic to a host, this container was stopped on purpose and
     // must stay stopped; with nothing running there is nothing to renew.
-    if (this.ctx.container?.running === false) return
+    if (this.retired === true || this.ctx.container?.running === false) return
     this.renewActivityTimeout()
   }
 
@@ -153,11 +156,37 @@ export class AppContainer extends Container {
     return { graceful, lastStatus }
   }
 
-  /** The router moved traffic to a host: stop this container and leave it stopped. */
+  async isRetired() {
+    if (this.retired === undefined) this.retired = (await this.ctx.storage.get('retiredByRouter')) === true
+    return this.retired
+  }
+
+  /**
+   * The router moved traffic to a host: stop this container and leave it stopped. The mark
+   * is stored first, because the package starts the container on ANY fetch: without it a
+   * late request (or a Worker version from before the router) would wake a second copy of
+   * the app that nothing would ever stop.
+   */
   async retire() {
+    this.retired = true
+    await this.ctx.storage.put('retiredByRouter', true)
     const { graceful, lastStatus } = await this.stopAndDestroy()
     console.log('[legacy] retired graceful=' + graceful + ' lastStatus=' + lastStatus)
     return { graceful }
+  }
+
+  /** The way back: the router wants this container to serve again. */
+  async revive() {
+    this.retired = false
+    await this.ctx.storage.delete('retiredByRouter')
+    return {}
+  }
+
+  async fetch(request) {
+    if (await this.isRetired()) {
+      return json(503, { error: 'This instance no longer serves. Try again.' }, { [GONE_HEADER]: '1', 'retry-after': '1' })
+    }
+    return super.fetch(request)
   }
 }
 
@@ -381,7 +410,8 @@ export class AppRouter extends DurableObject {
     /** Environment for the next forced swap; memory only, never stored. */
     this.envForNext = null
     this.ticking = null
-    this.armed = false
+    /** When the alarm was last checked (0: never). */
+    this.armed = 0
   }
 
   async load() {
@@ -403,9 +433,11 @@ export class AppRouter extends DurableObject {
 
   /** The heartbeat must never stop: it is what notices a new image and a crashed instance. */
   async arm() {
-    if (this.armed) return
-    this.armed = true
-    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now())
+    const now = Date.now()
+    if (this.armed && now - this.armed < ARM_CHECK_MS) return
+    this.armed = now
+    // null also while the alarm handler is running; setting one then only adds a look.
+    if (!this.ticking && (await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(now)
   }
 
   target() {
@@ -417,8 +449,9 @@ export class AppRouter extends DurableObject {
     if (name !== LEGACY) return this.env.HOST.get(this.env.HOST.idFromName(name))
     const legacy = getContainer(this.env.APP, 'app')
     return {
-      // Starting the old container is just asking it something: its package starts it on fetch.
-      begin: async () => ({}),
+      // Starting the old container is just asking it something (its package starts it on
+      // fetch), once the mark that keeps it stopped is cleared.
+      begin: () => legacy.revive(),
       retire: () => legacy.retire(),
       describe: async ({ probe = false } = {}) => {
         // While it is live it is not poked: it is supervised the way it always was (requests
@@ -467,8 +500,11 @@ export class AppRouter extends DurableObject {
   }
 
   async runTick() {
-    const state = await this.load()
-    const facts = await this.facts(state)
+    const facts = await this.facts(await this.load())
+    // Gathering the facts takes seconds (a health call per instance), and swap() may have
+    // stored a restart request meanwhile. Plan from what is stored NOW, with no await
+    // between this line and the save, or that request would be overwritten.
+    const state = this.state
     const { state: planned, actions, delay } = plan(state, facts, Date.now())
     const flipped = planned.live?.name !== state.live?.name
     // Stored BEFORE acting: a begin that fails is asked again on the next look, and the
@@ -479,8 +515,9 @@ export class AppRouter extends DurableObject {
       try {
         if (action.type === 'begin') {
           console.log('[router] begin ' + action.name + ' (' + action.reason + ')')
-          await this.instance(action.name).begin({ envVars: action.forced ? this.envForNext : null })
+          const envVars = action.forced ? this.envForNext : null
           if (action.forced) this.envForNext = null
+          await this.instance(action.name).begin({ envVars })
         } else if (action.type === 'retire') {
           const { graceful } = await this.instance(action.name).retire()
           console.log('[router] retired ' + action.name + ' graceful=' + graceful)
@@ -488,11 +525,7 @@ export class AppRouter extends DurableObject {
         }
       } catch (error) {
         console.error('[router] ' + action.type + ' ' + action.name + ' failed:', error?.message)
-        if (action.type === 'retire') {
-          const { state: after, dropped } = retireFailed(this.state, action.name)
-          await this.save(after)
-          if (dropped) console.error('[router] gave up stopping ' + action.name + '; check for a stray instance')
-        }
+        if (action.type === 'retire') await this.save(retireFailed(this.state, action.name, Date.now()))
       }
     }
     return delay
@@ -523,7 +556,7 @@ export class AppRouter extends DurableObject {
   /** Look now instead of at the next heartbeat (a new Worker version just started serving). */
   async poke() {
     await this.load()
-    this.armed = true
+    this.armed = Date.now()
     await this.ctx.storage.setAlarm(Date.now())
   }
 
@@ -567,7 +600,7 @@ export class AppRouter extends DurableObject {
       routerVersion: this.env.CF_VERSION?.id ?? null,
       live: brief(state.live, live),
       next: brief(state.next, next),
-      retiring: state.retiring.map((old) => ({ name: old.name, at: old.at, tries: old.tries ?? 0 })),
+      retiring: state.retiring.map((old) => ({ name: old.name, at: old.at, tries: old.tries ?? 0, retryAt: old.retryAt ?? null })),
       failed: state.failed ? { ...state.failed, image: short(state.failed.image) } : null,
       forced: state.forced,
       history: state.history,
@@ -625,9 +658,9 @@ async function sendToLive(env, make, repeatable) {
     let response
     try {
       const name = await liveName(router)
-      if (name === LEGACY) return await getContainer(env.APP, 'app').fetch(make())
       if (!name) return json(503, { error: 'The app is starting. Try again in a moment.' }, { 'retry-after': '5' })
-      response = await env.HOST.get(env.HOST.idFromName(name)).fetch(make())
+      const instance = name === LEGACY ? getContainer(env.APP, 'app') : env.HOST.get(env.HOST.idFromName(name))
+      response = await instance.fetch(make())
     } catch (error) {
       console.error('[worker] could not reach the live instance:', error?.message)
       if (last) return json(503, { error: 'The app did not answer. Try again in a moment.' }, { 'retry-after': '2' })
@@ -671,7 +704,7 @@ export default {
       const isEnvRevision = pathname === '/internal/env-revision' && request.method === 'GET'
       const isRollout = pathname === '/internal/rollout' && request.method === 'GET' && Boolean(router)
       // The staging copy has no secrets at all, so its rollout status is open (ROLLOUT_STATUS_PUBLIC).
-      if (isRollout && env.ROLLOUT_STATUS_PUBLIC === '1') return json(200, await router.status())
+      if (isRollout && env.ROLLOUT_STATUS_PUBLIC === '1' && !env.TICK_TOKEN) return json(200, await router.status())
       if ((!isRestart && !isEnvRevision && !isRollout) || !env.TICK_TOKEN) {
         return json(404, { error: 'Not found' })
       }
@@ -717,6 +750,10 @@ export default {
   // restarted, which is what re-arms its own timers.
   scheduled: (controller, env, ctx) => {
     const tick = { method: 'POST', headers: { 'x-tick-token': env.TICK_TOKEN ?? '' } }
+    // The cron is also the heartbeat's safety net: it sets the router's alarm again.
+    routerOf(env)
+      ?.poke()
+      .catch((error) => console.error('[cron] poke failed', error?.message))
     const sent = routerOf(env)
       ? sendToLive(env, () => new Request('http://app/internal/tick', tick), true)
       : getContainer(env.APP, 'app').fetch('http://app/internal/tick', tick)

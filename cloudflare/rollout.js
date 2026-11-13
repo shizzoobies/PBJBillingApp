@@ -17,8 +17,9 @@ export const RETIRE_GRACE_MS = 5_000
 export const ROLLOUT_TIMEOUT_MS = 20 * 60_000
 /** After a failed swap, how long before the same image is tried again. */
 export const FAILED_RETRY_MS = 30 * 60_000
-/** Tries at stopping an old instance before it is dropped from the list (and logged). */
-export const MAX_RETIRE_TRIES = 5
+/** A stop that failed is tried again after this long, times the number of tries, up to the cap. */
+export const RETIRE_RETRY_MS = 30_000
+export const RETIRE_RETRY_CAP_MS = 10 * 60_000
 /** Time between looks while a swap is in progress, and while nothing is happening. */
 export const TICK_FAST_MS = 2_000
 export const TICK_SLOW_MS = 30_000
@@ -73,7 +74,7 @@ export function plan(state, facts, now) {
     if (facts.next?.ready) {
       // The swap itself. The old instance is NOT stopped here: see RETIRE_GRACE_MS.
       const from = next.live?.name ?? null
-      if (from && from !== candidate.name) next.retiring.push({ name: from, at: now, tries: 0 })
+      if (from && from !== candidate.name) next.retiring.push({ name: from, at: now, tries: 0, wasLive: true })
       next.live = { name: candidate.name, since: now, image: facts.next.image ?? null, commit: facts.next.commit ?? null }
       next.next = null
       next.failed = null
@@ -82,10 +83,12 @@ export function plan(state, facts, now) {
         { at: now, from, to: candidate.name, reason: candidate.reason, tookMs: now - candidate.startedAt, commit: facts.next.commit ?? null },
       ].slice(-HISTORY_KEPT)
     } else if (
-      target !== LEGACY && candidate.name !== LEGACY && facts.wanted && facts.next?.begun && facts.next.image && facts.next.image !== facts.wanted
+      candidate.name !== LEGACY &&
+      (target === LEGACY || (facts.wanted && facts.next?.begun && facts.next.image && facts.next.image !== facts.wanted))
     ) {
-      // A newer deploy arrived while this one was still coming up: drop it and go straight
-      // to the newest image (the next look starts it) instead of waiting out the older one.
+      // A newer deploy arrived while this one was still coming up (or the target became the
+      // old application): drop it and go straight to what is wanted now (the next look
+      // starts it) instead of waiting out the older one.
       next.retiring.push({ name: candidate.name, at: now - RETIRE_GRACE_MS, tries: 0 })
       next.next = null
       next.history = [
@@ -139,15 +142,20 @@ export function plan(state, facts, now) {
   }
 
   // Old instances whose grace period is over. The router removes one from the list when the
-  // stop succeeded (retired()), or counts the failure (retireFailed()).
+  // stop succeeded (retired()), or schedules another try (retireFailed()); one is never
+  // forgotten while it may still be running.
   for (const old of next.retiring) {
     if (old.name === next.live?.name || old.name === next.next?.name) continue
-    if (now - old.at >= RETIRE_GRACE_MS) actions.push({ type: 'retire', name: old.name })
+    // The instance that was serving a moment ago is kept while the new live one is not
+    // answering (it crashed right after the swap): it is the only thing known to work.
+    if (old.wasLive && facts.live && facts.live.ready === false && now - old.at < ROLLOUT_TIMEOUT_MS) continue
+    if (now >= (old.retryAt ?? old.at + RETIRE_GRACE_MS)) actions.push({ type: 'retire', name: old.name })
   }
   // An instance that became live or next again (back to legacy and forward again) is not old.
   next.retiring = next.retiring.filter((old) => old.name !== next.live?.name && old.name !== next.next?.name)
 
-  const busy = Boolean(next.next) || next.retiring.length > 0
+  // An instance whose stop keeps failing is retried on the slow heartbeat, not every 2 seconds.
+  const busy = Boolean(next.next) || next.retiring.some((old) => !old.tries)
   return { state: next, actions, delay: busy ? TICK_FAST_MS : TICK_SLOW_MS }
 }
 
@@ -157,20 +165,14 @@ export function retired(state, name, { graceful = null, now = null } = {}) {
   return { ...state, retiring: state.retiring.filter((old) => old.name !== name), history }
 }
 
-/** Stopping it failed: try again next time, up to MAX_RETIRE_TRIES. `dropped` says it was given up on. */
-export function retireFailed(state, name) {
-  let dropped = false
-  const retiring = []
-  for (const old of state.retiring) {
-    if (old.name !== name) {
-      retiring.push(old)
-      continue
-    }
+/** Stopping it failed: try again later (a little later each time). It stays listed until it IS stopped. */
+export function retireFailed(state, name, now) {
+  const retiring = state.retiring.map((old) => {
+    if (old.name !== name) return old
     const tries = (old.tries ?? 0) + 1
-    if (tries >= MAX_RETIRE_TRIES) dropped = true
-    else retiring.push({ ...old, tries })
-  }
-  return { state: { ...state, retiring }, dropped }
+    return { ...old, tries, retryAt: now + Math.min(tries * RETIRE_RETRY_MS, RETIRE_RETRY_CAP_MS) }
+  })
+  return { ...state, retiring }
 }
 
 /** Ask for a swap to a fresh instance on the same image (a restart that reloads the environment). */

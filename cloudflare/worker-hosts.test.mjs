@@ -5,6 +5,7 @@ import { LEGACY, RETIRE_GRACE_MS, TICK_FAST_MS, TICK_SLOW_MS } from './rollout.j
 // live, and the swaps), and the Worker's routing. worker.test.mjs covers the old arrangement.
 const legacyFetch = vi.fn()
 const legacyRetire = vi.fn(async () => ({ graceful: true }))
+const legacyRevive = vi.fn(async () => ({}))
 const legacyRestartWith = vi.fn(async () => ({ graceful: true, lastStatus: 'stopped' }))
 vi.mock('@cloudflare/containers', () => ({
   Container: class {
@@ -13,7 +14,7 @@ vi.mock('@cloudflare/containers', () => ({
       this.env = env
     }
   },
-  getContainer: () => ({ fetch: legacyFetch, retire: legacyRetire, restartWith: legacyRestartWith }),
+  getContainer: () => ({ fetch: legacyFetch, retire: legacyRetire, revive: legacyRevive, restartWith: legacyRestartWith }),
 }))
 
 const { default: worker, AppHost, AppRouter } = await import('./worker.js')
@@ -73,6 +74,7 @@ function makeHost({ container = fakeContainer(), env = { NODE_ENV: 'production',
 beforeEach(() => {
   legacyFetch.mockReset()
   legacyRetire.mockClear()
+  legacyRevive.mockClear()
   legacyRestartWith.mockClear()
 })
 afterEach(() => {
@@ -281,6 +283,8 @@ describe('AppRouter', () => {
     env.ROLLOUT_TARGET = LEGACY
     legacyFetch.mockResolvedValue(Response.json({ ok: false }, { status: 503 }))
     await router.tick()
+    // The mark that keeps the old container stopped is cleared before it is asked anything.
+    expect(legacyRevive).toHaveBeenCalledTimes(1)
     await router.tick()
     await expect(router.liveName()).resolves.toBe('app-1')
     legacyFetch.mockImplementation(async () => Response.json({ ok: true, commit: 'old1234' }))
@@ -306,6 +310,28 @@ describe('AppRouter', () => {
     await expect(router.swap({ envVars: { NOT_LISTED: 'x' } })).rejects.toThrow('not in CONTAINER_ENV_NAMES')
   })
 
+  it('a restart asked for while the router is busy looking is not lost', async () => {
+    const { router, HOST } = makeRouter()
+    await router.liveName()
+    await router.tick()
+    // Hold the live host's answer open, as a slow health call would.
+    const live = HOST.hosts.get('app-1').host
+    let release
+    const held = new Promise((resolve) => void (release = resolve))
+    const describe = live.describe.bind(live)
+    vi.spyOn(live, 'describe').mockImplementationOnce(async () => {
+      await held
+      return describe()
+    })
+    const looking = router.tick()
+    await vi.advanceTimersByTimeAsync(10)
+    await router.swap({ envVars: { DATABASE_URL: 'fresh' } })
+    release()
+    await looking
+    expect(HOST.hosts.get('app-2').container.started[0].env).toEqual({ DATABASE_URL: 'fresh' })
+    expect((await router.status()).next).toMatchObject({ name: 'app-2', reason: 'restart' })
+  })
+
   it('a failed stop is tried again, and the alarm is always set again even when a look throws', async () => {
     const { router, HOST, images, storage } = makeRouter()
     await router.liveName()
@@ -321,6 +347,10 @@ describe('AppRouter', () => {
     await vi.advanceTimersByTimeAsync(21_000)
     await first
     expect((await router.status()).retiring).toMatchObject([{ name: 'app-1', tries: 1 }])
+    // Not yet: the next try waits its turn.
+    await router.tick()
+    expect((await router.status()).retiring).toMatchObject([{ name: 'app-1', tries: 1 }])
+    vi.setSystemTime(Date.now() + 30_000)
     const second = router.tick()
     await vi.advanceTimersByTimeAsync(21_000)
     await second
@@ -417,6 +447,8 @@ describe('the Worker with a router', () => {
     expect((await ask({ 'x-tick-token': 'tick-token-value' })).status).toBe(200)
     expect((await ask({}, { TICK_TOKEN: undefined })).status).toBe(404)
     expect((await ask({}, { TICK_TOKEN: undefined, ROLLOUT_STATUS_PUBLIC: '1' })).status).toBe(200)
+    // The flag never opens a Worker that has a token.
+    expect((await ask({}, { ROLLOUT_STATUS_PUBLIC: '1' })).status).toBe(401)
     expect(router.status).toHaveBeenCalledTimes(2)
   })
 
