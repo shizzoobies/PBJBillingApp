@@ -19246,6 +19246,22 @@ describe('invoice review events (file backend)', () => {
     expect(events.map((event) => event.event)).toEqual(['voided', 'unreviewed', 'reviewed'])
   })
 
+  it('keeps newest first when several events land in the same millisecond', async () => {
+    // A fast machine writes all three inside one millisecond, so their timestamps are
+    // equal (this is what made the test above fail on a CI run, 2026-11-13). The clock is
+    // frozen here to make that happen every time.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    onTestFinished(() => void vi.useRealTimers())
+    vi.setSystemTime(new Date('2026-11-13T03:00:00.000Z'))
+    await store.updateInvoice('inv-1', { status: 'reviewed' })
+    await store.updateInvoice('inv-1', { status: 'draft' })
+    await store.updateInvoice('inv-1', { status: 'void' })
+
+    const events = await store.listInvoiceReviewEvents({ invoiceId: 'inv-1' })
+    expect(new Set(events.map((event) => event.createdAt)).size).toBe(1)
+    expect(events.map((event) => event.event)).toEqual(['voided', 'unreviewed', 'reviewed'])
+  })
+
   it('takes the actor from the caller, never from the patch body', async () => {
     await store.updateInvoice(
       'inv-1',

@@ -20065,7 +20065,11 @@ export class AppDataStore {
     return list
       .filter((event) => (!invoiceId || event.invoiceId === invoiceId))
       .filter((event) => (!clientId || event.clientId === clientId))
-      .slice()
+      // The list is appended to, so reversing it is already newest first; the (stable)
+      // sort then only matters for timestamps that differ. Without the reverse, events
+      // written in the same millisecond came back oldest first. (Postgres stamps rows
+      // with now() to the microsecond, in separate transactions.)
+      .reverse()
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
       .slice(0, cap)
   }

@@ -107,9 +107,12 @@ describe('Remove case on the case page', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
     expect(restoreChecklist).toHaveBeenCalledWith('cl-1')
-    // The case is read again and the timeline is back.
+    // The timeline is back, and the case is read again. The page shows the timeline it
+    // already has as soon as the restore lands and re-reads the case one render later, so
+    // the second read is waited for too (checking it straight after "Prep" appeared
+    // failed on a CI run, 2026-11-12).
     await waitFor(() => expect(screen.getByText('Prep')).toBeTruthy())
-    expect(fetchCaseMock).toHaveBeenCalledTimes(2)
+    await waitFor(() => expect(fetchCaseMock).toHaveBeenCalledTimes(2))
   })
 
   it('a failed Undo keeps the page as it is and says why; the case is not read again', async () => {
