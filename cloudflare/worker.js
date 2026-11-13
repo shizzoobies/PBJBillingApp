@@ -356,6 +356,11 @@ export class AppHost extends DurableObject {
     }
   }
 
+  /** Is a container running here? Starts nothing (describe() would, for a host that should be up). */
+  async peek() {
+    return { begun: Boolean(await this.loadCfg()), running: Boolean(this.ctx.container.running) }
+  }
+
   /**
    * What the router asks every time it looks. Also the supervision: a host that has been
    * begun and is not running (it crashed, or its machine was replaced) is started again here,
@@ -383,7 +388,10 @@ export class AppHost extends DurableObject {
         ...mine,
         running: Boolean(container.running),
         ready: false,
-        parked: hold.ok === true,
+        // An instance whose environment has no database must never take over: it would start
+        // on the demo file backend. Only the staging copy, which has none, says that is fine
+        // (ALLOW_NO_DATABASE in its Wrangler config).
+        parked: hold.ok === true && (hold.checks?.database === 'ok' || this.env.ALLOW_NO_DATABASE === '1'),
         checks: hold.checks ?? null,
         commit: hold.commit ?? null,
         error: error ?? hold.error ?? null,
@@ -522,8 +530,10 @@ export class AppHost extends DurableObject {
    * hand-over this is where requests wait: the instance is parked, then let go, then boots.
    */
   waitReady() {
+    // Every request gets its own full wait: one that arrives late in a slow start is not cut
+    // short by the deadline of the first one.
+    this.readyUntil = Math.max(this.readyUntil ?? 0, Date.now() + COLD_WAIT_MS)
     this.readying ??= (async () => {
-      const deadline = Date.now() + COLD_WAIT_MS
       for (;;) {
         if (this.retiring || this.stopping || !this.cfg || this.cfg.stopped) return false
         try {
@@ -534,13 +544,13 @@ export class AppHost extends DurableObject {
         } catch (error) {
           console.error('[host] start failed', error?.message)
         }
-        if (Date.now() >= deadline) return false
+        if (Date.now() >= this.readyUntil) return false
         await sleep(COLD_POLL_MS)
       }
     })().finally(() => {
       this.readying = null
     })
-    return this.readying
+    return Promise.race([this.readying, sleep(COLD_WAIT_MS).then(() => false)])
   }
 
   async fetch(request) {
@@ -550,6 +560,11 @@ export class AppHost extends DurableObject {
     }
     const container = this.ctx.container
     if ((!container.running || !this.ready) && !(await this.waitReady())) {
+      // It stopped serving while this request waited (a hand-over that was undone): say so,
+      // so the Worker asks the router where to go instead of telling the browser to wait.
+      if (!this.cfg || this.cfg.stopped || this.retiring || this.stopping) {
+        return json(503, { error: 'This instance no longer serves. Try again.' }, { [GONE_HEADER]: '1', 'retry-after': '1' })
+      }
       return json(503, { error: 'The app is starting. Try again in a moment.' }, { 'retry-after': '5' })
     }
     try {
@@ -674,7 +689,16 @@ export class AppRouter extends DurableObject {
     // runs the newest version, where a long-lived one may briefly lag behind a deploy.
     let wanted = null
     if (target !== LEGACY) wanted = (await this.describe(hostName(state.seq + 1)))?.wanted ?? live?.wanted ?? null
-    return { live, next, wanted, target }
+    // While a hand-over is being undone: is the new instance's container really gone?
+    let to = null
+    if (state.handover?.phase === 'undo') {
+      try {
+        to = await this.instance(state.handover.to).peek()
+      } catch (error) {
+        console.error('[router] could not ask ' + state.handover.to + ':', error?.message)
+      }
+    }
+    return { live, next, wanted, target, to }
   }
 
   /** One look: gather the facts, decide (rollout.js), store the decision, then act on it. */
@@ -782,6 +806,9 @@ export class AppRouter extends DurableObject {
   async swap({ envVars = null, reason = 'restart' } = {}) {
     if (envVars) assertContainerEnv(envVars)
     const state = await this.load()
+    // A fresh instance can only start the newest image. If that image is the one whose
+    // hand-over was undone, a restart would only repeat the failure: refuse, out loud.
+    if (state.failed?.final) return { swapping: false, refused: 'The newest image did not start (' + (state.failed.why ?? 'unknown') + '). Deploy a fix; the app is still running the previous version and environment.' }
     this.envForNext = envVars ? { ...envVars } : null
     await this.save(force(state, reason))
     await this.poke()
@@ -953,7 +980,8 @@ export default {
         if (router && (await liveName(router)) !== LEGACY) {
           // A fresh instance is brought up beside the live one with this env and handed over to
           // like a deploy: requests wait a few seconds while the app starts, none fail.
-          await router.swap({ envVars: pickContainerEnv(env), reason: 'restart' })
+          const asked = await router.swap({ envVars: pickContainerEnv(env), reason: 'restart' })
+          if (!asked?.swapping) return json(409, { restarted: false, error: asked?.refused ?? 'The restart was refused.' })
           return json(200, { restarted: true, graceful: true, lastStatus: 'swapping', swapping: true })
         }
         const { graceful, lastStatus } = await getContainer(env.APP, 'app').restartWith(pickContainerEnv(env))

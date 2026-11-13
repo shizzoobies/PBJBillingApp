@@ -81,7 +81,9 @@ function liveImageOf(state, facts) {
  * Decide what to do now.
  *
  * state: what the router stored last time (never mutated).
- * facts: { live, next, wanted, target }
+ * facts: { live, next, wanted, target, to }
+ *   to: only while a hand-over is being undone: { running } of the instance being stopped,
+ *     asked without starting anything (null when it could not be asked).
  *   live / next: what each instance reports ({ begun, image, running, ready, parked, stopped,
  *     exits, protocol, commit }), or null when it could not be asked.
  *   wanted: the image the newest version of the code wants to run (null when unknown).
@@ -109,7 +111,10 @@ export function plan(state, facts, now) {
     const candidate = next.next
     const held = candidate.style === HANDOVER
     const canHandOver = (facts.live?.protocol ?? 0) >= PROTOCOL
-    if (held && facts.next?.parked && next.live && canHandOver) {
+    // The way back was asked for: a host that is coming up is not taken over to, however
+    // far along it is (it is dropped below).
+    const unwanted = target === LEGACY && candidate.name !== LEGACY
+    if (held && facts.next?.parked && next.live && canHandOver && !unwanted) {
       // The hand-over begins. The pointer moves first, so from this moment requests wait on
       // the new instance instead of arriving at an app that is about to stop.
       const from = next.live
@@ -118,7 +123,7 @@ export function plan(state, facts, now) {
       next.live = { name: candidate.name, since: now, image, commit: facts.next.commit ?? null }
       next.next = null
       actions.push({ type: 'stop', name: from.name, seq: true, settle: true }, { type: 'release', name: candidate.name, seq: true })
-    } else if (facts.next?.ready) {
+    } else if (facts.next?.ready && !unwanted) {
       // The overlap swap: the new app is already answering. The old instance is NOT stopped
       // here: see RETIRE_GRACE_MS.
       const from = next.live?.name ?? null
@@ -162,11 +167,13 @@ export function plan(state, facts, now) {
     // The live host has lost its own record of what to run (it should never happen). Nothing
     // else is serving, so set the same host up again rather than leave every request failing.
     actions.push({ type: 'begin', name: next.live.name, reason: 'revive', forced: false, held: false })
-  } else if (next.live.name !== LEGACY && facts.live?.stopped) {
-    // The live host is stopped (a hand-over was undone and the start-again did not stick).
-    // Nothing else is serving: start it.
-    actions.push({ type: 'resume', name: next.live.name })
   } else {
+    if (next.live.needsResume || (next.live.name !== LEGACY && facts.live?.stopped)) {
+      // The live instance is stopped (a hand-over was undone and the start-again did not
+      // stick). Nothing else is serving: start it. This does not stop a new deploy from being
+      // brought up below, which is the other way out.
+      actions.push({ type: 'resume', name: next.live.name })
+    }
     const liveImage = liveImageOf(next, facts)
     const wanted = target === LEGACY ? LEGACY : (facts.wanted ?? null)
     const failed = next.failed && next.failed.image === wanted ? next.failed : null
@@ -266,15 +273,25 @@ function planHandover(next, facts, now, actions, note) {
       actions.push(release)
     }
   } else if (h.phase === 'undo') {
-    if (now - (h.undoneAt ?? h.at) > HANDOVER_STOP_TIMEOUT_MS) {
-      // The new instance will not confirm it stopped. It was not serving and is not being
-      // sent anything; stopping it goes on being retried, but the old one must serve now.
+    if (now - (h.undoneAt ?? h.at) > HANDOVER_STOP_TIMEOUT_MS && facts.to && facts.to.running === false) {
+      // The stop-for-good keeps failing, but the new instance itself says nothing is running
+      // there. Forgetting its record goes on being retried; the old one is started now.
+      // (While the new app may still be running, the old one is NOT started: two copies must
+      // never run at once, even if that leaves nothing serving until the stop works.)
       next.retiring.push({ name: h.to, at: now - RETIRE_GRACE_MS, tries: 0 })
-      next.handover = { ...h, phase: 'resume' }
+      next.handover = { ...h, phase: 'resume', resumeAt: now }
       actions.push(resume)
     } else {
       actions.push(retire, resume)
     }
+  } else if (now - (h.resumeAt ?? h.undoneAt ?? h.at) > HANDOVER_STOP_TIMEOUT_MS) {
+    // Starting the old instance again keeps failing. Stop treating this as a hand-over, so
+    // the ordinary rules apply: the start is tried on every look, and a new deploy can be
+    // brought up and handed over to.
+    next.handover = null
+    next.live = { ...next.live, needsResume: true }
+    note({ from: h.from, to: h.to, reason: h.reason, style: HANDOVER, stuck: 'the old instance did not start again' })
+    actions.push({ type: 'resume', name: h.from })
   } else {
     actions.push(resume)
   }
@@ -283,7 +300,15 @@ function planHandover(next, facts, now, actions, note) {
 /** A step of the hand-over worked: move to its next phase. Anything unexpected changes nothing. */
 export function handoverStep(state, event, { name, now, graceful = null } = {}) {
   const h = state.handover
-  if (!h) return state
+  if (!h) {
+    // Outside a hand-over the one step that matters: the live instance was started again.
+    if (event === 'resumed' && state.live?.name === name && state.live.needsResume) {
+      const live = { ...state.live }
+      delete live.needsResume
+      return { ...state, live }
+    }
+    return state
+  }
   if (event === 'stopped' && h.phase === 'stop' && name === h.from) {
     return { ...state, handover: { ...h, phase: 'release', stoppedAt: now, graceful } }
   }
@@ -291,7 +316,7 @@ export function handoverStep(state, event, { name, now, graceful = null } = {}) 
     return { ...state, handover: { ...h, phase: 'boot', releasedAt: now } }
   }
   if (event === 'retired' && h.phase === 'undo' && name === h.to) {
-    return { ...state, handover: { ...h, phase: 'resume' } }
+    return { ...state, handover: { ...h, phase: 'resume', resumeAt: now } }
   }
   if (event === 'resumed' && h.phase === 'resume' && name === h.from) {
     const history = [...state.history, { at: now, resumed: h.from }].slice(-HISTORY_KEPT)

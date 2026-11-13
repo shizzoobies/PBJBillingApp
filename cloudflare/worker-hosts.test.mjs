@@ -376,6 +376,52 @@ describe('AppHost, held', () => {
     expect(container.running).toBe(false)
   })
 
+  it('is parked only with a database behind it, unless the staging copy says it has none', async () => {
+    const container = fakeContainer()
+    container.holdChecks = { database: 'none', net: 'ok' }
+    const { host } = makeHost({ container, env: { NODE_ENV: 'production' } })
+    await host.begin({ held: true })
+    await expect(host.describe()).resolves.toMatchObject({ parked: false, checks: { database: 'none' } })
+    container.holdChecks = { database: 'ok', net: 'skipped' }
+    await expect(host.describe()).resolves.toMatchObject({ parked: true })
+    // The staging copy has no database and says so.
+    const staging = makeHost({ env: { NODE_ENV: 'production', ALLOW_NO_DATABASE: '1' } })
+    staging.container.holdChecks = { database: 'none', net: 'ok' }
+    await staging.host.begin({ held: true })
+    await expect(staging.host.describe()).resolves.toMatchObject({ parked: true })
+  })
+
+  it('every waiting request gets its own full wait, and one waiting on a host that stops serving is told it is gone', async () => {
+    vi.useFakeTimers()
+    const { host } = makeHost()
+    await host.begin({ held: true })
+    const answers = []
+    const ask = () => host.fetch(new Request('https://app.example/api/x')).then((response) => answers.push(response))
+    const first = ask()
+    await vi.advanceTimersByTimeAsync(80_000)
+    const second = ask()
+    await vi.advanceTimersByTimeAsync(11_000)
+    await first
+    // The first gave up after its 90 seconds; the second, 11 seconds in, is still waiting.
+    expect(answers).toHaveLength(1)
+    expect(answers[0].status).toBe(503)
+    expect(answers[0].headers.get('retry-after')).toBe('5')
+    await host.retire()
+    await vi.advanceTimersByTimeAsync(500)
+    await second
+    expect(answers[1].status).toBe(503)
+    expect(answers[1].headers.get('x-pbj-host-gone')).toBe('1')
+  })
+
+  it('peek() says whether a container is running without starting one', async () => {
+    const { host, container } = makeHost()
+    await expect(host.peek()).resolves.toEqual({ begun: false, running: false })
+    await host.begin()
+    container.running = false
+    await expect(host.peek()).resolves.toEqual({ begun: true, running: false })
+    expect(container.started).toHaveLength(1)
+  })
+
   it('a parked host that is retired just leaves', async () => {
     const { host, container, storage } = makeHost()
     await host.begin({ held: true })
@@ -553,6 +599,53 @@ describe('AppRouter', () => {
     images.app = 'reg/app@sha256:cccccccccccc'
     await look(router)
     expect(HOST.hosts.get('app-3').container.started[0]).toMatchObject({ image: 'reg/app@sha256:cccccccccccc', entrypoint: HOLD })
+  })
+
+  it('while the new instance cannot be stopped and still runs, the old app is NOT started; once nothing runs there it is', async () => {
+    const { router, HOST, images } = makeRouter()
+    await router.liveName()
+    images.app = 'reg/app@sha256:bbbbbbbbbbbb'
+    await router.tick()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const old = HOST.hosts.get('app-1')
+    const next = HOST.hosts.get('app-2')
+    next.container.health = { ok: false }
+    await look(router)
+    // The new app hangs: it ignores SIGTERM and cannot be destroyed.
+    next.container.exitsOnSigterm = false
+    next.container.destroy.mockRejectedValue(new Error('destroy exploded'))
+    vi.setSystemTime(Date.now() + HANDOVER_BOOT_TIMEOUT_MS + 1_000)
+    await look(router, 22_000)
+    expect((await router.status()).handover).toMatchObject({ phase: 'undo' })
+    vi.setSystemTime(Date.now() + 10 * 60_000)
+    await look(router, 22_000)
+    expect((await router.status()).handover).toMatchObject({ phase: 'undo' })
+    expect(old.container.started).toHaveLength(1)
+    expect(old.container.running).toBe(false)
+    // It finally dies by itself; forgetting it still fails once more. The old app is started.
+    next.container.running = false
+    vi.spyOn(next.host, 'retire').mockRejectedValueOnce(new Error('storage exploded'))
+    await look(router)
+    expect(old.container.started).toHaveLength(2)
+    await look(router)
+    expect((await router.status()).handover).toBeNull()
+    await expect(router.liveName()).resolves.toBe('app-1')
+  })
+
+  it('refuses a restart on demand while the newest image is one that did not start', async () => {
+    const { router, HOST, images } = makeRouter()
+    await router.liveName()
+    images.app = 'reg/app@sha256:bbbbbbbbbbbb'
+    await router.tick()
+    HOST.hosts.get('app-2').container.health = { ok: false }
+    await look(router)
+    vi.setSystemTime(Date.now() + HANDOVER_BOOT_TIMEOUT_MS + 1_000)
+    await look(router)
+    await look(router)
+    const answer = await router.swap({ envVars: { DATABASE_URL: 'fresh' } })
+    expect(answer.swapping).toBe(false)
+    expect(answer.refused).toMatch(/did not start/)
+    expect((await router.status()).forced).toBeNull()
   })
 
   it('hands over from the old application: it serves until the host is parked, and is stopped once', async () => {
@@ -826,6 +919,19 @@ describe('the Worker with a router', () => {
     await expect(response.json()).resolves.toEqual({ restarted: true, graceful: true, lastStatus: 'swapping', swapping: true })
     expect(router.swap).toHaveBeenCalledWith({ envVars: { DATABASE_URL: 'db', TICK_TOKEN: 'tick-token-value' }, reason: 'restart' })
     expect(legacyRestartWith).not.toHaveBeenCalled()
+  })
+
+  it('says so (409) when the router refuses the restart', async () => {
+    const { ROUTER, router } = stubRouter(['app-1'])
+    router.swap.mockResolvedValueOnce({ swapping: false, refused: 'The newest image did not start.' })
+    const env = { ROUTER, HOST: {}, APP: {}, TICK_TOKEN: 'tick-token-value' }
+    const response = await worker.fetch(
+      new Request('https://app.example/internal/restart', { method: 'POST', headers: { 'x-tick-token': 'tick-token-value' } }),
+      env,
+      { waitUntil: vi.fn() },
+    )
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toEqual({ restarted: false, error: 'The newest image did not start.' })
   })
 
   it('the cron tick goes to the live host', async () => {

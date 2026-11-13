@@ -268,12 +268,51 @@ describe('a hand-over', () => {
     expect(plan(booting(), bootFacts({ exits: 1 }), T + 9_000).state.handover.phase).toBe('boot')
   })
 
-  it('starts the old instance again anyway when the failed new one will not confirm it stopped, and keeps trying to stop it', () => {
+  it('never starts the old app while the new one may still be running, however long its stop keeps failing', () => {
     const undone = plan(booting(), bootFacts({ exits: 2 }), T + 9_000).state
-    const out = plan(undone, { live: host('img-1', { ready: false, stopped: true }), next: null, wanted: 'img-2', target: 'hosts' }, T + 9_000 + HANDOVER_STOP_TIMEOUT_MS + 1)
+    const stoppedOld = host('img-1', { ready: false, stopped: true })
+    const late = T + 9_000 + 10 * HANDOVER_STOP_TIMEOUT_MS
+    for (const to of [null, undefined, { begun: true, running: true }]) {
+      const out = plan(undone, { live: stoppedOld, next: null, wanted: 'img-2', target: 'hosts', to }, late)
+      expect(out.state.handover.phase).toBe('undo')
+      expect(out.actions).toEqual([
+        { type: 'retire', name: 'app-2', seq: true },
+        { type: 'resume', name: 'app-1', seq: true },
+      ])
+    }
+    // Only when the new instance itself says nothing runs there is the old one started
+    // without the stop-for-good having worked; forgetting the new one goes on being retried.
+    const gone = { live: stoppedOld, next: null, wanted: 'img-2', target: 'hosts', to: { begun: true, running: false } }
+    expect(plan(undone, gone, T + 9_000 + HANDOVER_STOP_TIMEOUT_MS - 1).state.handover.phase).toBe('undo')
+    const out = plan(undone, gone, T + 9_000 + HANDOVER_STOP_TIMEOUT_MS + 1)
     expect(out.state.handover.phase).toBe('resume')
     expect(out.actions).toEqual([{ type: 'resume', name: 'app-1', seq: true }, { type: 'retire', name: 'app-2' }])
     expect(out.state.retiring).toMatchObject([{ name: 'app-2' }])
+  })
+
+  it('when the old instance will not start again, the ordinary rules take over: keep trying, and take a new deploy', () => {
+    const undone = plan(booting(), bootFacts({ exits: 2 }), T + 9_000).state
+    const resuming = handoverStep(retired(undone, 'app-2', { graceful: true, now: T + 12_000 }), 'retired', { name: 'app-2', now: T + 12_000 })
+    expect(resuming.handover).toMatchObject({ phase: 'resume', resumeAt: T + 12_000 })
+    const stoppedOld = host('img-1', { ready: false, stopped: true })
+    const facts = (wanted) => ({ live: stoppedOld, next: null, wanted, target: 'hosts' })
+    expect(plan(resuming, facts('img-2'), T + 12_000 + HANDOVER_STOP_TIMEOUT_MS).state.handover.phase).toBe('resume')
+    const out = plan(resuming, facts('img-2'), T + 12_000 + HANDOVER_STOP_TIMEOUT_MS + 1)
+    expect(out.state.handover).toBeNull()
+    expect(out.state.live).toMatchObject({ name: 'app-1', needsResume: true })
+    expect(out.actions).toEqual([{ type: 'resume', name: 'app-1' }])
+    expect(out.state.history.at(-1)).toMatchObject({ stuck: 'the old instance did not start again' })
+    // Every look tries the start again; the image that failed is still not retried...
+    expect(plan(out.state, facts('img-2'), T + 200_000).actions).toEqual([{ type: 'resume', name: 'app-1' }])
+    // ...and a new deploy is brought up beside the stopped instance: the other way out.
+    expect(plan(out.state, facts('img-3'), T + 200_000).actions).toEqual([
+      { type: 'resume', name: 'app-1' },
+      { type: 'begin', name: 'app-3', reason: 'image', forced: false, held: true },
+    ])
+    // Once the start works the mark is cleared.
+    const back = handoverStep(out.state, 'resumed', { name: 'app-1', now: T + 201_000 })
+    expect(back.live).toEqual({ name: 'app-1', since: T - 60_000 })
+    expect(plan(back, { live: host('img-1'), next: null, wanted: 'img-2', target: 'hosts' }, T + 202_000).actions).toEqual([])
   })
 
   it('a step reported out of order, or for another instance, changes nothing', () => {
@@ -320,12 +359,21 @@ describe('a swap that fails before it starts', () => {
     expect(state.retiring[0].retryAt).toBe(T + RETIRE_RETRY_CAP_MS)
   })
 
-  it('drops a host that is coming up as soon as the target becomes the old application', () => {
+  it('drops a host that is coming up as soon as the target becomes the old application, even one already parked or answering', () => {
     const state = { ...initialState({ hasLegacy: true }), seq: 1, next: candidate('app-1', { reason: 'cutover', image: 'img-1' }) }
-    const out = plan(state, { live: legacyLive, next: held('img-1', { parked: false }), wanted: null, target: LEGACY }, T)
-    expect(out.state.next).toBeNull()
-    expect(out.state.live.name).toBe(LEGACY)
-    expect(out.actions).toEqual([{ type: 'retire', name: 'app-1' }])
+    for (const next of [held('img-1', { parked: false }), held('img-1'), host('img-1')]) {
+      const out = plan(state, { live: legacyLive, next, wanted: null, target: LEGACY }, T)
+      expect(out.state.next).toBeNull()
+      expect(out.state.handover).toBeNull()
+      expect(out.state.live.name).toBe(LEGACY)
+      expect(out.actions).toEqual([{ type: 'retire', name: 'app-1' }])
+    }
+    // The same from a host: the parked candidate is dropped, and the old application is started on the next look.
+    const fromHost = liveOn('app-1', { seq: 2, next: candidate('app-2') })
+    const out = plan(fromHost, { live: host('img-1'), next: held('img-2'), wanted: null, target: LEGACY }, T)
+    expect(out.state.live.name).toBe('app-1')
+    expect(out.state.handover).toBeNull()
+    expect(out.actions).toEqual([{ type: 'retire', name: 'app-2' }])
   })
 
   it('sets a live host up again when it has lost its own record', () => {
@@ -335,7 +383,7 @@ describe('a swap that fails before it starts', () => {
   })
 
   it('starts a live host that is found stopped', () => {
-    const out = plan(liveOn('app-1'), { live: host('img-1', { ready: false, stopped: true }), next: null, wanted: 'img-2', target: 'hosts' }, T)
+    const out = plan(liveOn('app-1'), { live: host('img-1', { ready: false, stopped: true }), next: null, wanted: 'img-1', target: 'hosts' }, T)
     expect(out.actions).toEqual([{ type: 'resume', name: 'app-1' }])
     expect(out.state.next).toBeNull()
   })

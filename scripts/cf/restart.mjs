@@ -155,6 +155,7 @@ export async function restartContainer(argv = [], {
       throw new Error(
         restart.status === 404 ? 'Restart refused (404): TICK_TOKEN is not uploaded to the Worker yet' :
         restart.status === 401 ? 'Restart refused (401): TICK_TOKEN does not match the Worker\'s' :
+        restart.status === 409 ? 'Restart refused (409): the newest deploy did not start, so a fresh instance cannot be started; deploy a fix first (GET /internal/rollout says why)' :
         'Restart failed with HTTP ' + restart.status,
       )
     }

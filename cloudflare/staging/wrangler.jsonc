@@ -59,6 +59,10 @@
     "NODE_ENV": "production",
     "FIRM_TIME_ZONE": "America/New_York",
     // Staging has no secrets, so its rollout status is readable without a token.
-    "ROLLOUT_STATUS_PUBLIC": "1"
+    "ROLLOUT_STATUS_PUBLIC": "1",
+    // Staging has no database at all; everywhere else a new instance must reach one before it takes over.
+    "ALLOW_NO_DATABASE": "1",
+    // REHEARSAL: the new app fails to start (cloudflare/worker.js rehearsalOf).
+    "REHEARSAL_BOOT_FAIL": "1"
   }
 }
