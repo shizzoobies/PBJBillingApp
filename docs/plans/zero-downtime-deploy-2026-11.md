@@ -115,7 +115,8 @@ A side finding: every deploy pushes 15 of the image's 20 layers as new (a fresh 
 | Cutover from the old container (`387436f`) | Old container served until the first new instance answered, 18 s after it was started; then it was stopped | 0 of 213 |
 | An ordinary deploy, instance to instance (`6999f07`) | Swap 45 s after the deploy finished; new instance answered 16 s after it was started | 0 of 292 |
 | A new instance made to take 4 minutes to come up (`e31b682`) | Old instance served for the whole 253 s; swap at 00:40:01; old instance exited on SIGTERM at 00:40:08 | 0 of 491 health checks, 0 of 653 eight-second requests |
-| The way back to the old container (`668b224`, `ROLLOUT_TARGET` = `legacy`) | Old container started on its pinned image and took over when it answered, 6 s after it was asked; the instance was then stopped | 0 of 500 |
+| The way back to the old container (`668b224`, `ROLLOUT_TARGET` = `legacy`) | Old container started on its pinned image and took over when it answered, 6 s after it was asked; the instance was then stopped | 0 of 515 |
+| Forward again from the old container, on the final code (`355d9de`) | Old container served until the new instance answered 41 s after it was started; then it was stopped and has stayed stopped | 0 of 525 |
 
 No request took longer than one second during any swap. In the slow-start test, requests that were in flight at the moment of the swap and at the moment the old instance got SIGTERM all finished normally.
 
