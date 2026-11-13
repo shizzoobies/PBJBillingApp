@@ -415,10 +415,29 @@ describe('AppHost, held', () => {
 
   it('peek() says whether a container is running without starting one', async () => {
     const { host, container } = makeHost()
-    await expect(host.peek()).resolves.toEqual({ begun: false, running: false })
+    await expect(host.peek()).resolves.toEqual({ begun: false, running: false, stopped: false })
     await host.begin()
     container.running = false
-    await expect(host.peek()).resolves.toEqual({ begun: true, running: false })
+    await expect(host.peek()).resolves.toEqual({ begun: true, running: false, stopped: false })
+    expect(container.started).toHaveLength(1)
+  })
+
+  it('retire() marks the record stopped before the signal, so a reset before it is deleted cannot start the app again', async () => {
+    const { host, container, storage } = makeHost()
+    await host.begin()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    let markAtSignal = null
+    container.signal.mockImplementation(() => {
+      markAtSignal = storage.map.get('cfg')?.stopped
+      container.running = false
+    })
+    storage.deleteAll.mockRejectedValueOnce(new Error('storage exploded'))
+    await expect(host.retire()).rejects.toThrow('storage exploded')
+    expect(markAtSignal).toBe(true)
+    // The object is reset: a new one on the same storage finds the mark and starts nothing.
+    const again = new AppHost({ storage, container }, { NODE_ENV: 'production' })
+    await expect(again.peek()).resolves.toEqual({ begun: true, running: false, stopped: true })
+    await expect(again.describe()).resolves.toMatchObject({ stopped: true, running: false })
     expect(container.started).toHaveLength(1)
   })
 

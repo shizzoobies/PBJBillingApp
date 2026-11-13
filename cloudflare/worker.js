@@ -67,30 +67,9 @@ const SETTLE_MS = 1_000
 // How long after letting an instance go the host keeps checking that the hold really let go.
 const NUDGE_FOR_MS = 5 * 60_000
 
-/**
- * REHEARSAL ONLY (the staging Worker sets these vars; production never does). Read once, when
- * an instance is begun, and kept in its record, so an older instance is never affected.
- *   REHEARSAL_START_DELAY_SECONDS  make the new instance slow to come up, the way
- *     production's are while Cloudflare brings the image to the machine.
- *   REHEARSAL_BOOT_FAIL=1  make the new app fail to start, to practice the way back.
- */
-function rehearsalOf(env) {
-  const seconds = Number(env?.REHEARSAL_START_DELAY_SECONDS)
-  const delay = Number.isInteger(seconds) && seconds > 0 && seconds <= 3600 ? seconds : 0
-  const fail = env?.REHEARSAL_BOOT_FAIL === '1'
-  return delay || fail ? { delay, fail } : null
-}
-
 /** The command a start runs: null for the image's own (the app), the hold while parked. */
 function commandFor(cfg) {
-  const parked = Boolean(cfg.held && !cfg.released)
-  let command = parked ? HOLD_COMMAND : null
-  const rehearsal = cfg.rehearsal
-  if (rehearsal?.fail) command = parked ? [...HOLD_COMMAND, '/app/no-such-app.js'] : ['node', '/app/no-such-app.js']
-  if (rehearsal?.delay && !cfg.released) {
-    command = ['sh', '-c', 'sleep ' + rehearsal.delay + '; exec ' + (command ?? ['node', 'server.js']).join(' ')]
-  }
-  return command
+  return cfg.held && !cfg.released ? HOLD_COMMAND : null
 }
 
 const NAME_SET = new Set(CONTAINER_ENV_NAMES)
@@ -358,7 +337,8 @@ export class AppHost extends DurableObject {
 
   /** Is a container running here? Starts nothing (describe() would, for a host that should be up). */
   async peek() {
-    return { begun: Boolean(await this.loadCfg()), running: Boolean(this.ctx.container.running) }
+    const cfg = await this.loadCfg()
+    return { begun: Boolean(cfg), running: Boolean(this.ctx.container.running), stopped: Boolean(cfg?.stopped) }
   }
 
   /**
@@ -425,8 +405,6 @@ export class AppHost extends DurableObject {
       const image = this.ctx.container.images?.app
       if (!image) throw new Error('this Worker version has no container image named "app"')
       cfg = { image, begunAt: Date.now(), held: Boolean(held), released: false }
-      const rehearsal = rehearsalOf(this.env)
-      if (rehearsal) cfg.rehearsal = rehearsal
       await this.ctx.storage.put('cfg', cfg)
       this.cfg = cfg
       this.retiring = false
@@ -517,6 +495,13 @@ export class AppHost extends DurableObject {
   async retire() {
     this.retiring = true
     this.ready = false
+    // Stored before the signal, as in stop(): if this object is reset before its record is
+    // deleted, nothing (a waiting request, a look) starts the app here again.
+    const cfg = await this.loadCfg()
+    if (cfg && !cfg.stopped) {
+      this.cfg = { ...cfg, stopped: true }
+      await this.ctx.storage.put('cfg', this.cfg)
+    }
     const graceful = await this.endContainer()
     await this.ctx.storage.deleteAll()
     this.cfg = null
@@ -1009,16 +994,16 @@ export default {
   scheduled: (controller, env, ctx) => {
     const tick = { method: 'POST', headers: { 'x-tick-token': env.TICK_TOKEN ?? '' } }
     // The cron is also the heartbeat's safety net: it sets the router's alarm again.
-    routerOf(env)
+    const poked = routerOf(env)
       ?.poke(targetOf(env))
       .catch((error) => console.error('[cron] poke failed', error?.message))
     const sent = routerOf(env)
       ? sendToLive(env, () => new Request('http://app/internal/tick', tick), true)
       : getContainer(env.APP, 'app').fetch('http://app/internal/tick', tick)
-    return ctx.waitUntil(
-      sent
-        .then((response) => response.ok || console.error('[cron] tick', response.status))
-        .catch((error) => console.error('[cron] tick failed', error?.message)),
-    )
+    const ticked = sent
+      .then((response) => response.ok || console.error('[cron] tick', response.status))
+      .catch((error) => console.error('[cron] tick failed', error?.message))
+    // Both are waited for: a tick that fails fast must not cut the poke short.
+    return ctx.waitUntil(poked ? Promise.all([poked, ticked]) : ticked)
   },
 }

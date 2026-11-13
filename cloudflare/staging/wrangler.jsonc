@@ -61,8 +61,6 @@
     // Staging has no secrets, so its rollout status is readable without a token.
     "ROLLOUT_STATUS_PUBLIC": "1",
     // Staging has no database at all; everywhere else a new instance must reach one before it takes over.
-    "ALLOW_NO_DATABASE": "1",
-    // REHEARSAL: forward from the old container, with a new instance that is slow to come up.
-    "REHEARSAL_START_DELAY_SECONDS": "90"
+    "ALLOW_NO_DATABASE": "1"
   }
 }

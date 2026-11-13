@@ -272,7 +272,7 @@ describe('a hand-over', () => {
     const undone = plan(booting(), bootFacts({ exits: 2 }), T + 9_000).state
     const stoppedOld = host('img-1', { ready: false, stopped: true })
     const late = T + 9_000 + 10 * HANDOVER_STOP_TIMEOUT_MS
-    for (const to of [null, undefined, { begun: true, running: true }]) {
+    for (const to of [null, undefined, { begun: true, running: true, stopped: true }, { begun: true, running: false, stopped: false }]) {
       const out = plan(undone, { live: stoppedOld, next: null, wanted: 'img-2', target: 'hosts', to }, late)
       expect(out.state.handover.phase).toBe('undo')
       expect(out.actions).toEqual([
@@ -280,9 +280,10 @@ describe('a hand-over', () => {
         { type: 'resume', name: 'app-1', seq: true },
       ])
     }
-    // Only when the new instance itself says nothing runs there is the old one started
-    // without the stop-for-good having worked; forgetting the new one goes on being retried.
-    const gone = { live: stoppedOld, next: null, wanted: 'img-2', target: 'hosts', to: { begun: true, running: false } }
+    // Only when the new instance itself says nothing runs there, and its record says it stays
+    // stopped, is the old one started without the stop-for-good having worked; forgetting the
+    // new one goes on being retried.
+    const gone = { live: stoppedOld, next: null, wanted: 'img-2', target: 'hosts', to: { begun: true, running: false, stopped: true } }
     expect(plan(undone, gone, T + 9_000 + HANDOVER_STOP_TIMEOUT_MS - 1).state.handover.phase).toBe('undo')
     const out = plan(undone, gone, T + 9_000 + HANDOVER_STOP_TIMEOUT_MS + 1)
     expect(out.state.handover.phase).toBe('resume')
@@ -309,6 +310,10 @@ describe('a hand-over', () => {
       { type: 'resume', name: 'app-1' },
       { type: 'begin', name: 'app-3', reason: 'image', forced: false, held: true },
     ])
+    // While that new instance comes up (held: it runs no app) the old one is still tried.
+    const coming = plan(out.state, facts('img-3'), T + 200_000).state
+    const still = plan(coming, { live: stoppedOld, next: held('img-3', { parked: false }), wanted: 'img-3', target: 'hosts' }, T + 202_000)
+    expect(still.actions).toEqual([{ type: 'resume', name: 'app-1' }])
     // Once the start works the mark is cleared.
     const back = handoverStep(out.state, 'resumed', { name: 'app-1', now: T + 201_000 })
     expect(back.live).toEqual({ name: 'app-1', since: T - 60_000 })

@@ -82,7 +82,7 @@ function liveImageOf(state, facts) {
  *
  * state: what the router stored last time (never mutated).
  * facts: { live, next, wanted, target, to }
- *   to: only while a hand-over is being undone: { running } of the instance being stopped,
+ *   to: only while a hand-over is being undone: { begun, running, stopped } of the instance being stopped,
  *     asked without starting anything (null when it could not be asked).
  *   live / next: what each instance reports ({ begun, image, running, ready, parked, stopped,
  *     exits, protocol, commit }), or null when it could not be asked.
@@ -153,6 +153,11 @@ export function plan(state, facts, now) {
       // The start did not take (the call failed last time): ask again. Starting is idempotent.
       actions.push({ type: 'begin', name: candidate.name, reason: candidate.reason, forced: false, held })
     }
+    // A live instance that is stopped (an earlier hand-over was undone and its start-again
+    // did not stick) goes on being started while a held instance comes up: a held instance
+    // runs no app, so this never makes two.
+    const liveStopped = next.live && (next.live.needsResume || (next.live.name !== LEGACY && facts.live?.stopped))
+    if (next.next && held && liveStopped) actions.push({ type: 'resume', name: next.live.name })
   } else if (!next.live) {
     // Nothing has ever served (a brand-new deployment with no old application): there is
     // nothing to keep serving, so the first instance is live at once and requests wait on it.
@@ -273,9 +278,10 @@ function planHandover(next, facts, now, actions, note) {
       actions.push(release)
     }
   } else if (h.phase === 'undo') {
-    if (now - (h.undoneAt ?? h.at) > HANDOVER_STOP_TIMEOUT_MS && facts.to && facts.to.running === false) {
+    const gone = facts.to && facts.to.running === false && (facts.to.stopped === true || facts.to.begun === false)
+    if (now - (h.undoneAt ?? h.at) > HANDOVER_STOP_TIMEOUT_MS && gone) {
       // The stop-for-good keeps failing, but the new instance itself says nothing is running
-      // there. Forgetting its record goes on being retried; the old one is started now.
+      // there and its record says it must stay stopped (or it has no record left). Forgetting its record goes on being retried; the old one is started now.
       // (While the new app may still be running, the old one is NOT started: two copies must
       // never run at once, even if that leaves nothing serving until the stop works.)
       next.retiring.push({ name: h.to, at: now - RETIRE_GRACE_MS, tries: 0 })
