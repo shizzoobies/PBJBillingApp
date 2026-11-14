@@ -1,0 +1,180 @@
+{
+  "what": "Covered dates: three recipe corrections and the first re-stamp after 433f75e1 (featreq-6678d532). Approved by Alex 2026-11-14.",
+  "takenAt": "2026-11-14T14:14:23.416Z",
+  "undo": "Set each recipe back to `before` (period_coverage_start, period_coverage_end, period_coverage_anchor_due) and each checklist period_label back to `before`. Note the app re-stamps open labels from the recipe on every bulk save.",
+  "templates": [
+    {
+      "id": "template-em1be30",
+      "client": "Conch Shack Investments",
+      "title": "Monthly Reconciliations",
+      "before": {
+        "start": "2026-10-01",
+        "end": "2026-10-31",
+        "anchor": "2026-09-01"
+      },
+      "after": {
+        "start": "2026-10-01",
+        "end": "2026-10-31",
+        "anchor": "2026-11-05"
+      }
+    },
+    {
+      "id": "template-9uklzl9",
+      "client": "Emerald Custom Homes",
+      "title": "Monthly Reconciliations",
+      "before": {
+        "start": "2026-08-01",
+        "end": "2026-08-31",
+        "anchor": null
+      },
+      "after": {
+        "start": "2026-10-01",
+        "end": "2026-10-31",
+        "anchor": "2026-11-10"
+      }
+    },
+    {
+      "id": "template-71c14866",
+      "client": "Cooper & Cooper, PA",
+      "title": "Monthly Reconciliations with Review",
+      "before": {
+        "start": "2026-08-01",
+        "end": "2026-08-31",
+        "anchor": "2026-10-30"
+      },
+      "after": {
+        "start": "2026-10-01",
+        "end": "2026-10-31",
+        "anchor": "2026-11-05"
+      }
+    }
+  ],
+  "checklists": [
+    {
+      "id": "check-eeeaced2",
+      "templateId": "template-em1be30",
+      "before": "November 1 – November 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-ad1f6dca",
+      "templateId": "template-if7yavu",
+      "before": "September 1 – September 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-ae2ed1ac",
+      "templateId": "template-9idahpw",
+      "before": "September 1 – September 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-a743819f",
+      "templateId": "template-0wpzjlm",
+      "before": "September 1 – September 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-65d10791",
+      "templateId": "template-c6ncv3w",
+      "before": "September 1 – September 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-3ce6e30c",
+      "templateId": "template-y2mw42y",
+      "before": "September 1 – September 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-96e44980",
+      "templateId": "template-ksuo6cv",
+      "before": "September 1 – September 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-7c58ec9c",
+      "templateId": "template-e6nous7",
+      "before": "September 1 – September 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-5e8887a1",
+      "templateId": "template-ais65jt",
+      "before": "September 1 – September 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-6466e90f",
+      "templateId": "template-9uklzl9",
+      "before": "August 1 – August 31, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-84aba4a1",
+      "templateId": "template-6ky0yef",
+      "before": "September 1 – September 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-67b224cc",
+      "templateId": "template-wv886qb",
+      "before": "September 1 – September 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-9649e641",
+      "templateId": "template-1kjllma",
+      "before": "September 1 – September 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-c1a9180d",
+      "templateId": "template-71c14866",
+      "before": "September 1 – September 30, 2026",
+      "after": "October 1 – October 31, 2026"
+    },
+    {
+      "id": "check-66a010c9",
+      "templateId": "template-j17qs6i",
+      "before": "October 5 – November 5, 2026",
+      "after": "November 8 – November 14, 2026"
+    },
+    {
+      "id": "check-b20f56c2",
+      "templateId": "template-a12ougb",
+      "before": "October 5 – November 5, 2026",
+      "after": "November 1 – November 14, 2026"
+    },
+    {
+      "id": "check-f32f6433",
+      "templateId": "template-7ckhu1g",
+      "before": "August 1 – October 31, 2026",
+      "after": "October 1 – December 31, 2026"
+    },
+    {
+      "id": "check-455b8831",
+      "templateId": "template-roq29fy",
+      "before": "August 1 – October 31, 2026",
+      "after": "October 1 – December 31, 2026"
+    },
+    {
+      "id": "check-5b05a81a",
+      "templateId": "template-49qvbw9",
+      "before": "August 1 – October 31, 2026",
+      "after": "October 1 – December 31, 2026"
+    },
+    {
+      "id": "check-3c593d36",
+      "templateId": "template-quapzoh",
+      "before": "August 1 – October 31, 2026",
+      "after": "October 1 – December 31, 2026"
+    },
+    {
+      "id": "check-e3fceeae",
+      "templateId": "template-7k2w576",
+      "before": "August 1 – October 31, 2026",
+      "after": "October 1 – December 31, 2026"
+    }
+  ]
+}
