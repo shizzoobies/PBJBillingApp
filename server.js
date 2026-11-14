@@ -270,7 +270,7 @@ import {
   noteEditOutcomeRefusal,
   pendingNoteEditRefusal,
 } from './lib/note-edit-permission.js'
-import { checklistMonthLabel } from './lib/checklist-period-label.js'
+import { checklistMonthLabel, periodLabelFromDates } from './lib/checklist-period-label.js'
 import {
   approvalDenial,
   deletionTargetStillExists,
@@ -16912,7 +16912,7 @@ const server = createServer(async (request, response) => {
     }
 
     // PATCH /api/checklists/:id — edit task DETAILS (title / due date /
-    // assignee). Authorized like the item endpoints (owner / assignee / editor /
+    // assignee / board column / covered dates). Authorized like the item endpoints (owner / assignee / editor /
     // client-visible). Owner + the task's own creator apply directly; every
     // other authorized editor's change is ROUTED as a pending edit to the
     // approver. Handled before the DELETE `:id` block below (same matcher).
@@ -16994,7 +16994,27 @@ const server = createServer(async (request, response) => {
         proposed.categoryId = incoming
         prev.categoryId = checklist.categoryId ?? null
       }
-      if (Object.keys(proposed).length === 0) {
+      // Covered dates, set by hand on this checklist (featreq-6678d532: "there
+      // is not a way for us to update once it becomes active"). `{ start, end }`
+      // sets them; `null` hands them back to the recipe. `undefined` = not asked.
+      // Whoever may edit the task may edit its covered dates - it is a label.
+      let coveredDates
+      if ('coveredDates' in payload) {
+        if (payload.coveredDates === null) {
+          coveredDates = null
+        } else {
+          const start = String(payload.coveredDates?.start ?? '')
+          const end = String(payload.coveredDates?.end ?? '')
+          if (!periodLabelFromDates(start, end)) {
+            sendJson(response, 400, {
+              error: 'Pick both covered dates, with the first on or before the second.',
+            })
+            return
+          }
+          coveredDates = { start, end }
+        }
+      }
+      if (Object.keys(proposed).length === 0 && coveredDates === undefined) {
         sendJson(response, 400, { error: 'No editable fields provided' })
         return
       }
@@ -17002,17 +17022,38 @@ const server = createServer(async (request, response) => {
       // Edits apply directly for anyone authorized to edit this task — only
       // DELETES route to the owner for approval. (The permission gate above
       // still decides who may edit at all.)
-      const updated = await appDataStore.updateChecklistMeta(checklistId, proposed)
-      if (!updated) {
-        sendJson(response, 404, { error: 'Checklist not found' })
-        return
+      let updated = checklist
+      if (Object.keys(proposed).length > 0) {
+        updated = await appDataStore.updateChecklistMeta(checklistId, proposed)
+        if (!updated) {
+          sendJson(response, 404, { error: 'Checklist not found' })
+          return
+        }
       }
       // A non-owner assignee change should keep client visibility coherent.
       if (proposed.assigneeId) {
         await appDataStore.grantClientVisibility(updated.clientId, proposed.assigneeId)
       }
+      // The covered dates belong to the CASE, so every step of it changes with
+      // this one. The answer names those steps by id and label only: the page
+      // applies them to the steps it already holds, and nothing about a step
+      // this person cannot see travels here beyond the label they just set.
+      let caseLabels = null
+      if (coveredDates !== undefined) {
+        const relabeled = await appDataStore.setCasePeriodLabel(checklistId, coveredDates)
+        if (!relabeled) {
+          sendJson(response, 404, { error: 'Checklist not found' })
+          return
+        }
+        updated = relabeled.checklist
+        caseLabels = relabeled.caseChecklists.map((entry) => ({
+          id: entry.id,
+          periodLabel: entry.periodLabel ?? null,
+          periodLabelManual: entry.periodLabelManual === true,
+        }))
+      }
       await appDataStore.recordActivity(session.user.id, 'checklist_edited', updated.title)
-      sendJson(response, 200, { checklist: updated })
+      sendJson(response, 200, caseLabels ? { checklist: updated, caseLabels } : { checklist: updated })
       return
     }
 

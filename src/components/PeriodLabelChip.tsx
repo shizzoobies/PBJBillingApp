@@ -10,11 +10,21 @@
  * the label looks identical everywhere it appears and there is one place to
  * change if she wants it to read differently.
  */
-export function PeriodLabelChip({ label }: { label?: string | null }) {
+export function PeriodLabelChip({
+  label,
+  byHand = false,
+}: {
+  label?: string | null
+  /** The dates were set on this checklist rather than by its recipe (featreq-6678d532). */
+  byHand?: boolean
+}) {
   const text = typeof label === 'string' ? label.trim() : ''
   if (!text) return null
   return (
-    <span className="period-label-chip" title={`Covers ${text}`}>
+    <span
+      className="period-label-chip"
+      title={byHand ? `Covers ${text} (set on this checklist)` : `Covers ${text}`}
+    >
       {text}
     </span>
   )

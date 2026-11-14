@@ -2398,8 +2398,13 @@ export async function updateChecklistMetaRequest(
     assigneeId?: string | null
     /** Board column (service category); null/'' = Uncategorized. */
     categoryId?: string | null
+    /**
+     * Covered dates set by hand on this checklist's case (featreq-6678d532);
+     * null hands them back to the recipe. Leave the key out to change nothing.
+     */
+    coveredDates?: { start: string; end: string } | null
   },
-): Promise<{ checklist: Checklist } | { pending: PendingTaskEdit }> {
+): Promise<{ checklist: Checklist; caseLabels?: ChecklistCaseLabel[] } | { pending: PendingTaskEdit }> {
   const response = await apiFetch(`/api/checklists/${encodeURIComponent(checklistId)}`, {
     credentials: 'same-origin',
     method: 'PATCH',
@@ -2410,7 +2415,16 @@ export async function updateChecklistMetaRequest(
     const message = await safeErrorMessage(response)
     throw new ApiError(response.status, message || `Failed to update task (${response.status})`)
   }
-  return (await response.json()) as { checklist: Checklist } | { pending: PendingTaskEdit }
+  return (await response.json()) as
+    | { checklist: Checklist; caseLabels?: ChecklistCaseLabel[] }
+    | { pending: PendingTaskEdit }
+}
+
+/** One step of a case whose covered dates changed with the checklist that was edited. */
+export type ChecklistCaseLabel = {
+  id: string
+  periodLabel: string | null
+  periodLabelManual: boolean
 }
 
 /** Every pending task edit the caller can approve (owner: all; staff: routed to them). */

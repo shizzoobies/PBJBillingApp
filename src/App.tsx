@@ -2832,7 +2832,13 @@ function App() {
   // result tells the UI whether to show a "sent for approval" note.
   const updateChecklistMeta = async (
     checklistId: string,
-    patch: { title?: string; dueDate?: string; assigneeId?: string; categoryId?: string | null },
+    patch: {
+      title?: string
+      dueDate?: string
+      assigneeId?: string
+      categoryId?: string | null
+      coveredDates?: { start: string; end: string } | null
+    },
   ): Promise<{ pending: PendingTaskEdit } | { checklist: Checklist } | null> => {
     if (previewActiveRef.current) return null
     try {
@@ -2840,11 +2846,20 @@ function App() {
       const result = await updateChecklistMetaRequest(checklistId, patch)
       if ('checklist' in result) {
         const updated = result.checklist
+        // Covered dates belong to the whole case, so the other steps of it
+        // changed too: the server names them by id with their new label.
+        const caseLabels = new Map((result.caseLabels ?? []).map((entry) => [entry.id, entry]))
         applyServerDataUpdate((current) => ({
           ...current,
-          checklists: current.checklists.map((checklist) =>
-            checklist.id === checklistId ? updated : checklist,
-          ),
+          checklists: current.checklists.map((checklist) => {
+            if (checklist.id === checklistId) return updated
+            const relabeled = caseLabels.get(checklist.id)
+            if (!relabeled) return checklist
+            const next = { ...checklist, periodLabel: relabeled.periodLabel }
+            if (relabeled.periodLabelManual) next.periodLabelManual = true
+            else delete next.periodLabelManual
+            return next
+          }),
         }))
         setDataSyncState('synced')
         return { checklist: updated }

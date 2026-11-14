@@ -785,6 +785,7 @@
         "pushed_from_checklist_id": "cl-origin",
         "pushed_to_checklist_id": "cl-next",
         "period_label": "February 2026",
+        "period_label_manual": false,
         "skip_notice": null,
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
@@ -819,6 +820,7 @@
         "pushed_from_checklist_id": null,
         "pushed_to_checklist_id": null,
         "period_label": null,
+        "period_label_manual": false,
         "skip_notice": null,
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
@@ -853,6 +855,7 @@
         "pushed_from_checklist_id": null,
         "pushed_to_checklist_id": null,
         "period_label": null,
+        "period_label_manual": false,
         "skip_notice": null,
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
@@ -887,6 +890,7 @@
         "pushed_from_checklist_id": null,
         "pushed_to_checklist_id": null,
         "period_label": null,
+        "period_label_manual": false,
         "skip_notice": null,
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
@@ -921,6 +925,7 @@
         "pushed_from_checklist_id": null,
         "pushed_to_checklist_id": null,
         "period_label": null,
+        "period_label_manual": false,
         "skip_notice": null,
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
@@ -955,6 +960,7 @@
         "pushed_from_checklist_id": "cl-origin",
         "pushed_to_checklist_id": "cl-next",
         "period_label": null,
+        "period_label_manual": false,
         "skip_notice": null,
         "created_at": {
           "$date": "2026-03-05T16:00:00.000Z"
@@ -1407,6 +1413,7 @@
         "pushed_from_checklist_id": "",
         "pushed_to_checklist_id": "",
         "period_label": "",
+        "period_label_manual": "",
         "skip_notice": "::jsonb",
         "created_at": "",
         "updated_at": "<now()>"

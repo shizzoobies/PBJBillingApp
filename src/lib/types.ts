@@ -1645,6 +1645,12 @@ export type Checklist = {
    * predates the feature.
    */
   periodLabel?: string | null
+  /**
+   * True when the covered dates were set BY HAND on this checklist's case
+   * (featreq-6678d532). Automatic updates from the recipe then leave the label
+   * alone. Absent everywhere else. Only PATCH /api/checklists/:id writes it.
+   */
+  periodLabelManual?: boolean
   items: ChecklistItem[]
   caseId?: string
   stageId?: string

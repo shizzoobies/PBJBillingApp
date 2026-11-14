@@ -61,3 +61,53 @@ describe('the bulk save re-stamps the period labels it may have moved', () => {
     expect(versionAt).toBeGreaterThan(restampAt)
   })
 })
+
+/**
+ * Covered dates set by hand on one checklist - featreq-6678d532. Same reason
+ * for pinning the glue: the decision is tested in the store, both backends;
+ * what can silently move here is WHO may ask and WHAT the answer carries.
+ */
+describe('PATCH /api/checklists/:id takes covered dates', () => {
+  const route = () => {
+    const at = serverSource.indexOf("if (checklistMetaPatchMatch && request.method === 'PATCH') {")
+    expect(at, 'the edit-details route was not found').toBeGreaterThan(-1)
+    const end = serverSource.indexOf('// DELETE /api/checklists/:id', at)
+    return serverSource.slice(at, end)
+  }
+
+  it('is behind the same gate as every other edit of the task', () => {
+    const text = route()
+    const gateAt = text.indexOf('checklistWriteDenial({')
+    const writeAt = text.indexOf('appDataStore.setCasePeriodLabel(checklistId, coveredDates)')
+    expect(gateAt).toBeGreaterThan(-1)
+    expect(writeAt).toBeGreaterThan(gateAt)
+  })
+
+  it('refuses dates that are not a window before anything is written', () => {
+    const text = route()
+    const checkAt = text.indexOf('if (!periodLabelFromDates(start, end)) {')
+    expect(checkAt).toBeGreaterThan(-1)
+    expect(checkAt).toBeLessThan(text.indexOf('appDataStore.updateChecklistMeta('))
+    expect(text).toContain('Pick both covered dates, with the first on or before the second.')
+  })
+
+  it('tells "leave the dates alone" (no key) from "use the recipe\'s dates" (null)', () => {
+    const text = route()
+    expect(text).toContain("if ('coveredDates' in payload) {")
+    expect(text).toContain('if (payload.coveredDates === null) {')
+    expect(text).toContain('if (coveredDates !== undefined) {')
+    expect(text).toContain('Object.keys(proposed).length === 0 && coveredDates === undefined')
+  })
+
+  it('answers with the other steps by id and label only', () => {
+    const text = route()
+    const at = text.indexOf('caseLabels = relabeled.caseChecklists.map((entry) => ({')
+    expect(at).toBeGreaterThan(-1)
+    const shape = text.slice(at, text.indexOf('}))', at))
+    expect(shape.match(/^\s+\w+:/gm)?.map((line) => line.trim())).toEqual([
+      'id:',
+      'periodLabel:',
+      'periodLabelManual:',
+    ])
+  })
+})

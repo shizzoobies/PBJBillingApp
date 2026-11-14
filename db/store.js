@@ -153,7 +153,12 @@ import { clientHistoryRefusal } from '../lib/client-delete-rule.js'
 import { insertRowsBatched } from '../lib/insert-rows-batched.js'
 import { cleanServiceCategoryGroup } from '../lib/service-category-group.js'
 import {
+  caseOccurrenceKey,
+  caseOccurrences,
+  occurrenceBeforeAnchor,
+  periodLabelForCaseStep,
   periodLabelForInstance,
+  periodLabelFromDates,
   sanitizeCoverageDate,
   sanitizePeriodLabel,
 } from '../lib/checklist-period-label.js'
@@ -782,6 +787,9 @@ export const BULK_INSERT_SHAPES = {
       'pushed_from_checklist_id',
       'pushed_to_checklist_id',
       'period_label',
+      // Covered dates set by hand on this checklist (featreq-6678d532).
+      // Endpoint-owned like the push stamps: the STORED copy is written.
+      'period_label_manual',
       // Skip a step (featreq-7e1827e0): what the step before this one left when it
       // was skipped. Endpoint-owned like the push stamps: the STORED copy is written.
       'skip_notice',
@@ -985,7 +993,15 @@ export function checklistBulkRow(checklist, priorChecklistPushStamps, preservedC
     // Preserved like the skip stamps above: the bulk save wipes and reinserts,
     // and a column missing here is a label that vanishes on the next autosave
     // with no error anywhere.
-    sanitizePeriodLabel(checklist.periodLabel),
+    //
+    // Covered dates set BY HAND (featreq-6678d532) are endpoint-owned: PATCH
+    // /api/checklists/:id is the only writer of the marker, so when what is
+    // STORED is hand-set, the stored label and marker are written and the
+    // payload's copy (a tab that loaded before the edit) gets no vote.
+    storedPush?.periodLabelManual === true
+      ? sanitizePeriodLabel(storedPush.periodLabel)
+      : sanitizePeriodLabel(checklist.periodLabel),
+    storedPush?.periodLabelManual === true,
     // Skip a step (featreq-7e1827e0): only the skip endpoint writes a skip notice, so
     // the STORED one is kept and the payload's copy (present, absent or edited) is ignored.
     storedPush?.skipNotice ? JSON.stringify(storedPush.skipNotice) : null,
@@ -4598,6 +4614,9 @@ function buildChecklistFromStage({
   caseId,
   dueDate,
   completed = false,
+  // A LATER step of a case: the covered dates the case already carries (see
+  // `periodLabelForCaseStep`). Absent for a first step, which reads its own date.
+  casePeriod = null,
 }) {
   // When `completed` is true (a specific-months instance for a month whose
   // due date is already in the past), every item/sub-item/sub-sub-item is
@@ -4631,7 +4650,10 @@ function buildChecklistFromStage({
     // "and then the next would spring forward" — derived from THIS instance's
     // due date, so next cycle's instance names the next period without any
     // counter to keep in step. Null when the template does not carry one.
-    periodLabel: periodLabelForInstance(template, dueDate),
+    // A later step of a case reads what its case reads instead - every step
+    // of one case covers the same period, whenever each of them is due.
+    periodLabel: casePeriod ? casePeriod.periodLabel : periodLabelForInstance(template, dueDate),
+    ...(casePeriod?.periodLabelManual === true ? { periodLabelManual: true } : {}),
     // Onboarding link: every stage checklist of an onboarding case inherits the
     // template's `onboardingForClientId`, so completing/advancing any stage can
     // sync the client's lifecycle stage. Absent on ordinary templates.
@@ -6104,7 +6126,7 @@ function stageAdvanceFailure(checklist, error) {
  * any). The caller guards against double-spawn by checking for an existing
  * checklist with the same caseId/stageIndex+1 in the current data set.
  */
-function buildSpawnedNextStageChecklist({ template, justCompletedChecklist }) {
+function buildSpawnedNextStageChecklist({ template, justCompletedChecklist, caseSteps = null }) {
   const stages = template?.stages ?? []
   if (stages.length === 0) return null
   const currentStageIndex = typeof justCompletedChecklist.stageIndex === 'number'
@@ -6123,6 +6145,13 @@ function buildSpawnedNextStageChecklist({ template, justCompletedChecklist }) {
     stageCount: stages.length,
     caseId: justCompletedChecklist.caseId || justCompletedChecklist.id,
     dueDate,
+    // The covered dates of the CASE (featreq-6678d532), not of this step's own
+    // due date: a step due the month after the first one still covers the same
+    // period, and dates set by hand on the case come along.
+    casePeriod: periodLabelForCaseStep(
+      template,
+      Array.isArray(caseSteps) && caseSteps.length > 0 ? caseSteps : [justCompletedChecklist],
+    ),
   })
 }
 
@@ -6374,32 +6403,60 @@ function checklistIsFinished(items) {
  * one to spawn reading an occurrence further on. That is featreq-053fccba seen
  * from the other end, and it is what this repairs.
  *
- * Two things are deliberately left alone:
+ * Three things are deliberately left alone:
  *   - a FINISHED instance. Its label is history: it says what that piece of
  *     work covered when it was done, and rewriting it would edit the past.
- *   - anything due BEFORE the anchor's month. The anchor is the occurrence the
- *     window was set for; earlier instances belong to a cycle she was not
- *     describing, and they already show the seed window.
+ *   - anything BEFORE the anchor (`occurrenceBeforeAnchor`). The anchor is the
+ *     occurrence the window was set for; earlier instances belong to a cycle
+ *     she was not describing, and they already show the seed window.
+ *   - a label set BY HAND on the checklist (featreq-6678d532). The recipe not
+ *     agreeing with it is the whole point of setting it by hand.
  *
- * Instances arrive normalized — `{ id, dueDate, periodLabel, completed }` —
- * so the Postgres rows and the file records go through one piece of reasoning.
- * A stored '' counts as no label. Returns `[{ id, before, after }]`, only for
- * rows that actually differ, which is what makes calling this on every save
- * idempotent and cheap.
+ * WHICH DATE a label is counted from (featreq-6678d532): the occurrence of the
+ * CASE - the date its first step was first due (`caseOccurrences`) - never the
+ * row's own working due date. Counting from `dueDate` moved the label a month
+ * on when a checklist was pushed to next month, and gave the later steps of one
+ * case a different period from its first. So pass every row of the recipe,
+ * the binned ones too (`deleted: true`): they are not re-stamped, but a binned
+ * first step still says when its case began.
+ *
+ * Instances arrive normalized - `{ id, caseId, clientId, stageIndex, dueDate,
+ * cycleDueDate, periodLabel, periodLabelManual, completed, deleted }` - so the
+ * Postgres rows and the file records go through one piece of reasoning. A row
+ * with no case fields is its own case. A stored '' counts as no label. Returns
+ * `[{ id, before, after }]`, only for rows that actually differ, which is what
+ * makes calling this on every save idempotent and cheap.
  */
 export function periodRestampPlan(template, instances) {
   if (!template) return []
-  const anchor = template.periodCoverageAnchorDue
-  const floor = typeof anchor === 'string' && anchor.length >= 7 ? `${anchor.slice(0, 7)}-01` : null
+  const rows = (Array.isArray(instances) ? instances : []).filter(
+    (instance) => instance && typeof instance.id === 'string',
+  )
+  const occurrences = caseOccurrences(rows)
+  // Cases whose dates were set by hand. A step of such a case that is not
+  // marked itself (one the browser backfilled, say) reads the hand-set dates
+  // too, rather than the recipe's: one case, one period.
+  const byHand = new Map()
+  for (const instance of rows) {
+    if (instance.periodLabelManual === true && instance.periodLabel) {
+      byHand.set(caseOccurrenceKey(instance), instance.periodLabel)
+    }
+  }
   const plan = []
-  for (const instance of Array.isArray(instances) ? instances : []) {
-    if (!instance || typeof instance.id !== 'string') continue
-    if (instance.completed) continue
-    const due = instance.dueDate
-    if (typeof due !== 'string' || due === '') continue
-    if (floor && due < floor) continue
+  for (const instance of rows) {
+    if (instance.completed || instance.deleted) continue
+    if (instance.periodLabelManual === true) continue
+    const key = caseOccurrenceKey(instance)
     const before = instance.periodLabel ? instance.periodLabel : null
-    const after = periodLabelForInstance(template, due)
+    let after
+    if (byHand.has(key)) {
+      after = byHand.get(key)
+    } else {
+      const occurrence = occurrences.get(key)
+      if (!occurrence) continue
+      if (occurrenceBeforeAnchor(template, occurrence)) continue
+      after = periodLabelForInstance(template, occurrence)
+    }
     if (before === after) continue
     plan.push({ id: instance.id, before, after })
   }
@@ -7642,6 +7699,13 @@ export class AppDataStore {
         `alter table checklist_templates add column if not exists period_coverage_anchor_due date`,
       )
       await this.pool.query(`alter table checklists add column if not exists period_label text`)
+      // Covered dates set by hand on ONE checklist (featreq-6678d532; Alex's yes
+      // 2026-11-14). The re-stamp that runs on every save rewrites a label the
+      // recipe no longer agrees with - which is exactly what a hand-set label
+      // is - so it needs a mark that says "leave this one".
+      await this.pool.query(
+        `alter table checklists add column if not exists period_label_manual boolean not null default false`,
+      )
 
       // The instance's own skip marker. Deliberately NOT a soft-delete: the row
       // must stay out of the recycle bin and stay visible to the materializer's
@@ -9941,7 +10005,8 @@ export class AppDataStore {
                    case_id, stage_id, stage_index, stage_count, category_id, deleted_at,
                    deletion_requested_by, deletion_requested_at, onboarding_for_client_id, created_by,
                    skipped_at, skipped_by, cycle_due_date, pushed_at, pushed_by,
-                   pushed_from_checklist_id, pushed_to_checklist_id, period_label, skip_notice
+                   pushed_from_checklist_id, pushed_to_checklist_id, period_label, period_label_manual,
+                   skip_notice
             from checklists
             order by due_date asc, id asc
           `),
@@ -10121,6 +10186,9 @@ export class AppDataStore {
         // this to decide anything; it is rendered beside the title and that is
         // the whole of it.
         periodLabel: row.period_label ?? null,
+        // Set by hand on this checklist (featreq-6678d532): the re-stamp leaves
+        // it alone. Absent (not false) everywhere else, like the file backend.
+        ...(row.period_label_manual === true ? { periodLabelManual: true } : {}),
       }))
 
       const data = {
@@ -11050,7 +11118,7 @@ export class AppDataStore {
         const priorChecklistPushStamps = new Map(
           (
             await client.query(
-              `select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id, skip_notice from checklists`,
+              `select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id, skip_notice, period_label, period_label_manual from checklists`,
             )
           ).rows.map((row) => [
             row.id,
@@ -11062,6 +11130,9 @@ export class AppDataStore {
               pushedToChecklistId: row.pushed_to_checklist_id ?? null,
               // Skip a step (featreq-7e1827e0): endpoint-owned the same way.
               skipNotice: row.skip_notice ?? null,
+              // Covered dates set by hand (featreq-6678d532): endpoint-owned too.
+              periodLabel: row.period_label ?? null,
+              periodLabelManual: row.period_label_manual === true,
             },
           ]),
         )
@@ -11774,10 +11845,21 @@ export class AppDataStore {
                 if (prior[field] == null) delete next[field]
                 else next[field] = prior[field]
               }
+              // Covered dates set by hand (featreq-6678d532): the marker is
+              // endpoint-owned, and a hand-set label travels with it. A label
+              // that is NOT hand-set stays the payload's, as before.
+              if (prior.periodLabelManual === true) {
+                next.periodLabelManual = true
+                next.periodLabel = prior.periodLabel ?? null
+              } else {
+                delete next.periodLabelManual
+              }
             } else {
               // A row this save is creating has no stored skip notice, and a payload
               // may not mint one - the Postgres branch writes null for it.
               delete next.skipNotice
+              // Nor the hand-set mark: only the covered-dates endpoint writes it.
+              delete next.periodLabelManual
             }
             // Derived on read from the skip records (`_withStepSkipMarks`), never stored.
             delete next.stepSkipped
@@ -16646,13 +16728,18 @@ export class AppDataStore {
         periodCoverageAnchorDue: row.period_coverage_anchor_due,
       }
 
+      // Binned rows come back too: they are never re-stamped, but a binned
+      // first step still dates its case (see `periodRestampPlan`).
       const checklistResult = await this.pool.query(
-        `select id, to_char(due_date, 'YYYY-MM-DD') as due_date, period_label
+        `select id, case_id, client_id, stage_index, period_label, period_label_manual,
+                to_char(due_date, 'YYYY-MM-DD') as due_date,
+                to_char(cycle_due_date, 'YYYY-MM-DD') as cycle_due_date,
+                deleted_at is not null as deleted
            from checklists
-          where template_id = $1 and deleted_at is null`,
+          where template_id = $1`,
         [templateId],
       )
-      if (checklistResult.rows.length === 0) return 0
+      if (!checklistResult.rows.some((r) => !r.deleted)) return 0
 
       // The steps decide whether an instance is finished, and an item carrying
       // sub-items does not decide its own state — so the sub_items json comes
@@ -16661,7 +16748,7 @@ export class AppDataStore {
         `select checklist_id, done, sub_items
            from checklist_items
           where checklist_id = any($1::text[])`,
-        [checklistResult.rows.map((r) => r.id)],
+        [checklistResult.rows.filter((r) => !r.deleted).map((r) => r.id)],
       )
       const itemsByChecklist = new Map()
       for (const item of itemsResult.rows) {
@@ -16674,31 +16761,53 @@ export class AppDataStore {
         template,
         checklistResult.rows.map((r) => ({
           id: r.id,
+          caseId: r.case_id || r.id,
+          clientId: r.client_id,
+          stageIndex: r.stage_index,
           dueDate: r.due_date,
+          cycleDueDate: r.cycle_due_date,
           periodLabel: r.period_label,
+          periodLabelManual: r.period_label_manual === true,
+          deleted: r.deleted === true,
           completed: checklistIsFinished(itemsByChecklist.get(r.id)),
         })),
       )
       for (const entry of plan) {
+        // `period_label_manual = false` in the WHERE, not only in the plan: a
+        // hand edit that landed between the read above and this write wins.
         await this.pool.query(
-          `update checklists set period_label = $2, updated_at = now() where id = $1`,
+          `update checklists set period_label = $2, updated_at = now()
+            where id = $1 and period_label_manual = false`,
           [entry.id, entry.after],
         )
       }
       return plan.length
     }
 
-    const data = await readJson(localDataPath)
+    // Read and write in ONE file-queue slot, raw fs calls only (see
+    // `_withFileChecklistItem`): a hand edit of covered dates landing between a
+    // read and a later write would otherwise be put back as it was.
+    return enqueueFileOperation(localDataPath, async () => {
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
     const template = (data.checklistTemplates ?? []).find((item) => item.id === templateId)
     if (!template) return 0
     const plan = periodRestampPlan(
       template,
-      (data.checklists ?? [])
-        .filter((checklist) => checklist.templateId === templateId && !checklist.deletedAt)
-        .map((checklist) => ({
+      [
+        ...(data.checklists ?? []).map((checklist) => ({ checklist, binned: false })),
+        ...(data.recycledChecklists ?? []).map((checklist) => ({ checklist, binned: true })),
+      ]
+        .filter(({ checklist }) => checklist && checklist.templateId === templateId)
+        .map(({ checklist, binned }) => ({
           id: checklist.id,
+          caseId: checklist.caseId || checklist.id,
+          clientId: checklist.clientId,
+          stageIndex: checklist.stageIndex,
           dueDate: checklist.dueDate,
+          cycleDueDate: checklist.cycleDueDate ?? null,
           periodLabel: checklist.periodLabel,
+          periodLabelManual: checklist.periodLabelManual === true,
+          deleted: binned || Boolean(checklist.deletedAt),
           completed: checklistIsFinished(checklist.items),
         })),
     )
@@ -16709,8 +16818,161 @@ export class AppDataStore {
         ? { ...checklist, periodLabel: relabeled.get(checklist.id) }
         : checklist,
     )
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
     return plan.length
+    })
+  }
+
+  /**
+   * Set the covered dates of ONE case by hand, or hand them back to the recipe
+   * (featreq-6678d532: "there is not a way for us to update once it becomes
+   * active").
+   *
+   * `dates` is `{ start, end }` to set them, or `null` for "use the recipe's
+   * dates again". Either way it is applied to EVERY step of the checklist's case
+   * (same case id and client - see `sameCase`), finished and binned ones
+   * included: the period is the case's, and a step that opens later is born
+   * with it (`periodLabelForCaseStep`). Hand-set rows are marked
+   * `period_label_manual`, which is what the every-save re-stamp and the bulk
+   * save both honor.
+   *
+   * Returns `{ checklist, caseChecklists }` (the live rows, re-read), or null
+   * when the checklist does not exist, is binned, or the dates are not a window.
+   * Who may ask is the route's check.
+   */
+  async setCasePeriodLabel(checklistId, dates) {
+    if (typeof checklistId !== 'string' || checklistId === '') return null
+    const byHand = dates ? periodLabelFromDates(dates.start, dates.end) : null
+    if (dates && !byHand) return null
+
+    // What the recipe gives this case, for "use the recipe's dates again". The
+    // steps are passed WITHOUT their labels: what they say now is the hand-set
+    // text being given up, and `periodLabelForCaseStep` would otherwise hand it
+    // straight back for a case that began before the recipe's anchor. Such a
+    // case has no recipe dates of its own; it reads the window the recipe was
+    // given, which is what the re-stamp leaves on it too.
+    const automaticLabel = (template, steps) =>
+      template
+        ? periodLabelForCaseStep(
+            template,
+            steps.map((s) => ({ ...s, periodLabel: null, periodLabelManual: false })),
+          ).periodLabel
+        : null
+
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        const target = (
+          await client.query(
+            `select id, case_id, client_id, template_id from checklists
+              where id = $1 and deleted_at is null for update`,
+            [checklistId],
+          )
+        ).rows[0]
+        if (!target) {
+          await client.query('rollback')
+          return null
+        }
+        const steps = (
+          await client.query(
+            `select id, case_id, client_id, stage_index,
+                    to_char(due_date, 'YYYY-MM-DD') as due_date,
+                    to_char(cycle_due_date, 'YYYY-MM-DD') as cycle_due_date
+               from checklists
+              where coalesce(nullif(case_id, ''), id) = $1 and client_id is not distinct from $2
+              for update`,
+            // `||`, with the nullif above: an EMPTY case id is no case id (the
+            // same reading as `sameCase`), or one edit would relabel every
+            // such row of the client.
+            [target.case_id || target.id, target.client_id],
+          )
+        ).rows.map((row) => ({
+          id: row.id,
+          caseId: row.case_id || row.id,
+          clientId: row.client_id,
+          stageIndex: row.stage_index,
+          dueDate: row.due_date,
+          cycleDueDate: row.cycle_due_date,
+        }))
+        let label = byHand
+        if (!dates) {
+          const row = target.template_id
+            ? (
+                await client.query(
+                  `select frequency, period_label_enabled, scheduled_months,
+                          to_char(period_coverage_start, 'YYYY-MM-DD') as period_coverage_start,
+                          to_char(period_coverage_end, 'YYYY-MM-DD') as period_coverage_end,
+                          to_char(period_coverage_anchor_due, 'YYYY-MM-DD') as period_coverage_anchor_due
+                     from checklist_templates where id = $1`,
+                  [target.template_id],
+                )
+              ).rows[0]
+            : null
+          label = automaticLabel(
+            row
+              ? {
+                  frequency: row.frequency,
+                  periodLabelEnabled: Boolean(row.period_label_enabled),
+                  scheduledMonths: Array.isArray(row.scheduled_months) ? row.scheduled_months : [],
+                  periodCoverageStart: row.period_coverage_start,
+                  periodCoverageEnd: row.period_coverage_end,
+                  periodCoverageAnchorDue: row.period_coverage_anchor_due,
+                }
+              : null,
+            steps,
+          )
+        }
+        await client.query(
+          `update checklists
+              set period_label = $2, period_label_manual = $3, updated_at = now()
+            where id = any($1::text[])`,
+          [steps.map((step) => step.id), label, Boolean(dates)],
+        )
+        await client.query('commit')
+      } catch (error) {
+        await client.query('rollback').catch(() => {})
+        throw error
+      } finally {
+        client.release()
+      }
+      const data = await this.read()
+      const checklist = (data.checklists ?? []).find((entry) => entry.id === checklistId) ?? null
+      if (!checklist) return null
+      return {
+        checklist,
+        caseChecklists: (data.checklists ?? []).filter((entry) => sameCase(entry, checklist)),
+      }
+    }
+
+    // Read and write in ONE file-queue slot, raw fs calls only (see `_withFileChecklistItem`).
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+      const target = (data.checklists ?? []).find((entry) => entry?.id === checklistId)
+      if (!target || target.deletedAt) return null
+      const inCase = (entry) => Boolean(entry) && sameCase(entry, target)
+      const steps = [...(data.checklists ?? []), ...(data.recycledChecklists ?? [])].filter(inCase)
+      const label = dates
+        ? byHand
+        : automaticLabel(
+            (data.checklistTemplates ?? []).find((entry) => entry?.id === target.templateId) ?? null,
+            steps,
+          )
+      const apply = (entry) => {
+        if (!inCase(entry)) return entry
+        const next = { ...entry, periodLabel: label }
+        if (dates) next.periodLabelManual = true
+        else delete next.periodLabelManual
+        return next
+      }
+      data.checklists = (data.checklists ?? []).map(apply)
+      if (Array.isArray(data.recycledChecklists)) {
+        data.recycledChecklists = data.recycledChecklists.map(apply)
+      }
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      const checklist = data.checklists.find((entry) => entry.id === checklistId)
+      return { checklist, caseChecklists: data.checklists.filter(inCase) }
+    })
   }
 
   /**
@@ -23865,8 +24127,8 @@ export class AppDataStore {
         await client.query('begin')
         await client.query(
           `
-            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, onboarding_for_client_id, created_by, period_label, skip_notice, updated_at)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, now())
+            insert into checklists (id, title, client_id, assignee_id, template_id, frequency, due_date, viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count, category_id, onboarding_for_client_id, created_by, period_label, skip_notice, period_label_manual, updated_at)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19, now())
           `,
           [
             nextChecklist.id,
@@ -23887,6 +24149,8 @@ export class AppDataStore {
             nextChecklist.createdBy ?? null,
             sanitizePeriodLabel(nextChecklist.periodLabel),
             nextChecklist.skipNotice ? JSON.stringify(nextChecklist.skipNotice) : null,
+            // Only a later step of a case whose dates were set by hand is born marked.
+            nextChecklist.periodLabelManual === true && Boolean(sanitizePeriodLabel(nextChecklist.periodLabel)),
           ],
         )
 
@@ -24343,6 +24607,11 @@ export class AppDataStore {
       justCompletedChecklist: readyAfterPush
         ? { ...checklist, dueDate: checklist.cycleDueDate || checklist.dueDate }
         : checklist,
+      // Every step this case has had, the binned ones too: a first step that
+      // was deleted still says which occurrence the case is.
+      caseSteps: [...(data.checklists ?? []), ...(data.recycledChecklists ?? [])].filter(
+        (entry) => entry && ownCase(entry),
+      ),
     })
     if (!spawn) return skip('next_stage_empty')
     // Another case of this recipe already holds this step on this date: the v3
@@ -34424,7 +34693,7 @@ export class AppDataStore {
           await client.query(
             `select id, client_id, title, assignee_id, template_id, frequency, due_date,
                     viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count,
-                    category_id, cycle_due_date, period_label, skip_notice,
+                    category_id, cycle_due_date, period_label, skip_notice, period_label_manual,
                     onboarding_for_client_id, created_by, pushed_to_checklist_id,
                     to_char(coalesce(cycle_due_date, due_date), 'YYYY-MM-DD') as identity_date
                from checklists
@@ -34518,9 +34787,10 @@ export class AppDataStore {
                 id, title, client_id, assignee_id, template_id, frequency, due_date,
                 viewer_ids, editor_ids, case_id, stage_id, stage_index, stage_count,
                 category_id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id,
-                period_label, onboarding_for_client_id, created_by, skip_notice, created_at, updated_at
+                period_label, onboarding_for_client_id, created_by, skip_notice, created_at, updated_at,
+                period_label_manual
               )
-              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::jsonb, $23, $24)
+              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22::jsonb, $23, $24, $25)
             `,
             [
               newChecklistId,
@@ -34552,6 +34822,8 @@ export class AppDataStore {
               checklistRow.skip_notice ? JSON.stringify(checklistRow.skip_notice) : null,
               splitNowIso,
               splitNowIso,
+              // Dates set by hand stay set by hand on the copy that carries the open work.
+              checklistRow.period_label_manual === true,
             ],
           )
 
@@ -34708,6 +34980,7 @@ export class AppDataStore {
         stageCount: target.stageCount,
         categoryId: target.categoryId ?? null,
         periodLabel: target.periodLabel ?? null,
+        ...(target.periodLabelManual === true ? { periodLabelManual: true } : {}),
         onboardingForClientId: target.onboardingForClientId ?? null,
         createdBy: target.createdBy ?? null,
         createdAt: now,

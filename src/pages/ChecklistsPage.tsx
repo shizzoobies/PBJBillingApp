@@ -69,7 +69,13 @@ import { PeriodLabelChip } from '../components/PeriodLabelChip'
 import {
   checklistMonthLabel,
   coverageAnchorForTemplate,
+  coverageDatesFromLabel,
+  coverageReference,
+  occurrenceBeforeAnchor,
+  openCases,
   periodLabelForInstance,
+  periodLabelFromDates,
+  periodWindowFor,
 } from '../../lib/checklist-period-label.js'
 import { CompletedTasksSection } from '../components/CompletedTasksSection'
 import { CompletedWaits } from '../components/CompletedWaits'
@@ -111,7 +117,11 @@ import {
   startFirstRecipeStep,
 } from '../lib/recipeFirstStep'
 import { resolveTaskArea, type TaskArea } from '../lib/taskAreas'
-import { completedTaskRows, sortMostRecentlyCompletedFirst } from '../lib/completedTasks'
+import {
+  completedTaskRows,
+  isChecklistComplete,
+  sortMostRecentlyCompletedFirst,
+} from '../lib/completedTasks'
 import { filterInProgressChecklists, waitingStepCount } from '../lib/inProgressFilter'
 import { overdueChecklists } from '../lib/overdueChecklists'
 import { nextStageNeverOpened as isNextStageNeverOpened, openNextStageErrorText } from '../lib/stalledCase'
@@ -2851,6 +2861,15 @@ export function ChecklistCard({
   // Board column (service category). '' = Uncategorized. Editing this is how an
   // uncategorized checklist gets moved into the right board column.
   const [metaCategoryId, setMetaCategoryId] = useState(checklist.categoryId ?? '')
+  // Covered dates, on THIS checklist (featreq-6678d532: "there is not a way for
+  // us to update once it becomes active"). The label is stored as its finished
+  // phrase, so the two dates are read back out of it when the editor opens; a
+  // phrase this app did not write opens the fields empty.
+  const [metaCoverStart, setMetaCoverStart] = useState('')
+  const [metaCoverEnd, setMetaCoverEnd] = useState('')
+  const [metaCoverOpened, setMetaCoverOpened] = useState({ start: '', end: '' })
+  const [metaCoverError, setMetaCoverError] = useState<string | null>(null)
+  const hasCoveredDates = Boolean(checklist.periodLabel) || checklist.periodLabelManual === true
   // Inline "sent for approval" note shown after a routed save.
   const [metaPendingNote, setMetaPendingNote] = useState<string | null>(null)
   // True when this task already has a pending edit awaiting approval.
@@ -2860,16 +2879,35 @@ export function ChecklistCard({
     setMetaDue(checklist.dueDate)
     setMetaAssignee(checklist.assigneeId)
     setMetaCategoryId(checklist.categoryId ?? '')
+    const covered = coverageDatesFromLabel(checklist.periodLabel) ?? { start: '', end: '' }
+    setMetaCoverStart(covered.start)
+    setMetaCoverEnd(covered.end)
+    setMetaCoverOpened(covered)
+    setMetaCoverError(null)
     setMetaPendingNote(null)
     setEditingMeta(true)
   }
-  const saveMetaEditor = () => {
+  // "Use the repeating task's dates": hand a hand-set label back to the recipe.
+  // It saves the rest of the editor with it, so a title she changed in the same
+  // sitting is not thrown away when the editor closes.
+  const useRecipeCoveredDates = () => saveMetaEditor({ handBackCoveredDates: true })
+  const saveMetaEditor = ({ handBackCoveredDates = false } = {}) => {
     // Don't route a projected ghost (never persisted server-side).
     if (checklist.projected) {
       setEditingMeta(false)
       return
     }
     const title = metaTitle.trim()
+    // The covered dates are sent ONLY when she changed them: saving a new
+    // title must not turn the recipe's dates into hand-set ones.
+    const coverChanged =
+      !handBackCoveredDates &&
+      hasCoveredDates &&
+      (metaCoverStart !== metaCoverOpened.start || metaCoverEnd !== metaCoverOpened.end)
+    if (coverChanged && !periodLabelFromDates(metaCoverStart, metaCoverEnd)) {
+      setMetaCoverError('Pick both covered dates, with the first on or before the second.')
+      return
+    }
     void (async () => {
       const result = await updateChecklistMeta(checklist.id, {
         title: title || checklist.title,
@@ -2877,6 +2915,8 @@ export function ChecklistCard({
         assigneeId: metaAssignee || checklist.assigneeId,
         // '' → null so choosing "Uncategorized" clears the column.
         categoryId: metaCategoryId || null,
+        ...(coverChanged ? { coveredDates: { start: metaCoverStart, end: metaCoverEnd } } : {}),
+        ...(handBackCoveredDates ? { coveredDates: null } : {}),
       })
       if (result && 'pending' in result) {
         const approverName = employeeName(employees, result.pending.approverId ?? '')
@@ -3046,8 +3086,54 @@ export function ChecklistCard({
                   </select>
                 </label>
               </div>
+              {hasCoveredDates ? (
+                <div className="checklist-meta-covers">
+                  <div className="checklist-meta-editor-row">
+                    <label className="field">
+                      <span>Covers from</span>
+                      <input
+                        className="input"
+                        type="date"
+                        value={metaCoverStart}
+                        onChange={(event) => {
+                          setMetaCoverStart(event.target.value)
+                          setMetaCoverError(null)
+                        }}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Covers to</span>
+                      <input
+                        className="input"
+                        type="date"
+                        value={metaCoverEnd}
+                        onChange={(event) => {
+                          setMetaCoverEnd(event.target.value)
+                          setMetaCoverError(null)
+                        }}
+                      />
+                    </label>
+                  </div>
+                  <p className="checklist-meta-covers-note">
+                    {checklist.periodLabelManual === true
+                      ? 'These dates were set on this checklist, so its repeating task no longer changes them.'
+                      : (checklist.stageCount ?? 1) > 1
+                        ? 'Changing these changes them on every step of this case, and only this case.'
+                        : 'Changing these changes this checklist only. The next one still follows its repeating task.'}
+                    {checklist.periodLabelManual === true && checklist.templateId ? (
+                      <>
+                        {' '}
+                        <button type="button" className="link-button" onClick={useRecipeCoveredDates}>
+                          Use the repeating task's dates
+                        </button>
+                      </>
+                    ) : null}
+                  </p>
+                  {metaCoverError ? <p className="auth-error">{metaCoverError}</p> : null}
+                </div>
+              ) : null}
               <div className="button-row">
-                <button type="button" className="primary-action" onClick={saveMetaEditor}>
+                <button type="button" className="primary-action" onClick={() => saveMetaEditor()}>
                   Save
                 </button>
                 <button
@@ -3068,7 +3154,10 @@ export function ChecklistCard({
               {hideClientName ? (
                 <strong className="checklist-card-title">
                   {checklist.title}
-                  <PeriodLabelChip label={checklist.periodLabel} />
+                  <PeriodLabelChip
+                    label={checklist.periodLabel}
+                    byHand={checklist.periodLabelManual === true}
+                  />
                 </strong>
               ) : (
                 <>
@@ -3079,7 +3168,10 @@ export function ChecklistCard({
                   </strong>
                   <span className="checklist-card-title-sub">
                     {checklist.title}
-                    <PeriodLabelChip label={checklist.periodLabel} />
+                    <PeriodLabelChip
+                      label={checklist.periodLabel}
+                      byHand={checklist.periodLabelManual === true}
+                    />
                   </span>
                 </>
               )}
@@ -6555,6 +6647,41 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
   // A fresh copy: off, never generated, made from another recipe. Say why it is
   // off, because an owner who doesn't turn it on gets nothing at all.
   const isUnstartedCopy = Boolean(template.sourceTemplateId) && !template.active && !everGenerated
+  // Which checklist the covered dates below are FOR (featreq-6678d532). They
+  // used to belong to the recipe's NEXT due date, so correcting them skipped
+  // the checklist already open - the one she was looking at - and landed a
+  // month off on the one after. Now they are the dates of the earliest
+  // checklist still open, and with nothing open, of the next one. The two
+  // fields show that checklist's dates as they stand, so what she reads here
+  // is what its title says.
+  const openRecipeCases = openCases(
+    template.id,
+    data.checklists ?? [],
+    data.recycledChecklists ?? [],
+    isChecklistComplete,
+  )
+  const coverageRef = coverageReference(
+    template,
+    openRecipeCases.map((entry) => entry.occurrence),
+    localDateOnly(),
+  )
+  // A recipe whose dates were last typed under the old rule is anchored to an
+  // occurrence AFTER the open checklist, so its dates do not govern that
+  // checklist (the re-stamp leaves it alone) and working them out would show
+  // dates its title does not say. There the fields read the checklist's own
+  // label instead. The first change re-anchors to it, and from then on the
+  // recipe's dates are that checklist's dates.
+  const openLabelDates =
+    coverageRef.open && occurrenceBeforeAnchor(template, coverageRef.date)
+      ? coverageDatesFromLabel(
+          openRecipeCases.find((entry) => entry.occurrence === coverageRef.date)?.periodLabel,
+        )
+      : null
+  const coverageShown = openLabelDates ??
+    periodWindowFor(template, coverageRef.date) ?? {
+      start: template.periodCoverageStart ?? '',
+      end: template.periodCoverageEnd ?? '',
+    }
   return (
     <div className="repeating-task-body">
       {/* "Copy to client" is not repeated here — it lives on the row header
@@ -6814,14 +6941,15 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
           <div className="repeating-task-coverage">
             {/* Her words on the rework: "The period covers should allow me to
                 pick dates and then the how often should determine the next
-                period." So she sets the FIRST window here and nothing else —
-                every later occurrence steps forward by this task's own
-                schedule, exactly the way a reimbursed expense's covered dates
-                already do. Setting the dates re-anchors the cycle to the next
-                occurrence, so a correction takes effect from here on. */}
+                period." So she sets ONE window here and nothing else — every
+                later occurrence steps forward by this task's own schedule.
+                Changing a date re-anchors the cycle to the checklist these
+                dates are for (`coverageRef`), so a correction shows on the
+                checklist in front of her and carries on from there. */}
             <p className="repeating-task-coverage-hint">
-              Set the first period this task covers. After that each occurrence moves it
-              forward on its own, by however often the task repeats.
+              {coverageRef.open
+                ? 'The dates the open checklist covers. Change them here and that checklist changes too; each one after it moves forward on its own, by however often the task repeats.'
+                : 'The dates the next checklist covers. Each one after it moves forward on its own, by however often the task repeats.'}
             </p>
             <div className="repeating-task-coverage-row">
               <label>
@@ -6829,14 +6957,20 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
                 <input
                   className="compact-input"
                   type="date"
-                  value={template.periodCoverageStart ?? ''}
-                  onChange={(event) =>
+                  value={coverageShown.start ?? ''}
+                  onChange={(event) => {
+                    // Read now: the updater may run after React has put the
+                    // field back to the value it controls.
+                    const typed = event.target.value
                     props.onUpdateTemplate(template.id, (current) => ({
                       ...current,
-                      periodCoverageStart: event.target.value || null,
-                      periodCoverageAnchorDue: coverageAnchorForTemplate(current, localDateOnly()),
+                      periodCoverageStart: typed || null,
+                      // The other date is written as it is SHOWN, because both
+                      // now count from the same checklist.
+                      periodCoverageEnd: coverageShown.end || null,
+                      periodCoverageAnchorDue: coverageRef.date,
                     }))
-                  }
+                  }}
                 />
               </label>
               <label>
@@ -6844,25 +6978,28 @@ function TemplateEditor(props: RepeatingTaskRowProps) {
                 <input
                   className="compact-input"
                   type="date"
-                  value={template.periodCoverageEnd ?? ''}
-                  onChange={(event) =>
+                  value={coverageShown.end ?? ''}
+                  onChange={(event) => {
+                    const typed = event.target.value
                     props.onUpdateTemplate(template.id, (current) => ({
                       ...current,
-                      periodCoverageEnd: event.target.value || null,
-                      periodCoverageAnchorDue: coverageAnchorForTemplate(current, localDateOnly()),
+                      periodCoverageStart: coverageShown.start || null,
+                      periodCoverageEnd: typed || null,
+                      periodCoverageAnchorDue: coverageRef.date,
                     }))
-                  }
+                  }}
                 />
               </label>
             </div>
             {template.periodCoverageStart && template.periodCoverageEnd ? (
               <p className="repeating-task-coverage-preview">
-                Next one reads{' '}
+                {coverageRef.open && coverageRef.date
+                  ? `The checklist first due ${shortDate.format(new Date(`${coverageRef.date}T12:00:00`))} reads`
+                  : 'Next one reads'}{' '}
                 <strong>
-                  {periodLabelForInstance(
-                    template,
-                    coverageAnchorForTemplate(template, localDateOnly()) ?? template.nextDueDate,
-                  ) ?? '—'}
+                  {periodLabelFromDates(coverageShown.start, coverageShown.end) ??
+                    periodLabelForInstance(template, coverageRef.date ?? template.nextDueDate) ??
+                    '—'}
                 </strong>
               </p>
             ) : (

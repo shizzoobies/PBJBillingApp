@@ -7583,6 +7583,18 @@ h2 {
   min-width: 160px;
 }
 
+/* Covered dates on one checklist (featreq-6678d532), under its other fields. */
+.checklist-meta-covers {
+  display: grid;
+  gap: 6px;
+}
+
+.checklist-meta-covers-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 /* Recurring checklists on the client page: add + inline edit */
 .recurring-add-row {
   display: flex;

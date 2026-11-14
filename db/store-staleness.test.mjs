@@ -1943,14 +1943,14 @@ function fakePostgres({
     // answered nothing would make every push stamp look like a new row's.
     // The split link (featreq-fbab3370) rides in the same snapshot.
     if (
-      /^select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id, skip_notice from checklists$/i.test(
+      /^select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id, skip_notice, period_label, period_label_manual from checklists$/i.test(
         trimmed,
       )
     ) {
       return { rows: priorChecklistRows }
     }
     // read()'s main checklists select: answered only when a test hands rows in.
-    if (/\bperiod_label, skip_notice\s+from checklists\s+order by due_date asc, id asc$/i.test(trimmed)) {
+    if (/\bperiod_label, period_label_manual,\s+skip_notice\s+from checklists\s+order by due_date asc, id asc$/i.test(trimmed)) {
       return { rows: readChecklistRows }
     }
     // `_refuseBillingMasterWrite`'s single-row lookup, and `createClient`'s
@@ -12861,7 +12861,7 @@ describe('quiet skip (postgres branch)', () => {
     // The snapshot has to be taken BEFORE the wipe, or there is nothing left to
     // preserve from.
     const snapshotAt = fake.indexOf(
-      /^select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id, skip_notice from checklists$/i,
+      /^select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id, skip_notice, period_label, period_label_manual from checklists$/i,
     )
     expect(snapshotAt).toBeGreaterThan(-1)
     expect(snapshotAt).toBeLessThan(fake.indexOf(/^delete from checklists$/i))
@@ -23431,7 +23431,8 @@ describe('restampPeriodLabelsForTemplate (file backend)', () => {
           }),
           // Before the anchor's month — a cycle she was not describing.
           restampChecklist({ id: 'chk-june', dueDate: '2026-06-30', periodLabel: 'June words' }),
-          // A later occurrence: one step on from the anchor.
+          // A later occurrence: two months on from the anchor (October is
+          // skipped by this recipe and is still a month - featreq-6678d532).
           restampChecklist({ id: 'chk-nov', dueDate: '2026-11-30', periodLabel: 'wrong' }),
           // Never stamped at all (the switch went on after it spawned).
           restampChecklist({ id: 'chk-blank', periodLabel: null }),
@@ -23446,7 +23447,7 @@ describe('restampPeriodLabelsForTemplate (file backend)', () => {
     const label = (id) => persisted.checklists.find((c) => c.id === id)?.periodLabel
     expect(label('chk-open')).toBe('August 1 – August 31, 2026')
     expect(label('chk-blank')).toBe('August 1 – August 31, 2026')
-    expect(label('chk-nov')).toBe('September 1 – September 30, 2026')
+    expect(label('chk-nov')).toBe('October 1 – October 31, 2026')
     expect(label('chk-done')).toBe('October 31 – November 30, 2026')
     expect(label('chk-june')).toBe('June words')
   })
@@ -23549,7 +23550,7 @@ describe('restampPeriodLabelsForTemplate (postgres branch)', () => {
     expect(await pgStore.restampPeriodLabelsForTemplate('tmpl-recon')).toBe(2)
     expect(fake.updates().map((s) => s.params)).toEqual([
       ['chk-open', 'August 1 – August 31, 2026'],
-      ['chk-nov', 'September 1 – September 30, 2026'],
+      ['chk-nov', 'October 1 – October 31, 2026'],
     ])
     expect(fake.updates()[0].text).toMatch(/update checklists set period_label = \$2/)
     expect(fake.updates()[0].text).toMatch(/where id = \$1/)
@@ -23561,7 +23562,68 @@ describe('restampPeriodLabelsForTemplate (postgres branch)', () => {
     const selects = fake.statements.filter((s) => /select/i.test(s.text))
     expect(selects[0].text).toMatch(/to_char\(period_coverage_anchor_due, 'YYYY-MM-DD'\)/)
     expect(selects[1].text).toMatch(/to_char\(due_date, 'YYYY-MM-DD'\)/)
-    expect(selects[1].text).toMatch(/deleted_at is null/)
+    expect(selects[1].text).toMatch(/to_char\(cycle_due_date, 'YYYY-MM-DD'\)/)
+    // Binned rows are read (a binned first step still dates its case) and
+    // flagged, never re-stamped.
+    expect(selects[1].text).toMatch(/deleted_at is not null as deleted/)
+  })
+
+  it('never re-stamps a binned row, and never overwrites a label set by hand', async () => {
+    const fake = fakeRestampPostgres({
+      templateRow,
+      checklistRows: [
+        { id: 'chk-binned', due_date: '2026-09-10', period_label: 'wrong', deleted: true },
+        {
+          id: 'chk-hand',
+          due_date: '2026-09-10',
+          period_label: 'September 1 – September 15, 2026',
+          period_label_manual: true,
+        },
+        { id: 'chk-open', due_date: '2026-09-10', period_label: 'wrong' },
+      ],
+      itemRows: [
+        { checklist_id: 'chk-hand', done: false, sub_items: null },
+        { checklist_id: 'chk-open', done: false, sub_items: null },
+      ],
+    })
+    expect(await postgresStore(fake).restampPeriodLabelsForTemplate('tmpl-recon')).toBe(1)
+    expect(fake.updates().map((s) => s.params)).toEqual([['chk-open', 'August 1 – August 31, 2026']])
+    // The guard is in the statement too, for a hand edit that lands mid-run.
+    expect(fake.updates()[0].text).toMatch(/and period_label_manual = false/)
+    // Items are only read for the live rows.
+    const items = fake.statements.find((s) => /from checklist_items/i.test(s.text))
+    expect(items.params[0]).toEqual(['chk-hand', 'chk-open'])
+  })
+
+  it('counts a pushed row from the date it was first due, and a later step from its case', async () => {
+    const fake = fakeRestampPostgres({
+      templateRow,
+      checklistRows: [
+        // Pushed from September into October: still September's work.
+        {
+          id: 'chk-pushed',
+          case_id: 'case-p',
+          client_id: 'c1',
+          stage_index: 0,
+          due_date: '2026-10-06',
+          cycle_due_date: '2026-09-10',
+          period_label: 'September 1 – September 30, 2026',
+        },
+        // Step 1 done in September, step 2 open and due in October.
+        { id: 'chk-s1', case_id: 'case-s', client_id: 'c1', stage_index: 0, due_date: '2026-09-12', period_label: 'August 1 – August 31, 2026' },
+        { id: 'chk-s2', case_id: 'case-s', client_id: 'c1', stage_index: 1, due_date: '2026-10-03', period_label: 'September 1 – September 30, 2026' },
+      ],
+      itemRows: [
+        { checklist_id: 'chk-pushed', done: false, sub_items: null },
+        { checklist_id: 'chk-s1', done: true, sub_items: null },
+        { checklist_id: 'chk-s2', done: false, sub_items: null },
+      ],
+    })
+    expect(await postgresStore(fake).restampPeriodLabelsForTemplate('tmpl-recon')).toBe(2)
+    expect(fake.updates().map((s) => s.params)).toEqual([
+      ['chk-pushed', 'August 1 – August 31, 2026'],
+      ['chk-s2', 'August 1 – August 31, 2026'],
+    ])
   })
 
   it('a step with sub-steps is judged by them, not by its own flag', async () => {
@@ -23587,6 +23649,536 @@ describe('restampPeriodLabelsForTemplate (postgres branch)', () => {
     const fake = fakeRestampPostgres({ templateRow: null })
     expect(await postgresStore(fake).restampPeriodLabelsForTemplate('tmpl-recon')).toBe(0)
     expect(fake.statements).toHaveLength(1)
+  })
+})
+
+/**
+ * COVERED DATES THAT STAY RIGHT - featreq-6678d532. Brittany: "These do not
+ * always get pushed correctly and there is not a way for us to update once it
+ * becomes active."
+ *
+ * Three rules live in the store: a label is counted from the CASE (the date its
+ * first step was first due), never from a row's working due date; dates set by
+ * hand on a checklist are marked and nothing automatic rewrites them; and the
+ * mark is endpoint-owned, so a bulk save cannot mint or erase it.
+ */
+describe('covered dates are counted from the case (file backend)', () => {
+  // `active: false` keeps the materializer out of these: only the rows written are there.
+  const recipe = (over = {}) => restampTemplate({ active: false, ...over })
+
+  it('a checklist pushed into next month keeps the period it was for', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [recipe()],
+        checklists: [
+          restampChecklist({
+            id: 'chk-pushed',
+            dueDate: '2026-10-06',
+            periodLabel: 'August 1 – August 31, 2026',
+          }),
+        ],
+      }),
+    )
+    // The push endpoint is the only writer of the cycle date; stamp it the way it does.
+    const stored = JSON.parse(await readFile(localDataPath, 'utf8'))
+    stored.checklists[0].cycleDueDate = '2026-09-10'
+    await writeFile(localDataPath, JSON.stringify(stored, null, 2))
+
+    expect(await store.restampPeriodLabelsForTemplate('tmpl-recon')).toBe(0)
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(persisted.checklists[0].periodLabel).toBe('August 1 – August 31, 2026')
+  })
+
+  it('a later step due in another month reads the period of its case', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [recipe()],
+        checklists: [
+          restampChecklist({
+            id: 'chk-s1',
+            caseId: 'case-s',
+            stageIndex: 0,
+            stageCount: 2,
+            dueDate: '2026-09-12',
+            periodLabel: 'August 1 – August 31, 2026',
+            items: [{ id: 'i1', label: 'Reconcile', done: true }],
+          }),
+          restampChecklist({
+            id: 'chk-s2',
+            caseId: 'case-s',
+            stageIndex: 1,
+            stageCount: 2,
+            dueDate: '2026-10-03',
+            periodLabel: 'September 1 – September 30, 2026',
+            items: [{ id: 'i2', label: 'Review', done: false }],
+          }),
+        ],
+      }),
+    )
+    expect(await store.restampPeriodLabelsForTemplate('tmpl-recon')).toBe(1)
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(persisted.checklists.find((c) => c.id === 'chk-s2').periodLabel).toBe(
+      'August 1 – August 31, 2026',
+    )
+  })
+
+  it('a first step in the bin still dates its case', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [recipe()],
+        checklists: [
+          restampChecklist({
+            id: 'chk-s2',
+            caseId: 'case-s',
+            stageIndex: 1,
+            stageCount: 2,
+            dueDate: '2026-10-03',
+            periodLabel: 'wrong',
+          }),
+        ],
+        recycledChecklists: [
+          restampChecklist({
+            id: 'chk-s1',
+            caseId: 'case-s',
+            stageIndex: 0,
+            stageCount: 2,
+            dueDate: '2026-09-12',
+            periodLabel: 'binned words',
+            deletedAt: '2026-09-20T00:00:00.000Z',
+          }),
+        ],
+      }),
+    )
+    expect(await store.restampPeriodLabelsForTemplate('tmpl-recon')).toBe(1)
+    const persisted = JSON.parse(await readFile(localDataPath, 'utf8'))
+    expect(persisted.checklists[0].periodLabel).toBe('August 1 – August 31, 2026')
+    // The binned row itself is not re-stamped.
+    expect(persisted.recycledChecklists[0].periodLabel).toBe('binned words')
+  })
+
+  it('the next step of a case is born with the case period, not its own month', async () => {
+    const template = recipe({
+      stages: [
+        { id: 'st-1', name: 'Reconcile', assigneeId: 'emp-1', offsetDays: 0, viewerIds: [], editorIds: [], items: [{ id: 't1', label: 'Reconcile' }] },
+        { id: 'st-2', name: 'Review', assigneeId: 'emp-1', offsetDays: 0, dueDate: '2026-10-03', viewerIds: [], editorIds: [], items: [{ id: 't2', label: 'Review' }] },
+      ],
+    })
+    const first = restampChecklist({
+      id: 'chk-s1',
+      caseId: 'case-s',
+      stageId: 'st-1',
+      stageIndex: 0,
+      stageCount: 2,
+      dueDate: '2026-09-12',
+      periodLabel: 'August 1 – August 31, 2026',
+      items: [{ id: 'i1', label: 'Reconcile', done: true }],
+    })
+    const advance = await store.maybeSpawnNextStage(
+      { checklists: [first], checklistTemplates: [template] },
+      first,
+      { fileMode: true },
+    )
+    // Due in October; still August's books.
+    expect(advance.spawned.dueDate.slice(0, 7)).toBe('2026-10')
+    expect(advance.spawned.periodLabel).toBe('August 1 – August 31, 2026')
+    expect(advance.spawned.periodLabelManual).toBeUndefined()
+  })
+
+  it('the next step of a case carries dates set by hand, still marked', async () => {
+    const template = recipe({
+      stages: [
+        { id: 'st-1', name: 'Reconcile', assigneeId: 'emp-1', offsetDays: 0, viewerIds: [], editorIds: [], items: [{ id: 't1', label: 'Reconcile' }] },
+        { id: 'st-2', name: 'Review', assigneeId: 'emp-1', offsetDays: 2, viewerIds: [], editorIds: [], items: [{ id: 't2', label: 'Review' }] },
+      ],
+    })
+    const first = restampChecklist({
+      id: 'chk-s1',
+      caseId: 'case-s',
+      stageId: 'st-1',
+      stageIndex: 0,
+      stageCount: 2,
+      periodLabel: 'September 1 – September 15, 2026',
+      periodLabelManual: true,
+      items: [{ id: 'i1', label: 'Reconcile', done: true }],
+    })
+    const advance = await store.maybeSpawnNextStage(
+      { checklists: [first], checklistTemplates: [template] },
+      first,
+      { fileMode: true },
+    )
+    expect(advance.spawned).toMatchObject({
+      periodLabel: 'September 1 – September 15, 2026',
+      periodLabelManual: true,
+    })
+  })
+})
+
+describe('setCasePeriodLabel (file backend)', () => {
+  const recipe = (over = {}) => restampTemplate({ active: false, ...over })
+  const caseSteps = () => [
+    restampChecklist({
+      id: 'chk-s1',
+      caseId: 'case-s',
+      stageIndex: 0,
+      stageCount: 2,
+      periodLabel: 'August 1 – August 31, 2026',
+      items: [{ id: 'i1', label: 'Reconcile', done: true }],
+    }),
+    restampChecklist({
+      id: 'chk-s2',
+      caseId: 'case-s',
+      stageIndex: 1,
+      stageCount: 2,
+      dueDate: '2026-09-20',
+      periodLabel: 'August 1 – August 31, 2026',
+      items: [{ id: 'i2', label: 'Review', done: false }],
+    }),
+    // Another case of the same recipe, and another CLIENT sharing the case id.
+    restampChecklist({ id: 'chk-other', caseId: 'case-o', dueDate: '2026-11-05', periodLabel: 'October 1 – October 31, 2026' }),
+    restampChecklist({ id: 'chk-twin', clientId: 'c2', caseId: 'case-s', periodLabel: 'twin words' }),
+  ]
+  const seed = () =>
+    store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme' }, { id: 'c2', name: 'Bolt' }],
+        checklistTemplates: [recipe()],
+        checklists: caseSteps(),
+      }),
+    )
+  const stored = async () => JSON.parse(await readFile(localDataPath, 'utf8')).checklists
+  const byId = (rows, id) => rows.find((row) => row.id === id)
+
+  it('sets the dates on every step of the case, marks them, and touches nothing else', async () => {
+    await seed()
+    const result = await store.setCasePeriodLabel('chk-s2', { start: '2026-08-16', end: '2026-09-15' })
+    expect(result.checklist).toMatchObject({
+      id: 'chk-s2',
+      periodLabel: 'August 16 – September 15, 2026',
+      periodLabelManual: true,
+    })
+    expect(result.caseChecklists.map((row) => row.id).sort()).toEqual(['chk-s1', 'chk-s2'])
+
+    const rows = await stored()
+    for (const id of ['chk-s1', 'chk-s2']) {
+      expect(byId(rows, id)).toMatchObject({
+        periodLabel: 'August 16 – September 15, 2026',
+        periodLabelManual: true,
+      })
+    }
+    expect(byId(rows, 'chk-other').periodLabel).toBe('October 1 – October 31, 2026')
+    expect(byId(rows, 'chk-other').periodLabelManual).toBeUndefined()
+    expect(byId(rows, 'chk-twin').periodLabel).toBe('twin words')
+    expect(byId(rows, 'chk-twin').periodLabelManual).toBeUndefined()
+  })
+
+  it('the every-save re-stamp leaves dates set by hand alone', async () => {
+    await seed()
+    await store.setCasePeriodLabel('chk-s2', { start: '2026-08-16', end: '2026-09-15' })
+    await store.restampPeriodLabelsForTemplate('tmpl-recon')
+    expect(byId(await stored(), 'chk-s2').periodLabel).toBe('August 16 – September 15, 2026')
+  })
+
+  it('a bulk save from a tab that loaded before the edit cannot undo it or erase the mark', async () => {
+    await seed()
+    await store.setCasePeriodLabel('chk-s2', { start: '2026-08-16', end: '2026-09-15' })
+    // The stale tab still holds the old label and no mark.
+    await store.write(
+      workspace({
+        clients: [{ id: 'c1', name: 'Acme' }, { id: 'c2', name: 'Bolt' }],
+        checklistTemplates: [recipe()],
+        checklists: caseSteps(),
+      }),
+    )
+    expect(byId(await stored(), 'chk-s2')).toMatchObject({
+      periodLabel: 'August 16 – September 15, 2026',
+      periodLabelManual: true,
+    })
+  })
+
+  it('a bulk save cannot mint the mark', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [recipe()],
+        checklists: [restampChecklist({ id: 'chk-new', periodLabel: 'made up', periodLabelManual: true })],
+      }),
+    )
+    expect(byId(await stored(), 'chk-new').periodLabelManual).toBeUndefined()
+    // ...so the re-stamp still owns that label.
+    await store.restampPeriodLabelsForTemplate('tmpl-recon')
+    expect(byId(await stored(), 'chk-new').periodLabel).toBe('August 1 – August 31, 2026')
+  })
+
+  it('handing the dates back to the recipe clears the mark and re-reads the recipe', async () => {
+    await seed()
+    await store.setCasePeriodLabel('chk-s2', { start: '2026-08-16', end: '2026-09-15' })
+    const result = await store.setCasePeriodLabel('chk-s2', null)
+    expect(result.checklist.periodLabel).toBe('August 1 – August 31, 2026')
+    expect(result.checklist.periodLabelManual).toBeUndefined()
+    const rows = await stored()
+    for (const id of ['chk-s1', 'chk-s2']) {
+      expect(byId(rows, id).periodLabel).toBe('August 1 – August 31, 2026')
+      expect(byId(rows, id).periodLabelManual).toBeUndefined()
+    }
+  })
+
+  it('handing back on a case that began before the recipe anchor gives the recipe window, and it stays', async () => {
+    // The recipe's dates were set for October's checklist; this case began in
+    // September. It has no worked-out dates of its own, so handing back gives
+    // the window the recipe was given - never the hand-set text it is giving
+    // up - and the re-stamp, which leaves such a case alone, does not move it.
+    await store.write(
+      workspace({
+        checklistTemplates: [recipe({ periodCoverageAnchorDue: '2026-10-01' })],
+        checklists: [restampChecklist({ id: 'chk-early', caseId: 'case-e', periodLabel: 'July 1 – July 31, 2026' })],
+      }),
+    )
+    await store.setCasePeriodLabel('chk-early', { start: '2026-07-04', end: '2026-07-17' })
+    const result = await store.setCasePeriodLabel('chk-early', null)
+    expect(result.checklist.periodLabel).toBe('August 1 – August 31, 2026')
+    expect(result.checklist.periodLabelManual).toBeUndefined()
+    expect(await store.restampPeriodLabelsForTemplate('tmpl-recon')).toBe(0)
+  })
+
+  it('the next step of a case that began before the recipe anchor reads what the case says', async () => {
+    const template = recipe({
+      periodCoverageAnchorDue: '2026-10-01',
+      stages: [
+        { id: 'st-1', name: 'Reconcile', assigneeId: 'emp-1', offsetDays: 0, viewerIds: [], editorIds: [], items: [{ id: 't1', label: 'Reconcile' }] },
+        { id: 'st-2', name: 'Review', assigneeId: 'emp-1', offsetDays: 0, viewerIds: [], editorIds: [], items: [{ id: 't2', label: 'Review' }] },
+      ],
+    })
+    const first = restampChecklist({
+      id: 'chk-e1',
+      caseId: 'case-e',
+      stageId: 'st-1',
+      stageIndex: 0,
+      stageCount: 2,
+      periodLabel: 'July 1 – July 31, 2026',
+      items: [{ id: 'i1', label: 'Reconcile', done: true }],
+    })
+    const advance = await store.maybeSpawnNextStage(
+      { checklists: [first], checklistTemplates: [template] },
+      first,
+      { fileMode: true },
+    )
+    expect(advance.spawned.periodLabel).toBe('July 1 – July 31, 2026')
+    expect(advance.spawned.periodLabelManual).toBeUndefined()
+  })
+
+  it('a step the browser added to a hand-set case reads the hand-set dates', async () => {
+    await seed()
+    await store.setCasePeriodLabel('chk-s1', { start: '2026-08-16', end: '2026-09-15' })
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    data.checklists.push(
+      restampChecklist({ id: 'chk-s3', caseId: 'case-s', stageIndex: 2, dueDate: '2026-10-02', periodLabel: null }),
+    )
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    await store.restampPeriodLabelsForTemplate('tmpl-recon')
+    expect(byId(await stored(), 'chk-s3').periodLabel).toBe('August 16 – September 15, 2026')
+  })
+
+  it('reads an EMPTY case id as no case: only that checklist changes', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [recipe()],
+        checklists: [
+          restampChecklist({ id: 'chk-a', caseId: '', periodLabel: 'August 1 – August 31, 2026' }),
+          restampChecklist({ id: 'chk-b', caseId: '', dueDate: '2026-11-05', periodLabel: 'October 1 – October 31, 2026' }),
+        ],
+      }),
+    )
+    // The bulk save fills an absent case id; put the empty ones back the way old rows hold them.
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    for (const row of data.checklists) row.caseId = ''
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    await store.setCasePeriodLabel('chk-a', { start: '2026-08-16', end: '2026-09-15' })
+    const rows = await stored()
+    expect(byId(rows, 'chk-a').periodLabelManual).toBe(true)
+    expect(byId(rows, 'chk-b').periodLabel).toBe('October 1 – October 31, 2026')
+    expect(byId(rows, 'chk-b').periodLabelManual).toBeUndefined()
+    // And the re-stamp reads them as two cases too: chk-b keeps its own period.
+    await store.restampPeriodLabelsForTemplate('tmpl-recon')
+    expect(byId(await stored(), 'chk-b').periodLabel).toBe('October 1 – October 31, 2026')
+  })
+
+  it('a hand edit that lands while a re-stamp is running is not undone', async () => {
+    await seed()
+    // Both go through the file queue, so whichever order they run in, the hand-set dates stand.
+    const [, edited] = await Promise.all([
+      store.restampPeriodLabelsForTemplate('tmpl-recon'),
+      store.setCasePeriodLabel('chk-s2', { start: '2026-08-16', end: '2026-09-15' }),
+      store.restampPeriodLabelsForTemplate('tmpl-recon'),
+    ])
+    expect(edited.checklist.periodLabelManual).toBe(true)
+    expect(byId(await stored(), 'chk-s2')).toMatchObject({
+      periodLabel: 'August 16 – September 15, 2026',
+      periodLabelManual: true,
+    })
+  })
+
+  it('refuses dates that are not a window, a missing checklist and a binned one', async () => {
+    await seed()
+    expect(await store.setCasePeriodLabel('chk-s2', { start: '2026-09-15', end: '2026-08-16' })).toBeNull()
+    expect(await store.setCasePeriodLabel('chk-s2', { start: '', end: '2026-08-16' })).toBeNull()
+    expect(await store.setCasePeriodLabel('chk-nope', { start: '2026-08-16', end: '2026-09-15' })).toBeNull()
+    expect(await store.setCasePeriodLabel('', null)).toBeNull()
+    expect(byId(await stored(), 'chk-s2').periodLabel).toBe('August 1 – August 31, 2026')
+  })
+
+  it('a split push keeps the mark on the copy that carries the open work', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [recipe()],
+        checklists: [
+          restampChecklist({
+            id: 'chk-mix',
+            items: [
+              { id: 'i1', label: 'Reconcile', done: true },
+              { id: 'i2', label: 'Review', done: false },
+            ],
+          }),
+        ],
+      }),
+    )
+    await store.setCasePeriodLabel('chk-mix', { start: '2026-08-16', end: '2026-09-15' })
+    const pushed = await store.pushChecklistInstance('chk-mix', 'emp-1', '2026-10-08')
+    expect(pushed.checklist).toMatchObject({
+      periodLabel: 'August 16 – September 15, 2026',
+      periodLabelManual: true,
+      cycleDueDate: '2026-09-10',
+    })
+  })
+})
+
+describe('setCasePeriodLabel (postgres branch)', () => {
+  function fakeCasePostgres({ target = null, steps = [], templateRow = null } = {}) {
+    const statements = []
+    const query = async (text, params) => {
+      statements.push({ text, params })
+      if (/from checklist_templates/i.test(text)) return { rows: templateRow ? [templateRow] : [], rowCount: templateRow ? 1 : 0 }
+      if (/select id, case_id, client_id, template_id from checklists/i.test(text)) {
+        return { rows: target ? [target] : [], rowCount: target ? 1 : 0 }
+      }
+      if (/from checklists/i.test(text)) return { rows: steps, rowCount: steps.length }
+      return { rows: [], rowCount: 0 }
+    }
+    const pool = { query, async connect() { return { query, release() {} } } }
+    return { pool, statements, texts: () => statements.map((s) => s.text.replace(/\s+/g, ' ').trim()) }
+  }
+  const target = { id: 'chk-s2', case_id: 'case-s', client_id: 'c1', template_id: 'tmpl-recon' }
+  const steps = [
+    { id: 'chk-s1', case_id: 'case-s', client_id: 'c1', stage_index: 0, due_date: '2026-09-12', cycle_due_date: null },
+    { id: 'chk-s2', case_id: 'case-s', client_id: 'c1', stage_index: 1, due_date: '2026-10-03', cycle_due_date: null },
+  ]
+  const pgWith = (fake) => {
+    const pgStore = postgresStore(fake)
+    pgStore.read = async () => ({
+      checklists: [
+        { id: 'chk-s1', caseId: 'case-s', clientId: 'c1' },
+        { id: 'chk-s2', caseId: 'case-s', clientId: 'c1' },
+        { id: 'chk-twin', caseId: 'case-s', clientId: 'c2' },
+      ],
+    })
+    return pgStore
+  }
+
+  it('writes the label and the mark to every step of the case, in one transaction', async () => {
+    const fake = fakeCasePostgres({ target, steps })
+    const result = await pgWith(fake).setCasePeriodLabel('chk-s2', { start: '2026-08-16', end: '2026-09-15' })
+    const texts = fake.texts()
+    expect(texts[0]).toBe('begin')
+    expect(texts[1]).toMatch(/where id = \$1 and deleted_at is null for update$/)
+    // The case is its id AND its client: case ids are shared across clients.
+    expect(texts[2]).toMatch(
+      /where coalesce\(nullif\(case_id, ''\), id\) = \$1 and client_id is not distinct from \$2 for update$/,
+    )
+    expect(fake.statements[2].params).toEqual(['case-s', 'c1'])
+    const update = fake.statements.find((s) => /update checklists/i.test(s.text))
+    expect(update.text).toMatch(/set period_label = \$2, period_label_manual = \$3, updated_at = now\(\)/)
+    expect(update.params).toEqual([['chk-s1', 'chk-s2'], 'August 16 – September 15, 2026', true])
+    expect(texts.at(-1)).toBe('commit')
+    // No recipe read is needed to set dates by hand.
+    expect(texts.some((text) => /from checklist_templates/i.test(text))).toBe(false)
+    expect(result.caseChecklists.map((row) => row.id)).toEqual(['chk-s1', 'chk-s2'])
+  })
+
+  it('handing back reads the recipe and counts from the first step of the case', async () => {
+    const fake = fakeCasePostgres({
+      target,
+      steps,
+      templateRow: {
+        frequency: 'specific-months',
+        period_label_enabled: true,
+        scheduled_months: [2, 3, 5, 6, 8, 9, 11, 12],
+        period_coverage_start: '2026-08-01',
+        period_coverage_end: '2026-08-31',
+        period_coverage_anchor_due: '2026-09-01',
+      },
+    })
+    await pgWith(fake).setCasePeriodLabel('chk-s2', null)
+    const update = fake.statements.find((s) => /update checklists/i.test(s.text))
+    // Step 2 is due in October; the case began in September, so it is August's.
+    expect(update.params).toEqual([['chk-s1', 'chk-s2'], 'August 1 – August 31, 2026', false])
+  })
+
+  it('reads an EMPTY case id as no case: the checklist is its own case', async () => {
+    // `sameCase` and every other query read '' as "no case id". Passing '' on
+    // would relabel every such row of the client.
+    const fake = fakeCasePostgres({
+      target: { ...target, case_id: '' },
+      steps: [{ id: 'chk-s2', case_id: '', client_id: 'c1', stage_index: 0, due_date: '2026-10-03', cycle_due_date: null }],
+    })
+    await pgWith(fake).setCasePeriodLabel('chk-s2', { start: '2026-08-16', end: '2026-09-15' })
+    expect(fake.statements[2].params).toEqual(['chk-s2', 'c1'])
+    const update = fake.statements.find((s) => /update checklists/i.test(s.text))
+    expect(update.params[0]).toEqual(['chk-s2'])
+  })
+
+  it('handing back with the recipe gone leaves no label', async () => {
+    const fake = fakeCasePostgres({ target: { ...target, template_id: null }, steps })
+    await pgWith(fake).setCasePeriodLabel('chk-s2', null)
+    const update = fake.statements.find((s) => /update checklists/i.test(s.text))
+    expect(update.params).toEqual([['chk-s1', 'chk-s2'], null, false])
+  })
+
+  it('rolls back and answers null when the checklist is not there', async () => {
+    const fake = fakeCasePostgres({ target: null })
+    expect(await pgWith(fake).setCasePeriodLabel('chk-s2', { start: '2026-08-16', end: '2026-09-15' })).toBeNull()
+    expect(fake.texts()).toEqual([expect.stringMatching(/^begin$/), expect.stringMatching(/for update$/), 'rollback'])
+  })
+
+  it('never opens a transaction for dates that are not a window', async () => {
+    const fake = fakeCasePostgres({ target, steps })
+    expect(await pgWith(fake).setCasePeriodLabel('chk-s2', { start: '2026-09-15', end: '2026-08-16' })).toBeNull()
+    expect(fake.statements).toEqual([])
+  })
+})
+
+describe('the hand-set mark is endpoint-owned in a bulk save (postgres row)', () => {
+  const columns = BULK_INSERT_SHAPES.checklists.columns
+  const cell = (row, name) => row[columns.indexOf(name)]
+  const checklist = restampChecklist({ id: 'chk-1', periodLabel: 'what the tab holds', periodLabelManual: true })
+
+  it('has a column for it', () => {
+    expect(columns).toContain('period_label_manual')
+    expect(checklistBulkRow(checklist, new Map(), new Map())).toHaveLength(columns.length)
+  })
+
+  it('writes the STORED label and mark when the stored row is hand-set', () => {
+    const stored = new Map([['chk-1', { periodLabel: 'September 1 – September 15, 2026', periodLabelManual: true }]])
+    const row = checklistBulkRow(checklist, stored, new Map())
+    expect(cell(row, 'period_label')).toBe('September 1 – September 15, 2026')
+    expect(cell(row, 'period_label_manual')).toBe(true)
+  })
+
+  it('writes the payload label and no mark otherwise - a payload cannot mint one', () => {
+    const notByHand = new Map([['chk-1', { periodLabel: 'stored words', periodLabelManual: false }]])
+    for (const stamps of [notByHand, new Map()]) {
+      const row = checklistBulkRow(checklist, stamps, new Map())
+      expect(cell(row, 'period_label')).toBe('what the tab holds')
+      expect(cell(row, 'period_label_manual')).toBe(false)
+    }
   })
 })
 
@@ -43903,7 +44495,7 @@ describe('bulk save: checklists, items and templates as multi-row inserts (postg
     )
 
     const inserts = statementsOf(fake, 'checklists')
-    expect(inserts.map((statement) => statement.params.length / 29)).toEqual(sizes)
+    expect(inserts.map((statement) => statement.params.length / 30)).toEqual(sizes)
     for (const statement of inserts) expect(statement.text).toMatch(/\) on conflict do nothing returning id$/)
     // Every item of every checklist, in payload order, in one run of statements.
     expect(insertedRows(fake.statements, 'checklist_items').map((row) => row.id)).toEqual(
@@ -44433,7 +45025,7 @@ describe('bulk save: a clash across a chunk boundary (postgres branch)', () => {
       await postgresStore(fake).write(workspace({ checklists }))
 
       const inserts = fake.matching(/^insert into checklists\b/i)
-      expect(inserts.map((statement) => statement.params.length / 29)).toEqual([500, 1])
+      expect(inserts.map((statement) => statement.params.length / 30)).toEqual([500, 1])
       expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
         '[bulk-save] skipped duplicate checklist cl-00500 (template tpl-1, due 2026-02-28, stage 0) — an identical instance is already being written',
       ])
@@ -59311,7 +59903,7 @@ describe('skip a step (postgres branch)', () => {
     const [templateSelect] = fake.matching(/\bnext_due_date\b[\s\S]*from checklist_templates\b/i)
     expect(templateSelect.text).toMatch(/skip_allowed, skip_mode,/i)
     // read() re-reads after its own write-back, so the select can appear more than once.
-    expect(fake.matching(/period_label, skip_notice\s+from checklists\s+order by due_date asc/i).length).toBeGreaterThan(0)
+    expect(fake.matching(/period_label, period_label_manual,\s+skip_notice\s+from checklists\s+order by due_date asc/i).length).toBeGreaterThan(0)
     expect(data.checklistTemplates.find((entry) => entry.id === 't-step').skipMode).toBe('step')
     expect(data.checklistTemplates.find((entry) => entry.id === 't-old').skipMode).toBe('whole')
     expect(data.checklists.find((entry) => entry.id === 'cl-2').skipNotice).toEqual({
@@ -59362,7 +59954,7 @@ describe('skip a step (postgres branch)', () => {
       }),
     )
     const snapshotAt = fake.indexOf(
-      /^select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id, skip_notice from checklists$/i,
+      /^select id, cycle_due_date, pushed_at, pushed_by, pushed_from_checklist_id, pushed_to_checklist_id, skip_notice, period_label, period_label_manual from checklists$/i,
     )
     expect(snapshotAt).toBeGreaterThan(-1)
     expect(snapshotAt).toBeLessThan(fake.indexOf(/^delete from checklists$/i))
@@ -59406,8 +59998,8 @@ describe('skip a step (postgres branch)', () => {
       const result = await pg.maybeSpawnNextStage(data, skippedStage, { afterSkip: true, skipNotice })
       expect(result.spawned).toMatchObject({ stageIndex: 1, assigneeId: 'emp-2', skipNotice })
       const [insert] = fake.matching(/^insert into checklists \(/i)
-      expect(insert.text).toMatch(/period_label, skip_notice, updated_at\)/i)
-      expect(insert.text).toMatch(/\$17, \$18::jsonb, now\(\)\)/)
+      expect(insert.text).toMatch(/period_label, skip_notice, period_label_manual, updated_at\)/i)
+      expect(insert.text).toMatch(/\$17, \$18::jsonb, \$19, now\(\)\)/)
       expect(JSON.parse(insert.params[17])).toEqual(skipNotice)
 
       // Without afterSkip the same skipped stage is not "finished": no spawn.
