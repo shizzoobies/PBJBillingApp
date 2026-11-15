@@ -150,7 +150,10 @@ import {
   shortDate,
   sortChecklists,
   stageNameFor,
+  ensureTemplateStages,
 } from '../lib/utils'
+import { isChecklistComplete } from '../lib/completedTasks'
+import { evaluateRecurringTemplate } from '../../lib/recurring-gate.js'
 import { startFirstRecipeStep } from '../lib/recipeFirstStep'
 
 /* -------------------------------------------------------------------------- */
@@ -672,7 +675,9 @@ export function ClientDetailPage() {
           </CollapsibleSection>
 
           <CollapsibleSection id="client-section-recurring" kicker="Schedule" title="Recurring checklists">
-            <RecurringChecklistsBody client={client} data={data} />
+            {/* Keyed by client: its Start now result line must not follow
+                the person to the next client's page. */}
+            <RecurringChecklistsBody key={client.id} client={client} data={data} />
           </CollapsibleSection>
 
           {/* The other half of what used to be "Recent work for this client" —
@@ -3460,11 +3465,12 @@ function ApplyExistingTemplateModal({
   )
 }
 
-function RecurringChecklistsBody({ client, data }: { client: Client; data: AppData }) {
+export function RecurringChecklistsBody({ client, data }: { client: Client; data: AppData }) {
   const {
     role,
     activeEmployeeId,
     ownerMode,
+    previewMode,
     addChecklistTemplate,
     createChecklist,
     generateChecklistFromTemplate,
@@ -3476,6 +3482,59 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
   // Why "Start the first one now" did not start anything.
   const startFirstNote = useStartFirstNote(data.checklists)
   const [picking, setPicking] = useState(false)
+
+  // START NOW (featreq-1e29020b). Her words: "Need a way for Lisa and Allison to
+  // start now on checklist they are on that do not populate". Nothing was
+  // failing to populate: a repeating task's checklist only appears a few days
+  // before it is due, so until then there is nothing to open. This starts the
+  // next one early - for anyone who can see the client, since that is the rule
+  // the server applies. Offered only while the repeating task has NO open
+  // checklist: with one open there is already something to work on.
+  const [startAsking, setStartAsking] = useState<string | null>(null)
+  const [startBusy, setStartBusy] = useState(false)
+  const [startResult, setStartResult] = useState<{
+    text: string
+    checklistId?: string
+    failed?: boolean
+  } | null>(null)
+  const openTemplateIds = useMemo(
+    () =>
+      new Set(
+        data.checklists
+          .filter(
+            (checklist) =>
+              checklist.templateId &&
+              checklist.clientId === client.id &&
+              !checklist.deletedAt &&
+              !checklist.skippedAt &&
+              !checklist.pushedToChecklistId &&
+              !isChecklistComplete(checklist),
+          )
+          .map((checklist) => checklist.templateId as string),
+      ),
+    [data.checklists, client.id],
+  )
+  const startNext = async (template: ChecklistTemplate) => {
+    setStartBusy(true)
+    setStartResult(null)
+    try {
+      // When somebody else started it a moment earlier the server hands back
+      // theirs; "is started" is true either way.
+      const created = await generateChecklistFromTemplate(template.id, { next: true })
+      if (created) {
+        setStartResult({
+          text: `${created.title} is started, due ${shortDate.format(new Date(`${created.dueDate}T12:00:00`))}.`,
+          checklistId: created.id,
+        })
+      }
+    } catch (error) {
+      const reason = error instanceof Error && error.message ? ` ${error.message}` : ''
+      setStartResult({ text: `${template.title} could not be started.${reason}`, failed: true })
+    } finally {
+      setStartBusy(false)
+      setStartAsking(null)
+    }
+  }
 
   // Every client-bound recurring template targeting this client. Standard
   // (client-agnostic) blueprints are excluded — they never belong to a client.
@@ -3539,6 +3598,27 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
   // and they come back live the moment the client is reactivated) — but there
   // is no point authoring a new one that the materializer will skip.
   const retired = isInactiveClient(client)
+  // Start now: a repeating task the schedule itself WOULD run - on, for an
+  // active client, its first step holding tasks, months or a Next due date set,
+  // a one-year schedule not used up (`evaluateRecurringTemplate`, the same rule
+  // the schedule follows) - with nothing of it open. Starting early is only
+  // ever "what is coming, sooner". Not in preview, which is read-only.
+  const canStartNow = (template: ChecklistTemplate) =>
+    !previewMode &&
+    !retired &&
+    !openTemplateIds.has(template.id) &&
+    evaluateRecurringTemplate(ensureTemplateStages(template), {
+      clientStage: client.lifecycleStage,
+    }).reason === null
+  const firstUpcomingIds = new Set<string>()
+  {
+    const seen = new Set<string>()
+    for (const ghost of upcoming) {
+      if (!ghost.templateId || seen.has(ghost.templateId)) continue
+      seen.add(ghost.templateId)
+      firstUpcomingIds.add(ghost.id)
+    }
+  }
 
   return (
     <>
@@ -3592,6 +3672,23 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
         </p>
       ) : null}
 
+      {startResult ? (
+        <p className={startResult.failed ? 'auth-error' : 'series-scope-text'} role="status">
+          {startResult.text}{' '}
+          {startResult.checklistId ? (
+            <Link
+              className="active-checklist-link"
+              to={`/checklists?focus=${encodeURIComponent(startResult.checklistId)}`}
+            >
+              Open it
+            </Link>
+          ) : null}{' '}
+          <button type="button" className="link-action" onClick={() => setStartResult(null)}>
+            Dismiss
+          </button>
+        </p>
+      ) : null}
+
       {templates.length === 0 ? (
         <p className="muted-text">No recurring checklists assigned to this client yet.</p>
       ) : (
@@ -3617,6 +3714,17 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
                   employees={data.employees}
                   canEdit={ownerMode}
                   onUpdate={updateChecklistTemplate}
+                  startNow={
+                    canStartNow(template)
+                      ? {
+                          asking: startAsking === template.id,
+                          busy: startBusy,
+                          onAsk: () => setStartAsking(template.id),
+                          onCancel: () => setStartAsking(null),
+                          onStart: () => void startNext(template),
+                        }
+                      : undefined
+                  }
                 />
               ))}
             </ul>
@@ -3628,22 +3736,79 @@ function RecurringChecklistsBody({ client, data }: { client: Client; data: AppDa
         <div className="recurring-upcoming">
           <h3 className="mini-heading">Upcoming (next 60 days)</h3>
           <ul className="active-checklist-list">
-            {upcoming.map((ghost) => (
-              <li key={ghost.id} className="active-checklist-row">
-                <div className="active-checklist-main">
-                  <strong>{ghost.title}</strong>
-                  <span className="upcoming-badge">Upcoming</span>
-                </div>
-                <div className="active-checklist-meta">
-                  <span>Due {shortDate.format(new Date(`${ghost.dueDate}T12:00:00`))}</span>
-                  <span>{employeeName(data.employees, ghost.assigneeId)}</span>
-                </div>
-              </li>
-            ))}
+            {upcoming.map((ghost) => {
+              // Only the NEXT one of each repeating task can be started: the
+              // server starts the next on the schedule, whichever row is clicked.
+              const recipe = firstUpcomingIds.has(ghost.id)
+                ? templates.find((template) => template.id === ghost.templateId)
+                : undefined
+              const startable = recipe && canStartNow(recipe) ? recipe : undefined
+              return (
+                <li key={ghost.id} className="active-checklist-row">
+                  <div className="active-checklist-main">
+                    <strong>{ghost.title}</strong>
+                    <span className="upcoming-badge">Upcoming</span>
+                  </div>
+                  <div className="active-checklist-meta">
+                    <span>Due {shortDate.format(new Date(`${ghost.dueDate}T12:00:00`))}</span>
+                    <span>{employeeName(data.employees, ghost.assigneeId)}</span>
+                    {startable ? (
+                      <StartNowControl
+                        asking={startAsking === `upcoming:${startable.id}`}
+                        busy={startBusy}
+                        onAsk={() => setStartAsking(`upcoming:${startable.id}`)}
+                        onCancel={() => setStartAsking(null)}
+                        onStart={() => void startNext(startable)}
+                      />
+                    ) : null}
+                  </div>
+                </li>
+              )
+            })}
           </ul>
         </div>
       ) : null}
     </>
+  )
+}
+
+type StartNowProps = {
+  /** The "are you sure" step is showing. */
+  asking: boolean
+  busy: boolean
+  onAsk: () => void
+  onCancel: () => void
+  onStart: () => void
+}
+
+/**
+ * "Start now" with one confirming step: starting makes a real checklist and
+ * tells whoever it is assigned to, and a team member cannot delete it again
+ * without the owner, so a stray click should not be enough.
+ */
+function StartNowControl({ asking, busy, onAsk, onCancel, onStart }: StartNowProps) {
+  if (!asking) {
+    return (
+      <button
+        type="button"
+        className="active-checklist-link recurring-edit-btn"
+        title="Start the next checklist of this repeating task now, instead of waiting for it to appear"
+        onClick={onAsk}
+      >
+        Start now
+      </button>
+    )
+  }
+  return (
+    <span className="recurring-start-now" role="group" aria-label="Start the next checklist now">
+      Start the next one now?{' '}
+      <button type="button" className="primary-action" disabled={busy} onClick={onStart}>
+        {busy ? 'Starting…' : 'Yes, start it'}
+      </button>{' '}
+      <button type="button" className="link-action" disabled={busy} onClick={onCancel}>
+        Cancel
+      </button>
+    </span>
   )
 }
 
@@ -3652,6 +3817,7 @@ function RecurringTemplateRow({
   employees,
   canEdit,
   onUpdate,
+  startNow,
 }: {
   template: ChecklistTemplate
   employees: Employee[]
@@ -3660,6 +3826,8 @@ function RecurringTemplateRow({
     templateId: string,
     updater: (template: ChecklistTemplate) => ChecklistTemplate,
   ) => void
+  /** Present when the next checklist of this repeating task can be started early. */
+  startNow?: StartNowProps
 }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(template.title)
@@ -3779,6 +3947,7 @@ function RecurringTemplateRow({
       <div className="active-checklist-meta">
         <span>Assignee: {employeeName(employees, template.assigneeId)}</span>
         <span>{getChecklistFrequencyLabel(template.frequency)}</span>
+        {startNow ? <StartNowControl {...startNow} /> : null}
         {canEdit ? (
           <button type="button" className="active-checklist-link recurring-edit-btn" onClick={openEditor}>
             <Pencil size={12} style={{ verticalAlign: 'middle' }} /> Edit

@@ -3931,7 +3931,7 @@ function App() {
 
   const generateChecklistFromTemplate = async (
     templateId: string,
-    payload: { dueDate?: string } = {},
+    payload: { dueDate?: string; next?: boolean } = {},
   ) => {
     if (previewActiveRef.current) return null
     try {
@@ -3959,6 +3959,13 @@ function App() {
         setServerPersistenceEnabled(false)
         setDataSyncState('offline')
         return null
+      }
+      // A 409 is the server declining to start one (a schedule with nothing
+      // left, a task switched off): the caller shows the sentence. It is not a
+      // failed save, so it must not raise the "Couldn't save" banner.
+      if (error instanceof ApiError && error.status === 409) {
+        if (!dirtyRef.current) setDataSyncState((s) => (s === 'offline' ? s : 'synced'))
+        throw error
       }
       setDataSyncState('error')
       throw error

@@ -41,6 +41,7 @@ import {
   CHECKLIST_INSTANCE_UNIQUE_INDEX_V3,
   buildChecklistInstanceKeys,
   checklistInstanceKey,
+  checklistIdentityDueDate,
   checklistMonthKey,
   findChecklistInstance,
 } from '../lib/checklist-identity.js'
@@ -4979,6 +4980,45 @@ export class TimeEntrySplitError extends Error {
  * this to 409 `NOTHING_TO_PUSH`; the UI hides the Push button on a complete
  * checklist so this is reachable only from a stale render or a direct call.
  */
+/**
+ * Thrown by `generateChecklistFromTemplate(..., { next: true })` when a recipe
+ * that runs in chosen months has no occurrence left to start (a one-year
+ * schedule that is used up). The route answers it as a plain sentence.
+ */
+export class NothingScheduledError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'NothingScheduledError'
+  }
+}
+
+/**
+ * The next occurrence of a chosen-months recipe that has no checklist yet:
+ * the due date of its first step, in this month when this month is one of the
+ * recipe's and still has none, else the next of its months, into next year.
+ * A month whose checklist is in the bin counts as had (the same rule the
+ * materializer follows, so starting one early never makes a second). Null
+ * when the schedule has nothing left.
+ */
+function nextSpecificMonthsOccurrence(template, stageOne, today, monthKeys) {
+  const months = (Array.isArray(template.scheduledMonths) ? template.scheduledMonths : []).filter(
+    (month) => Number.isInteger(month) && month >= 1 && month <= 12,
+  )
+  if (months.length === 0) return null
+  const startIndex = Number(today.slice(0, 4)) * 12 + (Number(today.slice(5, 7)) - 1)
+  for (let step = 0; step < 24; step += 1) {
+    const year = Math.floor((startIndex + step) / 12)
+    const month = ((startIndex + step) % 12) + 1
+    if (!months.includes(month)) continue
+    // "Repeat every year" off: the recipe only runs in its one scheduled year.
+    if (template.repeatAnnually === false && year !== template.scheduleYear) continue
+    const due = resolveSpecificMonthsStageDueDate(template, stageOne, year, month)
+    if (monthKeys.has(checklistMonthKey(template.id, due))) continue
+    return due
+  }
+  return null
+}
+
 export class NothingToPushError extends Error {
   constructor(message) {
     super(message)
@@ -36117,9 +36157,29 @@ export class AppDataStore {
    * powers "Generate a task now" and the "Start the first one now" option.
    * `dueDate` defaults to the template's nextDueDate. Returns the created
    * checklist, or null if the template has no items in stage 1.
-   * Owner-only — caller enforces auth.
+   * Who may ask is the caller's check.
+   *
+   * `next: true` (featreq-1e29020b, "Start now" on the client page) asks for the
+   * NEXT occurrence on the recipe's own schedule, pulled forward. For a recipe
+   * with a cadence that is already what the default does (its Next due date).
+   * For one that runs in chosen months the default dates a checklist TODAY,
+   * which is not an occurrence at all - the month it belongs to would still
+   * make its own - so `next` finds the first of its months with no checklist
+   * (`nextSpecificMonthsOccurrence`) and the materializer then finds it there.
+   * Throws `NothingScheduledError` when such a recipe has nothing left.
    */
-  async generateChecklistFromTemplate(templateId, { dueDate } = {}) {
+  async generateChecklistFromTemplate(templateId, options = {}) {
+    const result = await this.generateChecklistFromTemplateResult(templateId, options)
+    return result ? result.checklist : null
+  }
+
+  /**
+   * The same, saying whether a checklist was MADE: `{ checklist, created }`, or
+   * null when the recipe is missing or has no stages. `created: false` means an
+   * existing checklist was handed back (this occurrence already has one, or one
+   * was already started ahead) - the route must not log or announce that as new.
+   */
+  async generateChecklistFromTemplateResult(templateId, { dueDate, next = false } = {}) {
     const data = await this.read()
     const rawTemplate = (data.checklistTemplates ?? []).find((t) => t.id === templateId)
     if (!rawTemplate) return null
@@ -36133,10 +36193,67 @@ export class AppDataStore {
     // yields at least one stage, so this guard is essentially defensive.)
     if (stages.length === 0) return null
     const stageOne = stages[0]
-    const baseDate = typeof dueDate === 'string' && dueDate
-      ? dueDate
-      : template.nextDueDate || firmToday()
-    const stageOneDue = resolveStageDueDate(stageOne, baseDate)
+    let stageOneDue
+    if (next === true) {
+      // START THE NEXT ONE (featreq-1e29020b). `dueDate` is not consulted.
+      const today = firmToday()
+      // One already started ahead and still open IS the next one: asked twice
+      // (two people, a retry) the answer is that checklist, never the
+      // occurrence after it - or the schedule would walk a step per click.
+      const startedAhead = (data.checklists ?? [])
+        .filter(
+          (entry) =>
+            entry &&
+            entry.templateId === template.id &&
+            (entry.stageIndex ?? 0) === 0 &&
+            !entry.deletedAt &&
+            !entry.skippedAt &&
+            !entry.pushedToChecklistId &&
+            checklistIdentityDueDate(entry) > today &&
+            !checklistIsFinished(entry.items),
+        )
+        .sort((a, b) => (checklistIdentityDueDate(a) < checklistIdentityDueDate(b) ? -1 : 1))[0]
+      if (startedAhead) return { checklist: startedAhead, created: false }
+
+      const keys = buildChecklistInstanceKeys(data.checklists, data.recycledChecklists)
+      if (template.frequency === 'specific-months') {
+        stageOneDue = nextSpecificMonthsOccurrence(template, stageOne, today, keys.monthKeys)
+      } else {
+        // A cadence: the first cycle from the recipe's Next due date that has no
+        // checklist. The Next due date itself only moves when the schedule
+        // reaches it, so a cycle started early AND finished is still "next" to
+        // the recipe - without this walk a second Start now handed back the
+        // finished one and started nothing. A cycle counts as had under the
+        // same two keys the materializer checks (its cycle date and its first
+        // step's due date), so what is started here is found there.
+        // No Next due date = no schedule (the materializer skips such a
+        // recipe): there is no "next one", so nothing is dated today instead.
+        let cycle = template.nextDueDate || ''
+        for (let step = 0; cycle && step < 60; step += 1) {
+          const due = resolveStageDueDate(stageOne, cycle)
+          const had =
+            keys.instanceKeys.has(checklistInstanceKey(template.id, cycle, 0)) ||
+            keys.instanceKeys.has(checklistInstanceKey(template.id, due, 0))
+          if (!had) {
+            stageOneDue = due
+            break
+          }
+          const advanced = advanceChecklistFrequency(cycle, template.frequency)
+          if (advanced === cycle) break
+          cycle = advanced
+        }
+      }
+      if (!stageOneDue) {
+        throw new NothingScheduledError(
+          'Nothing is left on this repeating task’s schedule to start.',
+        )
+      }
+    } else {
+      const baseDate = typeof dueDate === 'string' && dueDate
+        ? dueDate
+        : template.nextDueDate || firmToday()
+      stageOneDue = resolveStageDueDate(stageOne, baseDate)
+    }
 
     // "Generate a task now" is idempotent: if this template already has a
     // Stage-1 instance on that due date, hand back the one that exists instead
@@ -36144,7 +36261,7 @@ export class AppDataStore {
     // person double-clicking) used to produce two identical checklists; now it
     // also can't violate the UNIQUE partial index and 500 the request.
     const existing = findChecklistInstance(data.checklists, template.id, stageOneDue, 0)
-    if (existing) return existing
+    if (existing) return { checklist: existing, created: false }
 
     const caseId = `case-${randomUUID().slice(0, 8)}`
     const checklist = buildChecklistFromStage({
@@ -36155,7 +36272,17 @@ export class AppDataStore {
       caseId,
       dueDate: stageOneDue,
     })
-    const created = await this.createChecklist(checklist)
+    let created
+    try {
+      created = await this.createChecklist(checklist)
+    } catch (error) {
+      // Two people confirmed in the same moment: the instance index refused the
+      // second insert (23505). The first one's row is the answer for both.
+      if (error?.code !== '23505') throw error
+      const won = findChecklistInstance((await this.read()).checklists, template.id, stageOneDue, 0)
+      if (!won) throw error
+      return { checklist: won, created: false }
+    }
     await this.grantClientVisibility(created.clientId, created.assigneeId)
     // A freshly generated instance may be exactly what a pending note
     // (featreq-b688e73c) was waiting on — never fatal to "Generate a task now".
@@ -36164,7 +36291,7 @@ export class AppDataStore {
     } catch (error) {
       console.error('[generateChecklistFromTemplate] pending-notes attach pass failed:', error)
     }
-    return created
+    return { checklist: created, created: true }
   }
 
   /**

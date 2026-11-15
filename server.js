@@ -27,6 +27,7 @@ import {
   ManualPaymentError,
   NextStageRefusedError,
   RestoreConflictError,
+  NothingScheduledError,
   NothingToPushError,
   RETAINER_PAID_ON_FLOOR,
   PackageApplyError,
@@ -271,6 +272,7 @@ import {
   pendingNoteEditRefusal,
 } from './lib/note-edit-permission.js'
 import { checklistMonthLabel, periodLabelFromDates } from './lib/checklist-period-label.js'
+import { inactiveClientIds } from './lib/recurring-gate.js'
 import {
   approvalDenial,
   deletionTargetStillExists,
@@ -20294,7 +20296,9 @@ const server = createServer(async (request, response) => {
 
     // POST /api/checklist-templates/:id/generate — materialize a Stage-1
     // checklist instance from a template on demand ("Generate a task now" /
-    // "Start the first one now"). Owner only. Body: { dueDate? }.
+    // "Start the first one now" / "Start now" on the client page). Owner, or a
+    // team member for a client they can see. Body: { dueDate?, next? } -
+    // `next: true` starts the next occurrence on the recipe's own schedule.
     const templateGenerateMatch = normalizedPath.match(
       /^\/api\/checklist-templates\/([^/]+)\/generate$/,
     )
@@ -20308,6 +20312,7 @@ const server = createServer(async (request, response) => {
       const templateId = templateGenerateMatch[1]
       const payload = await readJsonBody(request)
       const dueDate = typeof payload?.dueDate === 'string' ? payload.dueDate : undefined
+      const next = payload?.next === true
       const data = await appDataStore.read()
       const template = (data.checklistTemplates ?? []).find((t) => t.id === templateId)
       if (!template) {
@@ -20331,12 +20336,48 @@ const server = createServer(async (request, response) => {
           })
           return
         }
+        // A team member starts what the schedule WOULD make, early - never a
+        // task the schedule itself would not: a repeating task that is switched
+        // off, or one for a client who is no longer active. (The owner keeps
+        // the wider button on the Repeating list, as before.)
+        if (!template.active) {
+          sendJson(response, 409, {
+            error: 'This repeating task is switched off, so it cannot be started. Ask an owner to turn it on.',
+          })
+          return
+        }
+        if (inactiveClientIds(data.clients).has(template.clientId)) {
+          sendJson(response, 409, {
+            error: 'This client is not active, so its repeating tasks are not started.',
+          })
+          return
+        }
       }
-      const checklist = await appDataStore.generateChecklistFromTemplate(templateId, { dueDate })
+      let generated
+      try {
+        generated = await appDataStore.generateChecklistFromTemplateResult(templateId, { dueDate, next })
+      } catch (error) {
+        if (error instanceof NothingScheduledError) {
+          sendJson(response, 409, { error: error.message })
+          return
+        }
+        throw error
+      }
+      const checklist = generated ? generated.checklist : null
       if (!checklist) {
         sendJson(response, 400, {
           error: 'This template has no stages to generate from',
         })
+        return
+      }
+      // START NOW that found one already started (two people, a retry) hands
+      // it back as it is: no "created" activity row and no second "New task"
+      // notice for something that is not new, and 200 rather than 201. Only
+      // for `next`: the plain call ("Start the first one now" on a new recipe)
+      // usually finds a row the browser has just made and saved, and its notice
+      // here is the only one the person it is assigned to ever gets.
+      if (next && !generated.created) {
+        sendJson(response, 200, checklist)
         return
       }
       await appDataStore.recordActivity(

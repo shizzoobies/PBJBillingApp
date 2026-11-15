@@ -33,6 +33,7 @@ import {
   MAX_LISTED_PENDING_NOTES,
   ManualPaymentError,
   NextStageRefusedError,
+  NothingScheduledError,
   NothingToPushError,
   PackageApplyError,
   PlanCadenceMatchError,
@@ -23649,6 +23650,322 @@ describe('restampPeriodLabelsForTemplate (postgres branch)', () => {
     const fake = fakeRestampPostgres({ templateRow: null })
     expect(await postgresStore(fake).restampPeriodLabelsForTemplate('tmpl-recon')).toBe(0)
     expect(fake.statements).toHaveLength(1)
+  })
+})
+
+/**
+ * START NOW - featreq-1e29020b. "Need a way for Lisa and Allison to start now on
+ * checklist they are on that do not populate." Nothing was failing to populate:
+ * a repeating task's checklist appears only its lead days before it is due.
+ * `generateChecklistFromTemplate(id, { next: true })` starts the NEXT occurrence
+ * on the recipe's own schedule, early, so that when its date arrives the
+ * materializer finds it there and makes no second one.
+ */
+describe('generateChecklistFromTemplate, next: true (file backend)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    // Sunday 15 November 2026, mid-morning Eastern.
+    vi.setSystemTime(new Date('2026-11-15T15:00:00.000Z'))
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const startRecipe = (over = {}) => ({
+    id: 'tpl-start',
+    title: 'Quarterly Reconciliations',
+    clientId: 'c1',
+    assigneeId: 'emp-1',
+    frequency: 'specific-months',
+    scheduledMonths: [1, 4, 7, 10],
+    dueDayOfMonth: 10,
+    nextDueDate: '',
+    active: true,
+    // Set up long ago, so no start floor is in play.
+    createdAt: '2026-01-01T12:00:00.000Z',
+    viewerIds: [],
+    editorIds: [],
+    stages: [
+      { id: 'stage-1', name: 'Step 1', assigneeId: 'emp-1', offsetDays: 0, viewerIds: [], editorIds: [], items: [{ id: 'ti-1', label: 'Reconcile' }] },
+    ],
+    ...over,
+  })
+  const ofRecipe = async () =>
+    (await store.read()).checklists.filter((entry) => entry.templateId === 'tpl-start')
+
+  it('starts the next of a chosen-months recipe’s months, into next year, not a checklist dated today', async () => {
+    await store.write(workspace({ checklistTemplates: [startRecipe()] }))
+    const before = (await ofRecipe()).map((entry) => entry.dueDate.slice(0, 7)).sort()
+    const started = await store.generateChecklistFromTemplate('tpl-start', { next: true })
+    // November is not one of its months; the next is January.
+    expect(started.dueDate).toBe('2027-01-10')
+    expect(started.items.every((item) => item.done === false)).toBe(true)
+    expect((await ofRecipe()).map((entry) => entry.dueDate.slice(0, 7)).sort()).toEqual(
+      [...before, '2027-01'].sort(),
+    )
+  })
+
+  it('is the same checklist when asked twice', async () => {
+    await store.write(workspace({ checklistTemplates: [startRecipe()] }))
+    const first = await store.generateChecklistFromTemplate('tpl-start', { next: true })
+    // January now has one, so "the next month with none" is April - but a second
+    // ask (two people, a retry) must hand back the one already started, not walk
+    // the schedule a step per click.
+    const second = await store.generateChecklistFromTemplate('tpl-start', { next: true })
+    expect(second.id).toBe(first.id)
+    const ahead = (await ofRecipe()).filter((entry) => entry.dueDate > '2026-11-15')
+    expect(ahead.map((entry) => entry.dueDate)).toEqual(['2027-01-10'])
+    // Once that one is finished, the next ask does move on.
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    for (const row of data.checklists) {
+      if (row.id === first.id) row.items = row.items.map((item) => ({ ...item, done: true }))
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    const third = await store.generateChecklistFromTemplate('tpl-start', { next: true })
+    expect(third.dueDate).toBe('2027-04-10')
+  })
+
+  it('when its date arrives, the schedule finds it there and makes no second one', async () => {
+    await store.write(workspace({ checklistTemplates: [startRecipe()] }))
+    const started = await store.generateChecklistFromTemplate('tpl-start', { next: true })
+    vi.setSystemTime(new Date('2027-01-05T15:00:00.000Z'))
+    const january = (await ofRecipe()).filter((entry) => entry.dueDate.slice(0, 7) === '2027-01')
+    expect(january.map((entry) => entry.id)).toEqual([started.id])
+  })
+
+  it('takes THIS month when it is one of the recipe’s and has no checklist yet', async () => {
+    // Set up this morning with its first run this month: the materializer has
+    // not made it (the recipe is switched off, which only stops the schedule).
+    await store.write(
+      workspace({
+        checklistTemplates: [startRecipe({ scheduledMonths: [11, 12], dueDayOfMonth: 25, active: false })],
+      }),
+    )
+    const started = await store.generateChecklistFromTemplate('tpl-start', { next: true })
+    expect(started.dueDate).toBe('2026-11-25')
+  })
+
+  it('counts a month whose checklist is in the bin as had', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [startRecipe({ scheduledMonths: [11, 12], dueDayOfMonth: 25, active: false })],
+        recycledChecklists: [
+          {
+            id: 'chk-binned',
+            title: 'Quarterly Reconciliations',
+            clientId: 'c1',
+            assigneeId: 'emp-1',
+            templateId: 'tpl-start',
+            dueDate: '2026-11-25',
+            deletedAt: '2026-11-10T12:00:00.000Z',
+            stageIndex: 0,
+            items: [{ id: 'i1', label: 'Reconcile', done: false }],
+            viewerIds: [],
+            editorIds: [],
+          },
+        ],
+      }),
+    )
+    const started = await store.generateChecklistFromTemplate('tpl-start', { next: true })
+    expect(started.dueDate).toBe('2026-12-25')
+  })
+
+  it('says so when a one-year schedule has nothing left', async () => {
+    await store.write(
+      workspace({
+        checklistTemplates: [startRecipe({ scheduledMonths: [3], repeatAnnually: false, scheduleYear: 2026, active: false })],
+      }),
+    )
+    await expect(store.generateChecklistFromTemplate('tpl-start', { next: true })).rejects.toBeInstanceOf(
+      NothingScheduledError,
+    )
+    expect(await ofRecipe()).toEqual([])
+  })
+
+  it('leaves the plain call alone: without next, a chosen-months recipe is still dated today', async () => {
+    await store.write(workspace({ checklistTemplates: [startRecipe({ active: false })] }))
+    const started = await store.generateChecklistFromTemplate('tpl-start')
+    expect(started.dueDate).toBe('2026-11-15')
+  })
+
+  it('on a cadence, once the one started early is FINISHED the next ask starts the cycle after it', async () => {
+    // The recipe's Next due date only moves when the schedule reaches it, so the
+    // finished cycle is still "next" to the recipe. Handing it back started
+    // nothing and said it had.
+    const weekly = startRecipe({
+      frequency: 'weekly',
+      scheduledMonths: undefined,
+      dueDayOfMonth: undefined,
+      nextDueDate: '2026-11-25',
+      leadDays: 3,
+    })
+    await store.write(workspace({ checklistTemplates: [weekly] }))
+    const first = await store.generateChecklistFromTemplateResult('tpl-start', { next: true })
+    expect(first.created).toBe(true)
+    expect(first.checklist.dueDate).toBe('2026-11-25')
+    // Asked again while it is open: the same one, and nothing made.
+    const again = await store.generateChecklistFromTemplateResult('tpl-start', { next: true })
+    expect(again).toMatchObject({ created: false, checklist: { id: first.checklist.id } })
+
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    for (const row of data.checklists) {
+      if (row.id === first.checklist.id) row.items = row.items.map((item) => ({ ...item, done: true }))
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const second = await store.generateChecklistFromTemplateResult('tpl-start', { next: true })
+    expect(second.created).toBe(true)
+    expect(second.checklist.dueDate).toBe('2026-12-02')
+    expect(second.checklist.id).not.toBe(first.checklist.id)
+    // The schedule, when it gets there, finds both and makes neither again.
+    vi.setSystemTime(new Date('2026-12-02T15:00:00.000Z'))
+    const later = (await ofRecipe()).map((entry) => entry.dueDate).sort()
+    expect(later).toEqual(['2026-11-25', '2026-12-02'])
+  })
+
+  it('counts a cycle as had by its first step’s own due date too', async () => {
+    // Step 1 is due two days before the cycle date; the materializer checks both
+    // keys, and so does the walk, or it would start the same cycle twice.
+    const weekly = startRecipe({
+      frequency: 'weekly',
+      scheduledMonths: undefined,
+      dueDayOfMonth: undefined,
+      nextDueDate: '2026-11-25',
+      stages: [
+        { id: 'stage-1', name: 'Step 1', assigneeId: 'emp-1', offsetDays: 2, viewerIds: [], editorIds: [], items: [{ id: 'ti-1', label: 'Reconcile' }] },
+      ],
+    })
+    await store.write(workspace({ checklistTemplates: [weekly] }))
+    const first = await store.generateChecklistFromTemplateResult('tpl-start', { next: true })
+    expect(first.checklist.dueDate).toBe('2026-11-23')
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    for (const row of data.checklists) {
+      if (row.id === first.checklist.id) row.items = row.items.map((item) => ({ ...item, done: true }))
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    const second = await store.generateChecklistFromTemplateResult('tpl-start', { next: true })
+    expect(second.checklist.dueDate).toBe('2026-11-30')
+  })
+
+  it('says whether a checklist was made, and the plain wrapper still answers the checklist itself', async () => {
+    await store.write(workspace({ checklistTemplates: [startRecipe({ active: false })] }))
+    const made = await store.generateChecklistFromTemplateResult('tpl-start', { dueDate: '2026-11-20' })
+    expect(made.created).toBe(true)
+    const same = await store.generateChecklistFromTemplateResult('tpl-start', { dueDate: '2026-11-20' })
+    expect(same).toMatchObject({ created: false, checklist: { id: made.checklist.id } })
+    expect((await store.generateChecklistFromTemplate('tpl-start', { dueDate: '2026-11-20' })).id).toBe(made.checklist.id)
+    expect(await store.generateChecklistFromTemplateResult('tpl-missing', {})).toBeNull()
+    expect(await store.generateChecklistFromTemplate('tpl-missing')).toBeNull()
+  })
+
+  it('two people at the same moment: the one the index refused gets the row that won', async () => {
+    await store.write(workspace({ checklistTemplates: [startRecipe()] }))
+    const real = store.createChecklist.bind(store)
+    let calls = 0
+    store.createChecklist = async (checklist, options) => {
+      calls += 1
+      // The other request lands first; then this one's insert is refused.
+      const winner = await real(checklist, options)
+      const refused = Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' })
+      void winner
+      throw refused
+    }
+    const result = await store.generateChecklistFromTemplateResult('tpl-start', { next: true })
+    store.createChecklist = real
+    expect(calls).toBe(1)
+    expect(result.created).toBe(false)
+    expect(result.checklist.dueDate).toBe('2027-01-10')
+    // Any other failure is still a failure.
+    store.createChecklist = async () => {
+      throw new Error('disk on fire')
+    }
+    await expect(store.generateChecklistFromTemplateResult('tpl-start', { dueDate: '2026-12-01' })).rejects.toThrow('disk on fire')
+    store.createChecklist = real
+  })
+
+  it('ignores a due date sent along with next, and has nothing to start on a cadence with no Next due date', async () => {
+    const weekly = startRecipe({
+      frequency: 'weekly',
+      scheduledMonths: undefined,
+      dueDayOfMonth: undefined,
+      nextDueDate: '2026-11-25',
+    })
+    await store.write(workspace({ checklistTemplates: [weekly] }))
+    const started = await store.generateChecklistFromTemplateResult('tpl-start', { next: true, dueDate: '2026-12-25' })
+    expect(started.checklist.dueDate).toBe('2026-11-25')
+
+    await store.write(workspace({ checklistTemplates: [{ ...weekly, nextDueDate: '', active: false }] }))
+    await expect(
+      store.generateChecklistFromTemplateResult('tpl-start', { next: true }),
+    ).rejects.toBeInstanceOf(NothingScheduledError)
+  })
+
+  it('only an OPEN one started ahead is handed back: not a skipped one, not one due today or earlier', async () => {
+    const row = (over) => ({
+      id: 'chk-x',
+      title: 'Quarterly Reconciliations',
+      clientId: 'c1',
+      assigneeId: 'emp-1',
+      templateId: 'tpl-start',
+      stageIndex: 0,
+      dueDate: '2027-01-10',
+      items: [{ id: 'i1', label: 'Reconcile', done: false }],
+      viewerIds: [],
+      editorIds: [],
+      ...over,
+    })
+    await store.write(
+      workspace({
+        checklistTemplates: [startRecipe({ active: false })],
+        checklists: [
+          // January's was skipped, and October's is still open and overdue.
+          row({ id: 'chk-skipped', skippedAt: '2026-11-10T12:00:00.000Z', skippedBy: 'emp-1' }),
+          row({ id: 'chk-overdue', dueDate: '2026-10-10' }),
+        ],
+      }),
+    )
+    // The skip endpoint is the only writer of the skip stamps; put them back as it leaves them.
+    const data = JSON.parse(await readFile(localDataPath, 'utf8'))
+    for (const entry of data.checklists) {
+      if (entry.id === 'chk-skipped') Object.assign(entry, { skippedAt: '2026-11-10T12:00:00.000Z', skippedBy: 'emp-1' })
+    }
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+
+    const started = await store.generateChecklistFromTemplateResult('tpl-start', { next: true })
+    // Neither is handed back; January counts as had (skipped), so it is April's.
+    expect(started.created).toBe(true)
+    expect(started.checklist.dueDate).toBe('2027-04-10')
+  })
+
+  it('a refused insert with no winning row to hand back is still a failure', async () => {
+    await store.write(workspace({ checklistTemplates: [startRecipe()] }))
+    const real = store.createChecklist.bind(store)
+    store.createChecklist = async () => {
+      throw Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' })
+    }
+    await expect(store.generateChecklistFromTemplateResult('tpl-start', { next: true })).rejects.toMatchObject({
+      code: '23505',
+    })
+    store.createChecklist = real
+  })
+
+  it('on a recipe with a cadence, next is its Next due date - what the plain call gives', async () => {
+    const weekly = startRecipe({
+      id: 'tpl-start',
+      frequency: 'weekly',
+      scheduledMonths: undefined,
+      dueDayOfMonth: undefined,
+      nextDueDate: '2026-11-25',
+      leadDays: 3,
+    })
+    await store.write(workspace({ checklistTemplates: [weekly] }))
+    expect(await ofRecipe()).toEqual([])
+    const started = await store.generateChecklistFromTemplate('tpl-start', { next: true })
+    expect(started.dueDate).toBe('2026-11-25')
+    // The schedule reaches that date and finds it: still one, and it moves on.
+    vi.setSystemTime(new Date('2026-11-23T15:00:00.000Z'))
+    const later = await ofRecipe()
+    expect(later.filter((entry) => entry.dueDate === '2026-11-25').map((entry) => entry.id)).toEqual([started.id])
   })
 })
 

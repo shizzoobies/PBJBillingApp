@@ -421,7 +421,8 @@ export type AppContextValue = {
   /** Wave 2: materialize a Stage-1 checklist instance from a template on demand. */
   generateChecklistFromTemplate: (
     templateId: string,
-    payload?: { dueDate?: string },
+    /** `next: true` starts the next occurrence on the recipe's own schedule. */
+    payload?: { dueDate?: string; next?: boolean },
   ) => Promise<Checklist | null>
   /**
    * Owner-only: open a client's 3-stage onboarding case (Proposal → Onboarding

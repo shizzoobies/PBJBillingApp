@@ -111,3 +111,58 @@ describe('PATCH /api/checklists/:id takes covered dates', () => {
     ])
   })
 })
+
+/**
+ * Start now for a team member - featreq-1e29020b. The store's part is tested in
+ * db/store-staleness.test.mjs; what can silently move here is WHO may start a
+ * checklist and WHAT they may start.
+ */
+describe('POST /api/checklist-templates/:id/generate for a team member', () => {
+  const route = () => {
+    const at = serverSource.indexOf("if (templateGenerateMatch && request.method === 'POST') {")
+    expect(at, 'the generate route was not found').toBeGreaterThan(-1)
+    const end = serverSource.indexOf('// GET /api/clients/:id/billed-on-invoices', at)
+    return serverSource.slice(at, end)
+  }
+
+  it('only for a client the person can see', () => {
+    const text = route()
+    expect(text).toContain("if (session.user.role !== 'owner') {")
+    expect(text).toContain('const allowedClients = visibleClientIdSet(session, data)')
+    expect(text).toContain('!allowedClients.has(template.clientId)')
+  })
+
+  it('never a repeating task that is switched off, nor one for a client who is not active', () => {
+    const text = route()
+    const gateAt = text.indexOf("if (session.user.role !== 'owner') {")
+    const generateAt = text.indexOf(
+      'appDataStore.generateChecklistFromTemplateResult(templateId, { dueDate, next })',
+    )
+    const offAt = text.indexOf('if (!template.active) {')
+    const retiredAt = text.indexOf('if (inactiveClientIds(data.clients).has(template.clientId)) {')
+    expect(offAt).toBeGreaterThan(gateAt)
+    expect(retiredAt).toBeGreaterThan(gateAt)
+    expect(generateAt).toBeGreaterThan(retiredAt)
+  })
+
+  it('Start now does not log or announce one that was already there; the plain call still announces', () => {
+    const text = route()
+    // Only for `next`: "Start the first one now" usually finds a row the browser
+    // just saved, and its notice here is the only one the assignee gets.
+    expect(text).not.toContain('if (!generated.created) {')
+    const existingAt = text.indexOf('if (next && !generated.created) {')
+    const activityAt = text.indexOf("'checklist_created',")
+    const notifyAt = text.indexOf("'task_assigned'")
+    expect(existingAt).toBeGreaterThan(-1)
+    expect(text.slice(existingAt, existingAt + 120)).toContain('sendJson(response, 200, checklist)')
+    expect(activityAt).toBeGreaterThan(existingAt)
+    expect(notifyAt).toBeGreaterThan(existingAt)
+  })
+
+  it('takes next only as a real true, and answers a used-up schedule as a sentence', () => {
+    const text = route()
+    expect(text).toContain('const next = payload?.next === true')
+    expect(text).toContain('if (error instanceof NothingScheduledError) {')
+    expect(text).toContain('sendJson(response, 409, { error: error.message })')
+  })
+})

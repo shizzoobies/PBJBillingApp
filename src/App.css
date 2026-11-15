@@ -7801,6 +7801,15 @@ button.repeating-task-toggle-pill {
   font: inherit;
 }
 
+/* "Start now" asking once before it makes a checklist (featreq-1e29020b). */
+.recurring-start-now {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
 .recurring-edit-btn {
   background: none;
   border: 0;

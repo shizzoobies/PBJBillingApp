@@ -3049,7 +3049,7 @@ export async function applyTemplateToClientRequest(
  */
 export async function generateChecklistFromTemplateRequest(
   templateId: string,
-  payload: { dueDate?: string } = {},
+  payload: { dueDate?: string; next?: boolean } = {},
 ) {
   const response = await apiFetch(
     `/api/checklist-templates/${encodeURIComponent(templateId)}/generate`,
