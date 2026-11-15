@@ -5119,6 +5119,15 @@ td strong {
   color: #1c4587;
   border-radius: 999px;
 }
+/* Which step this is, and its name: the part she reads out (featreq-6e3fb656). */
+.stage-badge-step {
+  font-size: 12px;
+  font-weight: 800;
+  color: #12305f;
+}
+.stage-badge-progress {
+  font-weight: 500;
+}
 .stage-badge-link {
   color: #1c4587;
   text-decoration: underline;

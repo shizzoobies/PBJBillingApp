@@ -398,3 +398,28 @@ describe('the recipe editor says the choice covers a push too', () => {
     expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
   })
 })
+
+/**
+ * featreq-6e3fb656: "Can we bold the step and name of it on the active checklist
+ * so it is easier to call out". The step and its name are one bold run; the
+ * count of done steps sits beside it, lighter.
+ */
+describe('the step and its name on the card', () => {
+  it('are bold, and the done count is not part of the bold run', () => {
+    renderPage()
+    const card = within(cardFor('First step close'))
+    const step = card.getByText(/^Step 1 of \d/)
+    expect(step.tagName).toBe('STRONG')
+    expect(step).toHaveClass('stage-badge-step')
+    expect(step.textContent).not.toMatch(/done/)
+    expect(step.parentElement).toHaveClass('stage-badge')
+    expect(step.parentElement?.querySelector('.stage-badge-progress')?.textContent).toMatch(/\d+\/\d+ done/)
+  })
+
+  it('carry the step name when the recipe gives one', () => {
+    renderPage()
+    const step = within(cardFor('First step close')).getByText(/^Step 1 of \d/)
+    const named = stages[0]?.name
+    if (named) expect(step.textContent).toBe(`Step 1 of ${stages.length} · ${named}`)
+  })
+})

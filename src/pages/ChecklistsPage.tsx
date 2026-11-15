@@ -3177,9 +3177,17 @@ export function ChecklistCard({
               )}
               {showStageBadge ? (
                 <span className="stage-badge">
-                  Step {stageNumber} of {stageCount}
-                  {stageName ? ` · ${stageName}` : ''} ·{' '}
-                  {completed}/{checklist.items.length} done
+                  {/* Her ask (featreq-6e3fb656): "bold the step and name of it
+                      on the active checklist so it is easier to call out". The
+                      step and its name carry the weight; the count beside them
+                      steps back so the two do not compete. */}
+                  <strong className="stage-badge-step">
+                    Step {stageNumber} of {stageCount}
+                    {stageName ? ` · ${stageName}` : ''}
+                  </strong>
+                  <span className="stage-badge-progress">
+                    · {completed}/{checklist.items.length} done
+                  </span>
                   {checklist.caseId && ownerMode ? (
                     <Link
                       className="stage-badge-link"
