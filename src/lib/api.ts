@@ -71,6 +71,7 @@
 import type { GroupAllocationMode } from '../../lib/group-allocation.js'
 import type { ScopeTag } from '../../lib/invoice-scope-retag.js'
 import type { InvoiceEstimate } from '../../lib/invoice-estimate.js'
+import type { WeekPlanEntry, WeekPlanMark } from '../../lib/week-plan.js'
 import type { SkipReasonCategory } from '../../lib/checklist-skip.js'
 import type { DashboardLayout } from '../../lib/dashboard-layout.js'
 
@@ -5190,6 +5191,56 @@ export async function invoiceEstimateRequest(period: string, signal?: AbortSigna
     )
   }
   return (await response.json()) as InvoiceEstimate
+}
+
+/**
+ * My Week (featreq-f0e8046b): one person's stored plan for one week. Your own
+ * unless `userId` names someone else, which only an owner may ask for (a team
+ * member gets a 403). `weekStart` is the Monday, yyyy-mm-dd.
+ */
+export async function fetchWeekPlanRequest(
+  weekStart: string,
+  userId?: string | null,
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams({ week: weekStart })
+  if (userId) query.set('user', userId)
+  const response = await apiFetch(`/api/week-plan?${query.toString()}`, {
+    credentials: 'same-origin',
+    signal,
+  })
+  if (!response.ok) {
+    const { message } = await safeError(response)
+    throw new ApiError(response.status, message || `Could not load the week (${response.status})`)
+  }
+  return (await response.json()) as { weekStart: string; userId: string; entries: WeekPlanEntry[] }
+}
+
+/**
+ * My Week: save MY row for one client and one week. The whole row is sent each
+ * time (days, note, task marks); the answer is the row as stored, or the empty
+ * row when nothing was left on it.
+ */
+export async function saveWeekPlanEntryRequest(
+  clientId: string,
+  body: {
+    weekStart: string
+    plannedDays: string[]
+    note: string
+    taskMarks: Record<string, WeekPlanMark | null>
+  },
+) {
+  const response = await apiFetch(`/api/week-plan/${encodeURIComponent(clientId)}`, {
+    credentials: 'same-origin',
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const { message } = await safeError(response)
+    throw new ApiError(response.status, message || `Could not save the week (${response.status})`)
+  }
+  return (await response.json()) as { weekStart: string; entry: WeekPlanEntry }
 }
 
 /**

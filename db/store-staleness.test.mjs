@@ -62121,3 +62121,296 @@ describe("an owner's own time is saved approved (featreq-5ad33ce9)", () => {
     })
   })
 })
+
+/**
+ * My Week: the stored plan (featreq-f0e8046b, table approved by Alex 2026-11-16).
+ *
+ * One row per person, week and client: the days, the note, the hand-set task
+ * marks. Endpoint-owned (never in the bulk save). These pin both backends: a
+ * save replaces the row, an empty row is deleted, one person's week never
+ * shows in another's, and what comes back is the same normalized shape either
+ * way. The Postgres half also pins the statements, because production is
+ * Postgres and the file backend cannot prove them.
+ */
+describe('My Week: week plan entries (featreq-f0e8046b)', () => {
+  const WEEK = '2026-11-16'
+  const NEXT_WEEK = '2026-11-23'
+
+  describe('file backend', () => {
+    beforeEach(async () => {
+      // The plan lives in auth-state.json, which the outer beforeEach leaves alone.
+      const state = existsSync(localAuthPath) ? JSON.parse(await readFile(localAuthPath, 'utf8')) : {}
+      delete state.weekPlanEntries
+      await mkdir(path.dirname(localAuthPath), { recursive: true })
+      await writeFile(localAuthPath, JSON.stringify(state, null, 2))
+    })
+
+    it('has nothing for a week nobody planned', async () => {
+      expect(await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })).toEqual([])
+      expect(await store.listWeekPlanEntries({})).toEqual([])
+    })
+
+    it('saves a row and reads it back, days in order with no repeats', async () => {
+      const saved = await store.saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: ['2026-11-18', '2026-11-16', '2026-11-18'],
+        note: '  bank feed first,   then payroll ',
+        taskMarks: { 'chk-1': { status: 'questions', note: 'asked Brittany' } },
+      })
+      expect(saved).toMatchObject({
+        clientId: 'c1',
+        plannedDays: ['2026-11-16', '2026-11-18'],
+        note: 'bank feed first, then payroll',
+        taskMarks: { 'chk-1': { status: 'questions', note: 'asked Brittany' } },
+      })
+      expect(typeof saved.updatedAt).toBe('string')
+      const listed = await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })
+      expect(listed).toEqual([saved])
+    })
+
+    it('a second save replaces the row: it is not merged', async () => {
+      await store.saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: ['2026-11-16'],
+        note: 'first',
+        taskMarks: { 'chk-1': { status: 'questions', note: '' } },
+      })
+      await store.saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: ['2026-11-20'],
+        note: '',
+        taskMarks: {},
+      })
+      const listed = await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })
+      expect(listed).toHaveLength(1)
+      expect(listed[0]).toMatchObject({ plannedDays: ['2026-11-20'], note: '', taskMarks: {} })
+    })
+
+    it('deletes a row with nothing left on it', async () => {
+      await store.saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: ['2026-11-16'],
+        note: '',
+        taskMarks: {},
+      })
+      const cleared = await store.saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: [],
+        note: '   ',
+        taskMarks: {},
+      })
+      expect(cleared).toEqual({ clientId: 'c1', plannedDays: [], note: '', taskMarks: {}, updatedAt: null })
+      expect(await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })).toEqual([])
+      const state = JSON.parse(await readFile(localAuthPath, 'utf8'))
+      expect(state.weekPlanEntries).toEqual([])
+    })
+
+    it('keeps each person, week and client apart', async () => {
+      const row = (userId, weekStart, clientId, day) =>
+        store.saveWeekPlanEntry({ userId, weekStart, clientId, plannedDays: [day], note: '', taskMarks: {} })
+      await row('emp-1', WEEK, 'c1', '2026-11-16')
+      await row('emp-1', WEEK, 'c2', '2026-11-17')
+      await row('emp-2', WEEK, 'c1', '2026-11-18')
+      await row('emp-1', NEXT_WEEK, 'c1', '2026-11-23')
+
+      const mine = await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })
+      expect(mine.map((entry) => [entry.clientId, entry.plannedDays])).toEqual([
+        ['c1', ['2026-11-16']],
+        ['c2', ['2026-11-17']],
+      ])
+      const theirs = await store.listWeekPlanEntries({ userId: 'emp-2', weekStart: WEEK })
+      expect(theirs.map((entry) => entry.plannedDays)).toEqual([['2026-11-18']])
+      const next = await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: NEXT_WEEK })
+      expect(next.map((entry) => entry.plannedDays)).toEqual([['2026-11-23']])
+
+      // Clearing one person's row leaves the other person's row for that client.
+      await store.saveWeekPlanEntry({ userId: 'emp-1', weekStart: WEEK, clientId: 'c1', plannedDays: [], note: '', taskMarks: {} })
+      expect(await store.listWeekPlanEntries({ userId: 'emp-2', weekStart: WEEK })).toHaveLength(1)
+    })
+
+    it('drops a mark it does not know and never stores junk', async () => {
+      const saved = await store.saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: ['2026-11-16', 'not a day', '2026-02-30'],
+        note: 'x'.repeat(900),
+        taskMarks: {
+          'chk-1': { status: 'finished', note: 'y'.repeat(900) },
+          'chk-2': { status: 'done' },
+          'chk-3': 'questions',
+        },
+      })
+      expect(saved.plannedDays).toEqual(['2026-11-16'])
+      expect(saved.note).toHaveLength(500)
+      expect(Object.keys(saved.taskMarks)).toEqual(['chk-1'])
+      expect(saved.taskMarks['chk-1'].note).toHaveLength(300)
+    })
+
+    it('refuses a save with no person, week or client', async () => {
+      await expect(store.saveWeekPlanEntry({ weekStart: WEEK, clientId: 'c1' })).rejects.toThrow()
+      await expect(store.saveWeekPlanEntry({ userId: 'emp-1', clientId: 'c1' })).rejects.toThrow()
+      await expect(store.saveWeekPlanEntry({ userId: 'emp-1', weekStart: WEEK })).rejects.toThrow()
+    })
+
+    it('the bulk save does not touch the plan', async () => {
+      await store.saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: ['2026-11-16'],
+        note: 'kept',
+        taskMarks: {},
+      })
+      await store.write(workspace())
+      const listed = await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })
+      expect(listed.map((entry) => entry.note)).toEqual(['kept'])
+    })
+  })
+
+  describe('postgres branch', () => {
+    const storedRow = (overrides = {}) => ({
+      client_id: 'c1',
+      // What the `to_char` array comes back as: text, never Date objects.
+      planned_days: ['2026-11-16', '2026-11-18'],
+      note: 'bank feed first',
+      task_marks: { 'chk-1': { status: 'questions', note: 'asked' } },
+      updated_at: new Date('2026-11-16T15:00:00.000Z'),
+      ...overrides,
+    })
+
+    it('reads one person, one week, days as text formatted by Postgres', async () => {
+      const fake = fakeSpitballPostgres((text) =>
+        /^select\b[\s\S]*from week_plan_entries/i.test(text) ? { rows: [storedRow()], rowCount: 1 } : null,
+      )
+      const listed = await postgresStore(fake).listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })
+      const [select] = fake.matching(/from week_plan_entries/i)
+      expect(select.params).toEqual(['emp-1', WEEK])
+      expect(select.text).toMatch(/where user_id = \$1 and week_start = \$2::date/i)
+      // Days must never pass through a JavaScript Date (a day could slip back by one).
+      expect(select.text).toMatch(/array\(select to_char\(d, 'YYYY-MM-DD'\) from unnest\(planned_days\) as d order by d\) as planned_days/)
+      expect(select.text).not.toMatch(/select \*/i)
+      expect(listed).toEqual([
+        {
+          clientId: 'c1',
+          plannedDays: ['2026-11-16', '2026-11-18'],
+          note: 'bank feed first',
+          taskMarks: { 'chk-1': { status: 'questions', note: 'asked' } },
+          updatedAt: '2026-11-16T15:00:00.000Z',
+        },
+      ])
+    })
+
+    it('reads marks that arrive as text, and a null note, without failing', async () => {
+      const fake = fakeSpitballPostgres((text) =>
+        /from week_plan_entries/i.test(text)
+          ? {
+              rows: [
+                storedRow({ note: null, task_marks: '{"chk-9":{"status":"finished","note":""}}' }),
+                storedRow({ client_id: 'c2', task_marks: 'not json', planned_days: null }),
+              ],
+              rowCount: 2,
+            }
+          : null,
+      )
+      const listed = await postgresStore(fake).listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })
+      expect(listed[0]).toMatchObject({ note: '', taskMarks: { 'chk-9': { status: 'finished', note: '' } } })
+      expect(listed[1]).toMatchObject({ clientId: 'c2', plannedDays: [], taskMarks: {} })
+    })
+
+    it('saves with one upsert on (user, week, client) and answers the stored row', async () => {
+      const fake = fakeSpitballPostgres((text) =>
+        /^insert into week_plan_entries/i.test(text) ? { rows: [storedRow()], rowCount: 1 } : null,
+      )
+      const saved = await postgresStore(fake).saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: ['2026-11-18', '2026-11-16'],
+        note: ' bank feed first ',
+        taskMarks: { 'chk-1': { status: 'questions', note: 'asked' } },
+      })
+      expect(fake.statements).toHaveLength(1)
+      const [insert] = fake.statements
+      expect(insert.text).toMatch(/on conflict \(user_id, week_start, client_id\) do update/i)
+      expect(insert.text).toMatch(/values \(\$1, \$2, \$3::date, \$4, \$5::date\[\], \$6, \$7::jsonb, now\(\)\)/i)
+      expect(insert.text).toMatch(/returning client_id, array\(select to_char/i)
+      const [id, userId, weekStart, clientId, days, note, marks] = insert.params
+      expect(insert.params).toHaveLength(7)
+      expect(id).toMatch(/^wplan-[0-9a-f-]{12}$/)
+      expect([userId, weekStart, clientId]).toEqual(['emp-1', WEEK, 'c1'])
+      expect(days).toEqual(['2026-11-16', '2026-11-18'])
+      expect(note).toBe('bank feed first')
+      // jsonb is sent as text and cast, the way every other jsonb column here is.
+      expect(JSON.parse(marks)).toEqual({ 'chk-1': { status: 'questions', note: 'asked' } })
+      expect(saved.plannedDays).toEqual(['2026-11-16', '2026-11-18'])
+      expect(saved.updatedAt).toBe('2026-11-16T15:00:00.000Z')
+    })
+
+    it('stores no note as null, not as an empty string', async () => {
+      const fake = fakeSpitballPostgres((text) =>
+        /^insert into week_plan_entries/i.test(text) ? { rows: [storedRow({ note: null })], rowCount: 1 } : null,
+      )
+      await postgresStore(fake).saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: ['2026-11-16'],
+        note: '',
+        taskMarks: {},
+      })
+      expect(fake.statements[0].params[5]).toBeNull()
+      expect(fake.statements[0].params[6]).toBe('{}')
+    })
+
+    it('deletes the row, and inserts nothing, when nothing is left on it', async () => {
+      const fake = fakeSpitballPostgres()
+      const cleared = await postgresStore(fake).saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: [],
+        note: '',
+        taskMarks: {},
+      })
+      expect(fake.statements).toHaveLength(1)
+      expect(fake.statements[0].text).toMatch(
+        /^delete from week_plan_entries where user_id = \$1 and week_start = \$2::date and client_id = \$3$/i,
+      )
+      expect(fake.statements[0].params).toEqual(['emp-1', WEEK, 'c1'])
+      expect(cleared).toEqual({ clientId: 'c1', plannedDays: [], note: '', taskMarks: {}, updatedAt: null })
+    })
+
+    it('initialize() creates the table Alex approved, and it is not part of the bulk save', async () => {
+      const source = (await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')).replace(/\r\n/g, '\n')
+      const start = source.indexOf('create table if not exists week_plan_entries (')
+      expect(start).toBeGreaterThan(0)
+      const ddl = source.slice(start, source.indexOf(')\n      `)', start))
+      for (const column of [
+        'id text primary key',
+        'user_id text not null',
+        'week_start date not null',
+        'client_id text not null',
+        "planned_days date[] not null default '{}'",
+        'note text',
+        "task_marks jsonb not null default '{}'::jsonb",
+        'updated_at timestamptz not null default now()',
+        'unique (user_id, week_start, client_id)',
+      ]) {
+        expect(ddl).toContain(column)
+      }
+      // The DDL, the three statements and one comment: nothing else names the table.
+      expect(source.split('week_plan_entries').length - 1).toBe(5)
+    })
+  })
+})

@@ -185,6 +185,7 @@ import { SetupChecklistPage } from './pages/SetupChecklistPage'
 import { UpdatesPage } from './pages/UpdatesPage'
 import { ContactsPage } from './pages/ContactsPage'
 import { GanttPage } from './pages/GanttPage'
+import { MyWeekPage } from './pages/MyWeekPage'
 import { ProposalEditorPage } from './pages/ProposalEditorPage'
 import { LettersPage } from './pages/LettersPage'
 import { EngagementsPage } from './pages/EngagementsPage'
@@ -4719,6 +4720,9 @@ function RoleAwareRoutes({ ownerMode }: { ownerMode: boolean }) {
           }
         />
         <Route path="/gantt" element={<GanttPage />} />
+        {/* My Week (featreq-f0e8046b): everyone plans their own week; the server
+            only ever answers with the asker's own plan. */}
+        <Route path="/my-week" element={<MyWeekPage />} />
         <Route
           path="/proposals"
           element={

@@ -235,6 +235,7 @@ import {
   sanitizeDashboardLayout,
 } from './lib/dashboard-layout.js'
 import { writeBroadcastsDataChange } from './lib/data-change-broadcast.js'
+import { isMonday, normalizeWeekPlanInput } from './lib/week-plan.js'
 import {
   listBlockingWeeks,
   normalizeTimeEntryMethod,
@@ -1300,6 +1301,8 @@ const PREVIEW_AWARE_API_PATHS = new Set([
   '/api/app-data',
   '/api/invoice-recap',
   '/api/waiting-on-me',
+  // My Week: while previewing, the plan shown is the previewed person's (read only).
+  '/api/week-plan',
   '/api/notifications',
   '/api/notifications/unread-count',
   '/api/checklists/item-deletions',
@@ -16140,6 +16143,91 @@ const server = createServer(async (request, response) => {
       sendJson(response, 200, {
         requests: all.filter((req) => visible.has(req.clientId)),
       })
+      return
+    }
+
+    // GET /api/week-plan?week=YYYY-MM-DD[&user=<id>] — My Week (featreq-f0e8046b):
+    // one person's stored plan for one week (the days she put each client on,
+    // her notes, the marks she set on tasks). The page derives everything else
+    // from the checklists it already holds (lib/week-plan.js).
+    //
+    // WHOSE: your own. A plan is a person's own notes about her own week, so a
+    // team member is refused anyone else's (403, on the server, not by hiding a
+    // control). An owner may read anyone's (`user=`). While an owner previews
+    // somebody, "your own" is the previewed person's, like every preview read.
+    if (normalizedPath === '/api/week-plan' && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      const scoped = await previewScopedSession(request, session, response)
+      if (!scoped) return
+      const weekStart = requestUrl.searchParams.get('week') || ''
+      if (!isMonday(weekStart)) {
+        sendJson(response, 400, { error: 'week must be a Monday, like 2026-11-16' })
+        return
+      }
+      let userId = scoped.user.id
+      const asked = (requestUrl.searchParams.get('user') || '').trim()
+      if (asked && asked !== scoped.user.id) {
+        if (scoped.user.role !== 'owner') {
+          sendJson(response, 403, { error: 'You can only see your own week.' })
+          return
+        }
+        const member = await appDataStore.getTeamMember(asked)
+        if (!member) {
+          sendJson(response, 404, { error: 'That person was not found.' })
+          return
+        }
+        userId = asked
+      }
+      const entries = await appDataStore.listWeekPlanEntries({ userId, weekStart })
+      sendJson(response, 200, { weekStart, userId, entries })
+      return
+    }
+
+    // PUT /api/week-plan/:clientId — save MY row for one client and one week:
+    // `{ weekStart, plannedDays, note, taskMarks }`, the whole row each time.
+    //
+    // Always the signed-in person's own plan: there is no `user` to name, so
+    // nobody, an owner included, can write another person's week. The client
+    // must be one she can see (a client she cannot see is "not found", the same
+    // answer as one that does not exist). A preview never reaches here: writes
+    // are refused while previewing.
+    const weekPlanSaveMatch = normalizedPath.match(/^\/api\/week-plan\/([^/]+)$/)
+    if (weekPlanSaveMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'PUT') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      // `normalizedPath` is already decoded once; decoding it again would let
+      // a stray percent sign throw.
+      const clientId = weekPlanSaveMatch[1]
+      const data = await appDataStore.read()
+      if (!visibleClientIdSet(session, data).has(clientId)) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      const payload = await readJsonBody(request)
+      const checked = normalizeWeekPlanInput(payload, {
+        checklistIds: (data.checklists ?? [])
+          .filter((checklist) => checklist.clientId === clientId)
+          .map((checklist) => checklist.id),
+      })
+      if (!checked.ok) {
+        sendJson(response, 400, { error: checked.error })
+        return
+      }
+      const entry = await appDataStore.saveWeekPlanEntry({
+        userId: session.user.id,
+        clientId,
+        ...checked.value,
+      })
+      sendJson(response, 200, { weekStart: checked.value.weekStart, entry })
       return
     }
 

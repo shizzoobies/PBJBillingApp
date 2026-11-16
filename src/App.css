@@ -14704,3 +14704,330 @@ details.invoice-run-sent ul,
 .engagement-section-trigger .field {
   flex-basis: 100%;
 }
+
+/* ============================================================
+   My Week (featreq-f0e8046b): a person's own plan for the week.
+   Five day columns over the list of clients with open work.
+   ============================================================ */
+.my-week-nav {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.my-week-hint {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 10px 0 0;
+  max-width: 78ch;
+}
+
+.my-week-readonly {
+  background: color-mix(in srgb, var(--gold) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--gold) 45%, var(--line));
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-size: 13px;
+  margin: 12px 0 0;
+  padding: 8px 12px;
+}
+
+.my-week-count {
+  color: var(--plum);
+  font-size: 14px;
+  font-weight: 760;
+  margin: 16px 0 10px;
+}
+
+.my-week-empty {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 12px 0 0;
+}
+
+.my-week-days {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.my-week-day {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  min-height: 92px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.my-week-day.is-today {
+  background: var(--surface);
+  border-color: var(--berry);
+  box-shadow: inset 0 3px 0 var(--berry);
+}
+
+.my-week-day h3 {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 760;
+  margin: 0 0 8px;
+}
+
+.my-week-day h3 span {
+  color: var(--bluegray);
+}
+
+.my-week-day h3 em {
+  color: var(--berry);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.my-week-day ul {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.my-week-day li {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--plum);
+  border-radius: 6px;
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px;
+}
+
+.my-week-day li strong {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.my-week-day li small,
+.my-week-day-empty {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+
+/* Every task in questions or finished: on the day, but nothing to pick up. */
+.my-week-day li.is-parked {
+  background: transparent;
+  border-left-color: var(--line-strong);
+  border-style: dashed;
+  color: var(--muted);
+}
+
+.my-week-subhead {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 760;
+  margin: 22px 0 10px;
+}
+
+.my-week-rows {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.my-week-row {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+}
+
+/* Not on a day yet and nothing marked: these sort first and carry the accent. */
+.my-week-row.is-not-started {
+  border-left: 4px solid var(--gold);
+}
+
+.my-week-row-head {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.my-week-row-name {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.my-week-rollup {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.my-week-daypick {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.my-week-daybtn {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  color: var(--bluegray);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 760;
+  min-height: 32px;
+  min-width: 44px;
+  padding: 4px 8px;
+}
+
+.my-week-daybtn.is-today {
+  border-color: var(--berry);
+}
+
+.my-week-daybtn.is-on {
+  background: var(--plum);
+  border-color: var(--plum);
+  color: #fff;
+}
+
+.my-week-daybtn:focus-visible {
+  outline: 2px solid var(--berry);
+  outline-offset: 2px;
+}
+
+.my-week-daybtn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.my-week-note {
+  display: block;
+  margin-top: 8px;
+}
+
+.my-week-note .input {
+  width: 100%;
+}
+
+.my-week-tasks {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.my-week-task {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  justify-content: space-between;
+  padding-top: 8px;
+}
+
+.my-week-task-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.my-week-task-main a {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.my-week-task-meta {
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 2px 12px;
+}
+
+.my-week-due.is-overdue {
+  color: var(--red);
+  font-weight: 760;
+}
+
+.my-week-due.is-week {
+  color: var(--plum);
+  font-weight: 760;
+}
+
+.my-week-task-status {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.my-week-task-status small {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.my-week-task.is-questions .my-week-task-main a,
+.my-week-task.is-finished .my-week-task-main a {
+  color: var(--muted);
+}
+
+.my-week-questions ul {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.my-week-questions li {
+  align-items: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  justify-content: space-between;
+  padding: 8px 12px;
+}
+
+.my-week-questions li > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.my-week-questions li span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.my-week-question-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 900px) {
+  .my-week-days {
+    grid-template-columns: 1fr;
+  }
+
+  .my-week-day {
+    min-height: 0;
+  }
+}

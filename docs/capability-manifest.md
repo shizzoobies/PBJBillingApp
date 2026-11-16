@@ -17,9 +17,9 @@ The displayed hours ARE the costing input: labor cost is the two-decimal hours s
 
 Sidebar pages: those grouped in the next paragraph (Engagements, Letters and Updates are owner only). A billing-month picker, notification bell and account menu sit in the top bar on every page.
 
-**The owner's sidebar is grouped into sections**. In order: Dashboard, **Engagements** (Proposals, Engagements, Letters), **Clients** (Clients, Contacts, Client Recap), **Billing** (Invoices, Invoice Recap, Plans), **Operations** (Time, Timesheet, Time Approvals, Checklists, Board, Delayed, Gantt), Team, **Reports** (Reports, Productivity), Updates, **Settings** (Settings, To 100%). Dashboard, Team and Updates stand alone.
+**The owner's sidebar is grouped into sections**. In order: Dashboard, **Engagements** (Proposals, Engagements, Letters), **Clients** (Clients, Contacts, Client Recap), **Billing** (Invoices, Invoice Recap, Plans), **Operations** (Time, Timesheet, Time Approvals, Checklists, Board, Delayed, My Week, Gantt), Team, **Reports** (Reports, Productivity), Updates, **Settings** (Settings, To 100%). Dashboard, Team and Updates stand alone.
 
-**Staff keep a flat sidebar** of eight links; no route changed.
+**Staff keep a flat sidebar** of ten links (Dashboard, Time, Timesheet, Checklists, Board, Delayed, My Week, Clients, Gantt, Invoice Recap); no route changed.
 
 - New-version prompt: a tab left open across a deploy shows a small "A new version of the app is ready - Refresh" toast (bottom-right) within minutes, or at once when you return to it. If a fix "isn't showing", refresh first - an old tab runs the old app.
 - Out-of-date tab protection: a tab open while someone else changed something can't save its copy of the workspace over newer data; it shows "This tab is out of date" with a Reload button, the only way forward (unsaved typing must be re-entered). Rare (tabs sync): mostly after a tab sat idle or lost its connection. Owners only (staff never save the whole workspace).
@@ -248,6 +248,7 @@ Sidebar pages: those grouped in the next paragraph (Engagements, Letters and Upd
   - **Checklists -> Repeating** - everyone assigned to the client can SEE the recurring recipes; only the owner changes them.
   - **Checklists -> Standard** - every team member can browse the blueprints READ-ONLY; only an owner edits one. An accountant can copy one to a client (the "Copy to client" picker, below); a bookkeeper views only.
   - **Gantt** - your own lane and your own tasks only.
+  - **My Week** - your own plan only; nobody else's week can be opened.
   - **Open/late task counts on the Clients list** - your own open tasks; an ACCOUNTANT also sees those of the people staffed alongside them on their clients.
   - **Board** - your own active checklists, same as the Checklists tab; an ACCOUNTANT can tick "Show my bookkeepers'".
 - **START NOW, for a repeating checklist that has not appeared yet** (anyone who can see the client, team members included). A repeating task's checklist only appears a few days before it is due (its lead days: often 0 to 3 for weekly work), so before then there is nothing to open - that is what "it did not populate" usually is, not a fault. On the client's page, under Recurring checklists, a repeating task that is On and has NO checklist open shows **Start now**; so does its first row under "Upcoming (next 60 days)". Click it, then **Yes, start it**: the NEXT checklist on that task's own schedule is created now, with its normal due date and steps, assigned as usual (the person it is assigned to is told, unless that is the person starting it), and a line says what was started with an **Open it** link. When its date arrives nothing second is made. For a task that runs only in chosen months it is the next of those months (a quarterly one started in November is January's). Not offered while that task already has a checklist open, on a task the schedule itself would not run (switched Off, its first step has no tasks, no months or no next due date set, a one-year schedule that is used up), for a client who is not active, or in preview. A team member cannot delete what they started without the owner's approval, which is why it asks once. When two people ask for the same one they get the same checklist, not a second one, and no second notice goes out. Once that one is finished, Start now is offered again and starts the one after it. The owner's own Start now on the Repeating tasks list still works as before.
@@ -432,6 +433,20 @@ Header actions: **Accept** marks the proposal Won, drafts its engagement letter 
 
 - Throughput by person (tasks completed, avg items/day) over a chosen range, daily or weekly; Download CSV.
 - Activity heatmap: hours, items completed, cases moved per day/week. Hover a cell for exact numbers.
+
+## My Week (owner + staff)
+
+Sidebar: **My Week** (under Operations for the owner; after Delayed for the team). Each person's OWN plan for the week, so the clients at the bottom of the list are not left until the end of the month. It is a planning page only: it never changes a due date, never assigns or completes anything and does not track hours.
+
+- **What is listed:** every client you have open work for that is due this month or overdue (your checklists that are not finished, skipped or deleted, plus a checklist where an open step is assigned to you by name). One row per client with its tasks under it: the task (click to open the checklist), its due date ("Overdue, was due ...", "Due this week, ..." or "Due ..."; the date is the soonest of the checklist's due date and any open step's, the way the Board dates it), its step when it is one step of a case, and how many steps are done. Inactive clients are left out.
+- **Putting a client on a day:** each client row has Mon, Tue, Wed, Thu, Fri buttons. Click a day to plan the client for it; click again to take it off. A client can be on more than one day. The five day columns at the top (Monday to Friday, today marked) show the clients on each day and how many tasks are still to work on.
+- **A note for yourself:** one line per client per week (for example "bank feed first, then payroll"). It saves when you leave the box.
+- **A status on each task** (not on the whole client): **Work on this week** (the default; reads "Planned" once the client is on a day, "Not planned" until then), **In questions** (you sent questions and are waiting for the answer, so do not reopen it), **Finished for month**. This is your own planning mark: it does not tick anything on the checklist.
+- **Sent questions:** tasks you set to In questions are listed at the bottom ("check these again at the end of the day, not first thing"), each with **Open** and **Answered, back to work** (which puts it back to Work on this week). A client whose tasks are ALL in questions or finished shows greyed on its day ("Waiting, nothing to pick up"); a client with one task in questions and another still to do stays live.
+- **The count at the top:** "N clients not planned this week" counts clients that are on no day and have no task marked. Those rows carry a gold edge and are listed first when the page opens (the list does not reshuffle while you are planning).
+- **Weeks:** the arrows move a week back or forward; **This week** returns. Each week has its own days, notes and statuses; the list of open work is always today's.
+- **Whose week:** always your own. A team member cannot see anyone else's week. An owner sees a team member's week by previewing as that person (Dashboard, Viewing as): it is shown read-only and says whose it is.
+- **Not yet (planned next):** tasks moving to In questions by themselves from the Waiting flags and coming back when answered, "Finished for month" setting itself, a "whose week" picker for the owner with a one-line summary per person, and taking the Gantt out of the menu. There is no end-of-day reminder (the page only), no drag and drop (use the day buttons) and no weekend days.
 
 ## Gantt (owner + staff)
 

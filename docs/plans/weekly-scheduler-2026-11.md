@@ -1,6 +1,6 @@
 # My Week: a weekly planner in place of the Gantt tab
 
-Ticket: featreq-f0e8046b ("Weekly client scheduler (revamping the Gantt tab)"), filed from a spitball session on 2026-11-14. Status of this document: a plan, nothing built. Written 2026-11-15.
+Ticket: featreq-f0e8046b ("Weekly client scheduler (revamping the Gantt tab)"), filed from a spitball session on 2026-11-14. Status of this document: ship 1 of 3 is built and live (2026-11-16: the page, the table, days, notes, a status on each task; see section 8 for her answers and the table as built). Ships 2 and 3 are not built. Written 2026-11-15.
 
 ## 1. What she asked for, in her words
 

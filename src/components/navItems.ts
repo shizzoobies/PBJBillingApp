@@ -4,6 +4,7 @@ import {
   BarChart3,
   BookUser,
   Building2,
+  CalendarDays,
   CalendarRange,
   CircleCheckBig,
   ClipboardCheck,
@@ -55,6 +56,10 @@ const TIME_APPROVALS: NavItem = {
 const CHECKLISTS: NavItem = { to: '/checklists', label: 'Checklists', icon: ListChecks }
 const BOARD: NavItem = { to: '/board', label: 'Board', icon: Kanban }
 const DELAYED: NavItem = { to: '/delayed', label: 'Delayed', icon: AlarmClock }
+// My Week (featreq-f0e8046b): each person's own plan for the week. It takes
+// the Gantt's place; the Gantt stays beside it for now and is removed later if
+// nobody asks for it (Brittany: "I do not think anyone uses it").
+const MY_WEEK: NavItem = { to: '/my-week', label: 'My Week', icon: CalendarDays }
 const GANTT: NavItem = { to: '/gantt', label: 'Gantt', icon: BarChart3 }
 // Proposals took the Engagements placeholder's slot (featreq-311473e2).
 const PROPOSALS: NavItem = {
@@ -123,6 +128,7 @@ export const navItems: NavItem[] = [
   CHECKLISTS,
   BOARD,
   DELAYED,
+  MY_WEEK,
   PROPOSALS,
   ENGAGEMENTS,
   LETTERS,
@@ -159,7 +165,7 @@ export const navSections: NavSection[] = [
   { label: 'Billing', items: [INVOICES, INVOICE_RECAP, PLANS] },
   {
     label: 'Operations',
-    items: [TIME, TIMESHEET, TIME_APPROVALS, CHECKLISTS, BOARD, DELAYED, GANTT],
+    items: [TIME, TIMESHEET, TIME_APPROVALS, CHECKLISTS, BOARD, DELAYED, MY_WEEK, GANTT],
   },
   { items: [TEAM] },
   { label: 'Reports', items: [REPORTS, PRODUCTIVITY] },

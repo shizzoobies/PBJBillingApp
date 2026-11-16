@@ -26,6 +26,7 @@ import { copiedTemplateSettings, copiedTemplateStages } from '../lib/checklist-t
 import { planSetUpSteps } from '../lib/checklist-link-match.js'
 import { STAGE_ADVANCE_FAILED_PHRASE } from '../lib/stage-advance-phrase.js'
 import { buildSkipNotice, isStepSkip, templateSkipMode } from '../lib/checklist-skip.js'
+import { isEmptyWeekPlanEntry, normalizeWeekPlanEntry } from '../lib/week-plan.js'
 import { ENGAGEMENT_LIST_LIMIT } from '../lib/engagement-list-limit.js'
 import {
   bundlingPlan,
@@ -6196,6 +6197,35 @@ function buildSpawnedNextStageChecklist({ template, justCompletedChecklist, case
 }
 
 /**
+ * A person's planned days as yyyy-mm-dd text, in order. Formatted by Postgres:
+ * a `date` read through node-postgres becomes a JavaScript Date at local
+ * midnight, and turning that back into a day can land on the day before.
+ */
+const WEEK_PLAN_DAYS_SQL =
+  "array(select to_char(d, 'YYYY-MM-DD') from unnest(planned_days) as d order by d)"
+
+/** One `week_plan_entries` row in the shape the file backend stores (see `normalizeWeekPlanEntry`). */
+function mapWeekPlanRow(row) {
+  return normalizeWeekPlanEntry({
+    clientId: row.client_id,
+    plannedDays: Array.isArray(row.planned_days) ? row.planned_days : [],
+    note: row.note ?? '',
+    // jsonb arrives parsed; a text copy (an older driver, a test double) is parsed here.
+    taskMarks: typeof row.task_marks === 'string' ? safeJsonObject(row.task_marks) : row.task_marks,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+  })
+}
+
+function safeJsonObject(text) {
+  try {
+    const value = JSON.parse(text)
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  } catch {
+    return {}
+  }
+}
+
+/**
  * One shape for a skip record whichever backend produced it. Timestamps are ISO
  * strings on both sides (pg hands back Date objects, the file backend already
  * stores strings), and `reviewedAt` being null is the whole dashboard filter.
@@ -7786,6 +7816,26 @@ export class AppDataStore {
       await this.pool.query(
         `create index if not exists checklist_skips_skipped_at_idx on checklist_skips (skipped_at desc)`,
       )
+      // My Week (featreq-f0e8046b, docs/plans/weekly-scheduler-2026-11.md; the
+      // table approved by Alex 2026-11-16). One row per person, week and
+      // client: the days she means to work on it, her note, and the marks she
+      // put on its tasks by hand. Endpoint-owned like the skips above: never
+      // part of the bulk save, so a stale tab cannot erase a plan. No foreign
+      // keys on purpose - a row for a client or person that is gone is simply
+      // never read again, and must not block deleting either.
+      await this.pool.query(`
+        create table if not exists week_plan_entries (
+          id text primary key,
+          user_id text not null,
+          week_start date not null,
+          client_id text not null,
+          planned_days date[] not null default '{}',
+          note text,
+          task_marks jsonb not null default '{}'::jsonb,
+          updated_at timestamptz not null default now(),
+          unique (user_id, week_start, client_id)
+        )
+      `)
       // One trail, two kinds. A push files the same record with the same
       // required reason — the owner reviews "this task moved and here is why"
       // either way — so it reuses this table rather than growing a second one
@@ -35137,6 +35187,99 @@ export class AppDataStore {
     return [...list]
       .map(normalizeChecklistSkip)
       .sort((a, b) => String(b.skippedAt).localeCompare(String(a.skippedAt)))
+  }
+
+  /**
+   * My Week: one person's stored rows for one week (featreq-f0e8046b). The
+   * caller decides whose week may be read; this only reads it. Dates come back
+   * as yyyy-mm-dd text straight from Postgres (`to_char`), never through a
+   * JavaScript Date, so no time zone can move a planned day.
+   *
+   * @param {{ userId: string, weekStart: string }} args - `weekStart` is a Monday, yyyy-mm-dd.
+   * @returns {Promise<Array<{ clientId: string, plannedDays: string[], note: string, taskMarks: object, updatedAt: string | null }>>}
+   */
+  async listWeekPlanEntries({ userId, weekStart } = {}) {
+    if (!userId || !weekStart) return []
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select client_id, ${WEEK_PLAN_DAYS_SQL} as planned_days, note, task_marks, updated_at
+           from week_plan_entries
+          where user_id = $1 and week_start = $2::date
+          order by client_id`,
+        [userId, weekStart],
+      )
+      return result.rows.map(mapWeekPlanRow)
+    }
+    const authState = await readJson(localAuthPath)
+    const list = Array.isArray(authState.weekPlanEntries) ? authState.weekPlanEntries : []
+    return list
+      .filter((entry) => entry?.userId === userId && entry?.weekStart === weekStart)
+      .map((entry) => normalizeWeekPlanEntry(entry))
+      .sort((a, b) => a.clientId.localeCompare(b.clientId))
+  }
+
+  /**
+   * My Week: replace one person's row for one week and one client with what
+   * she just saved (the page sends the whole row). A row with nothing left on
+   * it - no day, no note, no mark - is deleted, not kept empty. The route has
+   * already checked the values (`normalizeWeekPlanInput`); they are normalized
+   * once more here so both backends store exactly the same thing.
+   *
+   * @returns {Promise<{ clientId: string, plannedDays: string[], note: string, taskMarks: object, updatedAt: string | null }>}
+   *   the row as stored, or the empty row when it was deleted.
+   */
+  async saveWeekPlanEntry({ userId, weekStart, clientId, plannedDays, note, taskMarks } = {}) {
+    if (!userId || !weekStart || !clientId) {
+      throw new Error('saveWeekPlanEntry needs a user, a week and a client')
+    }
+    const next = normalizeWeekPlanEntry({ clientId, plannedDays, note, taskMarks })
+    const empty = isEmptyWeekPlanEntry(next)
+    if (this.pool) {
+      if (empty) {
+        await this.pool.query(
+          `delete from week_plan_entries where user_id = $1 and week_start = $2::date and client_id = $3`,
+          [userId, weekStart, clientId],
+        )
+        return { ...next, updatedAt: null }
+      }
+      const result = await this.pool.query(
+        `insert into week_plan_entries (id, user_id, week_start, client_id, planned_days, note, task_marks, updated_at)
+         values ($1, $2, $3::date, $4, $5::date[], $6, $7::jsonb, now())
+         on conflict (user_id, week_start, client_id) do update
+           set planned_days = excluded.planned_days,
+               note = excluded.note,
+               task_marks = excluded.task_marks,
+               updated_at = now()
+         returning client_id, ${WEEK_PLAN_DAYS_SQL} as planned_days, note, task_marks, updated_at`,
+        [
+          `wplan-${randomUUID().slice(0, 12)}`,
+          userId,
+          weekStart,
+          clientId,
+          next.plannedDays,
+          next.note || null,
+          JSON.stringify(next.taskMarks),
+        ],
+      )
+      return mapWeekPlanRow(result.rows[0])
+    }
+    // The read, the change and the write in ONE queue slot of the file, so two
+    // saves a moment apart (or a save and a sign-in) cannot each read the list
+    // before the other has written. Raw fs calls only in here.
+    return enqueueFileOperation(localAuthPath, async () => {
+      const authState = existsSync(localAuthPath)
+        ? JSON.parse(await readFile(localAuthPath, 'utf8'))
+        : {}
+      const list = Array.isArray(authState.weekPlanEntries) ? authState.weekPlanEntries : []
+      const others = list.filter(
+        (entry) =>
+          !(entry?.userId === userId && entry?.weekStart === weekStart && entry?.clientId === clientId),
+      )
+      const stored = { ...next, updatedAt: empty ? null : nowIso() }
+      authState.weekPlanEntries = empty ? others : [...others, { userId, weekStart, ...stored }]
+      await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
+      return stored
+    })
   }
 
   /**
