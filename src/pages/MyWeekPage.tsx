@@ -42,6 +42,12 @@ import {
  *
  * Whose week: the person using the app. While an owner previews somebody, it is
  * that person's week and nothing can be changed.
+ *
+ * An owner can also look at anyone's week from her own page (ship 3: "She can
+ * peek at everyone's from her page with a button"): a "Whose week" picker, and
+ * a line per person under "Everyone's week". Looking is all it is: another
+ * person's week is read-only here, and the server refuses a team member who
+ * asks for anyone's but her own.
  */
 
 const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
@@ -173,8 +179,16 @@ function stepWords(task: WeekPlanTask): string {
 }
 
 export function MyWeekPage() {
-  const { data, activeEmployeeId, previewMode } = useAppContext()
+  const { data, activeEmployeeId, previewMode, role } = useAppContext()
   const today = firmToday()
+  // Only an owner, and never while previewing, may look at another person's week.
+  const canPick = role === 'owner' && !previewMode
+  const [pickedId, setPickedId] = useState<string | null>(null)
+  const whoseId =
+    canPick && pickedId && data.employees.some((employee) => employee.id === pickedId)
+      ? pickedId
+      : activeEmployeeId
+  const ownWeek = whoseId === activeEmployeeId
   const [weekStart, setWeekStart] = useState(() => mondayOf(firmToday()))
   const [entries, setEntries] = useState<Record<string, WeekPlanEntry>>({})
   // The rows as they were when the week was read: the ORDER of the list comes
@@ -182,15 +196,23 @@ export function MyWeekPage() {
   // on a day (she may be about to pick a second day, or set a task's status).
   const [loadedEntries, setLoadedEntries] = useState<WeekPlanEntry[]>([])
   const [loadedFor, setLoadedFor] = useState<string | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
-  const [saveError, setSaveError] = useState<string | null>(null)
+  // An error belongs to the person and week it happened on (`key`), and is
+  // shown only there: her failed save must not sit above someone else's week.
+  const [loadError, setLoadError] = useState<{ key: string; message: string } | null>(null)
+  const [saveError, setSaveError] = useState<{ key: string; message: string } | null>(null)
   // The newest rows, for a save that is built while an earlier one is in flight.
   const entriesRef = useRef(entries)
   useEffect(() => {
     entriesRef.current = entries
   }, [entries])
 
-  const loadKey = `${activeEmployeeId}|${weekStart}`
+  // One save at a time per client and week. A click while a save is in flight
+  // only replaces what is sent next, so the newest row is always the last one
+  // written: two saves can never land out of order and leave the page showing
+  // something that is not stored. Only her own rows ever go in here.
+  const saveQueue = useRef(new Map<string, { latest: WeekPlanEntry; running: boolean }>())
+
+  const loadKey = `${whoseId}|${weekStart}`
   // Bumped to read the stored week again (after a save that failed).
   const [reloadTick, setReloadTick] = useState(0)
   useEffect(() => {
@@ -198,11 +220,12 @@ export function MyWeekPage() {
     const { signal } = controller
     const load = async () => {
       try {
-        const result = await fetchWeekPlanRequest(weekStart, null, signal)
+        // Her own week names nobody; an owner looking at someone names them.
+        const result = await fetchWeekPlanRequest(weekStart, ownWeek ? null : whoseId, signal)
         if (signal.aborted) return
         // The server answers with whose week it is. Anyone's but the person
-        // this page is for is never shown.
-        if (result.userId && result.userId !== activeEmployeeId) {
+        // this page is showing is never put on screen.
+        if (result.userId && result.userId !== whoseId) {
           throw new Error('Could not load the week.')
         }
         const next: Record<string, WeekPlanEntry> = {}
@@ -210,19 +233,34 @@ export function MyWeekPage() {
           const clean = normalizeWeekPlanEntry(entry)
           if (clean.clientId) next[clean.clientId] = clean
         }
+        // A save of hers for this week that has not landed yet is newer than
+        // what was just read: keep it on screen. Without this, a look at
+        // someone else's week (or another week) and back could show the row
+        // from before the save, and her next click would put that older row
+        // back over it.
+        if (ownWeek) {
+          for (const [key, slot] of saveQueue.current) {
+            if (key.startsWith(`${weekStart}|`)) next[key.slice(weekStart.length + 1)] = slot.latest
+          }
+        }
         entriesRef.current = next
         setEntries(next)
         setLoadedEntries(Object.values(next))
         setLoadError(null)
-        setLoadedFor(`${activeEmployeeId}|${weekStart}`)
+        setLoadedFor(`${whoseId}|${weekStart}`)
       } catch (error) {
         if (signal.aborted) return
-        setLoadError(error instanceof Error ? error.message : 'Could not load the week.')
+        setLoadError({
+          key: `${whoseId}|${weekStart}`,
+          message: error instanceof Error ? error.message : 'Could not load the week.',
+        })
       }
     }
     void load()
     return () => controller.abort()
-  }, [activeEmployeeId, weekStart, reloadTick])
+  }, [whoseId, ownWeek, weekStart, reloadTick])
+  const shownLoadError = loadError?.key === loadKey ? loadError.message : null
+  const shownSaveError = saveError?.key === loadKey ? saveError.message : null
 
   // Never another week's (or another person's) plan under this heading.
   const ready = loadedFor === loadKey
@@ -239,11 +277,11 @@ export function MyWeekPage() {
         checklists: data.checklists,
         clients,
         entries: shownEntries,
-        userId: activeEmployeeId,
+        userId: whoseId,
         weekStart,
         today,
       }),
-    [data.checklists, clients, shownEntries, activeEmployeeId, weekStart, today],
+    [data.checklists, clients, shownEntries, whoseId, weekStart, today],
   )
 
   // Not-started clients first, as of when the week was read (see `loadedEntries`).
@@ -253,7 +291,7 @@ export function MyWeekPage() {
       checklists: data.checklists,
       clients,
       entries: ready ? loadedEntries : [],
-      userId: activeEmployeeId,
+      userId: whoseId,
       weekStart,
       today,
     }).rows.map((row) => row.clientId)
@@ -266,21 +304,18 @@ export function MyWeekPage() {
           (place.get(b.row.clientId) ?? atLoad.length + b.index),
       )
       .map(({ row }) => row)
-  }, [data.checklists, clients, ready, loadedEntries, activeEmployeeId, weekStart, today, view.rows])
+  }, [data.checklists, clients, ready, loadedEntries, whoseId, weekStart, today, view.rows])
 
-  const canEdit = ready && !previewMode
+  // Only her own week, and never in preview.
+  const canEdit = ready && !previewMode && ownWeek
 
-  // The week on screen, for a save that fails after she has moved to another week.
-  const weekRef = useRef(weekStart)
+  // Whose week and which week is on screen, for a save that fails after she
+  // has moved on (to another week, or to look at another person's).
+  const viewRef = useRef(loadKey)
   useEffect(() => {
-    weekRef.current = weekStart
-  }, [weekStart])
+    viewRef.current = loadKey
+  }, [loadKey])
 
-  // One save at a time per client and week. A click while a save is in flight
-  // only replaces what is sent next, so the newest row is always the last one
-  // written: two saves can never land out of order and leave the page showing
-  // something that is not stored.
-  const saveQueue = useRef(new Map<string, { latest: WeekPlanEntry; running: boolean }>())
   // After a failed save the stored week is read again, but only once every
   // save still in flight has finished: read sooner and a save that lands a
   // moment later would be missing from the screen, and her next change to that
@@ -292,7 +327,7 @@ export function MyWeekPage() {
     reloadWanted.current = false
     setReloadTick((tick) => tick + 1)
   }, [])
-  const flush = useCallback(async (key: string, clientId: string, week: string) => {
+  const flush = useCallback(async (key: string, clientId: string, week: string, viewKey: string) => {
     const slot = saveQueue.current.get(key)
     if (!slot || slot.running) return
     slot.running = true
@@ -310,14 +345,17 @@ export function MyWeekPage() {
       saveQueue.current.delete(key)
     } catch (error) {
       saveQueue.current.delete(key)
-      // A failure for a week she has left says nothing here: that week is read
-      // fresh when she comes back to it.
-      if (weekRef.current !== week) return
-      setSaveError(
-        error instanceof Error
-          ? `That change was not saved: ${error.message}`
-          : 'That change was not saved.',
-      )
+      // A failure for a view she has left (another week, or another person's
+      // week) says nothing there and reloads nothing there: her own week is
+      // read fresh when she comes back to it.
+      if (viewRef.current !== viewKey) return
+      setSaveError({
+        key: viewKey,
+        message:
+          error instanceof Error
+            ? `That change was not saved: ${error.message}`
+            : 'That change was not saved.',
+      })
       // Read what is stored again. Until it is back nothing can be changed, so
       // a click made meanwhile cannot be wiped out by the reload.
       setLoadedFor(null)
@@ -341,9 +379,9 @@ export function MyWeekPage() {
       const slot = saveQueue.current.get(key)
       if (slot) slot.latest = next
       else saveQueue.current.set(key, { latest: next, running: false })
-      void flush(key, clientId, weekStart)
+      void flush(key, clientId, weekStart, loadKey)
     },
-    [canEdit, flush, weekStart],
+    [canEdit, flush, weekStart, loadKey],
   )
 
   const toggleDay = (clientId: string, day: string) =>
@@ -376,7 +414,14 @@ export function MyWeekPage() {
   const friday = view.days[4]
   const weekLabel = `${shortDay(weekStart)} to ${monthDayYear.format(asDate(friday))}`
   const thisWeek = mondayOf(today)
-  const whose = previewMode ? employeeName(data.employees, activeEmployeeId) : null
+  const whose = previewMode || !ownWeek ? employeeName(data.employees, whoseId) : null
+  const others = useMemo(
+    () =>
+      data.employees
+        .filter((employee) => employee.id !== activeEmployeeId)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [data.employees, activeEmployeeId],
+  )
 
   return (
     <section className="panel my-week" id="my-week">
@@ -410,33 +455,56 @@ export function MyWeekPage() {
               This week
             </button>
           ) : null}
+          {canPick ? (
+            <label className="my-week-who">
+              <span>Whose week</span>
+              <select
+                className="input"
+                value={whoseId}
+                onChange={(event) =>
+                  setPickedId(event.target.value === activeEmployeeId ? null : event.target.value)
+                }
+              >
+                <option value={activeEmployeeId}>My week</option>
+                {others.map((employee) => (
+                  <option key={employee.id} value={employee.id}>
+                    {employee.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
         </div>
       </div>
 
-      <p className="my-week-hint">
-        Every client you have open work for that is due this month or overdue. Put each client on the
-        day or days you plan to work on it. When you have sent questions and are waiting for an
-        answer, set that task to In questions so you can move on to a client you have not started.
-        This is your own plan: it does not change any due date or anyone's tasks.
-      </p>
+      {ownWeek && !previewMode ? (
+        <p className="my-week-hint">
+          Every client you have open work for that is due this month or overdue. Put each client on the
+          day or days you plan to work on it. When you have sent questions and are waiting for an
+          answer, set that task to In questions so you can move on to a client you have not started.
+          This is your own plan: it does not change any due date or anyone's tasks.
+        </p>
+      ) : null}
 
       {whose ? (
         <p className="my-week-readonly" role="status">
           You are looking at {whose}'s week. It cannot be changed from here.
         </p>
       ) : null}
-      {loadError ? (
+      {shownLoadError ? (
         <p className="invoice-run-error" role="alert">
-          {loadError}
+          {shownLoadError}
         </p>
       ) : null}
-      {saveError ? (
+      {shownSaveError ? (
         <p className="invoice-run-error" role="alert">
-          {saveError}
+          {shownSaveError}
         </p>
       ) : null}
 
-      {!ready && !loadError ? <p className="my-week-empty">Loading your week…</p> : null}
+      {!ready && !shownLoadError ? (
+        <p className="my-week-empty">{ownWeek ? 'Loading your week…' : 'Loading the week…'}</p>
+      ) : null}
 
       {ready ? (
         <>
@@ -519,7 +587,11 @@ export function MyWeekPage() {
             })}
           </div>
 
-          {view.rows.length > 0 ? <h3 className="my-week-subhead">My clients this week</h3> : null}
+          {view.rows.length > 0 ? (
+            <h3 className="my-week-subhead">
+              {ownWeek && !previewMode ? 'My clients this week' : `${whose ? `${whose}'s` : 'Their'} clients this week`}
+            </h3>
+          ) : null}
           <ul className="my-week-rows">
             {rows.map((row) => (
               <ClientRow
@@ -581,6 +653,174 @@ export function MyWeekPage() {
           ) : null}
         </>
       ) : null}
+
+      {canPick ? (
+        <TeamWeeks
+          employees={data.employees}
+          checklists={data.checklists}
+          clients={clients}
+          weekStart={weekStart}
+          today={today}
+          ownId={activeEmployeeId}
+          // Her own line follows what is on her screen, saved or about to be.
+          ownEntries={ownWeek && ready ? shownEntries : null}
+          viewedId={whoseId}
+          onLook={(id) => setPickedId(id === activeEmployeeId ? null : id)}
+        />
+      ) : null}
+    </section>
+  )
+}
+
+/**
+ * "Everyone's week" (owners only): one line per person with open work, read
+ * from each person's stored plan for the week on screen and the same rules the
+ * page itself uses. The owner's own line is built from her own page, so it
+ * moves as she plans. A person whose plan cannot be read says so; the others
+ * still show.
+ */
+function TeamWeeks({
+  employees,
+  checklists,
+  clients,
+  weekStart,
+  today,
+  ownId,
+  ownEntries,
+  viewedId,
+  onLook,
+}: {
+  employees: Array<{ id: string; name: string }>
+  checklists: unknown[]
+  clients: Array<{ id: string; name: string }>
+  weekStart: string
+  today: string
+  ownId: string
+  ownEntries: WeekPlanEntry[] | null
+  viewedId: string
+  onLook: (id: string) => void
+}) {
+  // Keyed by the ids, not by the list: the workspace refreshes often and a new
+  // array holding the same people must not read everyone's plan again.
+  const otherIdsKey = employees
+    .map((employee) => employee.id)
+    .filter((id) => id !== ownId)
+    .sort()
+    .join('|')
+  const [loaded, setLoaded] = useState<{
+    key: string
+    byUser: Record<string, WeekPlanEntry[] | null>
+  } | null>(null)
+  const loadKey = `${weekStart}|${otherIdsKey}`
+  useEffect(() => {
+    const controller = new AbortController()
+    const ids = otherIdsKey.split('|').filter(Boolean)
+    const load = async () => {
+      const results = await Promise.all(
+        ids.map(async (id) => {
+          try {
+            const result = await fetchWeekPlanRequest(weekStart, id, controller.signal)
+            // Never another person's plan under this person's name.
+            if (result.userId !== id) return [id, null] as const
+            return [id, result.entries.map((entry) => normalizeWeekPlanEntry(entry))] as const
+          } catch {
+            return [id, null] as const
+          }
+        }),
+      )
+      if (controller.signal.aborted) return
+      setLoaded({ key: `${weekStart}|${otherIdsKey}`, byUser: Object.fromEntries(results) })
+    }
+    void load()
+    return () => controller.abort()
+    // Read again each time she opens a different person's week, so a line and
+    // the week it opens cannot drift far apart on a page left open. (The
+    // earlier answer stays on screen until the new one is in.)
+  }, [weekStart, otherIdsKey, viewedId])
+
+  const lines = useMemo(() => {
+    const ready = loaded?.key === loadKey
+    return [...employees]
+      .sort((a, b) => Number(b.id === ownId) - Number(a.id === ownId) || a.name.localeCompare(b.name))
+      .map((employee) => {
+        const own = employee.id === ownId
+        const entries = own ? ownEntries : ready ? (loaded?.byUser[employee.id] ?? null) : undefined
+        const view =
+          entries === undefined || entries === null
+            ? null
+            : buildWeekPlan({ checklists, clients, entries, userId: employee.id, weekStart, today })
+        return {
+          id: employee.id,
+          name: own ? 'Me' : employee.name,
+          // undefined = still reading; null = could not be read (or her own page is not showing her week).
+          state: entries === undefined ? 'loading' : entries === null ? (own ? 'own-hidden' : 'failed') : 'ready',
+          view,
+        }
+      })
+      // A person with nothing open and nothing finished this month has no line.
+      .filter(
+        (line) =>
+          line.state !== 'ready' ||
+          (line.view?.rows.filter((row) => !row.noOpenWork).length ?? 0) +
+            (line.view?.finishedClientCount ?? 0) >
+            0,
+      )
+      .filter((line) => line.state !== 'own-hidden')
+  }, [employees, ownId, ownEntries, loaded, loadKey, checklists, clients, weekStart, today])
+
+  return (
+    <section className="my-week-team" aria-label="Everyone's week">
+      <h3 className="my-week-subhead">Everyone's week</h3>
+      <p className="my-week-hint">
+        One line for each person with open work this week. Only owners see this. Look opens their
+        week on this page; it cannot be changed from here.
+      </p>
+      {lines.length === 0 ? (
+        <p className="my-week-empty">Nobody has open work due this month.</p>
+      ) : (
+        <table className="my-week-team-table">
+          <thead>
+            <tr>
+              <th scope="col">Person</th>
+              <th scope="col">Clients</th>
+              <th scope="col">Not planned</th>
+              <th scope="col">In questions</th>
+              <th scope="col">Answered</th>
+              <th scope="col">Finished for month</th>
+              <th scope="col">
+                <span className="visually-hidden">Look</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {lines.map((line) => (
+              <tr key={line.id} className={line.id === viewedId ? 'is-viewed' : undefined}>
+                <th scope="row">{line.name}</th>
+                {line.view ? (
+                  <>
+                    <td>{line.view.rows.filter((row) => !row.noOpenWork).length}</td>
+                    <td>{line.view.notPlannedCount}</td>
+                    <td>{line.view.questions.length}</td>
+                    <td>{line.view.answered.length}</td>
+                    <td>{line.view.finishedClientCount}</td>
+                  </>
+                ) : (
+                  <td colSpan={5}>{line.state === 'loading' ? 'Loading…' : 'Could not be read'}</td>
+                )}
+                <td>
+                  {line.id === viewedId ? (
+                    <span className="my-week-team-here">On screen</span>
+                  ) : (
+                    <button type="button" className="ghost-action" onClick={() => onLook(line.id)}>
+                      Look<span className="visually-hidden"> at {line.name}'s week</span>
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </section>
   )
 }

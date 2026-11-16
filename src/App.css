@@ -15091,3 +15091,63 @@ details.invoice-run-sent ul,
   color: var(--muted);
   font-size: 13px;
 }
+
+/* My Week, ship 3: the owner's "whose week" picker and a line per person. */
+.my-week-who {
+  align-items: center;
+  color: var(--bluegray);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 760;
+  gap: 8px;
+}
+
+.my-week-team {
+  border-top: 1px solid var(--line);
+  margin-top: 26px;
+  padding-top: 4px;
+}
+
+.my-week-team-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 10px;
+  width: 100%;
+}
+
+.my-week-team-table th,
+.my-week-team-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: right;
+}
+
+.my-week-team-table th:first-child,
+.my-week-team-table td[colspan] {
+  text-align: left;
+}
+
+.my-week-team-table thead th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.my-week-team-table tbody th {
+  font-weight: 650;
+}
+
+.my-week-team-table tr.is-viewed {
+  background: var(--soft);
+}
+
+.my-week-team-here {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .my-week-team {
+    overflow-x: auto;
+  }
+}

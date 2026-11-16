@@ -527,8 +527,13 @@ describe('My Week: an owner looking at someone else’s week (preview)', () => {
       entries: [entry('c-acme', { taskMarks: { 'chk-payroll': { status: 'questions', note: '' } } })],
     })
     render(page())
-    await screen.findByText('My clients this week')
+    await screen.findByText("Lisa's clients this week")
     expect(screen.getByText("You are looking at Lisa's week. It cannot be changed from here.")).toBeInTheDocument()
+    // The advice written to "you" is for her own week only.
+    expect(screen.queryByText(/Put each client on the day or days you plan/)).not.toBeInTheDocument()
+    // No picker and no team table while previewing: preview shows one person's own view.
+    expect(screen.queryByLabelText('Whose week')).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: "Everyone's week" })).not.toBeInTheDocument()
 
     for (const button of within(screen.getByRole('group', { name: 'Days for Acme Dental' })).getAllByRole('button')) {
       expect(button).toBeDisabled()
@@ -789,5 +794,270 @@ describe('My Week: questions that set themselves from the Waiting flags', () => 
     await screen.findByText('My clients this week')
     expect(screen.getByText('1 client is finished for the month.')).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Acme Dental' })).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * Ship 3. From the ticket: "She can peek at everyone's from her page with a
+ * button." An owner gets a "Whose week" picker and a line per person; a team
+ * member gets neither, and the server refuses her anyone's week but her own.
+ */
+describe('My Week: an owner looks at anyone’s week from her own page', () => {
+  const OWNER = 'emp-owner'
+  const ALLISON = 'emp-allison'
+  const plans: Record<string, ReturnType<typeof entry>[]> = {}
+
+  beforeEach(() => {
+    for (const key of Object.keys(plans)) delete plans[key]
+    plans[LISA] = [entry('c-acme', { plannedDays: ['2026-11-18'], note: 'bank feed first' })]
+    plans[ALLISON] = []
+    plans[OWNER] = []
+    contextValue = {
+      data: {
+        ...data,
+        employees: [
+          { id: OWNER, name: 'Brittany', role: 'Owner' },
+          { id: LISA, name: 'Lisa', role: 'Bookkeeper' },
+          { id: ALLISON, name: 'Allison', role: 'Accountant' },
+          { id: 'emp-idle', name: 'Zed', role: 'Bookkeeper' },
+          { id: 'emp-none', name: 'Nia', role: 'Bookkeeper' },
+        ],
+        checklists: [
+          ...data.checklists,
+          checklist('chk-own', 'c-bright', 'Owner review', '2026-11-20', { assigneeId: OWNER }),
+        ],
+      },
+      activeEmployeeId: OWNER,
+      previewMode: false,
+      role: 'owner',
+    } as unknown as AppContextValue
+    mockFetch.mockImplementation(async (weekStart, userId) => {
+      const who = userId ?? OWNER
+      if (who === 'emp-idle') throw new Error('Could not load the week (500)')
+      return { weekStart, userId: who, entries: plans[who] ?? [] }
+    })
+  })
+
+  const teamTable = () => screen.getByRole('region', { name: "Everyone's week" })
+  const teamRow = (name: string) =>
+    within(teamTable()).getByRole('rowheader', { name }).closest('tr') as HTMLElement
+  const cells = (name: string) =>
+    Array.from(teamRow(name).querySelectorAll('td')).map((cell) => cell.textContent)
+
+  it('opens on her own week, with a picker and a line per person who has open work', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    // Her own week is asked for without naming anyone.
+    expect(mockFetch).toHaveBeenCalledWith(WEEK, null, expect.anything())
+    expect(screen.getByLabelText('Whose week')).toHaveValue(OWNER)
+    expect(within(screen.getByLabelText('Whose week')).getAllByRole('option').map((o) => o.textContent)).toEqual([
+      'My week',
+      'Allison',
+      'Lisa',
+      'Nia',
+      'Zed',
+    ])
+
+    await waitFor(() => expect(cells('Lisa')[0]).toBe('2'))
+    // Lisa: Acme (planned Wednesday) and Bright (not planned).
+    expect(cells('Lisa').slice(0, 5)).toEqual(['2', '1', '0', '0', '0'])
+    // Her own line comes from her own page.
+    expect(cells('Me').slice(0, 5)).toEqual(['1', '1', '0', '0', '0'])
+    expect(within(teamRow('Me')).getByText('On screen')).toBeInTheDocument()
+    // Allison holds one task on Bright Books and has planned nothing.
+    expect(cells('Allison').slice(0, 5)).toEqual(['1', '1', '0', '0', '0'])
+    // Nia has nothing open: no line. Zed's plan could not be read: said so.
+    expect(within(teamTable()).queryByRole('rowheader', { name: 'Nia' })).not.toBeInTheDocument()
+    expect(within(teamRow('Zed')).getByText('Could not be read')).toBeInTheDocument()
+    // Each other person's plan was asked for by name, once.
+    for (const id of [LISA, ALLISON, 'emp-idle', 'emp-none']) {
+      expect(mockFetch.mock.calls.filter((call) => call[1] === id)).toHaveLength(1)
+    }
+  })
+
+  it('her own line moves as she plans', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    await waitFor(() => expect(cells('Me')[1]).toBe('1'))
+    fireEvent.click(dayButton('Bright Books', /^Monday/))
+    await waitFor(() => expect(cells('Me')[1]).toBe('0'))
+    expect(mockSave).toHaveBeenCalledTimes(1)
+    expect(mockSave.mock.calls[0][0]).toBe('c-bright')
+  })
+
+  it('picking a person shows their week, by name, and nothing on it can be changed', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: LISA } })
+
+    await screen.findByText("Lisa's clients this week")
+    expect(screen.getByText("You are looking at Lisa's week. It cannot be changed from here.")).toBeInTheDocument()
+    expect(screen.getByLabelText('Note for Acme Dental')).toHaveValue('bank feed first')
+    expect(screen.getByLabelText('Note for Acme Dental')).toBeDisabled()
+    expect(dayButton('Acme Dental', /^Wednesday/)).toHaveAttribute('aria-pressed', 'true')
+    for (const button of within(screen.getByRole('group', { name: 'Days for Acme Dental' })).getAllByRole('button')) {
+      expect(button).toBeDisabled()
+    }
+    expect(screen.getByLabelText('Status of Payroll')).toBeDisabled()
+    // Her own task is not on Lisa's week.
+    expect(screen.queryByText('Owner review')).not.toBeInTheDocument()
+    fireEvent.click(dayButton('Acme Dental', /^Monday/))
+    expect(mockSave).not.toHaveBeenCalled()
+    expect(within(teamRow('Lisa')).getByText('On screen')).toBeInTheDocument()
+
+    // Back to her own.
+    fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: OWNER } })
+    await screen.findByText('My clients this week')
+    expect(screen.getByText('Owner review')).toBeInTheDocument()
+    expect(dayButton('Bright Books', /^Monday/)).not.toBeDisabled()
+  })
+
+  it('Look on a person’s line opens their week, and Look on her own line comes back', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    await waitFor(() => expect(cells('Lisa')[0]).toBe('2'))
+    fireEvent.click(within(teamRow('Lisa')).getByRole('button', { name: "Look at Lisa's week" }))
+    await screen.findByText("Lisa's clients this week")
+    expect(screen.getByLabelText('Whose week')).toHaveValue(LISA)
+
+    // Her own line cannot be built from her page while it shows Lisa, so it is left out...
+    expect(within(teamTable()).queryByRole('rowheader', { name: 'Me' })).not.toBeInTheDocument()
+    // ...and the picker is the way back.
+    fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: OWNER } })
+    await screen.findByText('My clients this week')
+    expect(within(teamRow('Me')).getByText('On screen')).toBeInTheDocument()
+  })
+
+  it('never shows one person’s plan under another’s name', async () => {
+    mockFetch.mockImplementation(async (weekStart, userId) => ({
+      weekStart,
+      // The server answers for the wrong person whenever Lisa is asked for.
+      userId: userId === LISA ? ALLISON : (userId ?? OWNER),
+      entries: userId === LISA ? [entry('c-acme', { note: 'not hers' })] : [],
+    }))
+    render(page())
+    await screen.findByText('My clients this week')
+    await waitFor(() => expect(within(teamRow('Lisa')).getByText('Could not be read')).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: LISA } })
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the week.')
+    expect(screen.queryByDisplayValue('not hers')).not.toBeInTheDocument()
+  })
+
+  it('a new week reads everyone again; a refresh of the same people does not', async () => {
+    const view = render(page())
+    await screen.findByText('My clients this week')
+    await waitFor(() => expect(cells('Lisa')[0]).toBe('2'))
+    const before = mockFetch.mock.calls.length
+
+    // The workspace refreshes: a new array holding the same people.
+    contextValue = {
+      ...contextValue,
+      data: { ...contextValue.data, employees: [...contextValue.data.employees] },
+    } as unknown as AppContextValue
+    view.rerender(page())
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(mockFetch.mock.calls.length).toBe(before)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next week' }))
+    await waitFor(() =>
+      expect(mockFetch.mock.calls.filter((call) => call[0] === '2026-11-23' && call[1] === LISA)).toHaveLength(1),
+    )
+  })
+
+  it('a change of hers still being saved survives a look at someone else and back', async () => {
+    type Saved = Awaited<ReturnType<typeof saveWeekPlanEntryRequest>>
+    let finishSave: () => void = () => {}
+    mockSave.mockImplementation(
+      (clientId, body) =>
+        new Promise<Saved>((resolve) => {
+          finishSave = () => resolve({ weekStart: body.weekStart, entry: entry(clientId, { plannedDays: body.plannedDays }) })
+        }),
+    )
+    render(page())
+    await screen.findByText('My clients this week')
+    fireEvent.click(dayButton('Bright Books', /^Monday/))
+    expect(mockSave).toHaveBeenCalledTimes(1)
+
+    // She looks at Lisa and comes straight back; the store has not got Monday yet,
+    // so her own week is read back WITHOUT it.
+    fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: LISA } })
+    await screen.findByText("Lisa's clients this week")
+    fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: OWNER } })
+    await screen.findByText('My clients this week')
+    // Monday is still on her screen: the save in flight is newer than what was read.
+    expect(dayButton('Bright Books', /^Monday/)).toHaveAttribute('aria-pressed', 'true')
+
+    // And her next click builds on it instead of putting the older row back.
+    finishSave()
+    await waitFor(() => expect(dayButton('Bright Books', /^Monday/)).not.toBeDisabled())
+    fireEvent.click(dayButton('Bright Books', /^Tuesday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(2))
+    expect(mockSave.mock.calls[1][1].plannedDays).toEqual(['2026-11-16', '2026-11-17'])
+  })
+
+  it('a save of hers that fails while she is looking at someone else says nothing on their week', async () => {
+    let failSave: (error: Error) => void = () => {}
+    mockSave.mockReturnValue(
+      new Promise((_, reject) => {
+        failSave = reject
+      }),
+    )
+    render(page())
+    await screen.findByText('My clients this week')
+    fireEvent.click(dayButton('Bright Books', /^Monday/))
+    fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: LISA } })
+    await screen.findByText("Lisa's clients this week")
+
+    failSave(new Error('Client not found'))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    // Lisa's week stays on screen; it is not thrown back to "Loading".
+    expect(screen.getByText("Lisa's clients this week")).toBeInTheDocument()
+
+    // Back on her own week, what is stored is shown: Monday was never saved.
+    fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: OWNER } })
+    await screen.findByText('My clients this week')
+    expect(dayButton('Bright Books', /^Monday/)).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('an error on one person’s week is not left standing on the next person’s', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    // Zed's plan cannot be read.
+    fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: 'emp-idle' } })
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the week (500)')
+    fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: LISA } })
+    await screen.findByText("Lisa's clients this week")
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('opening a person’s week reads the team’s lines again', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    await waitFor(() => expect(cells('Lisa')[0]).toBe('2'))
+    const allisonReads = () => mockFetch.mock.calls.filter((call) => call[1] === ALLISON).length
+    expect(allisonReads()).toBe(1)
+    fireEvent.click(within(teamRow('Lisa')).getByRole('button', { name: "Look at Lisa's week" }))
+    await screen.findByText("Lisa's clients this week")
+    await waitFor(() => expect(allisonReads()).toBe(2))
+    // Her own saves do not: the lines of the others are not read again for them.
+    fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: OWNER } })
+    await screen.findByText('My clients this week')
+    await waitFor(() => expect(allisonReads()).toBe(3))
+    fireEvent.click(dayButton('Bright Books', /^Monday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(allisonReads()).toBe(3)
+  })
+
+  it('a team member has no picker and no team table, and asks only for her own week', async () => {
+    contextValue = { ...contextValue, role: 'employee', activeEmployeeId: LISA } as unknown as AppContextValue
+    mockFetch.mockImplementation(async (weekStart) => ({ weekStart, userId: LISA, entries: plans[LISA] }))
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(screen.queryByLabelText('Whose week')).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: "Everyone's week" })).not.toBeInTheDocument()
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+    expect(mockFetch.mock.calls[0][1]).toBeNull()
   })
 })
