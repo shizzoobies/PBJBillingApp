@@ -92,3 +92,43 @@ Rough size: comparable to the Board current-step view plus Skip a step together.
 - **A wait on the client vs a wait on Brittany** both count as "In questions"; the row says which.
 - **No new idea of "done".** "Finished for the month" set by hand is only a planning mark; it never completes a checklist.
 - **Performance.** The list is derived from data the page already has in memory; the only new read is one small table for one person and one week.
+
+## 8. Her answers (2026-11-16) and what they change
+
+Brittany answered the seven questions on the ticket:
+
+| # | Question | Her answer | What is built |
+|---|---|---|---|
+| 1 | What fills the list | "yes" | Every client the person has open work for that is due this month or overdue, with this week's due dates marked. |
+| 2 | One row per client or one line per task | "we can see what this looks like" | One row per client with its tasks listed under it, as proposed. She will react to the real page, so keep the row layout easy to change. |
+| 3 | Status per client or per task | "each task" | **Changed.** The status belongs to each task, not to the client. |
+| 4 | "In questions" automatic | "I like this" | Automatic from the Waiting flags, with a manual move as well. |
+| 5 | Days | "Monday to Friday" | Five columns. |
+| 6 | Replace Gantt | "yeah this works I do not think anyone uses it" | My Week takes Gantt's place; Gantt is removed a month later if nobody asks. |
+| 7 | End of day reminder | "this page only" | No notification. |
+
+**What "each task" changes.**
+
+- The status column in section 3 is shown on each task line under the client, not once on the client row. A task is Not planned, Planned, In questions, Answered or Finished for the month by the same rules as before, read from that one checklist: it is In questions while every open step of hers on THAT checklist is waiting, and Answered when one of its waits is answered.
+- The client row shows a roll-up of its tasks in words ("2 planned, 1 in questions"), and the client still sits greyed on a day only when ALL of its tasks for that person are in questions. A client with one task in questions and one still to do stays live on its day, which is the case she described ("a client may need touching multiple times a week if it has multiple tasks due").
+- The Sent questions list at the bottom of today lists tasks, grouped under their client.
+- Putting a client on a day stays per client (answer 2), so the day columns hold clients, each showing its tasks.
+
+**The table, revised for this.** Still one table and still endpoint-owned. The hand-set status moves from two columns on the row to one small map keyed by checklist:
+
+```
+week_plan_entries
+  id            text primary key
+  user_id       text not null          -- whose plan
+  week_start    date not null          -- the Monday
+  client_id     text not null
+  planned_days  date[] not null default '{}'
+  note          text
+  task_marks    jsonb not null default '{}'   -- { "<checklist id>": { "status": "questions" | "finished", "note": "..." } }
+  updated_at    timestamptz not null default now()
+  unique (user_id, week_start, client_id)
+```
+
+`status_manual` and `status_note` from section 4 are not created. A mark for a checklist that no longer exists, or is no longer the person's, is ignored on read and dropped at the next save of that row. Postgres returns jsonb keys in its own order, so anything that compares a saved row uses the stable form (`stableStringify`), as elsewhere. **This table still needs Alex's yes before it is created.**
+
+The build order in section 6 is unchanged; ship 1 now carries the per-task status line and the roll-up, and its `PUT /api/week-plan/:clientId` takes `plannedDays`, `note` and `taskMarks`.
