@@ -17,7 +17,11 @@ import type { AppData } from '../lib/types'
  */
 
 vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
-vi.mock('../../lib/firm-time.js', () => ({ firmToday: () => '2026-11-17' }))
+// Only today's date is pinned; the rest of the firm's calendar helpers are the real ones.
+vi.mock('../../lib/firm-time.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  firmToday: () => '2026-11-17',
+}))
 vi.mock('../lib/api', () => ({
   fetchWeekPlanRequest: vi.fn(),
   saveWeekPlanEntryRequest: vi.fn(),
@@ -537,5 +541,253 @@ describe('My Week: an owner looking at someone else’s week (preview)', () => {
 
     fireEvent.click(dayButton('Acme Dental', /^Monday/))
     expect(mockSave).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Ship 2: questions set themselves. Her answer 4, to "when everything they have
+ * open ... is waiting, it moves to Sent questions on its own, and comes back to
+ * the top of their day when it is answered": "I like this".
+ */
+describe('My Week: questions that set themselves from the Waiting flags', () => {
+  const BRITT = 'emp-britt'
+  const waitOn = (over: Record<string, unknown> = {}) => ({
+    id: 'w1',
+    blockerId: BRITT,
+    requestedBy: LISA,
+    note: 'which account?',
+    createdAt: '2026-11-16T15:00:00.000Z',
+    ...over,
+  })
+  const withData = (checklists: unknown[]) => {
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...data,
+        employees: [...data.employees, { id: BRITT, name: 'Brittany', role: 'Owner' }],
+        checklists,
+      },
+    } as unknown as AppContextValue
+  }
+  const waitingTask = (id: string, clientId: string, title: string, wait = waitOn()) =>
+    checklist(id, clientId, title, '2026-11-30', {
+      items: [step('a', true), { ...step('b', false), waitingOns: [wait] }],
+    })
+
+  it('a task whose open work is all waiting reads In questions and says who and since when', async () => {
+    withData([waitingTask('chk-w', 'c-acme', 'Monthly close')])
+    render(page())
+    await screen.findByText('My clients this week')
+    const acme = within(row('Acme Dental'))
+    expect(acme.getByText('Waiting on Brittany since Nov 16')).toBeInTheDocument()
+    // The word beside the picker (the picker itself also lists 'In questions' as a choice).
+    expect(acme.getByText('In questions', { selector: 'small' })).toBeInTheDocument()
+    expect(acme.getByText('1 in questions')).toBeInTheDocument()
+    // The picker is only what she set herself: nothing.
+    expect(screen.getByLabelText('Status of Monthly close')).toHaveValue('work')
+    // Questions are out, so this client is not "not planned".
+    expect(screen.getByText('Every client is planned or in hand this week.')).toBeInTheDocument()
+
+    const sent = screen.getByRole('region', { name: 'Sent questions' })
+    expect(within(sent).getByText('Monthly close')).toBeInTheDocument()
+    expect(within(sent).getByText('Waiting on Brittany since Nov 16')).toBeInTheDocument()
+    // It clears by itself when answered: no button to do it by hand.
+    expect(within(sent).queryByRole('button', { name: 'Answered, back to work' })).not.toBeInTheDocument()
+    expect(mockSave).not.toHaveBeenCalled()
+  })
+
+  it('a wait on the client says "the client", and an old-style flag says it is marked waiting', async () => {
+    withData([
+      waitingTask('chk-c', 'c-acme', 'Sales tax', waitOn({ blockerType: 'client', blockerId: 'c-acme' })),
+      checklist('chk-old', 'c-bright', 'Bank recs', '2026-11-30', {
+        items: [{ ...step('a', false), waiting: true, waitingOn: 'statements from the bank' }],
+      }),
+    ])
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(within(row('Acme Dental')).getByText('Waiting on the client since Nov 16')).toBeInTheDocument()
+    expect(within(row('Bright Books')).getByText('Marked waiting: statements from the bank')).toBeInTheDocument()
+  })
+
+  it('greys the client on its day while everything is waiting, and not once one task is live', async () => {
+    withData([waitingTask('chk-w', 'c-acme', 'Monthly close')])
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [entry('c-acme', { plannedDays: ['2026-11-17'] })],
+    })
+    const view = render(page())
+    await screen.findByText('My clients this week')
+    expect(within(dayColumn(/^Tuesday Nov 17$/)).getByText('Acme Dental').closest('li')).toHaveClass('is-parked')
+
+    withData([waitingTask('chk-w', 'c-acme', 'Monthly close'), checklist('chk-p', 'c-acme', 'Payroll', '2026-11-18')])
+    view.rerender(page())
+    expect(within(dayColumn(/^Tuesday Nov 17$/)).getByText('Acme Dental').closest('li')).not.toHaveClass('is-parked')
+    expect(within(dayColumn(/^Tuesday Nov 17$/)).getByText('1 to work on')).toBeInTheDocument()
+  })
+
+  it('when the answer is in, the task moves to "Answered: pick these up" and out of Sent questions', async () => {
+    withData([
+      waitingTask(
+        'chk-w',
+        'c-acme',
+        'Monthly close',
+        waitOn({ resolvedAt: '2026-11-17T14:00:00.000Z', resolvedBy: BRITT }),
+      ),
+    ])
+    render(page())
+    await screen.findByText('My clients this week')
+    const answered = screen.getByRole('region', { name: 'Answered' })
+    expect(within(answered).getByText('Acme Dental')).toBeInTheDocument()
+    expect(within(answered).getByText('Brittany answered. Open it to confirm and carry on.')).toBeInTheDocument()
+    expect(within(answered).getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/checklists?focus=chk-w')
+    expect(screen.queryByRole('region', { name: 'Sent questions' })).not.toBeInTheDocument()
+    const acme = within(row('Acme Dental'))
+    expect(acme.getByText('Answered')).toBeInTheDocument()
+    expect(acme.getByText('1 answered')).toBeInTheDocument()
+  })
+
+  it('a question she set herself still has its own button, beside one the flags set', async () => {
+    withData([
+      waitingTask('chk-w', 'c-acme', 'Monthly close'),
+      checklist('chk-p', 'c-acme', 'Payroll', '2026-11-18'),
+    ])
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [entry('c-acme', { taskMarks: { 'chk-p': { status: 'questions', note: '' } } })],
+    })
+    render(page())
+    const sent = await screen.findByRole('region', { name: 'Sent questions' })
+    expect(within(sent).getAllByRole('listitem')).toHaveLength(2)
+    expect(within(sent).getAllByRole('button', { name: 'Answered, back to work' })).toHaveLength(1)
+    expect(screen.getByLabelText('Status of Payroll')).toHaveValue('questions')
+    expect(screen.getByLabelText('Status of Monthly close')).toHaveValue('work')
+  })
+
+  it('a question she set by hand on a task the flags also hold keeps its button', async () => {
+    withData([waitingTask('chk-w', 'c-acme', 'Monthly close')])
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [entry('c-acme', { taskMarks: { 'chk-w': { status: 'questions', note: '' } } })],
+    })
+    render(page())
+    const sent = await screen.findByRole('region', { name: 'Sent questions' })
+    expect(within(sent).getByText('Waiting on Brittany since Nov 16')).toBeInTheDocument()
+    fireEvent.click(within(sent).getByRole('button', { name: 'Answered, back to work' }))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave.mock.calls[0][1].taskMarks).toEqual({})
+    // Her mark is gone; the flags still hold it, now without a button.
+    expect(within(screen.getByRole('region', { name: 'Sent questions' })).queryByRole('button')).not.toBeInTheDocument()
+  })
+
+  it('says it plainly when two people are waiting on her, with and without a date', async () => {
+    withData([
+      checklist('chk-two', 'c-acme', 'Monthly close', '2026-11-30', {
+        items: [
+          {
+            ...step('a', false),
+            waitingOns: [
+              waitOn({ id: 'w1', blockerId: LISA, requestedBy: BRITT }),
+              waitOn({ id: 'w2', blockerId: LISA, requestedBy: 'emp-left', createdAt: '2026-11-12T15:00:00.000Z' }),
+            ],
+          },
+        ],
+      }),
+      checklist('chk-nodate', 'c-bright', 'Sales tax', '2026-11-30', {
+        items: [{ ...step('a', false), waitingOns: [waitOn({ blockerId: LISA, requestedBy: BRITT, createdAt: '' })] }],
+      }),
+    ])
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(
+      within(row('Acme Dental')).getByText('Brittany and a teammate have been waiting on you since Nov 12.'),
+    ).toBeInTheDocument()
+    expect(within(row('Bright Books')).getByText('Brittany is waiting on you.')).toBeInTheDocument()
+  })
+
+  it('names the client and each person once when several waits hold a task', async () => {
+    withData([
+      checklist('chk-many', 'c-acme', 'Monthly close', '2026-11-30', {
+        items: [
+          { ...step('a', false), waitingOns: [waitOn({ id: 'w1', blockerType: 'client', blockerId: 'c-acme', createdAt: '2026-11-13T15:00:00.000Z' })] },
+          { ...step('b', false), waitingOns: [waitOn({ id: 'w2' }), waitOn({ id: 'w3' })] },
+        ],
+      }),
+    ])
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(within(row('Acme Dental')).getByText('Waiting on the client and Brittany since Nov 13')).toBeInTheDocument()
+  })
+
+  it('a task where someone is waiting on HER is shown as her work, with who is waiting', async () => {
+    withData([
+      checklist('chk-me', 'c-acme', 'Monthly close', '2026-11-30', {
+        items: [{ ...step('a', false), waitingOns: [waitOn({ blockerId: LISA, requestedBy: BRITT })] }],
+      }),
+    ])
+    render(page())
+    await screen.findByText('My clients this week')
+    const acme = within(row('Acme Dental'))
+    expect(acme.getByText('Brittany has been waiting on you since Nov 16.')).toBeInTheDocument()
+    expect(acme.getByText('Not planned', { selector: 'small' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Sent questions' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Answered' })).not.toBeInTheDocument()
+    expect(screen.getByText('1 client not planned this week')).toBeInTheDocument()
+  })
+
+  it('an answer someone else must confirm reads as still waiting on them', async () => {
+    withData([
+      checklist('chk-c', 'c-acme', 'Monthly close', '2026-11-30', {
+        items: [
+          {
+            ...step('a', false),
+            assigneeId: BRITT,
+            waitingOns: [
+              waitOn({ blockerId: LISA, requestedBy: BRITT, resolvedAt: '2026-11-17T14:00:00.000Z', resolvedBy: LISA }),
+            ],
+          },
+        ],
+      }),
+    ])
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(within(row('Acme Dental')).getByText('Waiting on Brittany to confirm an answer')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Answered' })).not.toBeInTheDocument()
+  })
+
+  it('names a person who has left the team as "a teammate", and says when a question came back', async () => {
+    withData([
+      waitingTask('chk-gone', 'c-acme', 'Monthly close', waitOn({ blockerId: 'emp-left' })),
+      waitingTask(
+        'chk-q',
+        'c-bright',
+        'Sales tax',
+        waitOn({ questions: [{ at: '2026-11-16T18:00:00.000Z', by: BRITT, note: 'which month?' }] }),
+      ),
+    ])
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(within(row('Acme Dental')).getByText('Waiting on a teammate since Nov 16')).toBeInTheDocument()
+    // Lisa asked; Brittany asked her a question back: answering is Lisa's move.
+    const bright = within(row('Bright Books'))
+    expect(bright.getByText('Brittany asked you a question back.')).toBeInTheDocument()
+    expect(bright.getByText('Not planned', { selector: 'small' })).toBeInTheDocument()
+    // So it is not parked in Sent questions; only the other one is.
+    const sent = screen.getByRole('region', { name: 'Sent questions' })
+    expect(within(sent).getAllByRole('listitem')).toHaveLength(1)
+    expect(within(sent).getByText('Monthly close')).toBeInTheDocument()
+  })
+
+  it('says how many clients are finished for the month', async () => {
+    withData([
+      checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-30', { items: [step('a', true)] }),
+      checklist('chk-open', 'c-bright', 'Sales tax', '2026-11-30'),
+    ])
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(screen.getByText('1 client is finished for the month.')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Acme Dental' })).not.toBeInTheDocument()
   })
 })

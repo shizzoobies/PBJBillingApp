@@ -16,6 +16,7 @@ import {
   type WeekPlanMarkStatus,
   type WeekPlanRow,
   type WeekPlanTask,
+  type WeekPlanWait,
 } from '../../lib/week-plan.js'
 
 /**
@@ -33,6 +34,11 @@ import {
  * What is the person's own and stored: the days, the note, the marks
  * (`/api/week-plan`). Everything else is read off the checklists the page
  * already holds (`buildWeekPlan`), so it cannot drift from the real work.
+ *
+ * Questions set themselves (ship 2): a task whose every open step the team has
+ * marked Waiting reads In questions with nothing set, saying who it waits on and
+ * since when, and reads Answered once the answer is in. That is read off the
+ * checklists; the picker on a task is only for what she sets herself.
  *
  * Whose week: the person using the app. While an owner previews somebody, it is
  * that person's week and nothing can be changed.
@@ -66,7 +72,81 @@ const STATUS_WORDS: Record<WeekPlanTask['status'], string> = {
   not_planned: 'Not planned',
   planned: 'Planned',
   questions: 'In questions',
+  answered: 'Answered',
   finished: 'Finished for month',
+}
+
+const listOf = (names: string[]) =>
+  names.length <= 1 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+
+/**
+ * The waits on a task, in words. The list handed in is all of one kind (see
+ * `buildWeekPlan`): answers that are in, waits that are out with someone else,
+ * or waits where she is the one being asked. `nameOf` turns an id into a name.
+ */
+function waitWords(waits: WeekPlanWait[], nameOf: (id: string) => string): string {
+  if (waits.length === 0) return ''
+  const names = (list: WeekPlanWait[]) => [
+    ...new Set(list.map((wait) => (wait.who ? nameOf(wait.who) : '')).filter(Boolean)),
+  ]
+  const earliest = (list: WeekPlanWait[]) =>
+    list
+      .map((wait) => wait.since)
+      .filter((day): day is string => Boolean(day))
+      .sort()[0]
+  const since = (list: WeekPlanWait[]) => (earliest(list) ? ` since ${shortDay(earliest(list))}` : '')
+
+  if (waits[0].move === 'answered') {
+    const who = names(waits)
+    return who.length > 0
+      ? `${listOf(who)} answered. Open it to confirm and carry on.`
+      : 'An answer is in. Open it to confirm and carry on.'
+  }
+  if (waits[0].move === 'mine') {
+    // Two ways it is her move: someone is waiting on her to do something, or
+    // the person she asked has asked her a question back.
+    const waiting = waits.filter((wait) => !wait.askedBack)
+    const asking = waits.filter((wait) => wait.askedBack)
+    const parts: string[] = []
+    if (waiting.length > 0) {
+      const who = names(waiting)
+      const dated = Boolean(earliest(waiting))
+      const subject = who.length > 0 ? listOf(who) : 'Someone'
+      const verb =
+        who.length > 1 ? (dated ? 'have been waiting' : 'are waiting') : dated ? 'has been waiting' : 'is waiting'
+      parts.push(`${subject} ${verb} on you${since(waiting)}`)
+    }
+    if (asking.length > 0) {
+      const who = names(asking)
+      parts.push(`${who.length > 0 ? listOf(who) : 'Someone'} asked you a question back`)
+    }
+    return `${parts.join('. ')}.`
+  }
+  // Out with someone else.
+  const asking = waits.filter((wait) => !wait.toConfirm)
+  const confirming = waits.filter((wait) => wait.toConfirm)
+  const asked = [
+    ...(asking.some((wait) => wait.onClient) ? ['the client'] : []),
+    ...names(asking.filter((wait) => !wait.onClient)),
+  ]
+  const parts: string[] = []
+  if (asked.length > 0) parts.push(`Waiting on ${listOf(asked)}${since(asking)}`)
+  if (confirming.length > 0) {
+    const who = names(confirming)
+    parts.push(
+      who.length > 0
+        ? `${asked.length > 0 ? 'waiting on' : 'Waiting on'} ${listOf(who)} to confirm an answer`
+        : `${asked.length > 0 ? 'an' : 'An'} answer is waiting to be confirmed`,
+    )
+  }
+  if (parts.length === 0) {
+    // The old plain Waiting flag: nobody is named on it.
+    const note = waits.find((wait) => wait.note)?.note ?? ''
+    return note ? `Marked waiting: ${note}` : 'Marked waiting'
+  }
+  const askedBack = names(waits.filter((wait) => wait.askedBack))
+  const words = parts.join(', ')
+  return askedBack.length > 0 ? `${words}. ${listOf(askedBack)} asked a question back.` : words
 }
 
 function rollupWords(row: WeekPlanRow): string {
@@ -74,6 +154,7 @@ function rollupWords(row: WeekPlanRow): string {
   const parts = [
     [row.rollup.planned, 'planned'],
     [row.rollup.notPlanned, 'not planned'],
+    [row.rollup.answered, 'answered'],
     [row.rollup.questions, 'in questions'],
     [row.rollup.finished, 'finished'],
   ]
@@ -284,6 +365,14 @@ export function MyWeekPage() {
       return { ...current, taskMarks }
     })
 
+  // A person named on a wait may have left the team since: never "Unassigned".
+  const nameOf = useCallback(
+    (id: string) =>
+      [...data.employees, ...(data.inactiveEmployees ?? [])].find((employee) => employee.id === id)?.name ??
+      'a teammate',
+    [data.employees, data.inactiveEmployees],
+  )
+
   const friday = view.days[4]
   const weekLabel = `${shortDay(weekStart)} to ${monthDayYear.format(asDate(friday))}`
   const thisWeek = mondayOf(today)
@@ -358,6 +447,37 @@ export function MyWeekPage() {
                 ? 'Every client is planned or in hand this week.'
                 : `${view.notPlannedCount} ${view.notPlannedCount === 1 ? 'client' : 'clients'} not planned this week`}
           </p>
+          {view.finishedClientCount > 0 ? (
+            <p className="my-week-finished">
+              {view.finishedClientCount} {view.finishedClientCount === 1 ? 'client is' : 'clients are'} finished
+              for the month.
+            </p>
+          ) : null}
+
+          {view.answered.length > 0 ? (
+            <section className="my-week-answered" aria-label="Answered">
+              <h3 className="my-week-subhead">Answered: pick these up</h3>
+              <ul>
+                {view.answered.map((line) => (
+                  <li key={line.checklistId}>
+                    <div>
+                      <strong>{line.clientName}</strong>
+                      <span>{line.title}</span>
+                      <span>{waitWords(line.waits, nameOf)}</span>
+                    </div>
+                    <div className="my-week-question-actions">
+                      <Link
+                        className="ghost-action"
+                        to={`/checklists?focus=${encodeURIComponent(line.checklistId)}`}
+                      >
+                        Open
+                      </Link>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
 
           <div className="my-week-days" role="list" aria-label="The week, Monday to Friday">
             {view.days.map((day, index) => {
@@ -408,6 +528,7 @@ export function MyWeekPage() {
                 days={view.days}
                 today={today}
                 canEdit={canEdit}
+                nameOf={nameOf}
                 onToggleDay={(day) => toggleDay(row.clientId, day)}
                 onNote={(note) => setNote(row.clientId, note)}
                 onTaskChoice={(checklistId, choice) =>
@@ -429,6 +550,7 @@ export function MyWeekPage() {
                     <div>
                       <strong>{question.clientName}</strong>
                       <span>{question.title}</span>
+                      {question.auto ? <span>{waitWords(question.waits, nameOf)}</span> : null}
                     </div>
                     <div className="my-week-question-actions">
                       <Link
@@ -437,7 +559,10 @@ export function MyWeekPage() {
                       >
                         Open
                       </Link>
-                      {canEdit ? (
+                      {/* A question the Waiting flags set clears by itself when it
+                          is answered. One she set herself has a button, also
+                          when the flags say the same thing. */}
+                      {canEdit && question.byHand ? (
                         <button
                           type="button"
                           className="ghost-action"
@@ -465,6 +590,7 @@ function ClientRow({
   days,
   today,
   canEdit,
+  nameOf,
   onToggleDay,
   onNote,
   onTaskChoice,
@@ -473,6 +599,7 @@ function ClientRow({
   days: string[]
   today: string
   canEdit: boolean
+  nameOf: (id: string) => string
   onToggleDay: (day: string) => void
   onNote: (note: string) => void
   onTaskChoice: (checklistId: string, choice: TaskChoice) => void
@@ -560,6 +687,15 @@ function ClientRow({
                   {stepWords(task) ? <span>{stepWords(task)}</span> : null}
                   {task.mine === 'step' ? <span>A step of this is yours</span> : null}
                 </span>
+                {task.waits.length > 0 ? (
+                  <span
+                    className={`my-week-wait${
+                      task.waits[0].move === 'answered' ? ' is-answered' : task.waits[0].move === 'mine' ? ' is-mine' : ''
+                    }`}
+                  >
+                    {waitWords(task.waits, nameOf)}
+                  </span>
+                ) : null}
               </div>
               <div className="my-week-task-status">
                 {/* The label is only the name; the word beside the picker is not part of it. */}
@@ -567,7 +703,7 @@ function ClientRow({
                   <span className="visually-hidden">Status of {task.title}</span>
                   <select
                     className="input"
-                    value={task.status === 'questions' || task.status === 'finished' ? task.status : 'work'}
+                    value={task.hand ?? 'work'}
                     disabled={!canEdit}
                     onChange={(event) => onTaskChoice(task.checklistId, event.target.value as TaskChoice)}
                   >
@@ -578,11 +714,10 @@ function ClientRow({
                     ))}
                   </select>
                 </label>
-                {/* The picker already says a hand-set status; under "Work on this
-                    week" this says whether the client is on a day yet. */}
-                {task.status === 'planned' || task.status === 'not_planned' ? (
-                  <small>{STATUS_WORDS[task.status]}</small>
-                ) : null}
+                {/* The picker shows only what she set herself. Whenever the
+                    status shown is something else (planned or not, or set by
+                    the Waiting flags), this says it. */}
+                {task.status !== task.hand ? <small>{STATUS_WORDS[task.status]}</small> : null}
               </div>
             </li>
           ))}

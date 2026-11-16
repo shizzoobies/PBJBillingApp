@@ -15031,3 +15031,63 @@ details.invoice-run-sent ul,
     min-height: 0;
   }
 }
+
+/* My Week, ship 2: questions set by the Waiting flags, and answers that are in. */
+.my-week-finished {
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 650;
+  margin: -4px 0 10px;
+}
+
+.my-week-wait {
+  color: var(--bluegray);
+  font-size: 12px;
+}
+
+.my-week-wait.is-answered {
+  color: var(--green);
+  font-weight: 760;
+}
+
+/* Someone is waiting on HER: this is why the task is work. */
+.my-week-wait.is-mine {
+  color: var(--berry);
+  font-weight: 760;
+}
+
+.my-week-task.is-answered .my-week-task-main a {
+  color: var(--ink);
+}
+
+.my-week-answered ul {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+}
+
+.my-week-answered li {
+  align-items: center;
+  background: color-mix(in srgb, var(--green) 7%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--green) 35%, var(--line));
+  border-left: 4px solid var(--green);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  justify-content: space-between;
+  padding: 8px 12px;
+}
+
+.my-week-answered li > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.my-week-answered li span {
+  color: var(--muted);
+  font-size: 13px;
+}

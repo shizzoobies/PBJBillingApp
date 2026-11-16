@@ -18,7 +18,26 @@ export type WeekPlanEntry = {
   updatedAt: string | null
 }
 
-export type WeekPlanTaskStatus = 'not_planned' | 'planned' | WeekPlanMarkStatus
+/** 'answered' is never set by hand: a wait on the task has been answered and is hers to confirm. */
+export type WeekPlanTaskStatus = 'not_planned' | 'planned' | 'answered' | WeekPlanMarkStatus
+
+/**
+ * One wait on a task, read for the person looking. `move` is whose turn it is:
+ * 'mine' (someone is waiting on her), 'answered' (an answer is hers to
+ * confirm), 'out' (someone else's turn: this is what holds a step).
+ */
+export type WeekPlanWait = {
+  move: 'mine' | 'answered' | 'out'
+  /** Who the page names: who answered, who is waiting on her, who must confirm, or who is asked. Null for the client or an old-style flag. */
+  who: string | null
+  onClient: boolean
+  /** An answer is in and someone else has to confirm it. */
+  toConfirm: boolean
+  /** The person asked has asked a question back that nothing has followed. On a 'mine' wait it is hers to answer. */
+  askedBack: boolean
+  since: string | null
+  note: string
+}
 
 export type WeekPlanTask = {
   checklistId: string
@@ -33,7 +52,13 @@ export type WeekPlanTask = {
   caseId: string | null
   mine: 'checklist' | 'step'
   status: WeekPlanTaskStatus
+  /** What the Waiting flags say with nothing set by hand. */
+  auto: 'answered' | 'questions' | null
+  /** What she set herself, or null ("Work on this week"). */
+  hand: WeekPlanMarkStatus | null
   markNote: string
+  /** The waits behind the status shown; under Planned / Not planned, only the ones that are her move. */
+  waits: WeekPlanWait[]
 }
 
 export type WeekPlanRow = {
@@ -42,7 +67,7 @@ export type WeekPlanRow = {
   plannedDays: string[]
   note: string
   tasks: WeekPlanTask[]
-  rollup: { planned: number; notPlanned: number; questions: number; finished: number }
+  rollup: { planned: number; notPlanned: number; questions: number; answered: number; finished: number }
   noOpenWork: boolean
   allParked: boolean
   started: boolean
@@ -55,6 +80,11 @@ export type WeekPlanQuestion = {
   title: string
   dueDate: string
   note: string
+  /** Set by the Waiting flags (clears by itself) rather than by her. */
+  auto: boolean
+  /** She set In questions herself (hers to clear). */
+  byHand: boolean
+  waits: WeekPlanWait[]
 }
 
 export type WeekPlanView = {
@@ -64,6 +94,10 @@ export type WeekPlanView = {
   rows: WeekPlanRow[]
   notPlannedCount: number
   questions: WeekPlanQuestion[]
+  /** Tasks with an answer in, waiting for her to pick them up. */
+  answered: WeekPlanQuestion[]
+  /** Clients where everything she holds that is due this month is complete. */
+  finishedClientCount: number
 }
 
 export declare function isDateOnly(value: unknown): boolean
@@ -93,6 +127,10 @@ export declare function normalizeWeekPlanInput(
     }
   | { ok: false; error: string }
 export declare function isOpenWorkFor(checklist: unknown, userId: string): boolean
+export declare function taskWaitState(
+  checklist: unknown,
+  userId: string,
+): { auto: 'answered' | 'questions' | null; waits: WeekPlanWait[] }
 /** The soonest of the checklist's due date and its still-open steps' (hers only, when just a step is hers). */
 export declare function taskDueFor(
   checklist: { assigneeId?: string; dueDate: string; items?: unknown[] },
