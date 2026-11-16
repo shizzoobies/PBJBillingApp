@@ -61864,3 +61864,260 @@ describe('splitting a proposal (Postgres statements)', () => {
     expect(listed[0].splitFromId).toBe('prop-0')
   })
 })
+
+/**
+ * An owner's OWN time is saved approved (featreq-5ad33ce9).
+ *
+ * Brittany: "Can we make it to where I do not need to approve my stuff - ie,
+ * forgot to enter time". In 120 days she had approved her own entries 268
+ * times. The route decides whose time it is (`isOwnersOwnTime`) and hands the
+ * store one word, `selfApproved`; the store additionally checks, on the row as
+ * it is now, that a split block really is the acting person's own. These pin
+ * both backends: what is saved approved, what still queues, and that the word
+ * itself is never stored on an entry.
+ */
+describe("an owner's own time is saved approved (featreq-5ad33ce9)", () => {
+  const OWNER = 'owner-1'
+  const SESSIONS = [{ startAt: '2026-11-10T14:00:00.000Z', endAt: '2026-11-10T15:00:00.000Z' }]
+
+  const manual = (overrides = {}) => ({
+    employeeId: OWNER,
+    clientId: 'c1',
+    isAdministrative: false,
+    date: '2026-11-10',
+    minutes: 60,
+    description: 'Forgot to start the timer.',
+    billable: true,
+    taskId: null,
+    entryMethod: 'manual',
+    manualReason: 'Forgot to enter time',
+    ...overrides,
+  })
+
+  const block = (overrides = {}) => ({
+    id: 'own-block',
+    employeeId: OWNER,
+    clientId: 'c1',
+    isAdministrative: false,
+    date: '2026-11-10',
+    minutes: 60,
+    category: 'General',
+    description: 'Two sets of books',
+    billable: true,
+    taskId: null,
+    approvalStatus: 'approved',
+    entryMethod: 'timer',
+    startAt: SESSIONS[0].startAt,
+    endAt: SESSIONS[0].endAt,
+    sessions: SESSIONS,
+    groupClientIds: [],
+    ...overrides,
+  })
+
+  const slice = (id, clientId, minutes, overrides = {}) =>
+    block({ id, clientId, minutes, groupId: 'grp-own', groupAllocation: 'custom', approvalStatus: 'pending', ...overrides })
+
+  const seed = (timeEntries) =>
+    store.write(
+      workspace({
+        clients: [
+          { id: 'c1', name: 'Acme' },
+          { id: 'c2', name: 'Globex' },
+        ],
+        timeEntries,
+      }),
+    )
+  const persisted = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+  const halves = [
+    { clientId: 'c1', minutes: 30 },
+    { clientId: 'c2', minutes: 30 },
+  ]
+
+  describe('file backend', () => {
+    it('saves a manual entry approved when the route says it is her own', async () => {
+      await seed([])
+      const created = await store.createTimeEntry(manual({ selfApproved: true }))
+      expect(created.approvalStatus).toBe('approved')
+      // Still a manual entry with its reason: only the waiting is gone.
+      expect(created.entryMethod).toBe('manual')
+      expect(created.manualReason).toBe('Forgot to enter time')
+      const [stored] = (await persisted()).timeEntries
+      expect(stored.approvalStatus).toBe('approved')
+      // The word is an instruction to the store, never a field of the entry.
+      expect(Object.prototype.hasOwnProperty.call(stored, 'selfApproved')).toBe(false)
+      expect(Object.prototype.hasOwnProperty.call(created, 'selfApproved')).toBe(false)
+    })
+
+    it('still queues a manual entry without the word, and for anything but exactly true', async () => {
+      await seed([])
+      expect((await store.createTimeEntry(manual())).approvalStatus).toBe('pending')
+      expect((await store.createTimeEntry(manual({ selfApproved: false }))).approvalStatus).toBe('pending')
+      const odd = await store.createTimeEntry(manual({ selfApproved: 'true' }))
+      expect(odd.approvalStatus).toBe('pending')
+      expect(Object.prototype.hasOwnProperty.call(odd, 'selfApproved')).toBe(false)
+    })
+
+    it('saves her own typed group share approved too', async () => {
+      await seed([])
+      const created = await store.createTimeEntry(
+        manual({ entryMethod: 'timer', manualReason: undefined, groupId: 'grp-x', selfApproved: true }),
+      )
+      expect(created.approvalStatus).toBe('approved')
+    })
+
+    it('splitTimeEntry: an owner dividing her own block gets approved shares', async () => {
+      await seed([block()])
+      const { created } = await store.splitTimeEntry('own-block', halves, OWNER, 'grp-own', 'even', {
+        selfApproved: true,
+      })
+      expect(created.map((entry) => entry.approvalStatus)).toEqual(['approved', 'approved'])
+      const stored = (await persisted()).timeEntries
+      expect(stored.map((entry) => entry.approvalStatus)).toEqual(['approved', 'approved'])
+    })
+
+    it('splitTimeEntry: an owner dividing SOMEONE ELSE’s block still queues the shares', async () => {
+      await seed([block({ employeeId: 'emp-1' })])
+      const { created } = await store.splitTimeEntry('own-block', halves, OWNER, 'grp-own', 'even', {
+        selfApproved: true,
+      })
+      expect(created.map((entry) => entry.approvalStatus)).toEqual(['pending', 'pending'])
+    })
+
+    it('splitTimeEntry: a person dividing their own block without the word still queues', async () => {
+      await seed([block({ employeeId: 'emp-1' })])
+      const { created } = await store.splitTimeEntry('own-block', halves, 'emp-1', 'grp-own', 'even')
+      expect(created.map((entry) => entry.approvalStatus)).toEqual(['pending', 'pending'])
+      await seed([block({ employeeId: 'emp-1' })])
+      const again = await store.splitTimeEntry('own-block', halves, 'emp-1', 'grp-own', 'even', {
+        selfApproved: 'yes',
+      })
+      expect(again.created.map((entry) => entry.approvalStatus)).toEqual(['pending', 'pending'])
+    })
+
+    it('adjustSplitGroup: an owner re-dividing her own split gets approved shares', async () => {
+      await seed([slice('s1', 'c1', 30), slice('s2', 'c2', 30)])
+      const { created } = await store.adjustSplitGroup(
+        'grp-own',
+        [
+          { clientId: 'c1', minutes: 45 },
+          { clientId: 'c2', minutes: 15 },
+        ],
+        OWNER,
+        'custom',
+        { selfApproved: true },
+      )
+      expect(created.map((entry) => entry.approvalStatus)).toEqual(['approved', 'approved'])
+      const stored = (await persisted()).timeEntries.filter((entry) => entry.groupId === 'grp-own')
+      expect(stored.map((entry) => entry.approvalStatus)).toEqual(['approved', 'approved'])
+    })
+
+    it('adjustSplitGroup: someone else’s split, or no word, still goes back through approval', async () => {
+      await seed([slice('s1', 'c1', 30, { employeeId: 'emp-1' }), slice('s2', 'c2', 30, { employeeId: 'emp-1' })])
+      const others = await store.adjustSplitGroup('grp-own', halves, OWNER, 'custom', { selfApproved: true })
+      expect(others.created.map((entry) => entry.approvalStatus)).toEqual(['pending', 'pending'])
+
+      await seed([slice('s1', 'c1', 30), slice('s2', 'c2', 30)])
+      const noWord = await store.adjustSplitGroup('grp-own', halves, OWNER, 'custom')
+      expect(noWord.created.map((entry) => entry.approvalStatus)).toEqual(['pending', 'pending'])
+    })
+
+    // One share can have been moved to someone else since the split, and the
+    // replacements are all written under the FIRST share's person. A group
+    // that is not entirely hers must not come back as her approved time.
+    it('adjustSplitGroup: a group with one share that is someone else’s still queues, either order', async () => {
+      await seed([slice('s1', 'c1', 30), slice('s2', 'c2', 30, { employeeId: 'emp-1' })])
+      const mixed = await store.adjustSplitGroup('grp-own', halves, OWNER, 'custom', { selfApproved: true })
+      expect(mixed.created.map((entry) => entry.approvalStatus)).toEqual(['pending', 'pending'])
+
+      await seed([slice('s1', 'c1', 30, { employeeId: 'emp-1' }), slice('s2', 'c2', 30)])
+      const other = await store.adjustSplitGroup('grp-own', halves, OWNER, 'custom', { selfApproved: true })
+      expect(other.created.map((entry) => entry.approvalStatus)).toEqual(['pending', 'pending'])
+    })
+  })
+
+  describe('postgres branch', () => {
+    const START = '2026-11-10T14:00:00.000Z'
+    const STOP = '2026-11-10T15:00:00.000Z'
+    const sourceRow = (overrides = {}) => ({
+      id: 'own-block',
+      user_id: OWNER,
+      client_id: 'c1',
+      entry_date: new Date('2026-11-10T00:00:00.000Z'),
+      minutes: 60,
+      category: 'General',
+      description: 'Two sets of books',
+      billable: true,
+      entry_method: 'timer',
+      manual_reason: null,
+      is_administrative: false,
+      is_adhoc: false,
+      started_at: new Date(START),
+      ended_at: new Date(STOP),
+      sessions: [{ startAt: START, endAt: STOP }],
+      group_client_ids: [],
+      task_label: null,
+      task_id: null,
+      ...overrides,
+    })
+
+    it('createTimeEntry writes approved for her own manual entry and pending without the word', async () => {
+      const fake = fakePostgres()
+      await postgresStore(fake).createTimeEntry(manual({ selfApproved: true }))
+      await postgresStore(fake).createTimeEntry(manual())
+      const inserts = insertedRows(fake.statements, 'time_entries')
+      expect(inserts.map((row) => row.approval_status)).toEqual(['approved', 'pending'])
+      expect(inserts.map((row) => row.entry_method)).toEqual(['manual', 'manual'])
+      expect(inserts[0].manual_reason).toBe('Forgot to enter time')
+    })
+
+    it('splitTimeEntry writes approved shares for her own block only', async () => {
+      const own = fakePostgres({ holdingRows: [sourceRow()] })
+      await postgresStore(own).splitTimeEntry('own-block', halves, OWNER, 'grp-own', 'even', { selfApproved: true })
+      expect(insertedRows(own.statements, 'time_entries').map((row) => row.approval_status)).toEqual([
+        'approved',
+        'approved',
+      ])
+
+      const others = fakePostgres({ holdingRows: [sourceRow({ user_id: 'emp-1' })] })
+      await postgresStore(others).splitTimeEntry('own-block', halves, OWNER, 'grp-own', 'even', {
+        selfApproved: true,
+      })
+      expect(insertedRows(others.statements, 'time_entries').map((row) => row.approval_status)).toEqual([
+        'pending',
+        'pending',
+      ])
+
+      const noWord = fakePostgres({ holdingRows: [sourceRow()] })
+      await postgresStore(noWord).splitTimeEntry('own-block', halves, OWNER, 'grp-own', 'even')
+      expect(insertedRows(noWord.statements, 'time_entries').map((row) => row.approval_status)).toEqual([
+        'pending',
+        'pending',
+      ])
+    })
+
+    it('adjustSplitGroup writes approved shares for her own split only', async () => {
+      const groupRow = (id, clientId, userId) => sourceRow({ id, client_id: clientId, minutes: 30, user_id: userId })
+      const own = fakePostgres({ groupSlices: [groupRow('s1', 'c1', OWNER), groupRow('s2', 'c2', OWNER)] })
+      await postgresStore(own).adjustSplitGroup('grp-own', halves, OWNER, 'custom', { selfApproved: true })
+      expect(insertedRows(own.statements, 'time_entries').map((row) => row.approval_status)).toEqual([
+        'approved',
+        'approved',
+      ])
+
+      const others = fakePostgres({ groupSlices: [groupRow('s1', 'c1', 'emp-1'), groupRow('s2', 'c2', 'emp-1')] })
+      await postgresStore(others).adjustSplitGroup('grp-own', halves, OWNER, 'custom', { selfApproved: true })
+      expect(insertedRows(others.statements, 'time_entries').map((row) => row.approval_status)).toEqual([
+        'pending',
+        'pending',
+      ])
+
+      // Her share is first, a team member's is second: not her own group.
+      const mixed = fakePostgres({ groupSlices: [groupRow('s1', 'c1', OWNER), groupRow('s2', 'c2', 'emp-1')] })
+      await postgresStore(mixed).adjustSplitGroup('grp-own', halves, OWNER, 'custom', { selfApproved: true })
+      expect(insertedRows(mixed.statements, 'time_entries').map((row) => row.approval_status)).toEqual([
+        'pending',
+        'pending',
+      ])
+    })
+  })
+})

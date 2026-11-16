@@ -12296,9 +12296,16 @@ export class AppDataStore {
     // unsplit group HOLDING entry auto-approves like any capture; its split
     // products queue when created. Later edits re-queue separately
     // (updateTimeEntry flips approved → pending on material changes).
-    const autoApproved = entryMethod === 'timer' && !entry.groupId
+    //
+    // ONE exception (featreq-5ad33ce9): `selfApproved`, which the route sets
+    // only for an owner recording her OWN time (`isOwnersOwnTime`,
+    // lib/time-entry.js). The approver's own entry has nobody to wait for, so
+    // it is saved approved whatever the method. It is an instruction to this
+    // method, not a field of the entry: it is never stored.
+    const { selfApproved, ...entryFields } = entry
+    const autoApproved = selfApproved === true || (entryMethod === 'timer' && !entry.groupId)
     const nextEntry = {
-      ...entry,
+      ...entryFields,
       id: entry.id ?? `time-${randomUUID().slice(0, 8)}`,
       taskId: entry.taskId ?? null,
       // Normalized to a real boolean so the file backend stores what Postgres's
@@ -12394,11 +12401,16 @@ export class AppDataStore {
    * @param {string} actorUserId - who performed the split (for the audit row).
    * @param {string} groupId - shared id stamped on every slice.
    * @param {'even'|'full'|'custom'} allocationMode
+   * @param {{ selfApproved?: boolean }} [options] - `selfApproved`: the route's
+   *   word that the person splitting is an owner (featreq-5ad33ce9). The slices
+   *   are saved approved only when the block is ALSO that person's own time,
+   *   which is checked here on the row as it is now.
    * @returns {Promise<{created: object[], deletedId: string}>}
    * @throws {TimeEntrySplitError} when the entry is gone, already split, not
    *   splittable (administrative), or a regular entry got one allocation.
    */
-  async splitTimeEntry(entryId, allocations, actorUserId, groupId, allocationMode) {
+  async splitTimeEntry(entryId, allocations, actorUserId, groupId, allocationMode, options = {}) {
+    const ownerActing = options?.selfApproved === true
     const rows = (Array.isArray(allocations) ? allocations : []).filter(
       (row) => row && typeof row.clientId === 'string' && row.clientId && Number(row.minutes) > 0,
     )
@@ -12470,7 +12482,9 @@ export class AppDataStore {
         // checklist, every other share names it (see `splitShareTask`).
         ...splitShareTask(row.clientId, task, holding.taskLabel),
         // Typed time → the daily pending queue. See the doc comment above.
-        approvalStatus: 'pending',
+        // An owner dividing her OWN block is the approver typing her own time:
+        // nobody is left to approve it (featreq-5ad33ce9).
+        approvalStatus: ownerActing && holding.employeeId === actorUserId ? 'approved' : 'pending',
         entryMethod: holding.entryMethod === 'manual' ? 'manual' : 'timer',
         manualReason: holding.entryMethod === 'manual' ? holding.manualReason : undefined,
         startAt: holding.startAt,
@@ -12663,11 +12677,20 @@ export class AppDataStore {
    * @param {Array<{clientId: string, minutes: number}>} allocations
    * @param {string} actorUserId - who adjusted it (for the audit row).
    * @param {'even'|'full'|'custom'} allocationMode
+   * @param {{ selfApproved?: boolean }} [options] - as in `splitTimeEntry`: an
+   *   owner re-dividing her OWN split saves the new slices approved.
    * @returns {Promise<{created: object[], deletedIds: string[], groupId: string}>}
    * @throws {TimeEntrySplitError} `invalid_allocation` when nothing usable was
    *   asked for, `not_found` when the group is gone or empty.
    */
-  async adjustSplitGroup(groupId, allocations, actorUserId, allocationMode) {
+  async adjustSplitGroup(groupId, allocations, actorUserId, allocationMode, options = {}) {
+    const ownerActing = options?.selfApproved === true
+    // Set by each backend from the rows it holds: is EVERY share now in the
+    // group the acting person's? One share can have been moved to someone else
+    // since the split, and the replacements are all written under the first
+    // share's person, so "the first share is hers" is not enough to call the
+    // group her own time.
+    let groupIsActors = false
     const sharedGroupId = String(groupId || '').slice(0, 64)
     if (!sharedGroupId) {
       throw new TimeEntrySplitError('invalid_allocation', 'An adjustment needs a group id.')
@@ -12705,8 +12728,10 @@ export class AppDataStore {
         // have been set per client after the split). Only a newly added client
         // falls back to the group's task (see `adjustShareTask`).
         ...adjustShareTask(row.clientId, ownTasks, task, template.taskLabel),
-        // An adjustment is an edit: back through approval, like any other.
-        approvalStatus: 'pending',
+        // An adjustment is an edit: back through approval, like any other -
+        // except an owner's own split, which has nobody to go back to.
+        approvalStatus:
+          ownerActing && groupIsActors && template.employeeId === actorUserId ? 'approved' : 'pending',
         entryMethod: template.entryMethod === 'manual' ? 'manual' : 'timer',
         manualReason: template.entryMethod === 'manual' ? template.manualReason : undefined,
         startAt: template.startAt,
@@ -12767,6 +12792,7 @@ export class AppDataStore {
         const deletedIds = held.rows.map((each) => each.id)
         // The share that kept the checklist (at most one) names the group's task.
         const taskShare = held.rows.find((each) => each.task_id)
+        groupIsActors = held.rows.every((each) => each.user_id === actorUserId)
         const slices = buildSlices(
           template,
           await splitSourceTaskFromPg(client, taskShare?.task_id, taskShare?.client_id),
@@ -12857,6 +12883,7 @@ export class AppDataStore {
     const previousMinutes = existing.reduce((sum, entry) => sum + Number(entry.minutes), 0)
     const deletedIds = existing.map((entry) => entry.id)
     const taskShare = existing.find((entry) => entry.taskId)
+    groupIsActors = existing.every((entry) => entry.employeeId === actorUserId)
     const slices = buildSlices(
       {
         ...existing[0],

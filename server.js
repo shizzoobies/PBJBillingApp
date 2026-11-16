@@ -242,7 +242,8 @@ import {
   resolveCreatedEntryTiming,
   validateTimeEntryEdit,
   adhocAfterEntryEdit,
-  editRequiresReapproval,
+  approvalAfterEdit,
+  isOwnersOwnTime,
   validateTimeEntryRequiredFields,
   weekStartOf,
 } from './lib/time-entry.js'
@@ -1445,6 +1446,26 @@ function removalRefusalBody(error) {
     return { error: error.refusal.error, message: error.refusal.message }
   }
   return null
+}
+
+/**
+ * An owner's OWN skip or push needs nobody's review (featreq-5ad33ce9: "Can we
+ * make it to where I do not need to approve my stuff").
+ *
+ * Every skip and push lands in the owner's "to review" list so she sees what
+ * the team set aside. One she made herself only handed her own decision back
+ * to her. So it is stamped reviewed, by her, as it is filed: the record, its
+ * reason and the history are exactly as before, it just never waits in her
+ * list. A team member's skip is untouched. Best effort: if the stamp fails the
+ * skip is still saved and shows in the list as it used to.
+ */
+async function reviewOwnSkipIfOwner(session, record) {
+  if (session?.user?.role !== 'owner' || !record?.id) return
+  try {
+    await appDataStore.reviewChecklistSkip(record.id, session.user.id)
+  } catch (error) {
+    console.error('[checklist-skip] own-skip review stamp failed:', error?.message || error)
+  }
 }
 
 /**
@@ -11753,6 +11774,7 @@ const server = createServer(async (request, response) => {
           }
         }
 
+        const ownTime = isOwnersOwnTime(session.user, employeeId)
         const entry = await appDataStore.createTimeEntry({
           employeeId,
           clientId,
@@ -11772,12 +11794,25 @@ const server = createServer(async (request, response) => {
           groupId,
           groupClientIds,
           taskLabel,
+          // An owner's OWN time is saved approved (featreq-5ad33ce9).
+          selfApproved: ownTime,
         })
 
         // Manual entries are deliberately gated: log the submission and ping
         // every owner so they know a non-timer entry is waiting for approval.
         // Timer-stopped entries enter the approval queue silently, as before.
-        if (entryMethod === 'manual') {
+        // An owner's own manual entry is logged the same way but waits for
+        // nobody, so nobody is told it "needs approval".
+        if (entryMethod === 'manual' && ownTime) {
+          const client = (allData.clients ?? []).find((c) => c.id === clientId)
+          const clientLabel = isAdministrative ? 'Administrative' : client?.name ?? 'a client'
+          const employee = (allData.employees ?? []).find((e) => e.id === employeeId)
+          await appDataStore.recordActivity(
+            employeeId,
+            'time_entry_manual_submitted',
+            `${employee?.name ?? 'An owner'} · ${clientLabel}`,
+          )
+        } else if (entryMethod === 'manual') {
           const client = (allData.clients ?? []).find((c) => c.id === clientId)
           const clientLabel = isAdministrative ? 'Administrative' : client?.name ?? 'a client'
           const employee = (allData.employees ?? []).find((e) => e.id === employeeId)
@@ -12062,6 +12097,14 @@ const server = createServer(async (request, response) => {
           session.user.id,
           groupId,
           mode,
+          // An owner dividing her OWN block: the slices are saved approved.
+          // Not a block that was sent back to her: only the other owner can
+          // have done that, and dividing it must not quietly overrule them.
+          {
+            selfApproved:
+              isOwnersOwnTime(session.user, holding.employeeId) &&
+              holding.approvalStatus !== 'rejected',
+          },
         )
         sendJson(response, 200, result)
       } catch (error) {
@@ -12201,6 +12244,14 @@ const server = createServer(async (request, response) => {
           allocations,
           session.user.id,
           mode,
+          // Her own split, every share of it, and none of them sent back.
+          {
+            selfApproved: slices.every(
+              (slice) =>
+                isOwnersOwnTime(session.user, slice.employeeId) &&
+                slice.approvalStatus !== 'rejected',
+            ),
+          },
         )
         sendJson(response, 200, result)
       } catch (error) {
@@ -12520,12 +12571,26 @@ const server = createServer(async (request, response) => {
 
         // Editing resubmits the entry for approval — see `editRequiresReapproval`
         // for the rule, including the one thing that does NOT cost an entry its
-        // sign-off (an owner flipping only the ad hoc flag at review).
-        if (editRequiresReapproval(entry.approvalStatus, patch, isOwner)) {
+        // sign-off (an owner flipping only the ad hoc flag at review). An owner
+        // editing her OWN entry, approved or still pending, approves it by the
+        // edit (stamped by her, now); one that was sent back returns to the
+        // queue as before (`approvalAfterEdit`, featreq-5ad33ce9).
+        const signOff = approvalAfterEdit({
+          approvalStatus: entry.approvalStatus,
+          patch,
+          user: session.user,
+          employeeId: entry.employeeId,
+        })
+        if (signOff === 'requeue') {
           patch.approvalStatus = 'pending'
           patch.approvalNote = null
           patch.approvedBy = null
           patch.approvedAt = null
+        } else if (signOff === 'approve') {
+          patch.approvalStatus = 'approved'
+          patch.approvalNote = null
+          patch.approvedBy = session.user.id
+          patch.approvedAt = new Date().toISOString()
         }
 
         const updated = await appDataStore.updateTimeEntry(entryId, patch)
@@ -16564,6 +16629,7 @@ const server = createServer(async (request, response) => {
         // Skip a step: the mode AT SKIP TIME - the recipe's setting can change later.
         stepSkip,
       })
+      await reviewOwnSkipIfOwner(session, record)
       // The case page reads it off the row (`_withStepSkipMarks` on the next load).
       if (stepSkip) skipped.stepSkipped = true
 
@@ -16823,6 +16889,7 @@ const server = createServer(async (request, response) => {
         kind: 'push',
         newDueDate: validatedPush.newDueDate,
       })
+      await reviewOwnSkipIfOwner(session, pushRecord)
 
       await appDataStore.recordActivity(session.user.id, 'checklist_pushed', checklist.title)
 

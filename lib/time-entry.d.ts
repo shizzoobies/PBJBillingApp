@@ -76,6 +76,23 @@ export declare function editRequiresReapproval(
   isOwner?: boolean,
 ): boolean
 
+/** An owner's OWN time (featreq-5ad33ce9): saved approved, never queued for her own approval. */
+export declare function isOwnersOwnTime(
+  user: { id?: string; role?: string } | null | undefined,
+  employeeId: string | null | undefined,
+): boolean
+
+/**
+ * What an edit does to an entry's sign-off. 'approve' is only ever an owner
+ * editing her own entry that was still pending or sent back.
+ */
+export declare function approvalAfterEdit(args: {
+  approvalStatus: string
+  patch?: Record<string, unknown>
+  user: { id?: string; role?: string } | null | undefined
+  employeeId: string | null | undefined
+}): 'requeue' | 'approve' | 'keep'
+
 export declare function normalizeWorkSessions(rawSessions?: unknown): {
   sessions?: { startAt: string; endAt: string }[]
   minutes?: number

@@ -429,6 +429,7 @@ export function TimePage() {
           billableClients={timeTrackingClients}
           onSplit={splitGroupEntry}
           onAdjust={adjustSplitGroup}
+          ownTime={role === 'owner' && splitTarget.employeeId === activeEmployeeId}
           onClose={() => setSplitTarget(null)}
         />
       ) : null}
@@ -1308,6 +1309,11 @@ export function ManualEntryModal({
         ? employeeId
         : activeEmployeeId
       : activeEmployeeId
+  // An owner logging her OWN time: the server saves it approved and nobody
+  // reviews it (featreq-5ad33ce9, isOwnersOwnTime). Time she enters for
+  // someone else still goes to the approval queue, so the words follow who the
+  // entry is for.
+  const ownTime = role === 'owner' && effectiveEmployeeId === activeEmployeeId
 
   const eligibleTasks = useMemo(
     () => eligibleChecklistsFor(checklists, effectiveClientId),
@@ -1553,9 +1559,11 @@ export function ManualEntryModal({
       >
         {success ? (
           <div className="modal-body">
-            <h2 className="modal-title">Manual entry submitted</h2>
+            <h2 className="modal-title">{ownTime ? 'Manual entry saved' : 'Manual entry submitted'}</h2>
             <p className="modal-intro">
-              Manual entry submitted — an owner will review it.
+              {ownTime
+                ? 'Your time is saved and approved. Nobody needs to review it.'
+                : 'Manual entry submitted — an owner will review it.'}
             </p>
             <div className="button-row">
               <button type="button" className="primary-action" onClick={onClose}>
@@ -1587,7 +1595,9 @@ export function ManualEntryModal({
           <form className="modal-body" onSubmit={handleSubmit}>
             <h2 className="modal-title">Manual time entry</h2>
             <p className="modal-intro">
-              This entry will be submitted for owner approval, like all time entries.
+              {ownTime
+                ? 'This is your own time, so it is saved as approved. Nobody needs to review it.'
+                : 'This entry will be submitted for owner approval, like all time entries.'}
             </p>
             <div className="form-grid">
               <label className="field">
@@ -1830,7 +1840,13 @@ export function ManualEntryModal({
                 disabled={submitPending}
               >
                 <Clock3 size={16} />
-                {submitPending ? 'Submitting...' : 'Submit for approval'}
+                {ownTime
+                  ? submitPending
+                    ? 'Saving...'
+                    : 'Save time'
+                  : submitPending
+                    ? 'Submitting...'
+                    : 'Submit for approval'}
               </button>
             </div>
           </form>
@@ -1900,9 +1916,15 @@ export function GroupSplitModal({
   billableClients,
   onSplit,
   onAdjust,
+  ownTime = false,
   onClose,
 }: {
   entry: TimeEntry
+  /**
+   * An owner dividing her OWN time: the server saves the shares approved
+   * (featreq-5ad33ce9), so the dialog must not say they go back through approval.
+   */
+  ownTime?: boolean
   /** Every slice of `entry`'s split group — empty unless adjusting one. */
   groupSlices?: TimeEntry[]
   /** All visible clients — used for name lookup on already-chosen ids. */
@@ -2179,8 +2201,8 @@ export function GroupSplitModal({
                 This time is split across {prefill.clientIds.length}{' '}
                 {prefill.clientIds.length === 1 ? 'client' : 'clients'} —{' '}
                 {formatHoursMinutes(prefill.totalMinutes)} billed in total. Change the amounts, add
-                or remove clients, then save. The clock-in/out stays exactly as it was recorded,
-                and the entries go back through approval.
+                or remove clients, then save. The clock-in/out stays exactly as it was recorded
+                {ownTime ? '.' : ', and the entries go back through approval.'}
               </>
             ) : isHolding ? (
               <>
@@ -2192,8 +2214,8 @@ export function GroupSplitModal({
               <>
                 {formatHoursMinutes(entry.minutes)} currently billed to{' '}
                 {clientName(clients, entry.clientId)}. Pick every client this time should be split
-                across and choose how to divide it — this replaces the entry with one per client,
-                and they go back through approval.
+                across and choose how to divide it — this replaces the entry with one per client
+                {ownTime ? '.' : ', and they go back through approval.'}
               </>
             )}
           </p>
