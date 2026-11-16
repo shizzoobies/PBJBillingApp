@@ -210,4 +210,16 @@ Known and left as they are:
 - `GET /internal/rollout` (header `x-tick-token`) shows the live instance, a new one coming up (`held`, `parked`, `checks`), a hand-over in progress (`phase`: stop, release, boot, undo, resume), the last failure and why, and the last ten events with how long each pause was (`pausedMs`, `stopMs`, `bootMs`).
 - Deploy: push to `main` as before. The run's last step waits up to 25 minutes for the new commit on `/health` and now FAILS if it never appears.
 - The way back to the old container, while it is kept: set `"ROLLOUT_TARGET": "legacy"` in `wrangler.jsonc` vars and deploy; remove it and deploy to come forward again.
-- Still to do (section 11, steps 4 and 5): after about a week delete the old application and class, the `@cloudflare/containers` package and the legacy code paths; delete the staging Worker and `cf-staging.yml`; cache the image layers.
+- The way back to the old container (the item above) ended on 2026-11-15, see 12.6. Still to do (section 11, step 5): cache the image layers.
+
+### 12.6 The old arrangement removed (2026-11-15)
+
+Alex: "do the staging cleanup tonight", both halves. One commit removes the `AppContainer` class, the instance named `legacy`, the `ROLLOUT_TARGET` lever, the overlap swap (it existed only for the way back), the `APP` binding, the old container's entry in `wrangler.jsonc` and the `@cloudflare/containers` package, and adds migration `v3` (`deleted_classes: ["AppContainer"]`). Every instance is now a host and every swap is a hand-over; the hand-over rules themselves are unchanged (the tests that describe them pass untouched).
+
+Three things worth knowing later:
+
+- `wrangler deploy` does not delete a container application that has left the config (seen on staging: the old application was still listed, with no instance, after the migration). The old one (`pbjbillingapp-appcontainer`) is deleted by id with `wrangler containers delete` once the new commit serves, from a GitHub Actions run, because the laptop's token cannot manage container applications. In CI that command does not ask before deleting, so the run first reads the application back and refuses unless its name is the expected one.
+- A deleted class cannot come back with its data: after this there is no way back to the old arrangement, and no commit from before this one can be deployed again as it is (its `wrangler.jsonc` stops at migration `v2` and binds the deleted class; Cloudflare refuses it). For THIS deploy the only way back was a fix pushed forward. For every later deploy the way back is the usual one, a revert, as long as it leaves the migrations and bindings alone.
+- For some minutes after that deploy the router and Worker isolates of the previous version were still running. The new code tolerates what they send (`poke` ignores an argument) and what they stored (`target` and `targetStamp` stay in the router's state, unused).
+
+The staging copy (`pbjbillingapp-staging`, its two container applications, `cloudflare/staging/`, `.github/workflows/cf-staging.yml`) rehearsed this removal first and was then deleted. Sections 5, 9 and 12.2 describe a staging Worker that no longer exists; to rehearse again, recreate it from the history of this file's commit.

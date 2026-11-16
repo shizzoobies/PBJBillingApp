@@ -4,9 +4,11 @@ name: cf-deploy
 # instance of the repo Dockerfile image. `wrangler deploy` builds that image with
 # Docker, which this laptop does not have and ubuntu-latest does, so the deploy lives
 # here. The deploy itself stops nothing: the Worker brings a new instance up beside the
-# live one and hands over to it (cloudflare/worker.js). Rollback = re-run this workflow on
-# the previous commit (Actions > cf-deploy > Run workflow > pick the older commit's
-# branch/tag, or push a revert).
+# live one and hands over to it (cloudflare/worker.js). Rollback = push a revert (it is
+# brought up and handed over to like any deploy). One limit: a commit from BEFORE a Durable
+# Object migration in wrangler.jsonc cannot be deployed again once that migration has been
+# applied (the last one is v3, 2026-11-15, which removed the old AppContainer class), so
+# a revert must keep wrangler.jsonc's migrations and bindings as they are now.
 #
 # Secrets: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (repo secrets, already set).
 # The APP's secrets are Worker secrets uploaded once with scripts/cf/secrets-upload.mjs;

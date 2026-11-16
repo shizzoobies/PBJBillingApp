@@ -1,5 +1,5 @@
 // Dependency-free so scripts/cf/secrets-upload.mjs and the tests can import it without
-// the @cloudflare/containers package. cloudflare/worker.js re-exports it.
+// the Workers runtime. cloudflare/worker.js re-exports it.
 /**
  * The names copied from the Worker's env (vars + secrets) into the container's env,
  * and nothing else: a name not listed here never reaches the app. Secrets are Worker

@@ -1,25 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { HANDOVER, HANDOVER_BOOT_TIMEOUT_MS, LEGACY, RETIRE_GRACE_MS, TICK_FAST_MS, TICK_SLOW_MS } from './rollout.js'
+import { HANDOVER, HANDOVER_BOOT_TIMEOUT_MS, TICK_FAST_MS, TICK_SLOW_MS } from './rollout.js'
 
 // The arrangement that keeps the app up through a deploy: AppHost (one instance of the app),
 // AppRouter (which one is live, and the swaps), and the Worker's routing. worker.test.mjs
-// covers the old arrangement.
-const legacyFetch = vi.fn()
-const legacyRetire = vi.fn(async () => ({ graceful: true }))
-const legacyRevive = vi.fn(async () => ({}))
-const legacyRestartWith = vi.fn(async () => ({ graceful: true, lastStatus: 'stopped' }))
-const legacyProtocol = vi.fn(async () => 2)
-vi.mock('@cloudflare/containers', () => ({
-  Container: class {
-    constructor(ctx, env) {
-      this.ctx = ctx
-      this.env = env
-    }
-  },
-  getContainer: () => ({ fetch: legacyFetch, retire: legacyRetire, revive: legacyRevive, restartWith: legacyRestartWith, protocol: legacyProtocol }),
-}))
-
-const { default: worker, AppHost, AppRouter, targetOf } = await import('./worker.js')
+// covers the Worker's own guards.
+const { default: worker, AppHost, AppRouter } = await import('./worker.js')
 
 const HOLD = ['node', '/app/lib/container-hold.js']
 
@@ -104,14 +89,6 @@ function makeHost({ container = fakeContainer(), env = { NODE_ENV: 'production',
   return { host, storage, container }
 }
 
-beforeEach(() => {
-  legacyFetch.mockReset()
-  legacyRetire.mockClear()
-  legacyRevive.mockClear()
-  legacyRestartWith.mockClear()
-  legacyProtocol.mockReset()
-  legacyProtocol.mockImplementation(async () => 2)
-})
 afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
@@ -147,6 +124,21 @@ describe('AppHost', () => {
     await expect(host.begin({ envVars: { NOT_LISTED: 'x' } })).rejects.toThrow('not in CONTAINER_ENV_NAMES')
     await host.begin({ envVars: { DATABASE_URL: 'fresh' } })
     expect(container.started.at(-1).env).toEqual({ DATABASE_URL: 'fresh' })
+  })
+
+  it('refuses an environment that is not a plain object of strings, without echoing a value', async () => {
+    const { host, container } = makeHost()
+    for (const bad of [['DATABASE_URL'], new Map([['DATABASE_URL', 'x']]), 'DATABASE_URL=x']) {
+      await expect(host.begin({ envVars: bad })).rejects.toThrow('must be a plain object')
+    }
+    for (const bad of [{ DATABASE_URL: 5 }, { DATABASE_URL: { nested: 'secret-value' } }, { DATABASE_URL: undefined }]) {
+      const error = await host.begin({ envVars: bad }).then(() => null, (thrown) => thrown)
+      expect(error?.message).toContain('must hold only strings')
+      expect(error.message).not.toContain('secret-value')
+    }
+    // A refused environment leaves nothing behind: no container started, no record of an instance.
+    expect(container.started).toEqual([])
+    expect((await host.peek()).begun).toBe(false)
   })
 
   it('describe() starts a begun host that is not running (supervision) and reports it not ready yet', async () => {
@@ -467,11 +459,11 @@ function fakeHosts(images) {
   }
 }
 
-function makeRouter({ legacy = false, target } = {}) {
+function makeRouter() {
   const images = { app: 'reg/app@sha256:aaaaaaaaaaaa' }
   const HOST = fakeHosts(images)
   const storage = fakeStorage()
-  const env = { HOST, ...(legacy ? { APP: {} } : {}), ...(target ? { ROLLOUT_TARGET: target } : {}) }
+  const env = { HOST }
   const router = new AppRouter({ storage }, env)
   return { router, storage, HOST, images, env }
 }
@@ -481,13 +473,6 @@ async function look(router, ms = 1_100) {
   const looking = router.tick()
   await vi.advanceTimersByTimeAsync(ms)
   return looking
-}
-
-/** From the old application to the first host: begun held, handed over, done. */
-async function cutOver(router) {
-  await look(router)
-  await look(router)
-  await look(router)
 }
 
 describe('AppRouter', () => {
@@ -667,108 +652,6 @@ describe('AppRouter', () => {
     expect((await router.status()).forced).toBeNull()
   })
 
-  it('hands over from the old application: it serves until the host is parked, and is stopped once', async () => {
-    const { router, HOST } = makeRouter({ legacy: true })
-    await expect(router.liveName()).resolves.toBe(LEGACY)
-    await router.tick()
-    expect(HOST.hosts.get('app-1').container.started[0].entrypoint).toEqual(HOLD)
-    expect(legacyFetch).not.toHaveBeenCalled()
-    expect(legacyRetire).not.toHaveBeenCalled()
-    await look(router)
-    await expect(router.liveName()).resolves.toBe('app-1')
-    expect(legacyRetire).toHaveBeenCalledTimes(1)
-    expect(HOST.hosts.get('app-1').container.mode).toBe('app')
-    await look(router)
-    await look(router)
-    expect((await router.status()).handover).toBeNull()
-    expect(legacyRetire).toHaveBeenCalledTimes(1)
-    expect(legacyRevive).not.toHaveBeenCalled()
-  })
-
-  it('waits to hand over from the old application until its object runs code that can be stopped and started again', async () => {
-    const { router, HOST } = makeRouter({ legacy: true })
-    // For minutes after the first deploy the old object may still run the previous code.
-    legacyProtocol.mockRejectedValue(new TypeError('The RPC receiver does not implement the method "protocol".'))
-    await router.tick()
-    await look(router)
-    await look(router)
-    await expect(router.liveName()).resolves.toBe(LEGACY)
-    expect(legacyRetire).not.toHaveBeenCalled()
-    expect(HOST.hosts.get('app-1').container.mode).toBe('hold')
-    expect((await router.status()).next).toMatchObject({ name: 'app-1', parked: true })
-    legacyProtocol.mockImplementation(async () => 2)
-    await look(router)
-    await expect(router.liveName()).resolves.toBe('app-1')
-    expect(legacyRetire).toHaveBeenCalledTimes(1)
-  })
-
-  it('starts the old application again when the first host does not come up', async () => {
-    const { router, HOST } = makeRouter({ legacy: true })
-    await router.tick()
-    HOST.hosts.get('app-1').container.health = { ok: false }
-    await look(router)
-    await expect(router.liveName()).resolves.toBe('app-1')
-    vi.setSystemTime(Date.now() + HANDOVER_BOOT_TIMEOUT_MS + 1_000)
-    await look(router)
-    await expect(router.liveName()).resolves.toBe(LEGACY)
-    expect(legacyRevive).toHaveBeenCalledTimes(1)
-    expect(HOST.hosts.get('app-1').container.running).toBe(false)
-  })
-
-  it('stays on the old application while ROLLOUT_TARGET says legacy', async () => {
-    const { router, HOST } = makeRouter({ legacy: true, target: LEGACY })
-    await router.tick()
-    await router.tick()
-    await expect(router.liveName()).resolves.toBe(LEGACY)
-    expect(HOST.hosts.size).toBe(0)
-  })
-
-  it('goes back to the old application by overlap: it must answer /health before the host is stopped', async () => {
-    const { router, HOST, env } = makeRouter({ legacy: true })
-    await cutOver(router)
-    await expect(router.liveName()).resolves.toBe('app-1')
-    env.ROLLOUT_TARGET = LEGACY
-    legacyFetch.mockResolvedValue(Response.json({ ok: false }, { status: 503 }))
-    await router.tick()
-    // The mark that keeps the old container stopped is cleared before it is asked anything.
-    expect(legacyRevive).toHaveBeenCalledTimes(1)
-    await router.tick()
-    await expect(router.liveName()).resolves.toBe('app-1')
-    legacyFetch.mockImplementation(async () => Response.json({ ok: true, commit: 'old1234' }))
-    await router.tick()
-    await expect(router.liveName()).resolves.toBe(LEGACY)
-    expect(HOST.hosts.get('app-1').container.signals).toEqual([])
-    vi.setSystemTime(Date.now() + RETIRE_GRACE_MS)
-    await router.tick()
-    expect(HOST.hosts.get('app-1').container.signals).toEqual([15])
-  })
-
-  it('takes the target from the newest Worker version that pokes it, not from its own (possibly older) env', async () => {
-    const { router, HOST } = makeRouter({ legacy: true })
-    await cutOver(router)
-    await expect(router.liveName()).resolves.toBe('app-1')
-    // A new version says legacy; this object's own env still says hosts.
-    legacyFetch.mockImplementation(async () => Response.json({ ok: true, commit: 'old1234' }))
-    await router.poke({ target: LEGACY, stamp: 2_000 })
-    await router.tick()
-    await router.tick()
-    await expect(router.liveName()).resolves.toBe(LEGACY)
-    // A straggling isolate of the older version cannot turn it back.
-    await router.poke({ target: 'hosts', stamp: 1_000 })
-    expect((await router.status()).target).toBe(LEGACY)
-    await router.poke({ target: 'hosts', stamp: 3_000 })
-    expect((await router.status()).target).toBe('hosts')
-    expect(HOST.hosts.get('app-1').container.signals.length).toBeLessThanOrEqual(1)
-  })
-
-  it('targetOf reads the var and the version time, and defaults to hosts', () => {
-    expect(targetOf({})).toEqual({ target: 'hosts', stamp: 0 })
-    expect(targetOf({ ROLLOUT_TARGET: LEGACY, CF_VERSION: { timestamp: '2026-11-13T00:00:00.000Z' } })).toEqual({
-      target: LEGACY,
-      stamp: Date.parse('2026-11-13T00:00:00.000Z'),
-    })
-  })
-
   it('swap() hands over to a fresh host started with the environment handed in, once', async () => {
     const { router, HOST } = makeRouter()
     await router.liveName()
@@ -784,6 +667,10 @@ describe('AppRouter', () => {
     // app-3 exists only as the object the router asks "which image does the code want"; it runs nothing.
     expect(HOST.hosts.get('app-3')?.container.started ?? []).toEqual([])
     await expect(router.swap({ envVars: { NOT_LISTED: 'x' } })).rejects.toThrow('not in CONTAINER_ENV_NAMES')
+    await expect(router.swap({ envVars: ['DATABASE_URL'] })).rejects.toThrow('must be a plain object')
+    await expect(router.swap({ envVars: { DATABASE_URL: 5 } })).rejects.toThrow('must hold only strings')
+    // A refused restart asks for nothing.
+    expect((await router.status()).forced).toBeNull()
   })
 
   it('a restart asked for while the router is busy looking is not lost', async () => {
@@ -809,32 +696,53 @@ describe('AppRouter', () => {
   })
 
   it('a failed stop for good is tried again, and the alarm is always set again even when a look throws', async () => {
-    const { router, HOST, env, storage } = makeRouter({ legacy: true })
-    await cutOver(router)
-    // Back to the old application (overlap): the host is stopped for good after the grace period.
-    env.ROLLOUT_TARGET = LEGACY
-    legacyFetch.mockImplementation(async () => Response.json({ ok: true, commit: 'old1234' }))
+    const { router, HOST, images, storage } = makeRouter()
+    await router.liveName()
+    images.app = 'reg/app@sha256:bbbbbbbbbbbb'
     await router.tick()
-    await router.tick()
-    await expect(router.liveName()).resolves.toBe(LEGACY)
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const old = HOST.hosts.get('app-1')
-    old.container.signal.mockImplementation(() => {})
-    old.container.destroy.mockRejectedValueOnce(new Error('destroy exploded'))
-    vi.setSystemTime(Date.now() + RETIRE_GRACE_MS)
-    await look(router, 21_000)
+    vi.spyOn(old.host, 'retire').mockRejectedValueOnce(new Error('destroy exploded'))
+    // The hand-over begins, then finishes: the old host is due to be forgotten, and that fails.
+    await look(router)
+    await look(router)
+    await expect(router.liveName()).resolves.toBe('app-2')
     expect((await router.status()).retiring).toMatchObject([{ name: 'app-1', tries: 1 }])
     // Not yet: the next try waits its turn.
     await router.tick()
     expect((await router.status()).retiring).toMatchObject([{ name: 'app-1', tries: 1 }])
     vi.setSystemTime(Date.now() + 30_000)
-    await look(router, 21_000)
+    await look(router)
     expect((await router.status()).retiring).toEqual([])
 
     storage.setAlarm.mockClear()
     vi.spyOn(router, 'tick').mockRejectedValueOnce(new Error('look exploded'))
     await router.alarm()
     expect(storage.setAlarm).toHaveBeenCalledWith(Date.now() + TICK_SLOW_MS)
+  })
+
+  it('poke() ignores an argument an older Worker version may still pass: the live instance and the plan are unaffected, and the alarm is set', async () => {
+    const { router, storage } = makeRouter()
+    await router.liveName()
+    await router.tick()
+    const stored = structuredClone(storage.map.get('state'))
+    storage.setAlarm.mockClear()
+    await router.poke({ target: 'legacy', stamp: 9e15 })
+    expect(storage.setAlarm).toHaveBeenCalledWith(Date.now())
+    expect(storage.map.get('state')).toEqual(stored)
+    await expect(router.tick()).resolves.toBe(TICK_SLOW_MS)
+    const status = await router.status()
+    expect(status.live).toMatchObject({ name: 'app-1' })
+    expect(status.next).toBeNull()
+    expect(status.handover).toBeNull()
+  })
+
+  it('status() has no target: the rollout target no longer exists', async () => {
+    const { router } = makeRouter()
+    await router.liveName()
+    const status = await router.status()
+    expect('target' in status).toBe(false)
+    expect(Object.keys(status)).toEqual(['routerVersion', 'live', 'next', 'handover', 'retiring', 'failed', 'forced', 'history', 'alarm'])
   })
 })
 
@@ -873,7 +781,7 @@ describe('the Worker with a router', () => {
     const { HOST, fetches } = stubHosts({ 'app-4': new Response('ok') })
     const waitUntil = vi.fn()
     const request = new Request('https://app.example/api/x', { method: 'POST', body: 'b', headers: { 'x-forwarded-for': '198.51.100.1', 'cf-connecting-ip': '203.0.113.9' } })
-    const response = await worker.fetch(request, { ROUTER, HOST, APP: {} }, { waitUntil })
+    const response = await worker.fetch(request, { ROUTER, HOST }, { waitUntil })
     await expect(response.text()).resolves.toBe('ok')
     expect(fetches).toHaveLength(1)
     expect(fetches[0].name).toBe('app-4')
@@ -881,17 +789,38 @@ describe('the Worker with a router', () => {
     await expect(fetches[0].request.text()).resolves.toBe('b')
   })
 
-  it('uses the old application while the router says legacy', async () => {
-    const { ROUTER } = stubRouter([LEGACY])
-    legacyFetch.mockResolvedValue(new Response('old'))
-    const response = await worker.fetch(new Request('https://app.example/'), { ROUTER, HOST: {}, APP: {} }, { waitUntil: vi.fn() })
-    await expect(response.text()).resolves.toBe('old')
+  it('sends the request to env.HOST.get(idFromName(name)) for the name the router gives, and never reads env.APP', async () => {
+    const { ROUTER } = stubRouter(['app-7'])
+    const { HOST, fetches } = stubHosts({ 'app-7': () => new Response('ok') })
+    const idFromName = vi.spyOn(HOST, 'idFromName')
+    const get = vi.spyOn(HOST, 'get')
+    const env = {
+      ROUTER,
+      HOST,
+      TICK_TOKEN: 'tick-token-value',
+      get APP() {
+        throw new Error('env.APP was read')
+      },
+    }
+    const waitUntil = vi.fn()
+    const response = await worker.fetch(new Request('https://app.example/api/x'), env, { waitUntil })
+    await expect(response.text()).resolves.toBe('ok')
+    expect(idFromName).toHaveBeenCalledWith('app-7')
+    expect(get).toHaveBeenCalledWith('app-7')
+    expect(fetches.map((f) => f.name)).toEqual(['app-7'])
+    // The cron tick and a restart do not read it either.
+    let pending
+    worker.scheduled({}, env, { waitUntil: (p) => void (pending = p) })
+    await pending
+    expect(fetches.map((f) => f.name)).toEqual(['app-7', 'app-7'])
+    const restart = new Request('https://app.example/internal/restart', { method: 'POST', headers: { 'x-tick-token': 'tick-token-value' } })
+    expect((await worker.fetch(restart, env, { waitUntil })).status).toBe(200)
   })
 
   it('asks the router again when a GET lands on a host that has just stopped serving', async () => {
     const { ROUTER, router } = stubRouter(['app-1', 'app-2'])
     const { HOST, fetches } = stubHosts({ 'app-1': gone, 'app-2': new Response('new') })
-    const response = await worker.fetch(new Request('https://app.example/api/x'), { ROUTER, HOST, APP: {} }, { waitUntil: vi.fn() })
+    const response = await worker.fetch(new Request('https://app.example/api/x'), { ROUTER, HOST }, { waitUntil: vi.fn() })
     await expect(response.text()).resolves.toBe('new')
     expect(fetches.map((f) => f.name)).toEqual(['app-1', 'app-2'])
     expect(router.liveName).toHaveBeenCalledTimes(2)
@@ -900,7 +829,7 @@ describe('the Worker with a router', () => {
   it('never sends a request with a body twice', async () => {
     const { ROUTER } = stubRouter(['app-1', 'app-2'])
     const { HOST, fetches } = stubHosts({ 'app-1': gone, 'app-2': new Response('new') })
-    const response = await worker.fetch(new Request('https://app.example/api/x', { method: 'POST', body: 'b' }), { ROUTER, HOST, APP: {} }, { waitUntil: vi.fn() })
+    const response = await worker.fetch(new Request('https://app.example/api/x', { method: 'POST', body: 'b' }), { ROUTER, HOST }, { waitUntil: vi.fn() })
     expect(response.status).toBe(503)
     expect(fetches).toHaveLength(1)
   })
@@ -909,14 +838,14 @@ describe('the Worker with a router', () => {
     const { ROUTER } = stubRouter(['app-1'])
     const { HOST } = stubHosts({ 'app-1': new Error('Durable Object reset because its code was updated.') })
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    const response = await worker.fetch(new Request('https://app.example/api/x'), { ROUTER, HOST, APP: {} }, { waitUntil: vi.fn() })
+    const response = await worker.fetch(new Request('https://app.example/api/x'), { ROUTER, HOST }, { waitUntil: vi.fn() })
     expect(response.status).toBe(503)
     expect(response.headers.get('retry-after')).toBe('2')
   })
 
   it('shows the rollout status only with the token, unless the staging flag opens it', async () => {
     const { ROUTER, router } = stubRouter(['app-1'])
-    const env = { ROUTER, HOST: {}, APP: {}, TICK_TOKEN: 'tick-token-value' }
+    const env = { ROUTER, HOST: {}, TICK_TOKEN: 'tick-token-value' }
     const ask = (headers, extra = {}) => worker.fetch(new Request('https://app.example/internal/rollout', { headers }), { ...env, ...extra }, { waitUntil: vi.fn() })
     expect((await ask({})).status).toBe(401)
     expect((await ask({ 'x-tick-token': 'tick-token-value' })).status).toBe(200)
@@ -927,23 +856,10 @@ describe('the Worker with a router', () => {
     expect(router.status).toHaveBeenCalledTimes(2)
   })
 
-  it('a restart on a host is a swap with the Worker env, not a stop', async () => {
-    const { ROUTER, router } = stubRouter(['app-1'])
-    const env = { ROUTER, HOST: {}, APP: {}, TICK_TOKEN: 'tick-token-value', DATABASE_URL: 'db', NOT_LISTED: 'x' }
-    const response = await worker.fetch(
-      new Request('https://app.example/internal/restart', { method: 'POST', headers: { 'x-tick-token': 'tick-token-value' } }),
-      env,
-      { waitUntil: vi.fn() },
-    )
-    await expect(response.json()).resolves.toEqual({ restarted: true, graceful: true, lastStatus: 'swapping', swapping: true })
-    expect(router.swap).toHaveBeenCalledWith({ envVars: { DATABASE_URL: 'db', TICK_TOKEN: 'tick-token-value' }, reason: 'restart' })
-    expect(legacyRestartWith).not.toHaveBeenCalled()
-  })
-
   it('says so (409) when the router refuses the restart', async () => {
     const { ROUTER, router } = stubRouter(['app-1'])
     router.swap.mockResolvedValueOnce({ swapping: false, refused: 'The newest image did not start.' })
-    const env = { ROUTER, HOST: {}, APP: {}, TICK_TOKEN: 'tick-token-value' }
+    const env = { ROUTER, HOST: {}, TICK_TOKEN: 'tick-token-value' }
     const response = await worker.fetch(
       new Request('https://app.example/internal/restart', { method: 'POST', headers: { 'x-tick-token': 'tick-token-value' } }),
       env,
@@ -957,7 +873,7 @@ describe('the Worker with a router', () => {
     const { ROUTER } = stubRouter(['app-2'])
     const { HOST, fetches } = stubHosts({ 'app-2': new Response('{}') })
     let pending
-    worker.scheduled({}, { ROUTER, HOST, APP: {}, TICK_TOKEN: 'tick-token-value' }, { waitUntil: (p) => void (pending = p) })
+    worker.scheduled({}, { ROUTER, HOST, TICK_TOKEN: 'tick-token-value' }, { waitUntil: (p) => void (pending = p) })
     await pending
     expect(fetches[0].name).toBe('app-2')
     expect(fetches[0].request.url).toBe('http://app/internal/tick')

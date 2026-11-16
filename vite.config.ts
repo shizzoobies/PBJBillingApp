@@ -15,11 +15,9 @@ export default defineConfig({
     },
   },
   test: {
-    // The Worker imports @cloudflare/containers, which only exists inside the Workers bundle.
-    // worker.test.mjs mocks it; the alias just lets the import resolve before it is installed.
     alias: {
-      '@cloudflare/containers': fileURLToPath(new URL('./cloudflare/test-support/containers-stub.mjs', import.meta.url)),
-      // The Workers runtime module the Durable Object classes extend.
+      // The Workers runtime module the Durable Object classes extend; it only exists inside
+      // the Workers runtime.
       'cloudflare:workers': fileURLToPath(new URL('./cloudflare/test-support/workers-stub.mjs', import.meta.url)),
     },
     // happy-dom gives the test environment a DOM so React components mount.

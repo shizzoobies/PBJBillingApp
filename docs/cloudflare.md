@@ -6,10 +6,11 @@ the same `server.js` run on both.
 
 ## Since 2026-11-12: deploys hand over (read this first)
 
-The wiring below describes ONE container owned by the Durable Object `AppContainer`. That
-arrangement is still in the code as the instance named `legacy` (the way back), but it is no longer
-what serves. Since the cutover the app runs in an `AppHost` instance on Cloudflare's
-`durable_object` container scheduling policy, and `AppRouter` decides which instance is live:
+The app runs in an `AppHost` instance on Cloudflare's `durable_object` container scheduling
+policy, and `AppRouter` decides which instance is live. (Until 2026-11-12 it was ONE container owned
+by a Durable Object called `AppContainer`, which every deploy stopped before the new one was up. That
+arrangement stayed in the code as the way back until 2026-11-15, when its class, its container
+application and the `@cloudflare/containers` package were removed.)
 
 - **A deploy stops nothing by itself.** The router brings a new instance up beside the live one,
   HELD (`lib/container-hold.js`: container up, app not started, database reachable), moves the
@@ -20,10 +21,20 @@ what serves. Since the cutover the app runs in an `AppHost` instance on Cloudfla
   fresh instance with the Worker's current environment. The script waits for it (it can take several
   minutes while Cloudflare brings the image up; the app keeps answering meanwhile).
 - **`GET /internal/rollout`** (header `x-tick-token`) shows where things stand.
-- **The way back to the old container:** `"ROLLOUT_TARGET": "legacy"` in the `wrangler.jsonc` vars,
-  then deploy.
+- **The way back from a bad deploy** is a revert pushed to `main`: it is brought up and handed
+  over to like any other deploy. There is no other arrangement to fall back to any more. One limit:
+  a commit from before a Durable Object migration must not be deployed again once the migration has
+  been applied. The last migration is `v3` (2026-11-15, the commit that removed `AppContainer`).
+  An older commit's `wrangler.jsonc` stops at `v2` and binds the deleted class: `wrangler deploy`
+  would warn that the published migration tag `v3` "was not found" and try to apply every migration
+  again, which Cloudflare should reject (the classes exist already, and a deleted class cannot be
+  bound). Never try to force it. A revert of later work is fine as long as it keeps
+  `wrangler.jsonc`'s migrations and bindings. `wrangler rollback` has the same limit.
+- **A container application is not deleted by a deploy.** One that leaves `wrangler.jsonc` stays at
+  Cloudflare until `wrangler containers delete <id>` (ids from `wrangler containers list`). The
+  laptop's token cannot manage container applications; the repo's Actions token can.
 
-The rules, the rehearsal results and what is left to clean up are in
+The rules and the rehearsal results are in
 `docs/plans/zero-downtime-deploy-2026-11.md`, section 12. Everything below about the Worker's guards,
 the tick, secrets and the environment still applies unchanged.
 
@@ -33,13 +44,13 @@ the tick, secrets and the environment still applies unchanged.
 browser / Stripe / Resend / SignWell / ElevenLabs
         |
    Cloudflare Worker  (cloudflare/worker.js, wrangler.jsonc)      <- Cron Trigger every 15 min
-        |  getContainer(env.APP, 'app').fetch(request)
-   Durable Object AppContainer  --  ONE container (standard-1, max_instances 1)
+        |  asks AppRouter which instance is live, then env.HOST.get(<that one>).fetch(request)
+   Durable Object AppHost  --  the ONE live instance (standard-1); a second one only during a deploy
         |  port 8080
    node server.js  (the repo Dockerfile)  --  outbound 5432 straight to Postgres
 ```
 
-- **Worker to one container.** Every request is forwarded to the same named container instance with
+- **Worker to one container.** Every request is forwarded to the live instance with
   the original `Request` object (not a copy), so the HMAC-signed webhook bodies reach `server.js`
   byte for byte.
 - **Tick plus cron.** A container can sleep or be restarted at any time, so the app's hourly
@@ -50,8 +61,9 @@ browser / Stripe / Resend / SignWell / ElevenLabs
   per-invoice and per-day markers), so the interval and the tick overlapping is harmless. The route is
   404 when `TICK_TOKEN` is unset and 401 on a wrong token. The tick also wakes a restarted container,
   which re-arms its own timers. Cron changes take up to 15 minutes to propagate.
-- **Keep-awake.** `AppContainer` sets `sleepAfter = '2h'` and overrides `onActivityExpired()` to call
-  `renewActivityTimeout()` instead of stopping. The platform may still restart the container (SIGTERM,
+- **Keep-awake.** `AppHost` sets the container's inactivity timeout to six hours (the longest
+  Cloudflare allows) and the router looks at the live instance every 30 seconds, which keeps it
+  active; an instance that exits is started again by that look. The platform may still restart the container (SIGTERM,
   then SIGKILL after 15 minutes) and promises no minimum run time; disk is ephemeral. Nothing the app
   needs lives on its disk when `DATABASE_URL` is set.
 - **Secrets by name.** Every setting is a Worker secret (`wrangler secret bulk`, write-only afterwards)
@@ -73,16 +85,14 @@ browser / Stripe / Resend / SignWell / ElevenLabs
   off). `JWT_SECRET` is not in the list on purpose: the app never reads it (sessions are database rows), so
   changing or omitting it affects nothing. `ENV_REVISION` is stamped by the uploader (see "After every secret
   upload" below), not typed.
-- **The container reads its environment only when it starts.** A new Worker version re-attaches to the
-  running container, and `onActivityExpired` never stops it, so a secret upload changes nothing until the
-  container is restarted. `POST /internal/restart` (header `x-tick-token` = `TICK_TOKEN`) is answered by
-  the Worker itself, which hands its CURRENT env (`pickContainerEnv(env)`) to the Durable Object that owns
-  the container by calling `restartWith(envVars)` on it (Durable Object RPC inside the one Worker, never over
-  the public network). `restartWith` validates the values, sets `this.envVars`, sends SIGTERM, waits up to
-  20 seconds for the container to be gone, then destroys it either way and answers
-  `{ restarted: true, graceful: <bool>, lastStatus: <last getState() status> }` (`graceful` is false when it had
-  to be killed). A failing `destroy()` answers 500 `{ restarted: false }`. The next request starts the
-  container with the env that was handed over. The hand-over matters because the Durable Object isolate can be
+- **The container reads its environment only when it starts.** A new Worker version does not restart the
+  running instance, so a secret upload changes nothing until the app is restarted.
+  `POST /internal/restart` (header `x-tick-token` = `TICK_TOKEN`) is answered by the Worker itself, which
+  hands its CURRENT env (`pickContainerEnv(env)`) to the router (`AppRouter.swap`, Durable Object RPC inside
+  the one Worker, never over the public network). The router validates the values and brings a FRESH instance
+  up beside the live one with that env, then hands over to it like a deploy; the route answers at once with
+  `{ restarted: true, swapping: true }`, or 409 with the reason when the newest image is one that failed to
+  start, or 500 `{ restarted: false }`. Handing the env in matters because a Durable Object isolate can be
   OLDER than the Worker version (a secret upload does not replace it promptly) and then still holds the env it
   was constructed with; the stateless Worker always has the current one. `GET /internal/env-revision` (same token
   checks: 404 without `TICK_TOKEN`, 401 on a mismatch) answers `{ workerEnvRevision }`, the `ENV_REVISION` this
@@ -211,7 +221,7 @@ Nothing here has run against Cloudflare yet; the first deploy should check each 
 - `max_instances: 1` holds under a rollout (an old and a new container may overlap briefly; the app's
   markers make the jobs safe, but check for double sends).
 - `standard-1` (4 GiB) is enough for PDF generation and the bulk save under real load.
-- `POST /internal/restart` really ends the container on Cloudflare and the next request starts it with the new environment. The code (`AppContainer.restartWith`) sets `envVars`, calls `stop('SIGTERM')`, polls `getState()` (and the runtime's `running` flag) for the container to be gone, then `destroy()`; checked against the package source and a mock. The live proof is `restart.mjs`: `uptimeSeconds` drops and `envRevision` matches `worker env revision`.
+- (Historical: this item and the next describe the old one-container arrangement, removed 2026-11-15. A restart is now a hand-over to a fresh instance, see the top of this page.) `POST /internal/restart` really ends the container on Cloudflare and the next request starts it with the new environment. The code (`AppContainer.restartWith`) sets `envVars`, calls `stop('SIGTERM')`, polls `getState()` (and the runtime's `running` flag) for the container to be gone, then `destroy()`; checked against the package source and a mock. The live proof is `restart.mjs`: `uptimeSeconds` drops and `envRevision` matches `worker env revision`.
 - 2026-10-22 04:13-04:20Z observation that led to `restartWith`: after `secrets-upload.mjs --allow-live` stamped `ENV_REVISION=2026-10-22T04:13:33.697Z`, four restarts (each `HTTP 200 graceful=false`) all came back with the OLD `envRevision=2026-10-22T03:08:09.580Z` within seconds. The Durable Object isolate that owns the container still held the env it was constructed with, and the restart reused it. Still to confirm live: that `restartWith` is reachable on that isolate (RPC methods of the new class code), that `graceful` becomes true now that the runtime `running` flag counts, and that the uptime really drops (the earlier runs could not show whether the container restarted at all).
 - Outbound Postgres on 5432 from the container works (`/health` shows `db: ok`).
 - `package-lock.json` as edited on Windows installs cleanly with `npm ci` on Linux; if it does not, run

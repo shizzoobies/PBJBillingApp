@@ -33,8 +33,8 @@ export const SWAP_TIMEOUT_MS = 25 * 60_000
 const SWAP_INTERVAL_MS = 5_000
 // With no uptime from before the restart to compare with, a restarted container is younger than this.
 export const FRESH_UPTIME_SECONDS = 120
-// The restart route itself waits up to 20 s for a graceful stop before it destroys the
-// container (measured 20.9 s on 2026-10-22), so the request budget has to be well above that.
+// The restart route only asks the router for a hand-over to a fresh instance and answers at
+// once; the generous budget is for a router that is itself being replaced by a deploy.
 const REQUEST_TIMEOUT_MS = 60_000
 export const MAX_EXTRA_RESTARTS = 3
 export const RESTART_GAP_MS = 20_000

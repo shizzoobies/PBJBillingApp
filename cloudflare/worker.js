@@ -9,16 +9,11 @@
 // lets the new app start, so two copies of the app never run against the database at once.
 // The rules are in cloudflare/rollout.js.
 //
-// AppContainer is the OLD arrangement (one container on Cloudflare's default scheduling
-// policy, where a deploy stops the container before starting the new one). It stays until
-// the cutover has been observed, as the instance named "legacy" and as the way back.
-//
 // This file is bundled by wrangler (see wrangler.jsonc); it is not part of the
 // container image. https://developers.cloudflare.com/containers/
 import { DurableObject } from 'cloudflare:workers'
-import { Container, getContainer } from '@cloudflare/containers'
 import { CONTAINER_ENV_NAMES } from './env-names.js'
-import { LEGACY, PROTOCOL, TICK_SLOW_MS, force, handoverStep, hostName, initialState, plan, retireFailed, retired } from './rollout.js'
+import { PROTOCOL, TICK_SLOW_MS, force, handoverStep, hostName, initialState, plan, retireFailed, retired } from './rollout.js'
 
 /** How often a request re-checks that the router's heartbeat alarm is still set. */
 const ARM_CHECK_MS = 60_000
@@ -41,11 +36,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 // shutdown gives in-flight requests 10 seconds (server.js SHUTDOWN_BACKSTOP_MS).
 const GRACEFUL_STOP_MS = 20_000
 const STOP_POLL_MS = 500
-const STOPPED_STATES = new Set(['stopped', 'stopped_with_code'])
 
 // server.js listens on PORT, which the Dockerfile sets to 8080.
 const APP_PORT = 8080
-// The same size as the old application's instance_type.
+// The size of every instance of the app.
 const HOST_INSTANCE = 'standard-1'
 // The longest Cloudflare allows. The router looks at the live host every 30 seconds, which
 // keeps it active, so this only matters if the router itself is down for hours.
@@ -77,130 +71,14 @@ const NAME_SET = new Set(CONTAINER_ENV_NAMES)
 /** Throws (message without values) unless `value` is a plain object of listed names with string values. */
 function assertContainerEnv(value) {
   const plain = value !== null && typeof value === 'object' && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
-  if (!plain) throw new Error('restartWith needs a plain object of environment values')
+  if (!plain) throw new Error('the environment handed in must be a plain object')
   for (const [name, entry] of Object.entries(value)) {
-    if (!NAME_SET.has(name)) throw new Error('restartWith: a name is not in CONTAINER_ENV_NAMES')
-    if (typeof entry !== 'string') throw new Error('restartWith: every value must be a string')
+    if (!NAME_SET.has(name)) throw new Error('the environment handed in has a name that is not in CONTAINER_ENV_NAMES')
+    if (typeof entry !== 'string') throw new Error('the environment handed in must hold only strings')
   }
 }
 
 const json = (status, body, headers) => Response.json(body, { status, headers })
-
-// ---------------------------------------------------------------------------------------
-// The old arrangement (kept until the cutover has been observed).
-// ---------------------------------------------------------------------------------------
-export class AppContainer extends Container {
-  defaultPort = APP_PORT
-  // Idle time before the platform may put the container to sleep. Overridden below so
-  // it never does, but a long value keeps the default sane if that override is removed.
-  sleepAfter = '2h'
-
-  constructor(ctx, env) {
-    super(ctx, env)
-    // Applied at every container start. https://developers.cloudflare.com/containers/container-package/
-    this.envVars = pickContainerEnv(env)
-  }
-
-  // The default stops the container when sleepAfter passes with no requests. The app has
-  // in-process state (rate-limit buckets, open SSE streams) and its own hourly jobs, so we
-  // renew instead of stopping; the platform may still restart it at any time (SIGTERM,
-  // then SIGKILL after 15 minutes), which the app already survives.
-  // https://developers.cloudflare.com/containers/container-package/ (onActivityExpired:
-  // "If you override it, you must call stop() or destroy() or the container won't sleep" -
-  // not sleeping is the point here.)
-  async onActivityExpired() {
-    // Once the router has moved traffic to a host, this container was stopped on purpose and
-    // must stay stopped; with nothing running there is nothing to renew.
-    if (this.retired === true || this.ctx.container?.running === false) return
-    this.renewActivityTimeout()
-  }
-
-  /** SIGTERM, wait up to GRACEFUL_STOP_MS for the app to leave, then destroy() either way. */
-  async stopAndDestroy() {
-    let graceful = false
-    let lastStatus = null
-    try {
-      await this.stop('SIGTERM')
-      const deadline = Date.now() + GRACEFUL_STOP_MS
-      for (;;) {
-        const state = await this.getState()
-        lastStatus = state?.status ?? null
-        if (STOPPED_STATES.has(lastStatus) || this.container?.running === false) {
-          graceful = true
-          break
-        }
-        if (Date.now() >= deadline) break
-        await sleep(STOP_POLL_MS)
-      }
-    } catch (error) {
-      console.error('[restart] graceful stop failed', error?.message)
-    }
-    try {
-      await this.destroy()
-    } catch (error) {
-      console.error('[restart] destroy failed', error?.message)
-      throw error
-    }
-    return { graceful, lastStatus }
-  }
-
-  /**
-   * Restart the container on the environment the CALLER holds. The Durable Object isolate that
-   * owns the container can be older than the Worker version (a secret upload does not replace
-   * it promptly), so `this.envVars` from the constructor can be stale; the stateless Worker
-   * always has the current env and hands it in here. The package reads `envVars` when it
-   * starts the container, so a value set right before destroy() is what the next start uses.
-   * The values travel over the Durable Object RPC inside this one Worker, never the network.
-   *
-   * Resolves to { graceful, lastStatus }; throws if destroy() fails. The next request starts
-   * the container again.
-   */
-  async restartWith(envVars) {
-    assertContainerEnv(envVars)
-    this.envVars = { ...envVars }
-    const { graceful, lastStatus } = await this.stopAndDestroy()
-    console.log('[restart] graceful=' + graceful + ' lastStatus=' + lastStatus)
-    return { graceful, lastStatus }
-  }
-
-  /** Which hand-over calls this object answers (see PROTOCOL in rollout.js). */
-  async protocol() {
-    return PROTOCOL
-  }
-
-  async isRetired() {
-    if (this.retired === undefined) this.retired = (await this.ctx.storage.get('retiredByRouter')) === true
-    return this.retired
-  }
-
-  /**
-   * The router moved traffic to a host: stop this container and leave it stopped. The mark
-   * is stored first, because the package starts the container on ANY fetch: without it a
-   * late request (or a Worker version from before the router) would wake a second copy of
-   * the app that nothing would ever stop.
-   */
-  async retire() {
-    this.retired = true
-    await this.ctx.storage.put('retiredByRouter', true)
-    const { graceful, lastStatus } = await this.stopAndDestroy()
-    console.log('[legacy] retired graceful=' + graceful + ' lastStatus=' + lastStatus)
-    return { graceful }
-  }
-
-  /** The way back: the router wants this container to serve again. */
-  async revive() {
-    this.retired = false
-    await this.ctx.storage.delete('retiredByRouter')
-    return {}
-  }
-
-  async fetch(request) {
-    if (await this.isRetired()) {
-      return json(503, { error: 'This instance no longer serves. Try again.' }, { [GONE_HEADER]: '1', 'retry-after': '1' })
-    }
-    return super.fetch(request)
-  }
-}
 
 // ---------------------------------------------------------------------------------------
 // One instance of the app on the durable_object scheduling policy: this object's own code
@@ -400,6 +278,8 @@ export class AppHost extends DurableObject {
    * `held`: start parked (the hold, not the app) and wait for release().
    */
   async begin({ envVars = null, held = false } = {}) {
+    // Checked before anything is stored: a refused environment leaves no record behind.
+    if (envVars) assertContainerEnv(envVars)
     let cfg = await this.loadCfg()
     if (!cfg) {
       const image = this.ctx.container.images?.app
@@ -409,10 +289,7 @@ export class AppHost extends DurableObject {
       this.cfg = cfg
       this.retiring = false
     }
-    if (envVars) {
-      assertContainerEnv(envVars)
-      this.envOverride = { ...envVars }
-    }
+    if (envVars) this.envOverride = { ...envVars }
     this.startIfNeeded()
     return { image: cfg.image }
   }
@@ -581,7 +458,7 @@ export class AppRouter extends DurableObject {
   async load() {
     if (this.state === undefined) {
       const stored = await this.ctx.storage.get('state')
-      this.state = stored ?? initialState({ hasLegacy: Boolean(this.env.APP) })
+      this.state = stored ?? initialState()
       // A first-ever state is written at once, so "unchanged" in save() never hides it.
       if (!stored) await this.ctx.storage.put('state', this.state)
     }
@@ -604,60 +481,14 @@ export class AppRouter extends DurableObject {
     if (!this.ticking && (await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(now)
   }
 
-  /**
-   * Where traffic should be: 'hosts' or the old application. The Worker hands this in with
-   * every poke (see targetOf), because this object can keep running an OLDER version of the
-   * code and its vars for minutes after a deploy (measured: 5 minutes on staging), while the
-   * stateless Worker is always the newest. Its own env is only the fallback before any poke.
-   */
-  target() {
-    const stored = this.state?.target
-    if (stored === LEGACY || stored === 'hosts') return stored
-    return this.env.ROLLOUT_TARGET === LEGACY ? LEGACY : 'hosts'
-  }
-
-  /** Something with describe(), begin(), stop(), release(), resume() and retire(), whichever kind of instance `name` is. */
+  /** The instance called `name`: an AppHost, with describe(), begin(), stop(), release(), resume() and retire(). */
   instance(name) {
-    if (name !== LEGACY) return this.env.HOST.get(this.env.HOST.idFromName(name))
-    const legacy = getContainer(this.env.APP, 'app')
-    return {
-      // Starting the old container is just asking it something (its package starts it on
-      // fetch), once the mark that keeps it stopped is cleared.
-      begin: () => legacy.revive(),
-      retire: () => legacy.retire(),
-      // The old container has one kind of stop (stopped, marked, startable again by revive).
-      stop: () => legacy.retire(),
-      resume: () => legacy.revive(),
-      release: async () => ({}),
-      describe: async ({ probe = false } = {}) => {
-        // While it is live it is not poked: it is supervised the way it always was (requests
-        // and the cron tick). As the candidate on the way BACK, it is ready when it answers.
-        if (!probe) {
-          // The one thing asked of it: does its object run a version of this code that can be
-          // handed over from? (For minutes after the first deploy of this arrangement it may not.)
-          let protocol = 0
-          try {
-            protocol = Number(await legacy.protocol()) || 0
-          } catch {
-            // An older version of the code: no such method yet.
-          }
-          return { begun: true, image: LEGACY, running: true, ready: true, wanted: null, protocol }
-        }
-        try {
-          const response = await legacy.fetch(new Request('http://app/health', { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) }))
-          const body = await response.json().catch(() => null)
-          const ready = response.status === 200 && body?.ok === true
-          return { begun: true, image: LEGACY, running: true, ready, commit: body?.commit ?? null, wanted: null }
-        } catch (error) {
-          return { begun: true, image: LEGACY, running: false, ready: false, error: String(error?.message ?? error).slice(0, 160), wanted: null }
-        }
-      },
-    }
+    return this.env.HOST.get(this.env.HOST.idFromName(name))
   }
 
-  async describe(name, options) {
+  async describe(name) {
     try {
-      return await this.instance(name).describe(options)
+      return await this.instance(name).describe()
     } catch (error) {
       console.error('[router] could not ask ' + name + ':', error?.message)
       return null
@@ -665,15 +496,13 @@ export class AppRouter extends DurableObject {
   }
 
   async facts(state) {
-    const target = this.target()
     const [live, next] = await Promise.all([
       state.live ? this.describe(state.live.name) : null,
-      state.next ? this.describe(state.next.name, { probe: true }) : null,
+      state.next ? this.describe(state.next.name) : null,
     ])
     // What the newest code wants is asked of the host that WOULD be next: a new object always
     // runs the newest version, where a long-lived one may briefly lag behind a deploy.
-    let wanted = null
-    if (target !== LEGACY) wanted = (await this.describe(hostName(state.seq + 1)))?.wanted ?? live?.wanted ?? null
+    const wanted = (await this.describe(hostName(state.seq + 1)))?.wanted ?? live?.wanted ?? null
     // While a hand-over is being undone: is the new instance's container really gone?
     let to = null
     if (state.handover?.phase === 'undo') {
@@ -683,7 +512,7 @@ export class AppRouter extends DurableObject {
         console.error('[router] could not ask ' + state.handover.to + ':', error?.message)
       }
     }
-    return { live, next, wanted, target, to }
+    return { live, next, wanted, to }
   }
 
   /** One look: gather the facts, decide (rollout.js), store the decision, then act on it. */
@@ -769,16 +598,11 @@ export class AppRouter extends DurableObject {
 
   /**
    * Look now instead of at the next heartbeat (a new Worker version just started serving).
-   * `target` and `stamp` come from the Worker version that is poking; the newest stamp wins,
-   * so a straggling isolate of an older version cannot turn the target back.
+   * (For some minutes after the deploy that removed the old application, a Worker isolate of
+   * the version before it may still pass an argument here. It is ignored.)
    */
-  async poke({ target = null, stamp = 0 } = {}) {
-    const state = await this.load()
-    const wanted = target === LEGACY ? LEGACY : target === 'hosts' ? 'hosts' : null
-    if (wanted && Number.isFinite(stamp) && stamp >= (state.targetStamp ?? 0) && (state.target !== wanted || stamp > (state.targetStamp ?? 0))) {
-      if (state.target !== wanted) console.log('[router] target is now ' + wanted)
-      await this.save({ ...this.state, target: wanted, targetStamp: stamp })
-    }
+  async poke() {
+    await this.load()
     this.armed = Date.now()
     await this.ctx.storage.setAlarm(Date.now())
   }
@@ -806,7 +630,7 @@ export class AppRouter extends DurableObject {
     const short = (image) => (typeof image === 'string' && image.includes('sha256:') ? image.slice(-12) : (image ?? null))
     const [live, next] = await Promise.all([
       state.live ? this.describe(state.live.name) : null,
-      state.next ? this.describe(state.next.name, { probe: true }) : null,
+      state.next ? this.describe(state.next.name) : null,
     ])
     const brief = (entry, facts) =>
       entry && {
@@ -829,7 +653,6 @@ export class AppRouter extends DurableObject {
       }
     const handover = state.handover
     return {
-      target: this.target(),
       routerVersion: this.env.CF_VERSION?.id ?? null,
       live: brief(state.live, live),
       next: brief(state.next, next),
@@ -859,13 +682,7 @@ async function tokensMatch(presented, expected) {
   return diff === 0
 }
 
-const routerOf = (env) => (env.ROUTER ? env.ROUTER.get(env.ROUTER.idFromName('router')) : null)
-
-/** What this Worker version says the target is, and when the version was made (newest wins). */
-export function targetOf(env) {
-  const made = Date.parse(env?.CF_VERSION?.timestamp ?? '')
-  return { target: env?.ROLLOUT_TARGET === LEGACY ? LEGACY : 'hosts', stamp: Number.isFinite(made) ? made : 0 }
-}
+const routerOf = (env) => env.ROUTER.get(env.ROUTER.idFromName('router'))
 
 // One poke per Worker isolate: new isolates appear when a new version starts serving, which
 // is exactly when the router should look for a new image.
@@ -893,16 +710,13 @@ async function liveName(router) {
  */
 async function sendToLive(env, make, repeatable) {
   const router = routerOf(env)
-  // No router bound: the old arrangement, exactly as before.
-  if (!router) return getContainer(env.APP, 'app').fetch(make())
   for (let attempt = 0; ; attempt++) {
     const last = attempt > 0 || !repeatable
     let response
     try {
       const name = await liveName(router)
       if (!name) return json(503, { error: 'The app is starting. Try again in a moment.' }, { 'retry-after': '5' })
-      const instance = name === LEGACY ? getContainer(env.APP, 'app') : env.HOST.get(env.HOST.idFromName(name))
-      response = await instance.fetch(make())
+      response = await env.HOST.get(env.HOST.idFromName(name)).fetch(make())
     } catch (error) {
       console.error('[worker] could not reach the live instance:', error?.message)
       if (last) return json(503, { error: 'The app did not answer. Try again in a moment.' }, { 'retry-after': '2' })
@@ -934,9 +748,9 @@ export default {
     }
 
     const router = routerOf(env)
-    if (router && !poked) {
+    if (!poked) {
       poked = true
-      ctx?.waitUntil?.(router.poke(targetOf(env)).catch((error) => console.error('[worker] poke failed', error?.message)))
+      ctx?.waitUntil?.(router.poke().catch((error) => console.error('[worker] poke failed', error?.message)))
     }
 
     // /internal/* is for the Worker and its cron, never for the public internet. The cron
@@ -944,7 +758,7 @@ export default {
     if (pathname === '/internal' || pathname.startsWith('/internal/')) {
       const isRestart = pathname === '/internal/restart' && request.method === 'POST'
       const isEnvRevision = pathname === '/internal/env-revision' && request.method === 'GET'
-      const isRollout = pathname === '/internal/rollout' && request.method === 'GET' && Boolean(router)
+      const isRollout = pathname === '/internal/rollout' && request.method === 'GET'
       // The staging copy has no secrets at all, so its rollout status is open (ROLLOUT_STATUS_PUBLIC).
       if (isRollout && env.ROLLOUT_STATUS_PUBLIC === '1' && !env.TICK_TOKEN) return json(200, await router.status())
       if ((!isRestart && !isEnvRevision && !isRollout) || !env.TICK_TOKEN) {
@@ -962,17 +776,13 @@ export default {
       // older env than this Worker. So this Worker (which has the current env) hands it over.
       // The values go over the Durable Object RPC inside this Worker, never the public network.
       try {
-        if (router && (await liveName(router)) !== LEGACY) {
-          // A fresh instance is brought up beside the live one with this env and handed over to
-          // like a deploy: requests wait a few seconds while the app starts, none fail.
-          const asked = await router.swap({ envVars: pickContainerEnv(env), reason: 'restart' })
-          if (!asked?.swapping) return json(409, { restarted: false, error: asked?.refused ?? 'The restart was refused.' })
-          return json(200, { restarted: true, graceful: true, lastStatus: 'swapping', swapping: true })
-        }
-        const { graceful, lastStatus } = await getContainer(env.APP, 'app').restartWith(pickContainerEnv(env))
-        return json(200, { restarted: true, graceful, lastStatus })
+        // A fresh instance is brought up beside the live one with this env and handed over to
+        // like a deploy: requests wait a few seconds while the app starts, none fail.
+        const asked = await router.swap({ envVars: pickContainerEnv(env), reason: 'restart' })
+        if (!asked?.swapping) return json(409, { restarted: false, error: asked?.refused ?? 'The restart was refused.' })
+        return json(200, { restarted: true, graceful: true, lastStatus: 'swapping', swapping: true })
       } catch (error) {
-        console.error('[restart] restartWith failed', error?.message)
+        console.error('[restart] swap failed', error?.message)
         return json(500, { restarted: false })
       }
     }
@@ -989,21 +799,17 @@ export default {
   },
 
   // Cron Trigger (wrangler.jsonc triggers.crons): run the app's periodic jobs on the live
-  // instance, and nudge the router. The fetch also wakes the old container if it was
-  // restarted, which is what re-arms its own timers.
+  // instance, and nudge the router.
   scheduled: (controller, env, ctx) => {
     const tick = { method: 'POST', headers: { 'x-tick-token': env.TICK_TOKEN ?? '' } }
     // The cron is also the heartbeat's safety net: it sets the router's alarm again.
     const poked = routerOf(env)
-      ?.poke(targetOf(env))
+      .poke()
       .catch((error) => console.error('[cron] poke failed', error?.message))
-    const sent = routerOf(env)
-      ? sendToLive(env, () => new Request('http://app/internal/tick', tick), true)
-      : getContainer(env.APP, 'app').fetch('http://app/internal/tick', tick)
-    const ticked = sent
+    const ticked = sendToLive(env, () => new Request('http://app/internal/tick', tick), true)
       .then((response) => response.ok || console.error('[cron] tick', response.status))
       .catch((error) => console.error('[cron] tick failed', error?.message))
     // Both are waited for: a tick that fails fast must not cut the poke short.
-    return ctx.waitUntil(poked ? Promise.all([poked, ticked]) : ticked)
+    return ctx.waitUntil(Promise.all([poked, ticked]))
   },
 }
