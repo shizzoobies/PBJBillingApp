@@ -41,7 +41,23 @@ for h in "$@"; do
     sleep 15
   done
   [ -n "$run_id" ] || { echo "no cf-deploy.yml push run appeared for $sha - stopping"; exit 1; }
-  gh run watch "$run_id" --exit-status || { echo "Cloudflare deploy workflow failed - stopping"; exit 1; }
+  # `gh run watch` also exits non-zero when GitHub's API drops mid-watch: on
+  # 2026-11-16 a 502 from api.github.com was reported here as a failed deploy
+  # while the run was still going (it finished fine). So a watch that ends badly
+  # is believed only when the RUN says it is over and did not succeed; while the
+  # run is still going, or GitHub cannot say, it is watched again.
+  watched=0
+  for ((w=1; w<=10; w++)); do
+    if gh run watch "$run_id" --exit-status; then watched=1; break; fi
+    state=$(gh run view "$run_id" --json status,conclusion --jq '.status + " " + (.conclusion // "")' 2>/dev/null) || state=""
+    case "$state" in
+      "completed success") watched=1; break;;
+      completed*) break;;
+    esac
+    echo "lost the watch on run $run_id (${state:-no answer from GitHub}) - watching again"
+    sleep 15
+  done
+  [ "$watched" = 1 ] || { echo "Cloudflare deploy workflow failed - stopping"; exit 1; }
 
   # git --short=7 is a MINIMUM length, so slice the full SHA explicitly.
   short=${sha:0:7}

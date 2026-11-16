@@ -44,7 +44,23 @@ function scenario(t, kind) {
     'if [ "$2" = list ]; then',
     ' if [ "$SCENARIO" = list_fail ]; then exit 1; fi',
     ' if [ "$SCENARIO" = no_run ]; then echo "[]"; else echo \'[{"databaseId":123}]\'; fi',
-    'else [ "$SCENARIO" != workflow_fail ]; fi',
+    // What the run itself says (asked only after a watch that ended badly).
+    'elif [ "$2" = view ]; then',
+    ' case "$SCENARIO" in',
+    '  workflow_fail) echo "completed failure";;',
+    '  watch_drop|watch_lost) echo "in_progress ";;',
+    '  watch_silent) exit 1;;',
+    '  *) echo "completed success";;',
+    ' esac',
+    // The watch: fails for a failed deploy, and also when GitHub drops it.
+    'else',
+    ' case "$SCENARIO" in',
+    '  workflow_fail|watch_lost|watch_silent|watch_drop_done) exit 1;;',
+    // The first watch is dropped, the second one sees the run through.
+    '  watch_drop) [ "$(grep -c "gh run watch" "$TRACE")" -ge 2 ];;',
+    '  *) exit 0;;',
+    ' esac',
+    'fi',
   ].join('\n'))
   put('curl', [
     'echo curl >> "$TRACE"',
@@ -82,6 +98,44 @@ for (const kind of ['success', 'ahead']) {
     assert.match(result.trace, /gh run watch 123 --exit-status/)
     assert.match(result.trace, /tail/)
     assert.match(result.stdout, /ALL SHIPPED/)
+    // A watch that ends well is believed: the run is not asked again.
+    assert.doesNotMatch(result.trace, /gh run view/)
+  })
+}
+
+// 2026-11-16: GitHub's API answered 502 in the middle of a watch and the ship
+// script called a deploy that was still running (and went on to succeed) failed.
+test('ship watches again when the watch is dropped while the run is still going', { skip: !existsSync(bash) }, (t) => {
+  const result = scenario(t, 'watch_drop')
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.equal((result.trace.match(/gh run watch 123 --exit-status/g) || []).length, 2)
+  assert.match(result.trace, /gh run view 123 --json status,conclusion/)
+  assert.match(result.stdout, /lost the watch on run 123 \(in_progress ?\) - watching again/)
+  assert.match(result.stdout, /ALL SHIPPED/)
+})
+test('ship carries on when the watch is dropped but the run had finished well', { skip: !existsSync(bash) }, (t) => {
+  const result = scenario(t, 'watch_drop_done')
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.equal((result.trace.match(/gh run watch 123/g) || []).length, 1)
+  assert.match(result.trace, /curl/)
+  assert.match(result.stdout, /ALL SHIPPED/)
+})
+test('a deploy that really failed stops at once: one watch, one look at the run', { skip: !existsSync(bash) }, (t) => {
+  const result = scenario(t, 'workflow_fail')
+  assert.notEqual(result.status, 0)
+  assert.equal((result.trace.match(/gh run watch 123/g) || []).length, 1)
+  assert.equal((result.trace.match(/gh run view 123/g) || []).length, 1)
+  assert.match(result.stdout, /Cloudflare deploy workflow failed - stopping/)
+})
+for (const kind of ['watch_lost', 'watch_silent']) {
+  test('ship gives up after ten dropped watches and says so: ' + kind, { skip: !existsSync(bash) }, (t) => {
+    const result = scenario(t, kind)
+    assert.notEqual(result.status, 0)
+    assert.equal((result.trace.match(/gh run watch 123/g) || []).length, 10)
+    assert.match(result.stdout, /Cloudflare deploy workflow failed - stopping/)
+    assert.doesNotMatch(result.stdout, /ALL SHIPPED/)
+    assert.doesNotMatch(result.trace, /curl/)
+    if (kind === 'watch_silent') assert.match(result.stdout, /no answer from GitHub/)
   })
 }
 for (const kind of ['branch', 'dirty', 'diverged', 'busy', 'push_fail', 'list_fail', 'no_run', 'workflow_fail', 'http_fail', 'stale', 'unhealthy']) {
