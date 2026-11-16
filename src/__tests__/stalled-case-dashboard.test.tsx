@@ -18,6 +18,7 @@ vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))
 vi.mock('../lib/api', () => ({
   fetchGlobalActivity: vi.fn().mockResolvedValue({ entries: [] }),
   fetchRateVersions: vi.fn().mockResolvedValue({ billRateVersions: [], costRateVersions: [] }),
+  invoiceEstimateRequest: vi.fn(async () => ({ period: '', monthTotal: 0, serviceTotal: 0, reimburseTotal: 0, clients: [] })),
   fetchTeam: vi.fn().mockResolvedValue({ users: [] }),
   fetchTeamActivity: vi.fn().mockResolvedValue({ entries: [] }),
   listInvoicesRequest: vi.fn().mockResolvedValue([]),

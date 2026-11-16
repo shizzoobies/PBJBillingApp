@@ -21,6 +21,7 @@ vi.mock('../lib/api', () => ({
   // updater and take the whole view down.
   fetchGlobalActivity: vi.fn().mockResolvedValue({ entries: [] }),
   fetchRateVersions: vi.fn().mockResolvedValue({ billRateVersions: [], costRateVersions: [] }),
+  invoiceEstimateRequest: vi.fn(async () => ({ period: '', monthTotal: 0, serviceTotal: 0, reimburseTotal: 0, clients: [] })),
   fetchTeam: vi.fn().mockResolvedValue({ users: [] }),
   fetchTeamActivity: vi.fn().mockResolvedValue({ entries: [] }),
   // The owner dashboard also asks for the past-due invoices; that section has

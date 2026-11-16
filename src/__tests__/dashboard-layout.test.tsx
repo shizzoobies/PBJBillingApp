@@ -428,7 +428,9 @@ describe('Arrange waits for the saved arrangement', () => {
 })
 
 describe('a hidden panel’s own fetch', () => {
-  it('Team and This month at a glance hidden: no /api/team and no /api/rate-versions', async () => {
+  // The month panel's own request is the Invoice Recap estimate (featreq-464659c9);
+  // it used to be the rate history, which the dashboard no longer reads at all.
+  it('Team and This month at a glance hidden: no /api/team and no estimate request', async () => {
     const { container } = boot({
       version: 1,
       panels: [panel('alerts'), panel('team', { hidden: true }), panel('kpi', { hidden: true })],
@@ -437,6 +439,7 @@ describe('a hidden panel’s own fetch', () => {
     await waitFor(() => expect(within(container).queryByRole('region', { name: 'Team' })).toBeNull())
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(calls.some((call) => call.path.endsWith('/api/team'))).toBe(false)
+    expect(calls.some((call) => call.path.endsWith('/api/invoice-recap/estimate'))).toBe(false)
     expect(calls.some((call) => call.path.endsWith('/api/rate-versions'))).toBe(false)
   })
 
@@ -445,7 +448,8 @@ describe('a hidden panel’s own fetch', () => {
     await dashboardLoaded(container)
     await waitFor(() => {
       expect(calls.some((call) => call.path.endsWith('/api/team'))).toBe(true)
-      expect(calls.some((call) => call.path.endsWith('/api/rate-versions'))).toBe(true)
+      expect(calls.some((call) => call.path.endsWith('/api/invoice-recap/estimate'))).toBe(true)
     })
+    expect(calls.some((call) => call.path.endsWith('/api/rate-versions'))).toBe(false)
   })
 })

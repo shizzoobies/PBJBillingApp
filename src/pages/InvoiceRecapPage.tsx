@@ -57,8 +57,27 @@ function currentMonth(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
 }
 
+/**
+ * The month the page opens on: the one a link asked for (`?period=YYYY-MM`,
+ * the owner dashboard's "View full report", featreq-464659c9) when that is a
+ * real month, else today's. The dashboard quotes the topbar's billing month,
+ * which need not be today's; opening on anything else would put two different
+ * figures in front of her again. Read once from the address, not through the
+ * router, so the page needs no router around it; changing the month afterwards
+ * is the page's own state as before.
+ */
+function startingMonth(): string {
+  try {
+    const asked = new URLSearchParams(window.location.search).get('period') ?? ''
+    if (/^\d{4}-(0[1-9]|1[0-2])$/.test(asked)) return asked
+  } catch {
+    // No address to read: today's month.
+  }
+  return currentMonth()
+}
+
 export function InvoiceRecapPage({ ownerEstimate = false }: { ownerEstimate?: boolean }) {
-  const [period, setPeriod] = useState(currentMonth)
+  const [period, setPeriod] = useState(startingMonth)
   const [rows, setRows] = useState<InvoiceRecapRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)

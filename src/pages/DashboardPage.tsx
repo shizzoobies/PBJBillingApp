@@ -24,9 +24,6 @@ import {
   skipReasonLabel,
   stepSkipReviewLine,
 } from '../../lib/checklist-skip.js'
-// THE bill-rate chain the invoice is priced with, and the pin rule, so the
-// revenue estimate below says what the month run will.
-import { billRateAt, ratePeriodAsOf } from '../../lib/rate-history.js'
 import {
   blockerWaitLink,
   OWNER_TICK_CLEARS_WAIT_TITLE,
@@ -42,9 +39,9 @@ import {
 import { useDashboardArrangement } from '../lib/useDashboardArrangement'
 import {
   fetchGlobalActivity,
-  fetchRateVersions,
   fetchTeam,
   fetchTeamActivity,
+  invoiceEstimateRequest,
   listInvoicesRequest,
 } from '../lib/api'
 import { stalledCaseStages, stalledStageSentence } from '../lib/stalledCase'
@@ -53,7 +50,6 @@ import { caseRemovalKey, useRemoveCase } from '../lib/useRemoveCase'
 import { caseTitleOf, rowsOfCase } from '../../lib/case-removal.js'
 import type {
   ActivityEntry,
-  BillRateVersion,
   Checklist,
   PastDueInvoiceRow,
   TeamMember,
@@ -68,7 +64,6 @@ import {
   formatDecimalHours,
   isInBillingPeriod,
   localDateOnly,
-  normalizeBillingMonth,
   pastDueInvoice,
   relativeTime,
   shortDate,
@@ -592,11 +587,9 @@ function OwnerDashboardView() {
     billingPeriod,
     toggleChecklistItem,
     setPreviewUserId,
-    firmSettings,
     previewMode,
   } = useAppContext()
   const navigate = useNavigate()
-  const defaultHourlyRate = firmSettings.clientDefaults?.hourlyRate ?? 0
   // Remove case (owner only; this view never renders in preview, said again).
   const removeCaseControls = useRemoveCase()
   const caseRemoval: CaseRemoval | undefined = previewMode
@@ -614,24 +607,58 @@ function OwnerDashboardView() {
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
 
   /**
-   * The dated bill rates, so Projected billing below prices each hourly
-   * client at the month it is pinned to rather than at each person's live
-   * `billRate` — which mirrors the NEWEST version, a raise dated ahead
-   * included, and used to inflate this figure past what the invoice will say
-   * for every client still on older rates. Owner-only, like this whole view;
-   * a 403 answers empty lists and the fallback chain prices as before.
-   * Only the month-at-a-glance panel reads them, so a hidden one asks for none.
+   * Projected billing IS the Invoice Recap's Service total (featreq-464659c9).
+   *
+   * This tile used to work the month out here (hours logged so far at each
+   * person's rate, plus the monthly rates) while the report it links to quotes
+   * each client's estimate for the whole month, so the two disagreed by every
+   * hourly client's estimate not yet worked. Now there is one figure: the same
+   * route the Invoice Recap's ribbon reads (lib/invoice-estimate.js), asked for
+   * the same month. No second calculation is kept as a fallback, because a
+   * fallback is how the two drifted: while loading, and if the route fails,
+   * the tile shows a dash. Owner-only like this whole view, never in preview
+   * (the route refuses a preview), and a hidden panel asks for nothing.
+   *
+   * The old figure followed the page's data as it changed; this one is asked
+   * for again whenever the month's time on the page changes (how many entries,
+   * how many billable minutes), so time logged while she sits on the dashboard
+   * does not leave the tile behind the report. A failed or unusable answer
+   * clears the figure: an earlier answer is never left standing in its place.
    */
-  const [billRateVersions, setBillRateVersions] = useState<BillRateVersion[]>([])
+  const [serviceEstimate, setServiceEstimate] = useState<{
+    period: string
+    serviceTotal: number
+  } | null>(null)
+  const monthTimeKey = useMemo(() => {
+    let entries = 0
+    let billableMinutes = 0
+    for (const entry of data.timeEntries) {
+      if (!isInBillingPeriod(entry, billingPeriod)) continue
+      entries += 1
+      if (entry.billable) billableMinutes += entry.minutes
+    }
+    return `${entries}:${billableMinutes}`
+  }, [data.timeEntries, billingPeriod])
   useEffect(() => {
-    if (!kpiShown) return
+    if (!kpiShown || previewMode) return
     const controller = new AbortController()
-    fetchRateVersions(controller.signal)
-      .then((versions) => setBillRateVersions(versions.billRateVersions))
-      // Non-fatal: the estimate falls back to live rates, exactly as before.
-      .catch(() => {})
+    const load = async () => {
+      try {
+        const estimate = await invoiceEstimateRequest(billingPeriod, controller.signal)
+        if (controller.signal.aborted) return
+        const usable =
+          typeof estimate?.serviceTotal === 'number' && Number.isFinite(estimate.serviceTotal)
+        setServiceEstimate(
+          usable ? { period: billingPeriod, serviceTotal: estimate.serviceTotal } : null,
+        )
+      } catch {
+        // A dash, not the last figure; the Invoice Recap page says why it failed.
+        if (!controller.signal.aborted) setServiceEstimate(null)
+      }
+    }
+    void load()
     return () => controller.abort()
-  }, [kpiShown])
+  }, [kpiShown, previewMode, billingPeriod, monthTimeKey])
 
   // Fetch team once so we can show lastActiveAt per member (not while the Team
   // panel is hidden: nothing else reads it).
@@ -812,47 +839,9 @@ function OwnerDashboardView() {
     .filter((e) => e.billable)
     .reduce((sum, e) => sum + e.minutes, 0)
   const billablePct = hoursMinutes > 0 ? Math.round((billableMonthMinutes / hoursMinutes) * 100) : 0
-  const projectedBilling = data.clients.reduce((total, client) => {
-    if (client.billingMode === 'subscription') {
-      // Monthly billing uses the client's own monthly rate. No overage math.
-      const monthlyRate =
-        typeof client.monthlyRate === 'number' && !Number.isNaN(client.monthlyRate)
-          ? client.monthlyRate
-          : 0
-      return total + monthlyRate
-    }
-    if (client.billingMode === 'annual') {
-      // Annual billing only contributes in the client's chosen billing month.
-      const annualRate =
-        typeof client.annualRate === 'number' && !Number.isNaN(client.annualRate)
-          ? client.annualRate
-          : 0
-      const billingMonth = normalizeBillingMonth(client.annualBillingMonth)
-      const periodMonth = Number(billingPeriod.slice(5, 7))
-      return total + (periodMonth === billingMonth ? annualRate : 0)
-    }
-    // Hourly billing is per-employee: each person's billable hours for this
-    // client are charged at their bill rate AT THIS CLIENT'S PIN for the month
-    // (`billRateAt` at `ratePeriodAsOf`, the chain the invoice lines are priced
-    // through), or the firm default. A client still on June's rates is priced
-    // at June's here, the same as its invoice will be.
-    const ratePeriod = ratePeriodAsOf(client, billingPeriod)
-    const hourlyTotal = monthEntries
-      .filter((entry) => entry.clientId === client.id && entry.billable)
-      .reduce((sum, entry) => {
-        const employee = data.employees.find((e) => e.id === entry.employeeId)
-        const rate =
-          billRateAt(
-            billRateVersions,
-            employee ?? { id: entry.employeeId },
-            ratePeriod,
-            billingPeriod,
-            client,
-          ) ?? defaultHourlyRate
-        return sum + (entry.minutes / 60) * rate
-      }, 0)
-    return total + hourlyTotal
-  }, 0)
+  // Never a figure for another month: a late answer for the month she just left is not shown.
+  const projectedBilling =
+    serviceEstimate?.period === billingPeriod ? serviceEstimate.serviceTotal : null
   const activeClientCount = new Set(monthEntries.map((e) => e.clientId)).size
 
   return (
@@ -1151,9 +1140,12 @@ function OwnerDashboardView() {
             <strong>{billablePct}%</strong>
             <span>Billable</span>
           </div>
-          <div className="kpi-stat">
+          <div
+            className="kpi-stat"
+            title="The Service total on the Invoice Recap: invoices already sent as they stand, and every other client as its recap projects the month."
+          >
             <CircleDollarSign size={16} />
-            <strong>{currency.format(projectedBilling)}</strong>
+            <strong>{projectedBilling === null ? '—' : currency.format(projectedBilling)}</strong>
             <span>Projected billing</span>
           </div>
           <div className="kpi-stat">
@@ -1162,7 +1154,10 @@ function OwnerDashboardView() {
             <span>Active clients</span>
           </div>
         </div>
-        <Link to="/invoice-recap" className="dashboard-section-more">
+        {/* The report opens on the month this tile is quoting (the topbar's
+            billing month), not on today's: the two figures are then the same
+            request for the same month. */}
+        <Link to={`/invoice-recap?period=${billingPeriod}`} className="dashboard-section-more">
           View full report →
         </Link>
       </DashboardPanel>

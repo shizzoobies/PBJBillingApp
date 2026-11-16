@@ -52,6 +52,39 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  window.history.replaceState({}, '', '/')
+})
+
+describe('InvoiceRecapPage: the month it opens on (featreq-464659c9)', () => {
+  const thisMonth = () => {
+    const now = new Date()
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+  }
+
+  it('opens on the month a link asked for', async () => {
+    window.history.replaceState({}, '', '/invoice-recap?period=2026-08')
+    mockRecap.mockResolvedValue({ period: '2026-08', rows: [] })
+    render(<InvoiceRecapPage />)
+    await waitFor(() => expect(mockRecap).toHaveBeenCalledWith('2026-08'))
+    expect(mockRecap).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens on this month when no month was asked for', async () => {
+    mockRecap.mockResolvedValue({ period: thisMonth(), rows: [] })
+    render(<InvoiceRecapPage />)
+    await waitFor(() => expect(mockRecap).toHaveBeenCalledWith(thisMonth()))
+  })
+
+  it.each(['2026-13', '2026-8', 'next', '2026-08-01', ''])(
+    'ignores a month that is not one (%s) and opens on this month',
+    async (asked) => {
+      window.history.replaceState({}, '', `/invoice-recap?period=${asked}`)
+      mockRecap.mockResolvedValue({ period: thisMonth(), rows: [] })
+      render(<InvoiceRecapPage />)
+      await waitFor(() => expect(mockRecap).toHaveBeenCalledWith(thisMonth()))
+      expect(mockRecap).toHaveBeenCalledTimes(1)
+    },
+  )
 })
 
 describe('InvoiceRecapPage', () => {
