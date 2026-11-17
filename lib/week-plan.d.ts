@@ -4,10 +4,13 @@ export declare const WEEK_PLAN_NOTE_MAX: number
 export declare const WEEK_PLAN_MARK_NOTE_MAX: number
 export declare const WEEK_PLAN_MAX_MARKS: number
 export declare const WEEK_PLAN_MARK_STATUSES: readonly ['questions', 'finished']
+/** What a save from a page left open from before the days moved onto tasks is answered with. */
+export declare const WEEK_PLAN_RELOAD_MESSAGE: string
 
-/** What a person can set on a task by hand. No mark means "Work on this week". */
+/** What a person can set on a task by hand. No status means "Work on this week". */
 export type WeekPlanMarkStatus = 'questions' | 'finished'
-export type WeekPlanMark = { status: WeekPlanMarkStatus; note: string }
+/** What she set on one task: a status by hand, the days she means to work on it, or both. */
+export type WeekPlanMark = { status: WeekPlanMarkStatus | null; note: string; days: string[] }
 
 /** One stored row: one person, one week, one client. */
 export type WeekPlanEntry = {
@@ -52,6 +55,8 @@ export type WeekPlanTask = {
   caseId: string | null
   mine: 'checklist' | 'step'
   status: WeekPlanTaskStatus
+  /** The days she means to work on this task. */
+  days: string[]
   /** What the Waiting flags say with nothing set by hand. */
   auto: 'answered' | 'questions' | null
   /** What she set herself, or null ("Work on this week"). */
@@ -87,11 +92,23 @@ export type WeekPlanQuestion = {
   waits: WeekPlanWait[]
 }
 
+/** One thing on a day: a task, or a planned client with nothing open any more. */
+export type WeekPlanDayItem = {
+  clientId: string
+  clientName: string
+  checklistId: string | null
+  title: string
+  parked: boolean
+  nothingOpen: boolean
+}
+
 export type WeekPlanView = {
   weekStart: string
   days: string[]
   dueThrough: string
   rows: WeekPlanRow[]
+  /** Monday to Friday, each with the tasks put on it. */
+  byDay: Array<{ date: string; items: WeekPlanDayItem[] }>
   notPlannedCount: number
   questions: WeekPlanQuestion[]
   /** Tasks with an answer in, waiting for her to pick them up. */
@@ -107,6 +124,24 @@ export declare function isMonday(value: unknown): boolean
 export declare function weekDays(weekStart: string): string[]
 export declare function monthEndOf(dateOnly: string): string
 export declare function normalizeWeekPlanEntry(entry: unknown): WeekPlanEntry
+/** A row saved before days were per task: days on the client, none on any task. */
+export declare function isClientDayRow(entry: {
+  plannedDays?: string[]
+  taskMarks?: Record<string, { days?: string[] }>
+} | null | undefined): boolean
+/** A first-version row (days on the client) as days on each listed task; any other row unchanged. */
+export declare function asPerTaskRow(entry: WeekPlanEntry, taskIds: string[]): WeekPlanEntry
+export declare function withTaskDayToggled(
+  entry: WeekPlanEntry,
+  taskIds: string[],
+  checklistId: string,
+  day: string,
+): WeekPlanEntry
+export declare function withTaskStatusSet(
+  entry: WeekPlanEntry,
+  checklistId: string,
+  status: WeekPlanMarkStatus | null,
+): WeekPlanEntry
 export declare function isEmptyWeekPlanEntry(entry: {
   plannedDays?: string[]
   note?: string

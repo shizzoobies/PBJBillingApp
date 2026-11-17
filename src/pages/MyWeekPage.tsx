@@ -9,9 +9,12 @@ import { firmToday } from '../../lib/firm-time.js'
 import {
   WEEK_PLAN_NOTE_MAX,
   addDays,
+  asPerTaskRow,
   buildWeekPlan,
   mondayOf,
   normalizeWeekPlanEntry,
+  withTaskDayToggled,
+  withTaskStatusSet,
   type WeekPlanEntry,
   type WeekPlanMarkStatus,
   type WeekPlanRow,
@@ -25,10 +28,11 @@ import {
  * Brittany: "look at the week and say ok I need to touch these clients ... and
  * then sort clients by day", so that the clients at the bottom of a person's
  * list are not left until the end of the month. Each person plans her OWN week:
- * the clients she has open work for (due this month or overdue) are listed, she
- * puts each one on the day or days she means to work on it, writes a short note,
- * and marks a task "In questions" when she is waiting on an answer so she does
- * not reopen it. "I do not want to micromanage their days": nothing here assigns
+ * the clients she has open work for (due this month or overdue) are listed with
+ * their tasks, she puts each TASK on the day or days she means to work on it
+ * (her send-back: "there are 3 task ... I need to be able to put them to
+ * different days"), writes a short note per client, and marks a task "In
+ * questions" when she is waiting on an answer so she does not reopen it. "I do not want to micromanage their days": nothing here assigns
  * work, moves a due date or tracks hours.
  *
  * What is the person's own and stored: the days, the note, the marks
@@ -369,7 +373,16 @@ export function MyWeekPage() {
   const saveRow = useCallback(
     (clientId: string, change: (current: WeekPlanEntry) => WeekPlanEntry) => {
       if (!canEdit) return
-      const current = entriesRef.current[clientId] ?? normalizeWeekPlanEntry({ clientId })
+      // A row from before the days moved onto tasks is turned per-task before
+      // ANY change to it (a day, a status, the note), so what she had planned
+      // is saved in the new form and never lost by the save.
+      const taskIds = (view.rows.find((row) => row.clientId === clientId)?.tasks ?? []).map(
+        (task) => task.checklistId,
+      )
+      const current = asPerTaskRow(
+        entriesRef.current[clientId] ?? normalizeWeekPlanEntry({ clientId }),
+        taskIds,
+      )
       const next = normalizeWeekPlanEntry({ ...change(current), clientId })
       const optimistic = { ...entriesRef.current, [clientId]: next }
       entriesRef.current = optimistic
@@ -381,27 +394,41 @@ export function MyWeekPage() {
       else saveQueue.current.set(key, { latest: next, running: false })
       void flush(key, clientId, weekStart, loadKey)
     },
-    [canEdit, flush, weekStart, loadKey],
+    [canEdit, flush, weekStart, loadKey, view.rows],
   )
 
-  const toggleDay = (clientId: string, day: string) =>
-    saveRow(clientId, (current) => ({
-      ...current,
-      plannedDays: current.plannedDays.includes(day)
-        ? current.plannedDays.filter((each) => each !== day)
-        : [...current.plannedDays, day],
-    }))
+  // A day goes on ONE task. The client's task ids come from the page; each
+  // task's days are read off the row itself, so two quick clicks build on each
+  // other even before the first one has been drawn.
+  const toggleDay = (clientId: string, checklistId: string, day: string) => {
+    const taskIds = (view.rows.find((row) => row.clientId === clientId)?.tasks ?? []).map(
+      (task) => task.checklistId,
+    )
+    saveRow(clientId, (current) => withTaskDayToggled(current, taskIds, checklistId, day))
+  }
+
+  // A planned client with nothing open any more has no task to take a day off:
+  // this clears its days and its note so it leaves the page. A status she set
+  // on a task that is not listed right now (its due date moved out of the
+  // month) is kept for when the task comes back.
+  const clearRow = (clientId: string) =>
+    saveRow(clientId, (current) =>
+      normalizeWeekPlanEntry({
+        clientId,
+        taskMarks: Object.fromEntries(
+          Object.entries(current.taskMarks).map(([id, mark]) => [id, { ...mark, days: [] }]),
+        ),
+      }),
+    )
 
   const setNote = (clientId: string, note: string) =>
     saveRow(clientId, (current) => ({ ...current, note }))
 
+  // The task's days are kept; only its hand-set status changes.
   const setTaskChoice = (clientId: string, checklistId: string, choice: TaskChoice) =>
-    saveRow(clientId, (current) => {
-      const taskMarks = { ...current.taskMarks }
-      if (choice === 'work') delete taskMarks[checklistId]
-      else taskMarks[checklistId] = { status: choice, note: taskMarks[checklistId]?.note ?? '' }
-      return { ...current, taskMarks }
-    })
+    saveRow(clientId, (current) =>
+      withTaskStatusSet(current, checklistId, choice === 'work' ? null : choice),
+    )
 
   // A person named on a wait may have left the team since: never "Unassigned".
   const nameOf = useCallback(
@@ -479,7 +506,7 @@ export function MyWeekPage() {
 
       {ownWeek && !previewMode ? (
         <p className="my-week-hint">
-          Every client you have open work for that is due this month or overdue. Put each client on the
+          Every client you have open work for that is due this month or overdue. Put each task on the
           day or days you plan to work on it. When you have sent questions and are waiting for an
           answer, set that task to In questions so you can move on to a client you have not started.
           This is your own plan: it does not change any due date or anyone's tasks.
@@ -548,8 +575,7 @@ export function MyWeekPage() {
           ) : null}
 
           <div className="my-week-days" role="list" aria-label="The week, Monday to Friday">
-            {view.days.map((day, index) => {
-              const placed = view.rows.filter((row) => row.plannedDays.includes(day))
+            {view.byDay.map(({ date: day, items: placed }, index) => {
               return (
                 <section
                   key={day}
@@ -565,18 +591,21 @@ export function MyWeekPage() {
                     <p className="my-week-day-empty">Nothing planned</p>
                   ) : (
                     <ul>
-                      {placed.map((row) => (
+                      {/* One line per TASK she put on this day, under its client's
+                          name. A task that is waiting or finished stays on its
+                          day, greyed. */}
+                      {placed.map((item) => (
                         <li
-                          key={row.clientId}
-                          className={row.allParked || row.noOpenWork ? 'is-parked' : undefined}
+                          key={`${item.clientId}|${item.checklistId ?? ''}`}
+                          className={item.parked ? 'is-parked' : undefined}
                         >
-                          <strong>{row.clientName}</strong>
+                          <strong>{item.clientName}</strong>
                           <small>
-                            {row.noOpenWork
+                            {item.nothingOpen
                               ? 'Nothing open'
-                              : row.allParked
-                                ? 'Waiting, nothing to pick up'
-                                : `${row.tasks.length - row.rollup.questions - row.rollup.finished} to work on`}
+                              : item.parked
+                                ? `${item.title} (waiting or finished)`
+                                : item.title}
                           </small>
                         </li>
                       ))}
@@ -601,7 +630,8 @@ export function MyWeekPage() {
                 today={today}
                 canEdit={canEdit}
                 nameOf={nameOf}
-                onToggleDay={(day) => toggleDay(row.clientId, day)}
+                onToggleDay={(checklistId, day) => toggleDay(row.clientId, checklistId, day)}
+                onClear={() => clearRow(row.clientId)}
                 onNote={(note) => setNote(row.clientId, note)}
                 onTaskChoice={(checklistId, choice) =>
                   setTaskChoice(row.clientId, checklistId, choice)
@@ -832,6 +862,7 @@ function ClientRow({
   canEdit,
   nameOf,
   onToggleDay,
+  onClear,
   onNote,
   onTaskChoice,
 }: {
@@ -840,7 +871,8 @@ function ClientRow({
   today: string
   canEdit: boolean
   nameOf: (id: string) => string
-  onToggleDay: (day: string) => void
+  onToggleDay: (checklistId: string, day: string) => void
+  onClear: () => void
   onNote: (note: string) => void
   onTaskChoice: (checklistId: string, choice: TaskChoice) => void
 }) {
@@ -862,25 +894,6 @@ function ClientRow({
             {row.clientName}
           </Link>
           <span className="my-week-rollup">{rollupWords(row)}</span>
-        </div>
-        <div className="my-week-daypick" role="group" aria-label={`Days for ${row.clientName}`}>
-          {days.map((day, index) => {
-            const on = row.plannedDays.includes(day)
-            return (
-              <button
-                key={day}
-                type="button"
-                className={`my-week-daybtn${on ? ' is-on' : ''}${day === today ? ' is-today' : ''}`}
-                aria-pressed={on}
-                aria-label={`${DAY_NAMES[index]} ${shortDay(day)}`}
-                title={`${DAY_NAMES[index]} ${shortDay(day)}`}
-                disabled={!canEdit}
-                onClick={() => onToggleDay(day)}
-              >
-                {DAY_SHORT[index]}
-              </button>
-            )
-          })}
         </div>
       </div>
 
@@ -906,7 +919,14 @@ function ClientRow({
       </label>
 
       {row.noOpenWork ? (
-        <p className="my-week-empty">Nothing of yours is open for this client now.</p>
+        <p className="my-week-empty">
+          Nothing of yours is open for this client now.{' '}
+          {canEdit ? (
+            <button type="button" className="ghost-action" onClick={onClear}>
+              {row.note ? 'Take it off my week (clears the note)' : 'Take it off my week'}
+            </button>
+          ) : null}
+        </p>
       ) : (
         <ul className="my-week-tasks">
           {row.tasks.map((task) => (
@@ -936,6 +956,31 @@ function ClientRow({
                     {waitWords(task.waits, nameOf)}
                   </span>
                 ) : null}
+              </div>
+              {/* The days are on the TASK: a client with three tasks can have
+                  each on a different day. */}
+              <div
+                className="my-week-daypick"
+                role="group"
+                aria-label={`Days for ${task.title} (${row.clientName}), due ${shortDay(task.dueDate)}`}
+              >
+                {days.map((day, index) => {
+                  const on = task.days.includes(day)
+                  return (
+                    <button
+                      key={day}
+                      type="button"
+                      className={`my-week-daybtn${on ? ' is-on' : ''}${day === today ? ' is-today' : ''}`}
+                      aria-pressed={on}
+                      aria-label={`${DAY_NAMES[index]} ${shortDay(day)}`}
+                      title={`${DAY_NAMES[index]} ${shortDay(day)}`}
+                      disabled={!canEdit}
+                      onClick={() => onToggleDay(task.checklistId, day)}
+                    >
+                      {DAY_SHORT[index]}
+                    </button>
+                  )
+                })}
               </div>
               <div className="my-week-task-status">
                 {/* The label is only the name; the word beside the picker is not part of it. */}

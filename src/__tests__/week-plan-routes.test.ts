@@ -27,7 +27,7 @@ const slice = (startMark: string, endMark: string) => {
 describe('GET /api/week-plan', () => {
   const route = slice(
     "if (normalizedPath === '/api/week-plan' && request.method === 'GET') {",
-    'const weekPlanSaveMatch = normalizedPath.match(',
+    'const weekPlanOldSaveMatch = normalizedPath.match(',
   )
 
   it('needs a session, and answers as the previewed person while previewing', () => {
@@ -59,15 +59,55 @@ describe('GET /api/week-plan', () => {
 
   it('reads only through the store method, scoped to one person and one week', () => {
     expect(route).toContain('await appDataStore.listWeekPlanEntries({ userId, weekStart })')
+    // It says it keeps days on each task; the page will not use a week answered without that.
+    expect(route).toContain('sendJson(response, 200, { weekStart, userId, entries, daysPerTask: true })')
     expect(route.split('appDataStore.').length - 1).toBe(2) // getTeamMember (owner asking) + the list
   })
 })
 
-describe('PUT /api/week-plan/:clientId', () => {
+/**
+ * Where the first version of the page saved (days on the client). A page left
+ * open from before the days moved onto each task misreads the new rows and
+ * would write the client's days back over her per-task ones.
+ */
+describe('PUT /api/week-plan/:clientId (the first version’s address)', () => {
+  const route = slice(
+    'const weekPlanOldSaveMatch = normalizedPath.match(',
+    'const weekPlanSaveMatch = normalizedPath.match(',
+  )
+
+  it('matches only the address without /tasks', () => {
+    expect(route).toContain('normalizedPath.match(/^\\/api\\/week-plan\\/([^/]+)$/)')
+  })
+
+  it('tells the page to reload (409) and neither reads nor writes anything', () => {
+    expect(route).toContain('const session = await requireSession(request, response)')
+    expect(route).toContain('sendJson(response, 409, { error: WEEK_PLAN_RELOAD_MESSAGE })')
+    expect(route).not.toContain('appDataStore.')
+    expect(route).not.toContain('readJsonBody')
+  })
+
+  it('the words say what to do', async () => {
+    const { WEEK_PLAN_RELOAD_MESSAGE } = await import('../../lib/week-plan.js')
+    expect(WEEK_PLAN_RELOAD_MESSAGE).toBe('My Week has changed. Reload the page, then make the change again.')
+  })
+})
+
+describe('PUT /api/week-plan/:clientId/tasks', () => {
   const route = slice(
     'const weekPlanSaveMatch = normalizedPath.match(',
     "if (normalizedPath === '/api/waiting-on-me' && request.method === 'GET') {",
   )
+
+  // Its own address: the first version of the server has no such route, so a
+  // save from this page cannot be half-understood there during a hand-over.
+  it('has its own address, checked after the first version’s', () => {
+    expect(route).toContain('normalizedPath.match(/^\\/api\\/week-plan\\/([^/]+)\\/tasks$/)')
+    expect(server.indexOf('const weekPlanOldSaveMatch')).toBeLessThan(server.indexOf('const weekPlanSaveMatch'))
+    // The first version's pattern cannot swallow it: it allows no further slash.
+    expect('/api/week-plan/client-1/tasks').not.toMatch(/^\/api\/week-plan\/([^/]+)$/)
+    expect('/api/week-plan/client-1/tasks').toMatch(/^\/api\/week-plan\/([^/]+)\/tasks$/)
+  })
 
   it('always writes the signed-in person’s own plan: no user can be named', () => {
     expect(route).toContain('userId: session.user.id,')
@@ -101,6 +141,6 @@ describe('PUT /api/week-plan/:clientId', () => {
   it('writes are refused while previewing, before any route runs', () => {
     const guard = server.indexOf("sendJson(response, 403, { error: 'Preview mode is read-only' })")
     expect(guard).toBeGreaterThan(0)
-    expect(guard).toBeLessThan(server.indexOf('const weekPlanSaveMatch = normalizedPath.match('))
+    expect(guard).toBeLessThan(server.indexOf('const weekPlanOldSaveMatch = normalizedPath.match('))
   })
 })

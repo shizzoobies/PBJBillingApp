@@ -62257,6 +62257,28 @@ describe('My Week: week plan entries (featreq-f0e8046b)', () => {
       expect(saved.taskMarks['chk-1'].note).toHaveLength(300)
     })
 
+    // Days per task (her send-back): the days ride inside each task's mark.
+    it('keeps each task’s own days, with or without a status', async () => {
+      const saved = await store.saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: ['2026-11-16', '2026-11-18', '2026-11-20'],
+        note: '',
+        taskMarks: {
+          'chk-1': { days: ['2026-11-16'] },
+          'chk-2': { status: 'questions', note: 'asked', days: ['2026-11-20', '2026-11-18'] },
+          'chk-3': { days: [] },
+        },
+      })
+      expect(saved.taskMarks).toEqual({
+        'chk-1': { status: null, note: '', days: ['2026-11-16'] },
+        'chk-2': { status: 'questions', note: 'asked', days: ['2026-11-18', '2026-11-20'] },
+      })
+      const [listed] = await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })
+      expect(listed).toEqual(saved)
+    })
+
     it('refuses a save with no person, week or client', async () => {
       await expect(store.saveWeekPlanEntry({ weekStart: WEEK, clientId: 'c1' })).rejects.toThrow()
       await expect(store.saveWeekPlanEntry({ userId: 'emp-1', clientId: 'c1' })).rejects.toThrow()
@@ -62305,7 +62327,7 @@ describe('My Week: week plan entries (featreq-f0e8046b)', () => {
           clientId: 'c1',
           plannedDays: ['2026-11-16', '2026-11-18'],
           note: 'bank feed first',
-          taskMarks: { 'chk-1': { status: 'questions', note: 'asked' } },
+          taskMarks: { 'chk-1': { status: 'questions', note: 'asked', days: [] } },
           updatedAt: '2026-11-16T15:00:00.000Z',
         },
       ])
@@ -62352,9 +62374,35 @@ describe('My Week: week plan entries (featreq-f0e8046b)', () => {
       expect(days).toEqual(['2026-11-16', '2026-11-18'])
       expect(note).toBe('bank feed first')
       // jsonb is sent as text and cast, the way every other jsonb column here is.
-      expect(JSON.parse(marks)).toEqual({ 'chk-1': { status: 'questions', note: 'asked' } })
+      expect(JSON.parse(marks)).toEqual({ 'chk-1': { status: 'questions', note: 'asked', days: [] } })
       expect(saved.plannedDays).toEqual(['2026-11-16', '2026-11-18'])
       expect(saved.updatedAt).toBe('2026-11-16T15:00:00.000Z')
+    })
+
+    it('writes each task’s days inside the jsonb marks, and reads them back', async () => {
+      const marks = {
+        'chk-1': { status: null, note: '', days: ['2026-11-16'] },
+        'chk-2': { status: 'questions', note: 'asked', days: ['2026-11-18'] },
+      }
+      const fake = fakeSpitballPostgres((text) =>
+        /^insert into week_plan_entries/i.test(text)
+          ? { rows: [storedRow({ task_marks: marks })], rowCount: 1 }
+          : /from week_plan_entries/i.test(text)
+            ? { rows: [storedRow({ task_marks: marks })], rowCount: 1 }
+            : null,
+      )
+      const saved = await postgresStore(fake).saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: ['2026-11-16', '2026-11-18'],
+        note: 'bank feed first',
+        taskMarks: { 'chk-2': { status: 'questions', note: 'asked', days: ['2026-11-18'] }, 'chk-1': { days: ['2026-11-16'] } },
+      })
+      expect(JSON.parse(fake.statements[0].params[6])).toEqual(marks)
+      expect(saved.taskMarks).toEqual(marks)
+      const [listed] = await postgresStore(fake).listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })
+      expect(listed.taskMarks).toEqual(marks)
     })
 
     it('stores no note as null, not as an empty string', async () => {

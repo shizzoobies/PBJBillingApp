@@ -5213,7 +5213,20 @@ export async function fetchWeekPlanRequest(
     const { message } = await safeError(response)
     throw new ApiError(response.status, message || `Could not load the week (${response.status})`)
   }
-  return (await response.json()) as { weekStart: string; userId: string; entries: WeekPlanEntry[] }
+  const body = (await response.json()) as {
+    weekStart: string
+    userId: string
+    entries: WeekPlanEntry[]
+    daysPerTask?: boolean
+  }
+  // Only a server that keeps days on each task says `daysPerTask`. For a few
+  // seconds during an update the previous server can still answer, and it
+  // reads a per-task row as "the client is on these days": shown and then
+  // changed, that would be saved as her plan. So that answer is not used.
+  if (body.daysPerTask !== true) {
+    throw new ApiError(503, 'My Week is being updated. Reload the page in a moment.')
+  }
+  return { weekStart: body.weekStart, userId: body.userId, entries: body.entries }
 }
 
 /**
@@ -5230,7 +5243,9 @@ export async function saveWeekPlanEntryRequest(
     taskMarks: Record<string, WeekPlanMark | null>
   },
 ) {
-  const response = await apiFetch(`/api/week-plan/${encodeURIComponent(clientId)}`, {
+  // `/tasks`: the address for rows with days on each task. The first version of
+  // the page saved to the address without it, which now only answers "reload".
+  const response = await apiFetch(`/api/week-plan/${encodeURIComponent(clientId)}/tasks`, {
     credentials: 'same-origin',
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

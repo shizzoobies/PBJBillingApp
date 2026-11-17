@@ -99,8 +99,14 @@ const page = () => (
 const row = (clientName: string) =>
   screen.getByRole('link', { name: clientName }).closest('.my-week-row') as HTMLElement
 const dayColumn = (name: RegExp) => screen.getByRole('listitem', { name })
-const dayButton = (clientName: string, day: RegExp) =>
-  within(screen.getByRole('group', { name: `Days for ${clientName}` })).getByRole('button', { name: day })
+// Days are on each TASK (her send-back): the buttons sit on the task's line.
+// A client name is accepted as shorthand for that client's first-listed task
+// in these fixtures, so the older tests read as they did.
+const FIRST_TASK: Record<string, string> = { 'Acme Dental': 'Payroll', 'Bright Books': 'Sales tax' }
+const dayGroup = (taskOrClient: string) =>
+  screen.getByRole('group', { name: new RegExp(`^Days for ${FIRST_TASK[taskOrClient] ?? taskOrClient} \\(`) })
+const dayButton = (taskOrClient: string, day: RegExp) =>
+  within(dayGroup(taskOrClient)).getByRole('button', { name: day })
 
 describe('My Week: what it shows', () => {
   it('asks for her own week, this week, and lists her clients with open work', async () => {
@@ -136,17 +142,22 @@ describe('My Week: what it shows', () => {
     mockFetch.mockResolvedValue({
       weekStart: WEEK,
       userId: LISA,
+      // A row saved before days were per task: the CLIENT was put on Wednesday.
       entries: [entry('c-acme', { plannedDays: ['2026-11-18'], note: 'bank feed first' })],
     })
     render(page())
     await screen.findByText('My clients this week')
     expect(screen.getAllByRole('listitem', { name: /day Nov/ })).toHaveLength(5)
     expect(dayColumn(/^Tuesday Nov 17$/)).toHaveClass('is-today')
-    expect(within(dayColumn(/^Wednesday Nov 18$/)).getByText('Acme Dental')).toBeInTheDocument()
-    expect(within(dayColumn(/^Wednesday Nov 18$/)).getByText('2 to work on')).toBeInTheDocument()
+    // So both of its tasks are on Wednesday, each on its own line.
+    const wednesday = within(dayColumn(/^Wednesday Nov 18$/))
+    expect(wednesday.getAllByText('Acme Dental')).toHaveLength(2)
+    expect(wednesday.getByText('Payroll')).toBeInTheDocument()
+    expect(wednesday.getByText('Monthly close')).toBeInTheDocument()
     expect(within(dayColumn(/^Monday Nov 16$/)).getByText('Nothing planned')).toBeInTheDocument()
-    expect(dayButton('Acme Dental', /^Wednesday/)).toHaveAttribute('aria-pressed', 'true')
-    expect(dayButton('Acme Dental', /^Monday/)).toHaveAttribute('aria-pressed', 'false')
+    expect(dayButton('Payroll', /^Wednesday/)).toHaveAttribute('aria-pressed', 'true')
+    expect(dayButton('Monthly close', /^Wednesday/)).toHaveAttribute('aria-pressed', 'true')
+    expect(dayButton('Payroll', /^Monday/)).toHaveAttribute('aria-pressed', 'false')
     expect(screen.getByLabelText('Note for Acme Dental')).toHaveValue('bank feed first')
     expect(screen.getByText('1 client not planned this week')).toBeInTheDocument()
   })
@@ -167,21 +178,181 @@ describe('My Week: what it shows', () => {
 })
 
 describe('My Week: planning', () => {
-  it('putting a client on a day saves the whole row and shows it on that day at once', async () => {
+  it('putting a TASK on a day saves the whole row and shows only that task on that day', async () => {
     render(page())
     await screen.findByText('My clients this week')
-    fireEvent.click(dayButton('Acme Dental', /^Thursday/))
+    fireEvent.click(dayButton('Payroll', /^Thursday/))
 
-    expect(within(dayColumn(/^Thursday Nov 19$/)).getByText('Acme Dental')).toBeInTheDocument()
+    const thursday = within(dayColumn(/^Thursday Nov 19$/))
+    expect(thursday.getByText('Acme Dental')).toBeInTheDocument()
+    expect(thursday.getByText('Payroll')).toBeInTheDocument()
+    // The client's OTHER task is not dragged along.
+    expect(thursday.queryByText('Monthly close')).not.toBeInTheDocument()
+    expect(dayButton('Monthly close', /^Thursday/)).toHaveAttribute('aria-pressed', 'false')
     await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
     expect(mockSave).toHaveBeenCalledWith('c-acme', {
       weekStart: WEEK,
       plannedDays: ['2026-11-19'],
       note: '',
-      taskMarks: {},
+      taskMarks: { 'chk-payroll': { status: null, note: '', days: ['2026-11-19'] } },
     })
     expect(screen.getByText('1 client not planned this week')).toBeInTheDocument()
-    expect(within(row('Acme Dental')).getByText('2 planned')).toBeInTheDocument()
+    expect(within(row('Acme Dental')).getByText('1 planned, 1 not planned')).toBeInTheDocument()
+  })
+
+  // Her send-back: "for Associated ... there are 3 task associated with it and
+  // I do not want to work on each task on the same day. I need to be able to
+  // put them to different days." Done when each of the three can go on its own
+  // day and the five-day view shows only that task on each day.
+  it('three tasks of one client go on three different days', async () => {
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...data,
+        clients: [{ id: 'c-assoc', name: 'Associated Enterprise' }],
+        checklists: [
+          checklist('chk-1', 'c-assoc', 'Bank recs', '2026-11-30'),
+          checklist('chk-2', 'c-assoc', 'Payroll', '2026-11-30'),
+          checklist('chk-3', 'c-assoc', 'Sales tax', '2026-11-30'),
+        ],
+      },
+    } as unknown as AppContextValue
+    render(page())
+    await screen.findByText('My clients this week')
+    fireEvent.click(dayButton('Bank recs', /^Monday/))
+    fireEvent.click(dayButton('Payroll', /^Wednesday/))
+    fireEvent.click(dayButton('Sales tax', /^Friday/))
+
+    const onDay = (name: RegExp) =>
+      Array.from(dayColumn(name).querySelectorAll('li small')).map((small) => small.textContent)
+    expect(onDay(/^Monday Nov 16$/)).toEqual(['Bank recs'])
+    expect(onDay(/^Tuesday Nov 17$/)).toEqual([])
+    expect(onDay(/^Wednesday Nov 18$/)).toEqual(['Payroll'])
+    expect(onDay(/^Thursday Nov 19$/)).toEqual([])
+    expect(onDay(/^Friday Nov 20$/)).toEqual(['Sales tax'])
+    expect(within(row('Associated Enterprise')).getByText('3 planned')).toBeInTheDocument()
+
+    // The last save carries every task with its own days, and the row's days are their union.
+    await waitFor(() =>
+      expect(mockSave.mock.calls[mockSave.mock.calls.length - 1][1]).toEqual({
+        weekStart: WEEK,
+        plannedDays: ['2026-11-16', '2026-11-18', '2026-11-20'],
+        note: '',
+        taskMarks: {
+          'chk-1': { status: null, note: '', days: ['2026-11-16'] },
+          'chk-2': { status: null, note: '', days: ['2026-11-18'] },
+          'chk-3': { status: null, note: '', days: ['2026-11-20'] },
+        },
+      }),
+    )
+  })
+
+  it('a row from before (the client on a day) turns per-task at her first change, keeping what she had', async () => {
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [entry('c-acme', { plannedDays: ['2026-11-18'], note: 'bank feed first' })],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    // She moves Monthly close to Friday as well; Payroll stays on Wednesday.
+    fireEvent.click(dayButton('Monthly close', /^Friday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave).toHaveBeenCalledWith('c-acme', {
+      weekStart: WEEK,
+      plannedDays: ['2026-11-18', '2026-11-20'],
+      note: 'bank feed first',
+      taskMarks: {
+        'chk-close': { status: null, note: '', days: ['2026-11-18', '2026-11-20'] },
+        'chk-payroll': { status: null, note: '', days: ['2026-11-18'] },
+      },
+    })
+    // Now she can take Wednesday off one of them without touching the other.
+    fireEvent.click(dayButton('Monthly close', /^Wednesday/))
+    expect(dayButton('Monthly close', /^Wednesday/)).toHaveAttribute('aria-pressed', 'false')
+    expect(dayButton('Payroll', /^Wednesday/)).toHaveAttribute('aria-pressed', 'true')
+    const wednesday = within(dayColumn(/^Wednesday Nov 18$/))
+    expect(wednesday.getByText('Payroll')).toBeInTheDocument()
+    expect(wednesday.queryByText('Monthly close')).not.toBeInTheDocument()
+  })
+
+  it('two quick clicks on two tasks of one client both land (the second builds on the first)', async () => {
+    mockSave.mockImplementation(() => new Promise(() => {}))
+    render(page())
+    await screen.findByText('My clients this week')
+    fireEvent.click(dayButton('Payroll', /^Monday/))
+    fireEvent.click(dayButton('Monthly close', /^Tuesday/))
+    expect(dayButton('Payroll', /^Monday/)).toHaveAttribute('aria-pressed', 'true')
+    expect(dayButton('Monthly close', /^Tuesday/)).toHaveAttribute('aria-pressed', 'true')
+    expect(dayButton('Monthly close', /^Monday/)).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('taking a client off the week keeps a status on a task that is not listed right now', async () => {
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...data,
+        checklists: [
+          checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-30', { items: [step('a', true)] }),
+          // Still open, but its due date moved into next year: not on this page for now.
+          checklist('chk-later', 'c-acme', 'Year-end', '2027-01-15'),
+        ],
+      },
+    } as unknown as AppContextValue
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [
+        entry('c-acme', {
+          plannedDays: ['2026-11-18'],
+          note: 'call them',
+          taskMarks: {
+            'chk-done': { status: null, note: '', days: ['2026-11-18'] },
+            'chk-later': { status: 'questions', note: 'asked', days: [] },
+          },
+        }),
+      ],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    // There is a note, so the button says it goes too.
+    fireEvent.click(within(row('Acme Dental')).getByRole('button', { name: 'Take it off my week (clears the note)' }))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave).toHaveBeenCalledWith('c-acme', {
+      weekStart: WEEK,
+      plannedDays: [],
+      note: '',
+      taskMarks: { 'chk-later': { status: 'questions', note: 'asked', days: [] } },
+    })
+    expect(screen.queryByRole('link', { name: 'Acme Dental' })).not.toBeInTheDocument()
+  })
+
+  it('a planned client with nothing open any more can be taken off the week', async () => {
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...data,
+        checklists: [checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-30', { items: [step('a', true)] })],
+      },
+    } as unknown as AppContextValue
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [
+        entry('c-acme', {
+          plannedDays: ['2026-11-18'],
+          taskMarks: { 'chk-done': { status: null, note: '', days: ['2026-11-18'] } },
+        }),
+      ],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(within(dayColumn(/^Wednesday Nov 18$/)).getByText('Nothing open')).toBeInTheDocument()
+    // No note on it, so the button says nothing about one.
+    fireEvent.click(within(row('Acme Dental')).getByRole('button', { name: 'Take it off my week' }))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave).toHaveBeenCalledWith('c-acme', { weekStart: WEEK, plannedDays: [], note: '', taskMarks: {} })
+    expect(screen.queryByRole('link', { name: 'Acme Dental' })).not.toBeInTheDocument()
   })
 
   it('a client does not jump down the list the moment she plans it', async () => {
@@ -250,31 +421,115 @@ describe('My Week: planning', () => {
     mockFetch.mockResolvedValue({
       weekStart: WEEK,
       userId: LISA,
-      entries: [entry('c-acme', { plannedDays: ['2026-11-17'] })],
+      entries: [
+        entry('c-acme', {
+          plannedDays: ['2026-11-17'],
+          taskMarks: {
+            'chk-close': { status: null, note: '', days: ['2026-11-17'] },
+            'chk-payroll': { status: null, note: '', days: ['2026-11-17'] },
+          },
+        }),
+      ],
     })
     render(page())
     await screen.findByText('My clients this week')
     fireEvent.change(screen.getByLabelText('Status of Payroll'), { target: { value: 'questions' } })
 
     await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    // The task keeps its day; only its status changes.
     expect(mockSave).toHaveBeenCalledWith('c-acme', {
       weekStart: WEEK,
       plannedDays: ['2026-11-17'],
       note: '',
-      taskMarks: { 'chk-payroll': { status: 'questions', note: '' } },
+      taskMarks: {
+        'chk-close': { status: null, note: '', days: ['2026-11-17'] },
+        'chk-payroll': { status: 'questions', note: '', days: ['2026-11-17'] },
+      },
     })
     expect(screen.getByLabelText('Status of Payroll')).toHaveValue('questions')
     expect(screen.getByLabelText('Status of Monthly close')).toHaveValue('work')
     expect(within(row('Acme Dental')).getByText('1 planned, 1 in questions')).toBeInTheDocument()
-    // One task is still live, so the client is not greyed on its day.
-    expect(within(dayColumn(/^Tuesday Nov 17$/)).getByText('1 to work on')).toBeInTheDocument()
+    // On its day the waiting task is greyed and says so; the other one is live.
+    const tuesday = within(dayColumn(/^Tuesday Nov 17$/))
+    expect(tuesday.getByText('Payroll (waiting or finished)').closest('li')).toHaveClass('is-parked')
+    expect(tuesday.getByText('Monthly close').closest('li')).not.toHaveClass('is-parked')
 
     const sent = screen.getByRole('region', { name: 'Sent questions' })
     expect(within(sent).getByText('Acme Dental')).toBeInTheDocument()
     expect(within(sent).getByText('Payroll')).toBeInTheDocument()
+
+    // Back to "Work on this week": the status goes, the day stays.
+    fireEvent.change(screen.getByLabelText('Status of Payroll'), { target: { value: 'work' } })
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(2))
+    expect(mockSave.mock.calls[1][1].taskMarks['chk-payroll']).toEqual({
+      status: null,
+      note: '',
+      days: ['2026-11-17'],
+    })
   })
 
-  it('greys a client on its day only when every task is in questions or finished', async () => {
+  // Whatever she changes on a row from before (not only a day), it is saved
+  // in the new form: each task carrying the day the client was on.
+  it('a status set on a row from before keeps every task on the client’s day', async () => {
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [entry('c-acme', { plannedDays: ['2026-11-17'] })],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    fireEvent.change(screen.getByLabelText('Status of Payroll'), { target: { value: 'questions' } })
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave).toHaveBeenCalledWith('c-acme', {
+      weekStart: WEEK,
+      plannedDays: ['2026-11-17'],
+      note: '',
+      taskMarks: {
+        'chk-close': { status: null, note: '', days: ['2026-11-17'] },
+        'chk-payroll': { status: 'questions', note: '', days: ['2026-11-17'] },
+      },
+    })
+    // Both tasks are still shown on Tuesday.
+    expect(dayButton('Payroll', /^Tuesday/)).toHaveAttribute('aria-pressed', 'true')
+    expect(dayButton('Monthly close', /^Tuesday/)).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('a note typed on a row from before saves each task on the client’s day too', async () => {
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [entry('c-acme', { plannedDays: ['2026-11-17'] })],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    const note = screen.getByLabelText('Note for Acme Dental')
+    fireEvent.focus(note)
+    fireEvent.change(note, { target: { value: 'bank feed first' } })
+    fireEvent.blur(note)
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave).toHaveBeenCalledWith('c-acme', {
+      weekStart: WEEK,
+      plannedDays: ['2026-11-17'],
+      note: 'bank feed first',
+      taskMarks: {
+        'chk-close': { status: null, note: '', days: ['2026-11-17'] },
+        'chk-payroll': { status: null, note: '', days: ['2026-11-17'] },
+      },
+    })
+    expect(dayButton('Monthly close', /^Tuesday/)).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('a save refused because the page is out of date shows the words to reload', async () => {
+    mockSave.mockRejectedValue(new Error('My Week has changed. Reload the page, then make the change again.'))
+    render(page())
+    await screen.findByText('My clients this week')
+    fireEvent.click(dayButton('Payroll', /^Monday/))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'That change was not saved: My Week has changed. Reload the page, then make the change again.',
+    )
+  })
+
+  it('greys a task on its day when it is in questions or finished, and only that task', async () => {
     mockFetch.mockResolvedValue({
       weekStart: WEEK,
       userId: LISA,
@@ -282,17 +537,17 @@ describe('My Week: planning', () => {
         entry('c-acme', {
           plannedDays: ['2026-11-17'],
           taskMarks: {
-            'chk-payroll': { status: 'questions', note: '' },
-            'chk-close': { status: 'finished', note: '' },
+            'chk-payroll': { status: 'questions', note: '', days: ['2026-11-17'] },
+            'chk-close': { status: null, note: '', days: ['2026-11-17'] },
           },
         }),
       ],
     })
     render(page())
     await screen.findByText('My clients this week')
-    const placed = within(dayColumn(/^Tuesday Nov 17$/)).getByText('Acme Dental').closest('li')
-    expect(placed).toHaveClass('is-parked')
-    expect(within(dayColumn(/^Tuesday Nov 17$/)).getByText('Waiting, nothing to pick up')).toBeInTheDocument()
+    const tuesday = within(dayColumn(/^Tuesday Nov 17$/))
+    expect(tuesday.getByText('Payroll (waiting or finished)').closest('li')).toHaveClass('is-parked')
+    expect(tuesday.getByText('Monthly close').closest('li')).not.toHaveClass('is-parked')
   })
 
   it('"Answered, back to work" takes a task out of Sent questions', async () => {
@@ -535,8 +790,11 @@ describe('My Week: an owner looking at someone else’s week (preview)', () => {
     expect(screen.queryByLabelText('Whose week')).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: "Everyone's week" })).not.toBeInTheDocument()
 
-    for (const button of within(screen.getByRole('group', { name: 'Days for Acme Dental' })).getAllByRole('button')) {
-      expect(button).toBeDisabled()
+    // Every task's day buttons, not just one task's.
+    const dayGroups = screen.getAllByRole('group', { name: /^Days for / })
+    expect(dayGroups.length).toBeGreaterThan(1)
+    for (const group of dayGroups) {
+      for (const button of within(group).getAllByRole('button')) expect(button).toBeDisabled()
     }
     expect(screen.getByLabelText('Note for Acme Dental')).toBeDisabled()
     expect(screen.getByLabelText('Status of Payroll')).toBeDisabled()
@@ -614,7 +872,7 @@ describe('My Week: questions that set themselves from the Waiting flags', () => 
     expect(within(row('Bright Books')).getByText('Marked waiting: statements from the bank')).toBeInTheDocument()
   })
 
-  it('greys the client on its day while everything is waiting, and not once one task is live', async () => {
+  it('greys a waiting task on its day, and a live task beside it is not greyed', async () => {
     withData([waitingTask('chk-w', 'c-acme', 'Monthly close')])
     mockFetch.mockResolvedValue({
       weekStart: WEEK,
@@ -623,12 +881,13 @@ describe('My Week: questions that set themselves from the Waiting flags', () => 
     })
     const view = render(page())
     await screen.findByText('My clients this week')
-    expect(within(dayColumn(/^Tuesday Nov 17$/)).getByText('Acme Dental').closest('li')).toHaveClass('is-parked')
+    const tuesday = () => within(dayColumn(/^Tuesday Nov 17$/))
+    expect(tuesday().getByText('Monthly close (waiting or finished)').closest('li')).toHaveClass('is-parked')
 
     withData([waitingTask('chk-w', 'c-acme', 'Monthly close'), checklist('chk-p', 'c-acme', 'Payroll', '2026-11-18')])
     view.rerender(page())
-    expect(within(dayColumn(/^Tuesday Nov 17$/)).getByText('Acme Dental').closest('li')).not.toHaveClass('is-parked')
-    expect(within(dayColumn(/^Tuesday Nov 17$/)).getByText('1 to work on')).toBeInTheDocument()
+    expect(tuesday().getByText('Monthly close (waiting or finished)').closest('li')).toHaveClass('is-parked')
+    expect(tuesday().getByText('Payroll').closest('li')).not.toHaveClass('is-parked')
   })
 
   it('when the answer is in, the task moves to "Answered: pick these up" and out of Sent questions', async () => {
@@ -879,7 +1138,7 @@ describe('My Week: an owner looks at anyone’s week from her own page', () => {
     render(page())
     await screen.findByText('My clients this week')
     await waitFor(() => expect(cells('Me')[1]).toBe('1'))
-    fireEvent.click(dayButton('Bright Books', /^Monday/))
+    fireEvent.click(dayButton('Owner review', /^Monday/))
     await waitFor(() => expect(cells('Me')[1]).toBe('0'))
     expect(mockSave).toHaveBeenCalledTimes(1)
     expect(mockSave.mock.calls[0][0]).toBe('c-bright')
@@ -895,8 +1154,11 @@ describe('My Week: an owner looks at anyone’s week from her own page', () => {
     expect(screen.getByLabelText('Note for Acme Dental')).toHaveValue('bank feed first')
     expect(screen.getByLabelText('Note for Acme Dental')).toBeDisabled()
     expect(dayButton('Acme Dental', /^Wednesday/)).toHaveAttribute('aria-pressed', 'true')
-    for (const button of within(screen.getByRole('group', { name: 'Days for Acme Dental' })).getAllByRole('button')) {
-      expect(button).toBeDisabled()
+    // Every task's day buttons, not just one task's.
+    const dayGroups = screen.getAllByRole('group', { name: /^Days for / })
+    expect(dayGroups.length).toBeGreaterThan(1)
+    for (const group of dayGroups) {
+      for (const button of within(group).getAllByRole('button')) expect(button).toBeDisabled()
     }
     expect(screen.getByLabelText('Status of Payroll')).toBeDisabled()
     // Her own task is not on Lisa's week.
@@ -909,7 +1171,7 @@ describe('My Week: an owner looks at anyone’s week from her own page', () => {
     fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: OWNER } })
     await screen.findByText('My clients this week')
     expect(screen.getByText('Owner review')).toBeInTheDocument()
-    expect(dayButton('Bright Books', /^Monday/)).not.toBeDisabled()
+    expect(dayButton('Owner review', /^Monday/)).not.toBeDisabled()
   })
 
   it('Look on a person’s line opens their week, and Look on her own line comes back', async () => {
@@ -975,7 +1237,7 @@ describe('My Week: an owner looks at anyone’s week from her own page', () => {
     )
     render(page())
     await screen.findByText('My clients this week')
-    fireEvent.click(dayButton('Bright Books', /^Monday/))
+    fireEvent.click(dayButton('Owner review', /^Monday/))
     expect(mockSave).toHaveBeenCalledTimes(1)
 
     // She looks at Lisa and comes straight back; the store has not got Monday yet,
@@ -985,12 +1247,12 @@ describe('My Week: an owner looks at anyone’s week from her own page', () => {
     fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: OWNER } })
     await screen.findByText('My clients this week')
     // Monday is still on her screen: the save in flight is newer than what was read.
-    expect(dayButton('Bright Books', /^Monday/)).toHaveAttribute('aria-pressed', 'true')
+    expect(dayButton('Owner review', /^Monday/)).toHaveAttribute('aria-pressed', 'true')
 
     // And her next click builds on it instead of putting the older row back.
     finishSave()
-    await waitFor(() => expect(dayButton('Bright Books', /^Monday/)).not.toBeDisabled())
-    fireEvent.click(dayButton('Bright Books', /^Tuesday/))
+    await waitFor(() => expect(dayButton('Owner review', /^Monday/)).not.toBeDisabled())
+    fireEvent.click(dayButton('Owner review', /^Tuesday/))
     await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(2))
     expect(mockSave.mock.calls[1][1].plannedDays).toEqual(['2026-11-16', '2026-11-17'])
   })
@@ -1004,7 +1266,7 @@ describe('My Week: an owner looks at anyone’s week from her own page', () => {
     )
     render(page())
     await screen.findByText('My clients this week')
-    fireEvent.click(dayButton('Bright Books', /^Monday/))
+    fireEvent.click(dayButton('Owner review', /^Monday/))
     fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: LISA } })
     await screen.findByText("Lisa's clients this week")
 
@@ -1017,7 +1279,7 @@ describe('My Week: an owner looks at anyone’s week from her own page', () => {
     // Back on her own week, what is stored is shown: Monday was never saved.
     fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: OWNER } })
     await screen.findByText('My clients this week')
-    expect(dayButton('Bright Books', /^Monday/)).toHaveAttribute('aria-pressed', 'false')
+    expect(dayButton('Owner review', /^Monday/)).toHaveAttribute('aria-pressed', 'false')
   })
 
   it('an error on one person’s week is not left standing on the next person’s', async () => {
@@ -1044,7 +1306,7 @@ describe('My Week: an owner looks at anyone’s week from her own page', () => {
     fireEvent.change(screen.getByLabelText('Whose week'), { target: { value: OWNER } })
     await screen.findByText('My clients this week')
     await waitFor(() => expect(allisonReads()).toBe(3))
-    fireEvent.click(dayButton('Bright Books', /^Monday/))
+    fireEvent.click(dayButton('Owner review', /^Monday/))
     await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(allisonReads()).toBe(3)

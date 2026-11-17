@@ -235,7 +235,7 @@ import {
   sanitizeDashboardLayout,
 } from './lib/dashboard-layout.js'
 import { writeBroadcastsDataChange } from './lib/data-change-broadcast.js'
-import { isMonday, normalizeWeekPlanInput } from './lib/week-plan.js'
+import { WEEK_PLAN_RELOAD_MESSAGE, isMonday, normalizeWeekPlanInput } from './lib/week-plan.js'
 import {
   listBlockingWeeks,
   normalizeTimeEntryMethod,
@@ -16180,19 +16180,44 @@ const server = createServer(async (request, response) => {
         userId = asked
       }
       const entries = await appDataStore.listWeekPlanEntries({ userId, weekStart })
-      sendJson(response, 200, { weekStart, userId, entries })
+      // `daysPerTask`: this server keeps days on each task. The page checks
+      // for it and will not show (or let her change) a week answered without
+      // it, which is what yesterday's server sends during a deploy hand-over:
+      // it reads a per-task row as "the client is on these days".
+      sendJson(response, 200, { weekStart, userId, entries, daysPerTask: true })
       return
     }
 
-    // PUT /api/week-plan/:clientId — save MY row for one client and one week:
-    // `{ weekStart, plannedDays, note, taskMarks }`, the whole row each time.
+    // PUT /api/week-plan/:clientId — where the FIRST version of the page saved
+    // (days on the client). Kept only to answer it: a page left open from
+    // before the days moved onto each task misreads the new rows and would
+    // write the client's days back over her per-task ones, so it may not save.
+    // It is told to reload (409), and nothing is read or written.
+    const weekPlanOldSaveMatch = normalizedPath.match(/^\/api\/week-plan\/([^/]+)$/)
+    if (weekPlanOldSaveMatch) {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'PUT') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      sendJson(response, 409, { error: WEEK_PLAN_RELOAD_MESSAGE })
+      return
+    }
+
+    // PUT /api/week-plan/:clientId/tasks — save MY row for one client and one
+    // week: `{ weekStart, note, taskMarks }`, the whole row each time, with the
+    // days on each task (`taskMarks[checklistId].days`). Its own address, which
+    // the first version of the server does not have: during a deploy hand-over
+    // (or after a rollback) a save from this page finds no route there and is
+    // not written, instead of being half-understood.
     //
     // Always the signed-in person's own plan: there is no `user` to name, so
     // nobody, an owner included, can write another person's week. The client
     // must be one she can see (a client she cannot see is "not found", the same
     // answer as one that does not exist). A preview never reaches here: writes
     // are refused while previewing.
-    const weekPlanSaveMatch = normalizedPath.match(/^\/api\/week-plan\/([^/]+)$/)
+    const weekPlanSaveMatch = normalizedPath.match(/^\/api\/week-plan\/([^/]+)\/tasks$/)
     if (weekPlanSaveMatch) {
       const session = await requireSession(request, response)
       if (!session) return

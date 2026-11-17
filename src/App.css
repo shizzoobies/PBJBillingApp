@@ -14940,6 +14940,8 @@ details.invoice-run-sent ul,
 
 .my-week-task-main {
   display: grid;
+  /* Takes the slack, so the day buttons and the status line up down the list. */
+  flex: 1 1 240px;
   gap: 2px;
   min-width: 0;
 }
