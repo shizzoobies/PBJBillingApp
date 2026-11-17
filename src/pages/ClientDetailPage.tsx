@@ -14,6 +14,7 @@ import {
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ClientEngagementsCard } from '../components/ClientEngagementsCard'
+import { ClientSignedDocuments } from '../components/ClientSignedDocuments'
 import { useAppContext } from '../AppContext'
 import { ChecklistCard, NewTaskForm } from './ChecklistsPage'
 import { SectionScopeContext } from '../components/sectionScope'
@@ -511,6 +512,14 @@ export function ClientDetailPage() {
       <CollapsibleSection id="client-section-statements" kicker="Statements" title="Statement dates">
         <ClientStatementsPanel clientId={client.id} />
       </CollapsibleSection>
+
+      {/* featreq-d4548b2c: the client's signed PDFs, found by going to the client.
+          Owner only, like the letters they are (a letter carries the fees). */}
+      {ownerMode ? (
+        <CollapsibleSection id="client-section-documents" kicker="Documents" title="Signed documents">
+          <ClientSignedDocuments clientId={client.id} refreshKey={dataRefreshCount} />
+        </CollapsibleSection>
+      ) : null}
 
       <ClientNotesSection clientId={client.id} />
       </div>

@@ -31907,6 +31907,85 @@ export class AppDataStore {
     })
   }
 
+  /**
+   * The COMPLETED signature requests of `engagementIds`, each with its kept signed PDF's
+   * metadata (never the bytes), newest signing first: the Signed documents list on a client's
+   * page (featreq-d4548b2c). `documentId` is null while the PDF has not been kept yet. Read-only.
+   * @returns {Promise<Array<{ requestId: string, engagementId: string, documentId: string|null,
+   *   fileName: string|null, byteSize: number, keptAt: string|null, signedAt: string|null,
+   *   testMode: boolean, signers: Array<{ name: string, email: string }> }>>}
+   */
+  async listSignedDocumentsForEngagements(engagementIds) {
+    const ids = [...new Set((Array.isArray(engagementIds) ? engagementIds : []).filter((id) => typeof id === 'string' && id))]
+    if (ids.length === 0) return []
+    const iso = (value) => {
+      if (!value) return null
+      const date = new Date(value)
+      return Number.isNaN(date.getTime()) ? null : date.toISOString()
+    }
+    const shape = (row) => ({
+      requestId: row.requestId,
+      engagementId: row.engagementId,
+      documentId: row.documentId ?? null,
+      fileName: row.documentId ? String(row.fileName ?? '') : null,
+      byteSize: row.documentId ? Number(row.byteSize) || 0 : 0,
+      keptAt: row.documentId ? iso(row.keptAt) : null,
+      signedAt: iso(row.signedAt),
+      testMode: row.testMode !== false,
+      signers: cleanSignatureRecipients(row.recipients).map((signer) => ({ name: signer.name, email: signer.email })),
+    })
+    const newestFirst = (a, b) =>
+      String(b.signedAt ?? '').localeCompare(String(a.signedAt ?? '')) || String(a.requestId).localeCompare(String(b.requestId))
+    if (this.pool) {
+      // The PDF must be the one the request points at AND be that request's own.
+      const { rows } = await this.pool.query(
+        `select r.id as request_id, r.engagement_id, r.recipients, r.test_mode, r.completed_at,
+                d.id as document_id, d.file_name, d.byte_size, d.created_at as kept_at
+           from signature_requests r
+           left join signature_documents d
+             on d.id = r.signed_document_id and d.signature_request_id = r.id
+          where r.engagement_id = any($1::text[]) and r.status = 'completed'`,
+        [ids],
+      )
+      return rows
+        .map((row) =>
+          shape({
+            requestId: row.request_id,
+            engagementId: row.engagement_id,
+            documentId: row.document_id,
+            fileName: row.file_name,
+            byteSize: row.byte_size,
+            keptAt: row.kept_at,
+            signedAt: row.completed_at,
+            testMode: row.test_mode,
+            recipients: row.recipients,
+          }),
+        )
+        .sort(newestFirst)
+    }
+    const authState = existsSync(localAuthPath) ? await readJson(localAuthPath) : {}
+    const held = Array.isArray(authState.signatureDocuments) ? authState.signatureDocuments : []
+    return (authState.signatureRequests ?? [])
+      .filter((row) => row && ids.includes(row.engagementId) && row.status === 'completed')
+      .map((row) => {
+        const document = row.signedDocumentId
+          ? held.find((each) => each?.id === row.signedDocumentId && each.signatureRequestId === row.id)
+          : null
+        return shape({
+          requestId: row.id,
+          engagementId: row.engagementId,
+          documentId: document?.id ?? null,
+          fileName: document?.fileName,
+          byteSize: document?.byteSize,
+          keptAt: document?.createdAt,
+          signedAt: row.completedAt,
+          testMode: row.testMode,
+          recipients: row.recipients,
+        })
+      })
+      .sort(newestFirst)
+  }
+
   /** One stored signed PDF: its metadata and `bytes` (a Buffer), or null. */
   async getSignedDocument(id) {
     if (!id) return null

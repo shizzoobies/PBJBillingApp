@@ -3112,6 +3112,22 @@ export type SignatureRequest = {
   updatedAt: string | null
 }
 
+/** One line of a client's Signed documents list (featreq-d4548b2c): a letter signed through Send for signature, PDF kept. */
+export type ClientSignedDocument = {
+  requestId: string
+  engagementId: string
+  kind: EngagementKind
+  engagementStatus: EngagementStatus | null
+  subject: string
+  fileName: string
+  byteSize: number
+  signedAt: string | null
+  /** Who signed, by name (or address when no name is on file). */
+  signers: string[]
+  /** Signed in the provider's test mode: not legally binding. */
+  testMode: boolean
+}
+
 /** Whether e-signature is set up on the server, through which provider a send goes, and whether it is in test mode. */
 export type EsignStatus = { configured: boolean; provider?: EsignProvider | null; testMode: boolean }
 

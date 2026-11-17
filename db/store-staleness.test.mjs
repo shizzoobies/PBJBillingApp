@@ -57023,6 +57023,58 @@ describe('signature requests (both backends)', () => {
     expect(unnamed.fileName).toBe('signed-engagement-letter.pdf')
   })
 
+  // featreq-d4548b2c: the Signed documents list on a client's page.
+  it('file: lists the completed requests of some engagements with their kept PDF, newest signing first, never the bytes', async () => {
+    const first = await newRequest()
+    const second = await newRequest({ engagementId: 'eng-2', signwellDocumentId: 'doc-2', testMode: false })
+    const open = await newRequest({ engagementId: 'eng-3', signwellDocumentId: 'doc-3' })
+    const elsewhere = await newRequest({ engagementId: 'eng-other', signwellDocumentId: 'doc-4' })
+    const pending = await newRequest({ engagementId: 'eng-4', signwellDocumentId: 'doc-5' })
+    const keep = async (request, fileName, completedAt) => {
+      const meta = await store.storeSignedDocument({ signatureRequestId: request.id, fileName, bytes: Buffer.from('%PDF-' + fileName) })
+      await store.updateSignatureRequest(request.id, { status: 'completed', signedDocumentId: meta.id, completedAt })
+      return meta
+    }
+    const firstMeta = await keep(first, 'First.pdf', '2026-10-22T15:00:00.000Z')
+    const secondMeta = await keep(second, 'Second.pdf', '2026-11-03T15:00:00.000Z')
+    await keep(elsewhere, 'Other.pdf', '2026-11-04T15:00:00.000Z')
+    // Signed, but its PDF could not be kept yet.
+    await store.updateSignatureRequest(pending.id, { status: 'completed', completedAt: '2026-11-05T15:00:00.000Z' })
+
+    const listed = await store.listSignedDocumentsForEngagements(['eng-1', 'eng-2', 'eng-3', 'eng-4', 'eng-1', '', null])
+    expect(listed.map((row) => row.requestId)).toEqual([pending.id, second.id, first.id])
+    expect(listed[1]).toEqual({
+      requestId: second.id,
+      engagementId: 'eng-2',
+      documentId: secondMeta.id,
+      fileName: 'Second.pdf',
+      byteSize: Buffer.from('%PDF-Second.pdf').length,
+      keptAt: secondMeta.createdAt,
+      signedAt: '2026-11-03T15:00:00.000Z',
+      testMode: false,
+      signers: [{ name: 'Pat Example', email: 'pat@example.invalid' }],
+    })
+    expect(listed[2]).toMatchObject({ documentId: firstMeta.id, fileName: 'First.pdf', testMode: true })
+    // Not kept yet: no file, nothing to download.
+    expect(listed[0]).toMatchObject({ documentId: null, fileName: null, byteSize: 0, keptAt: null })
+    for (const row of listed) expect(row).not.toHaveProperty('bytes')
+    // A request that is still out is not a signed document.
+    expect(listed.some((row) => row.requestId === open.id)).toBe(false)
+    expect(await store.listSignedDocumentsForEngagements([])).toEqual([])
+    expect(await store.listSignedDocumentsForEngagements(null)).toEqual([])
+    expect(await store.listSignedDocumentsForEngagements(['eng-none'])).toEqual([])
+  })
+
+  it('file: a completed request never lists a PDF that belongs to another request', async () => {
+    const mine = await newRequest()
+    const theirs = await newRequest({ engagementId: 'eng-2', signwellDocumentId: 'doc-2' })
+    const theirMeta = await store.storeSignedDocument({ signatureRequestId: theirs.id, fileName: 'Theirs.pdf', bytes: Buffer.from('%PDF-theirs') })
+    // The request points at a document that is not its own.
+    await store.updateSignatureRequest(mine.id, { status: 'completed', signedDocumentId: theirMeta.id, completedAt: '2026-11-03T15:00:00.000Z' })
+    const [row] = await store.listSignedDocumentsForEngagements(['eng-1'])
+    expect(row).toMatchObject({ requestId: mine.id, documentId: null, fileName: null })
+  })
+
   it('file: one signed PDF per request - a second store reads the first back and keeps its bytes', async () => {
     const request = await newRequest()
     const first = await store.storeSignedDocument({ signatureRequestId: request.id, fileName: 'First.pdf', bytes: Buffer.from('%PDF-first') })
@@ -57481,6 +57533,75 @@ describe('signature requests (both backends)', () => {
       const params = fake.matching(/^update signature_requests set/i)[0].params
       expect(params[12]).toBe(true)
       expect(params[13]).toBeNull()
+    })
+
+    it('listSignedDocumentsForEngagements reads completed requests joined to their OWN kept PDF, never the bytes', async () => {
+      const { fake, pg } = pgWith([
+        [
+          /^select r\.id as request_id/i,
+          {
+            rows: [
+              {
+                request_id: 'sigreq-old',
+                engagement_id: 'eng-1',
+                recipients: [{ id: '1', name: 'Pat Example', email: 'pat@example.invalid', status: 'signed' }],
+                test_mode: true,
+                completed_at: new Date('2026-10-22T15:00:00.000Z'),
+                document_id: 'sigdoc-old',
+                file_name: 'Old.pdf',
+                byte_size: '2048',
+                kept_at: new Date('2026-10-22T15:00:05.000Z'),
+              },
+              {
+                request_id: 'sigreq-new',
+                engagement_id: 'eng-2',
+                recipients: '[{"id":"1","name":"Sam Signer","email":"sam@example.invalid"}]',
+                test_mode: false,
+                completed_at: new Date('2026-11-03T15:00:00.000Z'),
+                document_id: null,
+                file_name: null,
+                byte_size: null,
+                kept_at: null,
+              },
+            ],
+          },
+        ],
+      ])
+      const listed = await pg.listSignedDocumentsForEngagements(['eng-1', 'eng-2', 'eng-1', ''])
+      expect(listed).toEqual([
+        {
+          requestId: 'sigreq-new',
+          engagementId: 'eng-2',
+          documentId: null,
+          fileName: null,
+          byteSize: 0,
+          keptAt: null,
+          signedAt: '2026-11-03T15:00:00.000Z',
+          testMode: false,
+          signers: [{ name: 'Sam Signer', email: 'sam@example.invalid' }],
+        },
+        {
+          requestId: 'sigreq-old',
+          engagementId: 'eng-1',
+          documentId: 'sigdoc-old',
+          fileName: 'Old.pdf',
+          byteSize: 2048,
+          keptAt: '2026-10-22T15:00:05.000Z',
+          signedAt: '2026-10-22T15:00:00.000Z',
+          testMode: true,
+          signers: [{ name: 'Pat Example', email: 'pat@example.invalid' }],
+        },
+      ])
+      const query = fake.matching(/^select r\.id as request_id/i)[0]
+      const text = query.text.replace(/\s+/g, ' ')
+      // Only completed requests of the named engagements; the PDF must be the request's own.
+      expect(text).toContain("where r.engagement_id = any($1::text[]) and r.status = 'completed'")
+      expect(text).toContain('on d.id = r.signed_document_id and d.signature_request_id = r.id')
+      expect(text).not.toMatch(/\bbytes\b/)
+      expect(query.params).toEqual([['eng-1', 'eng-2']])
+      // No ids: no query at all.
+      expect(await pg.listSignedDocumentsForEngagements([])).toEqual([])
+      expect(fake.matching(/^select r\.id as request_id/i)).toHaveLength(1)
     })
 
     it('storeSignedDocument INSERTs the bytes as a Buffer; getSignedDocument reads them back', async () => {

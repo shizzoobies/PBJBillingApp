@@ -41,6 +41,7 @@
   type EngagementSection,
   type EngagementSendResult,
   type SignatureRequest,
+  type ClientSignedDocument,
   type EsignStatus,
   type EsignLetterPreview,
   type EngagementSignResult,
@@ -6073,6 +6074,25 @@ export async function listClientEsignRequests(clientId: string): Promise<Signatu
     'Could not read the signature requests',
   )
   return Array.isArray(body.requests) ? body.requests : []
+}
+
+/**
+ * A client's signed documents (featreq-d4548b2c): each letter signed through Send for signature whose
+ * signed PDF is kept, and how many letters are marked signed with no PDF (signed by hand, or the PDF
+ * could not be kept). Never the bytes: a PDF is downloaded from `engagementEsignPdfUrl`. Owner-only.
+ */
+export async function listClientSignedDocuments(
+  clientId: string,
+): Promise<{ documents: ClientSignedDocument[]; signedWithoutPdf: number }> {
+  const body = await engagementRequest<{ documents?: ClientSignedDocument[]; signedWithoutPdf?: number }>(
+    `/api/clients/${encodeURIComponent(clientId)}/signed-documents`,
+    { method: 'GET' },
+    'Could not read the signed documents',
+  )
+  return {
+    documents: Array.isArray(body.documents) ? body.documents : [],
+    signedWithoutPdf: Number(body.signedWithoutPdf) > 0 ? Number(body.signedWithoutPdf) : 0,
+  }
 }
 
 /**

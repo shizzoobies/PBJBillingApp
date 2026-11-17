@@ -236,6 +236,7 @@ import {
 } from './lib/dashboard-layout.js'
 import { writeBroadcastsDataChange } from './lib/data-change-broadcast.js'
 import { WEEK_PLAN_RELOAD_MESSAGE, isMonday, normalizeWeekPlanInput } from './lib/week-plan.js'
+import { clientSignedDocuments } from './lib/signed-documents.js'
 import {
   listBlockingWeeks,
   normalizeTimeEntryMethod,
@@ -14052,6 +14053,36 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // GET /api/clients/:id/signed-documents - the Signed documents list on the client's page
+    // (featreq-d4548b2c): every letter of this client that was completed through Send for signature,
+    // and whose signed PDF is kept, with its name and size, newest first, and how many signed letters
+    // have no PDF kept (signed by hand, or the PDF could not be kept). Never the bytes: each PDF is
+    // downloaded through the engagement's own route below.
+    // Owner-only and same-origin, like every e-signature route (a letter carries the client's fees).
+    const clientSignedDocumentsMatch = normalizedPath.match(/^\/api\/clients\/([^/]+)\/signed-documents$/)
+    if (clientSignedDocumentsMatch && request.method === 'GET') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can see signed documents' })
+        return
+      }
+      if (isCrossSiteOrigin(request)) {
+        sendJson(response, 403, { error: 'Origin not allowed' })
+        return
+      }
+      // normalizedPath is decoded already: the id is used as it is.
+      const clientId = clientSignedDocumentsMatch[1]
+      if (!(await appDataStore.getClientById(clientId))) {
+        sendJson(response, 404, { error: 'Client not found' })
+        return
+      }
+      const engagements = await appDataStore.listEngagements({ clientId })
+      const kept = await appDataStore.listSignedDocumentsForEngagements(engagements.map((row) => row.id))
+      sendJson(response, 200, clientSignedDocuments({ engagements, kept }), { 'Cache-Control': 'no-store' })
+      return
+    }
+
     // GET /api/engagements/:id/esign/:requestId/pdf - the signed PDF, downloaded in the app (it is
     // never emailed). 404 unless the request is this engagement's, completed, and its PDF was kept.
     const engagementEsignPdfMatch = normalizedPath.match(/^\/api\/engagements\/([^/]+)\/esign\/([^/]+)\/pdf$/)
@@ -14074,7 +14105,9 @@ const server = createServer(async (request, response) => {
         signatureRequest.signedDocumentId
           ? await appDataStore.getSignedDocument(signatureRequest.signedDocumentId)
           : null
-      if (!signed) {
+      // The document must be THIS request's own (the Signed documents list reads it the same way): a
+      // request pointing at another request's PDF serves nothing.
+      if (!signed || signed.signatureRequestId !== signatureRequest.id) {
         sendJson(response, 404, { error: 'No signed letter for that request' })
         return
       }

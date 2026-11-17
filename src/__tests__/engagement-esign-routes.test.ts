@@ -32,7 +32,9 @@ const sendRoute = () => between('// POST /api/engagements/:id/esign - { template
 const remindRoute = () => between('// POST /api/engagements/:id/esign/remind', '// POST /api/engagements/:id/esign/:requestId/finish')
 const finishRoute = () => between('// POST /api/engagements/:id/esign/:requestId/finish', '// GET /api/engagements/:id/esign - this engagement')
 const listRoute = () => between('// GET /api/engagements/:id/esign - this engagement', '// GET /api/clients/:id/esign')
-const clientListRoute = () => between('// GET /api/clients/:id/esign', '// GET /api/engagements/:id/esign/:requestId/pdf')
+const clientListRoute = () => between('// GET /api/clients/:id/esign', '// GET /api/clients/:id/signed-documents')
+const signedDocumentsRoute = () =>
+  between('// GET /api/clients/:id/signed-documents', '// GET /api/engagements/:id/esign/:requestId/pdf')
 const pdfRoute = () => between('// GET /api/engagements/:id/esign/:requestId/pdf', '// ---- end of the engagement e-signature routes')
 
 type Route = { name: string; block: () => string; write: boolean }
@@ -43,8 +45,65 @@ const ROUTES: Route[] = [
   { name: 'POST /api/engagements/:id/esign/:requestId/finish', block: finishRoute, write: true },
   { name: 'GET /api/engagements/:id/esign', block: listRoute, write: false },
   { name: 'GET /api/clients/:id/esign', block: clientListRoute, write: false },
+  { name: 'GET /api/clients/:id/signed-documents', block: signedDocumentsRoute, write: false },
   { name: 'GET /api/engagements/:id/esign/:requestId/pdf', block: pdfRoute, write: false },
 ]
+
+/**
+ * featreq-d4548b2c: the Signed documents list on a client's page. It is read off the client's
+ * engagements; it hands out names and dates, never a PDF's bytes (those stay behind the
+ * engagement's own download route), and it writes nothing.
+ */
+describe('GET /api/clients/:id/signed-documents', () => {
+  it('matches only that address', () => {
+    const block = signedDocumentsRoute()
+    expect(block).toContain('normalizedPath.match(/^\\/api\\/clients\\/([^/]+)\\/signed-documents$/)')
+    expect(block).toContain("clientSignedDocumentsMatch && request.method === 'GET'")
+  })
+
+  it('404s a client that does not exist before reading any letter', () => {
+    const block = signedDocumentsRoute()
+    expect(block).toContain('if (!(await appDataStore.getClientById(clientId))) {')
+    expect(block).toContain("sendJson(response, 404, { error: 'Client not found' })")
+    expect(block.indexOf('appDataStore.getClientById(clientId)')).toBeLessThan(block.indexOf('appDataStore.listEngagements('))
+  })
+
+  it('reads this client’s engagements, then only their completed requests, and answers with the list uncached', () => {
+    const block = signedDocumentsRoute()
+    expect(block).toContain('const engagements = await appDataStore.listEngagements({ clientId })')
+    expect(block).toContain(
+      'const kept = await appDataStore.listSignedDocumentsForEngagements(engagements.map((row) => row.id))',
+    )
+    expect(block).toContain(
+      "sendJson(response, 200, clientSignedDocuments({ engagements, kept }), { 'Cache-Control': 'no-store' })",
+    )
+  })
+
+  it('never reads a signed PDF’s bytes and never writes', () => {
+    const block = signedDocumentsRoute()
+    expect(block).not.toContain('getSignedDocument(')
+    expect(block).not.toContain('readJsonBody')
+    expect(block).not.toMatch(/appDataStore\.(?!getClientById|listEngagements|listSignedDocumentsForEngagements)/)
+  })
+
+  // The list calls a PDF "kept" only when it is the request's own document. The
+  // download reads it the same way, so no listed line can open another request's PDF.
+  it('the PDF download serves only the request’s own document', () => {
+    const block = pdfRoute()
+    expect(block).toContain('if (!signed || signed.signatureRequestId !== signatureRequest.id) {')
+    expect(block.indexOf('signed.signatureRequestId !== signatureRequest.id')).toBeLessThan(
+      block.indexOf("'Content-Type': 'application/pdf'"),
+    )
+  })
+
+  it('sits with the e-signature routes, before the PDF download it points at', () => {
+    expect(routes()).toContain('// GET /api/clients/:id/signed-documents')
+    expect(serverSource.indexOf('// GET /api/clients/:id/signed-documents')).toBeLessThan(
+      serverSource.indexOf('// GET /api/engagements/:id/esign/:requestId/pdf'),
+    )
+    expect(serverSource).toContain("import { clientSignedDocuments } from './lib/signed-documents.js'")
+  })
+})
 
 describe('the e-signature routes are owner-only and same-origin', () => {
   for (const route of ROUTES) {
