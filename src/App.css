@@ -2994,6 +2994,18 @@ td strong {
 .payroll-job-cell {
   padding-left: 22px;
 }
+/* The stretches under a row's session count: one per line, never broken mid-time. */
+.payroll-stretches {
+  white-space: nowrap;
+  font-size: 0.85em;
+}
+@media print {
+  /* A printed page has a fixed width: let a long stretch wrap rather than push
+     Billable $ and Cost off the paper. */
+  .payroll-stretches {
+    white-space: normal;
+  }
+}
 .report-metric-grid {
   display: grid;
   gap: 12px;

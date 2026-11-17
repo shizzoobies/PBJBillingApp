@@ -1531,6 +1531,41 @@ export function effectiveSessions(entry: {
   return []
 }
 
+const STRETCH_CLOCK = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' })
+
+/**
+ * Each stretch of an entry as text, e.g. "9:08 AM – 9:10 AM (2m)", EARLIEST
+ * FIRST (they are stored in the order they were typed or added, which is not
+ * always the order they happened). An entry that was stopped and picked up
+ * again later has a first start and a last stop hours apart while the time
+ * WORKED is only its stretches; a report that shows just the two clock times
+ * reads like a long shift with almost no hours on it (featreq-2da633de).
+ *
+ * Times are the viewer's local time, like `formatAuditStamp`. The date is added
+ * only where it is needed: a stretch that starts on another day than
+ * `entryDate` (the day the row sits under; the first stretch's day when not
+ * given), or one that runs past midnight. The length in parentheses is exact,
+ * so a timer stretch can read "9:08 AM – 9:10 AM (1m 15s)". A stretch with no
+ * real times, or one that does not stop after it starts, is left out.
+ */
+export function formatWorkStretches(sessions: WorkSession[], entryDate?: string): string[] {
+  const stretches = sessions
+    .map((session) => ({ session, start: new Date(session.startAt), end: new Date(session.endAt) }))
+    .filter(
+      ({ start, end }) =>
+        !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime()) && end.getTime() > start.getTime(),
+    )
+    .sort((a, b) => a.start.getTime() - b.start.getTime())
+  if (stretches.length === 0) return []
+  const rowDay = entryDate || localDateOnly(stretches[0].start)
+  return stretches.map(({ session, start, end }) => {
+    const from = localDateOnly(start) === rowDay ? STRETCH_CLOCK.format(start) : formatAuditStamp(session.startAt)
+    const to =
+      localDateOnly(end) === localDateOnly(start) ? STRETCH_CLOCK.format(end) : formatAuditStamp(session.endAt)
+    return `${from} – ${to} (${formatHoursMinutes(sessionMinutes(session))})`
+  })
+}
+
 /** Whole minutes in a single session (rounded, never negative). */
 export function sessionMinutes(session: WorkSession): number {
   const startMs = new Date(session.startAt).getTime()
