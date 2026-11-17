@@ -14878,6 +14878,43 @@ details.invoice-run-sent ul,
   gap: 4px;
 }
 
+/* "Work on a client that has no task": the picker above the client list. */
+.my-week-add {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 0 0 12px;
+}
+
+.my-week-add label {
+  display: grid;
+  font-size: 13px;
+  font-weight: 650;
+  gap: 4px;
+}
+
+.my-week-add .input {
+  min-width: 240px;
+}
+
+.my-week-add small {
+  color: var(--muted);
+  flex-basis: 100%;
+  font-size: 12px;
+}
+
+/* The "Other work (no task)" line under a client's tasks. */
+.my-week-other {
+  margin-top: 10px;
+}
+
+.my-week-other-name {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 650;
+}
+
 .my-week-daybtn {
   background: var(--surface);
   border: 1px solid var(--line-strong);

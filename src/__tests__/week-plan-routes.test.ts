@@ -93,20 +93,53 @@ describe('PUT /api/week-plan/:clientId (the first version’s address)', () => {
   })
 })
 
-describe('PUT /api/week-plan/:clientId/tasks', () => {
+describe('PUT /api/week-plan/:clientId/row (and /tasks)', () => {
   const route = slice(
     'const weekPlanSaveMatch = normalizedPath.match(',
     "if (normalizedPath === '/api/waiting-on-me' && request.method === 'GET') {",
   )
 
-  // Its own address: the first version of the server has no such route, so a
-  // save from this page cannot be half-understood there during a hand-over.
-  it('has its own address, checked after the first version’s', () => {
-    expect(route).toContain('normalizedPath.match(/^\\/api\\/week-plan\\/([^/]+)\\/tasks$/)')
+  // Two addresses, one handler. `/row` is where the page saves now: no earlier
+  // server has it, so a save from this page cannot be half-understood there
+  // during a hand-over. `/tasks` is kept for a page left open from before
+  // "work with no task", which hands back every mark it was given.
+  it('has both addresses, checked after the first version’s', () => {
+    expect(route).toContain('normalizedPath.match(/^\\/api\\/week-plan\\/([^/]+)\\/(?:row|tasks)$/)')
     expect(server.indexOf('const weekPlanOldSaveMatch')).toBeLessThan(server.indexOf('const weekPlanSaveMatch'))
-    // The first version's pattern cannot swallow it: it allows no further slash.
-    expect('/api/week-plan/client-1/tasks').not.toMatch(/^\/api\/week-plan\/([^/]+)$/)
-    expect('/api/week-plan/client-1/tasks').toMatch(/^\/api\/week-plan\/([^/]+)\/tasks$/)
+    const now = /^\/api\/week-plan\/([^/]+)\/(?:row|tasks)$/
+    for (const path of ['/api/week-plan/client-1/row', '/api/week-plan/client-1/tasks']) {
+      // The first version's pattern cannot swallow it: it allows no further slash.
+      expect(path).not.toMatch(/^\/api\/week-plan\/([^/]+)$/)
+      expect(path.match(now)?.[1]).toBe('client-1')
+    }
+    expect('/api/week-plan/client-1/rows').not.toMatch(now)
+    expect('/api/week-plan/client-1/row/x').not.toMatch(now)
+  })
+
+  // The server that is live while this one is being handed over to (66498a32)
+  // must have NO route for the new address: that is the whole protection.
+  it('the address the page saves to now is one the previous server’s patterns do not match', () => {
+    const previous = [/^\/api\/week-plan\/([^/]+)$/, /^\/api\/week-plan\/([^/]+)\/tasks$/]
+    for (const pattern of previous) expect('/api/week-plan/client-1/row').not.toMatch(pattern)
+    // And what an /api/ path with no route gets here (the same on that server)
+    // is the 404 the request helper turns into "being updated".
+    expect(server).toContain("sendJson(response, 404, { error: 'Not found' })")
+  })
+
+  // Work with no task: any client she can see, with or without a checklist.
+  // The rule lives in lib/week-plan.js; the route hands it this client's
+  // checklist ids and nothing that could widen the key.
+  it('lets the rules decide which marks are kept, and keeps other work for a client with no checklist', async () => {
+    expect(route).toContain('const checked = normalizeWeekPlanInput(payload, {')
+    expect(route).toContain('.filter((checklist) => checklist.clientId === clientId)')
+    const { normalizeWeekPlanInput, WEEK_PLAN_OTHER_KEY } = await import('../../lib/week-plan.js')
+    const checked = normalizeWeekPlanInput(
+      { weekStart: '2026-11-16', taskMarks: { [WEEK_PLAN_OTHER_KEY]: { days: ['2026-11-18'] }, 'chk-else': { days: ['2026-11-18'] } } },
+      { checklistIds: [] },
+    )
+    expect(checked.ok && checked.value.taskMarks).toEqual({
+      [WEEK_PLAN_OTHER_KEY]: { status: null, note: '', days: ['2026-11-18'] },
+    })
   })
 
   it('always writes the signed-in person’s own plan: no user can be named', () => {

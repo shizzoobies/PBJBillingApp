@@ -704,6 +704,327 @@ describe('My Week: planning', () => {
   })
 })
 
+/**
+ * featreq-f8ebbfc4 (2026-11-17), Brittany: "I need to be able to see all my
+ * clients and choose whether I work on any without a task - I might have adhoc
+ * work needed".
+ */
+describe('My Week: work with no task', () => {
+  const OTHER = { status: null, note: '', days: ['2026-11-18'] }
+  const picker = () => screen.getByLabelText('Work on a client that has no task') as HTMLSelectElement
+  // Choosing in the picker adds nothing by itself (on Windows an arrow key
+  // changes a closed picker): the button beside it does.
+  const add = (clientId: string) => {
+    fireEvent.change(picker(), { target: { value: clientId } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to my week' }))
+  }
+  const otherDay = (clientName: string, day: RegExp) =>
+    within(
+      within(row(clientName)).getByRole('group', { name: `Days for other work (${clientName})` }),
+    ).getByRole('button', { name: day })
+
+  beforeEach(() => {
+    // Two of her clients have no task of hers: Quiet Co and Zeta Farm.
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...data,
+        clients: [...data.clients, { id: 'c-zeta', name: 'Zeta Farm' }, { id: 'c-quiet', name: 'Quiet Co' }],
+      },
+    } as unknown as AppContextValue
+  })
+
+  it('the picker lists her clients that are not on the page, by name', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    // Not the ones already listed for their tasks, and never an inactive one.
+    expect([...picker().options].map((option) => option.textContent)).toEqual([
+      'Choose a client…',
+      'Quiet Co',
+      'Zeta Farm',
+    ])
+    expect(screen.queryByRole('link', { name: 'Quiet Co' })).not.toBeInTheDocument()
+  })
+
+  it('choosing a client adds it at the top with an Other work line, and saves nothing yet', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    const names = () =>
+      [...document.querySelectorAll('.my-week-row .client-name-link')].map((link) => link.textContent)
+    // Nothing to add until one is chosen; choosing one adds nothing by itself.
+    expect(screen.getByRole('button', { name: 'Add to my week' })).toBeDisabled()
+    fireEvent.change(picker(), { target: { value: 'c-quiet' } })
+    expect(names()).not.toContain('Quiet Co')
+    fireEvent.click(screen.getByRole('button', { name: 'Add to my week' }))
+    expect(names()[0]).toBe('Quiet Co')
+    expect(picker().value).toBe('')
+    expect(within(row('Quiet Co')).getByText('Other work (no task)')).toBeInTheDocument()
+    expect(otherDay('Quiet Co', /^Wednesday/)).toHaveAttribute('aria-pressed', 'false')
+    expect(mockSave).not.toHaveBeenCalled()
+    // It is on the page now, so it is no longer offered; the count of clients
+    // with tasks to plan has not moved.
+    expect([...picker().options].map((option) => option.textContent)).toEqual(['Choose a client…', 'Zeta Farm'])
+    expect(screen.getByText('2 clients not planned this week')).toBeInTheDocument()
+    // A second one goes under the first.
+    add('c-zeta')
+    expect(names().slice(0, 2)).toEqual(['Quiet Co', 'Zeta Farm'])
+  })
+
+  it('a day on it is saved under the key for other work, and shows on that day', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    add('c-quiet')
+    fireEvent.click(otherDay('Quiet Co', /^Wednesday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave).toHaveBeenCalledWith('c-quiet', {
+      weekStart: WEEK,
+      plannedDays: ['2026-11-18'],
+      note: '',
+      taskMarks: { '*': OTHER },
+    })
+    expect(otherDay('Quiet Co', /^Wednesday/)).toHaveAttribute('aria-pressed', 'true')
+    const wednesday = within(dayColumn(/^Wednesday Nov 18$/))
+    expect(wednesday.getByText('Quiet Co')).toBeInTheDocument()
+    expect(wednesday.getByText('Other work')).toBeInTheDocument()
+    expect(wednesday.queryByText('Nothing open')).not.toBeInTheDocument()
+    expect(within(row('Quiet Co')).getByText('Other work', { selector: '.my-week-rollup' })).toBeInTheDocument()
+  })
+
+  it('other work that is stored comes back by itself, and can be taken off the week', async () => {
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [entry('c-quiet', { plannedDays: ['2026-11-18'], taskMarks: { '*': OTHER } })],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(otherDay('Quiet Co', /^Wednesday/)).toHaveAttribute('aria-pressed', 'true')
+    expect([...picker().options].map((option) => option.textContent)).toEqual(['Choose a client…', 'Zeta Farm'])
+    fireEvent.click(within(row('Quiet Co')).getByRole('button', { name: 'Take it off my week' }))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave).toHaveBeenCalledWith('c-quiet', { weekStart: WEEK, plannedDays: [], note: '', taskMarks: {} })
+    expect(screen.queryByRole('link', { name: 'Quiet Co' })).not.toBeInTheDocument()
+    // And it is offered again.
+    expect([...picker().options].map((option) => option.textContent)).toContain('Quiet Co')
+  })
+
+  it('taking the last day off other work leaves the line there, to put it on another day', async () => {
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [
+        entry('c-quiet', { plannedDays: ['2026-11-18'], taskMarks: { '*': OTHER } }),
+        entry('c-acme', { plannedDays: ['2026-11-18'], taskMarks: { '*': OTHER } }),
+      ],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    // Other work alone does not make a client with open tasks planned.
+    expect(screen.getByText('2 clients not planned this week')).toBeInTheDocument()
+    // A client with no task: the row stays, with nothing on it.
+    fireEvent.click(otherDay('Quiet Co', /^Wednesday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave).toHaveBeenLastCalledWith('c-quiet', { weekStart: WEEK, plannedDays: [], note: '', taskMarks: {} })
+    expect(otherDay('Quiet Co', /^Wednesday/)).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(otherDay('Quiet Co', /^Thursday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(2))
+    expect(mockSave).toHaveBeenLastCalledWith('c-quiet', {
+      weekStart: WEEK,
+      plannedDays: ['2026-11-19'],
+      note: '',
+      taskMarks: { '*': { status: null, note: '', days: ['2026-11-19'] } },
+    })
+    // A client listed for its tasks: the line stays too.
+    fireEvent.click(otherDay('Acme Dental', /^Wednesday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(3))
+    expect(otherDay('Acme Dental', /^Wednesday/)).toHaveAttribute('aria-pressed', 'false')
+    expect(within(row('Acme Dental')).queryByRole('button', { name: /^Add other work/ })).not.toBeInTheDocument()
+  })
+
+  it('a client added by mistake is taken off without saving anything', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    add('c-quiet')
+    fireEvent.click(within(row('Quiet Co')).getByRole('button', { name: 'Take it off my week' }))
+    expect(screen.queryByRole('link', { name: 'Quiet Co' })).not.toBeInTheDocument()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(mockSave).not.toHaveBeenCalled()
+  })
+
+  it('a client listed for its tasks can have other work too, and its tasks keep their days', async () => {
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [
+        entry('c-acme', {
+          plannedDays: ['2026-11-16'],
+          taskMarks: { 'chk-payroll': { status: null, note: '', days: ['2026-11-16'] } },
+        }),
+      ],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    const acme = within(row('Acme Dental'))
+    // Not shown until she asks for it.
+    expect(acme.queryByText('Other work (no task)')).not.toBeInTheDocument()
+    fireEvent.click(acme.getByRole('button', { name: 'Add other work for Acme Dental' }))
+    expect(acme.queryByRole('button', { name: 'Add other work for Acme Dental' })).not.toBeInTheDocument()
+    expect(mockSave).not.toHaveBeenCalled()
+    // It stays where it was in the list.
+    expect(document.querySelector('.my-week-row .client-name-link')?.textContent).toBe('Bright Books')
+
+    fireEvent.click(otherDay('Acme Dental', /^Friday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave).toHaveBeenCalledWith('c-acme', {
+      weekStart: WEEK,
+      plannedDays: ['2026-11-16', '2026-11-20'],
+      note: '',
+      taskMarks: {
+        'chk-payroll': { status: null, note: '', days: ['2026-11-16'] },
+        '*': { status: null, note: '', days: ['2026-11-20'] },
+      },
+    })
+    expect(dayButton('Payroll', /^Monday/)).toHaveAttribute('aria-pressed', 'true')
+    expect(dayButton('Payroll', /^Friday/)).toHaveAttribute('aria-pressed', 'false')
+    expect(within(dayColumn(/^Friday Nov 20$/)).getByText('Other work')).toBeInTheDocument()
+    expect(acme.getByText('1 planned, 1 not planned, other work')).toBeInTheDocument()
+    // No "take it off" here: this client is on the page for its tasks.
+    expect(acme.queryByRole('button', { name: /Take it off my week/ })).not.toBeInTheDocument()
+  })
+
+  it('a client planned the old way with nothing open now keeps its day when she adds other work', async () => {
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...contextValue.data,
+        checklists: [checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-30', { items: [step('a', true)] })],
+      },
+    } as unknown as AppContextValue
+    // Saved by the first version: the client on Wednesday, no days on any task.
+    mockFetch.mockResolvedValue({ weekStart: WEEK, userId: LISA, entries: [entry('c-acme', { plannedDays: ['2026-11-18'] })] })
+    render(page())
+    await screen.findByText('My clients this week')
+    // With no task left to carry it, the day she planned is the client's other
+    // work: shown pressed on that line, so a click acts on what she sees.
+    expect(within(dayColumn(/^Wednesday Nov 18$/)).getByText('Other work')).toBeInTheDocument()
+    expect(otherDay('Acme Dental', /^Wednesday/)).toHaveAttribute('aria-pressed', 'true')
+    expect(otherDay('Acme Dental', /^Monday/)).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(otherDay('Acme Dental', /^Monday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave).toHaveBeenLastCalledWith('c-acme', {
+      weekStart: WEEK,
+      plannedDays: ['2026-11-16', '2026-11-18'],
+      note: '',
+      taskMarks: { '*': { status: null, note: '', days: ['2026-11-16', '2026-11-18'] } },
+    })
+    expect(otherDay('Acme Dental', /^Wednesday/)).toHaveAttribute('aria-pressed', 'true')
+    expect(within(dayColumn(/^Monday Nov 16$/)).getByText('Other work')).toBeInTheDocument()
+    // A click on the day that is on takes only that day off.
+    fireEvent.click(otherDay('Acme Dental', /^Wednesday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(2))
+    expect(mockSave).toHaveBeenLastCalledWith('c-acme', {
+      weekStart: WEEK,
+      plannedDays: ['2026-11-16'],
+      note: '',
+      taskMarks: { '*': { status: null, note: '', days: ['2026-11-16'] } },
+    })
+    expect(otherDay('Acme Dental', /^Wednesday/)).toHaveAttribute('aria-pressed', 'false')
+    expect(otherDay('Acme Dental', /^Monday/)).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('adding other work to a client that came onto the page after it opened does not move it to the top', async () => {
+    const { rerender } = render(page())
+    await screen.findByText('My clients this week')
+    // New work arrives for Zeta Farm while the page is open.
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...contextValue.data,
+        checklists: [...contextValue.data.checklists, checklist('chk-zeta', 'c-zeta', 'Cleanup', '2026-11-25')],
+      },
+    } as unknown as AppContextValue
+    rerender(page())
+    const names = () =>
+      [...document.querySelectorAll('.my-week-row .client-name-link')].map((link) => link.textContent)
+    await waitFor(() => expect(names()).toEqual(['Acme Dental', 'Bright Books', 'Zeta Farm']))
+    fireEvent.click(within(row('Zeta Farm')).getByRole('button', { name: 'Add other work for Zeta Farm' }))
+    expect(within(row('Zeta Farm')).getByText('Other work (no task)')).toBeInTheDocument()
+    expect(names()).toEqual(['Acme Dental', 'Bright Books', 'Zeta Farm'])
+  })
+
+  it('a client with nothing open keeps its Other work line', async () => {
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...contextValue.data,
+        checklists: [checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-30', { items: [step('a', true)] })],
+      },
+    } as unknown as AppContextValue
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [entry('c-acme', { note: 'call them' })],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    fireEvent.click(otherDay('Acme Dental', /^Thursday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave).toHaveBeenCalledWith('c-acme', {
+      weekStart: WEEK,
+      plannedDays: ['2026-11-19'],
+      note: 'call them',
+      taskMarks: { '*': { status: null, note: '', days: ['2026-11-19'] } },
+    })
+  })
+
+  it('an added client is for the week on screen only; a planned one is stored with its week', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    add('c-quiet')
+    fireEvent.click(screen.getByRole('button', { name: 'Next week' }))
+    await screen.findByText(/Week of Nov 23 to Nov 27, 2026/)
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2))
+    await screen.findByText('My clients this week')
+    expect(screen.queryByRole('link', { name: 'Quiet Co' })).not.toBeInTheDocument()
+    expect(mockSave).not.toHaveBeenCalled()
+  })
+
+  // Around an update the previous server can answer for a few seconds; it has
+  // no route for this page's save address, so the save fails and nothing is written.
+  it('a save that found no route says so and shows what is stored', async () => {
+    // What the request helper says for a save that found no route (week-plan-api.test.ts).
+    mockSave.mockRejectedValue(new Error('My Week is being updated. Try again in a moment.'))
+    render(page())
+    await screen.findByText('My clients this week')
+    add('c-quiet')
+    fireEvent.click(otherDay('Quiet Co', /^Wednesday/))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'That change was not saved: My Week is being updated. Try again in a moment.',
+    )
+    // The stored week is read again; the client she added is still there to try again.
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(otherDay('Quiet Co', /^Wednesday/)).toHaveAttribute('aria-pressed', 'false'))
+  })
+
+  it('while an owner previews someone nothing can be added, and stored other work is shown but not changed', async () => {
+    contextValue = { ...contextValue, previewMode: true } as unknown as AppContextValue
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      entries: [entry('c-quiet', { plannedDays: ['2026-11-18'], taskMarks: { '*': OTHER } })],
+    })
+    render(page())
+    await screen.findByText("Lisa's clients this week")
+    expect(screen.queryByLabelText('Work on a client that has no task')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Add other work/ })).not.toBeInTheDocument()
+    expect(otherDay('Quiet Co', /^Wednesday/)).toHaveAttribute('aria-pressed', 'true')
+    expect(otherDay('Quiet Co', /^Wednesday/)).toBeDisabled()
+    expect(within(row('Quiet Co')).queryByRole('button', { name: /Take it off my week/ })).not.toBeInTheDocument()
+    // A client listed for its tasks has no empty Other work line here.
+    expect(within(row('Acme Dental')).queryByText('Other work (no task)')).not.toBeInTheDocument()
+  })
+})
+
 describe('My Week: moving between weeks', () => {
   it('asks for the next week and never shows this week’s plan under it', async () => {
     mockFetch.mockResolvedValueOnce({

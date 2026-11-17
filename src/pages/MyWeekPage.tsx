@@ -8,6 +8,7 @@ import { employeeName } from '../lib/utils'
 import { firmToday } from '../../lib/firm-time.js'
 import {
   WEEK_PLAN_NOTE_MAX,
+  WEEK_PLAN_OTHER_KEY,
   addDays,
   asPerTaskRow,
   buildWeekPlan,
@@ -34,6 +35,13 @@ import {
  * different days"), writes a short note per client, and marks a task "In
  * questions" when she is waiting on an answer so she does not reopen it. "I do not want to micromanage their days": nothing here assigns
  * work, moves a due date or tracks hours.
+ *
+ * Work with no task (featreq-f8ebbfc4): "I need to be able to see all my
+ * clients and choose whether I work on any without a task - I might have adhoc
+ * work needed". Any client she can see can be added to her week from a picker
+ * under the heading, and every client row can carry an "Other work (no task)"
+ * line with its own Monday to Friday buttons. Those days are stored in the same
+ * row, under the key `WEEK_PLAN_OTHER_KEY` beside the tasks' marks.
  *
  * What is the person's own and stored: the days, the note, the marks
  * (`/api/week-plan`). Everything else is read off the checklists the page
@@ -160,7 +168,7 @@ function waitWords(waits: WeekPlanWait[], nameOf: (id: string) => string): strin
 }
 
 function rollupWords(row: WeekPlanRow): string {
-  if (row.noOpenWork) return 'Nothing open'
+  if (row.noOpenWork) return row.otherDays.length > 0 ? 'Other work' : 'Nothing open'
   const parts = [
     [row.rollup.planned, 'planned'],
     [row.rollup.notPlanned, 'not planned'],
@@ -170,6 +178,7 @@ function rollupWords(row: WeekPlanRow): string {
   ]
     .filter(([count]) => (count as number) > 0)
     .map(([count, word]) => `${count} ${word}`)
+  if (row.otherDays.length > 0) parts.push('other work')
   return parts.join(', ')
 }
 
@@ -217,6 +226,22 @@ export function MyWeekPage() {
   const saveQueue = useRef(new Map<string, { latest: WeekPlanEntry; running: boolean }>())
 
   const loadKey = `${whoseId}|${weekStart}`
+  // Clients she has asked to plan work on that is not a task (featreq-f8ebbfc4):
+  // a client with no task gets a row at once, and a client already listed gets
+  // its "Other work" line, before anything is saved. They belong to the person
+  // and week on screen and are forgotten when either changes; a day she then
+  // puts on one is stored, and brings the line back by itself.
+  // `top`: the ones she chose from the picker, which go to the top of the list.
+  const [added, setAdded] = useState<{ key: string; ids: string[]; top: string[] }>({
+    key: '',
+    ids: [],
+    top: [],
+  })
+  const addedIds = useMemo(() => (added.key === loadKey ? added.ids : []), [added, loadKey])
+  const pickedIds = useMemo(() => (added.key === loadKey ? added.top : []), [added, loadKey])
+  // The client chosen in the picker, added with its button (a picker that adds
+  // on change adds a client at every arrow key on Windows).
+  const [picking, setPicking] = useState('')
   // Bumped to read the stored week again (after a save that failed).
   const [reloadTick, setReloadTick] = useState(0)
   useEffect(() => {
@@ -284,8 +309,9 @@ export function MyWeekPage() {
         userId: whoseId,
         weekStart,
         today,
+        extraClientIds: addedIds,
       }),
-    [data.checklists, clients, shownEntries, whoseId, weekStart, today],
+    [data.checklists, clients, shownEntries, whoseId, weekStart, today, addedIds],
   )
 
   // Not-started clients first, as of when the week was read (see `loadedEntries`).
@@ -300,15 +326,26 @@ export function MyWeekPage() {
       today,
     }).rows.map((row) => row.clientId)
     const place = new Map(atLoad.map((clientId, index) => [clientId, index]))
+    // A client she has just added from the picker goes to the top, under the
+    // picker, in the order she added them. One that was already on the page
+    // stays where it is, also when she adds other work to it.
+    const top = new Map(pickedIds.map((clientId, index) => [clientId, index - pickedIds.length]))
+    const at = (clientId: string, index: number) =>
+      place.get(clientId) ?? top.get(clientId) ?? atLoad.length + index
     return view.rows
       .map((row, index) => ({ row, index }))
-      .sort(
-        (a, b) =>
-          (place.get(a.row.clientId) ?? atLoad.length + a.index) -
-          (place.get(b.row.clientId) ?? atLoad.length + b.index),
-      )
+      .sort((a, b) => at(a.row.clientId, a.index) - at(b.row.clientId, b.index))
       .map(({ row }) => row)
-  }, [data.checklists, clients, ready, loadedEntries, whoseId, weekStart, today, view.rows])
+  }, [data.checklists, clients, ready, loadedEntries, whoseId, weekStart, today, view.rows, pickedIds])
+
+  // Her clients that are not on the page (no open task of hers due this month,
+  // and nothing planned): the ones she can add to plan other work on.
+  const addable = useMemo(() => {
+    const listed = new Set(view.rows.map((row) => row.clientId))
+    return clients
+      .filter((client) => !listed.has(client.id))
+      .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+  }, [clients, view.rows])
 
   // Only her own week, and never in preview.
   const canEdit = ready && !previewMode && ownWeek
@@ -404,14 +441,45 @@ export function MyWeekPage() {
     const taskIds = (view.rows.find((row) => row.clientId === clientId)?.tasks ?? []).map(
       (task) => task.checklistId,
     )
+    // Once she has used a client's Other work line it stays on the page while
+    // she is here, so taking its last day off (to move it to another day) does
+    // not take the line, or a client with no task, out from under her.
+    if (checklistId === WEEK_PLAN_OTHER_KEY) addClient(clientId)
     saveRow(clientId, (current) => withTaskDayToggled(current, taskIds, checklistId, day))
   }
 
-  // A planned client with nothing open any more has no task to take a day off:
-  // this clears its days and its note so it leaves the page. A status she set
-  // on a task that is not listed right now (its due date moved out of the
-  // month) is kept for when the task comes back.
-  const clearRow = (clientId: string) =>
+  // Show a client's "Other work (no task)" line: a client with no task of hers
+  // gets a row for it, a client already on the page gets the line. Nothing is
+  // saved until she puts it on a day.
+  const addClient = (clientId: string, fromPicker = false) => {
+    if (!canEdit || !clientId) return
+    setAdded((current) => {
+      const ids = current.key === loadKey ? current.ids : []
+      const top = current.key === loadKey ? current.top : []
+      return {
+        key: loadKey,
+        ids: ids.includes(clientId) ? ids : [...ids, clientId],
+        top: fromPicker && !top.includes(clientId) ? [...top, clientId] : top,
+      }
+    })
+  }
+
+  // A client with no task of hers on the page has no task to take a day off:
+  // this clears its days (other work included) and its note so it leaves the
+  // page. A status she set on a task that is not listed right now (its due
+  // date moved out of the month) is kept for when the task comes back.
+  const clearRow = (clientId: string) => {
+    setAdded((current) =>
+      current.key === loadKey
+        ? {
+            key: loadKey,
+            ids: current.ids.filter((id) => id !== clientId),
+            top: current.top.filter((id) => id !== clientId),
+          }
+        : current,
+    )
+    // A client she only just added, with nothing put on it: nothing is stored.
+    if (!entriesRef.current[clientId]) return
     saveRow(clientId, (current) =>
       normalizeWeekPlanEntry({
         clientId,
@@ -420,6 +488,7 @@ export function MyWeekPage() {
         ),
       }),
     )
+  }
 
   const setNote = (clientId: string, note: string) =>
     saveRow(clientId, (current) => ({ ...current, note }))
@@ -509,7 +578,9 @@ export function MyWeekPage() {
           Every client you have open work for that is due this month or overdue. Put each task on the
           day or days you plan to work on it. When you have sent questions and are waiting for an
           answer, set that task to In questions so you can move on to a client you have not started.
-          This is your own plan: it does not change any due date or anyone's tasks.
+          For work that is not on a checklist, use Other work: add it to a client below, or pick any
+          of your other clients. This is your own plan: it does not change any due date or anyone's
+          tasks.
         </p>
       ) : null}
 
@@ -596,16 +667,18 @@ export function MyWeekPage() {
                           day, greyed. */}
                       {placed.map((item) => (
                         <li
-                          key={`${item.clientId}|${item.checklistId ?? ''}`}
+                          key={`${item.clientId}|${item.other ? 'other' : (item.checklistId ?? '')}`}
                           className={item.parked ? 'is-parked' : undefined}
                         >
                           <strong>{item.clientName}</strong>
                           <small>
-                            {item.nothingOpen
-                              ? 'Nothing open'
-                              : item.parked
-                                ? `${item.title} (waiting or finished)`
-                                : item.title}
+                            {item.other
+                              ? 'Other work'
+                              : item.nothingOpen
+                                ? 'Nothing open'
+                                : item.parked
+                                  ? `${item.title} (waiting or finished)`
+                                  : item.title}
                           </small>
                         </li>
                       ))}
@@ -621,6 +694,39 @@ export function MyWeekPage() {
               {ownWeek && !previewMode ? 'My clients this week' : `${whose ? `${whose}'s` : 'Their'} clients this week`}
             </h3>
           ) : null}
+          {/* Any of her clients that is not listed (no task of hers due): she
+              may have ad hoc work for it this week. Only on her own week. */}
+          {canEdit && addable.length > 0 ? (
+            <div className="my-week-add">
+              <label>
+                <span>Work on a client that has no task</span>
+                <select
+                  className="input"
+                  value={addable.some((client) => client.id === picking) ? picking : ''}
+                  onChange={(event) => setPicking(event.target.value)}
+                >
+                  <option value="">Choose a client…</option>
+                  {addable.map((client) => (
+                    <option key={client.id} value={client.id}>
+                      {client.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="ghost-action"
+                disabled={!addable.some((client) => client.id === picking)}
+                onClick={() => {
+                  addClient(picking, true)
+                  setPicking('')
+                }}
+              >
+                Add to my week
+              </button>
+              <small>For ad hoc work. The client is added to this week so you can put it on a day.</small>
+            </div>
+          ) : null}
           <ul className="my-week-rows">
             {rows.map((row) => (
               <ClientRow
@@ -630,6 +736,14 @@ export function MyWeekPage() {
                 today={today}
                 canEdit={canEdit}
                 nameOf={nameOf}
+                // The "Other work (no task)" line: always once it has a day (also
+                // on a week that is only being looked at); on her own week also
+                // on a client with no task listed, and where she asked for it.
+                showOther={
+                  row.otherDays.length > 0 ||
+                  (canEdit && (row.noOpenWork || addedIds.includes(row.clientId)))
+                }
+                onAddOther={() => addClient(row.clientId)}
                 onToggleDay={(checklistId, day) => toggleDay(row.clientId, checklistId, day)}
                 onClear={() => clearRow(row.clientId)}
                 onNote={(note) => setNote(row.clientId, note)}
@@ -861,6 +975,8 @@ function ClientRow({
   today,
   canEdit,
   nameOf,
+  showOther,
+  onAddOther,
   onToggleDay,
   onClear,
   onNote,
@@ -871,6 +987,8 @@ function ClientRow({
   today: string
   canEdit: boolean
   nameOf: (id: string) => string
+  showOther: boolean
+  onAddOther: () => void
   onToggleDay: (checklistId: string, day: string) => void
   onClear: () => void
   onNote: (note: string) => void
@@ -895,6 +1013,12 @@ function ClientRow({
           </Link>
           <span className="my-week-rollup">{rollupWords(row)}</span>
         </div>
+        {/* Ad hoc work for a client that is listed for its tasks. */}
+        {canEdit && !showOther ? (
+          <button type="button" className="ghost-action my-week-add-other" onClick={onAddOther}>
+            Add other work<span className="visually-hidden"> for {row.clientName}</span>
+          </button>
+        ) : null}
       </div>
 
       <label className="my-week-note">
@@ -920,7 +1044,7 @@ function ClientRow({
 
       {row.noOpenWork ? (
         <p className="my-week-empty">
-          Nothing of yours is open for this client now.{' '}
+          No task of yours is open for this client now.{' '}
           {canEdit ? (
             <button type="button" className="ghost-action" onClick={onClear}>
               {row.note ? 'Take it off my week (clears the note)' : 'Take it off my week'}
@@ -1008,6 +1132,41 @@ function ClientRow({
           ))}
         </ul>
       )}
+
+      {/* Work for this client that is not a task: its own days, nothing else. */}
+      {showOther ? (
+        <div className="my-week-task my-week-other">
+          <div className="my-week-task-main">
+            <span className="my-week-other-name">Other work (no task)</span>
+            <span className="my-week-task-meta">
+              <span>Work for this client that is not on a checklist</span>
+            </span>
+          </div>
+          <div
+            className="my-week-daypick"
+            role="group"
+            aria-label={`Days for other work (${row.clientName})`}
+          >
+            {days.map((day, index) => {
+              const on = row.otherDays.includes(day)
+              return (
+                <button
+                  key={day}
+                  type="button"
+                  className={`my-week-daybtn${on ? ' is-on' : ''}${day === today ? ' is-today' : ''}`}
+                  aria-pressed={on}
+                  aria-label={`${DAY_NAMES[index]} ${shortDay(day)}`}
+                  title={`${DAY_NAMES[index]} ${shortDay(day)}`}
+                  disabled={!canEdit}
+                  onClick={() => onToggleDay(WEEK_PLAN_OTHER_KEY, day)}
+                >
+                  {DAY_SHORT[index]}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      ) : null}
     </li>
   )
 }

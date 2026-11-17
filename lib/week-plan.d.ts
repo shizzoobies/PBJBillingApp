@@ -4,6 +4,8 @@ export declare const WEEK_PLAN_NOTE_MAX: number
 export declare const WEEK_PLAN_MARK_NOTE_MAX: number
 export declare const WEEK_PLAN_MAX_MARKS: number
 export declare const WEEK_PLAN_MARK_STATUSES: readonly ['questions', 'finished']
+/** The key in `taskMarks` for work on the client that is not tied to a task (days only). */
+export declare const WEEK_PLAN_OTHER_KEY: '*'
 /** What a save from a page left open from before the days moved onto tasks is answered with. */
 export declare const WEEK_PLAN_RELOAD_MESSAGE: string
 
@@ -72,6 +74,8 @@ export type WeekPlanRow = {
   plannedDays: string[]
   note: string
   tasks: WeekPlanTask[]
+  /** The days she put work with no task on. */
+  otherDays: string[]
   rollup: { planned: number; notPlanned: number; questions: number; answered: number; finished: number }
   noOpenWork: boolean
   allParked: boolean
@@ -100,6 +104,8 @@ export type WeekPlanDayItem = {
   title: string
   parked: boolean
   nothingOpen: boolean
+  /** Work on the client with no task. */
+  other: boolean
 }
 
 export type WeekPlanView = {
@@ -178,4 +184,6 @@ export declare function buildWeekPlan(args: {
   userId: string
   weekStart: string
   today: string
+  /** Clients she just added on the page to plan work with no task. */
+  extraClientIds?: string[]
 }): WeekPlanView

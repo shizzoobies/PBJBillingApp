@@ -5243,9 +5243,14 @@ export async function saveWeekPlanEntryRequest(
     taskMarks: Record<string, WeekPlanMark | null>
   },
 ) {
-  // `/tasks`: the address for rows with days on each task. The first version of
-  // the page saved to the address without it, which now only answers "reload".
-  const response = await apiFetch(`/api/week-plan/${encodeURIComponent(clientId)}/tasks`, {
+  // `/row`: an address the server from before "work with no task"
+  // (featreq-f8ebbfc4) does not have. That server has `/tasks`, where this page
+  // used to save, and would accept this row and drop its other work (the '*'
+  // key) without a word; for a few seconds around every update it can be the
+  // one that answers. Here it has no route, so nothing is written and the save
+  // fails out loud. (The very first page saved to the address with nothing
+  // after the client id, which now only answers "reload".)
+  const response = await apiFetch(`/api/week-plan/${encodeURIComponent(clientId)}/row`, {
     credentials: 'same-origin',
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -5253,6 +5258,12 @@ export async function saveWeekPlanEntryRequest(
   })
   if (!response.ok) {
     const { message } = await safeError(response)
+    // No route at all ("Not found", not "Client not found"): the server from
+    // before this address answered, which happens for a few seconds while an
+    // update is handed over. Nothing was written; say what to do.
+    if (response.status === 404 && (!message || message === 'Not found')) {
+      throw new ApiError(404, 'My Week is being updated. Try again in a moment.')
+    }
     throw new ApiError(response.status, message || `Could not save the week (${response.status})`)
   }
   return (await response.json()) as { weekStart: string; entry: WeekPlanEntry }

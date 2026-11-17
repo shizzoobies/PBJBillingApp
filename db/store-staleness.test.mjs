@@ -62170,6 +62170,34 @@ describe('My Week: week plan entries (featreq-f0e8046b)', () => {
       expect(listed).toEqual([saved])
     })
 
+    // featreq-f8ebbfc4: work for a client that is not a task, under its own key.
+    it('keeps the days of work with no task beside the tasks’ marks', async () => {
+      const saved = await store.saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c-no-task',
+        plannedDays: ['2026-11-19'],
+        note: '',
+        taskMarks: { '*': { status: null, note: '', days: ['2026-11-19'] } },
+      })
+      expect(saved).toMatchObject({
+        clientId: 'c-no-task',
+        plannedDays: ['2026-11-19'],
+        taskMarks: { '*': { status: null, note: '', days: ['2026-11-19'] } },
+      })
+      expect(await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })).toEqual([saved])
+      // Taking the day off leaves nothing: the row goes.
+      await store.saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c-no-task',
+        plannedDays: [],
+        note: '',
+        taskMarks: { '*': { status: null, note: '', days: [] } },
+      })
+      expect(await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })).toEqual([])
+    })
+
     it('a second save replaces the row: it is not merged', async () => {
       await store.saveWeekPlanEntry({
         userId: 'emp-1',

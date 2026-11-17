@@ -16205,19 +16205,30 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // PUT /api/week-plan/:clientId/tasks — save MY row for one client and one
-    // week: `{ weekStart, note, taskMarks }`, the whole row each time, with the
-    // days on each task (`taskMarks[checklistId].days`). Its own address, which
-    // the first version of the server does not have: during a deploy hand-over
-    // (or after a rollback) a save from this page finds no route there and is
-    // not written, instead of being half-understood.
+    // PUT /api/week-plan/:clientId/row (and .../tasks) — save MY row for one
+    // client and one week: `{ weekStart, note, taskMarks }`, the whole row each
+    // time, with the days on each task (`taskMarks[checklistId].days`) and,
+    // under the key '*', the days of work for the client that is not a task
+    // (featreq-f8ebbfc4; any client she can see, with or without a checklist).
+    //
+    // Two addresses, one handler, because two versions of the page and of the
+    // server are alive at once around every deploy:
+    //  - `/row` is where the page saves now. The server from before "work with
+    //    no task" does not have it, so during a hand-over (or after a rollback)
+    //    a save from this page finds no route there and is not written. That
+    //    server DOES have `/tasks`, and would accept the row and drop the '*'
+    //    key without a word, taking her other work with it.
+    //  - `/tasks` is where a page left open from before that still saves. It
+    //    sends back every mark it was given, '*' included, so nothing is lost
+    //    by taking its saves here. (`/tasks` was itself the address the very
+    //    first server did not have; see the route above.)
     //
     // Always the signed-in person's own plan: there is no `user` to name, so
     // nobody, an owner included, can write another person's week. The client
     // must be one she can see (a client she cannot see is "not found", the same
     // answer as one that does not exist). A preview never reaches here: writes
     // are refused while previewing.
-    const weekPlanSaveMatch = normalizedPath.match(/^\/api\/week-plan\/([^/]+)\/tasks$/)
+    const weekPlanSaveMatch = normalizedPath.match(/^\/api\/week-plan\/([^/]+)\/(?:row|tasks)$/)
     if (weekPlanSaveMatch) {
       const session = await requireSession(request, response)
       if (!session) return
