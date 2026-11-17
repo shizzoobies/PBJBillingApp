@@ -437,11 +437,44 @@ export async function createTimeEntry(entry: Omit<TimeEntry, 'id' | 'approvalSta
     // month lock both refuse with a message that tells the person exactly how
     // to unblock themselves ("submit the week of August 9…"). Swallowing it
     // into a generic string turned a self-service nudge into a support email.
-    const message = await safeErrorMessage(response)
-    throw new ApiError(response.status, message || `Failed to create time entry (${response.status})`)
+    const failure = await timeEntryFailure(response)
+    const error = new ApiError(
+      response.status,
+      failure.message || `Failed to create time entry (${response.status})`,
+      failure.code,
+    )
+    // A refused repeat of a timer names the entry the first save made.
+    if (failure.entry) error.timeEntry = failure.entry
+    throw error
   }
 
   return (await response.json()) as TimeEntry
+}
+
+/**
+ * A time-entry refusal, read once: the sentence for a person, the machine code
+ * when the server sent BOTH (with `error` alone, `error` IS the sentence and
+ * there is no code), and the entry a refused repeat of a timer names.
+ */
+async function timeEntryFailure(
+  response: Response,
+): Promise<{ message: string; code?: string; entry?: TimeEntry }> {
+  try {
+    const body = await response.json()
+    const sentence = body && typeof body.message === 'string' && body.message.trim() ? body.message : ''
+    const errorText = body && typeof body.error === 'string' ? body.error : ''
+    const entry =
+      body && body.entry && typeof body.entry === 'object' && typeof body.entry.id === 'string'
+        ? (body.entry as TimeEntry)
+        : undefined
+    return {
+      message: sentence || errorText,
+      ...(sentence && errorText ? { code: errorText } : {}),
+      ...(entry ? { entry } : {}),
+    }
+  } catch {
+    return { message: '' }
+  }
 }
 
 export async function updateTimeEntryRequest(
@@ -469,8 +502,12 @@ export async function updateTimeEntryRequest(
     body: JSON.stringify(patch),
   })
   if (!response.ok) {
-    const message = await safeErrorMessage(response)
-    throw new ApiError(response.status, message || `Failed to update time entry (${response.status})`)
+    const failure = await timeEntryFailure(response)
+    throw new ApiError(
+      response.status,
+      failure.message || `Failed to update time entry (${response.status})`,
+      failure.code,
+    )
   }
   return (await response.json()) as TimeEntry
 }

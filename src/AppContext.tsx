@@ -23,6 +23,7 @@ import type {
   TemplateStage,
   TimeEntry,
   TimerState,
+  TimerStopResult,
   WaitingOnMeItem,
 } from './lib/types'
 import type { SkipReasonCategory } from '../lib/checklist-skip.js'
@@ -81,7 +82,7 @@ export type AppContextValue = {
   startTimer: (timer: TimerState) => void
   updateTimer: (patch: Partial<TimerState>) => void
   cancelTimer: () => void
-  stopTimer: (descriptionOverride?: string) => Promise<void>
+  stopTimer: (descriptionOverride?: string) => Promise<TimerStopResult>
   logTime: (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => Promise<void>
   splitGroupEntry: (
     holding: TimeEntry,

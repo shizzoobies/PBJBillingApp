@@ -242,6 +242,10 @@ import {
   normalizeTimeEntryMethod,
   normalizeWorkSessions,
   resolveCreatedEntryTiming,
+  findAlreadyLoggedTimer,
+  hasDuplicateSessionStart,
+  TIMER_ALREADY_LOGGED_MESSAGE,
+  DUPLICATE_SESSION_MESSAGE,
   validateTimeEntryEdit,
   adhocAfterEntryEdit,
   approvalAfterEdit,
@@ -11679,6 +11683,46 @@ const server = createServer(async (request, response) => {
           sessions: finalSessions,
         } = resolveCreatedEntryTiming({ minutes, startAt, endAt, sessionsResult })
 
+        // The whole workspace, read once: the timer check just below, the weekly
+        // gate, client visibility and the task check all read it.
+        const allData = await appDataStore.read()
+
+        // A TIMER IS LOGGED ONCE (see `findAlreadyLoggedTimer`). The same timer
+        // arriving again (a second tab or window still showing it, a retry
+        // after a reply that never arrived) is answered 409, never saved again.
+        // The entry it already made rides along only when the ordinary read
+        // would show it to this person: a team member's own entry for a client
+        // they can no longer see stays hidden here too.
+        const answerTimerAlreadyLogged = (existing) => {
+          const visible =
+            session.user.role === 'owner' ||
+            isTimeEntryVisibleToScope(existing, session.user.id, visibleClientIdSet(session, allData))
+          sendJson(response, 409, {
+            error: 'timer_already_logged',
+            message: TIMER_ALREADY_LOGGED_MESSAGE,
+            ...(visible ? { entry: existing } : {}),
+          })
+        }
+        // Asked here, before every gate below (the month lock included: a month
+        // locked since the first save must not leave the repeat stuck behind
+        // "this month is locked"): nothing would be saved either way, and "it is
+        // already logged" is the true answer. Asked AGAIN at
+        // the save (`createTimerEntryOnce`), because this read is several
+        // awaits old by then. A share of a split is exempt: the shares of one
+        // block carry the same stretches by design.
+        const isTimerCapture = entryMethod === 'timer' && !groupId
+        if (isTimerCapture) {
+          const alreadyLogged = findAlreadyLoggedTimer({
+            entries: allData.timeEntries,
+            employeeId,
+            sessions: finalSessions,
+          })
+          if (alreadyLogged) {
+            answerTimerAlreadyLogged(alreadyLogged)
+            return
+          }
+        }
+
         // Month-end lock enforcement: a bookkeeper cannot log time dated within
         // a locked period. Owners are exempt (they're the approver/adjuster).
         if (session.user.role !== 'owner') {
@@ -11690,11 +11734,6 @@ const server = createServer(async (request, response) => {
             return
           }
         }
-
-        // Visibility scoping: a non-owner can only log time against clients
-        // they have visibility on. Administrative time has no client, so this
-        // check is skipped for it.
-        const allData = await appDataStore.read()
 
         // Weekly-submission gate: a non-owner must SUBMIT (or resubmit) a PRIOR
         // week that has logged time before logging time in a LATER week. A prior
@@ -11779,7 +11818,7 @@ const server = createServer(async (request, response) => {
         }
 
         const ownTime = isOwnersOwnTime(session.user, employeeId)
-        const entry = await appDataStore.createTimeEntry({
+        const newEntry = {
           employeeId,
           clientId,
           isAdministrative,
@@ -11800,7 +11839,20 @@ const server = createServer(async (request, response) => {
           taskLabel,
           // An owner's OWN time is saved approved (featreq-5ad33ce9).
           selfApproved: ownTime,
-        })
+        }
+        // A timer capture is saved through the store's one-at-a-time door, so
+        // two requests for the same timer in flight together cannot both land.
+        let entry
+        if (isTimerCapture) {
+          const saved = await appDataStore.createTimerEntryOnce(newEntry)
+          if (saved.alreadyLogged) {
+            answerTimerAlreadyLogged(saved.entry)
+            return
+          }
+          entry = saved.entry
+        } else {
+          entry = await appDataStore.createTimeEntry(newEntry)
+        }
 
         // Manual entries are deliberately gated: log the submission and ping
         // every owner so they know a non-timer entry is waiting for approval.
@@ -12537,6 +12589,12 @@ const server = createServer(async (request, response) => {
           const sessionsResult = normalizeWorkSessions(payload.sessions)
           if (sessionsResult.error) {
             sendJson(response, 400, { error: sessionsResult.error })
+            return
+          }
+          // One stretch, listed once: a resumed timer stopped in two places
+          // would append the same stretch twice (see `hasDuplicateSessionStart`).
+          if (hasDuplicateSessionStart(sessionsResult.sessions)) {
+            sendJson(response, 409, { error: 'duplicate_session', message: DUPLICATE_SESSION_MESSAGE })
             return
           }
           patch.sessions = sessionsResult.sessions

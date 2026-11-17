@@ -2235,6 +2235,21 @@ export type TimerState = {
   resumeEntryId?: string
 }
 
+/**
+ * How a Stop & log ended.
+ *  - `logged`: saved; the timer is cleared.
+ *  - `already_logged`: this very timer was found saved already (another tab or
+ *    window logged it), so nothing was saved again and the timer is cleared;
+ *    `entry` is what the first save made, when known.
+ *  - `not_saved`: nothing was saved and the timer is STILL RUNNING (the session
+ *    had ended and the app is back at sign-in, or this is a preview). Nothing
+ *    the person typed may be wiped.
+ */
+export type TimerStopResult =
+  | { outcome: 'logged' }
+  | { outcome: 'already_logged'; entry?: TimeEntry }
+  | { outcome: 'not_saved' }
+
 export type InvoiceLine = {
   advanceOffer?: import('../../lib/invoice-advance-offer.js').AdvanceOffer
   creditStatement?: import('../../lib/invoice-credit-statement.js').CreditStatement
@@ -2558,6 +2573,9 @@ export class ApiError extends Error {
 
   /** Every reason a save was refused, when the endpoint lists them (firm settings' follow-up questions). */
   problems?: string[]
+
+  /** The entry a refused repeat of a timer already made (409 `timer_already_logged`). */
+  timeEntry?: TimeEntry
 
   constructor(status: number, message: string, code?: string, reason?: string) {
     super(message)

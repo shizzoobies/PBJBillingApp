@@ -4,6 +4,7 @@ import { buildCreditStatement } from '../lib/invoice-credit-statement.js'
 import { AdvancePaymentLedger, ADVANCE_PAYMENT_SCHEMA } from './advance-payments.js'
 import { AdvancePaymentError, advanceRequest, advanceReceipt, stripeAdvanceReceipt, billingDefaults, billingDefaultsAt } from '../lib/advance-payments.js'
 import { stableStringify } from '../lib/stable-json.js'
+import { findAlreadyLoggedTimer } from '../lib/time-entry.js'
 import { mkdir, readFile, rename, writeFile as fsWriteFile } from 'node:fs/promises'
 import { classifySplitTarget } from '../lib/group-allocation.js'
 import { rollUpItemDone } from '../lib/checklist-step-done.js'
@@ -12327,10 +12328,8 @@ export class AppDataStore {
     }
   }
 
-  async createTimeEntry(entry) {
-    // A master collects nothing. Checked before anything is built, so the
-    // refusal is the whole of what happened.
-    await this._refuseBillingMasterWrite(entry?.clientId, 'time')
+  /** The entry `createTimeEntry` stores for these fields (id, approval, capture method, created stamp). */
+  _newTimeEntryFrom(entry) {
     // The capture method defaults to 'timer'; only an explicit 'manual' entry
     // carries a reason — any non-manual entry drops manualReason entirely.
     const entryMethod = entry.entryMethod === 'manual' ? 'manual' : 'timer'
@@ -12367,9 +12366,133 @@ export class AppDataStore {
       manualReason,
       createdAt: entry.createdAt ?? nowIso(),
     }
+    return nextEntry
+  }
+
+  /**
+   * Save a timer capture UNLESS this very timer is already saved (a timer is
+   * logged once; the rule is `findAlreadyLoggedTimer` in lib/time-entry.js).
+   *
+   * The route asks the same question on the workspace it read, but that read is
+   * several awaits old by the time it would insert: two requests for one timer
+   * in flight together (a second tab pressed while the first reply was slow, as
+   * during a deploy pause) would both pass it. Here the look and the insert are
+   * one step per person:
+   *  - Postgres: ONE transaction on ONE connection: a transaction-scoped
+   *    advisory lock keyed by the person, the look, the insert, the commit. The
+   *    next request for that person gets the lock only after the commit, so its
+   *    look sees the row. The lock is in the database, so it also holds across
+   *    the two servers that both answer during a deploy hand-over (from the
+   *    deploy after the one that introduced it: the server it replaced took no
+   *    lock). Nothing here asks the pool for a second connection while the first
+   *    is held, and a lock that cannot be had in 5 seconds is an error, not a
+   *    wait: a burst of stops must never tie up every connection.
+   *  - file: the data file's own operation queue.
+   *
+   * @returns {Promise<{ entry: object, alreadyLogged: boolean }>} the entry
+   *   saved, or the one this timer had already made.
+   */
+  async createTimerEntryOnce(entry) {
+    // A master collects nothing: the same refusal, before anything is looked at.
+    await this._refuseBillingMasterWrite(entry?.clientId, 'time')
+    const employeeId = entry?.employeeId
+    const sessions =
+      Array.isArray(entry?.sessions) && entry.sessions.length > 0
+        ? entry.sessions
+        : entry?.startAt
+          ? [{ startAt: entry.startAt }]
+          : []
+    const starts = sessions
+      .map((session) => (typeof session?.startAt === 'string' ? new Date(session.startAt) : null))
+      .filter((date) => date && !Number.isNaN(date.getTime()))
+      .map((date) => date.toISOString())
 
     if (this.pool) {
-      await this.pool.query(
+      // No stamps, nothing to compare: an ordinary save.
+      if (!employeeId || starts.length === 0) {
+        return { entry: await this.createTimeEntry(entry), alreadyLogged: false }
+      }
+      const dbClient = await this.pool.connect()
+      try {
+        await dbClient.query('begin')
+        await dbClient.query(`set local lock_timeout = '5s'`)
+        await dbClient.query('select pg_advisory_xact_lock(hashtext($1))', [`timer_log:${employeeId}`])
+        // The candidates, narrowed two ways (the rule below decides): entries
+        // dated within a day of the instants, and entries whose first start ..
+        // last stop holds one of them (an older entry a timer was resumed into).
+        // The date window is what still finds a row whose start/stop columns
+        // disagree with its stretches.
+        const days = starts.map((iso) => iso.slice(0, 10)).sort()
+        const { rows } = await dbClient.query(
+          `select * from time_entries
+            where user_id = $1
+              and (
+                entry_date between ($3::date - 1) and ($4::date + 1)
+                or (
+                  started_at is not null
+                  and exists (
+                    select 1 from unnest($2::timestamptz[]) as wanted(at)
+                     where wanted.at >= time_entries.started_at
+                       and (time_entries.ended_at is null or wanted.at <= time_entries.ended_at)
+                  )
+                )
+              )`,
+          [employeeId, starts, days[0], days[days.length - 1]],
+        )
+        const existing = findAlreadyLoggedTimer({
+          entries: rows.map(mapTimeEntryRow),
+          employeeId,
+          sessions,
+        })
+        if (existing) {
+          await dbClient.query('rollback')
+          return { entry: existing, alreadyLogged: true }
+        }
+        const created = this._newTimeEntryFrom(entry)
+        await this._insertTimeEntryRow(dbClient, created)
+        await dbClient.query('commit')
+        return { entry: created, alreadyLogged: false }
+      } catch (error) {
+        await dbClient.query('rollback').catch(() => {})
+        throw error
+      } finally {
+        dbClient.release()
+      }
+    }
+
+    const nextEntry = this._newTimeEntryFrom(entry)
+    return mutateLocalData((data) => {
+      const existing = findAlreadyLoggedTimer({ entries: data.timeEntries, employeeId, sessions })
+      if (existing) return { changed: false, result: { entry: existing, alreadyLogged: true } }
+      data.timeEntries = [nextEntry, ...(data.timeEntries ?? [])]
+      return { changed: true, result: { entry: nextEntry, alreadyLogged: false } }
+    })
+  }
+
+  async createTimeEntry(entry) {
+    // A master collects nothing. Checked before anything is built, so the
+    // refusal is the whole of what happened.
+    await this._refuseBillingMasterWrite(entry?.clientId, 'time')
+    const nextEntry = this._newTimeEntryFrom(entry)
+
+    if (this.pool) {
+      await this._insertTimeEntryRow(this.pool, nextEntry)
+      return nextEntry
+    }
+
+    const data = await readJson(localDataPath)
+    data.timeEntries = [nextEntry, ...data.timeEntries]
+    await writeFile(localDataPath, JSON.stringify(data, null, 2))
+    return nextEntry
+  }
+
+  /**
+   * The one insert of a new time entry. `queryable` is the pool, or a
+   * connection inside a transaction (`createTimerEntryOnce` inserts on the very
+   * connection that holds its lock).
+   */
+  async _insertTimeEntryRow(queryable, nextEntry) {
+      await queryable.query(
         `
           insert into time_entries (id, user_id, client_id, entry_date, minutes, category, description, billable, task_id, approval_status, entry_method, manual_reason, is_administrative, is_adhoc, started_at, ended_at, sessions, group_id, group_client_ids, group_allocation, task_label, created_at, updated_at)
           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19, $20, $21, $22, now())
@@ -12403,14 +12526,6 @@ export class AppDataStore {
           new Date(nextEntry.createdAt),
         ],
       )
-
-      return nextEntry
-    }
-
-    const data = await readJson(localDataPath)
-    data.timeEntries = [nextEntry, ...data.timeEntries]
-    await writeFile(localDataPath, JSON.stringify(data, null, 2))
-    return nextEntry
   }
 
   /**

@@ -62611,3 +62611,284 @@ describe('My Week: week plan entries (featreq-f0e8046b)', () => {
     })
   })
 })
+
+/**
+ * A TIMER IS LOGGED ONCE: the store half (featreq-0a6de076).
+ *
+ * The route asks "is this timer already saved?" on a workspace read that is
+ * several awaits old by the time it inserts, so two requests for one timer in
+ * flight together would both pass. `createTimerEntryOnce` makes the look and
+ * the insert one step per person. Cardinal rule 1: the file backend runs here
+ * for real; the Postgres branch is pinned statement by statement underneath,
+ * because CI never runs it.
+ */
+describe('a timer is logged once (createTimerEntryOnce)', () => {
+  const START = '2026-11-04T21:04:00.253Z'
+  const capture = (over = {}) => ({
+    employeeId: 'emp-1',
+    clientId: 'c1',
+    date: '2026-11-04',
+    minutes: 71.65,
+    description: 'Bank feed',
+    billable: true,
+    entryMethod: 'timer',
+    startAt: START,
+    endAt: '2026-11-04T22:15:39.693Z',
+    sessions: [{ startAt: START, endAt: '2026-11-04T22:15:39.693Z' }],
+    ...over,
+  })
+  const atStart = async () =>
+    (await store.read()).timeEntries.filter((entry) => (entry.sessions ?? []).some((s) => s.startAt === START))
+
+  describe('file backend', () => {
+    it('saves the first and answers the second with the entry the first made', async () => {
+      const first = await store.createTimerEntryOnce(capture())
+      expect(first.alreadyLogged).toBe(false)
+      expect(first.entry).toMatchObject({ employeeId: 'emp-1', entryMethod: 'timer', approvalStatus: 'approved' })
+
+      // The production repeat: same start, stopped 12 seconds later.
+      const second = await store.createTimerEntryOnce(
+        capture({
+          minutes: 71.85,
+          endAt: '2026-11-04T22:15:51.273Z',
+          sessions: [{ startAt: START, endAt: '2026-11-04T22:15:51.273Z' }],
+        }),
+      )
+      expect(second.alreadyLogged).toBe(true)
+      expect(second.entry.id).toBe(first.entry.id)
+      expect(second.entry.minutes).toBe(71.65)
+      expect(await atStart()).toHaveLength(1)
+    })
+
+    it('two saves of one timer in flight together land once', async () => {
+      const results = await Promise.all([store.createTimerEntryOnce(capture()), store.createTimerEntryOnce(capture())])
+      expect(results.map((result) => result.alreadyLogged).sort()).toEqual([false, true])
+      expect(new Set(results.map((result) => result.entry.id)).size).toBe(1)
+      expect(await atStart()).toHaveLength(1)
+    })
+
+    it('a different timer, and the same instant for another person, are saved', async () => {
+      await store.createTimerEntryOnce(capture())
+      const later = '2026-11-04T21:04:00.254Z'
+      const other = await store.createTimerEntryOnce(
+        capture({ startAt: later, sessions: [{ startAt: later, endAt: '2026-11-04T22:15:39.693Z' }] }),
+      )
+      expect(other.alreadyLogged).toBe(false)
+      const mate = await store.createTimerEntryOnce(capture({ employeeId: 'emp-2' }))
+      expect(mate.alreadyLogged).toBe(false)
+      expect(await atStart()).toHaveLength(2)
+    })
+
+    it('an entry with no clock stamps is never "the same timer"', async () => {
+      const bare = capture({ startAt: undefined, endAt: undefined, sessions: [] })
+      const one = await store.createTimerEntryOnce(bare)
+      const two = await store.createTimerEntryOnce(bare)
+      expect([one.alreadyLogged, two.alreadyLogged]).toEqual([false, false])
+      expect(one.entry.id).not.toBe(two.entry.id)
+    })
+
+    it('stores exactly what createTimeEntry stores', async () => {
+      const once = await store.createTimerEntryOnce(capture())
+      const later = '2026-11-05T15:00:00.000Z'
+      const plain = await store.createTimeEntry(
+        capture({
+          date: '2026-11-05',
+          startAt: later,
+          endAt: '2026-11-05T16:00:00.000Z',
+          sessions: [{ startAt: later, endAt: '2026-11-05T16:00:00.000Z' }],
+        }),
+      )
+      const keys = (entry) => Object.keys(entry).sort()
+      expect(keys(once.entry)).toEqual(keys(plain))
+      const stored = (await store.read()).timeEntries.find((entry) => entry.id === once.entry.id)
+      expect(stored).toMatchObject({ approvalStatus: 'approved', entryMethod: 'timer', isAdhoc: false, taskId: null })
+    })
+  })
+
+  describe('postgres branch (statement by statement)', () => {
+    const firstWord = (sql) => sql.trim().split(/\s+/)[0].toLowerCase()
+    const isInsert = (sql) => /insert into time_entries/i.test(sql)
+    /** A pool and one checked-out connection, each recording what it was asked. */
+    function timerPg({ found = [], failInsert = false, failCommit = false } = {}) {
+      const log = []
+      const run = (via) => async (text, params) => {
+        const sql = String(text)
+        log.push({ via, sql, params })
+        if (failInsert && isInsert(sql)) throw new Error('insert failed')
+        if (failCommit && sql === 'commit') throw new Error('commit failed')
+        if (/from time_entries\s+where user_id = \$1/i.test(sql)) return { rows: found, rowCount: found.length }
+        return { rows: [], rowCount: 0 }
+      }
+      const pool = {
+        query: run('pool'),
+        connect: async () => ({ query: run('conn'), release: () => log.push({ via: 'conn', sql: 'release' }) }),
+        on() {},
+      }
+      return { pool, log, conn: () => log.filter((row) => row.via === 'conn') }
+    }
+    const storedRow = {
+      id: 'time-first',
+      user_id: 'emp-1',
+      client_id: 'c1',
+      entry_date: new Date('2026-11-04T00:00:00.000Z'),
+      minutes: '71.65',
+      category: 'General',
+      description: 'Bank feed',
+      billable: true,
+      task_id: null,
+      approval_status: 'approved',
+      entry_method: 'timer',
+      started_at: new Date(START),
+      ended_at: new Date('2026-11-04T22:15:39.693Z'),
+      sessions: [{ startAt: START, endAt: '2026-11-04T22:15:39.693Z' }],
+      group_client_ids: [],
+    }
+
+    it('is one transaction on one connection: lock, look, insert, commit, and only then lets go', async () => {
+      const fake = timerPg()
+      const result = await postgresStore(fake).createTimerEntryOnce(capture())
+      expect(result.alreadyLogged).toBe(false)
+      expect(result.entry.id).toMatch(/^time-/)
+
+      const conn = fake.conn()
+      expect(conn.map((row) => firstWord(row.sql))).toEqual([
+        'begin',
+        'set',
+        'select',
+        'select',
+        'insert',
+        'commit',
+        'release',
+      ])
+      // A lock that cannot be had is an error after 5 seconds, never an endless wait.
+      expect(conn[1].sql).toBe("set local lock_timeout = '5s'")
+      expect(conn[2].sql).toBe('select pg_advisory_xact_lock(hashtext($1))')
+      expect(conn[2].params).toEqual(['timer_log:emp-1'])
+      // This person's entries dated within a day of the instant, or whose first
+      // start .. last stop holds it.
+      expect(conn[3].sql).toMatch(/where user_id = \$1/)
+      expect(conn[3].sql).toMatch(/entry_date between \(\$3::date - 1\) and \(\$4::date \+ 1\)/)
+      expect(conn[3].sql).toMatch(/unnest\(\$2::timestamptz\[\]\)/)
+      expect(conn[3].sql).toMatch(/wanted\.at >= time_entries\.started_at/)
+      expect(conn[3].sql).toMatch(/time_entries\.ended_at is null or wanted\.at <= time_entries\.ended_at/)
+      expect(conn[3].params).toEqual(['emp-1', [START], '2026-11-04', '2026-11-04'])
+
+      // The insert is ON the connection that holds the lock. Asking the pool for
+      // a second connection while holding the first is how a burst of stops
+      // would tie up every connection.
+      expect(isInsert(conn[4].sql)).toBe(true)
+      expect(fake.log.filter((row) => row.via === 'pool' && isInsert(row.sql))).toHaveLength(0)
+      // The pool is asked only the billing-master question, before the connection is taken.
+      const firstConn = fake.log.findIndex((row) => row.via === 'conn')
+      expect(fake.log.every((row, index) => row.via === 'conn' || index < firstConn)).toBe(true)
+      // The stored row is the entry that was answered.
+      expect(conn[4].params[0]).toBe(result.entry.id)
+      expect(conn[4].params[1]).toBe('emp-1')
+    })
+
+    it('the date window follows the instants (a stretch list spanning two days)', async () => {
+      const fake = timerPg()
+      await postgresStore(fake).createTimerEntryOnce(
+        capture({
+          sessions: [
+            { startAt: '2026-11-05T02:10:00.000Z', endAt: '2026-11-05T02:40:00.000Z' },
+            { startAt: START, endAt: '2026-11-04T22:15:39.693Z' },
+          ],
+        }),
+      )
+      expect(fake.conn()[3].params).toEqual([
+        'emp-1',
+        ['2026-11-05T02:10:00.000Z', START],
+        '2026-11-04',
+        '2026-11-05',
+      ])
+    })
+
+    it('answers with the entry already there and inserts nothing', async () => {
+      const fake = timerPg({ found: [storedRow] })
+      const result = await postgresStore(fake).createTimerEntryOnce(
+        capture({
+          endAt: '2026-11-04T22:15:51.273Z',
+          sessions: [{ startAt: START, endAt: '2026-11-04T22:15:51.273Z' }],
+        }),
+      )
+      expect(result.alreadyLogged).toBe(true)
+      expect(result.entry).toMatchObject({ id: 'time-first', employeeId: 'emp-1', minutes: 71.65 })
+      expect(fake.log.some((row) => isInsert(row.sql))).toBe(false)
+      expect(fake.conn().map((row) => firstWord(row.sql))).toEqual([
+        'begin',
+        'set',
+        'select',
+        'select',
+        'rollback',
+        'release',
+      ])
+    })
+
+    // The date window can hand back a row whose start/stop columns disagree
+    // with its stretches; the rule reads the stretches.
+    it('finds a row by its stretches even when its start column says otherwise', async () => {
+      const drifted = { ...storedRow, id: 'time-drifted', started_at: new Date('2026-11-04T21:30:00.000Z') }
+      const fake = timerPg({ found: [drifted] })
+      const result = await postgresStore(fake).createTimerEntryOnce(capture())
+      expect(result.alreadyLogged).toBe(true)
+      expect(result.entry.id).toBe('time-drifted')
+    })
+
+    // The look only narrows by time; the rule itself decides. A row whose span
+    // merely CONTAINS the instant (a long entry started earlier) is not this timer.
+    it('a candidate that only spans the instant is not a match', async () => {
+      const spanning = {
+        ...storedRow,
+        id: 'time-long',
+        started_at: new Date('2026-11-04T20:00:00.000Z'),
+        sessions: [{ startAt: '2026-11-04T20:00:00.000Z', endAt: '2026-11-04T22:15:39.693Z' }],
+      }
+      const fake = timerPg({ found: [spanning] })
+      const result = await postgresStore(fake).createTimerEntryOnce(capture())
+      expect(result.alreadyLogged).toBe(false)
+      expect(fake.log.filter((row) => isInsert(row.sql))).toHaveLength(1)
+    })
+
+    it('a failed insert rolls back, releases the connection and is thrown on', async () => {
+      const fake = timerPg({ failInsert: true })
+      await expect(postgresStore(fake).createTimerEntryOnce(capture())).rejects.toThrow('insert failed')
+      expect(fake.conn().map((row) => firstWord(row.sql))).toEqual([
+        'begin',
+        'set',
+        'select',
+        'select',
+        'insert',
+        'rollback',
+        'release',
+      ])
+    })
+
+    // The insert is inside the transaction, so a commit that fails saves
+    // nothing: the caller hears an error and the timer keeps running.
+    it('a failed commit is thrown on, with the connection released', async () => {
+      const fake = timerPg({ failCommit: true })
+      await expect(postgresStore(fake).createTimerEntryOnce(capture())).rejects.toThrow('commit failed')
+      expect(fake.conn().map((row) => firstWord(row.sql))).toEqual([
+        'begin',
+        'set',
+        'select',
+        'select',
+        'insert',
+        'commit',
+        'rollback',
+        'release',
+      ])
+    })
+
+    it('with no clock stamps it is an ordinary save: no lock, no look', async () => {
+      const fake = timerPg()
+      const result = await postgresStore(fake).createTimerEntryOnce(
+        capture({ startAt: undefined, endAt: undefined, sessions: [] }),
+      )
+      expect(result.alreadyLogged).toBe(false)
+      expect(fake.conn()).toHaveLength(0)
+      expect(fake.log.filter((row) => isInsert(row.sql))).toHaveLength(1)
+    })
+  })
+})

@@ -35,6 +35,7 @@ import type {
   Role,
   TimeEntry,
   TimerState,
+  TimerStopResult,
   TimesheetLock,
   WeeklySubmission,
   WorkSession,
@@ -649,6 +650,27 @@ function ManualBadge() {
  * into its own gated modal (see `ManualEntryModal`) — the timer is the
  * default, accurate flow.
  */
+/**
+ * What the panel says when Stop & log found the timer saved already (a timer is
+ * logged once; see `findAlreadyLoggedTimer` in lib/time-entry.js). It names
+ * what the first save holds, because the person may have gone on working in a
+ * window that still showed the timer: that later time is NOT in the entry, and
+ * only they know whether it should be.
+ */
+function alreadyLoggedNotice(entry?: TimeEntry): string {
+  // The particulars are this timer's only when the entry IS this timer: one
+  // stretch, not a share of a split. A resumed entry's last stop and total, or
+  // a share's minutes, would describe something else.
+  const itsOwn = Boolean(entry) && !entry?.groupId && effectiveSessions(entry ?? {}).length === 1
+  const stopped = itsOwn && entry?.endAt ? new Date(entry.endAt) : null
+  const when =
+    stopped && !Number.isNaN(stopped.getTime())
+      ? stopped.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      : ''
+  const saved = entry && when ? ` (stopped at ${when}, ${formatHoursMinutes(entry.minutes)} saved)` : ''
+  return `This timer had already been logged${saved}, so it was not saved a second time. If you kept working after that, edit that entry in Recent time to add the time.`
+}
+
 // Exported for the timer tests: a blocked Stop & log must never eat the elapsed
 // time, which is only provable by driving this panel directly.
 export function TimeCapture({
@@ -676,7 +698,7 @@ export function TimeCapture({
   onGenerateFromTemplate: (templateId: string) => Promise<string | null>
   employees: Employee[]
   onStartTimer: (timer: TimerState) => void
-  onStopTimer: (descriptionOverride?: string) => Promise<void>
+  onStopTimer: (descriptionOverride?: string) => Promise<TimerStopResult | void>
   onUpdateTimer: (patch: Partial<TimerState>) => void
   onCancelTimer: () => void
   role: Role
@@ -703,6 +725,19 @@ export function TimeCapture({
   const [isAdhoc, setIsAdhoc] = useState(false)
   const [busy, setBusy] = useState(false)
   const [stopError, setStopError] = useState('')
+  // Stop & log found this timer saved already: not an error, nothing to fix,
+  // but the person is told (see `alreadyLoggedNotice`).
+  const [stopNotice, setStopNotice] = useState('')
+  // The notice is about ONE timer. Once another is running, wherever it was
+  // started (this panel, the top bar, a client page, another tab), it is over,
+  // so it cannot come back when that later timer ends. Adjusted while
+  // rendering, the way React asks for state that follows a prop.
+  const runningStartedAt = timer?.startedAt ?? null
+  const [noticeSeenStart, setNoticeSeenStart] = useState<number | null>(runningStartedAt)
+  if (runningStartedAt !== noticeSeenStart) {
+    setNoticeSeenStart(runningStartedAt)
+    if (runningStartedAt !== null) setStopNotice('')
+  }
   // A Stop & log has been attempted and blocked — see `fieldPrompt`. Prompts
   // appear only after that, because the timer is deliberately free to start.
   const [stopAttempted, setStopAttempted] = useState(false)
@@ -839,6 +874,7 @@ export function TimeCapture({
     // A fresh timer starts with a clean slate — prompts belong to the stop that
     // was actually blocked, not to the next run.
     setStopAttempted(false)
+    setStopNotice('')
     if (groupMode) {
       if (groupClientIds.length === 0) return
       onStartTimer({
@@ -944,14 +980,24 @@ export function TimeCapture({
     setStopAttempted(false)
     setBusy(true)
     setStopError('')
+    setStopNotice('')
     try {
       // The live notes are kept on the running timer now, so stop with no
       // override and let it use the timer's own (persisted) description.
-      await onStopTimer()
+      const result = await onStopTimer()
+      // Nothing was saved and the timer is still running (the session had
+      // ended): keep everything, exactly as after a refusal.
+      if (result && result.outcome === 'not_saved') return
       // The time is logged — and only now is it safe to wipe the form. A stop
       // that was blocked or refused never reaches this line, so nothing a user
       // typed is thrown away while it is still un-logged.
       resetCaptureFields()
+      // Logged already, by an earlier save of this same timer: the form is
+      // wiped all the same (that entry holds what was typed), and the panel
+      // says nothing was saved twice.
+      if (result && result.outcome === 'already_logged') {
+        setStopNotice(alreadyLoggedNotice(result.entry))
+      }
     } catch (error) {
       // Surface a server block (e.g. "submit last week first") instead of a
       // silent failure — the timer stays running so no time is lost.
@@ -1170,6 +1216,11 @@ export function TimeCapture({
           {fieldPrompt('detail')}
         </label>
         {stopError ? <p className="auth-error full-span">{stopError}</p> : null}
+        {stopNotice && !timer ? (
+          <p className="muted-text full-span" role="status">
+            {stopNotice}
+          </p>
+        ) : null}
         <div className="button-row full-span">
           {timer ? (
             <>
@@ -2989,8 +3040,14 @@ function TimeEntryRow({
           ...reassignPatch,
         })
         setEditing(false)
-      } catch {
-        setError('Could not save — the month may be locked.')
+      } catch (error) {
+        // A list naming one stretch twice is refused with its own sentence;
+        // "the month may be locked" would send the person the wrong way.
+        setError(
+          error instanceof ApiError && error.code === 'duplicate_session'
+            ? error.message
+            : 'Could not save — the month may be locked.',
+        )
       } finally {
         setBusy(false)
       }

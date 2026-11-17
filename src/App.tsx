@@ -146,7 +146,16 @@ import {
   type WaitingOnMeItem,
   type TimeEntry,
   type TimerState,
+  type TimerStopResult,
 } from './lib/types'
+import { readStoredTimer, sameStoredTimer, subscribeStoredTimer, writeStoredTimer } from './lib/timerStorage'
+import {
+  isDuplicateSessionRefusal,
+  isTimerAlreadyLogged,
+  stretchAlreadyIn,
+  withSavedTimeEntry,
+  withoutStoppedTimer,
+} from './lib/timerStop'
 import { duplicateTemplateDraft } from './lib/cloneChecklistTemplate'
 import {
   currentBillingPeriod,
@@ -222,40 +231,6 @@ function OwnerOnly({
     return <Navigate to={previewMode ? '/dashboard' : '/time'} replace />
   }
   return children
-}
-
-// The running timer is persisted in the browser so a refresh or a tab switch
-// doesn't lose it (the elapsed time is recomputed from `startedAt`). Cleared on
-// stop / cancel.
-const TIMER_STORAGE_KEY = 'pbj.activeTimer.v1'
-
-function readStoredTimer(): TimerState | null {
-  try {
-    const raw = localStorage.getItem(TIMER_STORAGE_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as TimerState
-    if (
-      parsed &&
-      typeof parsed === 'object' &&
-      typeof parsed.employeeId === 'string' &&
-      typeof parsed.startedAt === 'number' &&
-      Number.isFinite(parsed.startedAt)
-    ) {
-      return parsed
-    }
-  } catch {
-    // ignore malformed / unavailable storage
-  }
-  return null
-}
-
-function writeStoredTimer(timer: TimerState | null) {
-  try {
-    if (timer) localStorage.setItem(TIMER_STORAGE_KEY, JSON.stringify(timer))
-    else localStorage.removeItem(TIMER_STORAGE_KEY)
-  } catch {
-    // ignore storage failures
-  }
 }
 
 // The shared "Report period" range is a per-user UI preference, so it lives in
@@ -1188,10 +1163,39 @@ function App() {
     return () => window.clearInterval(intervalId)
   }, [timer])
 
+  // The timer state most recently taken FROM the store (see the subscription
+  // below), boxed so that "nothing running" (null) is a value like any other.
+  const receivedTimerRef = useRef<{ timer: TimerState | null } | null>(null)
+
   // Persist the running timer to the browser so refresh / tab-switch keeps it.
+  // The one state this tab only RECEIVED is not written back: the store already
+  // holds it, and by the time this effect runs the other tab may have written
+  // something newer (the next keystroke, or the timer logged and gone); writing
+  // the older copy back would undo that there. The skip is for that exact value
+  // and is spent by whichever run comes next, so a change made HERE in the same
+  // moment (a timer stopped here above all) is always written.
   useEffect(() => {
+    const received = receivedTimerRef.current
+    receivedTimerRef.current = null
+    if (received && received.timer === timer) return
     writeStoredTimer(timer)
   }, [timer])
+
+  // One timer, however many tabs: when ANOTHER tab or window of this browser
+  // starts, edits, logs or cancels the timer, this one follows, so a timer that
+  // was already logged over there is not still running (and loggable) here.
+  useEffect(
+    () =>
+      subscribeStoredTimer((stored) => {
+        setTimer((current) => {
+          // Nothing new: no change of state, so no persist run to skip.
+          if (sameStoredTimer(current, stored)) return current
+          receivedTimerRef.current = { timer: stored }
+          return stored
+        })
+      }),
+    [],
+  )
 
   // The EFFECTIVE identity — who the app should behave as. Outside preview
   // it is simply the session user; while an owner previews a staff member it
@@ -1643,8 +1647,12 @@ function App() {
     [refreshChecklistSkips],
   )
 
-  const logTime = async (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => {
-    if (previewActiveRef.current) return
+  // Saves one new entry. TRUE once it is saved. FALSE when nothing was saved
+  // and nothing is wrong with the entry: a preview, or the session had ended
+  // (the app goes back to sign-in). Refusals and failures throw. The answer is
+  // what lets Stop & log keep a timer whose time was not saved.
+  const saveNewTimeEntry = async (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>): Promise<boolean> => {
+    if (previewActiveRef.current) return false
     try {
       setDataSyncState('saving')
       const newEntry = await createTimeEntry(entry)
@@ -1654,12 +1662,13 @@ function App() {
       }))
       setSelectedClientId(newEntry.clientId)
       setDataSyncState('synced')
+      return true
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setSessionUser(null)
         setServerPersistenceEnabled(false)
         setDataSyncState('offline')
-        return
+        return false
       }
       if (isCleanRejection(error)) {
         // The server declined this one entry (e.g. the weekly-submission gate).
@@ -1672,6 +1681,10 @@ function App() {
       setDataSyncState('error')
       throw error
     }
+  }
+
+  const logTime = async (entry: Omit<TimeEntry, 'id' | 'approvalStatus'>) => {
+    await saveNewTimeEntry(entry)
   }
 
   // Split a time entry across clients. ONE atomic server call replaces the old
@@ -1763,10 +1776,15 @@ function App() {
     }
   }
 
-  const stopTimer = async (descriptionOverride?: string) => {
+  const logStoppedTimer = async (descriptionOverride?: string): Promise<TimerStopResult> => {
     if (previewActiveRef.current || !timer) {
-      return
+      return { outcome: 'not_saved' }
     }
+    // Clears the timer that is being stopped HERE, and only that one: by the
+    // time a slow reply returns, this tab may hold a newer timer that another
+    // tab started (see `withoutStoppedTimer`).
+    const stoppedStartedAt = timer.startedAt
+    const clearStoppedTimer = () => setTimer((current) => withoutStoppedTimer(current, stoppedStartedAt))
 
     const isAdministrative = Boolean(timer.isAdministrative)
     // Use the latest edited description (the timer panel lets users keep
@@ -1798,9 +1816,17 @@ function App() {
             : existing.startAt && existing.endAt
               ? [{ startAt: existing.startAt, endAt: existing.endAt }]
               : []
-        await updateTimeEntry(existing.id, { sessions: [...prior, session] })
-        setTimer(null)
-        return
+        // Another tab already stopped this resumed timer: its stretch is in
+        // the entry as this tab now holds it. Nothing to send.
+        if (stretchAlreadyIn(prior, session.startAt)) {
+          clearStoppedTimer()
+          return { outcome: 'already_logged', entry: existing }
+        }
+        if (!(await saveTimeEntryPatch(existing.id, { sessions: [...prior, session] }))) {
+          return { outcome: 'not_saved' }
+        }
+        clearStoppedTimer()
+        return { outcome: 'logged' }
       }
       // The entry vanished (deleted) — fall through to log a fresh one.
     }
@@ -1810,7 +1836,7 @@ function App() {
     // for billing later, which replaces it with one billable entry per client.
     const groupClientIds = Array.isArray(timer.groupClientIds) ? timer.groupClientIds : []
     if (groupClientIds.length > 0) {
-      await logTime({
+      const savedBlock = await saveNewTimeEntry({
         employeeId: timer.employeeId,
         clientId: '',
         isAdministrative: false,
@@ -1836,11 +1862,12 @@ function App() {
         taskLabel: timer.taskLabel?.trim() || undefined,
         entryMethod: 'timer',
       })
-      setTimer(null)
-      return
+      if (!savedBlock) return { outcome: 'not_saved' }
+      clearStoppedTimer()
+      return { outcome: 'logged' }
     }
 
-    await logTime({
+    const saved = await saveNewTimeEntry({
       employeeId: timer.employeeId,
       clientId: timer.clientId,
       isAdministrative,
@@ -1865,10 +1892,42 @@ function App() {
       taskLabel: timer.taskId ? undefined : timer.taskLabel?.trim() || undefined,
       entryMethod: 'timer',
     })
-    setTimer(null)
+    // Not saved (the session had ended): the timer keeps running, so signing
+    // back in and pressing Stop & log again saves it.
+    if (!saved) return { outcome: 'not_saved' }
+    clearStoppedTimer()
+    return { outcome: 'logged' }
   }
 
-  const updateTimeEntry = async (
+  // A TIMER IS LOGGED ONCE. When the server answers that this very timer is
+  // already saved (another tab or window logged it first, or the reply to an
+  // earlier Stop & log never arrived), nothing was saved again. That is not a
+  // failure: show the entry the first save made, clear THAT timer here too, and
+  // let the panel say what happened. Every other refusal or failure is thrown
+  // on, with the timer still running.
+  const stopTimer = async (descriptionOverride?: string): Promise<TimerStopResult> => {
+    const stoppedStartedAt = timer?.startedAt
+    try {
+      return await logStoppedTimer(descriptionOverride)
+    } catch (error) {
+      if (!isTimerAlreadyLogged(error)) throw error
+      const saved = error.timeEntry
+      if (saved) {
+        applyServerDataUpdate((current) => ({
+          ...current,
+          timeEntries: withSavedTimeEntry(current.timeEntries, saved),
+        }))
+      }
+      if (stoppedStartedAt !== undefined) {
+        setTimer((current) => withoutStoppedTimer(current, stoppedStartedAt))
+      }
+      return saved ? { outcome: 'already_logged', entry: saved } : { outcome: 'already_logged' }
+    }
+  }
+
+  // Saves a change to one entry. TRUE once saved; FALSE when nothing was saved
+  // and nothing is wrong with it (a preview, or the session had ended).
+  const saveTimeEntryPatch = async (
     entryId: string,
     patch: {
       minutes?: number
@@ -1884,8 +1943,8 @@ function App() {
       sessions?: { startAt: string; endAt: string }[]
       employeeId?: string
     },
-  ) => {
-    if (previewActiveRef.current) return
+  ): Promise<boolean> => {
+    if (previewActiveRef.current) return false
     try {
       setDataSyncState('saving')
       const updated = await updateTimeEntryRequest(entryId, patch)
@@ -1896,16 +1955,27 @@ function App() {
         ),
       }))
       setDataSyncState('synced')
+      return true
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         setSessionUser(null)
         setServerPersistenceEnabled(false)
         setDataSyncState('offline')
-        return
+        return false
+      }
+      if (isDuplicateSessionRefusal(error)) {
+        // The server refused a list naming one stretch twice. Nothing is
+        // unsaved, so this is not the "your work is not being saved" alarm.
+        setDataSyncState('synced')
+        throw error
       }
       setDataSyncState('error')
       throw error
     }
+  }
+
+  const updateTimeEntry = async (...args: Parameters<typeof saveTimeEntryPatch>) => {
+    await saveTimeEntryPatch(...args)
   }
 
   const deleteTimeEntry = async (entryId: string) => {

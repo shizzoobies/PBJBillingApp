@@ -93,6 +93,9 @@ export declare function approvalAfterEdit(args: {
   employeeId: string | null | undefined
 }): 'requeue' | 'approve' | 'keep'
 
+/** The most stretches one entry may carry. */
+export declare const MAX_WORK_SESSIONS: number
+
 export declare function normalizeWorkSessions(rawSessions?: unknown): {
   sessions?: { startAt: string; endAt: string }[]
   minutes?: number
@@ -116,6 +119,27 @@ export declare function resolveCreatedEntryTiming(input: {
   endAt: string | undefined
   sessions: { startAt: string; endAt: string }[]
 }
+
+/**
+ * A timer is logged once: the entry of this person that already holds a stretch
+ * starting at the same instant as one of `sessions`, or null.
+ */
+export declare function findAlreadyLoggedTimer<Entry extends { employeeId?: string }>(input?: {
+  entries?: ReadonlyArray<Entry> | null
+  employeeId?: string | null
+  sessions?: ReadonlyArray<{ startAt?: string }> | null
+}): Entry | null
+
+/** What a page that does not know the `timer_already_logged` refusal shows. */
+export declare const TIMER_ALREADY_LOGGED_MESSAGE: string
+
+/** Do two of these stretches start at the same instant? */
+export declare function hasDuplicateSessionStart(
+  sessions: ReadonlyArray<{ startAt?: string }> | null | undefined,
+): boolean
+
+/** The sentence for the `duplicate_session` refusal. */
+export declare const DUPLICATE_SESSION_MESSAGE: string
 
 /** The Sunday ('YYYY-MM-DD') that anchors the Sun–Sat week containing `dateStr`. */
 export declare function weekStartOf(dateStr: string): string
