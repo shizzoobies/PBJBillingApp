@@ -171,3 +171,112 @@ export function clockMismatchNote(
     ? `The shares do not add up to this row's clock time (${clockTime})`
     : `Hours typed in (clock time ${clockTime})`
 }
+
+/**
+ * How an entry's time got onto the timesheet, for the person approving payroll.
+ *
+ *  - `manual`: logged with "Log time manually" (the entry says so itself).
+ *  - `timer_edited`: a timer entry whose clock times were edited after the
+ *    timer ran (a stretch added, moved or removed), by the person or by an
+ *    owner. Such an entry still says "timer"; nothing recorded the edit.
+ *  - `timer`: clocked, and left as clocked.
+ *  - `timer_unread`: a timer entry from before `CLOCK_EDITS_READABLE_FROM`
+ *    whose clock times sit on exact minutes. They may have been edited, or only
+ *    its note was; the data cannot say (see below). Nothing is said on screen,
+ *    and a sheet says exactly that rather than "Timer".
+ *  - `no_clock`: not a manual entry, and no clock times at all (older and
+ *    imported time).
+ *
+ * `timer_edited` is READ OFF THE CLOCK TIMES, not stored: the timer records the
+ * second (and millisecond) it started and stopped, while the entry's edit form
+ * works in whole minutes, so a stretch that starts AND stops on an exact minute
+ * went through the form. Checked against production on 2026-11-17: of the
+ * 1,863 timer entries with clock times (they begin in June), every one is
+ * either all seconds (1,514) or all exact minutes (349), and every manual
+ * entry is on exact minutes; none mixes (the form saves every stretch
+ * together; see below).
+ * A timer stretch landing on an exact minute at both ends by chance is one in
+ * billions. If the edit form ever takes seconds, this rule must become a stored
+ * flag instead.
+ *
+ * ONLY STRETCHES FROM `CLOCK_EDITS_READABLE_FROM` ON ARE READ. Until commit
+ * 93cdcecb (pushed 2026-08-05 18:32 UTC) the edit form sent the stretches on
+ * EVERY save, so fixing a typo in the note, the client or the Billable box put
+ * every clock time on whole minutes, with nobody touching one. For a stretch
+ * older than that the data cannot tell a note edit from a time edit, so it is
+ * never called edited (`timer_unread`). Since that commit the form sends the
+ * stretches only when the stretch list itself was touched (`spansTouched` in
+ * src/pages/TimePage.tsx; a test pins it, because this whole reading rests on
+ * it). The date is set well after the commit on purpose: a browser tab loaded
+ * before it kept the old form until it was reloaded, and nothing forced that.
+ *
+ * "Touched" is the form's word, not "changed": pressing Add time and removing
+ * the row again, or retyping a time to the same minute, still saves every
+ * stretch on whole minutes and so reads as edited. The clock times WERE
+ * rewritten (their seconds are gone); the wording says "edited", never what
+ * changed.
+ *
+ * THE MARK IS PER ENTRY, NEVER PER STRETCH, and says nothing of how much was
+ * edited. Once anything in the edit form's stretch list is touched, the form
+ * saves EVERY stretch from its whole-minute boxes (`handleSave` in
+ * src/pages/TimePage.tsx), the untouched ones included, so their seconds are
+ * gone too. That is why production has no mixed entries. Accepting the "Add
+ * session" defaults on a three-hour clocked entry marks all of it. Do not build
+ * "1 of 4 stretches typed" on this: the data cannot say it. And the wording
+ * must not accuse: editing clock times is an ordinary, allowed thing, owners do
+ * it to their own time and to others' at review, and nothing says who or when.
+ */
+export type HowLogged = 'manual' | 'timer_edited' | 'timer' | 'timer_unread' | 'no_clock'
+
+const onTheMinute = (iso: string) => {
+  const date = new Date(iso)
+  return date.getUTCSeconds() === 0 && date.getUTCMilliseconds() === 0
+}
+
+/**
+ * The first moment whose stretches can be read for edits: the start of a day
+ * (Eastern, the firm's) twelve days after the edit form stopped rewriting clock
+ * times on every save, so that a tab still running the old form is not
+ * plausible. `CLOCK_EDITS_READABLE_FROM_TEXT` is the same day in words.
+ */
+export const CLOCK_EDITS_READABLE_FROM = '2026-08-17T04:00:00.000Z'
+export const CLOCK_EDITS_READABLE_FROM_TEXT = 'Aug 17, 2026'
+const READABLE_FROM_MS = Date.parse(CLOCK_EDITS_READABLE_FROM)
+
+export function howLogged(entry: Pick<TimeEntry, 'entryMethod'>, clock: ClockSpans): HowLogged {
+  if (entry.entryMethod === 'manual') return 'manual'
+  if (clock.spans.length === 0) return 'no_clock'
+  const typed = (span: WorkSession) => onTheMinute(span.startAt) && onTheMinute(span.endAt)
+  const readable = (span: WorkSession) => new Date(span.startAt).getTime() >= READABLE_FROM_MS
+  if (clock.spans.some((span) => readable(span) && typed(span))) return 'timer_edited'
+  // On exact minutes, from before the form could be trusted: not known either way.
+  if (clock.spans.some((span) => !readable(span) && typed(span))) return 'timer_unread'
+  return 'timer'
+}
+
+/**
+ * The words for it as a method: a sheet's "Logged" column, the week review's
+ * Method line. One verb, the app's own ("Edit"): "changed by hand" read as
+ * "not genuine", and was wrong for a stretch added or removed.
+ */
+export const HOW_LOGGED_LABEL: Record<HowLogged, string> = {
+  manual: 'Manual entry',
+  timer_edited: 'Timer, clock times edited',
+  timer: 'Timer',
+  timer_unread: `Timer (before ${CLOCK_EDITS_READABLE_FROM_TEXT}: edits cannot be read)`,
+  no_clock: 'Hours only (no clock times)',
+}
+
+/** The line under a row's Clock in: only where the clock times are not just what the timer recorded. */
+export const HOW_LOGGED_NOTE: Record<HowLogged, string> = {
+  manual: 'Manual entry',
+  timer_edited: 'Clock times edited',
+  timer: '',
+  timer_unread: '',
+  no_clock: '',
+}
+
+/** The chip on an approval row, and what hovering it says. */
+export const CLOCK_TIMES_EDITED_CHIP = 'Clock times edited'
+export const CLOCK_TIMES_EDITED_TITLE =
+  'The clock times on this timer entry were edited after the timer ran, by the person or by an owner. Editing is allowed; this does not say who or when.'

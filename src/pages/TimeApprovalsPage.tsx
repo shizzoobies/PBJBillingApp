@@ -2,6 +2,13 @@ import { CheckCircle2, ChevronDown, ChevronRight, Eye, Lock, LockOpen, XCircle }
 import { useMemo, useState } from 'react'
 import { useLocation, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
+import {
+  CLOCK_TIMES_EDITED_CHIP,
+  CLOCK_TIMES_EDITED_TITLE,
+  HOW_LOGGED_LABEL,
+  clockSpansOf,
+  howLogged,
+} from '../lib/payrollClock'
 import type {
   Checklist,
   Client,
@@ -766,7 +773,10 @@ function WeekReviewEntryRow({
               <strong>Logged by:</strong> {employeeLabel}
             </span>
             <span>
-              <strong>Method:</strong> {entry.entryMethod === 'manual' ? 'Manual' : 'Timer'}
+              {/* "Timer, clock times edited" when the clock times were edited
+                  after the timer ran: see `howLogged`. */}
+              <strong>Method:</strong>{' '}
+              {entry.entryMethod === 'manual' ? 'Manual' : HOW_LOGGED_LABEL[howLogged(entry, clockSpansOf(entry))]}
             </span>
             {entry.manualReason ? (
               <span>
@@ -1193,6 +1203,14 @@ function ApprovalRow({
         <div className="approval-row-pills">
           {entry.entryMethod === 'manual' ? (
             <span className="manual-badge">Manual</span>
+          ) : null}
+          {/* A timer entry whose clock times were edited after the timer ran.
+              Deliberately NOT the Manual badge's look: a manual entry is an
+              exception with a required reason; an edit is an ordinary thing. */}
+          {howLogged(entry, clockSpansOf(entry)) === 'timer_edited' ? (
+            <span className="clock-edited-chip" title={CLOCK_TIMES_EDITED_TITLE}>
+              {CLOCK_TIMES_EDITED_CHIP}
+            </span>
           ) : null}
           {entry.isAdhoc ? <span className="adhoc-chip">Ad hoc</span> : null}
           <span className={`time-status-pill time-status-${entry.approvalStatus}`}>

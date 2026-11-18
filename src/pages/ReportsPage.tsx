@@ -53,7 +53,16 @@ import {
   shortDate,
   weekStartOf,
 } from '../lib/utils'
-import { buildSplitBlocks, clockMismatchNote, clockSpansOf, splitNote } from '../lib/payrollClock'
+import {
+  HOW_LOGGED_LABEL,
+  HOW_LOGGED_NOTE,
+  buildSplitBlocks,
+  clockMismatchNote,
+  clockSpansOf,
+  howLogged,
+  splitNote,
+  type HowLogged,
+} from '../lib/payrollClock'
 
 /**
  * Printed above the day-and-job table. Brittany read "clock in 9:08 AM, clock
@@ -76,6 +85,20 @@ const CLOCK_TIMES_NOTE =
   "row holds. Two rows of the same person whose clock times overlap are not counted twice " +
   'unless their listed stretches overlap; the shares of one block list the same stretches on ' +
   'purpose.'
+
+/**
+ * Its own paragraph, under the one above. It has to say three things so that
+ * the line under a Clock in is read as a fact and not as an accusation: what it
+ * means, that editing is an allowed and ordinary thing (owners' own time
+ * carries it too), and what the app does NOT know (who, when, what was there
+ * before).
+ */
+const CLOCK_EDIT_NOTE =
+  '"Manual entry" under a Clock in means the time was logged with Log time manually. "Clock ' +
+  'times edited" means the clock times of a timer entry were edited after the timer ran (a ' +
+  'stretch added, moved or removed), by the person or by an owner. Editing is allowed. The ' +
+  'line is only a note: it changes nothing in the Hours or the pay, and the app does not ' +
+  'record who edited, when, or what the times were before.'
 
 /**
  * The one sentence that tells the reader how a Cost figure was built. It stays
@@ -438,6 +461,8 @@ type PayrollEntryRow = {
   splitNote: string
   /** Said only when the row's time does not come from its clock times (see `clockMismatchNote`). */
   mismatchNote: string
+  /** Timer, timer with its clock times edited, manual, or no clock times (see `howLogged`). */
+  logged: HowLogged
   minutes: number
   billable: boolean
   billableMinutes: number
@@ -640,6 +665,7 @@ function PayrollHoursReport({
         stretches: spans.length > 1 ? formatWorkStretches(spans, entry.date) : [],
         splitNote: splitNote(entry, splitBlocks),
         mismatchNote: clockMismatchNote(entry, splitBlocks, clock),
+        logged: howLogged(entry, clock),
         minutes: entry.minutes,
         billable: entry.billable,
         billableMinutes: entry.billable ? entry.minutes : 0,
@@ -909,6 +935,7 @@ function PayrollHoursReport({
         'Worked stretches',
         'Split across clients',
         'Hours note',
+        'Logged',
       ],
       [...detailEntries]
         .sort((a, b) => a.date.localeCompare(b.date))
@@ -942,6 +969,7 @@ function PayrollHoursReport({
             formatWorkStretches(spans, entry.date).join('; '),
             splitNote(entry, splitBlocks, { forExport: true }),
             clockMismatchNote(entry, splitBlocks, clock),
+            HOW_LOGGED_LABEL[howLogged(entry, clock)],
           ]
         }),
     )
@@ -1108,6 +1136,7 @@ function PayrollHoursReport({
       </div>
 
       <p className="report-caption muted-text">{CLOCK_TIMES_NOTE}</p>
+      <p className="report-caption muted-text">{CLOCK_EDIT_NOTE}</p>
 
       <div className="table-wrap">
         <table>
@@ -1153,7 +1182,14 @@ function PayrollHoursReport({
                       <td>{row.task}</td>
                       {/* Blank for an entry logged as minutes only — it has no
                           timestamps to report, which is itself worth seeing. */}
-                      <td>{row.clockIn || '—'}</td>
+                      <td>
+                        {row.clockIn || '—'}
+                        {/* Not just what the timer recorded: a manual entry, or a
+                            timer entry whose clock times were edited afterwards. */}
+                        {HOW_LOGGED_NOTE[row.logged] ? (
+                          <div className="muted-text payroll-how-logged">{HOW_LOGGED_NOTE[row.logged]}</div>
+                        ) : null}
+                      </td>
                       <td>{row.clockOut || '—'}</td>
                       <td>
                         {row.sessionCount || '—'}
@@ -1377,6 +1413,7 @@ function ReportsOverview({
         'Worked stretches',
         'Split across clients',
         'Hours note',
+        'Logged',
       ],
       sorted.map((entry) => {
         const taskTitle = entry.taskId
@@ -1407,6 +1444,7 @@ function ReportsOverview({
           formatWorkStretches(spans, entry.date).join('; '),
           splitNote(entry, monthSplitBlocks, { forExport: true }),
           clockMismatchNote(entry, monthSplitBlocks, clock),
+          HOW_LOGGED_LABEL[howLogged(entry, clock)],
         ]
       }),
     )

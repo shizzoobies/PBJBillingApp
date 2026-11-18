@@ -1,9 +1,23 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ReportsPage } from '../pages/ReportsPage'
 import { DEFAULT_FIRM_SETTINGS, type TimeEntry } from '../lib/types'
 import { formatWorkStretches } from '../lib/utils'
-import { buildSplitBlocks, clockMismatchNote, clockSpansOf, splitNote } from '../lib/payrollClock'
+import {
+  CLOCK_EDITS_READABLE_FROM,
+  CLOCK_EDITS_READABLE_FROM_TEXT,
+  CLOCK_TIMES_EDITED_CHIP,
+  CLOCK_TIMES_EDITED_TITLE,
+  HOW_LOGGED_LABEL,
+  HOW_LOGGED_NOTE,
+  buildSplitBlocks,
+  clockMismatchNote,
+  clockSpansOf,
+  howLogged,
+  splitNote,
+} from '../lib/payrollClock'
 import type { AppContextValue } from '../AppContext'
 
 /**
@@ -365,6 +379,216 @@ describe('the rules (src/lib/payrollClock.ts)', () => {
   })
 })
 
+/**
+ * Who set the clock times: the timer, or a person. A timer entry whose times
+ * were typed or moved afterwards still says "timer", and nothing recorded the
+ * edit; it is read off the times themselves. The timer keeps the second it
+ * started and stopped; the edit form works in whole minutes.
+ */
+describe('how an entry was logged (howLogged)', () => {
+  /** A stamp with seconds, as the timer stores it. */
+  const clocked = (hour: number, minute: number, second: number, ms = 250) =>
+    new Date(2026, 10, 3, hour, minute, second, ms).toISOString()
+  const timerStretch = { startAt: clocked(9, 12, 43), endAt: clocked(10, 13, 53) }
+  const of = (over: Record<string, unknown>) => {
+    const e = entry({ id: 'x', minutes: 10, ...over })
+    return howLogged(e, clockSpansOf(e))
+  }
+
+  it('a clocked entry is a timer entry', () => {
+    expect(of({ entryMethod: 'timer', sessions: [timerStretch] })).toBe('timer')
+    expect(of({ sessions: [timerStretch, { startAt: clocked(11, 2, 42), endAt: clocked(11, 5, 11) }] })).toBe('timer')
+  })
+
+  it('a timer entry whose clock times sit on exact minutes had them edited', () => {
+    expect(of({ entryMethod: 'timer', sessions: BLOCK })).toBe('timer_edited')
+    expect(of({ entryMethod: 'timer', sessions: FOUR })).toBe('timer_edited')
+    // One typed stretch among clocked ones is enough: that stretch was not clocked.
+    expect(of({ entryMethod: 'timer', sessions: [timerStretch, stretch([14, 0], [14, 30])] })).toBe('timer_edited')
+  })
+
+  // Both ends, on the minute to the millisecond: one end by chance (1 in 60,000) is not an edit.
+  it('one end on the minute, or a start with zero seconds but not zero milliseconds, is still clocked', () => {
+    expect(of({ sessions: [{ startAt: at(9, 12), endAt: clocked(10, 13, 53) }] })).toBe('timer')
+    expect(of({ sessions: [{ startAt: clocked(16, 4, 0, 253), endAt: clocked(17, 15, 0, 1) }] })).toBe('timer')
+  })
+
+  it('a manual entry is manual whatever its times; no clock times at all is its own answer', () => {
+    expect(of({ entryMethod: 'manual', sessions: BLOCK })).toBe('manual')
+    expect(of({ entryMethod: 'manual' })).toBe('manual')
+    expect(of({ entryMethod: 'timer' })).toBe('no_clock')
+    expect(of({})).toBe('no_clock')
+  })
+
+  it('reads the same in any time zone (seconds are seconds everywhere)', () => {
+    // 05:30 offsets shift the minute, never the seconds.
+    expect(of({ sessions: [{ startAt: '2026-11-03T09:08:00.000+05:30', endAt: '2026-11-03T09:10:00.000+05:30' }] })).toBe(
+      'timer_edited',
+    )
+    expect(of({ sessions: [{ startAt: '2026-11-03T09:08:07.000+05:30', endAt: '2026-11-03T09:10:00.000+05:30' }] })).toBe(
+      'timer',
+    )
+  })
+
+  // Until 2026-08-05 the edit form sent the stretches on every save, so a typo
+  // fixed in the note put every clock time on whole minutes. For a stretch
+  // older than that the data cannot tell a note edit from a time edit, and
+  // saying "edited" about it would be a false statement about a person.
+  it('never calls a stretch edited from before the edit form stopped rewriting them', () => {
+    const july = (hour: number, minute: number) => new Date(2026, 6, 10, hour, minute).toISOString()
+    // Not known either way: neither "edited" nor a plain "Timer".
+    expect(of({ entryMethod: 'timer', sessions: [{ startAt: july(9, 0), endAt: july(10, 0) }] })).toBe('timer_unread')
+    // The envelope-only shape of an older entry reads the same way.
+    expect(of({ entryMethod: 'timer', sessions: [], startAt: july(9, 0), endAt: july(10, 0) })).toBe('timer_unread')
+    // An old entry that still has its seconds was never saved through the form: it IS a plain timer entry.
+    const julyClocked = (second: number) => new Date(2026, 6, 10, 9, 0, second, 250).toISOString()
+    expect(of({ sessions: [{ startAt: julyClocked(7), endAt: julyClocked(41) }] })).toBe('timer')
+    // The days just after the fix are not read either: a tab loaded before it kept the old form.
+    const aug7 = (hour: number) => new Date(2026, 7, 7, hour, 0).toISOString()
+    expect(of({ sessions: [{ startAt: aug7(9), endAt: aug7(10) }] })).toBe('timer_unread')
+    // The boundary: the first readable moment is, the millisecond before it is not.
+    const from = Date.parse(CLOCK_EDITS_READABLE_FROM)
+    const minute = 60_000
+    expect(from % minute).toBe(0)
+    expect(of({ sessions: [{ startAt: new Date(from).toISOString(), endAt: new Date(from + 5 * minute).toISOString() }] })).toBe(
+      'timer_edited',
+    )
+    expect(
+      of({ sessions: [{ startAt: new Date(from - minute).toISOString(), endAt: new Date(from + 5 * minute).toISOString() }] }),
+    ).toBe('timer_unread')
+    // The day in words is the day in the constant, as the firm's clock reads it.
+    expect(
+      new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', year: 'numeric' }).format(
+        new Date(from),
+      ),
+    ).toBe(CLOCK_EDITS_READABLE_FROM_TEXT)
+    // An old entry picked up again later and edited then IS readable, by its later stretch.
+    expect(of({ sessions: [{ startAt: july(9, 0), endAt: july(10, 0) }, stretch([14, 0], [14, 30])] })).toBe('timer_edited')
+  })
+
+  it('an entry with only a start and a stop is read like one stretch', () => {
+    expect(of({ sessions: [], startAt: at(9, 0), endAt: at(9, 30) })).toBe('timer_edited')
+    expect(of({ sessions: [], startAt: clocked(9, 0, 7), endAt: clocked(9, 30, 41) })).toBe('timer')
+  })
+
+  it('has words for each, and none of them accuses', () => {
+    expect(HOW_LOGGED_LABEL).toEqual({
+      manual: 'Manual entry',
+      timer_edited: 'Timer, clock times edited',
+      timer: 'Timer',
+      timer_unread: 'Timer (before Aug 17, 2026: edits cannot be read)',
+      no_clock: 'Hours only (no clock times)',
+    })
+    expect(HOW_LOGGED_NOTE).toEqual({
+      manual: 'Manual entry',
+      timer_edited: 'Clock times edited',
+      timer: '',
+      // Nothing on screen: there is nothing to say about it.
+      timer_unread: '',
+      no_clock: '',
+    })
+    expect(CLOCK_TIMES_EDITED_CHIP).toBe('Clock times edited')
+    // Who and when are not known, and editing is allowed: the hover text says both.
+    expect(CLOCK_TIMES_EDITED_TITLE).toMatch(/by the person or by an owner/)
+    expect(CLOCK_TIMES_EDITED_TITLE).toMatch(/Editing is allowed; this does not say who or when\./)
+    for (const text of [...Object.values(HOW_LOGGED_LABEL), ...Object.values(HOW_LOGGED_NOTE), CLOCK_TIMES_EDITED_TITLE]) {
+      expect(text).not.toMatch(/by hand|typed|changed|manual(?!ly)(?! entry)/i)
+    }
+  })
+
+  // THE WHOLE READING RESTS ON THIS: the edit form sends the stretches only
+  // when the stretch list itself was touched. If it ever sends them on every
+  // save again, every timer entry whose note is fixed would read "edited".
+  it('the edit form sends the stretches only when they were touched (read from TimePage.tsx)', () => {
+    const page = readFileSync(resolve(__dirname, '../pages/TimePage.tsx'), 'utf8').replace(/\r\n/g, '\n')
+    expect(page).toContain('...(spansTouched ? { sessions: built } : {}),')
+    expect(page.split('sessions: built').length - 1).toBe(1)
+    // It starts false, and opening the editor sets it only for "Add time" (which adds a stretch).
+    expect(page).toContain('const [spansTouched, setSpansTouched] = useState(false)')
+    expect(page).toContain('setSpansTouched(withExtraSession)')
+    // Only the three stretch-list actions set it to true, one each.
+    expect(page.split('setSpansTouched(true)').length - 1).toBe(3)
+    expect(page.split('setSpansTouched(').length - 1).toBe(4)
+    const handlers = ['const updateSessionRow = ', 'const addSessionRow = ', 'const removeSessionRow = ']
+    for (const handler of handlers) {
+      const from = page.indexOf(handler)
+      expect(from).toBeGreaterThan(-1)
+      // This handler's own body: up to the next `const` at its indentation.
+      const body = page.slice(from, page.indexOf('\n  const ', from + handler.length))
+      expect(body.split('setSpansTouched(true)').length - 1).toBe(1)
+    }
+  })
+})
+
+describe('Time by day and job: who set the clock times', () => {
+  const clocked = (hour: number, minute: number, second: number) =>
+    new Date(2026, 10, 3, hour, minute, second, 250).toISOString()
+
+  it('says so under Clock in, only where a person set them', async () => {
+    timeEntries = [
+      entry({ id: 'clocked', clientId: 'c1', minutes: 61.18, sessions: [{ startAt: clocked(9, 12, 43), endAt: clocked(10, 13, 53) }] }),
+      entry({ id: 'edited', clientId: 'c2', minutes: 115, entryMethod: 'timer', sessions: FOUR }),
+      entry({ id: 'manual', clientId: 'c3', minutes: 30, entryMethod: 'manual', manualReason: 'forgot', sessions: [stretch([14, 0], [14, 30])] }),
+      entry({ id: 'bare', clientId: 'c4', minutes: 30 }),
+    ]
+    const { rowOf, section } = await renderDetail()
+    const lineOf = (job: string) => rowOf(job).querySelector('.payroll-how-logged')?.textContent ?? null
+    expect(lineOf('Acme Dental')).toBeNull()
+    expect(lineOf('Bright Books')).toBe('Clock times edited')
+    expect(lineOf('Cedar Cafe')).toBe('Manual entry')
+    expect(lineOf('Delta Design')).toBeNull()
+    // What it means, that it is allowed, and what the app does not know.
+    const note = within(section).getByText(/"Clock times edited" means the clock times of a timer entry were edited after the timer ran/)
+    expect(note).toHaveTextContent('(a stretch added, moved or removed), by the person or by an owner')
+    // The LINE changes nothing. Editing itself does change the Hours, so the sentence must not say otherwise.
+    expect(note).toHaveTextContent(
+      'Editing is allowed. The line is only a note: it changes nothing in the Hours or the pay, and the app does not record who edited, when, or what the times were before.',
+    )
+    expect(note).not.toHaveTextContent('Editing is allowed and changes nothing')
+  })
+
+  it('both exports end with a Logged column', async () => {
+    timeEntries = [
+      entry({ id: 'clocked', clientId: 'c1', minutes: 61.18, sessions: [{ startAt: clocked(9, 12, 43), endAt: clocked(10, 13, 53) }] }),
+      entry({ id: 'edited', clientId: 'c2', minutes: 115, sessions: FOUR }),
+      entry({ id: 'manual', clientId: 'c3', minutes: 30, entryMethod: 'manual', sessions: [stretch([14, 0], [14, 30])] }),
+      entry({ id: 'bare', clientId: 'c4', minutes: 30 }),
+    ]
+    await renderDetail()
+    const expected = {
+      'Acme Dental': 'Timer',
+      'Bright Books': 'Timer, clock times edited',
+      'Cedar Cafe': 'Manual entry',
+      'Delta Design': 'Hours only (no clock times)',
+    }
+    for (const button of [/Raw hours/i, /Hours by month \(CSV\)/i]) {
+      mockDownloadCsv.mockReset()
+      fireEvent.click(screen.getByRole('button', { name: button }))
+      const [, headers, rows] = mockDownloadCsv.mock.calls[0] as unknown as [string, string[], Array<Array<string | number>>]
+      expect(headers[headers.length - 1]).toBe('Logged')
+      expect(Object.fromEntries(rows.map((row) => [row[2], row[row.length - 1]]))).toEqual(expected)
+      for (const row of rows) expect(row).toHaveLength(headers.length)
+    }
+  })
+
+  // The approval screens are where time is signed off: the same reading, in
+  // the entry's Method line and as a chip beside "Manual".
+  it('Time Approvals shows it too (read from TimeApprovalsPage.tsx)', () => {
+    const source = readFileSync(resolve(__dirname, '../pages/TimeApprovalsPage.tsx'), 'utf8').replace(/\r\n/g, '\n')
+    expect(source).toContain(
+      "{entry.entryMethod === 'manual' ? 'Manual' : HOW_LOGGED_LABEL[howLogged(entry, clockSpansOf(entry))]}",
+    )
+    expect(source).toContain("{howLogged(entry, clockSpansOf(entry)) === 'timer_edited' ? (")
+    // Its own quiet chip, never the Manual badge's look: an edit is not an exception.
+    expect(source).toContain('<span className="clock-edited-chip" title={CLOCK_TIMES_EDITED_TITLE}>')
+    expect(source).toContain('{CLOCK_TIMES_EDITED_CHIP}')
+    const css = readFileSync(resolve(__dirname, '../App.css'), 'utf8')
+    const chip = css.slice(css.indexOf('.clock-edited-chip {'), css.indexOf('}', css.indexOf('.clock-edited-chip {')))
+    expect(chip).toContain('color: var(--muted);')
+    expect(chip).not.toMatch(/background|font-weight|berry/)
+  })
+})
+
 describe('Time by day and job: when the time was worked', () => {
   it('says what the clock times are, on the page and in the column heads', async () => {
     const { section, detail } = await renderDetail()
@@ -422,7 +646,8 @@ describe('Time by day and job: when the time was worked', () => {
     const { rowOf, stretchesOf } = await renderDetail()
     const row = rowOf('Delta Design')
     const cells = [...row.querySelectorAll('td')].map((td) => td.textContent)
-    expect(cells).toContain('Nov 3, 8:59 AM')
+    // The Clock in cell also carries the edit line (this fixture's times are on exact minutes).
+    expect(cells).toContain('Nov 3, 8:59 AMClock times edited')
     expect(cells).toContain('Nov 3, 12:59 PM')
     expect(stretchesOf(row)).toEqual(FOUR_TEXT)
   })
@@ -476,7 +701,7 @@ describe('Time by day and job: when the time was worked', () => {
 })
 
 describe('the exports carry it too, in columns added at the end', () => {
-  const NEW = ['Worked stretches', 'Split across clients', 'Hours note']
+  const NEW = ['Worked stretches', 'Split across clients', 'Hours note', 'Logged']
 
   it('Raw hours: every earlier column keeps its place', async () => {
     await renderDetail()
@@ -555,7 +780,7 @@ describe('the exports carry it too, in columns added at the end', () => {
     await renderDetail()
     fireEvent.click(screen.getByRole('button', { name: /Hours by month \(CSV\)/i }))
     const [, headers, rows] = mockDownloadCsv.mock.calls[0] as unknown as [string, string[], Array<Array<string | number>>]
-    expect(headers.slice(-4)).toEqual(['Description', ...NEW])
+    expect(headers.slice(-5)).toEqual(['Description', ...NEW])
     expect(headers.indexOf('Hours')).toBe(7)
     const col = (name: string) => headers.indexOf(name)
     const acme = rows.find((row) => row[2] === 'Acme Dental') as Array<string | number>

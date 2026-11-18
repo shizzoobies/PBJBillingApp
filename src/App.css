@@ -7142,6 +7142,18 @@ h2 {
   padding: 2px 9px;
 }
 
+/* "Clock times edited" on an approval row. Quiet on purpose: gray, regular
+   weight, no fill. It states a fact about an ordinary, allowed edit and must
+   not read like the Manual badge beside it. */
+.clock-edited-chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 11px;
+  padding: 2px 9px;
+}
+
 .entry-manual-reason {
   color: var(--muted);
   display: block;
