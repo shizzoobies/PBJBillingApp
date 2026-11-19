@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
 import { fetchWeekPlanRequest, saveWeekPlanEntryRequest } from '../lib/api'
@@ -14,10 +14,15 @@ import {
   buildWeekPlan,
   mondayOf,
   normalizeWeekPlanEntry,
+  withTaskBrought,
+  withTaskBroughtBack,
   withTaskDayToggled,
+  withTaskPushed,
+  withTaskPutBack,
   withTaskStatusSet,
   type WeekPlanEntry,
   type WeekPlanMarkStatus,
+  type WeekPlanOffListTask,
   type WeekPlanRow,
   type WeekPlanTask,
   type WeekPlanWait,
@@ -29,7 +34,7 @@ import {
  * Brittany: "look at the week and say ok I need to touch these clients ... and
  * then sort clients by day", so that the clients at the bottom of a person's
  * list are not left until the end of the month. Each person plans her OWN week:
- * the clients she has open work for (due this month or overdue) are listed with
+ * the clients she has open work for (due this week or overdue) are listed with
  * their tasks, she puts each TASK on the day or days she means to work on it
  * (her send-back: "there are 3 task ... I need to be able to put them to
  * different days"), writes a short note per client, and marks a task "In
@@ -54,6 +59,15 @@ import {
  *
  * Whose week: the person using the app. While an owner previews somebody, it is
  * that person's week and nothing can be changed.
+ *
+ * This week's tasks only (her send-back, 2026-11-17: "Task for the week of
+ * 11/23 are showing up in 11/16's que ... to push it to next week or bring to
+ * this week"). The list holds what is due on or before the week's Sunday, and
+ * what is overdue. Later tasks this month are under "Due in a later week",
+ * each with "Bring to this week"; a task on the list has "Push to next week"
+ * (or "Put back", when she brought it forward). Pushed tasks stay findable
+ * under "Pushed to next week", with "Bring back to this week". The three
+ * controls show only when the server said it keeps them (`weekMoves`).
  *
  * An owner can also look at anyone's week from her own page (ship 3: "She can
  * peek at everyone's from her page with a button"): a "Whose week" picker, and
@@ -223,9 +237,26 @@ export function MyWeekPage() {
   // only replaces what is sent next, so the newest row is always the last one
   // written: two saves can never land out of order and leave the page showing
   // something that is not stored. Only her own rows ever go in here.
-  const saveQueue = useRef(new Map<string, { latest: WeekPlanEntry; running: boolean }>())
+  // `weekMoves`: the address it is saved to (`/week` when the week was read from
+  // a server that keeps the week flags, `/row` otherwise).
+  const saveQueue = useRef(
+    new Map<string, { latest: WeekPlanEntry; running: boolean; weekMoves: boolean }>(),
+  )
 
   const loadKey = `${whoseId}|${weekStart}`
+  // Did the server this week was read from say it keeps "brought into this
+  // week" and "pushed to next week"? Without that, Bring, Push, Put back and
+  // Bring back are not offered (they would not be kept).
+  const [movesFor, setMovesFor] = useState<{ key: string; on: boolean } | null>(null)
+  // "Due in a later week" and "Pushed to next week" stay on the page for the
+  // rest of the visit once she has used them, also when the last task has
+  // left them (a line that vanishes the moment it is used disappears under her
+  // hand). For the person and week on screen only.
+  const [keptLines, setKeptLines] = useState<{ key: string; later: boolean; pushed: boolean }>({
+    key: '',
+    later: false,
+    pushed: false,
+  })
   // Clients she has asked to plan work on that is not a task (featreq-f8ebbfc4):
   // a client with no task gets a row at once, and a client already listed gets
   // its "Other work" line, before anything is saved. They belong to the person
@@ -276,6 +307,7 @@ export function MyWeekPage() {
         setEntries(next)
         setLoadedEntries(Object.values(next))
         setLoadError(null)
+        setMovesFor({ key: `${whoseId}|${weekStart}`, on: result.weekMoves === true })
         setLoadedFor(`${whoseId}|${weekStart}`)
       } catch (error) {
         if (signal.aborted) return
@@ -338,7 +370,7 @@ export function MyWeekPage() {
       .map(({ row }) => row)
   }, [data.checklists, clients, ready, loadedEntries, whoseId, weekStart, today, view.rows, pickedIds])
 
-  // Her clients that are not on the page (no open task of hers due this month,
+  // Her clients that are not on the page (no open task of hers due this week,
   // and nothing planned): the ones she can add to plan other work on.
   const addable = useMemo(() => {
     const listed = new Set(view.rows.map((row) => row.clientId))
@@ -349,6 +381,9 @@ export function MyWeekPage() {
 
   // Only her own week, and never in preview.
   const canEdit = ready && !previewMode && ownWeek
+  const weekMoves = ready && movesFor?.key === loadKey && movesFor.on
+  // Bring, Push, Put back and Bring back: her own week, on a server that keeps them.
+  const canMove = canEdit && weekMoves
 
   // Whose week and which week is on screen, for a save that fails after she
   // has moved on (to another week, or to look at another person's).
@@ -375,12 +410,14 @@ export function MyWeekPage() {
     try {
       for (;;) {
         const sending = slot.latest
-        await saveWeekPlanEntryRequest(clientId, {
+        const body = {
           weekStart: week,
           plannedDays: sending.plannedDays,
           note: sending.note,
           taskMarks: sending.taskMarks,
-        })
+        }
+        if (slot.weekMoves) await saveWeekPlanEntryRequest(clientId, body, { weekMoves: true })
+        else await saveWeekPlanEntryRequest(clientId, body)
         if (slot.latest === sending) break
       }
       saveQueue.current.delete(key)
@@ -427,11 +464,13 @@ export function MyWeekPage() {
       setSaveError(null)
       const key = `${weekStart}|${clientId}`
       const slot = saveQueue.current.get(key)
-      if (slot) slot.latest = next
-      else saveQueue.current.set(key, { latest: next, running: false })
+      if (slot) {
+        slot.latest = next
+        slot.weekMoves = weekMoves
+      } else saveQueue.current.set(key, { latest: next, running: false, weekMoves })
       void flush(key, clientId, weekStart, loadKey)
     },
-    [canEdit, flush, weekStart, loadKey, view.rows],
+    [canEdit, flush, weekStart, loadKey, view.rows, weekMoves],
   )
 
   // A day goes on ONE task. The client's task ids come from the page; each
@@ -498,6 +537,57 @@ export function MyWeekPage() {
     saveRow(clientId, (current) =>
       withTaskStatusSet(current, checklistId, choice === 'work' ? null : choice),
     )
+
+  const keepLine = (line: 'later' | 'pushed') =>
+    setKeptLines((current) => ({
+      key: loadKey,
+      later: (current.key === loadKey && current.later) || line === 'later',
+      pushed: (current.key === loadKey && current.pushed) || line === 'pushed',
+    }))
+  // A task due in a later week, put on this week's list to work it early.
+  const bringTask = (clientId: string, checklistId: string) => {
+    if (!canMove) return
+    keepLine('later')
+    saveRow(clientId, (current) => withTaskBrought(current, checklistId))
+  }
+  // Off this week's list (it shows next week by its due date). On a task she
+  // brought forward this is Put back: it goes back to its own week.
+  const pushTask = (clientId: string, checklistId: string) => {
+    if (!canMove) return
+    keepLine('pushed')
+    saveRow(clientId, (current) => withTaskPushed(current, checklistId))
+  }
+  const putBackTask = (clientId: string, checklistId: string) => {
+    if (!canMove) return
+    keepLine('later')
+    saveRow(clientId, (current) => withTaskPutBack(current, checklistId))
+  }
+  const bringBackTask = (clientId: string, checklistId: string) => {
+    if (!canMove) return
+    keepLine('pushed')
+    saveRow(clientId, (current) => withTaskBroughtBack(current, checklistId))
+  }
+  const showLater = view.later.length > 0 || (keptLines.key === loadKey && keptLines.later)
+  const showPushed = view.pushed.length > 0 || (keptLines.key === loadKey && keptLines.pushed)
+  // A client on the page with nothing on this week's list (one she added from
+  // the picker, or kept by a note or a day) whose open tasks are in a later
+  // week or pushed: say where they are, not that nothing is open.
+  const offListNotes = useMemo(() => {
+    const later = new Set(view.later.map((group) => group.clientId))
+    const pushed = new Set(view.pushed.map((line) => line.clientId))
+    const notes = new Map<string, string>()
+    for (const clientId of new Set([...later, ...pushed])) {
+      notes.set(
+        clientId,
+        later.has(clientId) && pushed.has(clientId)
+          ? 'Its tasks are due in a later week or pushed to next week (listed below).'
+          : later.has(clientId)
+            ? 'Its tasks are due in a later week (listed below, under Due in a later week).'
+            : 'Its tasks are pushed to next week (listed below, under Pushed to next week).',
+      )
+    }
+    return notes
+  }, [view.later, view.pushed])
 
   // A person named on a wait may have left the team since: never "Unassigned".
   const nameOf = useCallback(
@@ -575,7 +665,7 @@ export function MyWeekPage() {
 
       {ownWeek && !previewMode ? (
         <p className="my-week-hint">
-          Every client you have open work for that is due this month or overdue. Put each task on the
+          Every client you have open work for that is due this week or overdue. Put each task on the
           day or days you plan to work on it. When you have sent questions and are waiting for an
           answer, set that task to In questions so you can move on to a client you have not started.
           For work that is not on a checklist, use Other work: add it to a client below, or pick any
@@ -608,7 +698,9 @@ export function MyWeekPage() {
         <>
           <p className="my-week-count" role="status">
             {view.rows.length === 0
-              ? 'No open work due this month. Nothing to plan.'
+              ? view.later.length > 0 || view.pushed.length > 0
+                ? 'No open work due this week.'
+                : 'No open work due this month. Nothing to plan.'
               : view.notPlannedCount === 0
                 ? 'Every client is planned or in hand this week.'
                 : `${view.notPlannedCount} ${view.notPlannedCount === 1 ? 'client' : 'clients'} not planned this week`}
@@ -629,6 +721,14 @@ export function MyWeekPage() {
                     <div>
                       <strong>{line.clientName}</strong>
                       <span>{line.title}</span>
+                      {/* Not in this week's client list: say where it lives. */}
+                      {line.offList ? (
+                        <span className="my-week-offlist-tag">
+                          {line.offList === 'pushed'
+                            ? 'pushed to next week'
+                            : `due ${shortDay(line.dueDate)} · later week`}
+                        </span>
+                      ) : null}
                       <span>{waitWords(line.waits, nameOf)}</span>
                     </div>
                     <div className="my-week-question-actions">
@@ -750,9 +850,42 @@ export function MyWeekPage() {
                 onTaskChoice={(checklistId, choice) =>
                   setTaskChoice(row.clientId, checklistId, choice)
                 }
+                canMove={canMove}
+                onPush={(checklistId) => pushTask(row.clientId, checklistId)}
+                onPutBack={(checklistId) => putBackTask(row.clientId, checklistId)}
+                weekEnd={view.weekEnd}
+                offListNote={offListNotes.get(row.clientId) ?? null}
               />
             ))}
           </ul>
+
+          {/* Her open tasks due after this week's Sunday (this month): not on
+              the list above, not lost. Collapsed until she opens it. */}
+          {showLater ? (
+            <WeekOffList
+              key={`later|${loadKey}`}
+              className="my-week-later"
+              title="Due in a later week"
+              nameOf={nameOf}
+              empty="Nothing else is due this month."
+              groups={view.later}
+              actionLabel={canMove ? 'Bring to this week' : null}
+              onAction={bringTask}
+            />
+          ) : null}
+          {/* What she pushed out of this week: findable, and undoable. */}
+          {showPushed ? (
+            <WeekOffList
+              key={`pushed|${loadKey}`}
+              className="my-week-pushed"
+              title="Pushed to next week"
+              nameOf={nameOf}
+              empty="Nothing is pushed to next week."
+              groups={groupByClient(view.pushed)}
+              actionLabel={canMove ? 'Bring back to this week' : null}
+              onAction={bringBackTask}
+            />
+          ) : null}
 
           {view.questions.length > 0 ? (
             <section className="my-week-questions" aria-label="Sent questions">
@@ -906,7 +1039,9 @@ function TeamWeeks({
         (line) =>
           line.state !== 'ready' ||
           (line.view?.rows.filter((row) => !row.noOpenWork).length ?? 0) +
-            (line.view?.finishedClientCount ?? 0) >
+            (line.view?.finishedClientCount ?? 0) +
+            // An answer that is in (also on a later or pushed task) is hers to pick up.
+            (line.view?.answered.length ?? 0) >
             0,
       )
       .filter((line) => line.state !== 'own-hidden')
@@ -969,6 +1104,141 @@ function TeamWeeks({
   )
 }
 
+type OffListGroup = {
+  clientId: string
+  clientName: string
+  tasks: WeekPlanOffListTask[]
+}
+
+/** The pushed tasks, one group per client, in the order they came (by client, then due date). */
+function groupByClient(
+  lines: Array<WeekPlanOffListTask & { clientId: string; clientName: string }>,
+): OffListGroup[] {
+  const groups: OffListGroup[] = []
+  for (const { clientId, clientName, ...task } of lines) {
+    let group = groups.find((each) => each.clientId === clientId)
+    if (!group) {
+      group = { clientId, clientName, tasks: [] }
+      groups.push(group)
+    }
+    group.tasks.push(task)
+  }
+  return groups
+}
+
+/**
+ * What state a task off this week's list is in, in words: an answer that is
+ * in, someone waiting on her, in questions, finished. Empty when nothing is set.
+ */
+function offListStateWords(task: WeekPlanOffListTask, nameOf: (id: string) => string): string {
+  if (task.status === 'answered') return `Answered. ${waitWords(task.waits, nameOf)}`
+  if (task.status === 'finished') return STATUS_WORDS.finished
+  if (task.status === 'questions') {
+    const mine = task.waits.length > 0 && task.waits[0].move === 'mine'
+    return mine ? `In questions. ${waitWords(task.waits, nameOf)}` : STATUS_WORDS.questions
+  }
+  return task.waits.length > 0 ? waitWords(task.waits, nameOf) : ''
+}
+
+/**
+ * A collapsed list of tasks that are not on this week's list ("Due in a later
+ * week", "Pushed to next week"), by client, each with its due date, the state
+ * it is in and, on her own week, one button. Closed until she opens it; the
+ * heading says how many of them need her (an answer in, someone waiting on her).
+ */
+function WeekOffList({
+  className,
+  title,
+  empty,
+  groups,
+  nameOf,
+  actionLabel,
+  onAction,
+}: {
+  className: string
+  title: string
+  empty: string
+  groups: OffListGroup[]
+  nameOf: (id: string) => string
+  /** The button on each task, or null where nothing can be changed. */
+  actionLabel: string | null
+  onAction: (clientId: string, checklistId: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const contentId = useId()
+  const tasks = groups.flatMap((group) => group.tasks)
+  const answered = tasks.filter((task) => task.status === 'answered').length
+  const waitingOnHer = tasks.filter((task) => task.needsHer && task.status !== 'answered').length
+  const heading = [
+    `${title} (${tasks.length})`,
+    ...(answered > 0 ? [`${answered} answered`] : []),
+    ...(waitingOnHer > 0 ? [`${waitingOnHer} waiting on you`] : []),
+  ].join(' · ')
+  return (
+    <section className={`my-week-offlist ${className}`} aria-label={title}>
+      <h3 className="my-week-subhead">
+        <button
+          type="button"
+          className="ghost-action"
+          aria-expanded={open}
+          aria-controls={contentId}
+          onClick={() => setOpen((was) => !was)}
+        >
+          {heading}
+        </button>
+      </h3>
+      <div id={contentId}>
+        {open ? (
+          groups.length === 0 ? (
+            <p className="my-week-empty">{empty}</p>
+          ) : (
+            <ul>
+              {groups.map((group) => (
+                <li key={group.clientId}>
+                  <strong>{group.clientName}</strong>
+                  <ul>
+                    {group.tasks.map((task) => {
+                      const state = offListStateWords(task, nameOf)
+                      return (
+                        <li
+                          key={task.checklistId}
+                          className={`my-week-offlist-task${task.needsHer ? ' is-needs-her' : ''}`}
+                        >
+                          <Link to={`/checklists?focus=${encodeURIComponent(task.checklistId)}`}>{task.title}</Link>
+                          <span className="my-week-due">Due {shortDay(task.dueDate)}</span>
+                          {state ? (
+                            <span
+                              className={`my-week-wait${
+                                task.status === 'answered' ? ' is-answered' : task.needsHer ? ' is-mine' : ''
+                              }`}
+                            >
+                              {state}
+                            </span>
+                          ) : null}
+                          {actionLabel ? (
+                            <button
+                              type="button"
+                              className="ghost-action"
+                              onClick={() => onAction(group.clientId, task.checklistId)}
+                            >
+                              {actionLabel}
+                              <span className="visually-hidden"> for {task.title} ({group.clientName})</span>
+                            </button>
+                          ) : null}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </li>
+              ))}
+            </ul>
+          )
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
 function ClientRow({
   row,
   days,
@@ -981,6 +1251,11 @@ function ClientRow({
   onClear,
   onNote,
   onTaskChoice,
+  canMove,
+  onPush,
+  onPutBack,
+  weekEnd,
+  offListNote,
 }: {
   row: WeekPlanRow
   days: string[]
@@ -993,11 +1268,23 @@ function ClientRow({
   onClear: () => void
   onNote: (note: string) => void
   onTaskChoice: (checklistId: string, choice: TaskChoice) => void
+  /** Push to next week / Put back are offered (her own week, on a server that keeps them). */
+  canMove: boolean
+  onPush: (checklistId: string) => void
+  onPutBack: (checklistId: string) => void
+  /** The week's Sunday: a task due by then (and not overdue) reads "Due this week". */
+  weekEnd: string
+  /** For a client with nothing on this week's list: where its open tasks are instead, or null. */
+  offListNote: string | null
 }) {
   // The note is typed freely and saved when she leaves the box (or presses Enter).
   const [draft, setDraft] = useState(row.note)
   const [editing, setEditing] = useState(false)
   const shownNote = editing ? draft : row.note
+  // The chip agrees with the list rule: due on or before the week's Sunday is
+  // this week's (a Saturday or Sunday due date included). `dueThisWeek` itself
+  // (Monday to Friday) is left as it is for its other readers.
+  const dueInWeek = (task: WeekPlanTask) => task.dueThisWeek || (task.dueDate >= days[0] && task.dueDate <= weekEnd)
   const commit = () => {
     setEditing(false)
     const next = draft.replace(/\s+/g, ' ').trim()
@@ -1011,7 +1298,7 @@ function ClientRow({
           <Link className="client-name-link" to={`/clients/${row.clientId}`}>
             {row.clientName}
           </Link>
-          <span className="my-week-rollup">{rollupWords(row)}</span>
+          <span className="my-week-rollup">{row.noOpenWork && offListNote && row.otherDays.length === 0 ? 'Nothing this week' : rollupWords(row)}</span>
         </div>
         {/* Ad hoc work for a client that is listed for its tasks. */}
         {canEdit && !showOther ? (
@@ -1044,7 +1331,7 @@ function ClientRow({
 
       {row.noOpenWork ? (
         <p className="my-week-empty">
-          No task of yours is open for this client now.{' '}
+          {offListNote ?? 'No task of yours is open for this client now.'}{' '}
           {canEdit ? (
             <button type="button" className="ghost-action" onClick={onClear}>
               {row.note ? 'Take it off my week (clears the note)' : 'Take it off my week'}
@@ -1062,11 +1349,12 @@ function ClientRow({
                 <span className="my-week-task-meta">
                   <span
                     className={
-                      task.overdue ? 'my-week-due is-overdue' : task.dueThisWeek ? 'my-week-due is-week' : 'my-week-due'
+                      task.overdue ? 'my-week-due is-overdue' : dueInWeek(task) ? 'my-week-due is-week' : 'my-week-due'
                     }
                   >
-                    {task.overdue ? 'Overdue, was due ' : task.dueThisWeek ? 'Due this week, ' : 'Due '}
-                    {shortDay(task.dueDate)}
+                    {task.brought
+                      ? `Brought forward · due ${shortDay(task.dueDate)}`
+                      : `${task.overdue ? 'Overdue, was due ' : dueInWeek(task) ? 'Due this week, ' : 'Due '}${shortDay(task.dueDate)}`}
                   </span>
                   {stepWords(task) ? <span>{stepWords(task)}</span> : null}
                   {task.mine === 'step' ? <span>A step of this is yours</span> : null}
@@ -1127,6 +1415,18 @@ function ClientRow({
                     status shown is something else (planned or not, or set by
                     the Waiting flags), this says it. */}
                 {task.status !== task.hand ? <small>{STATUS_WORDS[task.status]}</small> : null}
+                {/* Which week it belongs to. A task she brought forward goes
+                    back to its own week; any other leaves for next week. */}
+                {canMove ? (
+                  <button
+                    type="button"
+                    className="ghost-action my-week-move"
+                    onClick={() => (task.brought ? onPutBack(task.checklistId) : onPush(task.checklistId))}
+                  >
+                    {task.brought ? 'Put back' : 'Push to next week'}
+                    <span className="visually-hidden"> for {task.title} ({row.clientName})</span>
+                  </button>
+                ) : null}
               </div>
             </li>
           ))}

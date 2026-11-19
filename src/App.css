@@ -15147,6 +15147,37 @@ details.invoice-run-sent ul,
   font-size: 13px;
 }
 
+/* My Week, this week's tasks only: "Due in a later week" and "Pushed to next week". */
+.my-week-offlist {
+  margin-top: 14px;
+}
+
+.my-week-offlist ul {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.my-week-offlist ul ul {
+  margin: 4px 0 0 12px;
+}
+
+.my-week-offlist-task {
+  align-items: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 6px 12px;
+}
+
+.my-week-move {
+  font-size: 12px;
+}
+
 /* My Week, ship 3: the owner's "whose week" picker and a line per person. */
 .my-week-who {
   align-items: center;

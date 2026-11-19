@@ -62428,6 +62428,46 @@ describe('My Week: week plan entries (featreq-f0e8046b)', () => {
       expect(listed).toEqual(saved)
     })
 
+    // Her send-back 2026-11-17: "push it to next week or bring to this week".
+    it('keeps "brought" and "pushed" on a task’s mark, a mark with only a flag included', async () => {
+      const saved = await store.saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: ['2026-11-18'],
+        note: '',
+        taskMarks: {
+          'chk-1': { days: ['2026-11-18'], brought: true },
+          'chk-2': { status: 'questions', note: 'asked', days: [], pushed: true },
+          'chk-3': { pushed: true },
+          'chk-4': { brought: true, pushed: true },
+        },
+      })
+      expect(saved.taskMarks).toEqual({
+        'chk-1': { status: null, note: '', days: ['2026-11-18'], brought: true },
+        'chk-2': { status: 'questions', note: 'asked', days: [], pushed: true },
+        'chk-3': { status: null, note: '', days: [], pushed: true },
+      })
+      const [listed] = await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })
+      expect(listed).toEqual(saved)
+      // A row holding only a flag is kept, not deleted as empty.
+      const flagOnly = await store.saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c2',
+        plannedDays: [],
+        note: '',
+        taskMarks: { 'chk-9': { pushed: true } },
+      })
+      expect(typeof flagOnly.updatedAt).toBe('string')
+      // A flag belongs to its week: next week has nothing.
+      expect(await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: NEXT_WEEK })).toEqual([])
+      expect((await store.listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })).map((entry) => entry.clientId)).toEqual([
+        'c1',
+        'c2',
+      ])
+    })
+
     it('refuses a save with no person, week or client', async () => {
       await expect(store.saveWeekPlanEntry({ weekStart: WEEK, clientId: 'c1' })).rejects.toThrow()
       await expect(store.saveWeekPlanEntry({ userId: 'emp-1', clientId: 'c1' })).rejects.toThrow()
@@ -62552,6 +62592,54 @@ describe('My Week: week plan entries (featreq-f0e8046b)', () => {
       expect(saved.taskMarks).toEqual(marks)
       const [listed] = await postgresStore(fake).listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })
       expect(listed.taskMarks).toEqual(marks)
+    })
+
+    // Her send-back 2026-11-17: the two week flags ride inside the jsonb marks,
+    // the same statement and parameters as before.
+    it('writes "brought" and "pushed" inside the jsonb marks, a flag-only mark included, and reads them back', async () => {
+      const marks = {
+        'chk-1': { status: null, note: '', days: ['2026-11-16'], brought: true },
+        'chk-3': { status: null, note: '', days: [], pushed: true },
+      }
+      const fake = fakeSpitballPostgres((text) =>
+        /^insert into week_plan_entries/i.test(text)
+          ? { rows: [storedRow({ task_marks: marks })], rowCount: 1 }
+          : /from week_plan_entries/i.test(text)
+            ? { rows: [storedRow({ task_marks: JSON.stringify(marks) })], rowCount: 1 }
+            : null,
+      )
+      const saved = await postgresStore(fake).saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: ['2026-11-16'],
+        note: '',
+        taskMarks: { 'chk-3': { pushed: true }, 'chk-1': { days: ['2026-11-16'], brought: true } },
+      })
+      expect(fake.statements).toHaveLength(1)
+      expect(fake.statements[0].text).toMatch(/^insert into week_plan_entries/i)
+      expect(fake.statements[0].params).toHaveLength(7)
+      expect(JSON.parse(fake.statements[0].params[6])).toEqual(marks)
+      expect(saved.taskMarks).toEqual(marks)
+      const [listed] = await postgresStore(fake).listWeekPlanEntries({ userId: 'emp-1', weekStart: WEEK })
+      expect(listed.taskMarks).toEqual(marks)
+    })
+
+    it('a row holding only a flag is upserted, not deleted', async () => {
+      const fake = fakeSpitballPostgres((text) =>
+        /^insert into week_plan_entries/i.test(text) ? { rows: [storedRow()], rowCount: 1 } : null,
+      )
+      await postgresStore(fake).saveWeekPlanEntry({
+        userId: 'emp-1',
+        weekStart: WEEK,
+        clientId: 'c1',
+        plannedDays: [],
+        note: '',
+        taskMarks: { 'chk-1': { pushed: true } },
+      })
+      expect(fake.statements).toHaveLength(1)
+      expect(fake.statements[0].text).toMatch(/^insert into week_plan_entries/i)
+      expect(fake.statements[0].params[4]).toEqual([])
     })
 
     it('stores no note as null, not as an empty string', async () => {

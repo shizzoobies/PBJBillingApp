@@ -62,6 +62,30 @@ describe('saveWeekPlanEntryRequest', () => {
     expect(String(fetchMock.mock.calls[0][0])).not.toMatch(/\/tasks$/)
   })
 
+  // A server that keeps the week flags: the row goes to `/week`, an address no
+  // earlier server has (that server's `/row` would answer 200 and drop them).
+  it('with the week flags on, PUTs the row with its flags to /week', async () => {
+    const flagged = {
+      ...row,
+      taskMarks: { ...row.taskMarks, 'chk-2': { status: null, note: '', days: [], pushed: true } },
+    }
+    fetchMock.mockResolvedValue(jsonResponse({ weekStart: row.weekStart, entry: { clientId: 'c1', ...flagged, updatedAt: null } }))
+    await saveWeekPlanEntryRequest('client a', flagged, { weekMoves: true })
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toBe('/api/week-plan/client%20a/week')
+    expect(JSON.parse(String(init.body)).taskMarks['chk-2']).toEqual({ status: null, note: '', days: [], pushed: true })
+    const previous = [/\/api\/week-plan\/[^/]+$/, /\/api\/week-plan\/[^/]+\/(?:row|tasks)$/]
+    for (const pattern of previous) expect(String(url)).not.toMatch(pattern)
+  })
+
+  it('the /week address with no route (the previous server, mid-update) is an error, never a silent success', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse({ error: 'Not found' }, 404))
+    await expect(saveWeekPlanEntryRequest('client-1', row, { weekMoves: true })).rejects.toMatchObject({
+      status: 404,
+      message: 'My Week is being updated. Try again in a moment.',
+    })
+  })
+
   it('sends other work (the days on a client with no task) in the row, under its key', async () => {
     const other = { status: null, note: '', days: ['2026-11-18'] }
     const withOther = { ...row, plannedDays: ['2026-11-16', '2026-11-18'], taskMarks: { ...row.taskMarks, '*': other } }
@@ -116,7 +140,19 @@ describe('fetchWeekPlanRequest', () => {
       weekStart: '2026-11-16',
       userId: 'emp-1',
       entries: [{ clientId: 'c1', ...row, updatedAt: null }],
+      weekMoves: false,
     })
+  })
+
+  // "Bring to this week" / "Push to next week": only a server that says it
+  // keeps them gets the controls (the page hides them otherwise).
+  it('says whether the server keeps the week flags: only exactly true is yes', async () => {
+    fetchMock.mockResolvedValue(answer({ daysPerTask: true, weekMoves: true }))
+    expect((await fetchWeekPlanRequest('2026-11-16')).weekMoves).toBe(true)
+    for (const marker of [undefined, false, 'true', 1, null]) {
+      fetchMock.mockResolvedValue(answer({ daysPerTask: true, weekMoves: marker }))
+      expect((await fetchWeekPlanRequest('2026-11-16')).weekMoves).toBe(false)
+    }
   })
 
   it('names a person when an owner looks at their week', async () => {

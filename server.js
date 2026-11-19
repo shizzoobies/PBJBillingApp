@@ -235,7 +235,7 @@ import {
   sanitizeDashboardLayout,
 } from './lib/dashboard-layout.js'
 import { writeBroadcastsDataChange } from './lib/data-change-broadcast.js'
-import { WEEK_PLAN_RELOAD_MESSAGE, isMonday, normalizeWeekPlanInput } from './lib/week-plan.js'
+import { WEEK_PLAN_RELOAD_MESSAGE, isMonday, normalizeWeekPlanInput, withStoredWeekFlags } from './lib/week-plan.js'
 import { clientSignedDocuments } from './lib/signed-documents.js'
 import {
   listBlockingWeeks,
@@ -16275,7 +16275,11 @@ const server = createServer(async (request, response) => {
       // for it and will not show (or let her change) a week answered without
       // it, which is what yesterday's server sends during a deploy hand-over:
       // it reads a per-task row as "the client is on these days".
-      sendJson(response, 200, { weekStart, userId, entries, daysPerTask: true })
+      // `weekMoves`: this server keeps "brought into this week" and "pushed to
+      // next week" on a task (its `/week` address). A page answered without it
+      // hides those controls, since the server it is talking to would not
+      // keep them.
+      sendJson(response, 200, { weekStart, userId, entries, daysPerTask: true, weekMoves: true })
       return
     }
 
@@ -16296,15 +16300,16 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    // PUT /api/week-plan/:clientId/row (and .../tasks) — save MY row for one
+    // PUT /api/week-plan/:clientId/week (and .../row, .../tasks) — save MY row for one
     // client and one week: `{ weekStart, note, taskMarks }`, the whole row each
     // time, with the days on each task (`taskMarks[checklistId].days`) and,
     // under the key '*', the days of work for the client that is not a task
     // (featreq-f8ebbfc4; any client she can see, with or without a checklist).
     //
-    // Two addresses, one handler, because two versions of the page and of the
+    // Three addresses, one handler, because two versions of the page and of the
     // server are alive at once around every deploy:
-    //  - `/row` is where the page saves now. The server from before "work with
+    //  - `/row` is where the page saved until "this week's tasks only" (and
+    //    still does when the server it read from did not say `weekMoves`). The server from before "work with
     //    no task" does not have it, so during a hand-over (or after a rollback)
     //    a save from this page finds no route there and is not written. That
     //    server DOES have `/tasks`, and would accept the row and drop the '*'
@@ -16313,13 +16318,21 @@ const server = createServer(async (request, response) => {
     //    sends back every mark it was given, '*' included, so nothing is lost
     //    by taking its saves here. (`/tasks` was itself the address the very
     //    first server did not have; see the route above.)
+    //  - `/week` (featreq-f0e8046b send-back, 2026-11-17) is where the page
+    //    saves now: the same row plus, on a task's mark, `brought` (brought
+    //    into this week) and `pushed` (pushed to next week). No earlier server
+    //    has it, so a save from this page is never half-understood: a server
+    //    with `/row` would answer 200 and drop the two flags after writing.
+    //    On `/row` and `/tasks` (pages that know nothing of the flags, and
+    //    drop them when they read a row) the flags STORED on the row are kept
+    //    (`withStoredWeekFlags`), so an old tab cannot erase a push or a bring.
     //
     // Always the signed-in person's own plan: there is no `user` to name, so
     // nobody, an owner included, can write another person's week. The client
     // must be one she can see (a client she cannot see is "not found", the same
     // answer as one that does not exist). A preview never reaches here: writes
     // are refused while previewing.
-    const weekPlanSaveMatch = normalizedPath.match(/^\/api\/week-plan\/([^/]+)\/(?:row|tasks)$/)
+    const weekPlanSaveMatch = normalizedPath.match(/^\/api\/week-plan\/([^/]+)\/(row|tasks|week)$/)
     if (weekPlanSaveMatch) {
       const session = await requireSession(request, response)
       if (!session) return
@@ -16340,21 +16353,30 @@ const server = createServer(async (request, response) => {
         return
       }
       const payload = await readJsonBody(request)
-      const checked = normalizeWeekPlanInput(payload, {
-        checklistIds: (data.checklists ?? [])
-          .filter((checklist) => checklist.clientId === clientId)
-          .map((checklist) => checklist.id),
-      })
+      const clientChecklistIds = (data.checklists ?? [])
+        .filter((checklist) => checklist.clientId === clientId)
+        .map((checklist) => checklist.id)
+      const checked = normalizeWeekPlanInput(payload, { checklistIds: clientChecklistIds })
       if (!checked.ok) {
         sendJson(response, 400, { error: checked.error })
         return
       }
+      let row = checked.value
+      if (weekPlanSaveMatch[2] !== 'week') {
+        // A page that does not know the week flags: keep the stored ones.
+        const storedEntries = await appDataStore.listWeekPlanEntries({
+          userId: session.user.id,
+          weekStart: checked.value.weekStart,
+        })
+        const stored = storedEntries.find((entry) => entry.clientId === clientId) ?? null
+        row = withStoredWeekFlags(checked.value, stored, { checklistIds: clientChecklistIds })
+      }
       const entry = await appDataStore.saveWeekPlanEntry({
         userId: session.user.id,
         clientId,
-        ...checked.value,
+        ...row,
       })
-      sendJson(response, 200, { weekStart: checked.value.weekStart, entry })
+      sendJson(response, 200, { weekStart: row.weekStart, entry })
       return
     }
 

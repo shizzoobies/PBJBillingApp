@@ -56,7 +56,7 @@ const data = {
   ],
   employees: [{ id: LISA, name: 'Lisa', role: 'Bookkeeper' }],
   checklists: [
-    checklist('chk-close', 'c-acme', 'Monthly close', '2026-11-30'),
+    checklist('chk-close', 'c-acme', 'Monthly close', '2026-11-20'),
     checklist('chk-payroll', 'c-acme', 'Payroll', '2026-11-18'),
     checklist('chk-bright', 'c-bright', 'Sales tax', '2026-11-10'),
     checklist('chk-old', 'c-old', 'Wind down', '2026-11-20'),
@@ -132,7 +132,7 @@ describe('My Week: what it shows', () => {
     const acme = within(row('Acme Dental'))
     expect(acme.getByRole('link', { name: 'Payroll' })).toHaveAttribute('href', '/checklists?focus=chk-payroll')
     expect(acme.getByText('Due this week, Nov 18')).toBeInTheDocument()
-    expect(acme.getByText('Due Nov 30')).toBeInTheDocument()
+    expect(acme.getByText('Due this week, Nov 20')).toBeInTheDocument()
     expect(acme.getAllByText('1 of 2 done')).toHaveLength(2)
     expect(within(row('Bright Books')).getByText('Overdue, was due Nov 10')).toBeInTheDocument()
     expect(acme.getByText('2 not planned')).toBeInTheDocument()
@@ -211,9 +211,9 @@ describe('My Week: planning', () => {
         ...data,
         clients: [{ id: 'c-assoc', name: 'Associated Enterprise' }],
         checklists: [
-          checklist('chk-1', 'c-assoc', 'Bank recs', '2026-11-30'),
-          checklist('chk-2', 'c-assoc', 'Payroll', '2026-11-30'),
-          checklist('chk-3', 'c-assoc', 'Sales tax', '2026-11-30'),
+          checklist('chk-1', 'c-assoc', 'Bank recs', '2026-11-20'),
+          checklist('chk-2', 'c-assoc', 'Payroll', '2026-11-20'),
+          checklist('chk-3', 'c-assoc', 'Sales tax', '2026-11-20'),
         ],
       },
     } as unknown as AppContextValue
@@ -293,7 +293,7 @@ describe('My Week: planning', () => {
       data: {
         ...data,
         checklists: [
-          checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-30', { items: [step('a', true)] }),
+          checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-20', { items: [step('a', true)] }),
           // Still open, but its due date moved into next year: not on this page for now.
           checklist('chk-later', 'c-acme', 'Year-end', '2027-01-15'),
         ],
@@ -332,7 +332,7 @@ describe('My Week: planning', () => {
       ...contextValue,
       data: {
         ...data,
-        checklists: [checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-30', { items: [step('a', true)] })],
+        checklists: [checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-20', { items: [step('a', true)] })],
       },
     } as unknown as AppContextValue
     mockFetch.mockResolvedValue({
@@ -897,7 +897,7 @@ describe('My Week: work with no task', () => {
       ...contextValue,
       data: {
         ...contextValue.data,
-        checklists: [checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-30', { items: [step('a', true)] })],
+        checklists: [checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-20', { items: [step('a', true)] })],
       },
     } as unknown as AppContextValue
     // Saved by the first version: the client on Wednesday, no days on any task.
@@ -940,7 +940,7 @@ describe('My Week: work with no task', () => {
       ...contextValue,
       data: {
         ...contextValue.data,
-        checklists: [...contextValue.data.checklists, checklist('chk-zeta', 'c-zeta', 'Cleanup', '2026-11-25')],
+        checklists: [...contextValue.data.checklists, checklist('chk-zeta', 'c-zeta', 'Cleanup', '2026-11-19')],
       },
     } as unknown as AppContextValue
     rerender(page())
@@ -957,7 +957,7 @@ describe('My Week: work with no task', () => {
       ...contextValue,
       data: {
         ...contextValue.data,
-        checklists: [checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-30', { items: [step('a', true)] })],
+        checklists: [checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-20', { items: [step('a', true)] })],
       },
     } as unknown as AppContextValue
     mockFetch.mockResolvedValue({
@@ -1154,7 +1154,7 @@ describe('My Week: questions that set themselves from the Waiting flags', () => 
     } as unknown as AppContextValue
   }
   const waitingTask = (id: string, clientId: string, title: string, wait = waitOn()) =>
-    checklist(id, clientId, title, '2026-11-30', {
+    checklist(id, clientId, title, '2026-11-20', {
       items: [step('a', true), { ...step('b', false), waitingOns: [wait] }],
     })
 
@@ -1183,7 +1183,7 @@ describe('My Week: questions that set themselves from the Waiting flags', () => 
   it('a wait on the client says "the client", and an old-style flag says it is marked waiting', async () => {
     withData([
       waitingTask('chk-c', 'c-acme', 'Sales tax', waitOn({ blockerType: 'client', blockerId: 'c-acme' })),
-      checklist('chk-old', 'c-bright', 'Bank recs', '2026-11-30', {
+      checklist('chk-old', 'c-bright', 'Bank recs', '2026-11-20', {
         items: [{ ...step('a', false), waiting: true, waitingOn: 'statements from the bank' }],
       }),
     ])
@@ -1269,7 +1269,7 @@ describe('My Week: questions that set themselves from the Waiting flags', () => 
 
   it('says it plainly when two people are waiting on her, with and without a date', async () => {
     withData([
-      checklist('chk-two', 'c-acme', 'Monthly close', '2026-11-30', {
+      checklist('chk-two', 'c-acme', 'Monthly close', '2026-11-20', {
         items: [
           {
             ...step('a', false),
@@ -1280,7 +1280,7 @@ describe('My Week: questions that set themselves from the Waiting flags', () => 
           },
         ],
       }),
-      checklist('chk-nodate', 'c-bright', 'Sales tax', '2026-11-30', {
+      checklist('chk-nodate', 'c-bright', 'Sales tax', '2026-11-20', {
         items: [{ ...step('a', false), waitingOns: [waitOn({ blockerId: LISA, requestedBy: BRITT, createdAt: '' })] }],
       }),
     ])
@@ -1294,7 +1294,7 @@ describe('My Week: questions that set themselves from the Waiting flags', () => 
 
   it('names the client and each person once when several waits hold a task', async () => {
     withData([
-      checklist('chk-many', 'c-acme', 'Monthly close', '2026-11-30', {
+      checklist('chk-many', 'c-acme', 'Monthly close', '2026-11-20', {
         items: [
           { ...step('a', false), waitingOns: [waitOn({ id: 'w1', blockerType: 'client', blockerId: 'c-acme', createdAt: '2026-11-13T15:00:00.000Z' })] },
           { ...step('b', false), waitingOns: [waitOn({ id: 'w2' }), waitOn({ id: 'w3' })] },
@@ -1308,7 +1308,7 @@ describe('My Week: questions that set themselves from the Waiting flags', () => 
 
   it('a task where someone is waiting on HER is shown as her work, with who is waiting', async () => {
     withData([
-      checklist('chk-me', 'c-acme', 'Monthly close', '2026-11-30', {
+      checklist('chk-me', 'c-acme', 'Monthly close', '2026-11-20', {
         items: [{ ...step('a', false), waitingOns: [waitOn({ blockerId: LISA, requestedBy: BRITT })] }],
       }),
     ])
@@ -1324,7 +1324,7 @@ describe('My Week: questions that set themselves from the Waiting flags', () => 
 
   it('an answer someone else must confirm reads as still waiting on them', async () => {
     withData([
-      checklist('chk-c', 'c-acme', 'Monthly close', '2026-11-30', {
+      checklist('chk-c', 'c-acme', 'Monthly close', '2026-11-20', {
         items: [
           {
             ...step('a', false),
@@ -1367,8 +1367,8 @@ describe('My Week: questions that set themselves from the Waiting flags', () => 
 
   it('says how many clients are finished for the month', async () => {
     withData([
-      checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-30', { items: [step('a', true)] }),
-      checklist('chk-open', 'c-bright', 'Sales tax', '2026-11-30'),
+      checklist('chk-done', 'c-acme', 'Monthly close', '2026-11-20', { items: [step('a', true)] }),
+      checklist('chk-open', 'c-bright', 'Sales tax', '2026-11-20'),
     ])
     render(page())
     await screen.findByText('My clients this week')
@@ -1423,6 +1423,41 @@ describe('My Week: an owner looks at anyone’s week from her own page', () => {
     within(teamTable()).getByRole('rowheader', { name }).closest('tr') as HTMLElement
   const cells = (name: string) =>
     Array.from(teamRow(name).querySelectorAll('td')).map((cell) => cell.textContent)
+
+  // Her only open item is a later task with an answer in: hers to pick up, so she has a line.
+  it('keeps a line for a person whose only work is a later task with an answer in', async () => {
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...contextValue.data,
+        checklists: [
+          ...contextValue.data.checklists,
+          checklist('chk-nia', 'c-bright', 'Year-end prep', '2026-11-24', {
+            assigneeId: 'emp-none',
+            items: [
+              {
+                ...step('b', false),
+                waitingOns: [
+                  {
+                    id: 'w-nia',
+                    blockerId: OWNER,
+                    requestedBy: 'emp-none',
+                    note: '',
+                    createdAt: '2026-11-16T15:00:00.000Z',
+                    resolvedAt: '2026-11-18T14:00:00.000Z',
+                    resolvedBy: OWNER,
+                  },
+                ],
+              },
+            ],
+          }),
+        ],
+      },
+    } as unknown as AppContextValue
+    render(page())
+    await screen.findByText('My clients this week')
+    await waitFor(() => expect(cells('Nia')).toEqual(['0', '0', '0', '1', '0', expect.anything()]))
+  })
 
   it('opens on her own week, with a picker and a line per person who has open work', async () => {
     render(page())
@@ -1642,5 +1677,334 @@ describe('My Week: an owner looks at anyone’s week from her own page', () => {
     expect(screen.queryByRole('region', { name: "Everyone's week" })).not.toBeInTheDocument()
     expect(mockFetch).toHaveBeenCalledTimes(1)
     expect(mockFetch.mock.calls[0][1]).toBeNull()
+  })
+})
+
+/**
+ * Her send-back (2026-11-17): "Task for the week of 11/23 are showing up in
+ * 11/16's que to schedule ... to push it to next week or bring to this week".
+ * In the week of 11/16 a task due 11/24 is not on the list; "Bring to this
+ * week" puts it there (and on a day); "Push to next week" takes a task off.
+ */
+describe('My Week: this week’s tasks only, Bring to this week and Push to next week', () => {
+  const NEXT_TASK = checklist('chk-next', 'c-acme', 'Year-end prep', '2026-11-24')
+  const LATER_ONLY = checklist('chk-later', 'c-zeta', 'Cleanup', '2026-11-27')
+  beforeEach(() => {
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...data,
+        clients: [...data.clients, { id: 'c-zeta', name: 'Zeta Farms' }],
+        checklists: [...data.checklists, NEXT_TASK, LATER_ONLY],
+      },
+    } as unknown as AppContextValue
+    mockFetch.mockResolvedValue({ weekStart: WEEK, userId: LISA, entries: [], weekMoves: true })
+  })
+  const later = () => screen.getByRole('region', { name: 'Due in a later week' })
+  const pushedLine = () => screen.getByRole('region', { name: 'Pushed to next week' })
+
+  it('a task due next week is not on this week’s list; it waits, collapsed, under "Due in a later week"', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(screen.queryByRole('link', { name: 'Year-end prep' })).not.toBeInTheDocument()
+    // A client there only for a later task is not on the list, nor in the count.
+    expect(screen.queryByRole('link', { name: 'Zeta Farms' })).not.toBeInTheDocument()
+    expect(screen.getByText('2 clients not planned this week')).toBeInTheDocument()
+    const toggle = within(later()).getByRole('button', { name: 'Due in a later week (2)' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(toggle)
+    expect(within(later()).getByText('Acme Dental')).toBeInTheDocument()
+    expect(within(later()).getByRole('link', { name: 'Year-end prep' })).toBeInTheDocument()
+    expect(within(later()).getByText('Due Nov 24')).toBeInTheDocument()
+    expect(within(later()).getByText('Zeta Farms')).toBeInTheDocument()
+    expect(within(later()).getByText('Due Nov 27')).toBeInTheDocument()
+  })
+
+  it('Bring to this week puts it on the list, labeled, saved to /week, and it can go on a day', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    fireEvent.click(within(later()).getByRole('button', { name: /^Due in a later week/ }))
+    fireEvent.click(within(later()).getByRole('button', { name: 'Bring to this week for Year-end prep (Acme Dental)' }))
+    const acme = within(row('Acme Dental'))
+    expect(acme.getByRole('link', { name: 'Year-end prep' })).toBeInTheDocument()
+    expect(acme.getByText('Brought forward · due Nov 24')).toBeInTheDocument()
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave).toHaveBeenCalledWith(
+      'c-acme',
+      {
+        weekStart: WEEK,
+        plannedDays: [],
+        note: '',
+        taskMarks: { 'chk-next': { status: null, note: '', days: [], brought: true } },
+      },
+      { weekMoves: true },
+    )
+    // The section stays for the visit, with one fewer.
+    expect(within(later()).getByRole('button', { name: 'Due in a later week (1)' })).toBeInTheDocument()
+    fireEvent.click(dayButton('Year-end prep', /^Thursday/))
+    expect(within(dayColumn(/^Thursday Nov 19$/)).getByText('Year-end prep')).toBeInTheDocument()
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(2))
+    expect(mockSave.mock.calls[1][1].taskMarks['chk-next']).toEqual({
+      status: null,
+      note: '',
+      days: ['2026-11-19'],
+      brought: true,
+    })
+  })
+
+  it('Put back sends a brought task back to its week and clears its days here', async () => {
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      weekMoves: true,
+      entries: [
+        entry('c-acme', {
+          plannedDays: ['2026-11-19'],
+          taskMarks: { 'chk-next': { status: null, note: '', days: ['2026-11-19'], brought: true } },
+        }),
+      ],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    const acme = within(row('Acme Dental'))
+    expect(acme.queryByRole('button', { name: /^Push to next week: Year-end prep/ })).not.toBeInTheDocument()
+    fireEvent.click(acme.getByRole('button', { name: 'Put back for Year-end prep (Acme Dental)' }))
+    expect(within(row('Acme Dental')).queryByRole('link', { name: 'Year-end prep' })).not.toBeInTheDocument()
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave.mock.calls[0][1]).toEqual({ weekStart: WEEK, plannedDays: [], note: '', taskMarks: {} })
+    fireEvent.click(within(later()).getByRole('button', { name: 'Due in a later week (2)' }))
+    expect(within(later()).getByRole('link', { name: 'Year-end prep' })).toBeInTheDocument()
+  })
+
+  it('Push to next week takes a task off this list; the line stays for the visit and undoes it', async () => {
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(screen.queryByRole('region', { name: 'Pushed to next week' })).not.toBeInTheDocument()
+    fireEvent.click(dayButton('Payroll', /^Monday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    fireEvent.click(within(row('Acme Dental')).getByRole('button', { name: 'Push to next week for Payroll (Acme Dental)' }))
+    expect(within(row('Acme Dental')).queryByRole('link', { name: 'Payroll' })).not.toBeInTheDocument()
+    expect(within(dayColumn(/^Monday Nov 16$/)).getByText('Nothing planned')).toBeInTheDocument()
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(2))
+    expect(mockSave.mock.calls[1]).toEqual([
+      'c-acme',
+      {
+        weekStart: WEEK,
+        plannedDays: [],
+        note: '',
+        taskMarks: { 'chk-payroll': { status: null, note: '', days: [], pushed: true } },
+      },
+      { weekMoves: true },
+    ])
+    const toggle = within(pushedLine()).getByRole('button', { name: 'Pushed to next week (1)' })
+    fireEvent.click(toggle)
+    fireEvent.click(within(pushedLine()).getByRole('button', { name: 'Bring back to this week for Payroll (Acme Dental)' }))
+    expect(within(row('Acme Dental')).getByRole('link', { name: 'Payroll' })).toBeInTheDocument()
+    // The line does not vanish under her hand.
+    expect(within(pushedLine()).getByRole('button', { name: 'Pushed to next week (0)' })).toBeInTheDocument()
+    expect(within(pushedLine()).getByText('Nothing is pushed to next week.')).toBeInTheDocument()
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(3))
+    expect(mockSave.mock.calls[2][1].taskMarks).toEqual({})
+  })
+
+  it('on a later visit what she pushed is still listed', async () => {
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      weekMoves: true,
+      entries: [entry('c-acme', { taskMarks: { 'chk-payroll': { status: null, note: '', days: [], pushed: true } } })],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(within(row('Acme Dental')).queryByRole('link', { name: 'Payroll' })).not.toBeInTheDocument()
+    fireEvent.click(within(pushedLine()).getByRole('button', { name: 'Pushed to next week (1)' }))
+    expect(within(pushedLine()).getByRole('link', { name: 'Payroll' })).toBeInTheDocument()
+    expect(within(pushedLine()).getByText('Due Nov 18')).toBeInTheDocument()
+  })
+
+  it('a server that does not keep the moves: the lists show, the three controls do not, saves go to /row', async () => {
+    mockFetch.mockResolvedValue({ weekStart: WEEK, userId: LISA, entries: [] })
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(screen.queryByRole('button', { name: /^Push to next week/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Put back/ })).not.toBeInTheDocument()
+    fireEvent.click(within(later()).getByRole('button', { name: 'Due in a later week (2)' }))
+    expect(within(later()).getByRole('link', { name: 'Year-end prep' })).toBeInTheDocument()
+    expect(within(later()).queryByRole('button', { name: /^Bring to this week/ })).not.toBeInTheDocument()
+    fireEvent.click(dayButton('Payroll', /^Monday/))
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    // No third argument: the request helper saves to /row.
+    expect(mockSave.mock.calls[0]).toHaveLength(2)
+  })
+
+  it('looking at a week that cannot be changed: the same lists and labels, no controls', async () => {
+    contextValue = { ...contextValue, previewMode: true } as unknown as AppContextValue
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      weekMoves: true,
+      entries: [
+        entry('c-acme', {
+          taskMarks: {
+            'chk-next': { status: null, note: '', days: [], brought: true },
+            'chk-payroll': { status: null, note: '', days: [], pushed: true },
+          },
+        }),
+      ],
+    })
+    render(page())
+    await screen.findByText(/clients this week/)
+    expect(within(row('Acme Dental')).getByText('Brought forward · due Nov 24')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^(Push to next week|Put back)/ })).not.toBeInTheDocument()
+    fireEvent.click(within(pushedLine()).getByRole('button', { name: 'Pushed to next week (1)' }))
+    expect(within(pushedLine()).queryByRole('button', { name: /^Bring back/ })).not.toBeInTheDocument()
+    fireEvent.click(within(later()).getByRole('button', { name: 'Due in a later week (1)' }))
+    expect(within(later()).queryByRole('button', { name: /^Bring to this week/ })).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * The week rule decides the PLANNING list only. Work that is hers to pick up
+ * (an answer that is in, someone waiting on her) is never hidden by it.
+ */
+describe('My Week: tasks off this week’s list that need her', () => {
+  const BRITT = 'emp-britt'
+  const BOB = 'emp-bob'
+  const answeredStep = {
+    ...step('b', false),
+    waitingOns: [
+      {
+        id: 'w1',
+        blockerId: BRITT,
+        requestedBy: LISA,
+        note: 'which account?',
+        createdAt: '2026-11-16T15:00:00.000Z',
+        resolvedAt: '2026-11-18T14:00:00.000Z',
+        resolvedBy: BRITT,
+      },
+    ],
+  }
+  const onHerStep = {
+    ...step('b', false),
+    assigneeId: BOB,
+    waitingOns: [{ id: 'w2', blockerId: LISA, requestedBy: BOB, note: '', createdAt: '2026-11-16T15:00:00.000Z' }],
+  }
+  const withChecklists = (extra: unknown[]) => {
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...data,
+        employees: [...data.employees, { id: BRITT, name: 'Brittany', role: 'Owner' }, { id: BOB, name: 'Bob', role: 'Bookkeeper' }],
+        checklists: [...data.checklists, ...extra],
+      },
+    } as unknown as AppContextValue
+  }
+  const later = () => screen.getByRole('region', { name: 'Due in a later week' })
+  beforeEach(() => {
+    mockFetch.mockResolvedValue({ weekStart: WEEK, userId: LISA, entries: [], weekMoves: true })
+  })
+
+  it('a later task whose answer is in is in "Answered: pick these up", and its section says so', async () => {
+    withChecklists([checklist('chk-next', 'c-acme', 'Year-end prep', '2026-11-24', { items: [step('a', true), answeredStep] })])
+    render(page())
+    await screen.findByText('My clients this week')
+    const answered = screen.getByRole('region', { name: 'Answered' })
+    expect(within(answered).getByText('Year-end prep')).toBeInTheDocument()
+    // Not in this week's client list: the line says where it lives.
+    expect(within(answered).getByText('due Nov 24 · later week')).toBeInTheDocument()
+    expect(within(answered).getByText('Brittany answered. Open it to confirm and carry on.')).toBeInTheDocument()
+    const toggle = within(later()).getByRole('button', { name: 'Due in a later week (1) · 1 answered' })
+    fireEvent.click(toggle)
+    expect(within(later()).getByText('Answered. Brittany answered. Open it to confirm and carry on.')).toBeInTheDocument()
+  })
+
+  it('a later task where someone is waiting on her says so, and the heading counts it', async () => {
+    withChecklists([checklist('chk-next', 'c-acme', 'Year-end prep', '2026-11-24', { items: [step('a', true), onHerStep] })])
+    render(page())
+    await screen.findByText('My clients this week')
+    fireEvent.click(within(later()).getByRole('button', { name: 'Due in a later week (1) · 1 waiting on you' }))
+    expect(within(later()).getByText('Bob has been waiting on you since Nov 16.')).toBeInTheDocument()
+  })
+
+  it('a pushed task whose answer is in stays in "Answered: pick these up"', async () => {
+    withChecklists([])
+    contextValue = {
+      ...contextValue,
+      data: {
+        ...contextValue.data,
+        checklists: [
+          ...data.checklists.filter((each) => each.id !== 'chk-payroll'),
+          checklist('chk-payroll', 'c-acme', 'Payroll', '2026-11-18', { items: [step('a', true), answeredStep] }),
+        ],
+      },
+    } as unknown as AppContextValue
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      weekMoves: true,
+      entries: [entry('c-acme', { taskMarks: { 'chk-payroll': { status: null, note: '', days: [], pushed: true } } })],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(within(row('Acme Dental')).queryByRole('link', { name: 'Payroll' })).not.toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: 'Answered' })).getByText('Payroll')).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: 'Answered' })).getByText('pushed to next week')).toBeInTheDocument()
+    const pushedLine = screen.getByRole('region', { name: 'Pushed to next week' })
+    expect(within(pushedLine).getByRole('button', { name: 'Pushed to next week (1) · 1 answered' })).toBeInTheDocument()
+  })
+
+  it('Push on a task whose brought flag is stale (due date moved into this week) pushes it', async () => {
+    mockFetch.mockResolvedValue({
+      weekStart: WEEK,
+      userId: LISA,
+      weekMoves: true,
+      entries: [
+        entry('c-acme', {
+          plannedDays: ['2026-11-19'],
+          taskMarks: { 'chk-payroll': { status: null, note: '', days: ['2026-11-19'], brought: true } },
+        }),
+      ],
+    })
+    render(page())
+    await screen.findByText('My clients this week')
+    const acme = within(row('Acme Dental'))
+    expect(acme.queryByText(/^Brought forward/)).not.toBeInTheDocument()
+    fireEvent.click(acme.getByRole('button', { name: 'Push to next week for Payroll (Acme Dental)' }))
+    expect(within(row('Acme Dental')).queryByRole('link', { name: 'Payroll' })).not.toBeInTheDocument()
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1))
+    expect(mockSave.mock.calls[0][1].taskMarks['chk-payroll']).toEqual({ status: null, note: '', days: [], pushed: true })
+  })
+
+  it('a task due on the week’s Saturday or Sunday reads "Due this week"', async () => {
+    withChecklists([checklist('chk-sun', 'c-bright', 'Weekend close', '2026-11-22')])
+    render(page())
+    await screen.findByText('My clients this week')
+    expect(within(row('Bright Books')).getByText('Due this week, Nov 22')).toBeInTheDocument()
+  })
+
+  it('a client added from the picker whose tasks are all later says where they are', async () => {
+    withChecklists([checklist('chk-later', 'c-zeta', 'Cleanup', '2026-11-27')])
+    contextValue = {
+      ...contextValue,
+      data: { ...contextValue.data, clients: [...data.clients, { id: 'c-zeta', name: 'Zeta Farms' }] },
+    } as unknown as AppContextValue
+    render(page())
+    await screen.findByText('My clients this week')
+    fireEvent.change(screen.getByLabelText('Work on a client that has no task'), { target: { value: 'c-zeta' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to my week' }))
+    const zeta = within(row('Zeta Farms'))
+    expect(zeta.getByText(/Its tasks are due in a later week/)).toBeInTheDocument()
+    expect(zeta.queryByText(/No task of yours is open/)).not.toBeInTheDocument()
+  })
+
+  it('each collapsed section button says which list it opens', async () => {
+    withChecklists([checklist('chk-next', 'c-acme', 'Year-end prep', '2026-11-24')])
+    render(page())
+    await screen.findByText('My clients this week')
+    const toggle = within(later()).getByRole('button', { name: /^Due in a later week/ })
+    const controlled = toggle.getAttribute('aria-controls')
+    expect(controlled).toBeTruthy()
+    expect(document.getElementById(controlled as string)).not.toBeNull()
+    expect(later().contains(document.getElementById(controlled as string))).toBe(true)
   })
 })

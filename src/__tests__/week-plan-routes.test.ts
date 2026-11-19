@@ -60,7 +60,7 @@ describe('GET /api/week-plan', () => {
   it('reads only through the store method, scoped to one person and one week', () => {
     expect(route).toContain('await appDataStore.listWeekPlanEntries({ userId, weekStart })')
     // It says it keeps days on each task; the page will not use a week answered without that.
-    expect(route).toContain('sendJson(response, 200, { weekStart, userId, entries, daysPerTask: true })')
+    expect(route).toContain('sendJson(response, 200, { weekStart, userId, entries, daysPerTask: true, weekMoves: true })')
     expect(route.split('appDataStore.').length - 1).toBe(2) // getTeamMember (owner asking) + the list
   })
 })
@@ -93,7 +93,7 @@ describe('PUT /api/week-plan/:clientId (the first version’s address)', () => {
   })
 })
 
-describe('PUT /api/week-plan/:clientId/row (and /tasks)', () => {
+describe('PUT /api/week-plan/:clientId/week (and /row, /tasks)', () => {
   const route = slice(
     'const weekPlanSaveMatch = normalizedPath.match(',
     "if (normalizedPath === '/api/waiting-on-me' && request.method === 'GET') {",
@@ -103,24 +103,30 @@ describe('PUT /api/week-plan/:clientId/row (and /tasks)', () => {
   // server has it, so a save from this page cannot be half-understood there
   // during a hand-over. `/tasks` is kept for a page left open from before
   // "work with no task", which hands back every mark it was given.
-  it('has both addresses, checked after the first version’s', () => {
-    expect(route).toContain('normalizedPath.match(/^\\/api\\/week-plan\\/([^/]+)\\/(?:row|tasks)$/)')
+  it('has all three addresses, checked after the first version’s', () => {
+    expect(route).toContain('normalizedPath.match(/^\\/api\\/week-plan\\/([^/]+)\\/(row|tasks|week)$/)')
     expect(server.indexOf('const weekPlanOldSaveMatch')).toBeLessThan(server.indexOf('const weekPlanSaveMatch'))
-    const now = /^\/api\/week-plan\/([^/]+)\/(?:row|tasks)$/
-    for (const path of ['/api/week-plan/client-1/row', '/api/week-plan/client-1/tasks']) {
+    const now = /^\/api\/week-plan\/([^/]+)\/(row|tasks|week)$/
+    for (const path of ['/api/week-plan/client-1/row', '/api/week-plan/client-1/tasks', '/api/week-plan/client-1/week']) {
       // The first version's pattern cannot swallow it: it allows no further slash.
       expect(path).not.toMatch(/^\/api\/week-plan\/([^/]+)$/)
       expect(path.match(now)?.[1]).toBe('client-1')
     }
     expect('/api/week-plan/client-1/rows').not.toMatch(now)
     expect('/api/week-plan/client-1/row/x').not.toMatch(now)
+    expect('/api/week-plan/client-1/weeks').not.toMatch(now)
   })
 
-  // The server that is live while this one is being handed over to (66498a32)
-  // must have NO route for the new address: that is the whole protection.
+  // The server that is live while this one is being handed over to (the one
+  // with `/row` and `/tasks`) must have NO route for the new address: that is
+  // the whole protection. It would answer 200 on `/row` and drop the flags.
   it('the address the page saves to now is one the previous server’s patterns do not match', () => {
-    const previous = [/^\/api\/week-plan\/([^/]+)$/, /^\/api\/week-plan\/([^/]+)\/tasks$/]
-    for (const pattern of previous) expect('/api/week-plan/client-1/row').not.toMatch(pattern)
+    const previous = [
+      /^\/api\/week-plan\/([^/]+)$/,
+      /^\/api\/week-plan\/([^/]+)\/tasks$/,
+      /^\/api\/week-plan\/([^/]+)\/(?:row|tasks)$/,
+    ]
+    for (const pattern of previous) expect('/api/week-plan/client-1/week').not.toMatch(pattern)
     // And what an /api/ path with no route gets here (the same on that server)
     // is the 404 the request helper turns into "being updated".
     expect(server).toContain("sendJson(response, 404, { error: 'Not found' })")
@@ -167,8 +173,24 @@ describe('PUT /api/week-plan/:clientId/row (and /tasks)', () => {
     expect(route).toContain('if (!checked.ok) {')
     expect(route).toContain('sendJson(response, 400, { error: checked.error })')
     // What is saved is what the rule handed back, never the raw body.
-    expect(route).toContain('...checked.value,')
+    expect(route).toContain('let row = checked.value')
+    expect(route).toContain('...row,')
     expect(route).not.toContain('...payload')
+  })
+
+  // A page that does not know "brought" / "pushed" saves on `/row` or `/tasks`
+  // and drops the flags when it reads a row: the server keeps the stored ones.
+  it('on /row and /tasks keeps the stored week flags; only /week can change them', () => {
+    const keep = route.slice(route.indexOf("if (weekPlanSaveMatch[2] !== 'week') {"))
+    expect(route.indexOf("if (weekPlanSaveMatch[2] !== 'week') {")).toBeGreaterThan(0)
+    expect(keep).toContain('await appDataStore.listWeekPlanEntries({')
+    expect(keep).toContain('userId: session.user.id,')
+    expect(keep).toContain('weekStart: checked.value.weekStart,')
+    expect(keep).toContain('const stored = storedEntries.find((entry) => entry.clientId === clientId) ?? null')
+    expect(keep).toContain('row = withStoredWeekFlags(checked.value, stored, { checklistIds: clientChecklistIds })')
+    // Read before the write, and the write takes the merged row.
+    expect(keep.indexOf('withStoredWeekFlags(')).toBeLessThan(keep.indexOf('saveWeekPlanEntry('))
+    expect(server).toMatch(/import \{[^}]*withStoredWeekFlags[^}]*\} from '\.\/lib\/week-plan\.js'/)
   })
 
   it('writes are refused while previewing, before any route runs', () => {

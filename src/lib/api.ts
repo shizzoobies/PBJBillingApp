@@ -5249,7 +5249,7 @@ export async function fetchWeekPlanRequest(
   weekStart: string,
   userId?: string | null,
   signal?: AbortSignal,
-) {
+): Promise<{ weekStart: string; userId: string; entries: WeekPlanEntry[]; weekMoves?: boolean }> {
   const query = new URLSearchParams({ week: weekStart })
   if (userId) query.set('user', userId)
   const response = await apiFetch(`/api/week-plan?${query.toString()}`, {
@@ -5265,6 +5265,7 @@ export async function fetchWeekPlanRequest(
     userId: string
     entries: WeekPlanEntry[]
     daysPerTask?: boolean
+    weekMoves?: boolean
   }
   // Only a server that keeps days on each task says `daysPerTask`. For a few
   // seconds during an update the previous server can still answer, and it
@@ -5273,7 +5274,15 @@ export async function fetchWeekPlanRequest(
   if (body.daysPerTask !== true) {
     throw new ApiError(503, 'My Week is being updated. Reload the page in a moment.')
   }
-  return { weekStart: body.weekStart, userId: body.userId, entries: body.entries }
+  // `weekMoves`: the server keeps "brought into this week" and "pushed to next
+  // week" (its `/week` address). Without it the page hides those controls and
+  // saves to `/row`, which that server has and understands.
+  return {
+    weekStart: body.weekStart,
+    userId: body.userId,
+    entries: body.entries,
+    weekMoves: body.weekMoves === true,
+  }
 }
 
 /**
@@ -5289,15 +5298,23 @@ export async function saveWeekPlanEntryRequest(
     note: string
     taskMarks: Record<string, WeekPlanMark | null>
   },
+  { weekMoves = false }: { weekMoves?: boolean } = {},
 ) {
-  // `/row`: an address the server from before "work with no task"
+  // `/week` (when the week was read from a server that said `weekMoves`): the
+  // row with the week flags on the tasks' marks. No server before it has this
+  // address, so during a hand-over (or after a rollback) a save finds no route
+  // and fails out loud; that server's `/row` would answer 200 and drop the
+  // flags after writing.
+  //
+  // `/row` otherwise: an address the server from before "work with no task"
   // (featreq-f8ebbfc4) does not have. That server has `/tasks`, where this page
   // used to save, and would accept this row and drop its other work (the '*'
   // key) without a word; for a few seconds around every update it can be the
   // one that answers. Here it has no route, so nothing is written and the save
   // fails out loud. (The very first page saved to the address with nothing
   // after the client id, which now only answers "reload".)
-  const response = await apiFetch(`/api/week-plan/${encodeURIComponent(clientId)}/row`, {
+  const address = weekMoves ? 'week' : 'row'
+  const response = await apiFetch(`/api/week-plan/${encodeURIComponent(clientId)}/${address}`, {
     credentials: 'same-origin',
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

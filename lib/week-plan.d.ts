@@ -12,7 +12,15 @@ export declare const WEEK_PLAN_RELOAD_MESSAGE: string
 /** What a person can set on a task by hand. No status means "Work on this week". */
 export type WeekPlanMarkStatus = 'questions' | 'finished'
 /** What she set on one task: a status by hand, the days she means to work on it, or both. */
-export type WeekPlanMark = { status: WeekPlanMarkStatus | null; note: string; days: string[] }
+export type WeekPlanMark = {
+  status: WeekPlanMarkStatus | null
+  note: string
+  days: string[]
+  /** Brought into this week from a later week (stored only when true). */
+  brought?: boolean
+  /** Pushed out of this week to next week (stored only when true). */
+  pushed?: boolean
+}
 
 /** One stored row: one person, one week, one client. */
 export type WeekPlanEntry = {
@@ -50,6 +58,8 @@ export type WeekPlanTask = {
   dueDate: string
   overdue: boolean
   dueThisWeek: boolean
+  /** On this week's list because she brought it forward from a later week. */
+  brought: boolean
   stepsDone: number
   stepsTotal: number
   stageIndex: number | null
@@ -94,6 +104,8 @@ export type WeekPlanQuestion = {
   /** She set In questions herself (hers to clear). */
   byHand: boolean
   waits: WeekPlanWait[]
+  /** Only on an Answered line for a task that is not on this week's list: due in a later week, or pushed. */
+  offList?: 'later' | 'pushed'
 }
 
 /** One thing on a day: a task, or a planned client with nothing open any more. */
@@ -108,11 +120,30 @@ export type WeekPlanDayItem = {
   other: boolean
 }
 
+/** A task off this week's list: due in a later week, or pushed to next week. */
+export type WeekPlanOffListTask = {
+  checklistId: string
+  title: string
+  dueDate: string
+  /** The state it is in, read as on the list; null when nothing is set. */
+  status: 'answered' | 'questions' | 'finished' | null
+  /** The waits behind that state; with nothing set, only the ones that are her move. */
+  waits: WeekPlanWait[]
+  /** An answer is in, or someone is waiting on her: hers to pick up. */
+  needsHer: boolean
+}
+
 export type WeekPlanView = {
   weekStart: string
   days: string[]
+  /** The week's Sunday: a task due on or before it is this week's. */
+  weekEnd: string
   dueThrough: string
   rows: WeekPlanRow[]
+  /** Her open tasks due after this week's Sunday, through `dueThrough`, by client. */
+  later: Array<{ clientId: string; clientName: string; tasks: WeekPlanOffListTask[] }>
+  /** Tasks she pushed out of this week. */
+  pushed: Array<WeekPlanOffListTask & { clientId: string; clientName: string }>
   /** Monday to Friday, each with the tasks put on it. */
   byDay: Array<{ date: string; items: WeekPlanDayItem[] }>
   notPlannedCount: number
@@ -148,6 +179,20 @@ export declare function withTaskStatusSet(
   checklistId: string,
   status: WeekPlanMarkStatus | null,
 ): WeekPlanEntry
+/** "Bring to this week": the task is on this week's list. */
+export declare function withTaskBrought(entry: WeekPlanEntry, checklistId: string): WeekPlanEntry
+/** "Put back": a brought task goes back to its own week; its days in this week are cleared. */
+export declare function withTaskPutBack(entry: WeekPlanEntry, checklistId: string): WeekPlanEntry
+/** "Push to next week": off this week's list, its days here cleared, a stale `brought` cleared. */
+export declare function withTaskPushed(entry: WeekPlanEntry, checklistId: string): WeekPlanEntry
+/** "Bring back to this week": undo a push. */
+export declare function withTaskBroughtBack(entry: WeekPlanEntry, checklistId: string): WeekPlanEntry
+/** A save from a page that does not know the two week flags: the stored flags are kept. */
+export declare function withStoredWeekFlags(
+  value: { weekStart: string; plannedDays: string[]; note: string; taskMarks: Record<string, WeekPlanMark> },
+  stored: unknown,
+  context?: { checklistIds?: Iterable<string> },
+): { weekStart: string; plannedDays: string[]; note: string; taskMarks: Record<string, WeekPlanMark> }
 export declare function isEmptyWeekPlanEntry(entry: {
   plannedDays?: string[]
   note?: string
