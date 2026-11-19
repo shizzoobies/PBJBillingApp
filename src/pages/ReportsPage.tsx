@@ -35,6 +35,7 @@ import type {
   EmployeeReportRow,
   TaskReportRow,
   TimeEntry,
+  WorkSession,
 } from '../lib/types'
 import {
   addDays,
@@ -45,7 +46,6 @@ import {
   employeeName,
   formatDecimalHours,
   formatHoursTotal,
-  formatWorkStretches,
   getBillingPeriodLabel,
   getInvoice,
   isInBillingPeriod,
@@ -55,36 +55,51 @@ import {
 } from '../lib/utils'
 import {
   HOW_LOGGED_LABEL,
-  HOW_LOGGED_NOTE,
   buildSplitBlocks,
   clockMismatchNote,
+  clockMismatchShortNote,
   clockSpansOf,
+  entryFigures,
   howLogged,
+  howLoggedNote,
+  sheetNumbers,
+  sheetStretchLabel,
   splitNote,
+  splitShortNote,
+  stretchRows,
   type HowLogged,
 } from '../lib/payrollClock'
 
 /**
  * Printed above the day-and-job table. Brittany read "clock in 9:08 AM, clock
  * out 5:42 PM, 0.22 hours", three times, as a broken report, and a fourth row
- * as overlapping them (featreq-2da633de). Every figure was right, and nothing
- * on the page said what the two clock times are. Each sentence here has to be
- * true of every row: Hours is the stretches' total only "normally", because a
- * share holds its own part of a block and a typed duration is billed as typed
- * (the row itself says so in both cases); a full-mode share holds the whole
- * block, so the note says the row tells you WHAT part it holds, not that it is
- * a fraction; and the overlap sentence is about one person's rows, since two
- * people's time overlaps all day.
+ * as overlapping them (featreq-2da633de); then asked for every stretch on its
+ * own row (sent back 2026-11-18). It LEADS with the rounding, in plain words,
+ * because a stretch that reads a hundredth off its own length is the first
+ * thing she will check by hand.
  */
 const CLOCK_TIMES_NOTE =
-  'Clock in and Clock out are the first start and the last stop of an entry, not a shift. ' +
-  'When an entry was worked in more than one stretch (stopped and picked up again later), ' +
-  'each stretch is listed under Sessions, and Hours is normally the time worked in them. ' +
-  "A block of time split across several clients lists the block's clock times and stretches " +
-  'on every share, and the line under each share\'s Hours says what part of the block that ' +
-  "row holds. Two rows of the same person whose clock times overlap are not counted twice " +
-  'unless their listed stretches overlap; the shares of one block list the same stretches on ' +
-  'purpose.'
+  'Each row is one stretch of work (an entry logged without clock times is a single row). When ' +
+  "an entry has several stretches, their hours are rounded so they add up exactly to the entry's " +
+  'total, so a 50-minute stretch can show 0.84h instead of 0.83h and a very short stretch can ' +
+  'show 0.00h. Rounding never moves a total. The Stretch column marks the rows of one entry ' +
+  '"1 of 3", "2 of 3" and so on.'
+
+/**
+ * Its own paragraph, under the one above: the two kinds of row whose hours are
+ * not the time between their clock in and clock out. True in every state a
+ * part or entry can be left in: "only that client's time" holds for an even,
+ * a custom and a full-mode split alike (full mode puts the whole block on each
+ * client), after an Adjust split or a retyped part; and the rows of one block
+ * "can" show the same clock times, since Resume on one part, or a part moved,
+ * changes that.
+ */
+const CLOCK_PARTS_NOTE =
+  "Some rows' hours are not the time between their clock in and clock out. When a block of " +
+  "time is shared by several clients, each client has its own rows for it, holding only that " +
+  "client's time. When hours were typed in, the typed hours are spread over the entry's " +
+  'stretches by their length. The line under the hours on each of those rows says which, and ' +
+  'the rows of one shared block can show the same clock times on purpose.'
 
 /**
  * Its own paragraph, under the one above. It has to say three things so that
@@ -98,7 +113,9 @@ const CLOCK_EDIT_NOTE =
   'times edited" means the clock times of a timer entry were edited after the timer ran (a ' +
   'stretch added, moved or removed), by the person or by an owner. Editing is allowed. The ' +
   'line is only a note: it changes nothing in the Hours or the pay, and the app does not ' +
-  'record who edited, when, or what the times were before.'
+  'record who edited, when, or what the times were before. On an entry worked in several ' +
+  'stretches the line is on its first row and says "(this entry)": it covers the whole entry, ' +
+  'and the app cannot say which stretch was edited.'
 
 /**
  * The one sentence that tells the reader how a Cost figure was built. It stays
@@ -117,7 +134,8 @@ const COST_BASIS_NOTE =
  * a penny or two off its own hours × rate.
  */
 const COST_ROW_ROUNDING_NOTE =
-  'Each row’s Cost is that person’s pay for the period split across their entries, so the ' +
+  'Each row’s Cost is that person’s pay for the period split across their entries and each ' +
+  'entry’s stretches, so the ' +
   'column adds up to the total exactly; a single row can sit a few cents from its own hours ' +
   'times the rate.'
 
@@ -451,14 +469,17 @@ type PayrollEntryRow = {
   member: string
   job: string
   task: string
-  /** First start / last stop of the entry; '' when it was logged as minutes only. */
-  clockIn: string
-  clockOut: string
-  sessionCount: number
-  /** Each stretch worked, as text; empty unless the entry has more than one. */
-  stretches: string[]
+  /**
+   * The stretches the entry was worked in, earliest first; empty when it was
+   * logged as minutes only. The table prints one row per stretch
+   * (`stretchRows`), each with its own clock in, clock out and hours.
+   */
+  spans: WorkSession[]
   /** What a share of a split block is a share of (see `splitNote`); '' for any other entry. */
   splitNote: string
+  /** The short forms under the Hours of the entry's later stretch rows (`splitShortNote`, `clockMismatchShortNote`). */
+  splitShortNote: string
+  mismatchShortNote: string
   /** Said only when the row's time does not come from its clock times (see `clockMismatchNote`). */
   mismatchNote: string
   /** Timer, timer with its clock times edited, manual, or no clock times (see `howLogged`). */
@@ -634,11 +655,13 @@ function PayrollHoursReport({
   const splitBlocks = useMemo(() => buildSplitBlocks(timeEntries), [timeEntries])
 
   /**
-   * EVERY time entry, on its own row, grouped under its day. Entries are NOT
-   * collapsed by (day, job, task) any more: two stretches of work on the same
-   * client are two separate lines with their own clock in/out, because payroll
-   * has to be auditable entry by entry. Within a day, rows run in clock-in
-   * order; minutes-only entries (no timestamps) come last.
+   * EVERY time entry, grouped under its day. Entries are NOT collapsed by
+   * (day, job, task): two entries on the same client are two separate lines,
+   * because payroll has to be auditable entry by entry. Within a day, entries
+   * run in order of their first clock in; minutes-only entries (no timestamps)
+   * come last. The table prints each entry as one row PER STRETCH
+   * (`stretchRows`), its stretches together in time order; the totals here are
+   * built from the entries, and the stretch rows add back to them exactly.
    *
    * Day subtotals count a full-mode group's wall time ONCE — see
    * `duplicateFullSliceIds`. Those rows still render (and still bill); they
@@ -659,12 +682,11 @@ function PayrollHoursReport({
         member: employeeName(employees, entry.employeeId),
         job: jobOf(entry),
         task: taskOf(entry),
-        clockIn: formatAuditStamp(clock.firstStart),
-        clockOut: formatAuditStamp(clock.lastStop),
-        sessionCount: spans.length,
-        stretches: spans.length > 1 ? formatWorkStretches(spans, entry.date) : [],
+        spans,
         splitNote: splitNote(entry, splitBlocks),
+        splitShortNote: splitShortNote(entry, splitBlocks),
         mismatchNote: clockMismatchNote(entry, splitBlocks, clock),
+        mismatchShortNote: clockMismatchShortNote(entry, splitBlocks, clock),
         logged: howLogged(entry, clock),
         minutes: entry.minutes,
         billable: entry.billable,
@@ -739,7 +761,7 @@ function PayrollHoursReport({
   const detailHours = sumDisplayHours(dayGroups.map((group) => group.hours))
   const detailRows = dayGroups.flatMap((group) => group.rows)
   const showMemberColumn = memberFilter === 'all'
-  // Columns before Hours: Day/job, [Team member], Task, Clock in, Clock out, Sessions.
+  // Columns before Hours: Day/job, [Team member], Task, Clock in, Clock out, Stretch.
   const labelSpan = showMemberColumn ? 6 : 5
 
   // Billable $ is each row's person at its CLIENT'S pin — the SAME basis the
@@ -910,12 +932,16 @@ function PayrollHoursReport({
       ]),
     )
 
-  // Raw hours: one row per time entry, including the CLOCK IN / CLOCK OUT stamps
-  // so payroll can be audited against when the work actually happened. An entry
-  // logged as minutes only (no timer/manual timestamps) leaves them blank; a
-  // multi-session entry reports its first start and last stop, with the session
-  // count so a split day is obvious.
-  const exportRawHours = () =>
+  // Raw hours: ONE ROW PER STRETCH of each time entry (featreq-2da633de), the
+  // same rows the screen prints, so payroll can be audited against when the
+  // work actually happened. Every row is self-contained (date, person, client,
+  // task, description, its own clock in and out) because the sheet gets sorted
+  // by week and by person; for the same reason the entry's notes repeat on
+  // every one of its rows, and "Entry #" / "Split block #" let the rows be
+  // regrouped after sorting. An entry logged as minutes only is one row with
+  // the clock times blank.
+  const exportRawHours = () => {
+    const numbers = sheetNumbers()
     downloadCsv(
       `payroll-raw-hours-${periodType}-${start}.csv`,
       [
@@ -925,54 +951,56 @@ function PayrollHoursReport({
         'Task',
         'Clock in',
         'Clock out',
-        'Sessions',
+        'Stretch',
+        'Entry #',
+        'Split block #',
         'Hours',
         'Billable',
         'Billable hours',
         'Billable $',
         'Cost',
         'Description',
-        'Worked stretches',
         'Split across clients',
         'Hours note',
         'Logged',
       ],
       [...detailEntries]
         .sort((a, b) => a.date.localeCompare(b.date))
-        .map((entry) => {
+        .flatMap((entry) => {
           const clock = clockSpansOf(entry)
-          const spans = clock.spans
-          return [
-            entry.date,
-            employeeName(employees, entry.employeeId),
-            jobOf(entry),
-            taskOf(entry),
-            formatAuditStamp(clock.firstStart),
-            formatAuditStamp(clock.lastStop),
-            spans.length,
-            decimalHours(entry.minutes),
-            entry.billable ? 'Yes' : 'No',
-            entry.billable ? decimalHours(entry.minutes) : '0.00',
-            // Blank, not 0.00, when the person has no bill rate configured —
-            // a spreadsheet should not be told they billed nothing.
-            rowAmountOf(entry.id)?.toFixed(2) ?? '',
-            // The SAME allocated cent the on-screen detail row shows, so the
-            // export and the printout agree and the column sums to the report's
-            // total. Blank when there is no cost rate — and blank on a
-            // full-mode repeat, which the screen shows as "—" (the block is
-            // paid once). The export used to charge every repeat again.
-            rowCostOf(entry.id)?.toFixed(2) ?? '',
-            entry.description ?? '',
-            // Every stretch of every entry that has clock times, one stretch
-            // included: in a sorted sheet a blank here would read as "no time
-            // worked". Blank only for an entry logged as minutes.
-            formatWorkStretches(spans, entry.date).join('; '),
+          // The SAME allocated cents the on-screen detail rows show, so the
+          // export and the printout agree and each column sums to the report's
+          // total. `null` (blank, not 0.00) when there is no rate on file, and
+          // Cost is blank on a full-mode repeat, which the screen shows as "—"
+          // (the block is paid once).
+          const pieces = stretchRows(clock.spans, entryFigures(entry, rowAmountOf(entry.id), rowCostOf(entry.id)))
+          const notes = [
             splitNote(entry, splitBlocks, { forExport: true }),
             clockMismatchNote(entry, splitBlocks, clock),
             HOW_LOGGED_LABEL[howLogged(entry, clock)],
           ]
+          const number = numbers(entry)
+          return pieces.map((piece) => [
+            entry.date,
+            employeeName(employees, entry.employeeId),
+            jobOf(entry),
+            taskOf(entry),
+            formatAuditStamp(piece.startAt),
+            formatAuditStamp(piece.endAt),
+            sheetStretchLabel(piece),
+            number.entry,
+            number.block,
+            piece.hours.toFixed(2),
+            entry.billable ? 'Yes' : 'No',
+            piece.billableHours.toFixed(2),
+            piece.amount?.toFixed(2) ?? '',
+            piece.cost?.toFixed(2) ?? '',
+            entry.description ?? '',
+            ...notes,
+          ])
         }),
     )
+  }
 
   return (
     <section className="panel report-section" id="payroll-hours">
@@ -1136,6 +1164,7 @@ function PayrollHoursReport({
       </div>
 
       <p className="report-caption muted-text">{CLOCK_TIMES_NOTE}</p>
+      <p className="report-caption muted-text">{CLOCK_PARTS_NOTE}</p>
       <p className="report-caption muted-text">{CLOCK_EDIT_NOTE}</p>
 
       <div className="table-wrap">
@@ -1145,9 +1174,9 @@ function PayrollHoursReport({
               <th>Day / job</th>
               {showMemberColumn ? <th>Team member</th> : null}
               <th>Task</th>
-              <th>Clock in (first start)</th>
-              <th>Clock out (last stop)</th>
-              <th>Sessions</th>
+              <th>Clock in</th>
+              <th>Clock out</th>
+              <th>Stretch</th>
               <th>Hours</th>
               <th>Billable</th>
               <th>Billable $</th>
@@ -1175,59 +1204,69 @@ function PayrollHoursReport({
                     <td />
                     <td />
                   </tr>
-                  {group.rows.map((row) => (
-                    <tr key={row.id}>
-                      <td className="payroll-job-cell">{row.job}</td>
-                      {showMemberColumn ? <td>{row.member}</td> : null}
-                      <td>{row.task}</td>
-                      {/* Blank for an entry logged as minutes only — it has no
-                          timestamps to report, which is itself worth seeing. */}
-                      <td>
-                        {row.clockIn || '—'}
-                        {/* Not just what the timer recorded: a manual entry, or a
-                            timer entry whose clock times were edited afterwards. */}
-                        {HOW_LOGGED_NOTE[row.logged] ? (
-                          <div className="muted-text payroll-how-logged">{HOW_LOGGED_NOTE[row.logged]}</div>
-                        ) : null}
-                      </td>
-                      <td>{row.clockOut || '—'}</td>
-                      <td>
-                        {row.sessionCount || '—'}
-                        {/* Stopped and picked up again: each stretch, so the
-                            hours read against when the work happened and not
-                            against first start .. last stop. */}
-                        {row.stretches.length > 0 ? (
-                          <div className="muted-text payroll-stretches">
-                            {row.stretches.map((stretch, index) => (
-                              <div key={index}>{stretch}</div>
-                            ))}
-                          </div>
-                        ) : null}
-                      </td>
-                      {/* Two decimals, never one. Split allocations are small by
-                          construction — 33 of the 138 in production render as
-                          "0.0h" under one-decimal rounding, and the rounded rows
-                          add up to 2.9h more than was actually entered. */}
-                      <td>
-                        {formatDecimalHours(row.minutes)}
-                        {row.splitNote ? <div className="muted-text">{row.splitNote}</div> : null}
-                        {row.mismatchNote ? <div className="muted-text">{row.mismatchNote}</div> : null}
-                        {row.countedElsewhere ? (
-                          <div
-                            className="muted-text"
-                            title="Every client on this full-mode group split is billed the whole block. The hours and cost are counted once, on the first row of the group."
-                          >
-                            full block · counted once
-                          </div>
-                        ) : null}
-                      </td>
-                      <td>{formatDecimalHours(row.billableMinutes)}</td>
-                      <td>{money(rowAmountOf(row.id))}</td>
-                      {/* Deduped rows show no cost: the firm pays for the block
-                          once, and the first row of the group carries it. */}
-                      <td>{row.countedElsewhere ? '—' : money(rowCostOf(row.id))}</td>
-                    </tr>
-                  ))}
+                  {group.rows.flatMap((row) =>
+                    // ONE ROW PER STRETCH (featreq-2da633de, sent back
+                    // 2026-11-18): each with its own clock in, clock out and
+                    // hours, and the pieces add back exactly to the entry. A
+                    // full-mode repeat's cost stays "—" on every piece.
+                    stretchRows(
+                      row.spans,
+                      entryFigures(row, rowAmountOf(row.id), row.countedElsewhere ? null : rowCostOf(row.id)),
+                    ).map((piece) => {
+                      // The entry's full notes on its first stretch; every later
+                      // stretch of it carries a short form, so each row explains
+                      // its own hours.
+                      const first = piece.index === 1
+                      const loggedNote = first ? howLoggedNote(row.logged, piece.of) : ''
+                      const hoursNotes = first
+                        ? [row.splitNote, row.mismatchNote]
+                        : [row.splitShortNote, row.mismatchShortNote]
+                      return (
+                        <tr key={`${row.id}:${piece.index}`} data-entry-id={row.id}>
+                          <td className="payroll-job-cell">{row.job}</td>
+                          {showMemberColumn ? <td>{row.member}</td> : null}
+                          <td>{row.task}</td>
+                          {/* "—" for an entry logged as minutes only: it has no
+                              timestamps to report, which is itself worth seeing. */}
+                          <td>
+                            {formatAuditStamp(piece.startAt) || '—'}
+                            {/* Not just what the timer recorded: a manual entry, or a
+                                timer entry whose clock times were edited afterwards. */}
+                            {loggedNote ? <div className="muted-text payroll-how-logged">{loggedNote}</div> : null}
+                          </td>
+                          <td>{formatAuditStamp(piece.endAt) || '—'}</td>
+                          <td className="payroll-stretch-cell">{piece.label}</td>
+                          {/* Two decimals, never one. Split allocations are small by
+                              construction — 33 of the 138 in production render as
+                              "0.0h" under one-decimal rounding, and the rounded rows
+                              add up to 2.9h more than was actually entered. */}
+                          <td>
+                            {piece.hours.toFixed(2)}h
+                            {hoursNotes.map((note, index) =>
+                              note ? (
+                                <div key={index} className="muted-text payroll-hours-note">
+                                  {note}
+                                </div>
+                              ) : null,
+                            )}
+                            {row.countedElsewhere ? (
+                              <div
+                                className="muted-text payroll-hours-note"
+                                title="Every client on this block is billed the whole block. Its hours and cost are counted once, on the first client's rows."
+                              >
+                                {first ? 'full block · counted once' : 'counted once'}
+                              </div>
+                            ) : null}
+                          </td>
+                          <td>{piece.billableHours.toFixed(2)}h</td>
+                          <td>{money(piece.amount)}</td>
+                          {/* Deduped rows show no cost: the firm pays for the block
+                              once, and the first share of the group carries it. */}
+                          <td>{row.countedElsewhere ? '—' : money(piece.cost)}</td>
+                        </tr>
+                      )
+                    }),
+                  )}
                 </Fragment>
               ))
             )}
@@ -1395,6 +1434,7 @@ function ReportsOverview({
     const sorted = [...billingPeriodEntries].sort((a, b) => a.date.localeCompare(b.date))
     // Every entry, not just the month: a share's siblings may be dated elsewhere.
     const monthSplitBlocks = buildSplitBlocks(allTimeEntries)
+    const numbers = sheetNumbers()
     downloadCsv(
       `hours-by-month-${periodSlug}.csv`,
       [
@@ -1404,18 +1444,19 @@ function ReportsOverview({
         'Task',
         'Clock in',
         'Clock out',
-        'Sessions',
+        'Stretch',
+        'Entry #',
+        'Split block #',
         'Hours',
         'Billable',
         'Billable hours',
         'Billable $',
         'Description',
-        'Worked stretches',
         'Split across clients',
         'Hours note',
         'Logged',
       ],
-      sorted.map((entry) => {
+      sorted.flatMap((entry) => {
         const taskTitle = entry.taskId
           ? checklists.find((checklist: Checklist) => checklist.id === entry.taskId)?.title ??
             'Unassigned'
@@ -1423,29 +1464,41 @@ function ReportsOverview({
         const clientDisplay = entry.isAdministrative || !entry.clientId
           ? '(Admin)'
           : clientName(clients, entry.clientId)
-        // Clock in/out = first start, last stop. Blank for minutes-only entries.
+        // One row per stretch, like payroll "Raw hours" (the same function cuts
+        // them). Clock times blank for a minutes-only entry.
         const clock = clockSpansOf(entry)
-        const spans = clock.spans
-        return [
-          entry.date,
-          employeeName(employees, entry.employeeId),
-          clientDisplay,
-          taskTitle,
-          formatAuditStamp(clock.firstStart),
-          formatAuditStamp(clock.lastStop),
-          spans.length,
-          decimalHours(entry.minutes),
-          entry.billable ? 'Yes' : 'No',
-          entry.billable ? decimalHours(entry.minutes) : '0.00',
-          overviewAmountFor(entry)?.toFixed(2) ?? '',
-          entry.description,
-          // The same three closing columns as payroll "Raw hours", so a share
-          // or a typed duration is explained in this sheet too.
-          formatWorkStretches(spans, entry.date).join('; '),
+        // The entry's Billable $ as this sheet has always printed it (to the
+        // cent), split so its rows add back to exactly that.
+        const amount = overviewAmountFor(entry)
+        const pieces = stretchRows(
+          clock.spans,
+          entryFigures(entry, amount === null ? null : Number(amount.toFixed(2)), null),
+        )
+        // The same closing columns as payroll "Raw hours", so a share or a
+        // typed duration is explained in this sheet too, on every row.
+        const notes = [
           splitNote(entry, monthSplitBlocks, { forExport: true }),
           clockMismatchNote(entry, monthSplitBlocks, clock),
           HOW_LOGGED_LABEL[howLogged(entry, clock)],
         ]
+        const number = numbers(entry)
+        return pieces.map((piece) => [
+          entry.date,
+          employeeName(employees, entry.employeeId),
+          clientDisplay,
+          taskTitle,
+          formatAuditStamp(piece.startAt),
+          formatAuditStamp(piece.endAt),
+          sheetStretchLabel(piece),
+          number.entry,
+          number.block,
+          piece.hours.toFixed(2),
+          entry.billable ? 'Yes' : 'No',
+          piece.billableHours.toFixed(2),
+          piece.amount?.toFixed(2) ?? '',
+          entry.description,
+          ...notes,
+        ])
       }),
     )
   }

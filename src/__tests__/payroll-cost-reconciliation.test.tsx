@@ -295,7 +295,9 @@ describe('payroll detail Cost column adds up to its own total', () => {
   it('says on the page that rows are a split of the person’s period pay', async () => {
     await renderReport()
     expect(
-      screen.getByText(/split across their entries, so the column adds up to the total exactly/i),
+      screen.getByText(
+        /split across their entries and each entry’s stretches, so the column adds up to the total exactly/i,
+      ),
     ).toBeInTheDocument()
   })
 })
@@ -338,8 +340,10 @@ describe('payroll exports price off the hours they print', () => {
     fireEvent.click(screen.getByRole('button', { name: /Raw hours/i }))
 
     const [, headers, rows] = mockDownloadCsv.mock.calls[0]
-    // Hours stays at column 8 — anything already reading it still does.
-    expect(headers[7]).toBe('Hours')
+    // Hours is column 10 since 2026-11-19: "Entry #" and "Split block #" sit beside Stretch,
+    // so a sheet sorted by week or person can be regrouped by entry and by split block.
+    expect(headers[9]).toBe('Hours')
+    expect(headers.slice(6, 9)).toEqual(['Stretch', 'Entry #', 'Split block #'])
     expect(headers).not.toContain('Minutes (exact)')
     expect(headers).not.toContain('Hours (4dp)')
 

@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ReportsPage } from '../pages/ReportsPage'
 import { DEFAULT_FIRM_SETTINGS, type TimeEntry } from '../lib/types'
-import { formatWorkStretches } from '../lib/utils'
+import { formatAuditStamp } from '../lib/utils'
 import {
   CLOCK_EDITS_READABLE_FROM,
   CLOCK_EDITS_READABLE_FROM_TEXT,
@@ -14,9 +14,15 @@ import {
   HOW_LOGGED_NOTE,
   buildSplitBlocks,
   clockMismatchNote,
+  clockMismatchShortNote,
   clockSpansOf,
+  entryFigures,
   howLogged,
+  howLoggedNote,
+  largestRemainder,
   splitNote,
+  splitShortNote,
+  stretchRows,
 } from '../lib/payrollClock'
 import type { AppContextValue } from '../AppContext'
 
@@ -60,13 +66,6 @@ const FOUR = [
   stretch([10, 14], [11, 2]),
   stretch([11, 12], [12, 2]),
   stretch([12, 50], [12, 59]),
-]
-const BLOCK_TEXT = ['9:08 AM – 9:10 AM (2m)', '5:05 PM – 5:42 PM (37m)']
-const FOUR_TEXT = [
-  '8:59 AM – 9:07 AM (8m)',
-  '10:14 AM – 11:02 AM (48m)',
-  '11:12 AM – 12:02 PM (50m)',
-  '12:50 PM – 12:59 PM (9m)',
 ]
 
 const employees = [
@@ -170,61 +169,37 @@ async function renderDetail() {
   const section = heading.closest('section') as HTMLElement
   const tables = section.querySelectorAll('table')
   const detail = tables[tables.length - 1] as HTMLTableElement
-  /** The entry rows (not the day sub-headers) whose job cell reads `job`. */
+  /** The stretch rows (not the day sub-headers) whose job cell reads `job`. */
   const rowsOf = (job: string) =>
     [...detail.querySelectorAll<HTMLElement>('tbody tr:not(.payroll-day-row)')].filter(
       (row) => row.querySelector('td')?.textContent === job,
     )
-  const stretchesOf = (row: HTMLElement) =>
-    [...row.querySelectorAll('.payroll-stretches > div')].map((line) => line.textContent)
-  return { view, section, detail, rowsOf, rowOf: (job: string) => rowsOf(job)[0], stretchesOf }
+  /** The rows of one entry, by its id. */
+  const entryRows = (id: string) => [...detail.querySelectorAll<HTMLElement>(`tbody tr[data-entry-id="${id}"]`)]
+  return { view, section, detail, rowsOf, rowOf: (job: string) => rowsOf(job)[0], entryRows }
 }
 
-describe('formatWorkStretches', () => {
-  it('lists each stretch with its own length', () => {
-    expect(formatWorkStretches(BLOCK)).toEqual(BLOCK_TEXT)
-    expect(formatWorkStretches(FOUR)).toEqual(FOUR_TEXT)
+/**
+ * A row's cells as text, without the note lines under a figure. With every
+ * member shown: job, member, task, in, out, stretch, hours, billable, $, cost.
+ */
+const cellsOf = (row: HTMLElement) =>
+  [...row.querySelectorAll('td')].map((td) => {
+    const copy = td.cloneNode(true) as HTMLElement
+    copy.querySelectorAll('div').forEach((line) => line.remove())
+    return copy.textContent ?? ''
   })
-
-  // Stretches are stored in the order they were typed or added: a forgotten
-  // 8:59 stretch added afterwards is stored last.
-  it('lists them earliest first, whatever order they are stored in', () => {
-    expect(formatWorkStretches([FOUR[2], FOUR[0], FOUR[3], FOUR[1]])).toEqual(FOUR_TEXT)
-  })
-
-  it('adds the date only where it is needed', () => {
-    // A stretch on a later day than the row's.
-    const twoDays = [stretch([9, 0], [9, 30]), { startAt: at(8, 0, 4), endAt: at(8, 15, 4) }]
-    expect(formatWorkStretches(twoDays, DAY)).toEqual(['9:00 AM – 9:30 AM (30m)', 'Nov 4, 8:00 AM – 8:15 AM (15m)'])
-    // Without the row's day, the first stretch's day is the reference.
-    expect(formatWorkStretches(twoDays)).toEqual(['9:00 AM – 9:30 AM (30m)', 'Nov 4, 8:00 AM – 8:15 AM (15m)'])
-    // An entry filed under Nov 3 whose work was all on Nov 4: every stretch says so.
-    expect(formatWorkStretches([{ startAt: at(8, 0, 4), endAt: at(8, 15, 4) }], DAY)).toEqual([
-      'Nov 4, 8:00 AM – 8:15 AM (15m)',
-    ])
-    // A stretch that runs past midnight.
-    expect(formatWorkStretches([{ startAt: at(23, 30), endAt: at(0, 15, 4) }], DAY)).toEqual([
-      '11:30 PM – Nov 4, 12:15 AM (45m)',
-    ])
-  })
-
-  it('gives exact lengths, and leaves out what is not a stretch', () => {
-    expect(
-      formatWorkStretches([
-        { startAt: new Date(2026, 10, 3, 11, 2, 42).toISOString(), endAt: new Date(2026, 10, 3, 11, 5, 11).toISOString() },
-      ]),
-    ).toEqual(['11:02 AM – 11:05 AM (2m 29s)'])
-    expect(
-      formatWorkStretches([
-        { startAt: 'nope', endAt: at(9, 0) },
-        // Stops before it starts.
-        { startAt: at(9, 10), endAt: at(9, 8) },
-        stretch([9, 8], [9, 10]),
-      ]),
-    ).toEqual(['9:08 AM – 9:10 AM (2m)'])
-    expect(formatWorkStretches([])).toEqual([])
-  })
-})
+const IN = 3
+const OUT = 4
+const STRETCH = 5
+const HOURS = 6
+const BILLABLE = 7
+const AMOUNT = 8
+const COST = 9
+/** The figure at the start of a cell ("0.22h13m share of ..." -> 0.22, "$19.80" -> 19.8). */
+const lead = (text: string) => Number((text.match(/^\$?([\d,]+\.\d{2})/)?.[1] ?? 'NaN').replace(/,/g, ''))
+/** Adds two-decimal figures in whole hundredths, as the report does. */
+const sum2 = (values: number[]) => (values.reduce((total, value) => total + Math.round(value * 100), 0) / 100).toFixed(2)
 
 describe('the rules (src/lib/payrollClock.ts)', () => {
   it('Clock in is the EARLIEST start and Clock out the LATEST stop, whatever the stored order', () => {
@@ -248,7 +223,7 @@ describe('the rules (src/lib/payrollClock.ts)', () => {
     const shares = [share('a', 'c1'), share('b', 'c2'), share('c', 'c3')]
     const blocks = buildSplitBlocks(shares)
     expect(blocks.get('grp-1')).toEqual({ mode: 'even', shares: 3, clients: 3, minutes: 39, uniform: true })
-    expect(splitNote(shares[0], blocks)).toBe('13m share of a block split across 3 clients (the shares total 39m)')
+    expect(splitNote(shares[0], blocks)).toBe('This entry: 13m of a 39m block shared by 3 clients')
     expect(clockMismatchNote(shares[0], blocks, clockSpansOf(shares[0]))).toBe('')
     expect(splitNote(fourStretch, blocks)).toBe('')
   })
@@ -258,9 +233,9 @@ describe('the rules (src/lib/payrollClock.ts)', () => {
   it('stays true after an Adjust split that no longer adds up to the block', () => {
     const shares = [share('a', 'c1', 'custom', 10), share('b', 'c2', 'custom', 10), share('c', 'c3', 'custom', 10)]
     const blocks = buildSplitBlocks(shares)
-    expect(splitNote(shares[0], blocks)).toBe('10m share of a block split across 3 clients (the shares total 30m)')
+    expect(splitNote(shares[0], blocks)).toBe('This entry: 10m part of a block shared by 3 clients (the parts total 30m)')
     expect(clockMismatchNote(shares[0], blocks, clockSpansOf(shares[0]))).toBe(
-      "The shares do not add up to this row's clock time (39m)",
+      "The clients' parts of this block do not add up to the time on the clock (39m).",
     )
   })
 
@@ -269,38 +244,38 @@ describe('the rules (src/lib/payrollClock.ts)', () => {
     const shares = [grown, share('b', 'c2'), share('c', 'c3')]
     const blocks = buildSplitBlocks(shares)
     // The grown share's own stretches (49m) are what its shares total.
-    expect(splitNote(grown, blocks)).toBe('23m share of a block split across 3 clients (the shares total 49m)')
+    expect(splitNote(grown, blocks)).toBe('This entry: 23m of a 49m block shared by 3 clients')
     expect(clockMismatchNote(grown, blocks, clockSpansOf(grown))).toBe('')
     // Its siblings still list 39m of stretches, and say the totals differ.
     expect(clockMismatchNote(shares[1], blocks, clockSpansOf(shares[1]))).toBe(
-      "The shares do not add up to this row's clock time (39m)",
+      "The clients' parts of this block do not add up to the time on the clock (39m).",
     )
   })
 
   it('counts clients, not rows, and says "shares" when the shares are no longer different clients', () => {
     const twoOnOne = [share('a', 'c1'), share('b', 'c1'), share('c', 'c3')]
     expect(splitNote(twoOnOne[0], buildSplitBlocks(twoOnOne))).toBe(
-      '13m share of a block split across 2 clients (the shares total 39m)',
+      'This entry: 13m of a 39m block shared by 2 clients',
     )
     const allOnOne = [share('a', 'c1'), share('b', 'c1')]
     expect(splitNote(allOnOne[0], buildSplitBlocks(allOnOne))).toBe(
-      '13m share of a block split into 2 shares (the shares total 26m)',
+      'This entry: 13m part of a block split into 2 parts (the parts total 26m)',
     )
   })
 
   it('a full-mode share repeats the block; an older share with no recorded mode claims nothing it cannot know', () => {
     const full = [share('a', 'c1', 'full', 39), share('b', 'c2', 'full', 39)]
     const blocks = buildSplitBlocks(full)
-    expect(splitNote(full[0], blocks)).toBe('full 39m block billed to each of 2 clients')
+    expect(splitNote(full[0], blocks)).toBe('This entry: full 39m block billed to each of 2 clients')
     expect(splitNote(full[0], blocks, { forExport: true })).toBe(
-      'full 39m block billed to each of 2 clients; hours counted once',
+      'This entry: full 39m block billed to each of 2 clients; hours counted once',
     )
     expect(clockMismatchNote(full[0], blocks, clockSpansOf(full[0]))).toBe('')
 
     const legacy = [share('a', 'c1', null), share('b', 'c2', null)]
     const none = buildSplitBlocks(legacy)
     expect(none.size).toBe(0)
-    expect(splitNote(legacy[0], none)).toBe('share of a block split across clients')
+    expect(splitNote(legacy[0], none)).toBe('This entry: part of a block shared by several clients')
     expect(clockMismatchNote(legacy[0], none, clockSpansOf(legacy[0]))).toBe('')
   })
 
@@ -312,16 +287,16 @@ describe('the rules (src/lib/payrollClock.ts)', () => {
     const shares = [grown, share('b', 'c2', 'full', 39)]
     const blocks = buildSplitBlocks(shares)
     expect(blocks.get('grp-1')).toMatchObject({ uniform: false })
-    expect(splitNote(grown, blocks)).toBe('49m billed in full to this client, one of 2 shares of one block')
-    expect(splitNote(shares[1], blocks)).toBe('39m billed in full to this client, one of 2 shares of one block')
+    expect(splitNote(grown, blocks)).toBe('This entry: 49m billed in full to this client, one of 2 parts of one block')
+    expect(splitNote(shares[1], blocks)).toBe('This entry: 39m billed in full to this client, one of 2 parts of one block')
     expect(splitNote(shares[1], blocks, { forExport: true })).toBe(
-      '39m billed in full to this client, one of 2 shares of one block; hours counted once',
+      'This entry: 39m billed in full to this client, one of 2 parts of one block; hours counted once',
     )
     // A full share retyped to 20m: one line says what it holds, the other that it was typed. They agree.
     const retyped = [share('a', 'c1', 'full', 20), share('b', 'c2', 'full', 39)]
     const after = buildSplitBlocks(retyped)
-    expect(splitNote(retyped[0], after)).toBe('20m billed in full to this client, one of 2 shares of one block')
-    expect(clockMismatchNote(retyped[0], after, clockSpansOf(retyped[0]))).toBe('Hours typed in (clock time 39m)')
+    expect(splitNote(retyped[0], after)).toBe('This entry: 20m billed in full to this client, one of 2 parts of one block')
+    expect(clockMismatchNote(retyped[0], after, clockSpansOf(retyped[0]))).toBe("Hours typed in. This entry's stretches add up to 39m on the clock.")
   })
 
   // An owner can move one share to administrative time: it keeps its group but has no client.
@@ -330,20 +305,20 @@ describe('the rules (src/lib/payrollClock.ts)', () => {
     const shares = [share('a', 'c1'), share('b', 'c2'), admin]
     const blocks = buildSplitBlocks(shares)
     expect(blocks.get('grp-1')).toMatchObject({ shares: 3, clients: 2 })
-    expect(splitNote(shares[0], blocks)).toBe('13m share of a block split across 2 clients (the shares total 39m)')
-    expect(splitNote(admin, blocks)).toBe('13m share of a split block, moved to administrative time')
+    expect(splitNote(shares[0], blocks)).toBe('This entry: 13m of a 39m block shared by 2 clients')
+    expect(splitNote(admin, blocks)).toBe('This entry: 13m part of a shared block, moved to administrative time')
     // Full mode: "billed to each of 2 clients" would name a client that is not billed.
     const full = [share('a', 'c1', 'full', 39), share('b', '', 'full', 39, { isAdministrative: true })]
     expect(splitNote(full[0], buildSplitBlocks(full))).toBe(
-      '39m billed in full to this client, one of 2 shares of one block',
+      'This entry: 39m billed in full to this client, one of 2 parts of one block',
     )
   })
 
   it('the last share standing says so', () => {
     const alone = [share('a', 'c1')]
-    expect(splitNote(alone[0], buildSplitBlocks(alone))).toBe('13m, the one remaining share of a split block')
+    expect(splitNote(alone[0], buildSplitBlocks(alone))).toBe('This entry: 13m, the one remaining part of a shared block')
     const fullAlone = [share('a', 'c1', 'full', 39)]
-    expect(splitNote(fullAlone[0], buildSplitBlocks(fullAlone))).toBe('39m, the one remaining share of a split block')
+    expect(splitNote(fullAlone[0], buildSplitBlocks(fullAlone))).toBe('This entry: 39m, the one remaining part of a shared block')
   })
 
   it('a group whose shares disagree about the mode, or where one has none, is not described at all', () => {
@@ -353,17 +328,17 @@ describe('the rules (src/lib/payrollClock.ts)', () => {
     const blocks = buildSplitBlocks(partly)
     expect(blocks.size).toBe(0)
     // No "the shares total 26m" over three rows, and no false "do not add up".
-    expect(splitNote(partly[0], blocks)).toBe('share of a block split across clients')
+    expect(splitNote(partly[0], blocks)).toBe('This entry: part of a block shared by several clients')
     expect(clockMismatchNote(partly[0], blocks, clockSpansOf(partly[0]))).toBe('')
   })
 
   it('says when an ordinary entry’s Hours were typed, and stays quiet inside a minute', () => {
     const none = new Map()
     const typed = entry({ id: 't', minutes: 90, sessions: FOUR })
-    expect(clockMismatchNote(typed, none, clockSpansOf(typed))).toBe('Hours typed in (clock time 1h 55m)')
+    expect(clockMismatchNote(typed, none, clockSpansOf(typed))).toBe("Hours typed in. This entry's stretches add up to 1h 55m on the clock.")
     // One stretch, hours typed down: the two clock times alone would read as an hour.
     const half = entry({ id: 'h', minutes: 30, sessions: [stretch([9, 0], [10, 0])] })
-    expect(clockMismatchNote(half, none, clockSpansOf(half))).toBe('Hours typed in (clock time 1h)')
+    expect(clockMismatchNote(half, none, clockSpansOf(half))).toBe("Hours typed in. This entry's stretches add up to 1h on the clock.")
     // Clocks and durations round a little; that is not "typed".
     const close = entry({ id: 'c', minutes: 115.6, sessions: FOUR })
     expect(clockMismatchNote(close, none, clockSpansOf(close))).toBe('')
@@ -371,11 +346,242 @@ describe('the rules (src/lib/payrollClock.ts)', () => {
     const atEdge = entry({ id: 'e', minutes: 116, sessions: FOUR })
     expect(clockMismatchNote(atEdge, none, clockSpansOf(atEdge))).toBe('')
     const past = entry({ id: 'p', minutes: 116.1, sessions: FOUR })
-    expect(clockMismatchNote(past, none, clockSpansOf(past))).toBe('Hours typed in (clock time 1h 55m)')
+    expect(clockMismatchNote(past, none, clockSpansOf(past))).toBe("Hours typed in. This entry's stretches add up to 1h 55m on the clock.")
     expect(clockMismatchNote(fourStretch, none, clockSpansOf(fourStretch))).toBe('')
     // No clock times, nothing to compare.
     const bare = entry({ id: 'b', minutes: 30 })
     expect(clockMismatchNote(bare, none, clockSpansOf(bare))).toBe('')
+  })
+})
+
+/**
+ * Sent back 2026-11-18: "the report needs to show each entry too it is still
+ * showing as one line - on both the screen and the download report", then
+ * "Allison's 9:08-9:10 AM and 5:05-5:42 PM as two rows". One row per stretch,
+ * and the pieces add back EXACTLY to the entry's one row.
+ */
+describe('stretchRows: one row per stretch, adding back exactly', () => {
+  const hundredths = (values: number[]) => values.reduce((total, value) => total + Math.round(value * 100), 0)
+  const cents = (values: Array<number | null>) =>
+    values.reduce<number>((total, value) => total + (value === null ? 0 : Math.round(value * 100)), 0)
+  /** Every figure of the pieces adds back to the entry's. */
+  const addsBack = (pieces: ReturnType<typeof stretchRows>, figures: ReturnType<typeof entryFigures>) => {
+    expect(hundredths(pieces.map((piece) => piece.hours))).toBe(Math.round(figures.hours * 100))
+    expect(hundredths(pieces.map((piece) => piece.billableHours))).toBe(Math.round(figures.billableHours * 100))
+    if (figures.amount === null) expect(pieces.every((piece) => piece.amount === null)).toBe(true)
+    else expect(cents(pieces.map((piece) => piece.amount))).toBe(Math.round(figures.amount * 100))
+    if (figures.cost === null) expect(pieces.every((piece) => piece.cost === null)).toBe(true)
+    else expect(cents(pieces.map((piece) => piece.cost))).toBe(Math.round(figures.cost * 100))
+    for (const piece of pieces) {
+      for (const value of [piece.hours, piece.billableHours, piece.amount ?? 0, piece.cost ?? 0]) {
+        expect(value).toBeGreaterThanOrEqual(0)
+        // Exactly two decimals: no float dust reaches a cell.
+        expect(Math.round(value * 100) / 100).toBe(value)
+      }
+    }
+  }
+
+  it("Allison's four-stretch entry is four rows totaling 1.92h", () => {
+    const figures = entryFigures(fourStretch, 172.8, 71.04)
+    expect(figures).toEqual({ hours: 1.92, billableHours: 1.92, amount: 172.8, cost: 71.04 })
+    const pieces = stretchRows(clockSpansOf(fourStretch).spans, figures)
+    expect(pieces.map((piece) => [piece.startAt, piece.endAt])).toEqual(FOUR.map((span) => [span.startAt, span.endAt]))
+    expect(pieces.map((piece) => piece.label)).toEqual(['1 of 4', '2 of 4', '3 of 4', '4 of 4'])
+    // 8, 48, 50 and 9 minutes. Each on its own rounds to 0.13 + 0.80 + 0.83 + 0.15 = 1.91;
+    // the hundredth that makes them add to 1.92 goes to the largest remainder.
+    expect(pieces.map((piece) => piece.hours)).toEqual([0.13, 0.8, 0.84, 0.15])
+    // Money follows each row's hours, so every row multiplies out by hand: 0.84h x $90 = $75.60.
+    expect(pieces.map((piece) => piece.amount)).toEqual([11.7, 72, 75.6, 13.5])
+    expect(pieces.map((piece) => piece.cost)).toEqual([4.81, 29.6, 31.08, 5.55])
+    for (const piece of pieces) {
+      expect(piece.amount).toBe(Math.round(piece.hours * 90 * 100) / 100)
+      expect(piece.cost).toBe(Math.round(piece.hours * 37 * 100) / 100)
+    }
+    addsBack(pieces, figures)
+  })
+
+  it('the stored order does not matter: rows run earliest first', () => {
+    const jumbled = entry({ id: 'j', minutes: 115, sessions: [FOUR[2], FOUR[0], FOUR[3], FOUR[1]] })
+    const pieces = stretchRows(clockSpansOf(jumbled).spans, entryFigures(jumbled, null, null))
+    expect(pieces.map((piece) => piece.startAt)).toEqual(FOUR.map((span) => span.startAt))
+  })
+
+  it("a 13-minute share of Allison's 39-minute block: its 0.22h over the block's two stretches", () => {
+    const one = share('a', 'c1')
+    const figures = entryFigures(one, 19.8, 8.14)
+    const pieces = stretchRows(clockSpansOf(one).spans, figures)
+    expect(pieces.map((piece) => piece.label)).toEqual(['1 of 2', '2 of 2'])
+    // 2 and 37 minutes of the block's 39: 22 hundredths split 1.13 / 20.87.
+    expect(pieces.map((piece) => piece.hours)).toEqual([0.01, 0.21])
+    expect(pieces.map((piece) => piece.amount)).toEqual([0.9, 18.9])
+    expect(pieces.map((piece) => piece.cost)).toEqual([0.37, 7.77])
+    addsBack(pieces, figures)
+    // Three shares, six rows, and the three entries still total 0.66h.
+    const all = [share('a', 'c1'), share('b', 'c2'), share('c', 'c3')].flatMap((s) =>
+      stretchRows(clockSpansOf(s).spans, entryFigures(s, null, null)),
+    )
+    expect(all).toHaveLength(6)
+    expect(hundredths(all.map((piece) => piece.hours))).toBe(66)
+  })
+
+  it('typed hours are spread over the stretches by their length', () => {
+    const typed = entry({ id: 't', minutes: 90, sessions: FOUR })
+    const figures = entryFigures(typed, 135, 55.5)
+    const pieces = stretchRows(clockSpansOf(typed).spans, figures)
+    expect(pieces).toHaveLength(4)
+    addsBack(pieces, figures)
+    // The longest stretch holds the most.
+    expect(Math.max(...pieces.map((piece) => piece.hours))).toBe(pieces[2].hours)
+  })
+
+  it('one stretch, or minutes only, is one row exactly as before, with no Stretch label', () => {
+    const figures = entryFigures(single, 19.5, 8.14)
+    expect(stretchRows(clockSpansOf(single).spans, figures)).toEqual([
+      { ...figures, index: 1, of: 1, label: '', startAt: at(13, 0), endAt: at(13, 13) },
+    ])
+    const bare = entry({ id: 'bare', minutes: 30, billable: false })
+    const bareFigures = entryFigures(bare, null, 18.5)
+    expect(bareFigures).toEqual({ hours: 0.5, billableHours: 0, amount: null, cost: 18.5 })
+    expect(stretchRows(clockSpansOf(bare).spans, bareFigures)).toEqual([
+      { ...bareFigures, index: 1, of: 1, label: '', startAt: undefined, endAt: undefined },
+    ])
+  })
+
+  it('a full-mode repeat (no cost) keeps no cost on any of its rows; no rate stays no rate', () => {
+    const repeat = share('b', 'c2', 'full', 39)
+    const figures = entryFigures(repeat, null, null)
+    const pieces = stretchRows(clockSpansOf(repeat).spans, figures)
+    expect(pieces.map((piece) => piece.cost)).toEqual([null, null])
+    expect(pieces.map((piece) => piece.amount)).toEqual([null, null])
+    addsBack(pieces, figures)
+  })
+
+  it('odd cents and odd hundredths still add back exactly', () => {
+    const odd = entry({
+      id: 'odd',
+      minutes: 61.18,
+      sessions: [stretch([9, 0], [9, 7]), stretch([9, 30], [9, 37]), stretch([10, 0], [10, 7])],
+    })
+    // Three equal stretches: 1.02h, $91.81 and $37.73 do not divide by three.
+    const figures = entryFigures(odd, 91.81, 37.73)
+    const pieces = stretchRows(clockSpansOf(odd).spans, figures)
+    expect(pieces.map((piece) => piece.hours)).toEqual([0.34, 0.34, 0.34])
+    expect(pieces.map((piece) => piece.amount)).toEqual([30.61, 30.6, 30.6])
+    expect(pieces.map((piece) => piece.cost)).toEqual([12.58, 12.58, 12.57])
+    addsBack(pieces, figures)
+    // A non-billable entry: no billable hours on any row.
+    const internal = entry({ ...odd, id: 'internal', billable: false })
+    const internalPieces = stretchRows(clockSpansOf(internal).spans, entryFigures(internal, null, 37.73))
+    expect(internalPieces.map((piece) => piece.billableHours)).toEqual([0, 0, 0])
+  })
+})
+
+describe('largestRemainder: exact, the earlier stretch on every tie', () => {
+  it('a three-way tie goes to the earlier stretches, whatever float noise says', () => {
+    // 4 x 3/40, 4 x 13/40, 4 x 23/40 all leave 12/40: the earlier two win.
+    expect(largestRemainder(4, [3, 13, 23, 1])).toEqual([1, 1, 2, 0])
+  })
+
+  it('more stretches than hundredths: five 1-minute stretches of a 0.02h entry', () => {
+    expect(largestRemainder(2, [1, 1, 1, 1, 1])).toEqual([1, 1, 0, 0, 0])
+    const tiny = entry({
+      id: 'tiny',
+      minutes: 1.2,
+      sessions: [9, 10, 11, 12, 13].map((hour) => stretch([hour, 0], [hour, 1])),
+    })
+    const pieces = stretchRows(clockSpansOf(tiny).spans, entryFigures(tiny, null, null))
+    expect(pieces.map((piece) => piece.hours)).toEqual([0.01, 0.01, 0, 0, 0])
+  })
+
+  it('a zero-minute entry with stretches is zero on every row', () => {
+    const zero = entry({ id: 'zero', minutes: 0, sessions: BLOCK })
+    const pieces = stretchRows(clockSpansOf(zero).spans, entryFigures(zero, 0, 0))
+    expect(pieces.map((piece) => [piece.hours, piece.billableHours, piece.amount, piece.cost])).toEqual([
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+    ])
+  })
+
+  it('negative minutes split as their size, handed back negative, adding back exactly', () => {
+    expect(largestRemainder(-4, [3, 13, 23, 1])).toEqual([-1, -1, -2, 0])
+    const negative = entry({ id: 'neg', minutes: -13, sessions: BLOCK })
+    const pieces = stretchRows(clockSpansOf(negative).spans, entryFigures(negative, -19.8, -8.14))
+    expect(pieces.map((piece) => piece.hours)).toEqual([-0.01, -0.21])
+    expect(pieces.reduce((sum, piece) => sum + Math.round(piece.hours * 100), 0)).toBe(-22)
+    expect(pieces.reduce((sum, piece) => sum + Math.round((piece.amount ?? 0) * 100), 0)).toBe(-1980)
+    expect(pieces.reduce((sum, piece) => sum + Math.round((piece.cost ?? 0) * 100), 0)).toBe(-814)
+  })
+
+  it('no weight at all: everything on the first', () => {
+    expect(largestRemainder(5, [0, 0])).toEqual([5, 0])
+  })
+})
+
+describe('the short lines on an entry’s later rows, and the edit mark', () => {
+  it('a share’s later rows say it is this client’s part; full mode and administrative time say what they hold', () => {
+    const shares = [share('a', 'c1'), share('b', 'c2'), share('c', '', 'even', 13, { isAdministrative: true })]
+    const blocks = buildSplitBlocks(shares)
+    expect(splitShortNote(shares[0], blocks)).toBe("This client's part of a shared block")
+    expect(splitShortNote(shares[2], blocks)).toBe('Part of a shared block, now administrative time')
+    const full = [share('a', 'c1', 'full', 39), share('b', 'c2', 'full', 39)]
+    expect(splitShortNote(full[0], buildSplitBlocks(full))).toBe('Billed in full to this client')
+    // A group whose mode is not known still says only that it is a part.
+    expect(splitShortNote(share('x', 'c1', null), new Map())).toBe("This client's part of a shared block")
+    expect(splitShortNote(fourStretch, blocks)).toBe('')
+  })
+
+  it('a typed entry’s later rows say so briefly; a share’s parts mismatch has no short form (its split line covers it)', () => {
+    const none = new Map()
+    const typed = entry({ id: 't', minutes: 90, sessions: FOUR })
+    expect(clockMismatchShortNote(typed, none, clockSpansOf(typed))).toBe('Hours typed in for this entry')
+    expect(clockMismatchShortNote(fourStretch, none, clockSpansOf(fourStretch))).toBe('')
+    const custom = [share('a', 'c1', 'custom', 10), share('b', 'c2', 'custom', 10)]
+    expect(clockMismatchShortNote(custom[0], buildSplitBlocks(custom), clockSpansOf(custom[0]))).toBe('')
+    // A full-mode part retyped to 20m is typed hours, and says so.
+    const retyped = [share('a', 'c1', 'full', 20), share('b', 'c2', 'full', 39)]
+    expect(clockMismatchShortNote(retyped[0], buildSplitBlocks(retyped), clockSpansOf(retyped[0]))).toBe(
+      'Hours typed in for this entry',
+    )
+  })
+
+  it('the edit mark says it covers the entry when the entry has more than one stretch', () => {
+    expect(howLoggedNote('timer_edited', 4)).toBe('Clock times edited (this entry)')
+    expect(howLoggedNote('manual', 2)).toBe('Manual entry (this entry)')
+    expect(howLoggedNote('timer_edited', 1)).toBe('Clock times edited')
+    expect(howLoggedNote('manual', 0)).toBe('Manual entry')
+    expect(howLoggedNote('timer', 4)).toBe('')
+    expect(howLoggedNote('timer_unread', 4)).toBe('')
+  })
+
+  it('the one remaining part of a block says it in the singular, and claims no reason', () => {
+    const alone = [share('a', 'c1')]
+    const blocks = buildSplitBlocks(alone)
+    expect(splitNote(alone[0], blocks)).toBe('This entry: 13m, the one remaining part of a shared block')
+    expect(clockMismatchNote(alone[0], blocks, clockSpansOf(alone[0]))).toBe(
+      "This part's 13m is not the whole time on the clock (39m).",
+    )
+    // Retyped to the whole clock time, it is the whole time again: nothing to say.
+    const whole = [share('a', 'c1', 'custom', 39)]
+    expect(clockMismatchNote(whole[0], buildSplitBlocks(whole), clockSpansOf(whole[0]))).toBe('')
+  })
+
+  it('"This entry: " only on an entry with more than one stretch', () => {
+    const oneStretch = [
+      share('a', 'c1', 'even', 13, { sessions: [stretch([9, 0], [9, 39])], startAt: at(9, 0), endAt: at(9, 39) }),
+      share('b', 'c2', 'even', 13, { sessions: [stretch([9, 0], [9, 39])], startAt: at(9, 0), endAt: at(9, 39) }),
+      share('c', 'c3', 'even', 13, { sessions: [stretch([9, 0], [9, 39])], startAt: at(9, 0), endAt: at(9, 39) }),
+    ]
+    expect(splitNote(oneStretch[0], buildSplitBlocks(oneStretch))).toBe('13m of a 39m block shared by 3 clients')
+    // No clock times at all: no stretch rows to tell apart either.
+    const bare = [share('a', 'c1', 'even', 13, { sessions: [], startAt: undefined, endAt: undefined })]
+    expect(splitNote(bare[0], buildSplitBlocks(bare))).toBe('13m, the one remaining part of a shared block')
+  })
+
+  it('the parts mismatch says "The parts" once the parts no longer sit one per client', () => {
+    const twoOnOne = [share('a', 'c1', 'custom', 10), share('b', 'c1', 'custom', 10), share('c', 'c3', 'custom', 10)]
+    expect(clockMismatchNote(twoOnOne[0], buildSplitBlocks(twoOnOne), clockSpansOf(twoOnOne[0]))).toBe(
+      'The parts of this block do not add up to the time on the clock (39m).',
+    )
   })
 })
 
@@ -534,7 +740,8 @@ describe('Time by day and job: who set the clock times', () => {
     const { rowOf, section } = await renderDetail()
     const lineOf = (job: string) => rowOf(job).querySelector('.payroll-how-logged')?.textContent ?? null
     expect(lineOf('Acme Dental')).toBeNull()
-    expect(lineOf('Bright Books')).toBe('Clock times edited')
+    // Four stretches: the mark says it covers the entry. One stretch: it is that stretch's entry anyway.
+    expect(lineOf('Bright Books')).toBe('Clock times edited (this entry)')
     expect(lineOf('Cedar Cafe')).toBe('Manual entry')
     expect(lineOf('Delta Design')).toBeNull()
     // What it means, that it is allowed, and what the app does not know.
@@ -589,79 +796,199 @@ describe('Time by day and job: who set the clock times', () => {
   })
 })
 
-describe('Time by day and job: when the time was worked', () => {
-  it('says what the clock times are, on the page and in the column heads', async () => {
+describe('Time by day and job: one row per stretch', () => {
+  it('says what the rows are, rounding first, on the page and in the column heads', async () => {
     const { section, detail } = await renderDetail()
-    const note = within(section).getByText(/Clock in and Clock out are the first start and the last stop of an entry, not a shift\./)
-    // True of every row: "normally", since a share and a typed duration differ and say so themselves.
-    expect(note).toHaveTextContent('each stretch is listed under Sessions, and Hours is normally the time worked in them')
-    // True of an even, a custom and a full split alike: the row says what part it holds.
-    expect(note).toHaveTextContent("the line under each share's Hours says what part of the block that row holds")
-    // Her second question: the 8:59 entry "overlaps the other 3". One person's
-    // rows; two people's time overlaps all day.
-    expect(note).toHaveTextContent(
-      'Two rows of the same person whose clock times overlap are not counted twice unless their listed stretches overlap; the shares of one block list the same stretches on purpose.',
+    // The rounding leads, in plain words.
+    const rounding = within(section).getByText(/^Each row is one stretch of work \(/)
+    expect(rounding).toHaveTextContent(
+      "Each row is one stretch of work (an entry logged without clock times is a single row). When an entry has several stretches, their hours are rounded so they add up exactly to the entry's total, so a 50-minute stretch can show 0.84h instead of 0.83h and a very short stretch can show 0.00h. Rounding never moves a total. The Stretch column marks the rows of one entry \"1 of 3\", \"2 of 3\" and so on.",
+    )
+    // Its own paragraph: the two kinds of row whose hours are not their clock times.
+    const parts = within(section).getByText(/^Some rows' hours are not the time between their clock in and clock out\./)
+    // "only that client's time" is true of an even, a custom and a full split alike; "can" because
+    // Resume on one part, or a part moved, leaves the parts on different stretches.
+    expect(parts).toHaveTextContent(
+      "Some rows' hours are not the time between their clock in and clock out. When a block of time is shared by several clients, each client has its own rows for it, holding only that client's time. When hours were typed in, the typed hours are spread over the entry's stretches by their length. The line under the hours on each of those rows says which, and the rows of one shared block can show the same clock times on purpose.",
+    )
+    for (const note of [rounding, parts]) {
+      expect(note).not.toHaveTextContent(/first start|Sessions|\bshares?\b|remainder|proportion/i)
+    }
+    // The edit mark covers the entry, not one stretch.
+    expect(within(section).getByText(/"Clock times edited" means/)).toHaveTextContent(
+      'On an entry worked in several stretches the line is on its first row and says "(this entry)": it covers the whole entry, and the app cannot say which stretch was edited.',
+    )
+    expect(within(section).getByText(/Each row’s Cost is that person’s pay/)).toHaveTextContent(
+      'split across their entries and each entry’s stretches',
     )
     const heads = [...detail.querySelectorAll('th')].map((th) => th.textContent)
-    expect(heads).toContain('Clock in (first start)')
-    expect(heads).toContain('Clock out (last stop)')
+    expect(heads).toEqual([
+      'Day / job',
+      'Team member',
+      'Task',
+      'Clock in',
+      'Clock out',
+      'Stretch',
+      'Hours',
+      'Billable',
+      'Billable $',
+      'Cost',
+    ])
   })
 
-  it('a share of a block shows the block’s stretches, its own time, and what the shares total', async () => {
-    const { rowOf, stretchesOf } = await renderDetail()
-    for (const job of ['Acme Dental', 'Bright Books', 'Cedar Cafe']) {
-      const row = rowOf(job)
-      // The two clock times alone are what read as "a whole day, 0.22 hours".
-      expect(row).toHaveTextContent('9:08 AM')
-      expect(row).toHaveTextContent('5:42 PM')
-      expect(stretchesOf(row)).toEqual(BLOCK_TEXT)
-      // 13m is 0.22h: the bridge from the row's Hours to the block is on the row.
-      expect(within(row).getByText('13m share of a block split across 3 clients (the shares total 39m)')).toBeInTheDocument()
-      expect(row).toHaveTextContent('0.22h')
-      expect(within(row).queryByText(/do not add up|typed in/)).not.toBeInTheDocument()
+  it("Allison's four-stretch entry is four rows, each with its own clock in, clock out and hours", async () => {
+    const { entryRows } = await renderDetail()
+    const rows = entryRows('four')
+    expect(rows).toHaveLength(4)
+    const cells = rows.map(cellsOf)
+    expect(cells.map((row) => row[IN])).toEqual(FOUR.map((span) => formatAuditStamp(span.startAt)))
+    expect(cells.map((row) => row[OUT])).toEqual(FOUR.map((span) => formatAuditStamp(span.endAt)))
+    expect(cells.map((row) => row[STRETCH])).toEqual(['1 of 4', '2 of 4', '3 of 4', '4 of 4'])
+    expect(cells.map((row) => row[HOURS])).toEqual(['0.13h', '0.80h', '0.84h', '0.15h'])
+    expect(sum2(cells.map((row) => lead(row[HOURS])))).toBe('1.92')
+    expect(sum2(cells.map((row) => lead(row[BILLABLE])))).toBe('1.92')
+    // The edit mark, once, on its first row, saying it covers the entry.
+    expect(rows[0].querySelector('.payroll-how-logged')?.textContent).toBe('Clock times edited (this entry)')
+    for (const row of rows.slice(1)) expect(row.querySelector('.payroll-how-logged')).toBeNull()
+    // An ordinary entry: each row's hours are its stretch, and nothing needs saying.
+    for (const row of rows) expect(row.querySelector('.payroll-hours-note')).toBeNull()
+  })
+
+  it("Allison's 39-minute block split three ways is six rows: every client, every stretch", async () => {
+    const { entryRows, rowsOf } = await renderDetail()
+    for (const [id, job] of [
+      ['share-a', 'Acme Dental'],
+      ['share-b', 'Bright Books'],
+      ['share-c', 'Cedar Cafe'],
+    ]) {
+      const rows = entryRows(id)
+      expect(rowsOf(job)).toEqual(rows)
+      const cells = rows.map(cellsOf)
+      expect(cells.map((row) => [row[IN], row[OUT]])).toEqual(
+        BLOCK.map((span) => [formatAuditStamp(span.startAt), formatAuditStamp(span.endAt)]),
+      )
+      expect(cells.map((row) => row[STRETCH])).toEqual(['1 of 2', '2 of 2'])
+      // 13m is 0.22h, spread over the 2- and 37-minute stretches.
+      expect(cells.map((row) => lead(row[HOURS]))).toEqual([0.01, 0.21])
+      // Every row explains its own hours: the whole line on the first, a short form after it.
+      const notes = rows.map((row) => [...row.querySelectorAll('.payroll-hours-note')].map((line) => line.textContent))
+      expect(notes).toEqual([['This entry: 13m of a 39m block shared by 3 clients'], ["This client's part of a shared block"]])
     }
   })
 
-  it('an entry worked in four stretches lists all four; its hours are their sum', async () => {
-    const { rowsOf, stretchesOf } = await renderDetail()
-    const four = rowsOf('Delta Design').find((row) => row.querySelector('.payroll-stretches')) as HTMLElement
-    expect(stretchesOf(four)).toEqual(FOUR_TEXT)
-    // 8 + 48 + 50 + 9 = 115 minutes.
-    expect(four).toHaveTextContent('1.92h')
-    expect(within(four).queryByText(/share of|typed in/)).not.toBeInTheDocument()
+  // Resume on one part only: that part grows a stretch, the others do not. Every
+  // line still states only what the rows hold.
+  it('stays true after Resume on one part, and for a part moved to administrative time', async () => {
+    const grown = share('grown', 'c1', 'even', 23, { sessions: [...BLOCK, stretch([18, 0], [18, 10])], endAt: at(18, 10) })
+    const admin = share('admin', '', 'even', 13, { isAdministrative: true, billable: false })
+    timeEntries = [grown, share('kept', 'c2'), admin]
+    const { entryRows } = await renderDetail()
+    const notesOf = (id: string) =>
+      entryRows(id).map((row) => [...row.querySelectorAll('.payroll-hours-note')].map((line) => line.textContent))
+    expect(notesOf('grown')).toEqual([
+      ['This entry: 23m of a 49m block shared by 2 clients'],
+      ["This client's part of a shared block"],
+      ["This client's part of a shared block"],
+    ])
+    // Its parts add to 49m, its own clock to 39m: the block's size is no longer one figure.
+    expect(notesOf('kept')).toEqual([
+      [
+        'This entry: 13m part of a block shared by 2 clients (the parts total 49m)',
+        'The parts of this block do not add up to the time on the clock (39m).',
+      ],
+      ["This client's part of a shared block"],
+    ])
+    expect(notesOf('admin')).toEqual([
+      ['This entry: 13m part of a shared block, moved to administrative time', 'The parts of this block do not add up to the time on the clock (39m).'],
+      ['Part of a shared block, now administrative time'],
+    ])
   })
 
-  it('an entry worked in one stretch, or with no clock times, gets nothing extra', async () => {
-    const { rowsOf, detail } = await renderDetail()
-    const plain = [...rowsOf('Delta Design'), ...rowsOf('(Admin)')].filter((row) => !row.querySelector('.payroll-stretches'))
-    // The single-stretch entry, the minutes-only entry and the other person's.
-    expect(plain).toHaveLength(3)
-    for (const row of plain) expect(within(row).queryByText(/share of|typed in|do not add up/)).not.toBeInTheDocument()
-    // Three shares and the four-stretch entry.
-    expect(detail.querySelectorAll('.payroll-stretches')).toHaveLength(4)
+  it('an entry worked in one stretch, or with no clock times, is one row with a blank Stretch', async () => {
+    const { entryRows } = await renderDetail()
+    for (const id of ['single', 'bare', 'other']) {
+      const rows = entryRows(id)
+      expect(rows).toHaveLength(1)
+      expect(cellsOf(rows[0])[STRETCH]).toBe('')
+    }
+    expect(cellsOf(entryRows('single')[0]).slice(IN, OUT + 1)).toEqual([formatAuditStamp(at(13, 0)), formatAuditStamp(at(13, 13))])
+    expect(cellsOf(entryRows('single')[0])[HOURS]).toBe('0.22h')
+    expect(cellsOf(entryRows('bare')[0]).slice(IN, OUT + 1)).toEqual(['—', '—'])
+    expect(cellsOf(entryRows('bare')[0])[HOURS]).toBe('0.50h')
   })
 
-  it('the clock times and the list are in time order even when the stretches were stored out of order', async () => {
+  it('the day subtotal and the totals are what one row per entry gave', async () => {
+    const { detail } = await renderDetail()
+    // One row per entry: 3 x 0.22 + 1.92 + 0.22 + 0.50 + 0.33 = 3.63h.
+    const expected = sum2(
+      day3.map((e) => Math.round((e.minutes / 60) * 100) / 100),
+    )
+    expect(expected).toBe('3.63')
+    const day = detail.querySelector('tbody tr.payroll-day-row') as HTMLElement
+    expect(cellsOf(day)[1]).toBe(`${expected}h`)
+    const rows = [...detail.querySelectorAll<HTMLElement>('tbody tr:not(.payroll-day-row)')]
+    expect(rows).toHaveLength(4 + 6 + 3)
+    expect(sum2(rows.map((row) => lead(cellsOf(row)[HOURS])))).toBe(expected)
+    const footer = [...(detail.querySelector('tfoot tr') as HTMLElement).querySelectorAll('td')].map((td) => td.textContent ?? '')
+    expect(footer[1]).toBe(`${expected}h`)
+    expect(footer[2]).toBe(`${sum2(rows.map((row) => lead(cellsOf(row)[BILLABLE])))}h`)
+  })
+
+  it('Billable $ and Cost rows add to the totals under them, to the cent', async () => {
+    mockFetchRateVersions.mockResolvedValue({
+      billRateVersions: [
+        { userId: 'emp-1', effectivePeriod: '2026-01', rate: 90 },
+        { userId: 'emp-2', effectivePeriod: '2026-01', rate: 90 },
+      ],
+      costRateVersions: [
+        { userId: 'emp-1', effectiveDate: '1970-01-01', rate: 37 },
+        { userId: 'emp-2', effectiveDate: '1970-01-01', rate: 37 },
+      ],
+    } as never)
+    const { detail, entryRows } = await renderDetail()
+    await waitFor(() => expect(cellsOf(entryRows('four')[0])[COST]).toMatch(/^\$/))
+    const rows = [...detail.querySelectorAll<HTMLElement>('tbody tr:not(.payroll-day-row)')]
+    const footer = [...(detail.querySelector('tfoot tr') as HTMLElement).querySelectorAll('td')].map((td) => td.textContent ?? '')
+    const dollars = (column: number) =>
+      sum2(rows.map((row) => cellsOf(row)[column]).filter((cell) => cell.startsWith('$')).map(lead))
+    expect(`$${dollars(AMOUNT)}`).toBe(footer[footer.length - 2])
+    expect(`$${dollars(COST)}`).toBe(footer[footer.length - 1])
+    // And entry by entry: the four rows add to what the entry's one row priced (1.92h).
+    const four = entryRows('four').map(cellsOf)
+    expect(sum2(four.map((row) => lead(row[AMOUNT])))).toBe('172.80')
+    expect(sum2(four.map((row) => lead(row[COST])))).toBe((1.92 * 37).toFixed(2))
+  })
+
+  it('the clock times are in time order even when the stretches were stored out of order', async () => {
     timeEntries = [entry({ id: 'jumbled', minutes: 115, sessions: [FOUR[2], FOUR[0], FOUR[3], FOUR[1]] })]
-    const { rowOf, stretchesOf } = await renderDetail()
-    const row = rowOf('Delta Design')
-    const cells = [...row.querySelectorAll('td')].map((td) => td.textContent)
-    // The Clock in cell also carries the edit line (this fixture's times are on exact minutes).
-    expect(cells).toContain('Nov 3, 8:59 AMClock times edited')
-    expect(cells).toContain('Nov 3, 12:59 PM')
-    expect(stretchesOf(row)).toEqual(FOUR_TEXT)
+    const { entryRows } = await renderDetail()
+    const rows = entryRows('jumbled')
+    const cells = rows.map(cellsOf)
+    expect(cells.map((row) => row[IN])).toEqual(FOUR.map((span) => formatAuditStamp(span.startAt)))
+    // The Clock in cell of the first row also carries the edit line (this fixture's times are on exact minutes).
+    expect(rows[0].querySelector('td:nth-child(4)')?.textContent).toBe(
+      `${formatAuditStamp(FOUR[0].startAt)}Clock times edited (this entry)`,
+    )
+    expect(cells.map((row) => row[OUT])).toEqual(FOUR.map((span) => formatAuditStamp(span.endAt)))
   })
 
-  it('says when the Hours were typed and are not the clock time', async () => {
+  it('says on the first row that the Hours were typed, a short form on the others; the rows add to the typed figure', async () => {
     timeEntries = [
       entry({ id: 'typed', minutes: 90, sessions: FOUR }),
       entry({ id: 'half', clientId: 'c1', minutes: 30, sessions: [stretch([14, 0], [15, 0])] }),
     ]
-    const { rowOf } = await renderDetail()
-    expect(rowOf('Delta Design')).toHaveTextContent('1.50h')
-    expect(within(rowOf('Delta Design')).getByText('Hours typed in (clock time 1h 55m)')).toBeInTheDocument()
-    expect(rowOf('Acme Dental')).toHaveTextContent('0.50h')
-    expect(within(rowOf('Acme Dental')).getByText('Hours typed in (clock time 1h)')).toBeInTheDocument()
+    const { entryRows } = await renderDetail()
+    const typed = entryRows('typed')
+    expect(typed).toHaveLength(4)
+    expect(sum2(typed.map((row) => lead(cellsOf(row)[HOURS])))).toBe('1.50')
+    expect(within(typed[0]).getByText("Hours typed in. This entry's stretches add up to 1h 55m on the clock.")).toBeInTheDocument()
+    for (const row of typed.slice(1)) {
+      expect([...row.querySelectorAll('.payroll-hours-note')].map((line) => line.textContent)).toEqual([
+        'Hours typed in for this entry',
+      ])
+    }
+    expect(cellsOf(entryRows('half')[0])[HOURS]).toBe('0.50h')
+    expect(within(entryRows('half')[0]).getByText("Hours typed in. This entry's stretches add up to 1h on the clock.")).toBeInTheDocument()
   })
 
   // A share can be moved to another day. The ones left behind are still shares
@@ -671,121 +998,273 @@ describe('Time by day and job: when the time was worked', () => {
     timeEntries = [share('share-a', 'c1'), share('share-b', 'c2'), share('share-c', 'c3', 'even', 13, { date: '2026-12-20' })]
     const { rowOf, rowsOf } = await renderDetail()
     expect(rowsOf('Cedar Cafe')).toHaveLength(0)
-    expect(within(rowOf('Acme Dental')).getByText('13m share of a block split across 3 clients (the shares total 39m)')).toBeInTheDocument()
+    expect(within(rowOf('Acme Dental')).getByText('This entry: 13m of a 39m block shared by 3 clients')).toBeInTheDocument()
   })
 
   it('reads the same when the detail is filtered to one person', async () => {
-    const { rowOf, rowsOf, stretchesOf } = await renderDetail()
+    const { rowOf, rowsOf, entryRows } = await renderDetail()
     fireEvent.change(screen.getByLabelText('Team member'), { target: { value: 'emp-1' } })
-    await waitFor(() => expect(rowsOf('(Admin)').length + rowsOf('Delta Design').length).toBe(3))
+    // The four-stretch entry, the single one and the minutes-only one; the other person's is gone.
+    await waitFor(() => expect(rowsOf('(Admin)').length + rowsOf('Delta Design').length).toBe(6))
     const row = rowOf('Acme Dental')
-    expect(within(row).getByText('13m share of a block split across 3 clients (the shares total 39m)')).toBeInTheDocument()
-    expect(stretchesOf(row)).toEqual(BLOCK_TEXT)
+    expect(within(row).getByText('This entry: 13m of a 39m block shared by 3 clients')).toBeInTheDocument()
+    expect(entryRows('share-a')).toHaveLength(2)
   })
 
-  it('a custom split says each share’s own time; a full-mode split says the block is billed in full', async () => {
+  it('a custom split says each share’s own time; a full-mode split keeps the repeat’s cost off every row', async () => {
     timeEntries = [share('custom-a', 'c1', 'custom', 30), share('custom-b', 'c2', 'custom', 9)]
     const custom = await renderDetail()
-    expect(within(custom.rowOf('Acme Dental')).getByText('30m share of a block split across 2 clients (the shares total 39m)')).toBeInTheDocument()
-    expect(within(custom.rowOf('Bright Books')).getByText('9m share of a block split across 2 clients (the shares total 39m)')).toBeInTheDocument()
-    expect(custom.rowOf('Acme Dental')).toHaveTextContent('0.50h')
+    expect(within(custom.rowOf('Acme Dental')).getByText('This entry: 30m of a 39m block shared by 2 clients')).toBeInTheDocument()
+    expect(within(custom.rowOf('Bright Books')).getByText('This entry: 9m of a 39m block shared by 2 clients')).toBeInTheDocument()
+    expect(sum2(custom.entryRows('custom-a').map((row) => lead(cellsOf(row)[HOURS])))).toBe('0.50')
     custom.view.unmount()
 
     timeEntries = [share('full-a', 'c1', 'full', 39), share('full-b', 'c2', 'full', 39)]
     const full = await renderDetail()
-    expect(within(full.detail).getAllByText('full 39m block billed to each of 2 clients')).toHaveLength(2)
-    // The repeat still carries the older note: its hours are counted once.
+    // Once per share, on its first row.
+    expect(within(full.detail).getAllByText('This entry: full 39m block billed to each of 2 clients')).toHaveLength(2)
     expect(within(full.detail).getAllByText('full block · counted once')).toHaveLength(1)
-    expect(full.detail.querySelectorAll('.payroll-stretches')).toHaveLength(2)
+    expect(full.entryRows('full-a')).toHaveLength(2)
+    expect(full.entryRows('full-b')).toHaveLength(2)
+    // The later row of each says what it holds; the repeat's later row says it counts once.
+    const notesOf = (id: string) =>
+      full.entryRows(id).map((row) => [...row.querySelectorAll('.payroll-hours-note')].map((line) => line.textContent))
+    expect(notesOf('full-a')).toEqual([['This entry: full 39m block billed to each of 2 clients'], ['Billed in full to this client']])
+    expect(notesOf('full-b')).toEqual([
+      ['This entry: full 39m block billed to each of 2 clients', 'full block · counted once'],
+      ['Billed in full to this client', 'counted once'],
+    ])
+    for (const row of full.entryRows('full-b')) expect(cellsOf(row)[COST]).toBe('—')
+    // The block counts once in the day: 0.65h, not 1.30h.
+    expect(cellsOf(full.detail.querySelector('tbody tr.payroll-day-row') as HTMLElement)[1]).toBe('0.65h')
   })
 })
 
-describe('the exports carry it too, in columns added at the end', () => {
-  const NEW = ['Worked stretches', 'Split across clients', 'Hours note', 'Logged']
-
-  it('Raw hours: every earlier column keeps its place', async () => {
-    await renderDetail()
-    fireEvent.click(screen.getByRole('button', { name: /Raw hours/i }))
+describe('the downloads: one row per stretch too', () => {
+  const TAIL = ['Split across clients', 'Hours note', 'Logged']
+  type Sheet = { headers: string[]; rows: Array<Array<string | number>> }
+  const sheet = (button: RegExp): Sheet => {
+    mockDownloadCsv.mockReset()
+    fireEvent.click(screen.getByRole('button', { name: button }))
     const [, headers, rows] = mockDownloadCsv.mock.calls[0] as unknown as [string, string[], Array<Array<string | number>>]
-    expect(headers).toEqual([
+    return { headers, rows }
+  }
+  const columnSum = ({ headers, rows }: Sheet, name: string, only?: (row: Array<string | number>) => boolean) =>
+    sum2(
+      rows
+        .filter((row) => (only ? only(row) : true))
+        .map((row) => row[headers.indexOf(name)])
+        .filter((cell) => cell !== '')
+        .map(Number),
+    )
+
+  it('Raw hours: Stretch, Entry # and Split block # where Sessions was, no Worked stretches column, notes on every row', async () => {
+    await renderDetail()
+    const raw = sheet(/Raw hours/i)
+    expect(raw.headers).toEqual([
       'Date',
       'Team member',
       'Client',
       'Task',
       'Clock in',
       'Clock out',
-      'Sessions',
+      'Stretch',
+      'Entry #',
+      'Split block #',
       'Hours',
       'Billable',
       'Billable hours',
       'Billable $',
       'Cost',
       'Description',
-      ...NEW,
+      ...TAIL,
     ])
-    const col = (name: string) => headers.indexOf(name)
-    const byClient = (name: string) => rows.filter((row) => row[col('Client')] === name)
+    const col = (name: string) => raw.headers.indexOf(name)
+    for (const row of raw.rows) expect(row).toHaveLength(raw.headers.length)
+    expect(raw.rows).toHaveLength(4 + 6 + 3)
 
-    const acme = byClient('Acme Dental')[0]
-    expect(acme[col('Sessions')]).toBe(2)
-    expect(acme[col('Hours')]).toBe('0.22')
-    expect(acme[col('Worked stretches')]).toBe(BLOCK_TEXT.join('; '))
-    expect(acme[col('Split across clients')]).toBe('13m share of a block split across 3 clients (the shares total 39m)')
-    expect(acme[col('Hours note')]).toBe('')
-
-    // In a sorted sheet a blank reads as "no time worked": one stretch is listed
-    // too, and only an entry logged as minutes is blank.
-    const delta = byClient('Delta Design')
-    expect(delta.map((row) => row[col('Worked stretches')]).sort()).toEqual(
-      ['', '1:00 PM – 1:13 PM (13m)', '2:00 PM – 2:20 PM (20m)', FOUR_TEXT.join('; ')].sort(),
+    // The four-stretch entry: four self-contained rows.
+    const four = raw.rows.filter((row) => String(row[col('Stretch')]).endsWith('of 4'))
+    expect(four.map((row) => [row[col('Clock in')], row[col('Clock out')], row[col('Stretch')], row[col('Hours')]])).toEqual(
+      FOUR.map((span, i) => [formatAuditStamp(span.startAt), formatAuditStamp(span.endAt), `${i + 1} of 4`, ['0.13', '0.80', '0.84', '0.15'][i]]),
     )
-    for (const row of delta) expect(row[col('Split across clients')]).toBe('')
-    for (const row of rows) expect(row).toHaveLength(headers.length)
+    for (const row of four) {
+      expect(row.slice(0, 4)).toEqual([DAY, 'Avery Stone', 'Delta Design', 'Bookkeeping'])
+      expect(row[col('Description')]).toBe('Work')
+      expect(row[col('Logged')]).toBe('Timer, clock times edited')
+    }
+
+    // A share: two rows, the split line on BOTH (a sorted sheet has no first row).
+    const acme = raw.rows.filter((row) => row[col('Client')] === 'Acme Dental')
+    expect(acme.map((row) => [row[col('Stretch')], row[col('Hours')], row[col('Billable hours')]])).toEqual([
+      ['1 of 2', '0.01', '0.01'],
+      ['2 of 2', '0.21', '0.21'],
+    ])
+    for (const row of acme) {
+      expect(row[col('Split across clients')]).toBe('This entry: 13m of a 39m block shared by 3 clients')
+      expect(row[col('Hours note')]).toBe('')
+    }
+
+    // A minutes-only entry: one row, clock times and Stretch blank.
+    const bare = raw.rows.filter((row) => row[col('Logged')] === 'Hours only (no clock times)')
+    expect(bare).toHaveLength(1)
+    expect([bare[0][col('Clock in')], bare[0][col('Clock out')], bare[0][col('Stretch')], bare[0][col('Hours')]]).toEqual(['', '', '', '0.50'])
+    // One stretch: "1 of 1" in a sheet, so a sorted sheet has no blank that reads as "no clock times".
+    const singleRow = raw.rows.filter((row) => row[col('Clock in')] === formatAuditStamp(at(13, 0)))
+    expect(singleRow.map((row) => row[col('Stretch')])).toEqual(['1 of 1'])
+
+    // Entry #: one short number per entry, the same on each of its rows, in the sheet's order.
+    const entryNumbers = raw.rows.map((row) => row[col('Entry #')])
+    expect(new Set(entryNumbers)).toEqual(new Set([1, 2, 3, 4, 5, 6, 7]))
+    expect(new Set(four.map((row) => row[col('Entry #')])).size).toBe(1)
+    expect(new Set(acme.map((row) => row[col('Entry #')])).size).toBe(1)
+    let previous = 0
+    for (const value of entryNumbers) {
+      expect(Number(value) === previous || Number(value) === previous + 1).toBe(true)
+      previous = Number(value)
+    }
+    // Split block #: the same on every row of all three clients' parts, blank on every other row.
+    const shared = raw.rows.filter((row) => ['Acme Dental', 'Bright Books', 'Cedar Cafe'].includes(String(row[col('Client')])))
+    expect(shared).toHaveLength(6)
+    expect(new Set(shared.map((row) => row[col('Split block #')]))).toEqual(new Set([1]))
+    for (const row of raw.rows.filter((r) => !shared.includes(r))) expect(row[col('Split block #')]).toBe('')
+
+    // The columns sum to exactly what one row per entry gave.
+    expect(columnSum(raw, 'Hours')).toBe('3.63')
+    expect(columnSum(raw, 'Billable hours')).toBe('3.63')
   })
 
-  it('Raw hours says when Hours were typed, and that a full block counts once', async () => {
+  it('Raw hours money columns add to the screen’s totals; a full-mode repeat has no Cost on any row', async () => {
+    mockFetchRateVersions.mockResolvedValue({
+      billRateVersions: [{ userId: 'emp-1', effectivePeriod: '2026-01', rate: 90 }],
+      costRateVersions: [{ userId: 'emp-1', effectiveDate: '1970-01-01', rate: 37 }],
+    } as never)
     timeEntries = [
       entry({ id: 'typed', minutes: 90, sessions: FOUR }),
       share('full-a', 'c1', 'full', 39),
       share('full-b', 'c2', 'full', 39),
+      fourStretch,
     ]
+    const { detail, entryRows } = await renderDetail()
+    await waitFor(() => expect(cellsOf(entryRows('four')[0])[COST]).toMatch(/^\$/))
+    const footer = [...(detail.querySelector('tfoot tr') as HTMLElement).querySelectorAll('td')].map((td) => td.textContent ?? '')
+    const raw = sheet(/Raw hours/i)
+    const col = (name: string) => raw.headers.indexOf(name)
+    expect(`$${columnSum(raw, 'Billable $')}`).toBe(footer[footer.length - 2])
+    expect(`$${columnSum(raw, 'Cost')}`).toBe(footer[footer.length - 1])
+    // Hours: the repeat's rows carry its hours, as its one row did; without them the column is the screen's total.
+    expect(columnSum(raw, 'Hours', (row) => row[col('Client')] !== 'Bright Books')).toBe(footer[1].replace('h', ''))
+
+    // The repeated full-mode share: both rows billed, neither costed.
+    const fullRows = raw.rows.filter((row) => row[col('Client')] === 'Bright Books')
+    expect(fullRows).toHaveLength(2)
+    for (const row of fullRows) {
+      expect(row[col('Cost')]).toBe('')
+      expect(row[col('Split across clients')]).toBe('This entry: full 39m block billed to each of 2 clients; hours counted once')
+    }
+    // Each entry's rows add to that entry's cells on screen, column by column.
+    const sheetRowsOf: Record<string, (row: Array<string | number>) => boolean> = {
+      typed: (row) => row[col('Hours note')] !== '' && row[col('Client')] === 'Delta Design',
+      four: (row) => row[col('Hours note')] === '' && row[col('Client')] === 'Delta Design',
+      'full-a': (row) => row[col('Client')] === 'Acme Dental',
+      'full-b': (row) => row[col('Client')] === 'Bright Books',
+    }
+    for (const [id, belongs] of Object.entries(sheetRowsOf)) {
+      const screenRows = entryRows(id).map(cellsOf)
+      const onScreen = (column: number) =>
+        sum2(screenRows.map((row) => row[column]).filter((cell) => cell.startsWith('$')).map(lead))
+      const sheetRows = raw.rows.filter(belongs)
+      expect(sheetRows).toHaveLength(screenRows.length)
+      expect(sheetRows.map((row) => row[col('Hours')])).toEqual(screenRows.map((row) => row[HOURS].slice(0, -1)))
+      expect(columnSum(raw, 'Billable $', belongs)).toBe(onScreen(AMOUNT))
+      expect(columnSum(raw, 'Cost', belongs)).toBe(onScreen(COST))
+    }
+    // The typed entry's note is on each of its four rows.
+    const typedRows = raw.rows.filter((row) => row[col('Hours note')] === "Hours typed in. This entry's stretches add up to 1h 55m on the clock.")
+    expect(typedRows).toHaveLength(4)
+    expect(sum2(typedRows.map((row) => Number(row[col('Hours')])))).toBe('1.50')
+  })
+
+  it('Hours by month: the same rows and columns, with no Cost', async () => {
+    mockFetchRateVersions.mockResolvedValue({
+      billRateVersions: [{ userId: 'emp-1', effectivePeriod: '2026-01', rate: 90 }],
+      costRateVersions: [],
+    } as never)
     await renderDetail()
-    fireEvent.click(screen.getByRole('button', { name: /Raw hours/i }))
-    const [, headers, rows] = mockDownloadCsv.mock.calls[0] as unknown as [string, string[], Array<Array<string | number>>]
-    const col = (name: string) => headers.indexOf(name)
-    const typed = rows.find((row) => row[col('Client')] === 'Delta Design') as Array<string | number>
-    expect(typed[col('Hours')]).toBe('1.50')
-    expect(typed[col('Hours note')]).toBe('Hours typed in (clock time 1h 55m)')
-    const full = rows.filter((row) => row[col('Client')] !== 'Delta Design')
-    expect(full.map((row) => row[col('Split across clients')])).toEqual([
-      'full 39m block billed to each of 2 clients; hours counted once',
-      'full 39m block billed to each of 2 clients; hours counted once',
+    const month = sheet(/Hours by month \(CSV\)/i)
+    expect(month.headers.slice(0, 10)).toEqual([
+      'Date',
+      'Employee',
+      'Client',
+      'Task',
+      'Clock in',
+      'Clock out',
+      'Stretch',
+      'Entry #',
+      'Split block #',
+      'Hours',
     ])
+    expect(month.headers.slice(-4)).toEqual(['Description', ...TAIL])
+    expect(month.headers).not.toContain('Worked stretches')
+    expect(month.headers).not.toContain('Sessions')
+    expect(month.headers).not.toContain('Cost')
+    for (const row of month.rows) expect(row).toHaveLength(month.headers.length)
+    const col = (name: string) => month.headers.indexOf(name)
+    expect(month.rows).toHaveLength(4 + 6 + 3)
+    const four = month.rows.filter((row) => String(row[col('Stretch')]).endsWith('of 4'))
+    expect(four.map((row) => row[col('Hours')])).toEqual(['0.13', '0.80', '0.84', '0.15'])
+    // 115 minutes at $90 is $172.50, as the one row printed it; its rows add to that.
+    expect(sum2(four.map((row) => Number(row[col('Billable $')])))).toBe('172.50')
+    const acme = month.rows.filter((row) => row[2] === 'Acme Dental')
+    expect(acme).toHaveLength(2)
+    // 13 minutes at $90 is $19.50.
+    expect(sum2(acme.map((row) => Number(row[col('Billable $')])))).toBe('19.50')
+    for (const row of acme) {
+      expect(row[col('Split across clients')]).toBe('This entry: 13m of a 39m block shared by 3 clients')
+    }
+    expect(columnSum(month, 'Hours')).toBe('3.63')
+    // The same regrouping columns as Raw hours.
+    expect(new Set(month.rows.map((row) => row[col('Entry #')]))).toEqual(new Set([1, 2, 3, 4, 5, 6, 7]))
+    expect(new Set(four.map((row) => row[col('Entry #')])).size).toBe(1)
+    const shared = month.rows.filter((row) => row[col('Split block #')] !== '')
+    expect(shared.map((row) => row[2]).sort()).toEqual(
+      ['Acme Dental', 'Acme Dental', 'Bright Books', 'Bright Books', 'Cedar Cafe', 'Cedar Cafe'],
+    )
+    expect(new Set(shared.map((row) => row[col('Split block #')]))).toEqual(new Set([1]))
+    expect(month.rows.filter((row) => row[col('Stretch')] === '1 of 1')).toHaveLength(2)
+    expect(month.rows.filter((row) => row[col('Stretch')] === '')).toHaveLength(1)
+  })
+
+  it('the one remaining part of a block: the singular line on screen and on every row of both sheets', async () => {
+    timeEntries = [share('alone', 'c1')]
+    const { entryRows } = await renderDetail()
+    const notes = entryRows('alone').map((row) =>
+      [...row.querySelectorAll('.payroll-hours-note')].map((line) => line.textContent),
+    )
+    expect(notes).toEqual([
+      ['This entry: 13m, the one remaining part of a shared block', "This part's 13m is not the whole time on the clock (39m)."],
+      ["This client's part of a shared block"],
+    ])
+    for (const button of [/Raw hours/i, /Hours by month \(CSV\)/i]) {
+      const { headers, rows } = sheet(button)
+      expect(rows).toHaveLength(2)
+      for (const row of rows) {
+        expect(row[headers.indexOf('Hours note')]).toBe("This part's 13m is not the whole time on the clock (39m).")
+        expect(row[headers.indexOf('Split across clients')]).toBe('This entry: 13m, the one remaining part of a shared block')
+      }
+    }
   })
 
   it('Hours by month reads a block whole even when one share is dated in another month', async () => {
     timeEntries = [share('share-a', 'c1'), share('share-b', 'c2'), share('share-c', 'c3', 'even', 13, { date: '2026-12-20' })]
     await renderDetail()
-    fireEvent.click(screen.getByRole('button', { name: /Hours by month \(CSV\)/i }))
-    const [, headers, rows] = mockDownloadCsv.mock.calls[0] as unknown as [string, string[], Array<Array<string | number>>]
-    expect(rows).toHaveLength(2)
-    for (const row of rows) {
-      expect(row[headers.indexOf('Split across clients')]).toBe(
-        '13m share of a block split across 3 clients (the shares total 39m)',
+    const month = sheet(/Hours by month \(CSV\)/i)
+    // Two shares in November, two stretches each.
+    expect(month.rows).toHaveLength(4)
+    for (const row of month.rows) {
+      expect(row[month.headers.indexOf('Split across clients')]).toBe(
+        'This entry: 13m of a 39m block shared by 3 clients',
       )
     }
-  })
-
-  it('Hours by month: the same three columns at the end, so a share is explained there too', async () => {
-    await renderDetail()
-    fireEvent.click(screen.getByRole('button', { name: /Hours by month \(CSV\)/i }))
-    const [, headers, rows] = mockDownloadCsv.mock.calls[0] as unknown as [string, string[], Array<Array<string | number>>]
-    expect(headers.slice(-5)).toEqual(['Description', ...NEW])
-    expect(headers.indexOf('Hours')).toBe(7)
-    const col = (name: string) => headers.indexOf(name)
-    const acme = rows.find((row) => row[2] === 'Acme Dental') as Array<string | number>
-    expect(acme[col('Worked stretches')]).toBe(BLOCK_TEXT.join('; '))
-    expect(acme[col('Split across clients')]).toBe('13m share of a block split across 3 clients (the shares total 39m)')
-    for (const row of rows) expect(row).toHaveLength(headers.length)
   })
 })
