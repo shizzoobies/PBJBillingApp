@@ -179,6 +179,14 @@ describe('DashboardPage: Projected billing is the Invoice Recap Service total (f
     expect(mockEstimate.mock.calls[0][0]).toBe('2026-09')
   })
 
+  it('says in its hint that hourly clients this month are at the hours so far (featreq-abd4b683)', async () => {
+    render(page())
+    await waitFor(() => expect(projectedBilling()).toBe('$14,766.52'))
+    const hint = screen.getByText('Projected billing').closest('.kpi-stat')?.getAttribute('title') ?? ''
+    expect(hint).toMatch(/^The Service total on the Invoice Recap/)
+    expect(hint).toMatch(/hourly clients in the current month at the hours worked so far times their bill rates/)
+  })
+
   it('works nothing out from the hours and rates on the page', async () => {
     // The old tile said $540.00 here: one hour at $40 plus the $500 monthly rate.
     mockEstimate.mockResolvedValue(estimateOf('2026-09', 0))
@@ -240,6 +248,27 @@ describe('DashboardPage: Projected billing is the Invoice Recap Service total (f
     } as unknown as AppContextValue
     view.rerender(page())
     await waitFor(() => expect(projectedBilling()).toBe('$14,800.00'))
+    expect(mockEstimate).toHaveBeenCalledTimes(2)
+  })
+
+  // featreq-abd4b683: the figure is hours x each person's rate, so an edit that
+  // keeps the count and the minutes still changes it.
+  it.each([
+    ['reassigned to another person', { employeeId: OWNER }],
+    ['moved to another client', { clientId: 'client-sub' }],
+    ['flipped to ad hoc', { isAdhoc: true }],
+  ])('asks again when an entry is %s with the same minutes', async (_name, change) => {
+    const view = render(page())
+    await waitFor(() => expect(projectedBilling()).toBe('$14,766.52'))
+    expect(mockEstimate).toHaveBeenCalledTimes(1)
+
+    mockEstimate.mockResolvedValue(estimateOf('2026-09', 14700))
+    contextValue = {
+      ...contextValue,
+      data: { ...data, timeEntries: [{ ...data.timeEntries[0], ...change }] },
+    } as unknown as AppContextValue
+    view.rerender(page())
+    await waitFor(() => expect(projectedBilling()).toBe('$14,700.00'))
     expect(mockEstimate).toHaveBeenCalledTimes(2)
   })
 

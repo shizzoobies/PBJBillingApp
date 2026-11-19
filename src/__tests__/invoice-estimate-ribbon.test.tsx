@@ -109,6 +109,45 @@ describe('the owner estimate ribbon', () => {
     expect(cedar.textContent).not.toContain('$0.00')
   })
 
+  // featreq-abd4b683: an hourly client this month is its hours so far x rates.
+  it('says how hourly clients are quoted in the current month, and draws an "hours so far" row and a "no hours yet" row', async () => {
+    mockEstimate.mockResolvedValue({
+      ...estimate,
+      clients: [
+        { clientId: 'd', clientName: 'Dune', basis: 'projected', detail: 'hours so far', service: 600, reimburse: 0, total: 600 },
+        { clientId: 'e', clientName: 'Elm', basis: 'too_early', detail: 'no hours yet', service: null, reimburse: 0, total: null },
+        {
+          clientId: 'f',
+          clientName: 'Fig',
+          basis: 'projected',
+          detail: 'no hours yet, incl. October 2026 pushed work',
+          service: 26.25,
+          reimburse: 0,
+          total: 26.25,
+          pushedInWaiting: '2026-10',
+        },
+      ],
+    })
+    render(<InvoiceRecapPage ownerEstimate />)
+    await screen.findByText('Dune')
+    expect(
+      screen.getByText(/hourly clients in the current month at the hours worked so far times their bill rates/),
+    ).toBeInTheDocument()
+    const rowFor = (name: string) =>
+      screen.getAllByRole('row').find((row) => row.textContent?.startsWith(name)) as HTMLElement
+    expect(rowFor('Dune')).toHaveTextContent('Projected · hours so far')
+    expect(rowFor('Dune')).toHaveTextContent('$600.00')
+    const elm = rowFor('Elm')
+    expect(elm).toHaveTextContent('Too early')
+    expect(elm).toHaveTextContent('no hours yet')
+    expect(within(elm).getAllByText('—')).toHaveLength(2)
+    expect(elm.textContent).not.toContain('$0.00')
+    // A no-hours-yet row carrying pushed work shows its words and its money, and is not "too early".
+    expect(rowFor('Fig')).toHaveTextContent('Projected · no hours yet, incl. October 2026 pushed work')
+    expect(rowFor('Fig')).toHaveTextContent('$26.25')
+    expect(screen.getByText('3 clients: 0 sent, 2 projected, 1 too early')).toBeInTheDocument()
+  })
+
   it('asks for the estimate of the month the page is on', async () => {
     mockEstimate.mockResolvedValue(estimate)
     render(<InvoiceRecapPage ownerEstimate />)

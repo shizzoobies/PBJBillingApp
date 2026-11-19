@@ -8,7 +8,12 @@ export interface InvoiceEstimateRow {
    * 'rolled': this month's invoice was pushed into a later month (featreq-40697310); no figure is quoted.
    */
   basis: 'sent' | 'projected' | 'too_early' | 'rolled' | 'pushed_waiting'
-  /** A word for the basis ("estimate", "service so far", "plan", "no rates", "too early"...); null on a sent row. */
+  /**
+   * A word for the basis ("estimate", "service so far", "hours so far", "plan", "no rates", "no hours yet",
+   * "too early"...); null on a sent row. An hourly client in the current month is "hours so far" or
+   * "hours so far (some hours have no rate)" (featreq-abd4b683); a no-figure row that picks up pushed work becomes
+   * 'projected' with "..., incl. <Month Year> pushed work".
+   */
   detail: string | null
   /** Null when the estimate is unusable (never a made-up $0.00). */
   service: number | null

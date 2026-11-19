@@ -619,9 +619,13 @@ function OwnerDashboardView() {
    * the tile shows a dash. Owner-only like this whole view, never in preview
    * (the route refuses a preview), and a hidden panel asks for nothing.
    *
+   * Since featreq-abd4b683 that route quotes an hourly client in the CURRENT
+   * month at its hours so far x rates (her ask), so this tile climbs as time is
+   * logged on hourly clients - and still equals the report's Service total.
+   *
    * The old figure followed the page's data as it changed; this one is asked
-   * for again whenever the month's time on the page changes (how many entries,
-   * how many billable minutes), so time logged while she sits on the dashboard
+   * for again whenever the month's time on the page changes (any entry's person,
+   * client, minutes, billable or ad hoc flag - see monthTimeKey), so time logged while she sits on the dashboard
    * does not leave the tile behind the report. A failed or unusable answer
    * clears the figure: an earlier answer is never left standing in its place.
    */
@@ -629,15 +633,29 @@ function OwnerDashboardView() {
     period: string
     serviceTotal: number
   } | null>(null)
+  // What prices each of the month's entries (featreq-abd4b683: an hourly
+  // client's current month is its hours x each person's rate, so the figure
+  // moves with WHO logged the time, for WHICH client, how long, billable or not,
+  // and ad hoc or not - not only with the count and the minutes). Sorted by id so
+  // a re-ordered array with the same time asks for nothing. Out of scope: a bill
+  // rate changed on the Team page while the dashboard stays open does not change
+  // this key; the tile catches up the next time it is asked.
   const monthTimeKey = useMemo(() => {
-    let entries = 0
-    let billableMinutes = 0
+    const parts: string[] = []
     for (const entry of data.timeEntries) {
       if (!isInBillingPeriod(entry, billingPeriod)) continue
-      entries += 1
-      if (entry.billable) billableMinutes += entry.minutes
+      parts.push(
+        [
+          entry.id,
+          entry.employeeId,
+          entry.clientId,
+          entry.minutes,
+          entry.billable ? 1 : 0,
+          entry.isAdhoc ? 1 : 0,
+        ].join('|'),
+      )
     }
-    return `${entries}:${billableMinutes}`
+    return parts.sort().join(';')
   }, [data.timeEntries, billingPeriod])
   useEffect(() => {
     if (!kpiShown || previewMode) return
@@ -1142,7 +1160,7 @@ function OwnerDashboardView() {
           </div>
           <div
             className="kpi-stat"
-            title="The Service total on the Invoice Recap: invoices already sent as they stand, and every other client as its recap projects the month."
+            title="The Service total on the Invoice Recap: invoices already sent as they stand, hourly clients in the current month at the hours worked so far times their bill rates, and every other client as its recap projects the month."
           >
             <CircleDollarSign size={16} />
             <strong>{projectedBilling === null ? '—' : currency.format(projectedBilling)}</strong>

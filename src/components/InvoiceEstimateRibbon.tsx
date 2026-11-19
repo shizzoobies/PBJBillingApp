@@ -5,13 +5,15 @@ import { currency, getBillingPeriodLabel } from '../lib/utils'
 /**
  * The owner's estimate of the month's invoices, above the Invoice Recap
  * (featreq-a5e14899). Month total / Service total / Reimburse total for the
- * invoices "to be sent": a client with a sent invoice is that invoice, every
- * other client is the Client Recap's projection (lib/invoice-estimate.js).
+ * invoices "to be sent": a client with a sent invoice is that invoice, an
+ * hourly client in the current month is its hours so far x the bill rates
+ * (featreq-abd4b683), every other client is the Client Recap's projection
+ * (lib/invoice-estimate.js).
  *
  * Owner only, and the page decides: it renders this for the owner outside
  * preview and for nobody else, so staff never request the route at all. An
- * estimate that cannot be quoted for a client says "too early" or "no rates"
- * in that client's row; it is never shown as $0.00.
+ * estimate that cannot be quoted for a client says "too early", "no rates" or
+ * "no hours yet" in that client's row; it is never shown as $0.00.
  */
 
 const BASIS_LABEL: Record<InvoiceEstimateRow['basis'], string> = {
@@ -73,7 +75,8 @@ export function InvoiceEstimateRibbon({ period }: { period: string }) {
   return (
     <section className="invoice-estimate" aria-label="Estimated invoices">
       <p className="invoice-recap-hint">
-        Your estimate for {getBillingPeriodLabel(period)}: invoices already sent as they stand, and
+        Your estimate for {getBillingPeriodLabel(period)}: invoices already sent as they stand,
+        hourly clients in the current month at the hours worked so far times their bill rates, and
         every other client as the Client Recap projects it. Only you see this; the cards below are
         what has actually gone out.
       </p>

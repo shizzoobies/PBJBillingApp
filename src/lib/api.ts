@@ -3922,6 +3922,14 @@ export type ClientRecapProjection = {
   isEstimate: boolean
   amount: number | null
   serviceAmount: number | null
+  /**
+   * The billable hours logged so far priced as the invoice will price them
+   * (featreq-abd4b683). The owner's Invoice Recap estimate quotes this for an
+   * hourly client's current month; this page's card quotes serviceAmount.
+   */
+  serviceToDate?: number
+  /** True when billable time was logged by someone with no usable bill rate (priced at $0). */
+  hasUnratedHours?: boolean
   reimbursementsToDate: number
   hoursToDate: number
   businessDaysElapsed: number
@@ -5213,7 +5221,8 @@ export type { InvoiceEstimate, InvoiceEstimateRow } from '../../lib/invoice-esti
 
 /**
  * The OWNER's estimate of a month's invoices (featreq-a5e14899): sent invoices
- * as they stand, everyone else as the Client Recap projects them. A 403 for
+ * as they stand, hourly clients in the current month at their hours so far x
+ * rates (featreq-abd4b683), everyone else as the Client Recap projects them. A 403 for
  * anyone but the owner (and in preview) - callers must not request it then.
  */
 export async function invoiceEstimateRequest(period: string, signal?: AbortSignal) {
