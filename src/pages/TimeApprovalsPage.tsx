@@ -2,6 +2,7 @@ import { CheckCircle2, ChevronDown, ChevronRight, Eye, Lock, LockOpen, XCircle }
 import { useMemo, useState } from 'react'
 import { useLocation, useSearchParams } from 'react-router-dom'
 import { useAppContext } from '../AppContext'
+import { PayrollReviewSection } from '../components/PayrollReviewSection'
 import {
   CLOCK_TIMES_EDITED_CHIP,
   CLOCK_TIMES_EDITED_TITLE,
@@ -45,6 +46,17 @@ const APPROVAL_TABS: Array<{ key: ApprovalSection; label: string }> = [
   { key: 'locks', label: 'Timesheet locks' },
 ]
 
+/**
+ * PAYROLL REVIEW, the FIRST tab (featreq-20b13da0, ship 1): read-only. It sits
+ * before the three above but is kept OUT of `resolveApprovalSection`, so the
+ * page still opens where it always did (the first tab with pending work) and
+ * nothing about the three existing tabs changes. It opens on a click, on
+ * `?section=payroll`, or on `#payroll-review`. Owner only, never while
+ * previewing someone else.
+ */
+const PAYROLL_SECTION = 'payroll'
+const PAYROLL_ANCHOR = 'payroll-review'
+
 function previousPeriod(period: string): string {
   const [year, month] = period.split('-').map(Number)
   const date = new Date(year, month - 2, 1)
@@ -59,6 +71,7 @@ export function TimeApprovalsPage() {
   const {
     data,
     ownerMode,
+    previewMode,
     approveTimeEntry,
     rejectTimeEntry,
     approveTimeEntriesBatch,
@@ -147,7 +160,7 @@ export function TimeApprovalsPage() {
   // Always WRITE the param, even for the first tab: without it the resolver
   // would fall back to "first section with pending work" and yank the owner
   // straight back out of the quiet tab they just picked.
-  const setSection = (next: ApprovalSection) => {
+  const setSection = (next: ApprovalSection | typeof PAYROLL_SECTION) => {
     const params = new URLSearchParams(searchParams)
     params.set('section', next)
     setSearchParams(params, { replace: true })
@@ -156,6 +169,14 @@ export function TimeApprovalsPage() {
   if (!ownerMode) {
     return null
   }
+
+  // Owner only, and never while previewing: a preview shows what the
+  // previewed person sees, and pay data is not theirs.
+  const showPayrollReview = !previewMode
+  const payrollActive =
+    showPayrollReview &&
+    (searchParams.get('section') === PAYROLL_SECTION ||
+      (!searchParams.get('section') && location.hash.replace(/^#/, '') === PAYROLL_ANCHOR))
 
   // Include owners too: an owner can log their own time (timer or manual), and
   // those entries also land in the approval queue — so the owner needs to see
@@ -168,7 +189,10 @@ export function TimeApprovalsPage() {
   const approvalEmployees = [...data.employees, ...(data.inactiveEmployees ?? [])]
 
   return (
-    <section className="content-grid" id="time-approvals">
+    <section
+      className={payrollActive ? 'content-grid is-payroll-review' : 'content-grid'}
+      id="time-approvals"
+    >
       <header className="productivity-header">
         <div>
           <h1>Time Approvals</h1>
@@ -181,8 +205,19 @@ export function TimeApprovalsPage() {
             only — each section below is unchanged, it is just no longer at the
             bottom of a very long scroll. */}
         <div className="task-area-tabs" role="tablist" aria-label="Approval sections">
+          {showPayrollReview ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={payrollActive}
+              className={payrollActive ? 'task-area-tab is-active' : 'task-area-tab'}
+              onClick={() => setSection(PAYROLL_SECTION)}
+            >
+              Payroll review
+            </button>
+          ) : null}
           {APPROVAL_TABS.map((tab) => {
-            const isActive = tab.key === activeSection
+            const isActive = !payrollActive && tab.key === activeSection
             const count = sectionCounts[tab.key]
             const classes = ['task-area-tab', isActive ? 'is-active' : '', count === 0 ? 'is-empty' : '']
               .filter(Boolean)
@@ -204,7 +239,18 @@ export function TimeApprovalsPage() {
         </div>
       </header>
 
-      {activeSection === 'weekly' ? (
+      {payrollActive ? (
+        <PayrollReviewSection
+          employees={data.employees}
+          inactiveEmployees={data.inactiveEmployees ?? []}
+          clients={data.clients}
+          checklists={data.checklists}
+          entries={data.timeEntries}
+          submissions={data.weeklySubmissions ?? []}
+        />
+      ) : null}
+
+      {!payrollActive && activeSection === 'weekly' ? (
         <WeeklyReviewSection
           submissions={data.weeklySubmissions ?? []}
           employees={data.employees}
@@ -219,7 +265,7 @@ export function TimeApprovalsPage() {
         />
       ) : null}
 
-      {activeSection === 'queue' ? (
+      {!payrollActive && activeSection === 'queue' ? (
         <ApprovalQueue
           employees={approvalEmployees}
           reassignTargets={data.employees}
@@ -236,7 +282,7 @@ export function TimeApprovalsPage() {
         />
       ) : null}
 
-      {activeSection === 'locks' ? (
+      {!payrollActive && activeSection === 'locks' ? (
         <MonthEndSection
           employees={employees}
           entries={data.timeEntries}
@@ -447,7 +493,7 @@ function WeeklyReviewSection({
                       className="primary-action"
                       disabled={inFlight}
                       onClick={() => void handleApprove(submission.id)}
-                      title="Approve this week and seal every pending entry in it"
+                      title="Approve every pending entry in this week. This does not lock the time: it can still be edited."
                     >
                       <CheckCircle2 size={14} />
                       Approve week

@@ -1,21 +1,11 @@
 import { ChevronLeft, ChevronRight, Download, Printer } from 'lucide-react'
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { useAppContext } from '../AppContext'
 import { PrintHeader } from '../components/PrintHeader'
 import { downloadCsv } from '../lib/csv'
 import { groupHoursByTask } from '../lib/hoursByTask'
 import {
-  billRateAt,
-  costRateFor,
-  latestBillRate,
-  latestCostRate,
-  ratePeriodAsOf,
-} from '../../lib/rate-history.js'
-import { fetchRateVersions } from '../lib/api'
-import {
-  allocatePersonCost,
   billableMinutes as sumBillableMinutes,
-  billableRevenue,
   displayHours,
   duplicateFullSliceIds,
   internalMinutes as sumInternalMinutes,
@@ -25,17 +15,25 @@ import {
   sumPersonCosts,
   trackedMinutes as sumTrackedMinutes,
 } from '../lib/payrollAggregation'
+import {
+  buildPayrollDayGroups,
+  makePayrollPricing,
+  payrollJobOf,
+  payrollPersonFigures,
+  payrollTaskOf,
+  rowAmountCells,
+  rowCostCells,
+  useRateVersions,
+  type PayrollDayGroup,
+} from '../lib/payrollRows'
 import type {
-  BillRateVersion,
   Checklist,
   Client,
   ClientReportRow,
-  CostRateVersion,
   Employee,
   EmployeeReportRow,
   TaskReportRow,
   TimeEntry,
-  WorkSession,
 } from '../lib/types'
 import {
   addDays,
@@ -57,7 +55,6 @@ import {
   HOW_LOGGED_LABEL,
   buildSplitBlocks,
   clockMismatchNote,
-  clockMismatchShortNote,
   clockSpansOf,
   entryFigures,
   howLogged,
@@ -65,9 +62,7 @@ import {
   sheetNumbers,
   sheetStretchLabel,
   splitNote,
-  splitShortNote,
   stretchRows,
-  type HowLogged,
 } from '../lib/payrollClock'
 
 /**
@@ -165,45 +160,12 @@ export function ReportsPage() {
    * cell reads "—", exactly as it did for a person with no rate on file.
    * Owners are costed like anyone else (featreq-6fdd9e98): one who has entered
    * a cost rate on the Team page is priced here, one who has not reads "—".
-   */
-  const [billRateVersions, setBillRateVersions] = useState<BillRateVersion[]>([])
-  const [costRateVersions, setCostRateVersions] = useState<CostRateVersion[]>([])
-  useEffect(() => {
-    const controller = new AbortController()
-    fetchRateVersions(controller.signal)
-      .then((versions) => {
-        setBillRateVersions(versions.billRateVersions)
-        setCostRateVersions(versions.costRateVersions)
-      })
-      // Non-fatal: pricing falls back to today's rates and the Cost column
-      // simply reads "—", exactly as before.
-      .catch(() => {})
-    return () => controller.abort()
-  }, [])
-  /**
-   * The cost rate on the DAY each entry was worked — the rule the Client Recap
-   * and the assistant's margin analytics share. A raise lands on a payday, so
-   * the per-entry and per-day figures below, which have dates, resolve here.
-   */
-  const costRateOn = (employeeId: string, entryDate?: string) =>
-    costRateFor(costRateVersions, employeeId, entryDate ?? null)
-  /**
-   * One person's labor cost over a PERIOD, priced by the day each entry was
-   * worked. `laborCost` groups that person's rows by the rate in force on
-   * their day, so a raise mid-period costs each side of it at its own rate and
-   * the per-person figure ties exactly to the per-entry cells and the detail
-   * total — the summary is what she pays people from, so it cannot disagree.
    *
-   * `entries` may be the whole window; only this person's rows are priced.
-   * `null` ("—", never $0.00) when the person has no cost rate on file at all.
+   * The read and the four rate readers below live in src/lib/payrollRows.ts
+   * since the weekly Payroll review (featreq-20b13da0): both screens call the
+   * same functions, so they cannot price one week two ways.
    */
-  const periodCostOf = (employeeId: string, entries: TimeEntry[]) =>
-    latestCostRate(costRateVersions, employeeId) === null
-      ? null
-      : laborCost(
-          entries.filter((entry) => entry.employeeId === employeeId),
-          costRateOn,
-        )
+  const { billRateVersions, costRateVersions } = useRateVersions()
 
   if (!ownerMode) {
     return null
@@ -219,47 +181,27 @@ export function ReportsPage() {
   const employeesForNameLookup = [...data.employees, ...inactiveEmployees]
 
   /**
-   * THE BILL RATE FOR ONE ENTRY — the person's version at the pin of the
-   * client the hour was worked for, for the entry's month: `billRateAt` at
-   * `ratePeriodAsOf(client, month)`, the chain every invoice line is priced
-   * through. This used to read `employee.billRate`, which mirrors the NEWEST
-   * version — a raise dated ahead, or one a still-pinned client has not been
-   * moved to — so every Billable $ column disagreed with the invoice for any
-   * client on older rates. A pinned client's hour now bills here at its pin.
-   * A sub of a billing master carries its own pin, so it resolves like any
-   * other client. `null` = no bill rate on file for this person at all.
+   * THE RATE READERS (src/lib/payrollRows.ts, `makePayrollPricing`):
+   *  - `costRateOn`: the cost rate on the DAY each entry was worked, the rule
+   *    the Client Recap and the assistant's margin analytics share.
+   *  - `periodCostOf`: one person's labor cost over a PERIOD, priced by the day
+   *    each entry was worked (`laborCost`), so the per-person figure ties
+   *    exactly to the per-entry cells and the detail total. `null` ("—", never
+   *    $0.00) when the person has no cost rate on file at all.
+   *  - `billRateOn`: the person's bill rate at the pin of the client the hour
+   *    was worked for, for the entry's month: `billRateAt` at
+   *    `ratePeriodAsOf(client, month)`, the chain every invoice line is priced
+   *    through (never `employee.billRate`, which mirrors the NEWEST version).
+   *  - `periodBillableOf`: one person's Billable $ over a PERIOD, grouped by
+   *    person AND rate (`billableRevenue`) as Cost is; `null` when the person
+   *    has no bill rate on file at all.
    */
-  const billRateOn = (entry: Pick<TimeEntry, 'employeeId' | 'clientId' | 'date'>) => {
-    const client = data.clients.find((candidate) => candidate.id === entry.clientId) ?? null
-    const employee = employeesForNameLookup.find(
-      (candidate) => candidate.id === entry.employeeId,
-    ) ?? { id: entry.employeeId }
-    const month = typeof entry.date === 'string' && entry.date ? entry.date.slice(0, 7) : null
-    return billRateAt(billRateVersions, employee, ratePeriodAsOf(client, month), month, client)
-  }
-  /**
-   * One person's Billable $ over a PERIOD: their billable rows, each at the
-   * rate above, grouped by person AND rate (`billableRevenue`) exactly as
-   * Cost is by `laborCost` — so the per-person figure ties to the per-entry
-   * cells under it, and a client on older rates prices at those rates while
-   * one moved to the current rates prices at these. `null` ("—", never
-   * $0.00) when the person has no bill rate on file at all — the newest
-   * version, or the live mirror for someone with no versions.
-   */
-  const periodBillableOf = (employeeId: string, entries: TimeEntry[]) => {
-    const employee = employeesForNameLookup.find((candidate) => candidate.id === employeeId)
-    const onFile =
-      latestBillRate(billRateVersions, employeeId) ??
-      (typeof employee?.billRate === 'number' && !Number.isNaN(employee.billRate)
-        ? employee.billRate
-        : null)
-    return onFile === null
-      ? null
-      : billableRevenue(
-          entries.filter((entry) => entry.employeeId === employeeId),
-          billRateOn,
-        )
-  }
+  const { costRateOn, periodCostOf, billRateOn, periodBillableOf } = makePayrollPricing({
+    billRateVersions,
+    costRateVersions,
+    clients: data.clients,
+    employees: employeesForNameLookup,
+  })
 
   const billingPeriodEntries = data.timeEntries.filter((entry) =>
     isInBillingPeriod(entry, billingPeriod),
@@ -454,59 +396,11 @@ type PayrollSummaryRow = {
   billableMinutes: number
 }
 
-/**
- * ONE TIME ENTRY, reported on its own row. Entries are never merged: two
- * stretches on the same client and task are two separate lines with their own
- * clock in/out, because payroll has to be auditable entry by entry.
+/*
+ * ONE TIME ENTRY per row, grouped under its day (`PayrollEntryRow`,
+ * `PayrollDayGroup`): the row shape and its builder live in
+ * src/lib/payrollRows.ts, shared with the weekly Payroll review.
  */
-type PayrollEntryRow = {
-  id: string
-  date: string
-  /** Kept so the row can resolve its own person's bill/cost rate. */
-  employeeId: string
-  /** Kept so the row can resolve its own client's rate month (its pin). */
-  clientId: string
-  member: string
-  job: string
-  task: string
-  /**
-   * The stretches the entry was worked in, earliest first; empty when it was
-   * logged as minutes only. The table prints one row per stretch
-   * (`stretchRows`), each with its own clock in, clock out and hours.
-   */
-  spans: WorkSession[]
-  /** What a share of a split block is a share of (see `splitNote`); '' for any other entry. */
-  splitNote: string
-  /** The short forms under the Hours of the entry's later stretch rows (`splitShortNote`, `clockMismatchShortNote`). */
-  splitShortNote: string
-  mismatchShortNote: string
-  /** Said only when the row's time does not come from its clock times (see `clockMismatchNote`). */
-  mismatchNote: string
-  /** Timer, timer with its clock times edited, manual, or no clock times (see `howLogged`). */
-  logged: HowLogged
-  minutes: number
-  billable: boolean
-  billableMinutes: number
-  groupId?: string
-  groupAllocation?: 'even' | 'full' | 'custom'
-  /** Sort key: clock-in epoch ms, `Infinity` when there are no timestamps. */
-  startedAtMs: number
-  /**
-   * True when this slice's WALL TIME was already counted on a sibling slice of
-   * the same full-mode group. The row still shows (and still bills) — it just
-   * doesn't add its minutes or cost to the day/grand totals a second time.
-   */
-  countedElsewhere: boolean
-}
-
-/** All the work logged on a single day, plus that day's total. */
-/**
- * `hours` is the sum of the DISPLAYED hours of the rows underneath it (skipping
- * full-mode repeats), so a day subtotal always equals the column above it, and
- * the grand total is in turn the sum of the day subtotals. Both levels
- * reconcile because the composition is the same at each one.
- */
-type PayrollDayGroup = { date: string; hours: number; rows: PayrollEntryRow[] }
 
 function PayrollHoursReport({
   checklists,
@@ -572,30 +466,14 @@ function PayrollHoursReport({
           const entries = inRange.filter((entry) => entry.employeeId === employee.id)
           // Billable is NOT deduped (a full-mode split bills each client the
           // whole block on purpose); hours worked IS, so the two no longer add
-          // up to each other and `minutes` is computed on its own.
-          const billable = sumBillableMinutes(entries)
-          const internal = sumInternalMinutes(entries)
-          // Row minutes, not just their sum: the costing hours are the sum of
-          // the ROWS' two-decimal hours (featreq-7c8f64d7), which is also the
-          // figure this table prints.
-          const duplicates = duplicateFullSliceIds(entries)
-          const trackedRowMinutes = entries
-            .filter((entry) => !duplicates.has(entry.id))
-            .map((entry) => entry.minutes)
-          const billableRowMinutes = entries
-            .filter((entry) => entry.billable)
-            .map((entry) => entry.minutes)
+          // up to each other and `minutes` is computed on its own. Hours are
+          // the sum of the ROWS' two-decimal hours (featreq-7c8f64d7), which
+          // is also the figure this table prints (`payrollPersonFigures`,
+          // shared with the weekly Payroll review).
           return {
             id: employee.id,
             name: employee.name,
-            minutes: sumTrackedMinutes(entries),
-            billable,
-            internal,
-            trackedRowMinutes,
-            billableRowMinutes,
-            hours: periodDisplayHours(trackedRowMinutes),
-            billableHours: periodDisplayHours(billableRowMinutes),
-            count: entries.length,
+            ...payrollPersonFigures(entries),
           }
         })
         .sort((a, b) => b.minutes - a.minutes || a.name.localeCompare(b.name)),
@@ -630,14 +508,8 @@ function PayrollHoursReport({
   const goThisPeriod = () => setAnchorDate(localDateOnly())
 
   // "Job" = the client the time is billed to; admin time has no client.
-  const checklistTitleById = useMemo(
-    () => new Map(checklists.map((checklist) => [checklist.id, checklist.title])),
-    [checklists],
-  )
-  const jobOf = (entry: TimeEntry) =>
-    entry.isAdministrative || !entry.clientId ? '(Admin)' : clientName(clients, entry.clientId)
-  const taskOf = (entry: TimeEntry) =>
-    (entry.taskId ? checklistTitleById.get(entry.taskId) : entry.taskLabel?.trim()) || 'Unassigned'
+  const jobOf = useMemo(() => payrollJobOf(clients), [clients])
+  const taskOf = useMemo(() => payrollTaskOf(checklists), [checklists])
 
   const detailEntries = useMemo(
     () =>
@@ -666,62 +538,14 @@ function PayrollHoursReport({
    * Day subtotals count a full-mode group's wall time ONCE — see
    * `duplicateFullSliceIds`. Those rows still render (and still bill); they
    * just carry a "counted once" hint so the subtotal is explainable.
+   *
+   * Built by `buildPayrollDayGroups` (src/lib/payrollRows.ts), the one row
+   * builder the weekly Payroll review calls too.
    */
-  const dayGroups = useMemo<PayrollDayGroup[]>(() => {
-    const rows = detailEntries.map((entry) => {
-      // Earliest start, latest stop, and the stretches in time order: the
-      // stored order is the order they were typed or added.
-      const clock = clockSpansOf(entry)
-      const spans = clock.spans
-      const startedAtMs = clock.firstStart ? Date.parse(clock.firstStart) : Number.NaN
-      return {
-        id: entry.id,
-        date: entry.date,
-        employeeId: entry.employeeId,
-        clientId: entry.clientId,
-        member: employeeName(employees, entry.employeeId),
-        job: jobOf(entry),
-        task: taskOf(entry),
-        spans,
-        splitNote: splitNote(entry, splitBlocks),
-        splitShortNote: splitShortNote(entry, splitBlocks),
-        mismatchNote: clockMismatchNote(entry, splitBlocks, clock),
-        mismatchShortNote: clockMismatchShortNote(entry, splitBlocks, clock),
-        logged: howLogged(entry, clock),
-        minutes: entry.minutes,
-        billable: entry.billable,
-        billableMinutes: entry.billable ? entry.minutes : 0,
-        groupId: entry.groupId,
-        groupAllocation: entry.groupAllocation,
-        startedAtMs: Number.isNaN(startedAtMs) ? Number.POSITIVE_INFINITY : startedAtMs,
-        countedElsewhere: false,
-      }
-    })
-    rows.sort(
-      (a, b) =>
-        a.date.localeCompare(b.date) ||
-        a.startedAtMs - b.startedAtMs ||
-        a.member.localeCompare(b.member) ||
-        a.job.localeCompare(b.job) ||
-        a.task.localeCompare(b.task),
-    )
-    // Computed AFTER the sort so the slice that "counts" is the first one the
-    // reader sees, and the hint lands on the repeats below it.
-    const duplicates = duplicateFullSliceIds(rows)
-    const byDate = new Map<string, PayrollDayGroup>()
-    for (const row of rows) {
-      const countedElsewhere = duplicates.has(row.id)
-      const group = byDate.get(row.date) ?? { date: row.date, hours: 0, rows: [] }
-      group.rows.push({ ...row, countedElsewhere })
-      if (!countedElsewhere) {
-        group.hours = sumDisplayHours([group.hours, displayHours(row.minutes)])
-      }
-      byDate.set(row.date, group)
-    }
-    // `rows` is already date-ordered, so insertion order is date order.
-    return [...byDate.values()]
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detailEntries, employees, clients, checklistTitleById, splitBlocks])
+  const dayGroups = useMemo<PayrollDayGroup[]>(
+    () => buildPayrollDayGroups(detailEntries, { employees, jobOf, taskOf, splitBlocks }),
+    [detailEntries, employees, jobOf, taskOf, splitBlocks],
+  )
 
   // The collapsed (day × member × job × task) view — CSV export only.
   const daySummaryRows = useMemo<PayrollSummaryRow[]>(() => {
@@ -753,8 +577,7 @@ function PayrollHoursReport({
         a.job.localeCompare(b.job) ||
         a.task.localeCompare(b.task),
     )
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detailEntries, employees, clients, checklistTitleById])
+  }, [detailEntries, employees, jobOf, taskOf])
 
   // Grand total = the sum of the DAY SUBTOTALS, each of which is the sum of its
   // own rows. Every level of the table adds up to the level above it.
@@ -816,31 +639,12 @@ function PayrollHoursReport({
    * to be right. So each person's period cost is split across their own rows
    * (`allocatePersonCost`), which makes the column sum EXACTLY at the price of a
    * row landing a penny or two off its own hours × rate. Full-mode repeats are
-   * excluded and render "—": the firm pays for the block once.
+   * excluded and render "—": the firm pays for the block once. Grouped by
+   * person AND the rate that applied on the day — the same grouping
+   * `laborCost` uses, so the column sums to the total under it even when a
+   * raise lands mid-period (`rowCostCells`, src/lib/payrollRows.ts).
    */
-  const detailCostByRowId = (() => {
-    // Grouped by person AND the rate that applied on the day — the same
-    // grouping `laborCost` uses, so the column sums to the total under it
-    // even when a raise lands mid-period.
-    const groups = new Map<string, { rate: number | null; rows: { id: string; minutes: number }[] }>()
-    for (const row of detailRows) {
-      if (row.countedElsewhere) continue
-      const rate = costRateOn(row.employeeId, row.date)
-      const key = `${row.employeeId} ${rate ?? ''}`
-      const found = groups.get(key)
-      if (found) found.rows.push({ id: row.id, minutes: row.minutes })
-      else groups.set(key, { rate, rows: [{ id: row.id, minutes: row.minutes }] })
-    }
-    const byRowId = new Map<string, number | null>()
-    for (const group of groups.values()) {
-      const costs = allocatePersonCost(
-        group.rows.map((row) => row.minutes),
-        group.rate,
-      )
-      group.rows.forEach((row, index) => byRowId.set(row.id, costs[index]))
-    }
-    return byRowId
-  })()
+  const detailCostByRowId = rowCostCells(detailRows, { costRateOn })
   const rowCostOf = (rowId: string) => detailCostByRowId.get(rowId) ?? null
 
   // Billable hours and $ are NOT deduped: full mode bills each client the whole
@@ -858,31 +662,11 @@ function PayrollHoursReport({
    * billable-hours column reading 14.16 (14.16 x 115 = $1,628.40). The person's
    * period total is the half that has to be right, so it is `billableRevenue`
    * off the displayed hours at each rate, and the rows are a largest-remainder
-   * split of it, one split per (person, rate) group.
+   * split of it, one split per (person, rate) group: grouped by person AND the
+   * rate the row's client pins that month, the same grouping `billableRevenue`
+   * uses for the person's period figure (`rowAmountCells`).
    */
-  const detailAmountByRowId = (() => {
-    // Grouped by person AND the rate the row's client pins that month — the
-    // same grouping `billableRevenue` uses for the person's period figure, so
-    // the column sums to the total under it even when two clients bill the
-    // same person at two rates in one window.
-    const groups = new Map<string, { rate: number | null; rows: { id: string; minutes: number }[] }>()
-    for (const row of detailRows) {
-      const rate = billRateOn(row)
-      const key = `${row.employeeId} ${rate ?? ''}`
-      const found = groups.get(key)
-      if (found) found.rows.push({ id: row.id, minutes: row.billableMinutes })
-      else groups.set(key, { rate, rows: [{ id: row.id, minutes: row.billableMinutes }] })
-    }
-    const byRowId = new Map<string, number | null>()
-    for (const group of groups.values()) {
-      const amounts = allocatePersonCost(
-        group.rows.map((row) => row.minutes),
-        group.rate,
-      )
-      group.rows.forEach((row, index) => byRowId.set(row.id, amounts[index]))
-    }
-    return byRowId
-  })()
+  const detailAmountByRowId = rowAmountCells(detailRows, { billRateOn })
   const rowAmountOf = (rowId: string) => detailAmountByRowId.get(rowId) ?? null
 
   const detailAmount = detailRows.reduce(

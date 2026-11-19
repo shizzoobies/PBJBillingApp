@@ -15237,3 +15237,193 @@ details.invoice-run-sent ul,
     overflow-x: auto;
   }
 }
+
+/* Payroll review (Time Approvals, first tab; featreq-20b13da0). Read-only. */
+.payroll-review-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  margin: 8px 0;
+}
+
+.payroll-review-week {
+  min-width: 170px;
+  text-align: center;
+}
+
+.payroll-review-toggle {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.payroll-review-period {
+  color: var(--muted);
+  margin: 4px 0 12px;
+}
+
+.payroll-review-totals {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 28px;
+  margin-bottom: 12px;
+}
+
+.payroll-review-totals > div {
+  display: grid;
+  gap: 2px;
+}
+
+.payroll-review-totals strong {
+  font-size: 18px;
+}
+
+.payroll-review-status {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+
+.payroll-review-paycheck {
+  margin-bottom: 16px;
+}
+
+.payroll-review-person {
+  margin-top: 20px;
+}
+
+.payroll-review-table td {
+  vertical-align: top;
+}
+
+/* Tight enough for a laptop: figures never wrap, words do. */
+.payroll-review-table th,
+.payroll-review-table td {
+  padding: 8px;
+}
+
+/* A figure ("$1,315.00", "3.50h") has no space in it, so it never breaks;
+   only words ("not billable", "on the first part") wrap. */
+.payroll-review-table tr.payroll-review-entry td:nth-child(5),
+.payroll-review-table tr.payroll-review-entry td:nth-child(6),
+.payroll-review-table tr.payroll-review-entry td:nth-child(7) {
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
+
+.payroll-review-table tr.payroll-review-entry td:first-child {
+  min-width: 118px;
+}
+
+.payroll-review-table tr.payroll-review-entry td:nth-child(4) {
+  min-width: 130px;
+}
+
+.payroll-review-table tr.payroll-review-entry td:last-child {
+  min-width: 120px;
+  overflow-wrap: anywhere;
+}
+
+.payroll-review-table .payroll-flag-sentence,
+.payroll-review-table .payroll-review-note {
+  max-width: none;
+}
+
+/* She reads every description: never truncated, wrapped instead. */
+.payroll-review-description {
+  max-width: 360px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* A stretch is a PART of the entry line above it: indented, quiet, and never
+   in the Hours column, so it cannot be read as more hours to add. */
+.payroll-review-stretch td {
+  color: var(--muted);
+  font-size: 12px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  padding-left: 32px;
+}
+
+.payroll-review-day td {
+  background: var(--soft);
+}
+
+.payroll-review-purpose {
+  margin: 4px 0 10px;
+}
+
+.payroll-review-rates {
+  font-weight: 600;
+}
+
+.payroll-review-rates.is-error {
+  color: var(--danger, #b42318);
+}
+
+/* The block a shared part belongs to: on the row itself, at normal size. */
+.payroll-review-block-note {
+  margin-top: 2px;
+}
+
+.payroll-review-note {
+  font-size: 12px;
+  margin-top: 4px;
+  max-width: 280px;
+}
+
+.payroll-flag-list {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* A note to look, not an alarm: the same quiet outline as the "Clock times edited" chip. */
+.payroll-flag-chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 11px;
+  padding: 2px 9px;
+}
+
+/* Readable without hover (a tablet has none). */
+.payroll-flag-sentence {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+  margin-top: 2px;
+  max-width: 280px;
+}
+
+@media print {
+  #time-approvals.is-payroll-review .productivity-header {
+    display: none !important;
+  }
+
+  .payroll-review-person {
+    break-inside: auto;
+  }
+
+  /* An entry stays with its stretch lines; a heading never ends a page. */
+  .payroll-review-entry-group {
+    break-inside: avoid;
+  }
+
+  .payroll-review-person h3,
+  .payroll-review-day-group {
+    break-after: avoid;
+  }
+
+  .payroll-review-day td {
+    background: none;
+    border-bottom: 1px solid #999;
+  }
+}
