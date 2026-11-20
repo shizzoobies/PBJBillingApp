@@ -47,6 +47,8 @@ Held for after those answers: whether QuickBooks should get one line per employe
 
 ## 4. What Alex has to do at Intuit (the approval path)
 
+**Updated 2026-11-20: the step-by-step version of this section is docs/plans/qbo-production-approval-walkthrough-2026-11.md; use that one.** Corrections found re-reading Intuit that day: redirect addresses are set under Settings, Redirect URIs (not under Keys and credentials); the launch URL should be the sign-in page; the connect/reconnect URL has been mandatory since 2026-02-24 and must work for whoever presses it; the first review is automated and normally answers within about five minutes (a person reviews only a rejection); the questionnaire cannot be edited after it is submitted; single creates are unmetered but the batch endpoint is metered; over the free cap Intuit blocks calls, it does not bill.
+
 Production access for an app that is never listed on the QuickBooks App Store still needs Intuit's app questionnaire. Nothing here costs money. Steps 1 to 3 can be done today; step 6 needs the integration built and tested in the sandbox first, because the questionnaire asks whether connect, disconnect and reconnect were tested there.
 
 1. **Sign in at developer.intuit.com** with the Intuit account that should own the app (an account Alex controls; Brittany does not need a developer account - she only presses Connect later as the admin of her QuickBooks company).
