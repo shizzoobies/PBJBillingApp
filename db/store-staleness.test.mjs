@@ -21,6 +21,10 @@ import {
   ClientHasHistoryError,
   CLIENT_SELECT_COLUMNS,
   CREATED_AT_PRESERVED_TABLES,
+  PAYROLL_UNDO_ID_TAKEN_MESSAGE,
+  PAYROLL_WEEK_APPROVALS_TABLE_SQL,
+  mapStoredTimeEntryJson,
+  payrollUndoClientGoneMessage,
   CoverageConfirmationError,
   EntryTagError,
   INVOICE_CHANGED_MESSAGE,
@@ -69,6 +73,8 @@ import {
   statementAccountsVersion,
 } from './store.js'
 import { firstCycleForNewRecipe } from '../src/lib/recipeFirstStep.ts'
+import { ENTRY_CHANGED_MESSAGE, applyEntryMarks, entrySignature, signatureFields } from '../lib/payroll-week-approvals.js'
+import { stableStringify } from '../lib/stable-json.js'
 import {
   BULK_SAVE_SLICES,
   BULK_SAVE_TABLES,
@@ -62977,6 +62983,729 @@ describe('a timer is logged once (createTimerEntryOnce)', () => {
       expect(result.alreadyLogged).toBe(false)
       expect(fake.conn()).toHaveLength(0)
       expect(fake.log.filter((row) => isInsert(row.sql))).toHaveLength(1)
+    })
+  })
+})
+
+/**
+ * PAYROLL REVIEW SHIP 2: the week rows (featreq-0b4e42a1; table approved by
+ * Alex 2026-11-20). Marks, deny-and-remove with a full copy kept, and Undo.
+ * Cardinal rule 1: the file backend runs here for real (the rows live in the
+ * DATA file so a deny is one write), and the Postgres branch is pinned through
+ * a recording pool, statement by statement, because CI never runs it.
+ */
+describe('Payroll review ship 2: payroll_week_approvals (featreq-0b4e42a1)', () => {
+  const WEEK = '2026-11-08'
+  const at = (day, hour, minute, second = 0) => new Date(2026, 10, day, hour, minute, second).toISOString()
+  const manual = (over = {}) => ({
+    id: 'm1',
+    employeeId: 'emp-1',
+    clientId: 'c1',
+    isAdministrative: false,
+    date: '2026-11-10',
+    minutes: 72,
+    billable: true,
+    taskLabel: 'Bookkeeping',
+    description: 'Logged by hand',
+    entryMethod: 'manual',
+    approvalStatus: 'pending',
+    startAt: at(10, 9, 0),
+    endAt: at(10, 10, 12),
+    sessions: [{ startAt: at(10, 9, 0), endAt: at(10, 10, 12) }],
+    ...over,
+  })
+  const BLOCK = [{ startAt: at(11, 9, 0, 7), endAt: at(11, 10, 12, 7) }]
+  const part = (id, clientId) => ({
+    id,
+    employeeId: 'emp-1',
+    clientId,
+    isAdministrative: false,
+    date: '2026-11-11',
+    minutes: 24,
+    billable: true,
+    taskLabel: 'Bookkeeping',
+    description: 'Shared meeting',
+    entryMethod: 'timer',
+    approvalStatus: 'approved',
+    approvedBy: 'emp-patrice',
+    approvedAt: '2026-11-12T15:00:00.000Z',
+    startAt: BLOCK[0].startAt,
+    endAt: BLOCK[0].endAt,
+    sessions: BLOCK,
+    groupId: 'g1',
+    groupAllocation: 'even',
+    groupClientIds: [],
+  })
+  const payrollWorkspace = () =>
+    workspace({
+      clients: [
+        { id: 'c1', name: 'Acme Dental' },
+        { id: 'c2', name: 'Bright Books' },
+        { id: 'c3', name: 'Cedar Cafe' },
+      ],
+      employees: [{ id: 'emp-1', name: 'Lisa Reyes', role: 'bookkeeper' }],
+      timeEntries: [manual(), part('p1', 'c1'), part('p2', 'c2'), part('p3', 'c3')],
+    })
+  const okMark = (entry, over = {}) => ({
+    kind: 'ok',
+    by: 'emp-patrice',
+    byName: 'Brittany',
+    at: '2026-11-20T15:00:00.000Z',
+    note: '',
+    signature: entrySignature(entry),
+    flags: ['manual'],
+    ...over,
+  })
+  const denial = (id = 'deny-1') => ({
+    id,
+    deniedBy: 'emp-patrice',
+    deniedByName: 'Brittany',
+    deniedAt: '2026-11-20T15:00:00.000Z',
+    note: 'Logged twice by the system',
+  })
+  const onDisk = async () => JSON.parse(await readFile(localDataPath, 'utf8'))
+
+  describe('file backend (the data file)', () => {
+    beforeEach(async () => {
+      await store.write(payrollWorkspace())
+    })
+
+    it('has no row until the first mark, then one row for that person and week', async () => {
+      expect(await store.listPayrollWeekApprovals(WEEK)).toEqual([])
+      const row = await store.savePayrollEntryMark({ entryId: 'm1', expectedSignature: entrySignature(manual()), mark: okMark(manual()) })
+      expect(row).toMatchObject({ userId: 'emp-1', weekStart: WEEK, status: 'open', deniedEntries: [] })
+      // The store keeps what the entry looked like, from the row it checked.
+      expect(row.entryMarks.m1).toEqual({ ...okMark(manual()), fields: signatureFields(manual()) })
+      // A second mark lands on the SAME row.
+      await store.savePayrollEntryMark({
+        entryId: 'p1',
+        expectedSignature: entrySignature(part('p1', 'c1')),
+        mark: okMark(part('p1', 'c1'), { flags: ['overlap'] }),
+      })
+      const rows = await store.listPayrollWeekApprovals(WEEK)
+      expect(rows).toHaveLength(1)
+      expect(Object.keys(rows[0].entryMarks).sort()).toEqual(['m1', 'p1'])
+      expect(await store.listPayrollWeekApprovals('2026-11-15')).toEqual([])
+    })
+
+    it('refuses a mark on an entry that changed or is gone, and takes a tick off', async () => {
+      await expect(
+        store.savePayrollEntryMark({ entryId: 'm1', expectedSignature: entrySignature(manual({ minutes: 60 })), mark: okMark(manual()) }),
+      ).rejects.toMatchObject({ status: 409, message: ENTRY_CHANGED_MESSAGE })
+      await expect(
+        store.savePayrollEntryMark({ entryId: 'nope', expectedSignature: entrySignature(manual()), mark: okMark(manual()) }),
+      ).rejects.toMatchObject({ status: 409 })
+      await expect(
+        store.savePayrollEntryMark({ entryId: 'm1', expectedSignature: entrySignature(manual()), mark: { kind: 'junk' } }),
+      ).rejects.toMatchObject({ status: 400 })
+      expect(await store.listPayrollWeekApprovals(WEEK)).toEqual([])
+      await store.savePayrollEntryMark({ entryId: 'm1', expectedSignature: entrySignature(manual()), mark: okMark(manual()) })
+      const row = await store.savePayrollEntryMark({ entryId: 'm1', mark: null })
+      expect(row.entryMarks).toEqual({})
+    })
+
+    it('deny copies the entry as stored onto the week row and removes it, in one write', async () => {
+      const before = (await onDisk()).timeEntries.find((entry) => entry.id === 'm1')
+      const result = await store.denyPayrollEntries({
+        entryId: 'm1',
+        signatures: { m1: entrySignature(manual()) },
+        denial: denial(),
+      })
+      expect(result).toMatchObject({ userId: 'emp-1', weekStart: WEEK })
+      expect(result.denial).toMatchObject({ id: 'deny-1', hours: 1.2, note: 'Logged twice by the system' })
+      expect(result.denial.parts.map((item) => item.id)).toEqual(['m1'])
+      const disk = await onDisk()
+      expect(disk.timeEntries.some((entry) => entry.id === 'm1')).toBe(false)
+      const [row] = disk.payrollWeekApprovals
+      expect(stableStringify(row.deniedEntries[0].entries[0])).toBe(stableStringify(before))
+    })
+
+    it('a part of a shared block denies the WHOLE block, every part, and Undo puts it back byte for byte', async () => {
+      const stored = (await onDisk()).timeEntries.filter((entry) => entry.groupId === 'g1')
+      const signatures = Object.fromEntries(stored.map((entry) => [entry.id, entrySignature(entry)]))
+      const result = await store.denyPayrollEntries({ entryId: 'p2', signatures, denial: denial() })
+      expect(result.denial.parts.map((item) => item.id).sort()).toEqual(['p1', 'p2', 'p3'])
+      expect(result.denial.hours).toBe(1.2)
+      expect((await onDisk()).timeEntries.map((entry) => entry.id)).toEqual(['m1'])
+
+      const undone = await store.undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' })
+      expect(undone.restored.map((entry) => entry.id).sort()).toEqual(['p1', 'p2', 'p3'])
+      const back = (await onDisk()).timeEntries.filter((entry) => entry.groupId === 'g1')
+      const byId = (list) => [...list].sort((a, b) => a.id.localeCompare(b.id)).map(stableStringify)
+      expect(byId(back)).toEqual(byId(stored))
+      expect((await store.listPayrollWeekApprovals(WEEK))[0].deniedEntries).toEqual([])
+    })
+
+    it('refuses a deny whose screen saw something else, and changes nothing', async () => {
+      const disk = await onDisk()
+      // A signature that no longer matches.
+      await expect(
+        store.denyPayrollEntries({ entryId: 'm1', signatures: { m1: entrySignature(manual({ minutes: 1 })) }, denial: denial() }),
+      ).rejects.toMatchObject({ status: 409, message: ENTRY_CHANGED_MESSAGE })
+      // Only one part of a block named.
+      await expect(
+        store.denyPayrollEntries({ entryId: 'p1', signatures: { p1: entrySignature(part('p1', 'c1')) }, denial: denial() }),
+      ).rejects.toMatchObject({ status: 409 })
+      // Gone.
+      await expect(
+        store.denyPayrollEntries({ entryId: 'gone', signatures: { gone: entrySignature(manual()) }, denial: denial() }),
+      ).rejects.toMatchObject({ status: 409 })
+      expect(await onDisk()).toEqual(disk)
+    })
+
+    it('Undo refuses in words when an id is taken again or the client is gone, and changes nothing', async () => {
+      await store.denyPayrollEntries({ entryId: 'm1', signatures: { m1: entrySignature(manual()) }, denial: denial() })
+      // The same id comes back (a stale tab, say): Undo will not make two.
+      await store.write(payrollWorkspace())
+      const taken = await onDisk()
+      await expect(store.undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' })).rejects.toMatchObject({
+        status: 409,
+        message: PAYROLL_UNDO_ID_TAKEN_MESSAGE,
+      })
+      expect(await onDisk()).toEqual(taken)
+
+      // The client is gone.
+      await store.denyPayrollEntries({ entryId: 'm1', signatures: { m1: entrySignature(manual()) }, denial: denial('deny-2') })
+      // (Written to the file directly: the bulk save refuses to drop a client with time.)
+      const noAcme = await onDisk()
+      noAcme.clients = noAcme.clients.filter((client) => client.id !== 'c1')
+      noAcme.timeEntries = noAcme.timeEntries.filter((entry) => entry.clientId !== 'c1')
+      await writeFile(localDataPath, JSON.stringify(noAcme, null, 2))
+      const gone = await onDisk()
+      await expect(store.undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-2' })).rejects.toMatchObject({
+        status: 409,
+        message: payrollUndoClientGoneMessage(''),
+      })
+      expect(await onDisk()).toEqual(gone)
+      await expect(store.undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'nope' })).rejects.toMatchObject({ status: 404 })
+    })
+
+    it('the bulk save never touches the rows: a payload copy is ignored, the stored rows are kept', async () => {
+      await store.savePayrollEntryMark({ entryId: 'm1', expectedSignature: entrySignature(manual()), mark: okMark(manual()) })
+      const kept = (await onDisk()).payrollWeekApprovals
+      await store.write({ ...payrollWorkspace(), payrollWeekApprovals: [{ id: 'forged', userId: 'emp-1', weekStart: WEEK }] })
+      expect((await onDisk()).payrollWeekApprovals).toEqual(kept)
+      await store.write(payrollWorkspace())
+      expect((await onDisk()).payrollWeekApprovals).toEqual(kept)
+      // And the rows are not in the staleness fingerprint: a mark does not move it.
+      const version = await store.computeWorkspaceVersion()
+      await store.savePayrollEntryMark({ entryId: 'm1', mark: null })
+      expect(await store.computeWorkspaceVersion()).toBe(version)
+    })
+
+    it('sent back, changed, denied, undone: the send-back mark comes back with the time (Changed, look again)', async () => {
+      const sig = entrySignature(manual())
+      await store.savePayrollEntryMark({
+        entryId: 'm1',
+        expectedSignature: sig,
+        mark: { kind: 'sent_back', by: 'emp-patrice', byName: 'Brittany', at: '2026-11-20T15:00:00.000Z', note: 'Which client?', signature: sig, flags: [] },
+      })
+      // The person changes it (now on another client) and it waits again.
+      const changed = manual({ clientId: 'c2', approvalStatus: 'pending' })
+      const disk = await onDisk()
+      disk.timeEntries = disk.timeEntries.map((entry) => (entry.id === 'm1' ? changed : entry))
+      await writeFile(localDataPath, JSON.stringify(disk, null, 2))
+      const denied = await store.denyPayrollEntries({ entryId: 'm1', signatures: { m1: entrySignature(changed) }, denial: denial() })
+      expect(denied.denial.marks.m1.kind).toBe('sent_back')
+      expect(denied.row.entryMarks.m1).toBeUndefined()
+      const undone = await store.undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' })
+      expect(undone.row.entryMarks.m1.kind).toBe('sent_back')
+      const shown = applyEntryMarks([], { entry: changed, mark: undone.row.entryMarks.m1, personName: 'Lisa Reyes' })
+      expect(shown.flags[0]).toMatchObject({ kind: 'changed', label: 'Changed, look again' })
+    })
+
+    it('Undo of a copy with no usable id says so in its own words', async () => {
+      await store.denyPayrollEntries({ entryId: 'm1', signatures: { m1: entrySignature(manual()) }, denial: denial() })
+      const disk = await onDisk()
+      delete disk.payrollWeekApprovals[0].deniedEntries[0].entries[0].id
+      await writeFile(localDataPath, JSON.stringify(disk, null, 2))
+      await expect(store.undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' })).rejects.toMatchObject({
+        status: 409,
+        message: 'This copy cannot be put back as it is. Tell Alex.',
+      })
+    })
+
+    it('listInvoiceEvidence by month: the month, a pushed month and the invoice that carries it; nothing else', async () => {
+      const disk = await onDisk()
+      disk.invoices = [
+        { id: 'nov', clientId: 'c1', period: '2026-11', kind: 'monthly', status: 'sent', lineItems: [] },
+        { id: 'pushed', clientId: 'c2', period: '2026-11', kind: 'monthly', status: 'void', rolledIntoPeriod: '2026-12', lineItems: [] },
+        { id: 'carrying', clientId: 'c2', period: '2026-12', kind: 'monthly', status: 'draft', lineItems: [] },
+        { id: 'dec-other', clientId: 'c3', period: '2026-12', kind: 'monthly', status: 'sent', lineItems: [] },
+        { id: 'oct', clientId: 'c1', period: '2026-10', kind: 'monthly', status: 'sent', lineItems: [] },
+      ]
+      await writeFile(localDataPath, JSON.stringify(disk, null, 2))
+      const rows = await store.listInvoiceEvidence({ periods: ['2026-11'] })
+      expect(rows.map((row) => [row.clientId, row.period, row.status, row.rolledIntoPeriod])).toEqual([
+        ['c1', '2026-11', 'sent', null],
+        ['c2', '2026-11', 'void', '2026-12'],
+        ['c2', '2026-12', 'draft', null],
+      ])
+      // Without periods: the same rows and shape as always.
+      const all = await store.listInvoiceEvidence()
+      expect(all).toHaveLength(5)
+      expect(all[0]).not.toHaveProperty('rolledIntoPeriod')
+    })
+
+    it('reads the names a notice uses from the data file', async () => {
+      const names = await store.lookupNoticeNames({ clientIds: ['c1', 'c9'], checklistIds: ['none'] })
+      expect([...names.clients]).toEqual([['c1', 'Acme Dental']])
+      expect(names.tasks.size).toBe(0)
+    })
+
+    it('a stale owner tab that still holds a denied entry cannot put it back: its save is refused', async () => {
+      const staleVersion = await store.computeWorkspaceVersion()
+      await store.denyPayrollEntries({ entryId: 'm1', signatures: { m1: entrySignature(manual()) }, denial: denial() })
+      expect(await store.computeWorkspaceVersion()).not.toBe(staleVersion)
+      await expect(store.write(payrollWorkspace(), { expectedVersion: staleVersion })).rejects.toBeInstanceOf(StaleWorkspaceError)
+      expect((await onDisk()).timeEntries.some((entry) => entry.id === 'm1')).toBe(false)
+    })
+  })
+
+  describe('Postgres branch (recording pool)', () => {
+    /** One log for the pool and the connection, so the order inside the transaction is visible. */
+    function payrollPg(responder = () => null) {
+      const log = []
+      const answer = (text, params, on) => {
+        const sql = String(text).replace(/\s+/g, ' ').trim()
+        log.push({ sql, params, on })
+        const out = responder(sql, params)
+        if (out instanceof Error) throw out
+        return out ?? { rows: [], rowCount: 0 }
+      }
+      const pool = {
+        query: async (text, params) => answer(text, params, 'pool'),
+        connect: async () => ({
+          query: async (text, params) => answer(text, params, 'client'),
+          release: () => log.push({ sql: 'release', on: 'client' }),
+        }),
+      }
+      return { pool, log, sql: () => log.map((row) => row.sql) }
+    }
+    /** `to_jsonb(t)` of a time_entries row: every column, dates and instants as TEXT. */
+    const storedRow = (entry) => ({
+      id: entry.id,
+      user_id: entry.employeeId,
+      client_id: entry.clientId,
+      entry_date: entry.date,
+      minutes: entry.minutes,
+      category: 'Bookkeeping',
+      description: entry.description,
+      billable: entry.billable,
+      task_id: null,
+      approval_status: entry.approvalStatus,
+      approval_note: null,
+      approved_by: entry.approvedBy ?? null,
+      approved_at: entry.approvedAt ? entry.approvedAt.replace('Z', '+00:00') : null,
+      entry_method: entry.entryMethod,
+      manual_reason: null,
+      is_administrative: false,
+      is_adhoc: false,
+      started_at: entry.startAt.replace('Z', '+00:00'),
+      ended_at: entry.endAt.replace('Z', '+00:00'),
+      sessions: entry.sessions,
+      group_id: entry.groupId ?? null,
+      group_client_ids: [],
+      group_allocation: entry.groupAllocation ?? null,
+      task_label: entry.taskLabel,
+      created_at: '2026-11-11T14:00:00.123456+00:00',
+      updated_at: '2026-11-12T15:00:00.5+00:00',
+    })
+    const weekRow = (over = {}) => ({
+      id: 'pwa-1',
+      user_id: 'emp-1',
+      week_start: WEEK,
+      status: 'open',
+      approved_by: null,
+      approved_at: null,
+      totals: null,
+      entry_signatures: {},
+      entry_marks: {},
+      denied_entries: [],
+      history: [],
+      updated_at: new Date('2026-11-20T15:00:00.000Z'),
+      ...over,
+    })
+    const blockRows = () => [part('p1', 'c1'), part('p2', 'c2'), part('p3', 'c3')].map(storedRow)
+    const words = (fake) => fake.sql().map((sql) => sql.split(' ')[0])
+
+    it('initialize() creates the table Alex approved, look-first, with no foreign key, and the bulk save never names it', async () => {
+      for (const column of [
+        'create table if not exists payroll_week_approvals (',
+        'id text primary key',
+        'user_id text not null',
+        'week_start date not null',
+        "status text not null default 'open'",
+        'approved_by text',
+        'approved_at timestamptz',
+        'totals jsonb',
+        "entry_signatures jsonb not null default '{}'::jsonb",
+        "entry_marks jsonb not null default '{}'::jsonb",
+        "denied_entries jsonb not null default '[]'::jsonb",
+        "history jsonb not null default '[]'::jsonb",
+        'updated_at timestamptz not null default now()',
+        'unique (user_id, week_start)',
+      ]) {
+        expect(PAYROLL_WEEK_APPROVALS_TABLE_SQL).toContain(column)
+      }
+      expect(PAYROLL_WEEK_APPROVALS_TABLE_SQL).not.toMatch(/references/i)
+      const source = (await readFile(path.join(projectRoot, 'db', 'store.js'), 'utf8')).replace(/\r\n/g, '\n')
+      expect(source).toContain('await this.pool.query(PAYROLL_WEEK_APPROVALS_TABLE_SQL)')
+      // Never in the bulk save, never in the fingerprint.
+      expect(BULK_SAVE_TABLES).not.toContain('payroll_week_approvals')
+      expect(BULK_SAVE_SLICES).not.toContain('payrollWeekApprovals')
+      const writeBody = source.slice(source.indexOf('  async write(data, {'), source.indexOf('  async computeWorkspaceVersion()'))
+      expect(writeBody).not.toContain('payroll_week_approvals')
+    })
+
+    it('the bulk save issues no statement that names the table', async () => {
+      const fake = fakePostgres()
+      await postgresStore(fake).write(workspace())
+      expect(fake.statements.some((statement) => /payroll_week_approvals/.test(statement.text))).toBe(false)
+    })
+
+    it('a deny reaches the stale-tab guard: time_entries is in the fingerprint, whole rows', () => {
+      expect(BULK_SAVE_TABLES).toContain('time_entries')
+      expect(tableVersionSql('time_entries')).toContain("(to_jsonb(t) - 'updated_at' - 'created_at')::text")
+    })
+
+    it('reads a week with dates as text', async () => {
+      const fake = payrollPg((sql) => (/from payroll_week_approvals/.test(sql) ? { rows: [weekRow()], rowCount: 1 } : null))
+      const rows = await postgresStore(fake).listPayrollWeekApprovals(WEEK)
+      expect(rows[0]).toMatchObject({ userId: 'emp-1', weekStart: WEEK, status: 'open', entryMarks: {}, deniedEntries: [] })
+      expect(fake.log[0].sql).toContain("to_char(week_start, 'YYYY-MM-DD') as week_start")
+      expect(fake.log[0].params).toEqual([WEEK])
+    })
+
+    it('a mark locks the entry, checks its signature and upserts the row in one transaction', async () => {
+      const entry = manual()
+      const mark = okMark(entry)
+      const fake = payrollPg((sql) => {
+        if (/^select to_jsonb\(t\) as stored from time_entries t where id = \$1 for update$/.test(sql)) {
+          return { rows: [{ stored: storedRow(entry) }], rowCount: 1 }
+        }
+        if (/^insert into payroll_week_approvals/.test(sql)) {
+          // Postgres hands jsonb back with its keys reordered.
+          return { rows: [weekRow({ entry_marks: { m1: Object.fromEntries(Object.entries(mark).reverse()) } })], rowCount: 1 }
+        }
+        return null
+      })
+      const row = await postgresStore(fake).savePayrollEntryMark({ entryId: 'm1', expectedSignature: entrySignature(entry), mark })
+      expect(stableStringify(row.entryMarks.m1)).toBe(stableStringify(mark))
+      expect(words(fake)).toEqual(['begin', 'select', 'insert', 'commit', 'release'])
+      const insert = fake.log.find((item) => /^insert/.test(item.sql))
+      expect(insert.sql).toContain(
+        'on conflict (user_id, week_start) do update set entry_marks = payroll_week_approvals.entry_marks || jsonb_build_object($4::text, $5::jsonb)',
+      )
+      expect(insert.params.slice(1, 4)).toEqual(['emp-1', WEEK, 'm1'])
+      expect(JSON.parse(insert.params[4])).toEqual({ ...mark, fields: signatureFields(entry) })
+    })
+
+    it('taking a tick off removes only that key', async () => {
+      const fake = payrollPg((sql) => {
+        if (/^select to_jsonb/.test(sql)) return { rows: [{ stored: storedRow(manual()) }], rowCount: 1 }
+        if (/^update payroll_week_approvals/.test(sql)) return { rows: [weekRow()], rowCount: 1 }
+        return null
+      })
+      await postgresStore(fake).savePayrollEntryMark({ entryId: 'm1', mark: null })
+      const update = fake.log.find((item) => /^update/.test(item.sql))
+      expect(update.sql).toContain('set entry_marks = entry_marks - $3::text')
+      expect(update.params).toEqual(['emp-1', WEEK, 'm1'])
+    })
+
+    it('a mark on a changed entry rolls back and writes nothing', async () => {
+      const fake = payrollPg((sql) =>
+        /^select to_jsonb/.test(sql) ? { rows: [{ stored: storedRow(manual({ minutes: 5 })) }], rowCount: 1 } : null,
+      )
+      await expect(
+        postgresStore(fake).savePayrollEntryMark({ entryId: 'm1', expectedSignature: entrySignature(manual()), mark: okMark(manual()) }),
+      ).rejects.toMatchObject({ status: 409, message: ENTRY_CHANGED_MESSAGE })
+      expect(words(fake)).toEqual(['begin', 'select', 'rollback', 'release'])
+    })
+
+    function denyPg({ failDelete = false, deleteCount = 3, deadlock = false } = {}) {
+      return payrollPg((sql) => {
+        // The block is read WITHOUT a lock; every row is then locked in one statement.
+        if (/^select group_id from time_entries where id = \$1$/.test(sql)) {
+          return { rows: [{ group_id: 'g1' }], rowCount: 1 }
+        }
+        if (/^select to_jsonb\(t\) as stored from time_entries t where group_id = \$1 order by id for update$/.test(sql)) {
+          if (deadlock) return Object.assign(new Error('deadlock detected'), { code: '40P01' })
+          return { rows: blockRows().map((stored) => ({ stored })), rowCount: 3 }
+        }
+        if (/^insert into payroll_week_approvals/.test(sql)) return { rows: [weekRow()], rowCount: 1 }
+        if (/^delete from time_entries where id = any\(\$1::text\[\]\)$/.test(sql)) {
+          return failDelete ? new Error('delete failed') : { rows: [], rowCount: deleteCount }
+        }
+        return null
+      })
+    }
+    const blockSignatures = () =>
+      Object.fromEntries([part('p1', 'c1'), part('p2', 'c2'), part('p3', 'c3')].map((entry) => [entry.id, entrySignature(entry)]))
+
+    it('a deny copies the whole block as stored, then deletes it, inside one transaction', async () => {
+      const fake = denyPg()
+      const result = await postgresStore(fake).denyPayrollEntries({ entryId: 'p2', signatures: blockSignatures(), denial: denial() })
+      expect(words(fake)).toEqual(['begin', 'select', 'select', 'select', 'insert', 'delete', 'commit', 'release'])
+      const insert = fake.log.find((item) => /^insert/.test(item.sql))
+      expect(insert.sql).toContain('set denied_entries = payroll_week_approvals.denied_entries || excluded.denied_entries')
+      expect(insert.sql).toContain('entry_marks = payroll_week_approvals.entry_marks - $5::text[]')
+      const [record] = JSON.parse(insert.params[3])
+      // The copy is the jsonb row itself, every column as stored.
+      expect(record.entries.map(stableStringify)).toEqual(blockRows().map(stableStringify))
+      expect(record).toMatchObject({ id: 'deny-1', hours: 1.2, note: 'Logged twice by the system', deniedBy: 'emp-patrice' })
+      expect(insert.params[4]).toEqual(['p1', 'p2', 'p3'])
+      expect(fake.log.find((item) => /^delete/.test(item.sql)).params).toEqual([['p1', 'p2', 'p3']])
+      expect(result.weekStart).toBe(WEEK)
+    })
+
+    it('a failed delete rolls the copy back with it, and a short delete is refused', async () => {
+      const failing = denyPg({ failDelete: true })
+      await expect(
+        postgresStore(failing).denyPayrollEntries({ entryId: 'p2', signatures: blockSignatures(), denial: denial() }),
+      ).rejects.toThrow('delete failed')
+      expect(words(failing)).toEqual(['begin', 'select', 'select', 'select', 'insert', 'delete', 'rollback', 'release'])
+      const short = denyPg({ deleteCount: 2 })
+      await expect(
+        postgresStore(short).denyPayrollEntries({ entryId: 'p2', signatures: blockSignatures(), denial: denial() }),
+      ).rejects.toMatchObject({ status: 409 })
+      expect(short.sql()).not.toContain('commit')
+    })
+
+    it('locks the whole block in ONE statement, in id order, and answers a deadlock with the 409, not a 500', async () => {
+      const fake = denyPg()
+      await postgresStore(fake).denyPayrollEntries({ entryId: 'p2', signatures: blockSignatures(), denial: denial() })
+      const reads = fake.log.filter((item) => /^select/.test(item.sql))
+      expect(reads.map((item) => item.sql)).toEqual([
+        'select group_id from time_entries where id = $1',
+        'select to_jsonb(t) as stored from time_entries t where group_id = $1 order by id for update',
+        // The week row's marks on those entries, under the row lock, so the copy keeps them.
+        'select entry_marks from payroll_week_approvals where user_id = $1 and week_start = $2::date for update',
+      ])
+      const locked = denyPg({ deadlock: true })
+      await expect(
+        postgresStore(locked).denyPayrollEntries({ entryId: 'p2', signatures: blockSignatures(), denial: denial() }),
+      ).rejects.toMatchObject({ status: 409, message: ENTRY_CHANGED_MESSAGE })
+      expect(locked.sql()).toContain('rollback')
+      expect(locked.sql()).not.toContain('commit')
+    })
+
+    it('a lone entry is locked by its own statement', async () => {
+      const single = storedRow(manual())
+      const fake = payrollPg((sql) => {
+        if (/^select group_id from time_entries where id = \$1$/.test(sql)) return { rows: [{ group_id: null }], rowCount: 1 }
+        if (/^select to_jsonb\(t\) as stored from time_entries t where id = \$1 for update$/.test(sql)) {
+          return { rows: [{ stored: single }], rowCount: 1 }
+        }
+        if (/^insert into payroll_week_approvals/.test(sql)) return { rows: [weekRow()], rowCount: 1 }
+        if (/^delete from time_entries/.test(sql)) return { rows: [], rowCount: 1 }
+        return null
+      })
+      await postgresStore(fake).denyPayrollEntries({ entryId: 'm1', signatures: { m1: entrySignature(manual()) }, denial: denial() })
+      expect(words(fake)).toEqual(['begin', 'select', 'select', 'select', 'insert', 'delete', 'commit', 'release'])
+    })
+
+    it('a deny on a changed block refuses before writing anything', async () => {
+      const fake = denyPg()
+      const signatures = { ...blockSignatures(), p3: entrySignature(part('p3', 'c1')) }
+      await expect(postgresStore(fake).denyPayrollEntries({ entryId: 'p2', signatures, denial: denial() })).rejects.toMatchObject({
+        status: 409,
+        message: ENTRY_CHANGED_MESSAGE,
+      })
+      expect(fake.sql().some((sql) => /^(insert|delete)/.test(sql))).toBe(false)
+      expect(fake.sql()).toContain('rollback')
+    })
+
+    function undoPg({ taken = 0, clients = ['c1', 'c2', 'c3'], entries = blockRows() } = {}) {
+      const record = { ...denial(), hours: 1.2, parts: [], entries }
+      return payrollPg((sql, params) => {
+        if (/^select attname from pg_attribute/.test(sql)) {
+          return { rows: Object.keys(blockRows()[0]).map((attname) => ({ attname })), rowCount: 26 }
+        }
+        if (/^select id from clients where id = any/.test(sql)) {
+          const have = clients.filter((id) => params[0].includes(id))
+          return { rows: have.map((id) => ({ id })), rowCount: have.length }
+        }
+        if (/^select .* from payroll_week_approvals where user_id = \$1 and week_start = \$2::date for update$/.test(sql)) {
+          return { rows: [weekRow({ denied_entries: [record] })], rowCount: 1 }
+        }
+        if (/^select id from time_entries where id = any/.test(sql)) {
+          return { rows: Array.from({ length: taken }, () => ({ id: 'p1' })), rowCount: taken }
+        }
+        if (/^select id from clients where id = any/.test(sql)) return { rows: clients.map((id) => ({ id })), rowCount: clients.length }
+        if (/^select id from users where id = any/.test(sql)) return { rows: [{ id: 'emp-1' }], rowCount: 1 }
+        if (/^update payroll_week_approvals/.test(sql)) return { rows: [weekRow()], rowCount: 1 }
+        return null
+      })
+    }
+
+    it('Undo puts every stored column back through jsonb_populate_record, and drops the copy, in one transaction', async () => {
+      const fake = undoPg()
+      const result = await postgresStore(fake).undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' })
+      const inserts = fake.log.filter((item) => /^insert into time_entries/.test(item.sql))
+      expect(inserts).toHaveLength(3)
+      const columns = Object.keys(blockRows()[0]).join(', ')
+      expect(inserts[0].sql).toBe(
+        `insert into time_entries (${columns}) select ${columns} from jsonb_populate_record(null::time_entries, $1::jsonb)`,
+      )
+      expect(inserts.map((item) => stableStringify(JSON.parse(item.params[0])))).toEqual(blockRows().map(stableStringify))
+      const update = fake.log.find((item) => /^update payroll_week_approvals/.test(item.sql))
+      expect(JSON.parse(update.params[2])).toEqual([])
+      expect(fake.sql().at(-2)).toBe('commit')
+      expect(result.restored.map((entry) => entry.id)).toEqual(['p1', 'p2', 'p3'])
+      // The app shape of what came back is the same entry the page held.
+      expect(result.restored.map(entrySignature)).toEqual(Object.values(blockSignatures()))
+    })
+
+    it('Undo refuses an id taken again, or a client that is gone, before inserting anything', async () => {
+      const taken = undoPg({ taken: 1 })
+      await expect(
+        postgresStore(taken).undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' }),
+      ).rejects.toMatchObject({ status: 409, message: PAYROLL_UNDO_ID_TAKEN_MESSAGE })
+      expect(taken.sql().some((sql) => /^insert/.test(sql))).toBe(false)
+      expect(taken.sql()).toContain('rollback')
+      const gone = undoPg({ clients: ['c1', 'c2'] })
+      await expect(
+        postgresStore(gone).undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' }),
+      ).rejects.toMatchObject({ status: 409, message: payrollUndoClientGoneMessage('') })
+      expect(gone.sql().some((sql) => /^insert/.test(sql))).toBe(false)
+      const missing = undoPg()
+      await expect(
+        postgresStore(missing).undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'other' }),
+      ).rejects.toMatchObject({ status: 404 })
+    })
+
+    it('Undo leaves out a column the copy holds that time_entries no longer has, instead of failing', async () => {
+      const withGone = blockRows().map((row) => ({ ...row, retired_column: 'x' }))
+      const fake = undoPg({ entries: withGone })
+      await postgresStore(fake).undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' })
+      const inserts = fake.log.filter((item) => /^insert into time_entries/.test(item.sql))
+      expect(inserts).toHaveLength(3)
+      expect(inserts[0].sql).not.toContain('retired_column')
+      // Read from the same relation `null::time_entries` resolves to.
+      expect(
+        fake.log.some(
+          (item) =>
+            item.sql ===
+            "select attname from pg_attribute where attrelid = 'time_entries'::regclass and attnum > 0 and not attisdropped",
+        ),
+      ).toBe(true)
+    })
+
+    it('Undo checks the client the same way as the file backend: administrative time has none to check', async () => {
+      const admin = blockRows().map((row) => ({ ...row, client_id: 'c-gone', is_administrative: true }))
+      const fake = undoPg({ entries: admin, clients: [] })
+      await postgresStore(fake).undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' })
+      expect(fake.log.some((item) => /^select id from clients/.test(item.sql))).toBe(false)
+      expect(fake.sql()).toContain('commit')
+    })
+
+    it('reads the names a notice uses with two narrow queries, never the whole workspace', async () => {
+      const fake = payrollPg((sql) => {
+        if (/^select id, name from clients where id = any/.test(sql)) return { rows: [{ id: 'c1', name: 'Acme Dental' }], rowCount: 1 }
+        if (/^select id, title from checklists where id = any/.test(sql)) return { rows: [{ id: 'chk-1', title: 'Month-end close' }], rowCount: 1 }
+        return null
+      })
+      const names = await postgresStore(fake).lookupNoticeNames({ clientIds: ['c1', 'c1', ''], checklistIds: ['chk-1', null] })
+      expect(names.clients.get('c1')).toBe('Acme Dental')
+      expect(names.tasks.get('chk-1')).toBe('Month-end close')
+      expect(fake.log.map((item) => item.params)).toEqual([[['c1']], [['chk-1']]])
+    })
+
+    it('a mark keeps the fields of the entry it checked', async () => {
+      const entry = manual()
+      const fake = payrollPg((sql) => {
+        if (/^select to_jsonb/.test(sql)) return { rows: [{ stored: storedRow(entry) }], rowCount: 1 }
+        if (/^insert into payroll_week_approvals/.test(sql)) return { rows: [weekRow()], rowCount: 1 }
+        return null
+      })
+      await postgresStore(fake).savePayrollEntryMark({ entryId: 'm1', expectedSignature: entrySignature(entry), mark: okMark(entry) })
+      const insert = fake.log.find((item) => /^insert/.test(item.sql))
+      expect(JSON.parse(insert.params[4]).fields).toEqual(signatureFields(entry))
+    })
+
+    it('a deny keeps the marks the entries carried, and Undo merges them back', async () => {
+      const mark = { kind: 'ok', by: 'emp-patrice', byName: 'Brittany', at: '2026-11-20T15:00:00.000Z', note: '', signature: entrySignature(part('p1', 'c1')), flags: ['overlap'] }
+      const fake = payrollPg((sql) => {
+        if (/^select group_id from time_entries/.test(sql)) return { rows: [{ group_id: 'g1' }], rowCount: 1 }
+        if (/^select to_jsonb/.test(sql)) return { rows: blockRows().map((stored) => ({ stored })), rowCount: 3 }
+        if (/^select entry_marks from payroll_week_approvals/.test(sql)) return { rows: [{ entry_marks: { p1: mark, other: mark } }], rowCount: 1 }
+        if (/^insert into payroll_week_approvals/.test(sql)) return { rows: [weekRow()], rowCount: 1 }
+        if (/^delete from time_entries/.test(sql)) return { rows: [], rowCount: 3 }
+        return null
+      })
+      await postgresStore(fake).denyPayrollEntries({ entryId: 'p2', signatures: blockSignatures(), denial: denial() })
+      const [record] = JSON.parse(fake.log.find((item) => /^insert/.test(item.sql)).params[3])
+      expect(record.marks).toEqual({ p1: mark })
+
+      const undo = payrollPg((sql) => {
+        if (/^select .* from payroll_week_approvals where user_id/.test(sql)) {
+          return { rows: [weekRow({ denied_entries: [{ ...denial(), hours: 1.2, parts: [], entries: blockRows(), marks: { p1: mark } }] })], rowCount: 1 }
+        }
+        if (/^select attname from pg_attribute/.test(sql)) return { rows: Object.keys(blockRows()[0]).map((attname) => ({ attname })), rowCount: 26 }
+        if (/^select id from clients/.test(sql)) return { rows: [{ id: 'c1' }, { id: 'c2' }, { id: 'c3' }], rowCount: 3 }
+        if (/^select id from users/.test(sql)) return { rows: [{ id: 'emp-1' }], rowCount: 1 }
+        if (/^update payroll_week_approvals/.test(sql)) return { rows: [weekRow()], rowCount: 1 }
+        return null
+      })
+      await postgresStore(undo).undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' })
+      const update = undo.log.find((item) => /^update payroll_week_approvals/.test(item.sql))
+      expect(update.sql).toContain('entry_marks = entry_marks || $4::jsonb')
+      expect(JSON.parse(update.params[3])).toEqual({ p1: mark })
+    })
+
+    it('Undo answers a unique violation, a deadlock and a copy with no id in words', async () => {
+      const failing = (code) =>
+        payrollPg((sql) => {
+          if (/^select .* from payroll_week_approvals where user_id/.test(sql)) {
+            return { rows: [weekRow({ denied_entries: [{ ...denial(), hours: 1.2, parts: [], entries: blockRows() }] })], rowCount: 1 }
+          }
+          if (/^select attname from pg_attribute/.test(sql)) return { rows: Object.keys(blockRows()[0]).map((attname) => ({ attname })), rowCount: 26 }
+          if (/^select id from clients/.test(sql)) return { rows: [{ id: 'c1' }, { id: 'c2' }, { id: 'c3' }], rowCount: 3 }
+          if (/^select id from users/.test(sql)) return { rows: [{ id: 'emp-1' }], rowCount: 1 }
+          if (/^insert into time_entries/.test(sql)) return Object.assign(new Error('pg'), { code })
+          return null
+        })
+      await expect(
+        postgresStore(failing('23505')).undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' }),
+      ).rejects.toMatchObject({ status: 409, message: PAYROLL_UNDO_ID_TAKEN_MESSAGE })
+      await expect(
+        postgresStore(failing('40P01')).undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' }),
+      ).rejects.toMatchObject({ status: 409, message: ENTRY_CHANGED_MESSAGE })
+      const noId = undoPg({ entries: blockRows().map(({ id: _id, ...rest }) => rest) })
+      await expect(
+        postgresStore(noId).undoPayrollDenial({ userId: 'emp-1', weekStart: WEEK, denialId: 'deny-1' }),
+      ).rejects.toMatchObject({ status: 409, message: 'This copy cannot be put back as it is. Tell Alex.' })
+      expect(noId.sql().some((sql) => /^insert/.test(sql))).toBe(false)
+    })
+
+    it('listInvoiceEvidence by month: one statement, the months as one array parameter; without months, unchanged', async () => {
+      const fake = payrollPg(() => ({ rows: [], rowCount: 0 }))
+      await postgresStore(fake).listInvoiceEvidence({ periods: ['2026-11', '2026-12', 'junk'] })
+      const [call] = fake.log
+      expect(call.params).toEqual([['2026-11', '2026-12']])
+      expect(call.sql).toContain('select client_id, period, kind, status, rolled_into_period,')
+      expect(call.sql).toContain("where (i.kind = 'monthly' and (i.period = any($1::text[]) or (i.status = 'void' and i.rolled_into_period = any($1::text[]))")
+      expect(call.sql).toContain(
+        "or (i.status <> 'void' and i.period in (select v.rolled_into_period from invoices v where v.client_id = i.client_id and v.kind = 'monthly' and v.status = 'void' and v.period = any($1::text[])))))",
+      )
+      const both = payrollPg(() => ({ rows: [], rowCount: 0 }))
+      await postgresStore(both).listInvoiceEvidence({ clientIds: ['c1'], periods: ['2026-11'] })
+      expect(both.log[0].params).toEqual([['c1'], ['2026-11']])
+      expect(both.log[0].sql).toContain('where (client_id = any($1::text[])')
+      expect(both.log[0].sql).toContain("and (i.kind = 'monthly' and (i.period = any($2::text[])")
+      const plain = payrollPg(() => ({ rows: [], rowCount: 0 }))
+      await postgresStore(plain).listInvoiceEvidence()
+      expect(plain.log[0].params).toEqual([])
+      expect(plain.log[0].sql).not.toContain('rolled_into_period')
+      expect(plain.log[0].sql).toMatch(/from invoices i$/)
+    })
+
+    it('maps a stored jsonb row to the same entry the file backend holds', () => {
+      const entry = part('p1', 'c1')
+      const mapped = mapStoredTimeEntryJson(storedRow(entry))
+      expect(entrySignature(mapped)).toBe(entrySignature(entry))
+      expect(mapped).toMatchObject({ id: 'p1', employeeId: 'emp-1', date: '2026-11-11', minutes: 24, groupId: 'g1', approvalStatus: 'approved' })
     })
   })
 })

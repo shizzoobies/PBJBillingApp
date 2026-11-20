@@ -15333,6 +15333,157 @@ details.invoice-run-sent ul,
   max-width: none;
 }
 
+/* Ship 2: the Actions button sits at the top of the Flags cell, so the row is
+   no wider than the read-only screen at 1200px. */
+.payroll-review-table tr.payroll-review-entry td.payroll-review-flags {
+  min-width: 120px;
+  overflow-wrap: anywhere;
+}
+
+.payroll-review-table tr.payroll-review-entry td.payroll-review-flags {
+  position: relative;
+}
+
+.payroll-review-actions {
+  margin-bottom: 6px;
+  white-space: nowrap;
+}
+
+.payroll-review-actions-toggle {
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.payroll-review-actions-menu {
+  background: var(--surface, #fff);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+  display: grid;
+  gap: 2px;
+  padding: 4px;
+  position: absolute;
+  right: 8px;
+  top: 34px;
+  z-index: 5;
+}
+
+.payroll-review-actions-menu button {
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.payroll-review-actions-menu button {
+  display: grid;
+  gap: 1px;
+  white-space: normal;
+  width: 240px;
+}
+
+.payroll-review-actions-help {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.payroll-review-invoice-warning {
+  border-left: 3px solid var(--danger, #b42318);
+  font-weight: 600;
+  padding-left: 8px;
+}
+
+.payroll-review-notice-preview p {
+  background: var(--surface, #fff);
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  margin: 2px 0 0;
+  padding: 6px 8px;
+}
+
+.payroll-review-status-line {
+  font-weight: 600;
+  margin: 0 0 10px;
+}
+
+.payroll-review-actions-menu button:hover,
+.payroll-review-actions-menu button:focus-visible {
+  background: var(--soft);
+}
+
+.payroll-review-sheet td {
+  background: var(--soft);
+}
+
+.payroll-review-sheet-body {
+  display: grid;
+  gap: 8px;
+  max-width: 720px;
+}
+
+.payroll-review-sheet-body p {
+  margin: 0;
+}
+
+.payroll-review-sheet-body label {
+  display: grid;
+  gap: 4px;
+}
+
+.payroll-review-sheet-body textarea {
+  width: 100%;
+}
+
+.payroll-review-sheet-parts {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.payroll-review-sheet-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.payroll-review-action-error {
+  color: var(--danger, #b42318);
+  font-size: 12px;
+  margin: 4px 0 0;
+  white-space: normal;
+}
+
+/* A flag she OK'd: still there, quieter, so the row says it was looked at. */
+.payroll-flag-chip.is-seen {
+  border-style: dashed;
+  color: var(--muted);
+}
+
+.payroll-review-removed-line {
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.payroll-review-removed {
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+  padding-top: 8px;
+}
+
+.payroll-review-removed h4 {
+  margin: 0 0 6px;
+}
+
+.payroll-review-removed ul {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
 /* She reads every description: never truncated, wrapped instead. */
 .payroll-review-description {
   max-width: 360px;

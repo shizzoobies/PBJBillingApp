@@ -36,6 +36,8 @@ import type { AppContextValue } from '../AppContext'
 
 vi.mock('../lib/api', () => ({
   fetchRateVersions: vi.fn(async () => ({ billRateVersions: [], costRateVersions: [] })),
+  // Ship 2's read: null = an older server, so the screen stays read-only (ship 1).
+  fetchPayrollWeekRequest: vi.fn(async () => null),
 }))
 vi.mock('../lib/csv', () => ({ downloadCsv: vi.fn() }))
 vi.mock('../AppContext', () => ({ useAppContext: () => contextValue }))

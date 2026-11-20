@@ -31,6 +31,7 @@ import {
   NothingToPushError,
   RETAINER_PAID_ON_FLOOR,
   PackageApplyError,
+  PayrollWeekError,
   PlanCadenceMatchError,
   ProposalQuestionnaireError,
   ProposalStateError,
@@ -50,6 +51,22 @@ import {
   isReservedEngagementLetterName,
 } from './db/store.js'
 import { serviceCategoryGroupRefusal } from './lib/service-category-group.js'
+import {
+  ENTRY_CHANGED_MESSAGE,
+  deniedMessage,
+  denialAuditTarget,
+  entrySignature,
+  invoicedFacts,
+  isWeekStart,
+  weekInvoiceMonths,
+  normalizeDenyInput,
+  normalizeMarkInput,
+  normalizeSendBackInput,
+  normalizeUndoInput,
+  payrollHoursOf,
+  restoredMessage,
+  sentBackMessage,
+} from './lib/payroll-week-approvals.js'
 import {
   allocateGroupMinutes,
   classifySplitTarget,
@@ -1338,6 +1355,122 @@ const NOT_A_REPEAT_COPY_MESSAGE =
   'Only a note that a repeating note added to a checklist can be dismissed.'
 
 /**
+ * SEND A TIME ENTRY BACK to the person who logged it: today's reject
+ * (`POST /api/time-entries/:id/reject`), and Payroll review's "Send back to
+ * fix" reuses it whole, so both make the same status change, tell the person
+ * the same way, and leave the same `sent_back` mark on the person's payroll
+ * week (so Payroll review can say "Changed, look again" once they change it).
+ * The mark is best effort: the send-back stands without it. Entries sent back
+ * before this ship simply have no mark. The note is already checked.
+ *
+ * @returns {Promise<{ updated: object, week: object | null }>}
+ */
+async function sendTimeEntryBack({ entry, entryId, note, session, request }) {
+  const updated = await appDataStore.updateTimeEntry(entryId, {
+    approvalStatus: 'rejected',
+    approvalNote: note,
+    approvedBy: session.user.id,
+    approvedAt: new Date().toISOString(),
+  })
+  await appDataStore.recordActivity(session.user.id, 'time_entry_rejected', entryId)
+  // The reject is written: a failed name lookup must not turn it into a 500.
+  let owner = null
+  try {
+    owner = await appDataStore.getTeamMember(session.user.id)
+  } catch (error) {
+    console.error('[time-entries] reviewer lookup failed:', error?.message || error)
+  }
+  let week = null
+  try {
+    const signature = entrySignature(entry)
+    week = await appDataStore.savePayrollEntryMark({
+      entryId,
+      expectedSignature: signature,
+      mark: { kind: 'sent_back', by: session.user.id, byName: owner?.name ?? '', at: new Date().toISOString(), note, signature, flags: [] },
+    })
+  } catch (error) {
+    // Without the mark the entry still reads "Sent back"; only "Changed, look again" is lost.
+    console.error('[payroll-weeks] send-back mark failed:', error?.message || error)
+  }
+  // Tell the bookkeeper their time was sent back. Without this the
+  // rejection is SILENT — the only trace is a red note partway down their
+  // Recent time list, and the weekly submission still reads "pending", so
+  // they have no idea anything needs redoing.
+  try {
+    if (entry.employeeId && entry.employeeId !== session.user.id) {
+      await notify(appDataStore, entry.employeeId, 'time_entry_rejected', {
+        timeEntryId: entryId,
+        clientId: entry.clientId || '',
+        message: sentBackMessage({
+          ownerName: owner?.name ?? '',
+          hours: payrollHoursOf([entry]),
+          parts: await payrollNoticeParts([entry]),
+          note,
+        }),
+        link: '/time',
+        appPublicUrl: getPublicAppUrl(request),
+      })
+    }
+  } catch (err) {
+    console.error('[notify] time_entry_rejected dispatch failed:', err?.message || err)
+  }
+  return { updated, week }
+}
+
+/** Payroll review ship 2: answer a store refusal (`PayrollWeekError`) in words, or rethrow. */
+function sendPayrollWeekRefusal(response, error) {
+  if (error instanceof PayrollWeekError) {
+    sendJson(response, error.status, { error: error.message })
+    return true
+  }
+  return false
+}
+
+/**
+ * The words a notice about time uses: each entry's day, its client (or
+ * Administrative) and its task, looked up narrowly (`lookupNoticeNames`), never
+ * through the whole-workspace read.
+ */
+async function payrollNoticeParts(parts) {
+  const { clients, tasks } = await appDataStore.lookupNoticeNames({
+    clientIds: parts.filter((part) => !part.isAdministrative).map((part) => part.clientId),
+    checklistIds: parts.map((part) => part.taskId),
+  })
+  return parts.map((part) => ({
+    date: part.date,
+    job: part.isAdministrative || !part.clientId ? 'Administrative' : clients.get(part.clientId) ?? '',
+    task: (part.taskId ? tasks.get(part.taskId) : part.taskLabel?.trim()) || '',
+  }))
+}
+
+/**
+ * Answer an owner-only Payroll review write's gate: a session, an owner, the
+ * right method, same-origin and a JSON body. Preview never reaches a write:
+ * the read-only guard above every route refuses it. Returns the session or null.
+ */
+async function requirePayrollWeekWriter(request, response) {
+  const session = await requireSession(request, response)
+  if (!session) return null
+  if (request.method !== 'POST') {
+    sendJson(response, 405, { error: 'Method not allowed' })
+    return null
+  }
+  if (session.user.role !== 'owner') {
+    sendJson(response, 403, { error: 'Only owners can review payroll.' })
+    return null
+  }
+  if (isCrossSiteOrigin(request)) {
+    sendJson(response, 403, { error: 'Origin not allowed' })
+    return null
+  }
+  if (!isJsonContentType(request)) {
+    sendJson(response, 415, { error: 'application/json required' })
+    return null
+  }
+  return session
+}
+
+/**
  * Answer a refusal from lib/note-edit-permission.js (editing a note, featreq-da3801ab).
  * The 409 for a pending note already on a checklist carries a sentence for a person.
  */
@@ -1991,6 +2124,9 @@ function scopeAppDataForSession(session, data) {
     autopayAttempts: undefined,
     // The credit-on-account ledger: owners only, like autopay.
     accountCredits: undefined,
+    // Payroll review's week rows (her marks, the copies of denied entries):
+    // owners only, and read through GET /api/payroll-weeks, never here.
+    payrollWeekApprovals: undefined,
     ...(data.firmSettings ? { firmSettings } : {}),
     clients,
     checklists,
@@ -11205,7 +11341,11 @@ const server = createServer(async (request, response) => {
         // performed, and describes the FULL persisted workspace rather than the
         // scoped view. Staff receive it too and simply never use it (PUT is
         // owner-only).
-        sendJson(response, 200, scopeAppDataForSession(scopingSession, data), {
+        // Payroll review's week rows ride the FILE backend's whole-file read
+        // (with the full copies of denied entries): never served here, to
+        // anyone. The page reads them through GET /api/payroll-weeks.
+        const { payrollWeekApprovals: _payrollRows, ...served } = scopeAppDataForSession(scopingSession, data)
+        sendJson(response, 200, served, {
           [WORKSPACE_VERSION_HEADER]: workspaceVersion,
         })
         return
@@ -12321,6 +12461,235 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    // ---- Payroll review, ship 2 (featreq-0b4e42a1) ----
+    // What the owner can do to ONE entry on the Payroll review tab: OK it,
+    // send it back to fix, deny and remove it (with Undo). Owner only, every
+    // body checked here (lib/payroll-week-approvals.js), same-origin. Not on
+    // the preview allowlist, so a preview is refused (403 preview_unsupported
+    // on the read, "Preview mode is read-only" on a write).
+    //
+    // GET /api/payroll-weeks?week=<Sunday>: every person's row for that week.
+    // `actions` is the capability marker: a page that gets a 404 here (an
+    // older server during a deploy hand-over) shows the read-only screen with
+    // no buttons, because that server would not keep what she does.
+    if (normalizedPath === '/api/payroll-weeks') {
+      const session = await requireSession(request, response)
+      if (!session) return
+      if (request.method !== 'GET') {
+        sendJson(response, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (session.user.role !== 'owner') {
+        sendJson(response, 403, { error: 'Only owners can review payroll.' })
+        return
+      }
+      const weekStart = requestUrl.searchParams.get('week') || ''
+      if (!isWeekStart(weekStart)) {
+        sendJson(response, 400, { error: 'week must be a Sunday, like 2026-11-08' })
+        return
+      }
+      const rows = await appDataStore.listPayrollWeekApprovals(weekStart)
+      // The full stored copies stay on the server; the page lists `parts`.
+      const weeks = rows.map((row) => ({
+        ...row,
+        deniedEntries: row.deniedEntries.map(({ entries: _stored, ...denial }) => denial),
+      }))
+      // Which months' invoices already bill whose time: the deny confirm warns
+      // about them (read only; nothing about an invoice is written from here).
+      const invoiced = invoicedFacts(
+        await appDataStore.listInvoiceEvidence({ periods: weekInvoiceMonths(weekStart) }),
+        weekStart,
+      )
+      sendJson(response, 200, { weekStart, weeks, invoiced, actions: { ok: true, sendBack: true, deny: true, undo: true } })
+      return
+    }
+
+    // POST /api/payroll-weeks/marks: "OK, looked at" on one entry, or take
+    // the tick off. Writes only the week row, never time, so it is exempt
+    // from the data-change broadcast (lib/data-change-broadcast.js).
+    if (normalizedPath === '/api/payroll-weeks/marks') {
+      const session = await requirePayrollWeekWriter(request, response)
+      if (!session) return
+      const checked = normalizeMarkInput(await readJsonBody(request))
+      if (!checked.ok) {
+        sendJson(response, checked.status ?? 400, { error: checked.error })
+        return
+      }
+      const { entryId, remove, signature, flags, partners } = checked.value
+      const owner = await appDataStore.getTeamMember(session.user.id)
+      try {
+        const row = await appDataStore.savePayrollEntryMark({
+          entryId,
+          expectedSignature: signature,
+          mark: remove
+            ? null
+            : { kind: 'ok', by: session.user.id, byName: owner?.name ?? '', at: new Date().toISOString(), note: '', signature, flags, partners },
+        })
+        sendJson(response, 200, { week: row })
+      } catch (error) {
+        if (sendPayrollWeekRefusal(response, error)) return
+        throw error
+      }
+      return
+    }
+
+    // POST /api/payroll-weeks/send-back: today's reject (the same status
+    // change and the same notice to the person, `sendTimeEntryBack`), plus a
+    // `sent_back` mark so the screen can say "Changed, look again" once the
+    // person edits it. Refuses what the reject refuses (an owner, a note, the
+    // entry there), plus an entry that changed since she looked (409).
+    if (normalizedPath === '/api/payroll-weeks/send-back') {
+      const session = await requirePayrollWeekWriter(request, response)
+      if (!session) return
+      const checked = normalizeSendBackInput(await readJsonBody(request))
+      if (!checked.ok) {
+        sendJson(response, checked.status ?? 400, { error: checked.error })
+        return
+      }
+      const { entryId, signature, note } = checked.value
+      const entry = await appDataStore.getTimeEntry(entryId)
+      if (!entry) {
+        sendJson(response, 404, { error: 'Time entry not found' })
+        return
+      }
+      if (entrySignature(entry) !== signature) {
+        sendJson(response, 409, { error: ENTRY_CHANGED_MESSAGE })
+        return
+      }
+      // The mark is left by the shared send-back itself, for both routes.
+      const { updated, week } = await sendTimeEntryBack({ entry, entryId, note, session, request })
+      sendJson(response, 200, { entry: updated, week })
+      return
+    }
+
+    // POST /api/payroll-weeks/deny: DENY AND REMOVE. The entry (or the whole
+    // shared block it is part of) is copied onto the person's week row and
+    // deleted from the time, in one transaction (`denyPayrollEntries`). An
+    // owner's delete refuses nothing today beyond "not found" (owners are
+    // exempt from the month lock), and neither does this; an entry that
+    // changed since she looked is refused (409) and nothing changes.
+    if (normalizedPath === '/api/payroll-weeks/deny') {
+      const session = await requirePayrollWeekWriter(request, response)
+      if (!session) return
+      const checked = normalizeDenyInput(await readJsonBody(request))
+      if (!checked.ok) {
+        sendJson(response, checked.status ?? 400, { error: checked.error })
+        return
+      }
+      const { entryId, signatures, note } = checked.value
+      const owner = await appDataStore.getTeamMember(session.user.id)
+      let result
+      try {
+        result = await appDataStore.denyPayrollEntries({
+          entryId,
+          signatures,
+          denial: {
+            id: `deny-${randomUUID().slice(0, 12)}`,
+            deniedBy: session.user.id,
+            deniedByName: owner?.name ?? '',
+            deniedAt: new Date().toISOString(),
+            note,
+          },
+        })
+      } catch (error) {
+        if (sendPayrollWeekRefusal(response, error)) return
+        throw error
+      }
+      const { denial, userId, weekStart } = result
+      // The deny is committed: what follows is best effort (logged), and the
+      // answer is still 200 with the row, so a retry never meets a confusing 409.
+      try {
+        await appDataStore.recordActivity(
+          session.user.id,
+          'time_entry_denied',
+          denialAuditTarget({ userId, weekStart, hours: denial.hours, entryIds: denial.parts.map((part) => part.id) }),
+        )
+      } catch (err) {
+        console.error('[payroll-weeks] deny activity failed:', err?.message || err)
+      }
+      try {
+        if (userId !== session.user.id) {
+          await notify(appDataStore, userId, 'time_entry_denied', {
+            timeEntryId: entryId,
+            clientId: denial.parts[0]?.clientId || '',
+            message: deniedMessage({
+              ownerName: owner?.name ?? '',
+              hours: denial.hours,
+              parts: await payrollNoticeParts(denial.parts),
+              note,
+            }),
+            link: '/time',
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        }
+      } catch (err) {
+        console.error('[notify] time_entry_denied dispatch failed:', err?.message || err)
+      }
+      const { entries: _stored, ...shown } = denial
+      sendJson(response, 200, {
+        removedIds: denial.parts.map((part) => part.id),
+        denial: shown,
+        week: { ...result.row, deniedEntries: result.row.deniedEntries.map(({ entries: _copy, ...item }) => item) },
+      })
+      return
+    }
+
+    // POST /api/payroll-weeks/undo: put a denied entry (or block) back exactly
+    // as stored, in one transaction (`undoPayrollDenial`). Until ship 3 adds
+    // Approve week, always available.
+    if (normalizedPath === '/api/payroll-weeks/undo') {
+      const session = await requirePayrollWeekWriter(request, response)
+      if (!session) return
+      const checked = normalizeUndoInput(await readJsonBody(request))
+      if (!checked.ok) {
+        sendJson(response, checked.status ?? 400, { error: checked.error })
+        return
+      }
+      let result
+      try {
+        result = await appDataStore.undoPayrollDenial(checked.value)
+      } catch (error) {
+        if (sendPayrollWeekRefusal(response, error)) return
+        throw error
+      }
+      const { denial, restored } = result
+      const { userId, weekStart } = checked.value
+      // The undo is committed: what follows is best effort (logged), and the
+      // answer is still 200 with the row.
+      try {
+        await appDataStore.recordActivity(
+          session.user.id,
+          'time_entry_denial_undone',
+          denialAuditTarget({ userId, weekStart, hours: denial.hours, entryIds: restored.map((entry) => entry.id) }),
+        )
+      } catch (err) {
+        console.error('[payroll-weeks] undo activity failed:', err?.message || err)
+      }
+      try {
+        const owner = await appDataStore.getTeamMember(session.user.id)
+        if (userId !== session.user.id) {
+          await notify(appDataStore, userId, 'time_entry_restored', {
+            timeEntryId: restored[0]?.id ?? '',
+            clientId: restored[0]?.clientId || '',
+            message: restoredMessage({
+              ownerName: owner?.name ?? '',
+              hours: denial.hours,
+              parts: await payrollNoticeParts(denial.parts ?? []),
+            }),
+            link: '/time',
+            appPublicUrl: getPublicAppUrl(request),
+          })
+        }
+      } catch (err) {
+        console.error('[notify] time_entry_restored dispatch failed:', err?.message || err)
+      }
+      sendJson(response, 200, {
+        restored,
+        week: { ...result.row, deniedEntries: result.row.deniedEntries.map(({ entries: _copy, ...item }) => item) },
+      })
+      return
+    }
+
     // Approve / reject / edit / delete a single time entry.
     const timeEntryActionMatch = normalizedPath.match(
       /^\/api\/time-entries\/([^/]+)(?:\/(approve|reject))?$/,
@@ -12376,36 +12745,8 @@ const server = createServer(async (request, response) => {
           sendJson(response, 400, { error: 'A rejection note is required' })
           return
         }
-        const updated = await appDataStore.updateTimeEntry(entryId, {
-          approvalStatus: 'rejected',
-          approvalNote: note,
-          approvedBy: session.user.id,
-          approvedAt: new Date().toISOString(),
-        })
-        await appDataStore.recordActivity(session.user.id, 'time_entry_rejected', entryId)
-        // Tell the bookkeeper their time was sent back. Without this the
-        // rejection is SILENT — the only trace is a red note partway down their
-        // Recent time list, and the weekly submission still reads "pending", so
-        // they have no idea anything needs redoing.
-        try {
-          if (entry.employeeId && entry.employeeId !== session.user.id) {
-            const reviewerName =
-              (await appDataStore.getTeamMember(session.user.id))?.name ?? 'An owner'
-            const hours = (Number(entry.minutes) / 60).toFixed(2)
-            const scope = entry.isAdministrative || !entry.clientId ? 'Administrative' : null
-            await notify(appDataStore, entry.employeeId, 'time_entry_rejected', {
-              timeEntryId: entryId,
-              clientId: entry.clientId || '',
-              message: `${reviewerName} sent back your ${hours}h entry on ${entry.date}${
-                scope ? ` (${scope})` : ''
-              } — "${note}". Edit and resubmit it from the Time page.`,
-              link: '/time',
-              appPublicUrl: getPublicAppUrl(request),
-            })
-          }
-        } catch (err) {
-          console.error('[notify] time_entry_rejected dispatch failed:', err?.message || err)
-        }
+        // The same send-back Payroll review's "Send back to fix" makes.
+        const { updated } = await sendTimeEntryBack({ entry, entryId, note, session, request })
         sendJson(response, 200, updated)
         return
       }

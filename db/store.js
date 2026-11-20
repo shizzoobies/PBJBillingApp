@@ -28,6 +28,16 @@ import { planSetUpSteps } from '../lib/checklist-link-match.js'
 import { STAGE_ADVANCE_FAILED_PHRASE } from '../lib/stage-advance-phrase.js'
 import { buildSkipNotice, isStepSkip, templateSkipMode } from '../lib/checklist-skip.js'
 import { isEmptyWeekPlanEntry, normalizeWeekPlanEntry } from '../lib/week-plan.js'
+import {
+  ENTRY_CHANGED_MESSAGE,
+  denialPart,
+  entrySignature,
+  normalizeMark,
+  normalizeMarks,
+  payrollHoursOf,
+  signatureFields,
+} from '../lib/payroll-week-approvals.js'
+import { sundayOf } from '../lib/payroll-week-checks.js'
 import { ENGAGEMENT_LIST_LIMIT } from '../lib/engagement-list-limit.js'
 import {
   bundlingPlan,
@@ -465,6 +475,167 @@ export function mapTimeEntryRow(row) {
     ...(row.created_at ? { createdAt: row.created_at.toISOString() } : {}),
   }
 }
+
+/**
+ * A `time_entries` row read as `to_jsonb(t)` (every column, as stored: dates
+ * and instants are TEXT there) in the app's shape, through the same mapper as
+ * a plain row. Used by Payroll review's deny and undo, which keep the jsonb
+ * copy itself so Undo can put the row back exactly as it was.
+ *
+ * The date is built at UTC midnight and read back with `toISOString()` in
+ * `mapTimeEntryRow`, which, like that mapper's own date handling, assumes the
+ * server runs on UTC (production does).
+ */
+export function mapStoredTimeEntryJson(stored) {
+  const instant = (value) => (typeof value === 'string' && value ? new Date(value) : null)
+  return mapTimeEntryRow({
+    ...stored,
+    entry_date: new Date(`${String(stored.entry_date).slice(0, 10)}T00:00:00.000Z`),
+    approved_at: instant(stored.approved_at),
+    started_at: instant(stored.started_at),
+    ended_at: instant(stored.ended_at),
+    created_at: instant(stored.created_at),
+  })
+}
+
+/** Payroll review ship 2: the endpoint-owned week rows (see `initialize()`). */
+export const PAYROLL_WEEK_APPROVALS_TABLE_SQL = `
+        create table if not exists payroll_week_approvals (
+          id text primary key,
+          user_id text not null,
+          week_start date not null,
+          status text not null default 'open',
+          approved_by text,
+          approved_at timestamptz,
+          totals jsonb,
+          entry_signatures jsonb not null default '{}'::jsonb,
+          entry_marks jsonb not null default '{}'::jsonb,
+          denied_entries jsonb not null default '[]'::jsonb,
+          history jsonb not null default '[]'::jsonb,
+          updated_at timestamptz not null default now(),
+          unique (user_id, week_start)
+        )
+      `
+
+/** The columns every read of a week row selects; dates as text (`to_char`), never through a JS Date. */
+export const PAYROLL_WEEK_SELECT = `id, user_id, to_char(week_start, 'YYYY-MM-DD') as week_start, status, approved_by,
+                approved_at, totals, entry_signatures, entry_marks, denied_entries, history, updated_at`
+
+/** A refusal of a Payroll review action, with the HTTP status and the sentence for her. */
+export class PayrollWeekError extends Error {
+  constructor(status, message) {
+    super(message)
+    this.name = 'PayrollWeekError'
+    this.status = status
+  }
+}
+
+export const PAYROLL_ENTRY_GONE_MESSAGE = 'This entry is no longer there. Reload and look again.'
+export const PAYROLL_DENIAL_GONE_MESSAGE = 'That removed entry is not there any more. Reload and look again.'
+export const PAYROLL_UNDO_ID_TAKEN_MESSAGE =
+  'This time cannot be put back: an entry with the same id is in the time already. Nothing was changed.'
+export const PAYROLL_BLOCK_MIXED_PEOPLE_MESSAGE =
+  'The parts of this shared block belong to more than one person, so it cannot be removed here. Nothing was changed.'
+export function payrollUndoClientGoneMessage(name) {
+  return `This time cannot be put back: its client${name ? ` ${name}` : ''} no longer exists. Nothing was changed.`
+}
+export const PAYROLL_UNDO_COPY_BROKEN_MESSAGE = 'This copy cannot be put back as it is. Tell Alex.'
+export const PAYROLL_UNDO_PERSON_GONE_MESSAGE =
+  'This time cannot be put back: the person it belongs to is no longer in the app. Nothing was changed.'
+
+const isoText = (value) => {
+  if (!value) return null
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
+}
+
+/** A denied-entries list as stored, junk dropped (both backends). */
+function normalizeDeniedEntries(raw) {
+  return (Array.isArray(raw) ? raw : []).filter(
+    (item) => item && typeof item === 'object' && typeof item.id === 'string' && Array.isArray(item.entries),
+  )
+}
+
+/** One week row in the app's shape, from either backend. */
+export function mapPayrollWeekRow(row) {
+  const pg = Object.prototype.hasOwnProperty.call(row, 'user_id')
+  return {
+    id: row.id,
+    userId: pg ? row.user_id : row.userId,
+    weekStart: pg ? row.week_start : row.weekStart,
+    status: ['open', 'approved', 'paid'].includes(row.status) ? row.status : 'open',
+    approvedBy: (pg ? row.approved_by : row.approvedBy) ?? null,
+    approvedAt: isoText(pg ? row.approved_at : row.approvedAt),
+    totals: row.totals ?? null,
+    entrySignatures: (pg ? row.entry_signatures : row.entrySignatures) ?? {},
+    entryMarks: normalizeMarks(pg ? row.entry_marks : row.entryMarks),
+    deniedEntries: normalizeDeniedEntries(pg ? row.denied_entries : row.deniedEntries),
+    history: Array.isArray(row.history) ? row.history : [],
+    updatedAt: isoText(pg ? row.updated_at : row.updatedAt),
+  }
+}
+
+/** A brand-new week row for the file backend (the Postgres defaults, spelled out). */
+function newFilePayrollWeekRow(userId, weekStart) {
+  return {
+    id: `pwa-${randomUUID().slice(0, 12)}`,
+    userId,
+    weekStart,
+    status: 'open',
+    approvedBy: null,
+    approvedAt: null,
+    totals: null,
+    entrySignatures: {},
+    entryMarks: {},
+    deniedEntries: [],
+    history: [],
+    updatedAt: nowIso(),
+  }
+}
+
+/**
+ * The entries a deny acts on, checked: the clicked entry and, for a part of a
+ * shared block, every part of the block. Every one must be named in
+ * `signatures` with the signature it has now, and no other may be named, or
+ * the screen was looking at something else (409, nothing changes). The parts
+ * must all be one person's.
+ */
+function checkDenyTargets(entries, signatures) {
+  const named = Object.keys(signatures)
+  if (
+    entries.length === 0 ||
+    named.length !== entries.length ||
+    entries.some((entry) => signatures[entry.id] !== entrySignature(entry))
+  ) {
+    throw new PayrollWeekError(409, ENTRY_CHANGED_MESSAGE)
+  }
+  if (new Set(entries.map((entry) => entry.employeeId)).size !== 1) {
+    throw new PayrollWeekError(409, PAYROLL_BLOCK_MIXED_PEOPLE_MESSAGE)
+  }
+}
+
+/** The denial record kept on the week row: who, when, why, the hours, what the page lists, and the full stored copies. */
+function denialRecord(denial, appEntries, storedCopies, marks = {}) {
+  // The marks the removed entries carried on this week row (an OK, a
+  // send-back), kept so Undo can put them back with the time.
+  const kept = Object.fromEntries(
+    appEntries.filter((entry) => marks && marks[entry.id]).map((entry) => [entry.id, marks[entry.id]]),
+  )
+  return {
+    id: denial.id,
+    deniedBy: denial.deniedBy,
+    deniedByName: denial.deniedByName ?? '',
+    deniedAt: denial.deniedAt,
+    note: denial.note,
+    hours: payrollHoursOf(appEntries),
+    parts: appEntries.map(denialPart),
+    entries: storedCopies,
+    ...(Object.keys(kept).length > 0 ? { marks: kept } : {}),
+  }
+}
+
+/** A column name from a `to_jsonb` row, refused if it is not a plain identifier (it is interpolated). */
+const STORED_COLUMN = /^[a-z_][a-z0-9_]*$/
 
 /**
  * What `write()` inserts into `time_entries`, one row per entry: the bound
@@ -4122,6 +4293,10 @@ export function mapInvoiceEvidenceRow(row) {
     sourceClientIds: Array.isArray(row?.source_client_ids)
       ? row.source_client_ids.filter((id) => typeof id === 'string' && id)
       : [],
+    // Only when the caller asked by month (Payroll review): a pushed month's target.
+    ...(row && Object.prototype.hasOwnProperty.call(row, 'rolled_into_period')
+      ? { rolledIntoPeriod: row.rolled_into_period ?? null }
+      : {}),
   }
 }
 
@@ -7837,6 +8012,17 @@ export class AppDataStore {
           unique (user_id, week_start, client_id)
         )
       `)
+      // Payroll review, ship 2 (featreq-0b4e42a1; table approved by Alex
+      // 2026-11-20, docs/plans/payroll-week-approval-2026-11.md sections 4.1 and
+      // 11). One row per person and Sunday-to-Saturday week, created on the
+      // first OK tick, send-back or deny in that week. Endpoint-owned like
+      // My Week's plan table: never in the bulk save and never in the staleness
+      // fingerprint. No foreign keys on purpose (cardinal rule 6). Only 'open'
+      // is written until ship 3 adds Approve week; `denied_entries` holds the
+      // full stored copy of every entry she denied, so Undo puts it back.
+      // `create table if not exists` is the look-first form: a boot with the
+      // table in place changes nothing.
+      await this.pool.query(PAYROLL_WEEK_APPROVALS_TABLE_SQL)
       // One trail, two kinds. A push files the same record with the same
       // required reason — the owner reviews "this task moved and here is why"
       // either way — so it reuses this table rather than growing a second one
@@ -12209,6 +12395,9 @@ export class AppDataStore {
         autopayAttempts: _payloadAutopayAttempts,
         // The credit-on-account ledger, same reasoning.
         accountCredits: _payloadAccountCredits,
+        // Payroll review's week rows (marks, denied entries): endpoint-owned.
+        // A stale tab's copy must never put back a mark or lose a denied copy.
+        payrollWeekApprovals: _payloadPayrollWeekApprovals,
         ...withoutServerOwned
       } = toPersist
       toPersist = {
@@ -12226,6 +12415,9 @@ export class AppDataStore {
           ? { autopayAttempts: previous.autopayAttempts }
           : {}),
         ...(Array.isArray(previous?.accountCredits) ? { accountCredits: previous.accountCredits } : {}),
+        ...(Array.isArray(previous?.payrollWeekApprovals)
+          ? { payrollWeekApprovals: previous.payrollWeekApprovals }
+          : {}),
       }
 
       const serialized = JSON.stringify(toPersist, null, 2)
@@ -17280,14 +17472,49 @@ export class AppDataStore {
    * for a sub) - the Client Recap passes the client, or the master's subs.
    * Without it, every invoice (the owner's invoice estimate, which asks about
    * every client at once).
+   *
+   * `periods` (optional, Payroll review's deny warning) narrows it to MONTHLY
+   * invoices of those months, plus the void ones pushed INTO those months
+   * (`rolled_into_period`), plus the invoices that carry a pushed month of
+   * those (same client, period = a void row's `rolled_into_period`, not void).
+   * Rows then also say `rolledIntoPeriod`. Callers that pass no periods get
+   * exactly what they always did.
    */
-  async listInvoiceEvidence({ clientIds = null } = {}) {
+  async listInvoiceEvidence({ clientIds = null, periods = null } = {}) {
     const filter = Array.isArray(clientIds)
       ? clientIds.filter((id) => typeof id === 'string' && id)
       : null
+    const months = Array.isArray(periods)
+      ? [...new Set(periods.filter((period) => typeof period === 'string' && /^\d{4}-\d{2}$/.test(period)))]
+      : null
     if (this.pool) {
+      const params = []
+      const where = []
+      if (filter) {
+        params.push(filter)
+        const own = `client_id = any($${params.length}::text[])
+                    or exists (
+                      select 1
+                        from jsonb_array_elements(
+                               case when jsonb_typeof(line_items) = 'array' then line_items else '[]'::jsonb end
+                             ) as carried
+                       where carried->>'sourceClientId' = any($${params.length}::text[]))`
+        // Bare when it is the only filter (the statement callers have always run).
+        where.push(months ? `(${own})` : own)
+      }
+      if (months) {
+        params.push(months)
+        const n = params.length
+        where.push(`(i.kind = 'monthly'
+                    and (i.period = any($${n}::text[])
+                         or (i.status = 'void' and i.rolled_into_period = any($${n}::text[]))
+                         or (i.status <> 'void'
+                             and i.period in (select v.rolled_into_period from invoices v
+                                               where v.client_id = i.client_id and v.kind = 'monthly'
+                                                 and v.status = 'void' and v.period = any($${n}::text[])))))`)
+      }
       const { rows } = await this.pool.query(
-        `select client_id, period, kind, status,
+        `select client_id, period, kind, status,${months ? ' rolled_into_period,' : ''}
                 coalesce(
                   (select array_agg(distinct line->>'sourceClientId')
                      from jsonb_array_elements(
@@ -17296,35 +17523,42 @@ export class AppDataStore {
                     where coalesce(line->>'sourceClientId', '') <> ''),
                   '{}'
                 ) as source_client_ids
-           from invoices
-          ${
-            filter
-              ? `where client_id = any($1::text[])
-                    or exists (
-                      select 1
-                        from jsonb_array_elements(
-                               case when jsonb_typeof(line_items) = 'array' then line_items else '[]'::jsonb end
-                             ) as carried
-                       where carried->>'sourceClientId' = any($1::text[]))`
-              : ''
-          }`,
-        filter ? [filter] : [],
+           from invoices i
+          ${where.length > 0 ? `where ${where.join(' and ')}` : ''}`,
+        params,
       )
       return rows.map(mapInvoiceEvidenceRow)
     }
     const data = await readJson(localDataPath)
     const wanted = filter ? new Set(filter) : null
+    const invoices = Array.isArray(data.invoices) ? data.invoices : []
     const matches = (invoice) =>
       !wanted ||
       wanted.has(invoice?.clientId) ||
       (Array.isArray(invoice?.lineItems) &&
         invoice.lineItems.some((line) => wanted.has(line?.sourceClientId)))
-    return (Array.isArray(data.invoices) ? data.invoices : []).filter(matches).map((invoice) =>
+    const asked = months ? new Set(months) : null
+    // The months a void invoice of an asked month was pushed into, per client.
+    const carriedInto = new Set(
+      asked
+        ? invoices
+            .filter((invoice) => invoice?.kind === 'monthly' && invoice.status === 'void' && asked.has(invoice.period) && invoice.rolledIntoPeriod)
+            .map((invoice) => `${invoice.clientId}|${invoice.rolledIntoPeriod}`)
+        : [],
+    )
+    const inMonths = (invoice) =>
+      !asked ||
+      (invoice?.kind === 'monthly' &&
+        (asked.has(invoice.period) ||
+          (invoice.status === 'void' && asked.has(invoice.rolledIntoPeriod)) ||
+          (invoice.status !== 'void' && carriedInto.has(`${invoice.clientId}|${invoice.period}`))))
+    return invoices.filter((invoice) => matches(invoice) && inMonths(invoice)).map((invoice) =>
       mapInvoiceEvidenceRow({
         client_id: invoice?.clientId,
         period: invoice?.period,
         kind: invoice?.kind,
         status: invoice?.status,
+        ...(asked ? { rolled_into_period: invoice?.rolledIntoPeriod ?? null } : {}),
         source_client_ids: [
           ...new Set(
             (Array.isArray(invoice?.lineItems) ? invoice.lineItems : [])
@@ -35473,6 +35707,391 @@ export class AppDataStore {
       authState.weekPlanEntries = empty ? others : [...others, { userId, weekStart, ...stored }]
       await fsWriteFile(localAuthPath, JSON.stringify(authState, null, 2))
       return stored
+    })
+  }
+
+  // ---- Payroll review, ship 2 (featreq-0b4e42a1) ----------------------------
+  //
+  // `payroll_week_approvals`: one row per person and week, endpoint-owned.
+  // WHERE THE FILE BACKEND KEEPS IT: in the DATA file (`tmp/app-data.json`,
+  // key `payrollWeekApprovals`), not the auth file where My Week's plan
+  // lives. A deny copies an entry onto the week row AND removes it from
+  // `timeEntries`, and Undo does the reverse; with both in one file each is ONE
+  // write in ONE queue slot, the file twin of the Postgres transaction. Split
+  // across two files, a crash between the two writes would lose the entry or
+  // keep it twice. The bulk save rewrites the data file from the page's copy,
+  // so `write()` carries the stored `payrollWeekApprovals` over untouched (as
+  // it does the credit ledger), and the staff read strips it (server.js).
+
+  /**
+   * Every person's row for one week (marks and denied entries), oldest first.
+   * The caller (the owner-only route) decides who may read it.
+   */
+  async listPayrollWeekApprovals(weekStart) {
+    if (typeof weekStart !== 'string' || !weekStart) return []
+    if (this.pool) {
+      const result = await this.pool.query(
+        `select ${PAYROLL_WEEK_SELECT}
+           from payroll_week_approvals
+          where week_start = $1::date
+          order by user_id`,
+        [weekStart],
+      )
+      return result.rows.map(mapPayrollWeekRow)
+    }
+    const data = await readJson(localDataPath)
+    return (Array.isArray(data.payrollWeekApprovals) ? data.payrollWeekApprovals : [])
+      .filter((row) => row?.weekStart === weekStart)
+      .map(mapPayrollWeekRow)
+      .sort((a, b) => a.userId.localeCompare(b.userId))
+  }
+
+  /**
+   * Put one mark on one entry (an "OK, looked at" tick, or the `sent_back`
+   * mark a send-back from Payroll review leaves), or take it off (`mark`
+   * null). The entry must still be there and, for a new mark, still have the
+   * signature the screen saw (409 otherwise, nothing changes). The row is
+   * created on the first mark in that person's week.
+   *
+   * @returns {Promise<object>} the person's week row as stored.
+   */
+  async savePayrollEntryMark({ entryId, expectedSignature, mark } = {}) {
+    const clean = mark === null ? null : normalizeMark(mark)
+    if (mark !== null && !clean) throw new PayrollWeekError(400, 'That mark is not one this screen can save.')
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        // The entry row is locked so an edit cannot land between the
+        // signature check and the mark.
+        const held = await client.query(
+          `select to_jsonb(t) as stored from time_entries t where id = $1 for update`,
+          [entryId],
+        )
+        if (!held.rowCount) throw new PayrollWeekError(409, PAYROLL_ENTRY_GONE_MESSAGE)
+        const entry = mapStoredTimeEntryJson(held.rows[0].stored)
+        if (clean && entrySignature(entry) !== expectedSignature) throw new PayrollWeekError(409, ENTRY_CHANGED_MESSAGE)
+        // What the entry looked like, from the row just checked, so an un-tick can say what changed.
+        if (clean) clean.fields = signatureFields(entry)
+        const weekStart = sundayOf(entry.date)
+        const result = clean
+          ? await client.query(
+              `insert into payroll_week_approvals (id, user_id, week_start, status, entry_marks, updated_at)
+               values ($1, $2, $3::date, 'open', jsonb_build_object($4::text, $5::jsonb), now())
+               on conflict (user_id, week_start) do update
+                 set entry_marks = payroll_week_approvals.entry_marks || jsonb_build_object($4::text, $5::jsonb),
+                     updated_at = now()
+               returning ${PAYROLL_WEEK_SELECT}`,
+              [`pwa-${randomUUID().slice(0, 12)}`, entry.employeeId, weekStart, entryId, JSON.stringify(clean)],
+            )
+          : await client.query(
+              `update payroll_week_approvals
+                  set entry_marks = entry_marks - $3::text, updated_at = now()
+                where user_id = $1 and week_start = $2::date
+               returning ${PAYROLL_WEEK_SELECT}`,
+              [entry.employeeId, weekStart, entryId],
+            )
+        await client.query('commit')
+        return result.rows[0]
+          ? mapPayrollWeekRow(result.rows[0])
+          : mapPayrollWeekRow(newFilePayrollWeekRow(entry.employeeId, weekStart))
+      } catch (error) {
+        await client.query('rollback').catch(() => {})
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = existsSync(localDataPath) ? JSON.parse(await readFile(localDataPath, 'utf8')) : {}
+      const entry = (data.timeEntries ?? []).find((item) => item?.id === entryId)
+      if (!entry) throw new PayrollWeekError(409, PAYROLL_ENTRY_GONE_MESSAGE)
+      if (clean && entrySignature(entry) !== expectedSignature) throw new PayrollWeekError(409, ENTRY_CHANGED_MESSAGE)
+      if (clean) clean.fields = signatureFields(entry)
+      const weekStart = sundayOf(entry.date)
+      const rows = Array.isArray(data.payrollWeekApprovals) ? data.payrollWeekApprovals : []
+      let row = rows.find((item) => item?.userId === entry.employeeId && item?.weekStart === weekStart)
+      if (!row) {
+        if (!clean) return mapPayrollWeekRow(newFilePayrollWeekRow(entry.employeeId, weekStart))
+        row = newFilePayrollWeekRow(entry.employeeId, weekStart)
+        rows.push(row)
+      }
+      const marks = { ...(row.entryMarks ?? {}) }
+      if (clean) marks[entryId] = clean
+      else delete marks[entryId]
+      row.entryMarks = marks
+      row.updatedAt = nowIso()
+      data.payrollWeekApprovals = rows
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return mapPayrollWeekRow(row)
+    })
+  }
+
+  /**
+   * DENY AND REMOVE (Alex's decision 2026-11-20: the entry is removed and a
+   * full copy kept). The clicked entry, or every part of its shared block, is
+   * copied AS STORED onto the person's week row and deleted from
+   * `time_entries`, in ONE transaction (one file slot): a failure in either
+   * half leaves neither. The same delete as `deleteTimeEntry`, which refuses
+   * nothing for an owner beyond "not found".
+   *
+   * @param {{ entryId: string, signatures: Record<string, string>,
+   *   denial: { id: string, deniedBy: string, deniedByName?: string, deniedAt: string, note: string } }} args
+   * @returns {Promise<{ row: object, denial: object, removed: object[] }>}
+   */
+  async denyPayrollEntries({ entryId, signatures, denial } = {}) {
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        // The block is read WITHOUT a lock, then every row of it (or the one
+        // entry) is locked in ONE statement in id order, so two denies of
+        // parts of the same block take their locks in the same order. A
+        // block that changed in between fails the checks below (409).
+        const clicked = await client.query(`select group_id from time_entries where id = $1`, [entryId])
+        if (!clicked.rowCount) throw new PayrollWeekError(409, ENTRY_CHANGED_MESSAGE)
+        const groupId = clicked.rows[0].group_id
+        const held = groupId
+          ? await client.query(
+              `select to_jsonb(t) as stored from time_entries t where group_id = $1 order by id for update`,
+              [groupId],
+            )
+          : await client.query(`select to_jsonb(t) as stored from time_entries t where id = $1 for update`, [entryId])
+        const stored = held.rows.map((row) => row.stored)
+        const entries = stored.map(mapStoredTimeEntryJson)
+        if (!entries.some((entry) => entry.id === entryId)) throw new PayrollWeekError(409, ENTRY_CHANGED_MESSAGE)
+        checkDenyTargets(entries, signatures ?? {})
+        const clickedEntry = entries.find((entry) => entry.id === entryId)
+        const weekStart = sundayOf(clickedEntry.date)
+        const userId = clickedEntry.employeeId
+        // The row's marks on these entries, read under the row lock, so the copy keeps them.
+        const prior = await client.query(
+          `select entry_marks from payroll_week_approvals where user_id = $1 and week_start = $2::date for update`,
+          [userId, weekStart],
+        )
+        const record = denialRecord(denial, entries, stored, normalizeMarks(prior.rows[0]?.entry_marks))
+        const ids = entries.map((entry) => entry.id)
+        const saved = await client.query(
+          `insert into payroll_week_approvals (id, user_id, week_start, status, denied_entries, updated_at)
+           values ($1, $2, $3::date, 'open', $4::jsonb, now())
+           on conflict (user_id, week_start) do update
+             set denied_entries = payroll_week_approvals.denied_entries || excluded.denied_entries,
+                 entry_marks = payroll_week_approvals.entry_marks - $5::text[],
+                 updated_at = now()
+           returning ${PAYROLL_WEEK_SELECT}`,
+          [`pwa-${randomUUID().slice(0, 12)}`, userId, weekStart, JSON.stringify([record]), ids],
+        )
+        const removed = await client.query(`delete from time_entries where id = any($1::text[])`, [ids])
+        if (removed.rowCount !== ids.length) throw new PayrollWeekError(409, ENTRY_CHANGED_MESSAGE)
+        await client.query('commit')
+        return { row: mapPayrollWeekRow(saved.rows[0]), denial: record, removed: entries, userId, weekStart }
+      } catch (error) {
+        await client.query('rollback').catch(() => {})
+        // A deadlock with another write on the same rows: nothing was changed,
+        // and the screen should look again rather than see a 500.
+        if (error?.code === '40P01') throw new PayrollWeekError(409, ENTRY_CHANGED_MESSAGE)
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = existsSync(localDataPath) ? JSON.parse(await readFile(localDataPath, 'utf8')) : {}
+      const all = Array.isArray(data.timeEntries) ? data.timeEntries : []
+      const target = all.find((item) => item?.id === entryId)
+      if (!target) throw new PayrollWeekError(409, ENTRY_CHANGED_MESSAGE)
+      const entries = target.groupId ? all.filter((item) => item?.groupId === target.groupId) : [target]
+      checkDenyTargets(entries, signatures ?? {})
+      const weekStart = sundayOf(target.date)
+      const userId = target.employeeId
+      // The copy is the stored object itself, cloned: every field as stored.
+      const rowsNow = Array.isArray(data.payrollWeekApprovals) ? data.payrollWeekApprovals : []
+      const before = rowsNow.find((item) => item?.userId === userId && item?.weekStart === weekStart)
+      const record = denialRecord(
+        denial,
+        entries,
+        entries.map((entry) => JSON.parse(JSON.stringify(entry))),
+        normalizeMarks(before?.entryMarks),
+      )
+      const ids = new Set(entries.map((entry) => entry.id))
+      const rows = Array.isArray(data.payrollWeekApprovals) ? data.payrollWeekApprovals : []
+      let row = rows.find((item) => item?.userId === userId && item?.weekStart === weekStart)
+      if (!row) {
+        row = newFilePayrollWeekRow(userId, weekStart)
+        rows.push(row)
+      }
+      row.deniedEntries = [...(Array.isArray(row.deniedEntries) ? row.deniedEntries : []), record]
+      const marks = { ...(row.entryMarks ?? {}) }
+      for (const id of ids) delete marks[id]
+      row.entryMarks = marks
+      row.updatedAt = nowIso()
+      data.payrollWeekApprovals = rows
+      data.timeEntries = all.filter((item) => !ids.has(item?.id))
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return { row: mapPayrollWeekRow(row), denial: record, removed: entries, userId, weekStart }
+    })
+  }
+
+  /**
+   * The names a time-entry notice uses, read narrowly (never the whole
+   * workspace, which on Postgres is a full read and can trigger the
+   * materializer write-back): client names by id and checklist (task) titles
+   * by id.
+   *
+   * @returns {Promise<{ clients: Map<string, string>, tasks: Map<string, string> }>}
+   */
+  async lookupNoticeNames({ clientIds = [], checklistIds = [] } = {}) {
+    const ids = (list) => [...new Set((Array.isArray(list) ? list : []).filter((id) => typeof id === 'string' && id))]
+    const wantedClients = ids(clientIds)
+    const wantedTasks = ids(checklistIds)
+    if (this.pool) {
+      const clients = wantedClients.length
+        ? (await this.pool.query(`select id, name from clients where id = any($1::text[])`, [wantedClients])).rows
+        : []
+      const tasks = wantedTasks.length
+        ? (await this.pool.query(`select id, title from checklists where id = any($1::text[])`, [wantedTasks])).rows
+        : []
+      return {
+        clients: new Map(clients.map((row) => [row.id, row.name])),
+        tasks: new Map(tasks.map((row) => [row.id, row.title])),
+      }
+    }
+    const data = existsSync(localDataPath) ? await readJson(localDataPath) : {}
+    const clientSet = new Set(wantedClients)
+    const taskSet = new Set(wantedTasks)
+    return {
+      clients: new Map((data.clients ?? []).filter((row) => clientSet.has(row?.id)).map((row) => [row.id, row.name])),
+      tasks: new Map((data.checklists ?? []).filter((row) => taskSet.has(row?.id)).map((row) => [row.id, row.title])),
+    }
+  }
+
+  /**
+   * UNDO a deny: the stored copies go back into `time_entries` exactly as
+   * they were (same ids, approval status, stretches, block), the copy leaves
+   * `denied_entries`, in one transaction (one file slot). Refused in words,
+   * changing nothing, when an id is taken again, or the client or the person
+   * is gone.
+   *
+   * @returns {Promise<{ row: object, denial: object, restored: object[] }>}
+   */
+  async undoPayrollDenial({ userId, weekStart, denialId } = {}) {
+    if (this.pool) {
+      const client = await this.pool.connect()
+      try {
+        await client.query('begin')
+        const held = await client.query(
+          `select ${PAYROLL_WEEK_SELECT}
+             from payroll_week_approvals
+            where user_id = $1 and week_start = $2::date
+            for update`,
+          [userId, weekStart],
+        )
+        if (!held.rowCount) throw new PayrollWeekError(404, PAYROLL_DENIAL_GONE_MESSAGE)
+        const row = mapPayrollWeekRow(held.rows[0])
+        const denial = row.deniedEntries.find((item) => item.id === denialId)
+        if (!denial) throw new PayrollWeekError(404, PAYROLL_DENIAL_GONE_MESSAGE)
+        const stored = denial.entries
+        if (stored.length === 0 || stored.some((entry) => typeof entry?.id !== 'string' || !entry.id)) {
+          throw new PayrollWeekError(409, PAYROLL_UNDO_COPY_BROKEN_MESSAGE)
+        }
+        const ids = stored.map((entry) => entry.id)
+        const taken = await client.query(`select id from time_entries where id = any($1::text[])`, [ids])
+        if (taken.rowCount) throw new PayrollWeekError(409, PAYROLL_UNDO_ID_TAKEN_MESSAGE)
+        // The client check, the same on both backends: administrative time has none.
+        const clientIds = [
+          ...new Set(
+            stored
+              .filter((entry) => !entry.is_administrative)
+              .map((entry) => entry.client_id)
+              .filter((id) => typeof id === 'string' && id),
+          ),
+        ]
+        if (clientIds.length > 0) {
+          const found = await client.query(`select id from clients where id = any($1::text[])`, [clientIds])
+          const have = new Set(found.rows.map((item) => item.id))
+          const missing = clientIds.find((id) => !have.has(id))
+          if (missing) throw new PayrollWeekError(409, payrollUndoClientGoneMessage(''))
+        }
+        const userIds = [...new Set(stored.map((entry) => entry.user_id).filter(Boolean))]
+        const people = await client.query(`select id from users where id = any($1::text[])`, [userIds])
+        if (people.rowCount !== userIds.length) throw new PayrollWeekError(409, PAYROLL_UNDO_PERSON_GONE_MESSAGE)
+        // The columns `time_entries` has TODAY: a column dropped or renamed
+        // since the deny is left out of the insert instead of making the copy
+        // unrestorable (a column added since takes its default).
+        // Read from the very relation `null::time_entries` resolves to (the
+        // search path), not from the first schema on it.
+        const live = await client.query(
+          `select attname from pg_attribute
+            where attrelid = 'time_entries'::regclass and attnum > 0 and not attisdropped`,
+        )
+        const liveColumns = new Set(live.rows.map((item) => item.attname))
+        for (const entry of stored) {
+          // Every column the copy holds that still exists, by name, converted
+          // back by Postgres itself: the row returns as it was stored.
+          const columns = Object.keys(entry).filter((column) => liveColumns.has(column))
+          if (columns.length === 0 || !columns.includes('id') || columns.some((column) => !STORED_COLUMN.test(column))) {
+            throw new PayrollWeekError(409, PAYROLL_UNDO_COPY_BROKEN_MESSAGE)
+          }
+          const list = columns.join(', ')
+          await client.query(
+            `insert into time_entries (${list})
+             select ${list} from jsonb_populate_record(null::time_entries, $1::jsonb)`,
+            [JSON.stringify(entry)],
+          )
+        }
+        const remaining = row.deniedEntries.filter((item) => item.id !== denialId)
+        const saved = await client.query(
+          `update payroll_week_approvals
+              set denied_entries = $3::jsonb,
+                  entry_marks = entry_marks || $4::jsonb,
+                  updated_at = now()
+            where user_id = $1 and week_start = $2::date
+           returning ${PAYROLL_WEEK_SELECT}`,
+          // The marks the entries carried when they were denied come back with them.
+          [userId, weekStart, JSON.stringify(remaining), JSON.stringify(normalizeMarks(denial.marks))],
+        )
+        await client.query('commit')
+        return {
+          row: mapPayrollWeekRow(saved.rows[0]),
+          denial,
+          restored: stored.map(mapStoredTimeEntryJson),
+        }
+      } catch (error) {
+        await client.query('rollback').catch(() => {})
+        // An id taken between the check and the insert, or a deadlock: said in words, nothing changed.
+        if (error?.code === '23505') throw new PayrollWeekError(409, PAYROLL_UNDO_ID_TAKEN_MESSAGE)
+        if (error?.code === '40P01') throw new PayrollWeekError(409, ENTRY_CHANGED_MESSAGE)
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+    return enqueueFileOperation(localDataPath, async () => {
+      const data = existsSync(localDataPath) ? JSON.parse(await readFile(localDataPath, 'utf8')) : {}
+      const rows = Array.isArray(data.payrollWeekApprovals) ? data.payrollWeekApprovals : []
+      const row = rows.find((item) => item?.userId === userId && item?.weekStart === weekStart)
+      const list = Array.isArray(row?.deniedEntries) ? row.deniedEntries : []
+      const denial = list.find((item) => item?.id === denialId)
+      if (!row || !denial || !Array.isArray(denial.entries)) throw new PayrollWeekError(404, PAYROLL_DENIAL_GONE_MESSAGE)
+      if (denial.entries.length === 0 || denial.entries.some((entry) => typeof entry?.id !== 'string' || !entry.id)) {
+        throw new PayrollWeekError(409, PAYROLL_UNDO_COPY_BROKEN_MESSAGE)
+      }
+      const all = Array.isArray(data.timeEntries) ? data.timeEntries : []
+      const present = new Set(all.map((item) => item?.id))
+      if (denial.entries.some((entry) => present.has(entry.id))) throw new PayrollWeekError(409, PAYROLL_UNDO_ID_TAKEN_MESSAGE)
+      const clientIds = new Set((data.clients ?? []).map((item) => item?.id))
+      const gone = denial.entries.find((entry) => !entry.isAdministrative && entry.clientId && !clientIds.has(entry.clientId))
+      if (gone) throw new PayrollWeekError(409, payrollUndoClientGoneMessage(''))
+      const people = new Set([...(data.employees ?? []), ...(data.inactiveEmployees ?? [])].map((item) => item?.id))
+      if (denial.entries.some((entry) => !people.has(entry.employeeId))) {
+        throw new PayrollWeekError(409, PAYROLL_UNDO_PERSON_GONE_MESSAGE)
+      }
+      data.timeEntries = [...all, ...denial.entries.map((entry) => JSON.parse(JSON.stringify(entry)))]
+      row.deniedEntries = list.filter((item) => item?.id !== denialId)
+      row.entryMarks = { ...(row.entryMarks ?? {}), ...normalizeMarks(denial.marks) }
+      row.updatedAt = nowIso()
+      await fsWriteFile(localDataPath, JSON.stringify(data, null, 2))
+      return { row: mapPayrollWeekRow(row), denial, restored: denial.entries }
     })
   }
 

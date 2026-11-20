@@ -269,8 +269,9 @@ describe('the bulk PUT runs the attach pass after a successful save', () => {
 })
 
 describe('GET /api/app-data hands out the version that came WITH its data', () => {
+  // 3200 (was 2600): the GET now drops Payroll review's week rows from what it serves.
   const block = () =>
-    routeBlock(/if \(normalizedPath === '\/api\/app-data'\) \{/, 2600)
+    routeBlock(/if \(normalizedPath === '\/api\/app-data'\) \{/, 3200)
 
   it('reads data and version together and never computes a version after the read', () => {
     const text = block()

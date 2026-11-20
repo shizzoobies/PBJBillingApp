@@ -73,6 +73,7 @@ import type { GroupAllocationMode } from '../../lib/group-allocation.js'
 import type { ScopeTag } from '../../lib/invoice-scope-retag.js'
 import type { InvoiceEstimate } from '../../lib/invoice-estimate.js'
 import type { WeekPlanEntry, WeekPlanMark } from '../../lib/week-plan.js'
+import type { DenialPart, EntryMark, InvoicedFact, MarkPartners } from '../../lib/payroll-week-approvals.js'
 import type { SkipReasonCategory } from '../../lib/checklist-skip.js'
 import type { DashboardLayout } from '../../lib/dashboard-layout.js'
 
@@ -613,6 +614,91 @@ export async function rejectTimeEntryRequest(entryId: string, note: string) {
     throw new ApiError(response.status, message || `Failed to reject entry (${response.status})`)
   }
   return (await response.json()) as TimeEntry
+}
+
+// ---- Payroll review, ship 2 (featreq-0b4e42a1) ----
+
+/** One denied entry (or block) as the page lists it: never the full stored copy. */
+export type PayrollDenial = {
+  id: string
+  deniedBy: string
+  deniedByName: string
+  deniedAt: string
+  note: string
+  hours: number
+  parts: DenialPart[]
+}
+
+/** One person's week row: her marks on entries and what she removed. */
+export type PayrollWeekRow = {
+  id: string
+  userId: string
+  weekStart: string
+  status: 'open' | 'approved' | 'paid'
+  entryMarks: Record<string, EntryMark>
+  deniedEntries: PayrollDenial[]
+  updatedAt: string | null
+}
+
+export type PayrollWeekState = {
+  weekStart: string
+  weeks: PayrollWeekRow[]
+  /** Which months' invoices already bill whose time (read only; for the deny confirm's warning). */
+  invoiced?: InvoicedFact[]
+  actions: { ok: boolean; sendBack: boolean; deny: boolean; undo: boolean }
+}
+
+async function payrollWeekPost<T>(path: string, body: unknown): Promise<T> {
+  const response = await apiFetch(path, {
+    credentials: 'same-origin',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const message = await safeErrorMessage(response)
+    throw new ApiError(response.status, message || `That did not save (${response.status}). Reload and try again.`)
+  }
+  return (await response.json()) as T
+}
+
+/**
+ * Owner-only: every person's row for one week. NULL when the server does not
+ * know these routes (404: an older server during a deploy hand-over) or will
+ * not answer them: the page then stays the read-only screen, with no button
+ * that would not save.
+ */
+export async function fetchPayrollWeekRequest(weekStart: string, signal?: AbortSignal): Promise<PayrollWeekState | null> {
+  const response = await apiFetch(`/api/payroll-weeks?week=${encodeURIComponent(weekStart)}`, {
+    credentials: 'same-origin',
+    signal,
+  })
+  if (!response.ok) return null
+  const body = (await response.json()) as Partial<PayrollWeekState>
+  if (!body || !Array.isArray(body.weeks) || !body.actions) return null
+  return body as PayrollWeekState
+}
+
+export function markPayrollEntryRequest(body: {
+  entryId: string
+  signature?: string
+  flags?: string[]
+  partners?: MarkPartners
+  remove?: boolean
+}) {
+  return payrollWeekPost<{ week: PayrollWeekRow }>('/api/payroll-weeks/marks', body)
+}
+
+export function sendBackPayrollEntryRequest(body: { entryId: string; signature: string; note: string }) {
+  return payrollWeekPost<{ entry: TimeEntry; week: PayrollWeekRow | null }>('/api/payroll-weeks/send-back', body)
+}
+
+export function denyPayrollEntryRequest(body: { entryId: string; signatures: Record<string, string>; note: string }) {
+  return payrollWeekPost<{ removedIds: string[]; denial: PayrollDenial; week: PayrollWeekRow }>('/api/payroll-weeks/deny', body)
+}
+
+export function undoPayrollDenialRequest(body: { userId: string; weekStart: string; denialId: string }) {
+  return payrollWeekPost<{ restored: TimeEntry[]; week: PayrollWeekRow }>('/api/payroll-weeks/undo', body)
 }
 
 /** Owner-only: approve a batch of entries (e.g. "approve all for employee"). */

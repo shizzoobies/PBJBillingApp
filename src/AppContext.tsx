@@ -121,6 +121,12 @@ export type AppContextValue = {
   deleteTimeEntry: (entryId: string) => Promise<void>
   approveTimeEntry: (entryId: string) => Promise<void>
   rejectTimeEntry: (entryId: string, note: string) => Promise<void>
+  /**
+   * Payroll review (featreq-0b4e42a1): put what a send-back, a deny or an Undo
+   * already saved on the server into this tab's copy (local only, never a
+   * bulk save): the sent-back entry, the removed ids, the entries put back.
+   */
+  applyPayrollEntryChange: (change: { updated?: TimeEntry; removedIds?: string[]; restored?: TimeEntry[] }) => void
   approveTimeEntriesBatch: (entryIds: string[]) => Promise<void>
   /**
    * Move scope tags that the INVOICE save has already written (featreq-8cec48db).

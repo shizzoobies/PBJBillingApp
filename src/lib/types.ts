@@ -2503,6 +2503,10 @@ export type NotificationEvent =
   | 'time_entry_manual'
   /** An owner sent a submitted time entry back for changes. */
   | 'time_entry_rejected'
+  /** An owner removed an entry of yours from payroll on Payroll review (with Undo). */
+  | 'time_entry_denied'
+  /** An owner put back an entry of yours she had removed from payroll. */
+  | 'time_entry_restored'
   | 'waiting_cleared'
   | 'waiting_on_requested'
   | 'waiting_on_done'

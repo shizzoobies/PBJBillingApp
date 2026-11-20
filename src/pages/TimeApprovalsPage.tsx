@@ -70,10 +70,12 @@ function previousPeriod(period: string): string {
 export function TimeApprovalsPage() {
   const {
     data,
+    sessionUser,
     ownerMode,
     previewMode,
     approveTimeEntry,
     rejectTimeEntry,
+    applyPayrollEntryChange,
     approveTimeEntriesBatch,
     updateTimeEntry,
     lockTimesheet,
@@ -247,6 +249,8 @@ export function TimeApprovalsPage() {
           checklists={data.checklists}
           entries={data.timeEntries}
           submissions={data.weeklySubmissions ?? []}
+          onEntryChange={applyPayrollEntryChange}
+          ownerName={data.employees.find((member) => member.id === sessionUser?.id)?.name ?? sessionUser?.name ?? ''}
         />
       ) : null}
 

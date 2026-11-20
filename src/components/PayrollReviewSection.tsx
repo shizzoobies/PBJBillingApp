@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, Printer } from 'lucide-react'
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { dateOnlyInZone, firmToday } from '../../lib/firm-time.js'
 import {
   FLAG_LABELS,
@@ -8,11 +8,36 @@ import {
   addDaysIso,
   dayFlags,
   entryFlags,
+  findLoggedTwice,
+  findOverlaps,
   lastCompletedWeekStart,
-  lookFlags,
   payPeriodOf,
-  type PayrollFlag,
 } from '../../lib/payroll-week-checks.js'
+import {
+  applyEntryMarks,
+  deniedMessage,
+  entrySignature,
+  instantDayText,
+  payrollHoursOf,
+  sentBackMessage,
+  type InvoicedFact,
+  type MarkPartners,
+  type MarkedFlag,
+  type TickableFlagKind,
+} from '../../lib/payroll-week-approvals.js'
+import {
+  ApiError,
+} from '../lib/types'
+import {
+  denyPayrollEntryRequest,
+  fetchPayrollWeekRequest,
+  markPayrollEntryRequest,
+  sendBackPayrollEntryRequest,
+  undoPayrollDenialRequest,
+  type PayrollDenial,
+  type PayrollWeekRow,
+  type PayrollWeekState,
+} from '../lib/api'
 import { PrintHeader } from './PrintHeader'
 import { displayHours, duplicateFullSliceIds, sumDisplayHours, sumPersonCosts } from '../lib/payrollAggregation'
 import {
@@ -44,23 +69,55 @@ import type { Checklist, Client, Employee, TimeEntry, WeeklySubmission } from '.
 import { currency, shortDate } from '../lib/utils'
 import {
   DASH_MEANS_TEXT,
+  CHANGED_KEY_TEXT,
+  DENY_BUTTON_LABEL,
+  DENY_LABEL,
+  DENY_SHARED_TEXT,
+  NOTE_REQUIRED_TEXT,
+  NOTICE_PREVIEW_LABEL,
+  OK_ACTION_LABEL,
+  OK_COVERS_TEXT,
+  OK_HELP_TEXT,
+  OK_KEY_TEXT,
   OWNERS_LEFT_OUT_TEXT,
   PAYCHECK_COUNTS_TEXT,
   PAYCHECK_FOOT_TEXT,
   RATES_FAILED_TEXT,
   RATES_LOADING_TEXT,
+  REMOVED_HEADING,
+  REVIEW_ACTIONS_TEXT,
   REVIEW_ONLY_TEXT,
+  SEND_BACK_LABEL,
+  STAFF_REMOVED_NOTE,
   TOTALS_COUNT_TEXT,
+  UNDO_CONFIRM_LABEL,
+  UNDO_LABEL,
+  UNDO_OK_LABEL,
+  denyBlockButtonLabel,
+  denyConfirmText,
+  denyHelpText,
+  deniedStatusText,
+  invoiceWarningText,
+  otherWeekText,
+  reasonLabel,
+  removedByText,
+  removedHoursText,
+  sendBackConfirmText,
+  sendBackHelpText,
+  undoConfirmText,
 } from '../lib/payrollReviewText'
 
 /**
- * PAYROLL REVIEW (featreq-20b13da0, ship 1 of 4): the week as Brittany reads it
- * in her spreadsheet. "Normally I download the excel sort by week
- * Sunday-Saturday. Sort by employee and then review the length of time they
- * worked and their description."
+ * PAYROLL REVIEW (featreq-20b13da0 ship 1, featreq-0b4e42a1 ship 2): the week
+ * as Brittany reads it in her spreadsheet. "Normally I download the excel sort
+ * by week Sunday-Saturday. Sort by employee and then review the length of time
+ * they worked and their description."
  *
- * READ-ONLY. It stores nothing and changes no entry: sending back, denying and
- * Approve week with a real lock are later ships. Every figure comes from the
+ * SHIP 2: on each entry she can tick "OK, looked at", send it back to fix, or
+ * deny and remove it (with Undo), all through GET/POST /api/payroll-weeks*.
+ * When that read does not answer (an older server during a deploy hand-over)
+ * the screen is ship 1's read-only screen, with no button that would not save.
+ * Approve week with a real lock is ship 3. Every figure comes from the
  * payroll Hours report's own functions (src/lib/payrollRows.ts), so the two can
  * never put two numbers on one week, and every flag from
  * lib/payroll-week-checks.js, which the server will run too.
@@ -102,12 +159,38 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 const flaggedText = (n: number) => (n === 1 ? '1 flagged entry' : `${n} flagged entries`)
 const listOf = (items: string[]) =>
   items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`
+/** The flags that NEED A LOOK (counted, kept by Show only flagged); one she OK'd ("seen") is not. */
+const lookOf = (flags: readonly MarkedFlag[]) => flags.filter((flag) => flag.tier === 'look')
+const firstNameOf = (name: string) => name.trim().split(/\s+/)[0] || name
+
+/** What the row can do once the server keeps it (ship 2); absent on the read-only screen. */
+type RowActions = {
+  tickable: TickableFlagKind[]
+  ok: 'current' | 'changed' | null
+  sentBack: boolean
+  open: 'menu' | 'send_back' | 'deny' | null
+  busy: boolean
+  error: string
+  setOpen: (open: 'menu' | 'send_back' | 'deny' | null) => void
+  onOk: () => void
+  onRemoveOk: () => void
+  onSendBack: (note: string) => void
+  onDeny: (note: string) => void
+  /** Every entry a deny would remove (the whole shared block for a part), in words. */
+  denyParts: string[]
+  /** The invoice warnings for those entries (review A), in words. */
+  denyWarnings: string[]
+  denyTaken: string
+  personFirst: string
+  /** The notice the person will get, as it will be sent, for the note typed so far. */
+  noticeFor: (kind: 'send_back' | 'deny', note: string) => string
+}
 
 /** One person's week, built from the report's own rows and money cells. */
 type PersonWeek = {
   employee: Employee
   entries: TimeEntry[]
-  days: Array<PayrollDayGroup & { cost: number | null; billable: number | null; flags: PayrollFlag[] }>
+  days: Array<PayrollDayGroup & { cost: number | null; billable: number | null; flags: MarkedFlag[] }>
   costOf: (rowId: string) => number | null
   amountOf: (rowId: string) => number | null
   hours: number
@@ -137,7 +220,7 @@ function buildPersonWeek(
     taskOf: (entry: TimeEntry) => string
     splitBlocks: ReturnType<typeof buildSplitBlocks>
     pricing: PayrollPricing
-    flagsOf: (entryId: string) => PayrollFlag[]
+    flagsOf: (entryId: string) => MarkedFlag[]
   },
 ): PersonWeek {
   const groups = buildPayrollDayGroups(entries, deps)
@@ -175,7 +258,7 @@ function buildPersonWeek(
     billable: allUnpriced(weekBillable, unbilledHours, figures.billableHours) ? null : weekBillable,
     uncostedHours,
     unbilledHours,
-    flaggedEntries: entries.filter((entry) => lookFlags(deps.flagsOf(entry.id)).length > 0).length,
+    flaggedEntries: entries.filter((entry) => lookOf(deps.flagsOf(entry.id)).length > 0).length,
     longDays: days.filter((day) => day.flags.length > 0).length,
   }
 }
@@ -276,6 +359,8 @@ export function PayrollReviewSection({
   entries,
   submissions,
   today = firmToday(),
+  onEntryChange,
+  ownerName = '',
 }: {
   employees: Employee[]
   inactiveEmployees: Employee[]
@@ -285,12 +370,46 @@ export function PayrollReviewSection({
   submissions: WeeklySubmission[]
   /** The firm's day (yyyy-mm-dd); the page opens on the last week that has ended. */
   today?: string
+  /** Brings this tab's copy in line after a send-back, deny or Undo the server saved. */
+  onEntryChange?: (change: { updated?: TimeEntry; removedIds?: string[]; restored?: TimeEntry[] }) => void
+  /** The signed-in owner's name, for the notice preview ("Brittany removed ..."). */
+  ownerName?: string
 }) {
   const [weekStart, setWeekStart] = useState(() => lastCompletedWeekStart(today))
   const [person, setPerson] = useState<string>(EVERYONE)
   const [flaggedOnly, setFlaggedOnly] = useState(false)
   const [showPaycheck, setShowPaycheck] = useState(false)
   const { billRateVersions, costRateVersions, status } = useRateVersions(true)
+  // Ship 2: her marks and denied entries for the week, from the server. NULL
+  // (an older server, or not answered yet) = the read-only screen.
+  const [serverWeek, setServerWeek] = useState<PayrollWeekState | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
+  const [openRow, setOpenRow] = useState<{ entryId: string; open: 'menu' | 'send_back' | 'deny' } | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [rowError, setRowError] = useState<{ id: string; message: string } | null>(null)
+  const [statusLine, setStatusLine] = useState('')
+  // Bumped by every read AND every answer a mark, send-back, deny or Undo
+  // brings: a read still in flight when a newer answer landed is dropped, so
+  // it can never put back what the screen showed before.
+  const answerSeq = useRef(0)
+  useEffect(() => {
+    const controller = new AbortController()
+    let live = true
+    const mine = ++answerSeq.current
+    fetchPayrollWeekRequest(weekStart, controller.signal)
+      .then((state) => {
+        if (live && mine === answerSeq.current) setServerWeek(state ?? null)
+      })
+      .catch(() => {
+        if (live && mine === answerSeq.current) setServerWeek(null)
+      })
+    return () => {
+      live = false
+      controller.abort()
+    }
+    // `entries` too: a deny, an Undo or an edit elsewhere re-reads the workspace,
+    // and the marks must be read again against it.
+  }, [weekStart, reloadKey, entries])
 
   const weekEnd = addDaysIso(weekStart, 6)
   const period = payPeriodOf(weekStart)
@@ -314,6 +433,10 @@ export function PayrollReviewSection({
         typeof entry.date === 'string' && entry.date >= from && entry.date <= to && rosterIds.has(entry.employeeId),
     )
   const weekEntries = within(weekStart, weekEnd)
+  const removedUserIds =
+    serverWeek && serverWeek.weekStart === weekStart
+      ? serverWeek.weeks.filter((row) => row.deniedEntries.length > 0).map((row) => row.userId)
+      : []
 
   /**
    * Who is shown. "Everyone" is the team without the owners (their own time
@@ -325,7 +448,9 @@ export function PayrollReviewSection({
       const one = roster.find((member) => member.id === person)
       return one ? [one] : []
     }
-    const withTime = new Set(windowEntries.map((entry) => entry.employeeId))
+    // A person whose time this week was all removed still has a Removed from
+    // payroll list (with Undo), so they stay in the list too.
+    const withTime = new Set([...windowEntries.map((entry) => entry.employeeId), ...removedUserIds])
     const staff = [
       ...employees.filter((member) => !isOwner(member)),
       ...inactiveEmployees.filter((member) => !isOwner(member) && withTime.has(member.id)),
@@ -359,7 +484,200 @@ export function PayrollReviewSection({
     formatTime: fmtTime,
     others: [...shownEntries, ...neighbors],
   })
-  const flagsOf = (entryId: string) => flags.get(entryId) ?? []
+
+  // Ship 2: only when the server answered for THIS week does the screen act
+  // (and only then are her marks read into the flags).
+  const live = serverWeek && serverWeek.weekStart === weekStart && serverWeek.actions?.deny ? serverWeek : null
+  const rowOf = (userId: string): PayrollWeekRow | undefined => live?.weeks.find((row) => row.userId === userId)
+  const nameOfPerson = (userId: string) => roster.find((member) => member.id === userId)?.name ?? ''
+  const clientNameOf = (clientId: string) => clients.find((client) => client.id === clientId)?.name ?? ''
+  // WHICH other entries an overlap or a possible duplicate names right now,
+  // read the way entryFlags reads them (a pair called a duplicate is not also
+  // an overlap), so an OK covers those partners and no others.
+  const pool = [...shownEntries, ...neighbors]
+  const overlapHits: Map<string, Array<{ otherId: string }>> = live ? findOverlaps(pool) : new Map()
+  const twiceHits: Map<string, Array<{ otherId: string }>> = live ? findLoggedTwice(pool) : new Map()
+  const partnersOf = (entryId: string): MarkPartners => {
+    const doubled = [...new Set((twiceHits.get(entryId) ?? []).map((hit) => hit.otherId))]
+    const overlap = [
+      ...new Set((overlapHits.get(entryId) ?? []).map((hit) => hit.otherId).filter((id) => !doubled.includes(id))),
+    ]
+    return {
+      ...(overlap.length > 0 ? { overlap: overlap.sort() } : {}),
+      ...(doubled.length > 0 ? { possible_duplicate: doubled.sort() } : {}),
+    }
+  }
+  const marked = new Map<string, ReturnType<typeof applyEntryMarks>>()
+  for (const entry of shownEntries) {
+    const base = flags.get(entry.id) ?? []
+    marked.set(
+      entry.id,
+      live
+        ? applyEntryMarks(base, {
+            entry,
+            mark: rowOf(entry.employeeId)?.entryMarks[entry.id] ?? null,
+            personName: nameOfPerson(entry.employeeId),
+            partners: partnersOf(entry.id),
+            clientName: clientNameOf,
+            personNameOf: nameOfPerson,
+          })
+        : { flags: base, ok: null, tickable: [] },
+    )
+  }
+  const flagsOf = (entryId: string): MarkedFlag[] => marked.get(entryId)?.flags ?? []
+
+  /** Put one week row the server answered in place of the one held. */
+  const takeRow = (row: PayrollWeekRow | null | undefined) => {
+    if (!row) return
+    answerSeq.current += 1
+    setServerWeek((current) =>
+      current && current.weekStart === row.weekStart
+        ? { ...current, weeks: [...current.weeks.filter((item) => item.userId !== row.userId), row] }
+        : current,
+    )
+  }
+  const failed = (entryId: string, error: unknown) => {
+    const message =
+      error instanceof ApiError || error instanceof Error ? error.message : 'That did not save. Reload and try again.'
+    setRowError({ id: entryId, message })
+    // A 409 means the screen was looking at something else: read again.
+    if (error instanceof ApiError && (error.status === 409 || error.status === 404)) setReloadKey((key) => key + 1)
+  }
+  const run = async (entryId: string, work: () => Promise<void>) => {
+    setBusyId(entryId)
+    setRowError(null)
+    try {
+      await work()
+      setOpenRow(null)
+    } catch (error) {
+      failed(entryId, error)
+    } finally {
+      setBusyId(null)
+    }
+  }
+  const blockOf = (entry: TimeEntry) =>
+    entry.groupId ? entries.filter((item) => item.groupId === entry.groupId) : [entry]
+  const inWeek = (date: string) => date >= weekStart && date <= weekEnd
+  const partWords = (part: TimeEntry) =>
+    `${fmtDayLong(part.date)} · ${jobOf(part)} · ${taskOf(part)} · ${hoursText(displayHours(Number(part.minutes) || 0))}` +
+    (inWeek(part.date) ? '' : ` (${otherWeekText(fmtDay(part.date))})`)
+  /** "1.20h, $27.00 at cost, $120.00 billable": hours, then the money while rates are read (a dash for no rate). */
+  const takenWords = (parts: TimeEntry[]) => {
+    const hours = hoursText(payrollHoursOf(parts))
+    if (status !== 'ready' || !parts[0]) return hours
+    const userId = parts[0].employeeId
+    const cost = pricing.periodCostOf(userId, parts)
+    const billable = parts.some((part) => part.billable) ? `${money(pricing.periodBillableOf(userId, parts))} billable` : 'not billable'
+    return `${hours}, ${money(cost)} at cost, ${billable}`
+  }
+  const monthName = new Intl.DateTimeFormat('en-US', { month: 'long', timeZone: 'UTC' })
+  /** The invoice warnings for these parts: one per invoice that already bills one of them (read only). */
+  const warningsFor = (parts: TimeEntry[]) => {
+    const facts: InvoicedFact[] = live?.invoiced ?? []
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const part of parts) {
+      if (part.isAdministrative || !part.clientId || typeof part.date !== 'string') continue
+      // Only time that is ON the invoice as hours: billable, and either the
+      // client bills by the hour or the entry is ad hoc work on a plan client.
+      // A plan client's ordinary time is covered by the plan's fee, not billed.
+      if (!part.billable) continue
+      const billingMode = clients.find((client) => client.id === part.clientId)?.billingMode
+      if (billingMode !== 'hourly' && !part.isAdhoc) continue
+      const period = part.date.slice(0, 7)
+      for (const fact of facts) {
+        if (fact.clientId !== part.clientId || fact.period !== period) continue
+        const key = `${fact.invoiceClientId}|${fact.period}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        const monthOf = (period: string) => monthName.format(new Date(`${period}-15T12:00:00Z`))
+        out.push(
+          invoiceWarningText(
+            clientNameOf(fact.invoiceClientId) || 'the client',
+            monthOf(fact.carriedTo ?? fact.period),
+            fact.sent,
+            fact.carriedTo ? monthOf(fact.period) : undefined,
+          ),
+        )
+      }
+    }
+    return out
+  }
+  const noticeParts = (parts: TimeEntry[]) =>
+    parts.map((part) => ({
+      date: part.date,
+      job: part.isAdministrative || !part.clientId ? 'Administrative' : clientNameOf(part.clientId),
+      task: (part.taskId ? checklists.find((checklist) => checklist.id === part.taskId)?.title : part.taskLabel?.trim()) || '',
+    }))
+  const actionsFor = (entry: TimeEntry): RowActions | null => {
+    if (!live) return null
+    const applied = marked.get(entry.id)
+    const mark = rowOf(entry.employeeId)?.entryMarks[entry.id]
+    const parts = blockOf(entry)
+    const open = openRow?.entryId === entry.id ? openRow.open : null
+    return {
+      tickable: applied?.tickable ?? [],
+      ok: applied?.ok ?? null,
+      sentBack: entry.approvalStatus === 'rejected',
+      open,
+      busy: busyId === entry.id,
+      error: rowError?.id === entry.id ? rowError.message : '',
+      setOpen: (next) => {
+        setRowError(null)
+        setOpenRow(next ? { entryId: entry.id, open: next } : null)
+      },
+      onOk: () =>
+        void run(entry.id, async () => {
+          const kept = applied?.ok === 'current' && mark?.kind === 'ok' ? mark.flags : []
+          const flagsToTick = [...new Set([...kept, ...(applied?.tickable ?? [])])]
+          const answer = await markPayrollEntryRequest({
+            entryId: entry.id,
+            signature: entrySignature(entry),
+            flags: flagsToTick,
+            partners: partnersOf(entry.id),
+          })
+          takeRow(answer.week)
+        }),
+      onRemoveOk: () =>
+        void run(entry.id, async () => {
+          const answer = await markPayrollEntryRequest({ entryId: entry.id, remove: true })
+          takeRow(answer.week)
+        }),
+      onSendBack: (note) =>
+        void run(entry.id, async () => {
+          const answer = await sendBackPayrollEntryRequest({ entryId: entry.id, signature: entrySignature(entry), note })
+          onEntryChange?.({ updated: answer.entry })
+          takeRow(answer.week)
+        }),
+      onDeny: (note) =>
+        void run(entry.id, async () => {
+          const signatures = Object.fromEntries(parts.map((part) => [part.id, entrySignature(part)]))
+          const answer = await denyPayrollEntryRequest({ entryId: entry.id, signatures, note })
+          onEntryChange?.({ removedIds: answer.removedIds })
+          takeRow(answer.week)
+          setStatusLine(deniedStatusText(answer.denial.hours, firstNameOf(nameOfPerson(entry.employeeId) || 'the person')))
+        }),
+      denyParts: parts.map((part) => partWords(part)),
+      denyWarnings: warningsFor(parts),
+      denyTaken: takenWords(parts),
+      personFirst: firstNameOf(nameOfPerson(entry.employeeId) || 'the person'),
+      noticeFor: (kind, note) =>
+        kind === 'deny'
+          ? deniedMessage({ ownerName, hours: payrollHoursOf(parts), parts: noticeParts(parts), note })
+          : sentBackMessage({ ownerName, hours: payrollHoursOf([entry]), parts: noticeParts([entry]), note }),
+    }
+  }
+  const undo = (row: PayrollWeekRow, denial: PayrollDenial) =>
+    void run(denial.id, async () => {
+      const answer = await undoPayrollDenialRequest({ userId: row.userId, weekStart: row.weekStart, denialId: denial.id })
+      onEntryChange?.({ restored: answer.restored })
+      takeRow(answer.week)
+      setStatusLine('')
+    })
+  const removedFor = (userId: string) => {
+    const row = rowOf(userId)
+    return row ? { row, denials: row.deniedEntries } : null
+  }
 
   const weeks = people.map((member) =>
     buildPersonWeek(
@@ -422,7 +740,12 @@ export function PayrollReviewSection({
         </button>
       </div>
 
-      <p className="payroll-review-purpose no-print">{REVIEW_ONLY_TEXT}</p>
+      <p className="payroll-review-purpose no-print">{live ? REVIEW_ACTIONS_TEXT : REVIEW_ONLY_TEXT}</p>
+      {live && statusLine ? (
+        <p className="payroll-review-status-line no-print" role="status">
+          {statusLine}
+        </p>
+      ) : null}
 
       <div className="payroll-review-controls no-print">
         <div className="payroll-nav">
@@ -550,8 +873,15 @@ export function PayrollReviewSection({
         day); these are counted and kept by Show only flagged. Notes, not counted: {FLAG_LABELS.clock_edited} and{' '}
         {FLAG_LABELS.not_approved}. Each one says why in a line under it; none of them changes anything.
       </p>
+      {live ? (
+        <>
+          <p className="report-caption muted-text">{OK_KEY_TEXT}</p>
+          <p className="report-caption muted-text">{OK_COVERS_TEXT}</p>
+          <p className="report-caption muted-text">{CHANGED_KEY_TEXT}</p>
+        </>
+      ) : null}
 
-      {shownEntries.length === 0 ? (
+      {shownEntries.length === 0 && !weeks.some((week) => (removedFor(week.employee.id)?.denials.length ?? 0) > 0) ? (
         <p className="muted-text payroll-review-empty">No time logged this week.</p>
       ) : (
         weeks.map((week) => (
@@ -563,6 +893,14 @@ export function PayrollReviewSection({
             splitBlocks={splitBlocks}
             blockSpans={blockSpans}
             status={status}
+            actionsFor={live ? actionsFor : null}
+            removed={removedFor(week.employee.id)}
+            describePart={(part) => ({ job: jobOf(part), task: taskOf(part) })}
+            onUndo={undo}
+            busyId={busyId}
+            rowError={rowError}
+            inWeek={inWeek}
+            personFirst={firstNameOf(week.employee.name)}
           />
         ))
       )}
@@ -570,7 +908,7 @@ export function PayrollReviewSection({
   )
 }
 
-const COLUMNS = 9
+const BASE_COLUMNS = 9
 
 function PersonWeekTable({
   week,
@@ -579,21 +917,49 @@ function PersonWeekTable({
   splitBlocks,
   blockSpans,
   status,
+  actionsFor,
+  removed,
+  describePart,
+  onUndo,
+  busyId,
+  rowError,
+  inWeek,
+  personFirst,
 }: {
   week: PersonWeek
-  flagsOf: (entryId: string) => PayrollFlag[]
+  flagsOf: (entryId: string) => MarkedFlag[]
   flaggedOnly: boolean
   splitBlocks: ReturnType<typeof buildSplitBlocks>
   blockSpans: ReadonlyMap<string, BlockSpan>
   status: RateReadStatus
+  actionsFor: ((entry: TimeEntry) => RowActions | null) | null
+  removed: { row: PayrollWeekRow; denials: PayrollDenial[] } | null
+  describePart: (part: TimeEntry) => { job: string; task: string }
+  onUndo: (row: PayrollWeekRow, denial: PayrollDenial) => void
+  busyId: string | null
+  rowError: { id: string; message: string } | null
+  /** True for a date in the week on screen. */
+  inWeek: (date: string) => boolean
+  personFirst: string
 }) {
+  // The actions sit in the Flags cell, so the row is no wider than ship 1 measured at 1200px.
+  const COLUMNS = BASE_COLUMNS
+  const [confirmUndo, setConfirmUndo] = useState<string | null>(null)
+  const denials = removed?.denials ?? []
+  // Only the parts DATED in this week count toward "removed this week"; a
+  // part of a removed block dated in another week is said apart.
+  const asEntries = (denial: PayrollDenial) => denial.parts as unknown as TimeEntry[]
+  const removedHours = sumDisplayHours(denials.map((denial) => payrollHoursOf(asEntries(denial).filter((part) => inWeek(part.date)))))
+  const removedElsewhere = sumDisplayHours(
+    denials.map((denial) => payrollHoursOf(asEntries(denial).filter((part) => !inWeek(part.date)))),
+  )
   const visibleDays = week.days
     .map((day) => ({
       ...day,
       // A day flagged as long shows ALL its rows, so she can see why it is long.
       shownRows:
         flaggedOnly && day.flags.length === 0
-          ? day.rows.filter((row) => lookFlags(flagsOf(row.id)).length > 0)
+          ? day.rows.filter((row) => lookOf(flagsOf(row.id)).length > 0)
           : day.rows,
     }))
     .filter((day) => !flaggedOnly || day.shownRows.length > 0 || day.flags.length > 0)
@@ -611,6 +977,9 @@ function PersonWeekTable({
   return (
     <div className="payroll-review-person" data-person-id={week.employee.id}>
       <h3>{heading}</h3>
+      {denials.length > 0 ? (
+        <p className="payroll-review-removed-line">{removedHoursText(removedHours, removedElsewhere)}</p>
+      ) : null}
       {week.entries.length === 0 ? (
         <p className="muted-text">No time logged this week.</p>
       ) : visibleDays.length === 0 ? (
@@ -636,7 +1005,7 @@ function PersonWeekTable({
                 <Fragment key={day.date}>
                   <tbody className="payroll-review-day-group">
                   <tr className="payroll-review-day" data-day={day.date}>
-                    <td colSpan={COLUMNS - 1}>
+                    <td colSpan={BASE_COLUMNS - 1}>
                       <strong>
                         {`${fmtDayLong(day.date)} · ${hoursLine(day.hours)}` +
                           moneyParts(moneyPhrase(status, day.cost, []), moneyPhrase(status, day.billable, []))}
@@ -656,6 +1025,8 @@ function PersonWeekTable({
                       splitBlocks={splitBlocks}
                       blockSpans={blockSpans}
                       status={status}
+                      columns={COLUMNS}
+                      actions={actionsFor ? actionsFor(row.entry) : null}
                     />
                   ))}
                 </Fragment>
@@ -667,14 +1038,191 @@ function PersonWeekTable({
           ) : null}
         </div>
       )}
+      {removed && denials.length > 0 ? (
+        <div className="payroll-review-removed" aria-label={`${REMOVED_HEADING}: ${week.employee.name}`}>
+          <h4>{REMOVED_HEADING}</h4>
+          <p className="muted-text">{STAFF_REMOVED_NOTE}</p>
+          <ul>
+            {denials.map((denial) => (
+              <li key={denial.id} data-denial-id={denial.id}>
+                {denial.parts.map((part) => {
+                  const words = describePart(part as unknown as TimeEntry)
+                  return (
+                    <div key={part.id} className="payroll-review-removed-part">
+                      {`${fmtDayLong(part.date)} · ${words.job} · ${words.task} · ${part.description || '—'} · ${hoursText(displayHours(part.minutes))}` +
+                        (inWeek(part.date) ? '' : ` (${otherWeekText(fmtDay(part.date))})`)}
+                    </div>
+                  )
+                })}
+                <div className="muted-text">
+                  {removedByText(firstNameOf(denial.deniedByName), instantDayText(denial.deniedAt), denial.note)}
+                  {denial.parts.length > 1 ? ` · ${hoursText(denial.hours)} in all` : ''}
+                </div>
+                {confirmUndo === denial.id ? (
+                  <div className="payroll-review-undo-confirm no-print" role="group" aria-label={UNDO_LABEL}>
+                    <span>{undoConfirmText(personFirst)}</span>{' '}
+                    <button
+                      type="button"
+                      className="primary-action"
+                      disabled={busyId === denial.id}
+                      onClick={() => {
+                        setConfirmUndo(null)
+                        onUndo(removed.row, denial)
+                      }}
+                    >
+                      {UNDO_CONFIRM_LABEL}
+                    </button>{' '}
+                    <button type="button" className="ghost-action" onClick={() => setConfirmUndo(null)}>
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="ghost-action no-print"
+                    disabled={busyId === denial.id}
+                    onClick={() => setConfirmUndo(denial.id)}
+                  >
+                    {UNDO_LABEL}
+                  </button>
+                )}
+                {rowError?.id === denial.id ? (
+                  <p className="payroll-review-action-error" role="alert">
+                    {rowError.message}
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </div>
   )
 }
 
+/**
+ * The actions at the right of an entry, kept small: one "Actions" button opens
+ * a short menu, each choice with a one-line helper under it; Send back and
+ * Deny open a sheet under the row that says what will happen and asks for her
+ * reason.
+ */
+function EntryActionsCell({ actions }: { actions: RowActions }) {
+  const menuOpen = actions.open === 'menu'
+  const item = (label: string, help: string, onClick: () => void) => (
+    <button type="button" role="menuitem" aria-label={label} onClick={onClick}>
+      <span className="payroll-review-actions-label">{label}</span>
+      <span className="payroll-review-actions-help">{help}</span>
+    </button>
+  )
+  return (
+    <div className="payroll-review-actions no-print">
+      <button
+        type="button"
+        className="ghost-action payroll-review-actions-toggle"
+        aria-expanded={menuOpen}
+        disabled={actions.busy}
+        onClick={() => actions.setOpen(menuOpen ? null : 'menu')}
+      >
+        Actions
+      </button>
+      {menuOpen ? (
+        <div className="payroll-review-actions-menu" role="menu">
+          {actions.tickable.length > 0 ? item(OK_ACTION_LABEL, OK_HELP_TEXT, actions.onOk) : null}
+          {actions.ok ? (
+            <button type="button" role="menuitem" onClick={actions.onRemoveOk}>
+              {UNDO_OK_LABEL}
+            </button>
+          ) : null}
+          {actions.sentBack
+            ? null
+            : item(SEND_BACK_LABEL, sendBackHelpText(actions.personFirst), () => actions.setOpen('send_back'))}
+          {item(DENY_LABEL, denyHelpText(actions.personFirst), () => actions.setOpen('deny'))}
+        </div>
+      ) : null}
+      {actions.error && (actions.open === null || actions.open === 'menu') ? (
+        <p className="payroll-review-action-error" role="alert">
+          {actions.error}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * The confirm sheet under an entry: what will happen, in plain words, any
+ * invoice that already bills the time, her reason (required) and the notice
+ * exactly as it will be sent.
+ */
+function EntryActionSheet({ actions, columns }: { actions: RowActions; columns: number }) {
+  const [note, setNote] = useState('')
+  const [tried, setTried] = useState(false)
+  const kind = actions.open
+  if (kind !== 'send_back' && kind !== 'deny') return null
+  const deny = kind === 'deny'
+  const submit = () => {
+    setTried(true)
+    if (!note.trim()) return
+    if (deny) actions.onDeny(note.trim())
+    else actions.onSendBack(note.trim())
+  }
+  const several = actions.denyParts.length > 1
+  return (
+    <tr className="payroll-review-sheet no-print">
+      <td colSpan={columns}>
+        <div className="payroll-review-sheet-body" role="group" aria-label={deny ? DENY_LABEL : SEND_BACK_LABEL}>
+          <strong>{deny ? DENY_LABEL : SEND_BACK_LABEL}</strong>
+          {deny ? (
+            <>
+              {several ? <p>{DENY_SHARED_TEXT}</p> : null}
+              <ul className="payroll-review-sheet-parts">
+                {actions.denyParts.map((part) => (
+                  <li key={part}>{part}</li>
+                ))}
+              </ul>
+              <p>{denyConfirmText(actions.personFirst, actions.denyTaken)}</p>
+              {actions.denyWarnings.map((warning) => (
+                <p key={warning} className="payroll-review-invoice-warning" data-warning="invoice">
+                  {warning}
+                </p>
+              ))}
+            </>
+          ) : (
+            <p>{sendBackConfirmText(actions.personFirst)}</p>
+          )}
+          <label>
+            <span>{reasonLabel(actions.personFirst)}</span>
+            <textarea value={note} rows={2} maxLength={1000} onChange={(event) => setNote(event.target.value)} />
+          </label>
+          {tried && !note.trim() ? <p className="payroll-review-action-error">{NOTE_REQUIRED_TEXT}</p> : null}
+          <div className="payroll-review-notice-preview" aria-label={NOTICE_PREVIEW_LABEL}>
+            <span className="muted-text">{NOTICE_PREVIEW_LABEL}</span>
+            <p>{actions.noticeFor(deny ? 'deny' : 'send_back', note)}</p>
+          </div>
+          {actions.error ? (
+            <p className="payroll-review-action-error" role="alert">
+              {actions.error}
+            </p>
+          ) : null}
+          <div className="payroll-review-sheet-buttons">
+            <button type="button" className="primary-action" disabled={actions.busy} onClick={submit}>
+              {deny ? (several ? denyBlockButtonLabel(actions.denyParts.length) : DENY_BUTTON_LABEL) : 'Send back'}
+            </button>
+            <button type="button" className="ghost-action" disabled={actions.busy} onClick={() => actions.setOpen(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      </td>
+    </tr>
+  )
+}
+
 /** The NEEDS A LOOK chips, each with its sentence written under it (and on hover). */
-function FlagList({ flags }: { flags: PayrollFlag[] }) {
-  const look = lookFlags(flags)
-  if (look.length === 0) return null
+function FlagList({ flags }: { flags: MarkedFlag[] }) {
+  const look = lookOf(flags)
+  // A flag she OK'd still shows, as seen: "Manual entry · OK'd by Brittany Nov 20".
+  const seen = flags.filter((flag) => flag.tier === 'seen')
+  if (look.length === 0 && seen.length === 0) return null
   return (
     <ul className="payroll-flag-list">
       {look.map((flag) => (
@@ -683,6 +1231,13 @@ function FlagList({ flags }: { flags: PayrollFlag[] }) {
             {flag.label}
           </span>{' '}
           <span className="payroll-flag-sentence">{flag.sentence}</span>
+        </li>
+      ))}
+      {seen.map((flag) => (
+        <li key={flag.kind} data-flag={flag.kind} data-seen="true">
+          <span className="payroll-flag-chip is-seen" title={flag.sentence}>
+            {`${flag.label} · ${flag.seenBy ?? ''}`}
+          </span>
         </li>
       ))}
     </ul>
@@ -701,14 +1256,19 @@ function EntryRows({
   splitBlocks,
   blockSpans,
   status,
+  columns,
+  actions,
 }: {
   row: PayrollEntryRow
   week: PersonWeek
-  flags: PayrollFlag[]
+  flags: MarkedFlag[]
   splitBlocks: ReturnType<typeof buildSplitBlocks>
   blockSpans: ReadonlyMap<string, BlockSpan>
   status: RateReadStatus
+  columns: number
+  actions: RowActions | null
 }) {
+  const COLUMNS = columns
   const entry = row.entry
   const cost = row.countedElsewhere ? null : week.costOf(row.id)
   const amount = week.amountOf(row.id)
@@ -758,7 +1318,8 @@ function EntryRows({
             </div>
           ) : null}
         </td>
-        <td>
+        <td className="payroll-review-flags">
+          {actions ? <EntryActionsCell actions={actions} /> : null}
           <FlagList flags={flags} />
           {otherNotes.map((note) => (
             <div key={note.kind} className="muted-text payroll-review-note" data-note={note.kind}>
@@ -767,6 +1328,7 @@ function EntryRows({
           ))}
         </td>
       </tr>
+      {actions ? <EntryActionSheet key={actions.open ?? 'closed'} actions={actions} columns={COLUMNS} /> : null}
       {several
         ? pieces.map((piece) => (
             <tr key={piece.index} className="payroll-review-stretch" data-entry-id={row.id}>

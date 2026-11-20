@@ -2048,6 +2048,29 @@ function App() {
     }
   }
 
+  // Payroll review (featreq-0b4e42a1): the server already saved the change
+  // (send back, deny, Undo); this only brings this tab's copy in line, the
+  // way the delete above does, without a bulk save.
+  const applyPayrollEntryChange = (change: {
+    updated?: TimeEntry
+    removedIds?: string[]
+    restored?: TimeEntry[]
+  }) => {
+    if (previewActiveRef.current) return
+    const removed = new Set(change.removedIds ?? [])
+    const restored = change.restored ?? []
+    const restoredIds = new Set(restored.map((entry) => entry.id))
+    applyServerDataUpdate((current) => ({
+      ...current,
+      timeEntries: [
+        ...current.timeEntries
+          .filter((entry) => !removed.has(entry.id) && !restoredIds.has(entry.id))
+          .map((entry) => (change.updated && entry.id === change.updated.id ? change.updated : entry)),
+        ...restored,
+      ],
+    }))
+  }
+
   const approveTimeEntriesBatch = async (entryIds: string[]) => {
     if (previewActiveRef.current || entryIds.length === 0) return
     try {
@@ -4527,6 +4550,7 @@ function App() {
     deleteTimeEntry,
     approveTimeEntry,
     rejectTimeEntry,
+    applyPayrollEntryChange,
     approveTimeEntriesBatch,
     applyScopeTagsLocally,
     lockTimesheet,
