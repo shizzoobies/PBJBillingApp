@@ -257,3 +257,19 @@ Her words, then the effect on the plan. Three answers differ from the defaults a
 7. **What the employee sees while a week is locked?** "yes". As planned: "Approved for payroll", no edit, delete or resume.
 
 What this adds to Alex's decisions (section 9): how a week becomes "paid" (a button, or only through the QuickBooks hand-off); and how a denied-and-removed entry is stored (a status on the entry that every hours, cost and billing reader must skip, or a move into an audit table). Ship 1 (the read-only review screen) now uses the 3-hour and 8-hour flags and carries the Paycheck totals button; it still needs no schema.
+
+## 11. Alex's decisions (2026-11-20) and the build order from here
+
+Asked after ship 1 went live (179ed41d) with Brittany's answers in hand (section 10). All four are settled; do not re-ask.
+
+1. **The table: YES.** `payroll_week_approvals` as in section 4.1, endpoint-owned, never in the bulk save or the staleness fingerprint, look-first in `initialize()`, both backends. Two additions from her answers: `status` is `'open' | 'approved' | 'paid'`, and a `denied_entries jsonb not null default '[]'` column holds the full copy of every entry she denied (below).
+2. **A denied entry is REMOVED and a copy is kept.** Deny takes the entry out of `time_entries`, so no report, invoice, recap or cost figure can count it by mistake, and stores the whole entry as it was (plus who, when, why, and the hours and pay taken off) in `denied_entries` on that person's week row. She can undo a deny (the entry comes back exactly as it was) until the week is approved. No "denied" status is added to entries, so no reader has to learn to skip one.
+3. **Paid: a button now, QuickBooks later.** "Mark pay period paid" is hers to press once both weeks of the period are approved; it stamps both week rows `paid`. A paid week cannot be reopened or changed by anyone; a correction after payment is a new entry in a later week. When the QuickBooks hand-off (ship 4) exists it may set the same stamp itself. There is no undo button for a mistaken press (it would defeat her rule); Alex can clear one with an approved write.
+4. **Owners obey the week lock.** Nobody, owners included, changes time in a locked week without pressing Reopen and giving a reason. This differs from the month lock on purpose.
+
+Following from those: the bulk save restores a locked week's rows from what is stored (section 5 row 9, the recommended option); the old Approval queue and the Weekly submissions approve are retired at ship 3 (her answer 5).
+
+**Build order.**
+- **Ship 2 (next): what she can do to one entry.** The table; on the Payroll review screen, per entry: **Send back to fix** (note required; today's reject, plus a mark so the screen knows it was sent back from here and can say "Fixed, look again" once the person edits it), **Deny and remove** (note required; the confirm names the hours and pay taken off; the employee is told why and by how much; an entry that is part of a shared block is denied as the whole block, every part listed in the confirm), **Undo** on a denied entry, and **OK, looked at** on an entry carrying a needs-a-look mark (manual entry, overlap, possible duplicate, typed hours, long entry): the tick records who, when and what the entry looked like, and un-ticks itself if the entry changes. A "Removed from payroll" list per person shows what was denied. Still no lock in this ship.
+- **Ship 3: Approve week, the lock, Reopen, Mark pay period paid**, enforced on every writer of `time_entries` (section 5), with the checks run on the server (so `howLogged` and `clockMismatchNote` move from `src/lib/payrollClock.ts` into `lib/` first), the bulk-save restore, two review rounds and a rolled-back trial. Retires the old queue.
+- **Ship 4: hand-off to QuickBooks** with featreq-e01549db, when the Intuit approval exists.
